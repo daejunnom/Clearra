@@ -14,6 +14,7 @@ import ctypes
 import ctypes.wintypes
 import dataclasses
 import datetime as dt
+import gc
 import hashlib
 import io
 import json
@@ -43,6 +44,7 @@ CANCELLED_ERROR = "E_CLEARRA_PROCESS_CANCELLED"
 PARENT_LOST_ERROR = "E_CLEARRA_PROCESS_PARENT_LOST"
 NONZERO_ERROR = "E_CLEARRA_PROCESS_NONZERO_EXIT"
 TREE_CLEANUP_ERROR = "E_CLEARRA_PROCESS_TREE_CLEANUP"
+HOST_MEMORY_PRESSURE_ERROR = "E_CLEARRA_HOST_MEMORY_PRESSURE"
 WSL_DISTRIBUTION = "Clearra-Build"
 SIGTERM_NUMBER = int(getattr(signal, "SIGTERM", 15))
 SIGKILL_NUMBER = int(getattr(signal, "SIGKILL", 9))
@@ -77,8 +79,7 @@ class Admission:
     commit_limit_bytes: int | None = None
     commit_available_bytes: int | None = None
     commit_reserve_bytes: int | None = None
-    gc_recovery_headroom_bytes: int = 0
-    gc_recovery_headroom_backing: str = "none"
+    start_admission_mode: str = "strict-working-set"
 
 
 @dataclasses.dataclass
@@ -104,6 +105,7 @@ class RuntimeResult:
     oom_counter_before: int | None
     oom_counter_after: int | None
     process_tree_stopped: bool
+    memory_pressure: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def receipt(self) -> dict[str, Any]:
         value = dataclasses.asdict(self)
@@ -236,6 +238,80 @@ def profile_contract(policy: Mapping[str, Any], profile: str) -> Mapping[str, An
     return contract
 
 
+def memory_pressure_status(
+    policy: Mapping[str, Any],
+    snapshot: MemorySnapshot,
+    *,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
+    """Return bounded host-pressure thresholds without inspecting process RSS.
+
+    The runtime samples only host/cgroup availability.  This deliberately avoids
+    hot-path RSS polling while still noticing memory consumed by processes that
+    are outside the Clearra-owned tree after the job has started.
+    """
+
+    contract = policy.get("runtime_policy", {}).get("memory_pressure", {})
+    platform_value = os.name if platform_name is None else platform_name
+    physical_reserve = max(
+        int(contract.get("physical_reserve_mib", 512)) * MIB,
+        int(
+            snapshot.physical_bytes
+            * float(contract.get("physical_reserve_fraction", 0.03125))
+        ),
+    )
+    critical_physical = (
+        int(contract.get("critical_physical_reserve_mib", 128)) * MIB
+    )
+    commit_reserve: int | None = None
+    critical_commit: int | None = None
+    if (
+        platform_value == "nt"
+        and snapshot.commit_limit_bytes is not None
+        and snapshot.commit_available_bytes is not None
+    ):
+        commit_reserve = max(
+            int(contract.get("commit_reserve_mib", 1024)) * MIB,
+            int(
+                snapshot.commit_limit_bytes
+                * float(contract.get("commit_reserve_fraction", 0.03125))
+            ),
+        )
+        critical_commit = (
+            int(contract.get("critical_commit_reserve_mib", 256)) * MIB
+        )
+    physical_low = snapshot.available_bytes < physical_reserve
+    commit_low = (
+        commit_reserve is not None
+        and snapshot.commit_available_bytes is not None
+        and snapshot.commit_available_bytes < commit_reserve
+    )
+    physical_critical = snapshot.available_bytes < critical_physical
+    commit_critical = (
+        critical_commit is not None
+        and snapshot.commit_available_bytes is not None
+        and snapshot.commit_available_bytes < critical_commit
+    )
+    reasons: list[str] = []
+    if physical_low:
+        reasons.append("physical-available")
+    if commit_low:
+        reasons.append("commit-available")
+    return {
+        "physical_bytes": snapshot.physical_bytes,
+        "available_bytes": snapshot.available_bytes,
+        "commit_limit_bytes": snapshot.commit_limit_bytes,
+        "commit_available_bytes": snapshot.commit_available_bytes,
+        "physical_reserve_bytes": physical_reserve,
+        "commit_reserve_bytes": commit_reserve,
+        "critical_physical_reserve_bytes": critical_physical,
+        "critical_commit_reserve_bytes": critical_commit,
+        "under_pressure": bool(reasons),
+        "critical": physical_critical or commit_critical,
+        "reasons": reasons,
+    }
+
+
 def calculate_admission(
     policy: Mapping[str, Any],
     profile: str,
@@ -249,86 +325,90 @@ def calculate_admission(
     runtime_policy = policy.get("runtime_policy", {})
     reserve_policy = runtime_policy.get("host_reserve", {})
     platform_value = os.name if platform_name is None else platform_name
-    admission_basis = str(contract.get("admission_basis") or "physical")
-    windows_commit_policy = {
-        "windows-commit-control": "windows_commit_control",
-        "windows-commit-build-test": "windows_commit_build_test",
-    }.get(admission_basis)
-    use_windows_commit = (
-        platform_value == "nt"
-        and windows_commit_policy is not None
-        and current.commit_limit_bytes is not None
-        and current.commit_available_bytes is not None
+    start_admission_mode = str(
+        contract.get("start_admission") or "strict-working-set"
     )
-    if use_windows_commit:
-        commit_policy = runtime_policy.get(str(windows_commit_policy), {})
-        reserve = max(
-            int(commit_policy.get("minimum_physical_reserve_mib", 1024)) * MIB,
-            int(
-                current.physical_bytes
-                * float(commit_policy.get("physical_reserve_fraction", 0.0625))
-            ),
-        )
-        commit_reserve = max(
-            int(commit_policy.get("minimum_commit_reserve_mib", 4096)) * MIB,
-            int(
-                current.commit_limit_bytes
-                * float(commit_policy.get("commit_reserve_fraction", 0.125))
-            ),
-        )
-        capacity_basis = admission_basis
-    else:
-        reserve_floor = int(reserve_policy.get("minimum_mib", 2048)) * MIB
-        reserve_fraction = float(reserve_policy.get("physical_fraction", 0.20))
-        reserve = max(reserve_floor, int(current.physical_bytes * reserve_fraction))
-        commit_reserve = None
-        capacity_basis = "physical"
+    pressure = memory_pressure_status(
+        policy, current, platform_name=platform_value
+    )
     minimum = int(contract["minimum_memory_mib"]) * MIB
     if minimum_override_mib is not None:
         minimum = max(minimum, int(minimum_override_mib) * MIB)
-    gc_recovery_headroom = int(contract.get("gc_recovery_headroom_mib", 0)) * MIB
-    required_hard_limit = minimum + gc_recovery_headroom
     configured_max = contract.get("maximum_memory_mib")
     maximum = int(configured_max) * MIB if configured_max is not None else None
-    if maximum is not None and maximum < required_hard_limit:
+    if maximum is not None and maximum < minimum:
         raise RuntimePolicyError(
-            f"runtime profile cannot preserve its GC recovery headroom: {profile}"
+            f"runtime profile cannot satisfy its declared memory bound: {profile}"
         )
-    commit_backed_gc = (
-        gc_recovery_headroom
-        if capacity_basis == "windows-commit-build-test"
-        else 0
-    )
-    gc_recovery_backing = (
-        "windows-commit"
-        if commit_backed_gc
-        else "physical"
-        if gc_recovery_headroom
-        else "none"
-    )
-    candidates = [
-        current.physical_bytes - reserve + commit_backed_gc,
-        current.available_bytes - reserve + commit_backed_gc,
-    ]
-    if use_windows_commit:
-        assert current.commit_limit_bytes is not None
-        assert current.commit_available_bytes is not None
-        assert commit_reserve is not None
-        candidates.extend(
-            [
-                current.commit_limit_bytes - commit_reserve,
-                current.commit_available_bytes - commit_reserve,
-            ]
+    if start_admission_mode == "critical-reserve":
+        reserve = int(pressure["critical_physical_reserve_bytes"])
+        commit_reserve = pressure["critical_commit_reserve_bytes"]
+        start_reasons: list[str] = []
+        if current.available_bytes < reserve:
+            start_reasons.append("physical-available")
+        if (
+            commit_reserve is not None
+            and current.commit_available_bytes is not None
+            and current.commit_available_bytes < int(commit_reserve)
+        ):
+            start_reasons.append("commit-available")
+        if start_reasons:
+            raise RuntimePolicyError(
+                f"{ADMISSION_ERROR}: profile={profile} start_admission={start_admission_mode} "
+                f"reasons={','.join(start_reasons)} available_bytes={current.available_bytes} "
+                f"reserve_bytes={reserve} commit_available_bytes={current.commit_available_bytes} "
+                f"commit_reserve_bytes={commit_reserve}"
+            )
+        if maximum is not None:
+            # The Job Object/cgroup bound describes the owned tree, not a
+            # reservation against the start snapshot.  External processes may
+            # grow after launch, so current availability must not shrink this
+            # stable limit.  The runtime pressure guard protects the host.
+            hard_limit = maximum
+        elif platform_value == "nt" and current.commit_limit_bytes is not None:
+            hard_limit = max(
+                0,
+                current.commit_limit_bytes
+                - int(pressure["commit_reserve_bytes"] or 0),
+            )
+        else:
+            hard_limit = max(
+                0,
+                current.physical_bytes - int(pressure["physical_reserve_bytes"]),
+            )
+        capacity_basis = "runtime-pressure"
+    elif start_admission_mode == "strict-working-set":
+        reserve_floor = int(reserve_policy.get("minimum_mib", 2048)) * MIB
+        reserve_fraction = float(reserve_policy.get("physical_fraction", 0.20))
+        reserve = max(reserve_floor, int(current.physical_bytes * reserve_fraction))
+        commit_reserve = pressure["commit_reserve_bytes"]
+        candidates = [
+            current.physical_bytes - reserve,
+            current.available_bytes - reserve,
+        ]
+        if (
+            current.commit_limit_bytes is not None
+            and current.commit_available_bytes is not None
+            and commit_reserve is not None
+        ):
+            candidates.extend(
+                [
+                    current.commit_limit_bytes - int(commit_reserve),
+                    current.commit_available_bytes - int(commit_reserve),
+                ]
+            )
+        if maximum is not None:
+            candidates.append(maximum)
+        hard_limit = max(0, min(candidates))
+        capacity_basis = "physical-strict"
+    else:
+        raise RuntimePolicyError(
+            f"unknown runtime start admission mode: {start_admission_mode}"
         )
-    if maximum is not None:
-        candidates.append(maximum)
-    hard_limit = max(0, min(candidates))
-    if hard_limit < required_hard_limit:
+    if hard_limit < minimum:
         raise RuntimePolicyError(
             f"{ADMISSION_ERROR}: profile={profile} minimum_bytes={minimum} "
-            f"gc_recovery_headroom_bytes={gc_recovery_headroom} "
-            f"gc_recovery_headroom_backing={gc_recovery_backing} "
-            f"required_hard_limit_bytes={required_hard_limit} "
+            f"start_admission={start_admission_mode} "
             f"available_bytes={current.available_bytes} reserve_bytes={reserve} "
             f"commit_available_bytes={current.commit_available_bytes} "
             f"commit_reserve_bytes={commit_reserve} capacity_basis={capacity_basis} "
@@ -345,9 +425,8 @@ def calculate_admission(
         capacity_basis=capacity_basis,
         commit_limit_bytes=current.commit_limit_bytes,
         commit_available_bytes=current.commit_available_bytes,
-        commit_reserve_bytes=commit_reserve,
-        gc_recovery_headroom_bytes=gc_recovery_headroom,
-        gc_recovery_headroom_backing=gc_recovery_backing,
+        commit_reserve_bytes=int(commit_reserve) if commit_reserve is not None else None,
+        start_admission_mode=start_admission_mode,
     )
 
 
@@ -1074,6 +1153,80 @@ def _posix_group_alive(process_group: int) -> bool:
         return True
 
 
+def _create_gc_pressure_channel(protocol: str) -> dict[str, Any]:
+    channel_id = uuid.uuid4().hex
+    root = _runtime_state_root() / "runtime" / "memory-pressure" / channel_id
+    root.mkdir(parents=True, exist_ok=False)
+    request = root / "request.json"
+    acknowledgement = root / "ack.json"
+    return {
+        "id": channel_id,
+        "protocol": protocol,
+        "root": root,
+        "request": request,
+        "acknowledgement": acknowledgement,
+    }
+
+
+def _write_gc_pressure_request(
+    channel: Mapping[str, Any], *, request_id: str, child_pid: int
+) -> None:
+    request = pathlib.Path(channel["request"])
+    temporary = request.with_suffix(".json.partial")
+    payload = {
+        "schema_id": str(channel["protocol"]),
+        "request_id": request_id,
+        "action": "full-gc-and-release-idle-memory",
+        "child_pid": child_pid,
+        "requested_utc": utc_now(),
+    }
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, request)
+
+
+def _gc_pressure_acknowledged(
+    channel: Mapping[str, Any], *, request_id: str
+) -> bool:
+    acknowledgement = pathlib.Path(channel["acknowledgement"])
+    try:
+        information = acknowledgement.lstat()
+        if acknowledgement.is_symlink() or information.st_size > 4096:
+            return False
+        payload = json.loads(acknowledgement.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return bool(
+        isinstance(payload, Mapping)
+        and payload.get("schema_id") == channel["protocol"]
+        and payload.get("request_id") == request_id
+        and payload.get("action") == "full-gc"
+        and payload.get("status") == "completed"
+    )
+
+
+def _reset_gc_pressure_channel(channel: Mapping[str, Any]) -> None:
+    for key in ("request", "acknowledgement"):
+        with contextlib.suppress(OSError):
+            pathlib.Path(channel[key]).unlink(missing_ok=True)
+
+
+def _close_gc_pressure_channel(channel: Mapping[str, Any] | None) -> bool:
+    if channel is None:
+        return True
+    _reset_gc_pressure_channel(channel)
+    root = pathlib.Path(channel["root"])
+    try:
+        root.rmdir()
+        with contextlib.suppress(OSError):
+            root.parent.rmdir()
+    except OSError:
+        return False
+    return not root.exists()
+
+
 def run_host_process(
     command: Sequence[str],
     *,
@@ -1099,6 +1252,29 @@ def run_host_process(
     invoked = [executable, *command[1:]]
     parent_pid = os.getppid() if monitor_parent else None
     contract = profile_contract(policy, profile)
+    pressure_contract = policy.get("runtime_policy", {}).get("memory_pressure", {})
+    pressure_action = str(contract.get("memory_pressure_action") or "fail-close")
+    if pressure_action not in {
+        "gc-then-fail-close",
+        "fail-close",
+        "hard-limit-only",
+    }:
+        raise RuntimePolicyError(
+            f"unknown runtime memory pressure action: {pressure_action}"
+        )
+    if cleanup_only:
+        # Cleanup must remain available specifically when the host is already
+        # constrained so it can terminate the dedicated WSL distribution.
+        pressure_action = "hard-limit-only"
+    pressure_interval = float(pressure_contract.get("sample_interval_seconds", 2.0))
+    pressure_grace = float(pressure_contract.get("recovery_grace_seconds", 2.0))
+    pressure_protocol = str(
+        pressure_contract.get(
+            "cooperative_gc_protocol", "clearra.memory-pressure.v1"
+        )
+    )
+    if pressure_interval <= 0 or pressure_grace < 0:
+        raise RuntimePolicyError("runtime memory pressure timing is invalid")
     timeout = int(
         contract["timeout_seconds"]
         if timeout_override_seconds is None
@@ -1170,6 +1346,25 @@ def run_host_process(
     creationflags = 0
     start_new_session = False
     preexec_fn: Callable[[], None] | None = None
+    pressure_state: dict[str, Any] = {
+        "enabled": pressure_action != "hard-limit-only",
+        "action": pressure_action,
+        "sample_interval_seconds": pressure_interval,
+        "recovery_grace_seconds": pressure_grace,
+        "checks": 0,
+        "events": 0,
+        "recovered_events": 0,
+        "supervisor_full_gc_runs": 0,
+        "supervisor_gc_collected_objects": 0,
+        "cooperative_gc_protocol": pressure_protocol,
+        "cooperative_gc_requests": 0,
+        "cooperative_full_gc_completions": 0,
+        "last_cooperative_full_gc_completed": False,
+        "fail_closed": False,
+        "last_observation": None,
+        "last_pressure_observation": None,
+        "channel_removed": True,
+    }
     if os.name == "nt":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000004  # CREATE_SUSPENDED
         job = _WindowsJob(admission.hard_limit_bytes, process_limit)
@@ -1259,6 +1454,13 @@ def run_host_process(
         raise
     containment["concurrency_class"] = runtime_slot.class_id
     containment["concurrency_slot"] = runtime_slot.index
+    containment["host_memory_pressure_action"] = pressure_action
+    containment["host_memory_pressure_sampling"] = (
+        "host-or-cgroup-availability"
+        if pressure_action != "hard-limit-only"
+        else "disabled"
+    )
+    containment["process_rss_polling"] = False
     events_before = _memory_events(cgroup)
     stdin_mode: Any = (
         subprocess.PIPE
@@ -1268,11 +1470,48 @@ def run_host_process(
     process: subprocess.Popen[bytes] | None = None
     threads: list[threading.Thread] = []
     process_tree_stopped = False
+    pressure_channel: dict[str, Any] | None = None
+    active_gc_request: str | None = None
+    recovery_deadline: float | None = None
+    next_pressure_check = started
+    child_environment = dict(env)
+
+    def observe_pressure() -> dict[str, Any]:
+        pressure_state["checks"] += 1
+        try:
+            observation = memory_pressure_status(policy, memory_snapshot())
+        except RuntimePolicyError:
+            pressure_state["observer_failures"] = int(
+                pressure_state.get("observer_failures", 0)
+            ) + 1
+            observation = {
+                "under_pressure": True,
+                "critical": True,
+                "reasons": ["observer-unavailable"],
+            }
+        pressure_state["last_observation"] = observation
+        if observation["under_pressure"]:
+            pressure_state["last_pressure_observation"] = observation
+        return observation
+
     try:
+        if pressure_action == "gc-then-fail-close":
+            pressure_channel = _create_gc_pressure_channel(pressure_protocol)
+            child_environment.update(
+                {
+                    "CLEARRA_MEMORY_PRESSURE_PROTOCOL": pressure_protocol,
+                    "CLEARRA_MEMORY_PRESSURE_REQUEST_PATH": str(
+                        pressure_channel["request"]
+                    ),
+                    "CLEARRA_MEMORY_PRESSURE_ACK_PATH": str(
+                        pressure_channel["acknowledgement"]
+                    ),
+                }
+            )
         process = subprocess.Popen(
             invoked,
             cwd=cwd,
-            env=dict(env),
+            env=child_environment,
             stdin=stdin_mode,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1299,6 +1538,8 @@ def run_host_process(
         threads = collector.start(process)
         deadline = started + timeout
         while True:
+            if process.poll() is not None:
+                break
             if parent_pid is not None and not _pid_alive(parent_pid):
                 reason = "parent-lost"
                 error_code = PARENT_LOST_ERROR
@@ -1316,6 +1557,95 @@ def run_host_process(
                 else:
                     termination_stage = _terminate_posix_group(process, grace)
                 break
+            now = time.monotonic()
+            pressure_due = (
+                pressure_action != "hard-limit-only"
+                and (
+                    now >= next_pressure_check
+                    or (
+                        recovery_deadline is not None
+                        and now >= recovery_deadline
+                    )
+                )
+            )
+            if pressure_due:
+                observation = observe_pressure()
+                next_pressure_check = now + pressure_interval
+                if (
+                    active_gc_request is not None
+                    and pressure_channel is not None
+                    and not pressure_state["last_cooperative_full_gc_completed"]
+                    and _gc_pressure_acknowledged(
+                        pressure_channel, request_id=active_gc_request
+                    )
+                ):
+                    pressure_state["cooperative_full_gc_completions"] += 1
+                    pressure_state["last_cooperative_full_gc_completed"] = True
+                if not observation["under_pressure"]:
+                    if active_gc_request is not None:
+                        pressure_state["recovered_events"] += 1
+                        if pressure_channel is not None:
+                            _reset_gc_pressure_channel(pressure_channel)
+                        active_gc_request = None
+                        recovery_deadline = None
+                else:
+                    fail_close = pressure_action == "fail-close"
+                    if fail_close:
+                        pressure_state["events"] += 1
+                    if (
+                        pressure_action == "gc-then-fail-close"
+                        and active_gc_request is None
+                    ):
+                        pressure_state["events"] += 1
+                        active_gc_request = uuid.uuid4().hex
+                        pressure_state["cooperative_gc_requests"] += 1
+                        pressure_state["last_cooperative_full_gc_completed"] = False
+                        if pressure_channel is not None:
+                            _reset_gc_pressure_channel(pressure_channel)
+                            try:
+                                _write_gc_pressure_request(
+                                    pressure_channel,
+                                    request_id=active_gc_request,
+                                    child_pid=process.pid,
+                                )
+                            except OSError:
+                                pressure_state["cooperative_gc_request_error"] = True
+                        pressure_state["supervisor_full_gc_runs"] += 1
+                        pressure_state["supervisor_gc_collected_objects"] += int(
+                            gc.collect()
+                        )
+                        observation = observe_pressure()
+                        if not observation["under_pressure"]:
+                            pressure_state["recovered_events"] += 1
+                            if pressure_channel is not None:
+                                _reset_gc_pressure_channel(pressure_channel)
+                            active_gc_request = None
+                            recovery_deadline = None
+                        elif observation["critical"]:
+                            fail_close = True
+                        else:
+                            recovery_deadline = now + pressure_grace
+                    elif active_gc_request is not None and (
+                        observation["critical"]
+                        or (
+                            recovery_deadline is not None
+                            and now >= recovery_deadline
+                        )
+                    ):
+                        fail_close = True
+                    if fail_close:
+                        reason = "host-memory-pressure"
+                        error_code = HOST_MEMORY_PRESSURE_ERROR
+                        pressure_state["fail_closed"] = True
+                        if job is not None:
+                            termination_stage = _terminate_windows_job(
+                                process, job, grace
+                            )
+                        else:
+                            termination_stage = _terminate_posix_group(
+                                process, grace
+                            )
+                        break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 reason = "timeout"
@@ -1325,8 +1655,19 @@ def run_host_process(
                 else:
                     termination_stage = _terminate_posix_group(process, grace)
                 break
+            wake_after = min(1.0, remaining)
+            if pressure_action != "hard-limit-only":
+                wake_after = min(
+                    wake_after,
+                    max(0.01, next_pressure_check - time.monotonic()),
+                )
+            if recovery_deadline is not None:
+                wake_after = min(
+                    wake_after,
+                    max(0.01, recovery_deadline - time.monotonic()),
+                )
             try:
-                process.wait(timeout=min(1.0, remaining))
+                process.wait(timeout=wake_after)
                 break
             except subprocess.TimeoutExpired:
                 continue
@@ -1379,6 +1720,9 @@ def run_host_process(
             elif os.name != "nt":
                 process_tree_stopped = True
             stdout, stderr = collector.finish(threads)
+            pressure_state["channel_removed"] = _close_gc_pressure_channel(
+                pressure_channel
+            )
         finally:
             runtime_slot.release()
     returncode = process.returncode if process is not None and process.returncode is not None else 125
@@ -1395,7 +1739,13 @@ def run_host_process(
     elif collector.exceeded.is_set():
         reason = "output-limit"
         error_code = OUTPUT_LIMIT_ERROR
-    elif reason not in {"timeout", "output-limit", "user-cancel", "parent-lost"}:
+    elif reason not in {
+        "timeout",
+        "output-limit",
+        "user-cancel",
+        "parent-lost",
+        "host-memory-pressure",
+    }:
         if returncode == 0:
             reason = "normal"
             error_code = None
@@ -1434,6 +1784,7 @@ def run_host_process(
         oom_counter_before=oom_before,
         oom_counter_after=oom_after,
         process_tree_stopped=process_tree_stopped,
+        memory_pressure=pressure_state,
     )
 
 
@@ -2736,6 +3087,7 @@ def runtime_audit(
         "schema_id": "clearra.runtime-audit.v1",
         "platform": platform.platform(),
         "memory": dataclasses.asdict(snapshot),
+        "memory_pressure": memory_pressure_status(policy, snapshot),
         "profiles": profiles,
         "process_registry_entries": len(policy.get("process_registry", [])),
     }

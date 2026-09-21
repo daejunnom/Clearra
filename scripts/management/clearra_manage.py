@@ -626,10 +626,23 @@ def remove_owned_path(path: pathlib.Path, policy: dict[str, Any]) -> None:
         path.unlink(missing_ok=True)
 
 
-def validate_managed_command(producer: str, command: Sequence[str]) -> None:
-    if producer != "cargo" or pathlib.Path(command[0]).stem.casefold() != "cargo":
+def validate_managed_command(
+    producer: str, command: Sequence[str], profile: str
+) -> None:
+    executable = pathlib.Path(command[0]).stem.casefold()
+    cargo_arguments = command[
+        1 : command.index("--") if "--" in command else len(command)
+    ]
+    if producer == "cargo" and profile == "verification" and (
+        executable != "cargo"
+        or list(cargo_arguments)
+        not in (["fmt", "--all"], ["fmt", "--all", "--check"])
+    ):
+        raise ManagementError(
+            "Cargo verification profile is restricted to cargo fmt --all [--check]"
+        )
+    if producer != "cargo" or executable != "cargo":
         return
-    cargo_arguments = command[1 : command.index("--") if "--" in command else len(command)]
     if any(
         re.match(
             r"^(?:--target-dir|--build-dir|--artifact-dir|--out-dir|--config)(?:=|$)",
@@ -652,11 +665,11 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
     executable = shutil.which(command[0])
     if not executable:
         raise ManagementError(f"required command is unavailable: {command[0]}")
-    validate_managed_command(arguments.producer, command)
     producer = next(item for item in policy["producers"] if item["id"] == arguments.producer)
     selected_profile = getattr(arguments, "profile", None) or producer["default_profile"]
     selected_contract = runtime_owner.profile_contract(policy, selected_profile)
     allowed_profiles = {producer["default_profile"]}
+    allowed_profiles.update(producer.get("allowed_profiles", []))
     allowed_profiles.update(
         entry["profile"]
         for entry in policy.get("process_registry", [])
@@ -667,6 +680,7 @@ def storage_run(arguments: argparse.Namespace, policy: dict[str, Any]) -> int:
             f"runtime profile is not registered for producer: "
             f"{arguments.producer}/{selected_profile}"
         )
+    validate_managed_command(arguments.producer, command, selected_profile)
     if (
         selected_contract.get("explicit_timeout_required")
         or selected_contract.get("explicit_lease_required")
@@ -1203,6 +1217,8 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
         "hard_containment_required",
         "oom_policy",
         "admission_basis",
+        "start_admission",
+        "memory_pressure_action",
         "concurrency_class",
     }
     for profile, contract in profiles.items():
@@ -1226,6 +1242,7 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
     expected_profiles = {
         "control": (256, 512, 300, 300, 32),
         "build-test": (3072, 6144, 5400, 5400, 512),
+        "verification": (768, 2048, 5400, 5400, 512),
         "benchmark-search": (4096, None, 7200, 7200, 256),
         "local-service": (512, 2048, 7200, 7200, 64),
         "cloud-job": (16384, 16384, 840, 900, 64),
@@ -1253,9 +1270,12 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
         failures.append("benchmark-search must require an explicit timeout")
     if not profiles.get("local-service", {}).get("explicit_lease_required"):
         failures.append("local-service must require an explicit lease")
-    build_test = profiles.get("build-test", {})
-    if build_test.get("gc_recovery_headroom_mib") != 768:
-        failures.append("build-test must preserve bounded GC recovery headroom")
+    cargo_producer = next(
+        (entry for entry in policy.get("producers", []) if entry.get("id") == "cargo"),
+        {},
+    )
+    if cargo_producer.get("allowed_profiles") != ["verification"]:
+        failures.append("Cargo format verification profile is not closed")
     required_process_fields = {
         "profile",
         "runtime",
@@ -1344,33 +1364,67 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
                 )
     runtime_policy = policy.get("runtime_policy", {})
     expected_memory_routing = {
-        "control": ("windows-commit-control", "control"),
-        "build-test": ("windows-commit-build-test", "memory-intensive"),
-        "benchmark-search": ("physical", "memory-intensive"),
-        "local-service": ("physical", "local-service"),
-        "cloud-job": ("physical", "cloud-job"),
+        "control": (
+            "runtime-pressure",
+            "critical-reserve",
+            "gc-then-fail-close",
+            "control",
+        ),
+        "build-test": (
+            "runtime-pressure",
+            "critical-reserve",
+            "gc-then-fail-close",
+            "memory-intensive",
+        ),
+        "verification": (
+            "runtime-pressure",
+            "critical-reserve",
+            "gc-then-fail-close",
+            "memory-intensive",
+        ),
+        "benchmark-search": (
+            "physical",
+            "strict-working-set",
+            "fail-close",
+            "memory-intensive",
+        ),
+        "local-service": (
+            "runtime-pressure",
+            "critical-reserve",
+            "gc-then-fail-close",
+            "local-service",
+        ),
+        "cloud-job": (
+            "runtime-pressure",
+            "critical-reserve",
+            "gc-then-fail-close",
+            "cloud-job",
+        ),
     }
     for profile, expected in expected_memory_routing.items():
         contract = profiles.get(profile, {})
         if (
             contract.get("admission_basis"),
+            contract.get("start_admission"),
+            contract.get("memory_pressure_action"),
             contract.get("concurrency_class"),
         ) != expected:
             failures.append(f"resource profile has invalid memory routing: {profile}")
-    if runtime_policy.get("windows_commit_control") != {
-        "minimum_physical_reserve_mib": 1024,
-        "physical_reserve_fraction": 0.0625,
-        "minimum_commit_reserve_mib": 4096,
-        "commit_reserve_fraction": 0.125,
+    if runtime_policy.get("memory_pressure") != {
+        "sample_interval_seconds": 2.0,
+        "recovery_grace_seconds": 2.0,
+        "physical_reserve_mib": 512,
+        "physical_reserve_fraction": 0.03125,
+        "commit_reserve_mib": 1024,
+        "commit_reserve_fraction": 0.03125,
+        "critical_physical_reserve_mib": 128,
+        "critical_commit_reserve_mib": 256,
+        "cooperative_gc_protocol": "clearra.memory-pressure.v1",
+        "supervisor_full_gc": True,
+        "require_ack_for_child_full_gc_claim": True,
+        "automatic_retry": False,
     }:
-        failures.append("Windows control admission does not preserve RAM and commit reserves")
-    if runtime_policy.get("windows_commit_build_test") != {
-        "minimum_physical_reserve_mib": 2048,
-        "physical_reserve_fraction": 0.125,
-        "minimum_commit_reserve_mib": 4096,
-        "commit_reserve_fraction": 0.125,
-    }:
-        failures.append("Windows build admission does not preserve RAM and commit reserves")
+        failures.append("dynamic host memory-pressure recovery contract differs")
     if runtime_policy.get("parallel_admission") != {
         "stale_slot_grace_seconds": 30,
         "classes": {
@@ -1401,7 +1455,7 @@ def runtime_policy_failures(policy: dict[str, Any]) -> list[str]:
             "review": "control",
             "upload": "control",
             "check": "control",
-            "promote": "build-test",
+            "promote": "verification",
             "protect": "control",
             "finalize": "build-test",
         },
@@ -3756,6 +3810,8 @@ def verify_independent_main_checkout(
                     "run",
                     "--producer",
                     "cargo",
+                    "--profile",
+                    "verification",
                     "--",
                     "cargo",
                     "fmt",

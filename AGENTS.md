@@ -71,6 +71,14 @@ Do not silently lower worker counts, enable normal-path `MemoryHigh` or RSS
 sampling, or retry an OOM with different resources. Admission failure and OOM
 must remain distinct typed failures, and the outer process boundary owns all
 descendants without adding supervisor work to solver hot paths.
+General host work reserves only the manifest's critical start margin; do not
+restore full-working-set preallocation. The supervisor samples host or cgroup
+availability at the low frequency in the manifest, requests cooperative full
+GC where a runtime acknowledges that protocol, remeasures, and fail-closes only
+the Clearra-owned tree if the small recovery reserve is still unavailable.
+Never claim that a child performed full GC without its matching acknowledgement.
+Benchmark search keeps strict working-set admission and skips GC recovery so a
+memory-pressure intervention cannot be mistaken for a valid timing sample.
 
 Never read, archive, print, or otherwise inspect `.env` files, keys, service
 account files, API keys, or credential files. Report only that a prohibited

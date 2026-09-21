@@ -285,7 +285,10 @@
         "build-cache",
         "test"
       ],
-      "default_profile": "build-test"
+      "default_profile": "build-test",
+      "allowed_profiles": [
+        "verification"
+      ]
     },
     {
       "id": "frontend",
@@ -3795,13 +3798,14 @@
       "output_limit_bytes": 16777216,
       "hard_containment_required": false,
       "oom_policy": "fail-no-retry",
-      "admission_basis": "windows-commit-control",
+      "admission_basis": "runtime-pressure",
+      "start_admission": "critical-reserve",
+      "memory_pressure_action": "gc-then-fail-close",
       "concurrency_class": "control"
     },
     "build-test": {
       "minimum_memory_mib": 3072,
       "maximum_memory_mib": 6144,
-      "gc_recovery_headroom_mib": 768,
       "timeout_seconds": 5400,
       "maximum_timeout_seconds": 5400,
       "termination_grace_seconds": 10,
@@ -3809,7 +3813,24 @@
       "output_limit_bytes": 67108864,
       "hard_containment_required": false,
       "oom_policy": "fail-no-retry",
-      "admission_basis": "windows-commit-build-test",
+      "admission_basis": "runtime-pressure",
+      "start_admission": "critical-reserve",
+      "memory_pressure_action": "gc-then-fail-close",
+      "concurrency_class": "memory-intensive"
+    },
+    "verification": {
+      "minimum_memory_mib": 768,
+      "maximum_memory_mib": 2048,
+      "timeout_seconds": 5400,
+      "maximum_timeout_seconds": 5400,
+      "termination_grace_seconds": 10,
+      "maximum_descendant_processes": 512,
+      "output_limit_bytes": 67108864,
+      "hard_containment_required": false,
+      "oom_policy": "fail-no-retry",
+      "admission_basis": "runtime-pressure",
+      "start_admission": "critical-reserve",
+      "memory_pressure_action": "gc-then-fail-close",
       "concurrency_class": "memory-intensive"
     },
     "benchmark-search": {
@@ -3824,6 +3845,8 @@
       "oom_policy": "fail-no-retry",
       "explicit_timeout_required": true,
       "admission_basis": "physical",
+      "start_admission": "strict-working-set",
+      "memory_pressure_action": "fail-close",
       "concurrency_class": "memory-intensive"
     },
     "local-service": {
@@ -3837,7 +3860,9 @@
       "hard_containment_required": false,
       "oom_policy": "fail-no-retry",
       "explicit_lease_required": true,
-      "admission_basis": "physical",
+      "admission_basis": "runtime-pressure",
+      "start_admission": "critical-reserve",
+      "memory_pressure_action": "gc-then-fail-close",
       "concurrency_class": "local-service"
     },
     "cloud-job": {
@@ -3853,7 +3878,9 @@
       "cpu_count": 8,
       "concurrency": 1,
       "maximum_jobs": 1,
-      "admission_basis": "physical",
+      "admission_basis": "runtime-pressure",
+      "start_admission": "critical-reserve",
+      "memory_pressure_action": "gc-then-fail-close",
       "concurrency_class": "cloud-job"
     }
   },
@@ -3885,7 +3912,7 @@
         "review": "control",
         "upload": "control",
         "check": "control",
-        "promote": "build-test",
+        "promote": "verification",
         "protect": "control",
         "finalize": "build-test"
       }
@@ -3894,17 +3921,19 @@
       "minimum_mib": 2048,
       "physical_fraction": 0.2
     },
-    "windows_commit_control": {
-      "minimum_physical_reserve_mib": 1024,
-      "physical_reserve_fraction": 0.0625,
-      "minimum_commit_reserve_mib": 4096,
-      "commit_reserve_fraction": 0.125
-    },
-    "windows_commit_build_test": {
-      "minimum_physical_reserve_mib": 2048,
-      "physical_reserve_fraction": 0.125,
-      "minimum_commit_reserve_mib": 4096,
-      "commit_reserve_fraction": 0.125
+    "memory_pressure": {
+      "sample_interval_seconds": 2.0,
+      "recovery_grace_seconds": 2.0,
+      "physical_reserve_mib": 512,
+      "physical_reserve_fraction": 0.03125,
+      "commit_reserve_mib": 1024,
+      "commit_reserve_fraction": 0.03125,
+      "critical_physical_reserve_mib": 128,
+      "critical_commit_reserve_mib": 256,
+      "cooperative_gc_protocol": "clearra.memory-pressure.v1",
+      "supervisor_full_gc": true,
+      "require_ack_for_child_full_gc_claim": true,
+      "automatic_retry": false
     },
     "parallel_admission": {
       "stale_slot_grace_seconds": 30,

@@ -152,7 +152,9 @@ class ManagementPolicyTests(unittest.TestCase):
             "--config=build.target-dir='outside'",
         ):
             with self.subTest(option=option), self.assertRaises(MANAGE.ManagementError):
-                MANAGE.validate_managed_command("cargo", ["cargo", "check", option])
+                MANAGE.validate_managed_command(
+                    "cargo", ["cargo", "check", option], "build-test"
+                )
 
     def test_secret_names_are_never_accepted(self) -> None:
         for name in (".env", ".env.production", "deploy.key", "service-account-prod.json", "API-KEY.txt"):
@@ -405,7 +407,7 @@ class ManagementPolicyTests(unittest.TestCase):
             ("deps", "install"): "build-test",
             ("package", "pack"): "build-test",
             ("git", "review"): "control",
-            ("git", "promote"): "build-test",
+            ("git", "promote"): "verification",
         }
         for (domain, action), expected in cases.items():
             with self.subTest(domain=domain, action=action):
@@ -497,6 +499,20 @@ class ManagementPolicyTests(unittest.TestCase):
             MANAGE.ManagementError, "profile is not registered for producer"
         ):
             MANAGE.storage_run(arguments, self.policy)
+
+    def test_cargo_verification_profile_is_fmt_only(self) -> None:
+        MANAGE.validate_managed_command(
+            "cargo", ["cargo", "fmt", "--all"], "verification"
+        )
+        MANAGE.validate_managed_command(
+            "cargo", ["cargo", "fmt", "--all", "--check"], "verification"
+        )
+        with self.assertRaisesRegex(
+            MANAGE.ManagementError, "restricted to cargo fmt"
+        ):
+            MANAGE.validate_managed_command(
+                "cargo", ["cargo", "check", "--workspace"], "verification"
+            )
 
     def test_raw_wsl_mutation_is_detected_outside_supervisor(self) -> None:
         parent = ROOT / "_local" / "tmp" / "management-tests"

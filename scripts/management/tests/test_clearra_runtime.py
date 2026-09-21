@@ -39,7 +39,7 @@ class RuntimeContractTests(unittest.TestCase):
         cls.policy = load_policy()
         (ROOT / "_local" / "tmp").mkdir(parents=True, exist_ok=True)
 
-    def test_windows_control_admission_preserves_ram_and_commit_reserves(self) -> None:
+    def test_windows_control_start_admission_uses_only_critical_reserves(self) -> None:
         admission = RUNTIME.calculate_admission(
             self.policy,
             "control",
@@ -51,10 +51,11 @@ class RuntimeContractTests(unittest.TestCase):
             ),
             platform_name="nt",
         )
-        self.assertEqual(admission.reserve_bytes, RUNTIME.GIB)
-        self.assertEqual(admission.commit_reserve_bytes, 4 * RUNTIME.GIB)
+        self.assertEqual(admission.reserve_bytes, 128 * RUNTIME.MIB)
+        self.assertEqual(admission.commit_reserve_bytes, 256 * RUNTIME.MIB)
         self.assertEqual(admission.hard_limit_bytes, 512 * RUNTIME.MIB)
-        self.assertEqual(admission.capacity_basis, "windows-commit-control")
+        self.assertEqual(admission.capacity_basis, "runtime-pressure")
+        self.assertEqual(admission.start_admission_mode, "critical-reserve")
 
         with self.assertRaisesRegex(
             RUNTIME.RuntimePolicyError, RUNTIME.ADMISSION_ERROR
@@ -64,39 +65,35 @@ class RuntimeContractTests(unittest.TestCase):
                 "control",
                 snapshot=RUNTIME.MemorySnapshot(
                     16 * RUNTIME.GIB,
-                    1200 * RUNTIME.MIB,
+                    64 * RUNTIME.MIB,
                     32 * RUNTIME.GIB,
                     12 * RUNTIME.GIB,
                 ),
                 platform_name="nt",
             )
 
-    def test_windows_build_admission_preserves_gc_physical_and_commit_reserves(self) -> None:
+    def test_windows_build_start_is_decoupled_from_declared_working_set(self) -> None:
         admission = RUNTIME.calculate_admission(
             self.policy,
             "build-test",
             snapshot=RUNTIME.MemorySnapshot(
                 16 * RUNTIME.GIB,
-                6 * RUNTIME.GIB,
+                768 * RUNTIME.MIB,
                 32 * RUNTIME.GIB,
-                14 * RUNTIME.GIB,
+                2 * RUNTIME.GIB,
             ),
             platform_name="nt",
         )
-        self.assertEqual(admission.reserve_bytes, 2 * RUNTIME.GIB)
-        self.assertEqual(admission.commit_reserve_bytes, 4 * RUNTIME.GIB)
+        self.assertEqual(admission.reserve_bytes, 128 * RUNTIME.MIB)
+        self.assertEqual(admission.commit_reserve_bytes, 256 * RUNTIME.MIB)
         self.assertEqual(admission.minimum_bytes, 3 * RUNTIME.GIB)
-        self.assertEqual(admission.gc_recovery_headroom_bytes, 768 * RUNTIME.MIB)
-        self.assertEqual(
-            admission.hard_limit_bytes, 4 * RUNTIME.GIB + 768 * RUNTIME.MIB
-        )
-        self.assertEqual(admission.gc_recovery_headroom_backing, "windows-commit")
+        self.assertEqual(admission.hard_limit_bytes, 6 * RUNTIME.GIB)
         self.assertEqual(admission.maximum_bytes, 6 * RUNTIME.GIB)
-        self.assertEqual(admission.capacity_basis, "windows-commit-build-test")
+        self.assertEqual(admission.capacity_basis, "runtime-pressure")
 
         for available, commit_available in (
-            (5000 * RUNTIME.MIB, 14 * RUNTIME.GIB),
-            (8 * RUNTIME.GIB, 7500 * RUNTIME.MIB),
+            (64 * RUNTIME.MIB, 14 * RUNTIME.GIB),
+            (8 * RUNTIME.GIB, 128 * RUNTIME.MIB),
         ):
             with self.subTest(
                 available=available, commit_available=commit_available
@@ -115,8 +112,8 @@ class RuntimeContractTests(unittest.TestCase):
                     platform_name="nt",
                 )
 
-    def test_benchmark_and_non_windows_build_admission_remain_physical(self) -> None:
-        for profile in ("build-test", "benchmark-search"):
+    def test_non_windows_relaxed_profiles_keep_stable_tree_limits(self) -> None:
+        for profile in ("build-test", "verification"):
             admission = RUNTIME.calculate_admission(
                 self.policy,
                 profile,
@@ -128,14 +125,130 @@ class RuntimeContractTests(unittest.TestCase):
                 ),
                 platform_name="posix",
             )
-            self.assertEqual(
-                admission.reserve_bytes, int(16 * RUNTIME.GIB * 0.20)
+            self.assertEqual(admission.reserve_bytes, 128 * RUNTIME.MIB)
+            self.assertEqual(admission.capacity_basis, "runtime-pressure")
+
+        benchmark = RUNTIME.calculate_admission(
+            self.policy,
+            "benchmark-search",
+            snapshot=RUNTIME.MemorySnapshot(
+                16 * RUNTIME.GIB,
+                8 * RUNTIME.GIB,
+                32 * RUNTIME.GIB,
+                20 * RUNTIME.GIB,
+            ),
+            platform_name="posix",
+        )
+        self.assertEqual(
+            benchmark.reserve_bytes, int(16 * RUNTIME.GIB * 0.20)
+        )
+        self.assertEqual(benchmark.capacity_basis, "physical-strict")
+        self.assertEqual(benchmark.start_admission_mode, "strict-working-set")
+
+        cloud = RUNTIME.calculate_admission(
+            self.policy,
+            "cloud-job",
+            snapshot=RUNTIME.MemorySnapshot(
+                16 * RUNTIME.GIB,
+                RUNTIME.GIB,
+                32 * RUNTIME.GIB,
+                2 * RUNTIME.GIB,
+            ),
+            platform_name="posix",
+        )
+        self.assertEqual(cloud.hard_limit_bytes, 16 * RUNTIME.GIB)
+
+    def test_windows_verification_profile_has_fixed_tree_limit(self) -> None:
+        admission = RUNTIME.calculate_admission(
+            self.policy,
+            "verification",
+            snapshot=RUNTIME.MemorySnapshot(
+                16 * RUNTIME.GIB,
+                4 * RUNTIME.GIB,
+                32 * RUNTIME.GIB,
+                14 * RUNTIME.GIB,
+            ),
+            platform_name="nt",
+        )
+        self.assertEqual(admission.minimum_bytes, 768 * RUNTIME.MIB)
+        self.assertEqual(admission.hard_limit_bytes, 2 * RUNTIME.GIB)
+        self.assertEqual(admission.maximum_bytes, 2 * RUNTIME.GIB)
+        self.assertEqual(admission.capacity_basis, "runtime-pressure")
+
+    def test_memory_pressure_tracks_external_physical_and_commit_growth(self) -> None:
+        healthy = RUNTIME.memory_pressure_status(
+            self.policy,
+            RUNTIME.MemorySnapshot(
+                16 * RUNTIME.GIB,
+                2 * RUNTIME.GIB,
+                32 * RUNTIME.GIB,
+                4 * RUNTIME.GIB,
+            ),
+            platform_name="nt",
+        )
+        self.assertFalse(healthy["under_pressure"])
+        self.assertEqual(healthy["physical_reserve_bytes"], 512 * RUNTIME.MIB)
+        self.assertEqual(healthy["commit_reserve_bytes"], RUNTIME.GIB)
+
+        pressured = RUNTIME.memory_pressure_status(
+            self.policy,
+            RUNTIME.MemorySnapshot(
+                16 * RUNTIME.GIB,
+                384 * RUNTIME.MIB,
+                32 * RUNTIME.GIB,
+                768 * RUNTIME.MIB,
+            ),
+            platform_name="nt",
+        )
+        self.assertTrue(pressured["under_pressure"])
+        self.assertFalse(pressured["critical"])
+        self.assertEqual(
+            pressured["reasons"], ["physical-available", "commit-available"]
+        )
+
+    def test_child_full_gc_requires_an_exact_protocol_acknowledgement(self) -> None:
+        with tempfile.TemporaryDirectory(
+            dir=ROOT / "_local" / "tmp"
+        ) as directory, mock.patch.dict(
+            os.environ, {"CLEARRA_STATE_ROOT": directory}
+        ):
+            channel = RUNTIME._create_gc_pressure_channel(
+                "clearra.memory-pressure.v1"
             )
-            self.assertEqual(admission.capacity_basis, "physical")
-            self.assertEqual(
-                admission.gc_recovery_headroom_backing,
-                "physical" if profile == "build-test" else "none",
+            acknowledgement = pathlib.Path(channel["acknowledgement"])
+            acknowledgement.write_text(
+                json.dumps(
+                    {
+                        "schema_id": "clearra.memory-pressure.v1",
+                        "request_id": "wrong-request",
+                        "action": "full-gc",
+                        "status": "completed",
+                    }
+                ),
+                encoding="utf-8",
             )
+            self.assertFalse(
+                RUNTIME._gc_pressure_acknowledged(
+                    channel, request_id="expected-request"
+                )
+            )
+            acknowledgement.write_text(
+                json.dumps(
+                    {
+                        "schema_id": "clearra.memory-pressure.v1",
+                        "request_id": "expected-request",
+                        "action": "full-gc",
+                        "status": "completed",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                RUNTIME._gc_pressure_acknowledged(
+                    channel, request_id="expected-request"
+                )
+            )
+            self.assertTrue(RUNTIME._close_gc_pressure_channel(channel))
 
     def test_parallel_heavy_runtime_slot_is_single_owner_and_reusable(self) -> None:
         admission = RUNTIME.Admission(
@@ -491,6 +604,149 @@ class RuntimeContractTests(unittest.TestCase):
             result.containment["lease_wrapper"],
             "scripts/management/clearra_process_wrapper.py",
         )
+
+    def test_persistent_host_pressure_fail_closes_owned_tree_after_gc(self) -> None:
+        policy = self._integration_policy()
+        policy["runtime_policy"]["memory_pressure"]["sample_interval_seconds"] = 0.02
+        policy["runtime_policy"]["memory_pressure"]["recovery_grace_seconds"] = 0.02
+        healthy = RUNTIME.MemorySnapshot(
+            16 * RUNTIME.GIB,
+            2 * RUNTIME.GIB,
+            32 * RUNTIME.GIB,
+            4 * RUNTIME.GIB,
+        )
+        pressured = RUNTIME.MemorySnapshot(
+            16 * RUNTIME.GIB,
+            384 * RUNTIME.MIB,
+            32 * RUNTIME.GIB,
+            768 * RUNTIME.MIB,
+        )
+        samples = iter((healthy, pressured, pressured))
+
+        def snapshot() -> RUNTIME.MemorySnapshot:
+            return next(samples, pressured)
+
+        with tempfile.TemporaryDirectory(
+            dir=ROOT / "_local" / "tmp"
+        ) as directory, mock.patch.dict(
+            os.environ, {"CLEARRA_STATE_ROOT": directory}
+        ), mock.patch.object(
+            RUNTIME, "memory_snapshot", side_effect=snapshot
+        ):
+            result = RUNTIME.run_host_process(
+                [sys.executable, "-B", "-c", "import time; time.sleep(60)"],
+                cwd=ROOT,
+                env=os.environ.copy(),
+                policy=policy,
+                profile="control",
+                echo=False,
+            )
+
+        self.assertEqual(result.reason, "host-memory-pressure")
+        self.assertEqual(result.error_code, RUNTIME.HOST_MEMORY_PRESSURE_ERROR)
+        self.assertTrue(result.process_tree_stopped)
+        self.assertTrue(result.memory_pressure["fail_closed"])
+        self.assertEqual(result.memory_pressure["supervisor_full_gc_runs"], 1)
+        self.assertEqual(result.memory_pressure["cooperative_full_gc_completions"], 0)
+        self.assertFalse(
+            result.memory_pressure["last_cooperative_full_gc_completed"]
+        )
+        self.assertTrue(result.memory_pressure["channel_removed"])
+
+    def test_benchmark_pressure_action_fail_closes_without_gc(self) -> None:
+        policy = self._integration_policy()
+        policy["resource_profiles"]["control"]["memory_pressure_action"] = (
+            "fail-close"
+        )
+        policy["runtime_policy"]["memory_pressure"]["sample_interval_seconds"] = 0.02
+        healthy = RUNTIME.MemorySnapshot(
+            16 * RUNTIME.GIB,
+            2 * RUNTIME.GIB,
+            32 * RUNTIME.GIB,
+            4 * RUNTIME.GIB,
+        )
+        pressured = RUNTIME.MemorySnapshot(
+            16 * RUNTIME.GIB,
+            384 * RUNTIME.MIB,
+            32 * RUNTIME.GIB,
+            768 * RUNTIME.MIB,
+        )
+        samples = iter((healthy, pressured))
+
+        def snapshot() -> RUNTIME.MemorySnapshot:
+            return next(samples, pressured)
+
+        with mock.patch.object(RUNTIME, "memory_snapshot", side_effect=snapshot):
+            result = RUNTIME.run_host_process(
+                [sys.executable, "-B", "-c", "import time; time.sleep(60)"],
+                cwd=ROOT,
+                env=os.environ.copy(),
+                policy=policy,
+                profile="control",
+                echo=False,
+            )
+
+        self.assertEqual(result.reason, "host-memory-pressure")
+        self.assertEqual(result.memory_pressure["events"], 1)
+        self.assertEqual(result.memory_pressure["supervisor_full_gc_runs"], 0)
+        self.assertEqual(result.memory_pressure["cooperative_gc_requests"], 0)
+
+    def test_acknowledged_child_full_gc_still_fail_closes_if_pressure_remains(
+        self,
+    ) -> None:
+        policy = self._integration_policy()
+        policy["runtime_policy"]["memory_pressure"]["sample_interval_seconds"] = 0.05
+        policy["runtime_policy"]["memory_pressure"]["recovery_grace_seconds"] = 0.5
+        healthy = RUNTIME.MemorySnapshot(
+            16 * RUNTIME.GIB,
+            2 * RUNTIME.GIB,
+            32 * RUNTIME.GIB,
+            4 * RUNTIME.GIB,
+        )
+        pressured = RUNTIME.MemorySnapshot(
+            16 * RUNTIME.GIB,
+            384 * RUNTIME.MIB,
+            32 * RUNTIME.GIB,
+            768 * RUNTIME.MIB,
+        )
+        samples = iter((healthy, pressured))
+
+        def snapshot() -> RUNTIME.MemorySnapshot:
+            return next(samples, pressured)
+
+        program = (
+            "import gc,json,os,pathlib,time;"
+            "request=pathlib.Path(os.environ['CLEARRA_MEMORY_PRESSURE_REQUEST_PATH']);"
+            "ack=pathlib.Path(os.environ['CLEARRA_MEMORY_PRESSURE_ACK_PATH']);"
+            "deadline=time.time()+10;"
+            "\nwhile not request.is_file() and time.time()<deadline: time.sleep(0.01)\n"
+            "payload=json.loads(request.read_text(encoding='utf-8'));"
+            "gc.collect();"
+            "ack.write_text(json.dumps({'schema_id':os.environ['CLEARRA_MEMORY_PRESSURE_PROTOCOL'],'request_id':payload['request_id'],'action':'full-gc','status':'completed'}),encoding='utf-8');"
+            "time.sleep(60)"
+        )
+        with tempfile.TemporaryDirectory(
+            dir=ROOT / "_local" / "tmp"
+        ) as directory, mock.patch.dict(
+            os.environ, {"CLEARRA_STATE_ROOT": directory}
+        ), mock.patch.object(
+            RUNTIME, "memory_snapshot", side_effect=snapshot
+        ):
+            result = RUNTIME.run_host_process(
+                [sys.executable, "-B", "-c", program],
+                cwd=ROOT,
+                env=os.environ.copy(),
+                policy=policy,
+                profile="control",
+                echo=False,
+            )
+
+        self.assertEqual(result.reason, "host-memory-pressure")
+        self.assertEqual(result.memory_pressure["cooperative_full_gc_completions"], 1)
+        self.assertTrue(
+            result.memory_pressure["last_cooperative_full_gc_completed"]
+        )
+        self.assertTrue(result.memory_pressure["fail_closed"])
 
     def test_linux_timeout_kills_detached_descendant(self) -> None:
         policy = self._integration_policy()
