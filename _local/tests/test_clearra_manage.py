@@ -423,6 +423,43 @@ checksum = "abc"
             },
         )
 
+    def test_cargo_dependency_resolution_runs_through_build_owner(self) -> None:
+        requested, effective = MANAGE.cargo_dependency_resolution_command(
+            self.policy,
+            ["-p", "serde", "--precise", "1.0.228"],
+            None,
+        )
+        self.assertEqual(
+            requested,
+            (
+                "cargo",
+                "+1.98.1",
+                "update",
+                "-p",
+                "serde",
+                "--precise",
+                "1.0.228",
+            ),
+        )
+        self.assertEqual(effective[0], "node")
+        self.assertIn("invoke-clearra-build.mjs", effective[1])
+        self.assertEqual(effective[-len(requested) :], requested)
+
+        admission_requested, admission_effective = (
+            MANAGE.cargo_dependency_resolution_command(
+                self.policy,
+                ["-p", "new-crate", "--precise", "1.2.3"],
+                {"kind": "exact-new-cargo-dependency"},
+            )
+        )
+        self.assertEqual(
+            admission_requested,
+            ("cargo", "+1.98.1", "metadata", "--format-version", "1"),
+        )
+        self.assertEqual(
+            admission_effective[-len(admission_requested) :], admission_requested
+        )
+
     def test_package_tarball_inspection_seals_members_and_identity(self) -> None:
         parent = ROOT / "_local" / "tmp" / "management-tests"
         parent.mkdir(parents=True, exist_ok=True)

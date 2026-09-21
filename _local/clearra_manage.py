@@ -1568,6 +1568,30 @@ def cargo_lock_package_identities(material: str) -> set[tuple[str, str, str]]:
     return identities
 
 
+def cargo_dependency_resolution_command(
+    policy: dict[str, Any],
+    values: Sequence[str],
+    admission: dict[str, Any] | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if admission is None:
+        requested = (
+            "cargo",
+            f"+{policy['toolchains']['rust']}",
+            "update",
+            *values,
+        )
+    else:
+        requested = (
+            "cargo",
+            f"+{policy['toolchains']['rust']}",
+            "metadata",
+            "--format-version",
+            "1",
+        )
+    effective = tuple(managed_execution_command("cargo", requested))
+    return requested, effective
+
+
 def dependency_changed_paths() -> list[str]:
     changed = {
         value
@@ -1604,30 +1628,17 @@ def dependency_update(
             raise ManagementError("unable to resolve the pnpm shared store")
         shared_root = pathlib.Path(store_result.stdout.strip())
         command = ("pnpm", "update", "--lockfile-only", "--ignore-scripts", *values)
+        requested_command = command
         environment = None
     else:
         shared_root = pathlib.Path(
             os.environ.get("CARGO_HOME", str(pathlib.Path.home() / ".cargo"))
         )
-        if admission is None:
-            command = (
-                "cargo",
-                f"+{policy['toolchains']['rust']}",
-                "update",
-                *values,
-            )
-        else:
-            command = (
-                "cargo",
-                f"+{policy['toolchains']['rust']}",
-                "metadata",
-                "--format-version",
-                "1",
-            )
-        environment = os.environ.copy()
-        environment["CARGO_TARGET_DIR"] = str(
-            ROOT / "build" / "cargo" / "host" / "dependency-update"
+        requested_command, command = cargo_dependency_resolution_command(
+            policy, values, admission
         )
+        environment = os.environ.copy()
+        environment["CLEARRA_BUILD_ROOT"] = str(build_root())
     shared_before = tree_identity_snapshot(shared_root, max_depth=1)
     completed = run(command, check=False, env=environment)
     shared_after = tree_identity_snapshot(shared_root, max_depth=1)
@@ -1698,6 +1709,7 @@ def dependency_update(
         {
             "manager": manager,
             "command": list(command),
+            "requested_command": list(requested_command),
             "exit_code": completed.returncode,
             "before": before,
             "after": after,
