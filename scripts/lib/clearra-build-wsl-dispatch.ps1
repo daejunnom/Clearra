@@ -59,8 +59,16 @@ function New-ClearraIndependentWslBuildArguments(
     # binding. Do not silently repair an externally requested output path.
     Assert-ClearraBuildEnvironmentBeforeMutation (Resolve-ClearraBuildSourceRoot)
     foreach ($name in $AdditionalEnvironment.Keys) {
-        if ($name -ne 'CLEARRA_WSL_ENABLE_STAGE_PROFILING' -or
-            [string]$AdditionalEnvironment[$name] -notin @('0', '1')) {
+        $value = [string]$AdditionalEnvironment[$name]
+        $accepted = if ($name -eq 'CLEARRA_WSL_ENABLE_STAGE_PROFILING') {
+            $value -in @('0', '1')
+        } elseif ($name -eq 'RUST_MIN_STACK') {
+            $value -match '^[0-9]+$' -and
+                [uint64]$value -ge 1048576 -and [uint64]$value -le 67108864
+        } else {
+            $false
+        }
+        if (-not $accepted) {
             throw "Unsupported independent WSL build environment setting: $name"
         }
     }

@@ -170,8 +170,12 @@ try {
         $linuxOtherCase = Get-ClearraIndependentWslTransactionRoot $linuxSource.Replace('/fixture/','/Fixture/')
         Assert-ArtifactPathCondition ($linuxTransaction -match '^/mnt/c/fixture-cache/Clearra/build/experiments/[0-9a-f]{24}/current$' -and
             $linuxTransaction -ne $linuxOtherCase) 'wsl_source_identity_is_independent_and_case_sensitive'
+        $stackDispatch = @(New-ClearraIndependentWslBuildArguments -LinuxSourceRoot $linuxSource `
+            -ScriptName 'wsl-native-cargo.sh' -AdditionalEnvironment @{ RUST_MIN_STACK='16777216' })
+        Assert-ArtifactPathCondition ($stackDispatch -contains 'RUST_MIN_STACK=16777216') 'wsl_allows_bounded_rust_test_stack'
         Assert-ArtifactPathCondition (Test-ArtifactPathThrows { New-ClearraIndependentWslBuildArguments -LinuxSourceRoot '/mnt/c/source' -ScriptName 'wsl-core-c-tests.sh' }) 'wsl_dispatch_refuses_unvalidated_source_copy'
         Assert-ArtifactPathCondition (Test-ArtifactPathThrows { New-ClearraIndependentWslBuildArguments -LinuxSourceRoot $linuxSource -ScriptName 'wsl-core-c-tests.sh' -AdditionalEnvironment @{ CARGO_TARGET_DIR=$entryOutside } }) 'wsl_dispatch_cannot_reintroduce_output_override'
+        Assert-ArtifactPathCondition (Test-ArtifactPathThrows { New-ClearraIndependentWslBuildArguments -LinuxSourceRoot $linuxSource -ScriptName 'wsl-native-cargo.sh' -AdditionalEnvironment @{ RUST_MIN_STACK='67108865' } }) 'wsl_rejects_unbounded_rust_test_stack'
     } finally { ${function:ConvertTo-ClearraWslBuildPath} = $entryOriginalMapping }
     Complete-ClearraBuildTransaction
     Exit-ClearraBuildArtifactCacheUsage
