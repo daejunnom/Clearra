@@ -534,6 +534,21 @@ function readCatalogTextOptions(command, tokens) {
 
     const controlledWidth = HOST_CONTROLLED_OPTIONS.get(parsed.name);
     if (controlledWidth !== undefined) {
+      if (["--tablebase", "--tb", "--no-tablebase", "--no-tb"].includes(parsed.name)) {
+        if (!supportsNamedOption(command, "tablebase")) {
+          throw new Error(
+            `Text command /${command.name} does not expose option '${parsed.name}'.`,
+          );
+        }
+        if (parsed.value !== null) {
+          throw new Error(`Text command option '${parsed.name}' does not accept a value.`);
+        }
+        options.push({
+          name: "tablebase",
+          value: ["--tablebase", "--tb"].includes(parsed.name) ? "on" : "off",
+        });
+        continue;
+      }
       if (["pc.score", "pc.score-minimals"].includes(command.capabilityId)) {
         throw new Error(
           `Text command /${command.name} does not expose execution option '${parsed.name}'.`,

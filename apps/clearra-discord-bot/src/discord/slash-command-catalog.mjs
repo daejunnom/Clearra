@@ -653,6 +653,7 @@ function registrationOptions(input, capabilityId = null) {
         linesOption(),
         pcHoldOption(),
         kicktableOption(true),
+        ...(capabilityId === "pc.minimals" ? [tablebaseOption()] : []),
         pcQueueKnowledgeOption(),
         spinProfileOption(false),
         onOffOption("preserve-b2b", "Require a solution that preserves back-to-back", "off"),
@@ -665,6 +666,7 @@ function registrationOptions(input, capabilityId = null) {
         linesOption(),
         pcHoldOption(),
         kicktableOption(true),
+        tablebaseOption(),
         spinProfileOption(false),
         onOffOption("preserve-b2b", "Require a path that preserves back-to-back", "off"),
       ]);
@@ -695,6 +697,7 @@ function registrationOptions(input, capabilityId = null) {
         linesOption(),
         pcHoldOption(),
         kicktableOption(true),
+        tablebaseOption(),
         pcScoreProfileOption(),
         spinProfileOption(false),
         boundedIntegerOption("initial-b2b", "Initial back-to-back chain used by scoring", 0, 65_535),
@@ -1516,6 +1519,14 @@ function kicktableOption(native = false) {
   });
 }
 
+function tablebaseOption() {
+  return onOffOption(
+    "tablebase",
+    "Use a qualified 4-line tablebase; unavailable profiles fail without offline fallback",
+    "off",
+  );
+}
+
 function setupPriorityOption() {
   return Object.freeze({
     ...stringOption(
@@ -1843,9 +1854,9 @@ function syntax(entry, locale = "en") {
       case "pc":
         return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<내장 프로필>] [options:hold=use]`;
       case "pc-v2":
-        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [solution-probabilities:<on|off>]`;
+        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>]${entry.capabilityId === "pc.minimals" ? " [tablebase:<on|off>]" : ""} [queue-knowledge:<oracle|visible-7>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [solution-probabilities:<on|off>]`;
       case "pc-path-v2":
-        return `/${path} next:<큐|패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [spin-profile:<프로필>] [preserve-b2b:<on|off>]`;
+        return `/${path} next:<큐|패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [tablebase:<on|off>] [spin-profile:<프로필>] [preserve-b2b:<on|off>]`;
       case "pc-chance-v2":
         return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>]`;
       case "pc-save-v2":
@@ -1856,7 +1867,7 @@ function syntax(entry, locale = "en") {
         return `/${path} field:<초기 필드> next:<큐 패턴> spin-profile:<프로필> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<on|off>] [kicktable:<내장 프로필>] [max-patterns:<개수>] [max-nodes:<개수>] [max-frontier-states:<개수>] [max-candidates:<개수>] [max-memory-mib:<MiB>]`;
       case "pc-score-v2":
         return ["pc.score", "pc.score-minimals"].includes(entry.capabilityId)
-          ? `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<프로필>] [initial-b2b:0..65535]`
+          ? `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [tablebase:<on|off>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<프로필>] [initial-b2b:0..65535]`
           : `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [queue-knowledge:<oracle|visible-7>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [initial-b2b:0..65535] [solution-probabilities:<on|off>]`;
       case "pc-score-finder-v2":
         return `/${path} next:<정확한 IOTSZJL 큐> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [initial-b2b:<on|off>]`;
@@ -1930,9 +1941,9 @@ function syntax(entry, locale = "en") {
     case "pc":
       return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<built-in>] [options:hold=use]`;
     case "pc-v2":
-      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [solution-probabilities:<on|off>]`;
+      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>]${entry.capabilityId === "pc.minimals" ? " [tablebase:<on|off>]" : ""} [queue-knowledge:<oracle|visible-7>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [solution-probabilities:<on|off>]`;
     case "pc-path-v2":
-      return `/${path} next:<queue|pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [spin-profile:<profile>] [preserve-b2b:<on|off>]`;
+      return `/${path} next:<queue|pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [tablebase:<on|off>] [spin-profile:<profile>] [preserve-b2b:<on|off>]`;
     case "pc-chance-v2":
       return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>]`;
     case "pc-save-v2":
@@ -1943,7 +1954,7 @@ function syntax(entry, locale = "en") {
       return `/${path} field:<initial field> next:<queue pattern> spin-profile:<profile> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<on|off>] [kicktable:<built-in>] [max-patterns:<count>] [max-nodes:<count>] [max-frontier-states:<count>] [max-candidates:<count>] [max-memory-mib:<MiB>]`;
     case "pc-score-v2":
       return ["pc.score", "pc.score-minimals"].includes(entry.capabilityId)
-        ? `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<profile>] [initial-b2b:0..65535]`
+        ? `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [tablebase:<on|off>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<profile>] [initial-b2b:0..65535]`
         : `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [queue-knowledge:<oracle|visible-7>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [initial-b2b:0..65535] [solution-probabilities:<on|off>]`;
     case "pc-score-finder-v2":
       return `/${path} next:<exact IOTSZJL queue> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [initial-b2b:<on|off>]`;
@@ -2088,13 +2099,6 @@ function inputHelp(entry, locale = "en") {
         "Built-in score profiles currently provide approximate scores rather than complete game-specific scoring. The direct `/score` alias uses its existing Jstris Ultra preset.",
         nativeKickHelp,
       ];
-    case "pc-score-finder-v2":
-      return [
-        `\`field\` is a 1–${DISCORD_PC_FIELD_MAX_ROWS}-row initial PC board or one static document; \`next\` must be one exact IOTSZJL queue, never a pattern.`,
-        "Jstris Ultra scoring, T-spin recognition, all-witness search, and CPU execution are fixed by the capability. Score/profile, spin/profile, objective, queue-knowledge, worker, backend, fallback, and max-memory overrides are unavailable.",
-        "Score equality and ordering are score-only. Attack is informational and cannot select or order a witness; Discord returns only the first result in deterministic order and exposes no tie metadata.",
-        nativeKickHelp,
-      ];
       if (entry.capabilityId === "pc.score-minimals") return [
         `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS} and omission evaluates feasible targets serially.`,
         "This route fixes exact score-only minimum-cover semantics. Attack is informational only and cannot affect equality, eligibility, ordering, membership, or canonical selection.",
@@ -2104,6 +2108,13 @@ function inputHelp(entry, locale = "en") {
       return [
         `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS} and omission evaluates feasible targets serially.`,
         "`score-profile` defaults to `tetrio`; spin profile, initial/preserved B2B, queue knowledge, and per-solution probabilities are independent named options.",
+        nativeKickHelp,
+      ];
+    case "pc-score-finder-v2":
+      return [
+        `\`field\` is a 1–${DISCORD_PC_FIELD_MAX_ROWS}-row initial PC board or one static document; \`next\` must be one exact IOTSZJL queue, never a pattern.`,
+        "Jstris Ultra scoring, T-spin recognition, all-witness search, and CPU execution are fixed by the capability. Score/profile, spin/profile, objective, queue-knowledge, worker, backend, fallback, and max-memory overrides are unavailable.",
+        "Score equality and ordering are score-only. Attack is informational and cannot select or order a witness; Discord returns only the first result in deterministic order and exposes no tie metadata.",
         nativeKickHelp,
       ];
     case "pc-tiling-v2":
@@ -3303,6 +3314,7 @@ const KOREAN_OPTION_NAMES = Object.freeze({
   field: "필드",
   lines: "줄",
   kicktable: "킥테이블",
+  tablebase: "테이블베이스",
   options: "옵션",
   pieces: "미노",
   profile: "프로필",
@@ -3640,6 +3652,7 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   field: "10열 필드: grid:줄/줄 또는 CTK3/Fumen/문서, 여러 줄은 입력 창 사용",
   lines: `PC 목표 높이 1–${DISCORD_PC_FIELD_MAX_ROWS}이며 생략하면 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 전체를 자동 판정합니다`,
   kicktable: "내장 킥테이블이며 기본값은 SRS+입니다",
+  tablebase: "사용 가능한 4라인 테이블베이스를 사용합니다. 미지원 프로필은 오프라인 탐색으로 전환하지 않습니다",
   options: "추가 선택 설정",
   base: `기존 필드 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,
   target: `목표 칸 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,

@@ -173,6 +173,7 @@ test("Gateway grouped /pc path reaches the canonical CLI authority while legacy 
     "--spin-profile", "all-spin-plus",
     "--preserve-b2b",
     "--rule", "srs-x",
+    "--no-tablebase",
     "--format", "json",
     "--include-solution-data",
   ]);
