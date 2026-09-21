@@ -2974,7 +2974,11 @@ impl CompactBuildProbabilitySession {
         self.ensure_result_materialization_bound()?;
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().execution_constraints().requested()
-            || self.problem.objective().score().requested();
+            || self.problem.objective().score().requested()
+            || self
+                .problem
+                .pc_chance_evidence_policy()
+                .retains_pc_path_v2_evidence();
         let scoring_batch = if execution_evidence_requested {
             Some(self.prepare_exact_spin_execution_batch()?)
         } else {
@@ -3681,7 +3685,11 @@ impl CompactBuildProbabilitySession {
         self.finished = true;
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().execution_constraints().requested()
-            || self.problem.objective().score().requested();
+            || self.problem.objective().score().requested()
+            || self
+                .problem
+                .pc_chance_evidence_policy()
+                .retains_pc_path_v2_evidence();
         let evidence_materialized = self.distributed_spin_materialized
             || (self.problem.objective().execution_constraints().requested()
                 && self.distributed_execution_constraint_materialized);
@@ -4470,7 +4478,11 @@ impl CompactBuildProbabilitySession {
         }
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().execution_constraints().requested()
-            || self.problem.objective().score().requested();
+            || self.problem.objective().score().requested()
+            || self
+                .problem
+                .pc_chance_evidence_policy()
+                .retains_pc_path_v2_evidence();
         let evidence_materialized = self.distributed_spin_materialized
             || (self.problem.objective().execution_constraints().requested()
                 && self.distributed_execution_constraint_materialized);

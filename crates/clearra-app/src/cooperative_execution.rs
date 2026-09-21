@@ -3924,7 +3924,8 @@ pub(crate) fn compile_search_command(
             let aggregation = command.query().aggregation();
             let finesse = command.query().finesse_request().clone();
             let solution_probability_policy = command.query().solution_probability_policy();
-            let compiled = ProblemCompiler::compile_scenario_pc(command.query().core_query());
+            let compiled = ProblemCompiler::compile_scenario_pc(command.query().core_query())
+                .map(|problem| command.with_private_product_evidence(problem));
             let result_command = (command.result_mode()
                 != BuildProbabilityResultMode::AllSolutions)
                 .then(|| Box::new(command));
