@@ -162,13 +162,33 @@ clearra-pc4-qualifier offline-family-materialize `
   --output C:\absolute\qualification\jstris-180-offline-p7p4-materialization.json
 ```
 
+If the canonical offline proof JSON is lost while its validated materialized
+family and self-hashed materialization receipt remain, `offline-family-recover`
+fully re-hashes and decodes that family, recomputes strict ordering and the
+normalized family hash, reconstructs the canonical proof bytes, and requires
+their receipt identity to equal the identity already bound by the
+materialization. This is recovery of prior evidence, not a new solver proof or
+an authority shortcut.
+
+```powershell
+clearra-pc4-qualifier offline-family-recover `
+  --dataset-root C:\absolute\pc4-data --profile jstris-180 `
+  --expected-count 456459 `
+  --family C:\absolute\qualification\jstris-180-offline-p7p4.bin `
+  --materialization C:\absolute\qualification\jstris-180-offline-p7p4-materialization.json `
+  --output C:\absolute\qualification\jstris-180-offline-p7p4.json
+```
+
 `tablebase-family-proof` accepts only a complete outgoing merge, its exact
 matching outside-boundary dead proof, the offline receipt, and the validated
 materialization above. It drives the ordinary App tablebase path from verified
 local Range slices and compares every canonical solution identity in order.
 Count or the 64-bit display hash alone cannot pass this comparison. The
 temporary activated snapshot exists only inside this local qualifier process;
-it is never written as a production manifest.
+it is never written as a production manifest. Local qualification reads use a
+bounded page cache for all three immutable artifacts so repeated graph records
+do not become millions of seek/read system calls; every admitted slice still
+passes through the ordinary Range identity and byte validation boundary.
 
 ```powershell
 clearra-pc4-qualifier tablebase-family-proof `

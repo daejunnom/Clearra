@@ -5,7 +5,7 @@ use core::{
     hash::{Hash, Hasher},
     num::NonZeroUsize,
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
 
@@ -96,17 +96,49 @@ struct DrawAtom {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct DrawState {
+struct PlacementState {
     atom: u16,
-    used: u8,
+    // `used` is in 0..=7 and hold has eight exact states (empty plus seven
+    // tetrominoes). Packing both into one byte removes two alignment bytes
+    // from every determinized supply state without quotienting histories.
+    used_and_held: u8,
     remaining: u8,
     consumed: u16,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct PlacementState {
-    draw: DrawState,
-    held: Option<PieceKind>,
+const PLACEMENT_USED_MASK: u8 = 0b0000_0111;
+const PLACEMENT_HELD_SHIFT: u32 = 3;
+const PLACEMENT_HELD_MASK: u8 = 0b0011_1000;
+const _: [(); 6] = [(); core::mem::size_of::<PlacementState>()];
+
+impl PlacementState {
+    fn new(atom: u16, used: u8, remaining: u8, consumed: u16, held: Option<PieceKind>) -> Self {
+        debug_assert!(used <= PLACEMENT_USED_MASK);
+        Self {
+            atom,
+            used_and_held: used | (held_code(held) << PLACEMENT_HELD_SHIFT),
+            remaining,
+            consumed,
+        }
+    }
+
+    const fn used(self) -> u8 {
+        self.used_and_held & PLACEMENT_USED_MASK
+    }
+
+    fn set_used(&mut self, used: u8) {
+        debug_assert!(used <= PLACEMENT_USED_MASK);
+        self.used_and_held = (self.used_and_held & !PLACEMENT_USED_MASK) | used;
+    }
+
+    const fn held(self) -> Option<PieceKind> {
+        held_from_code((self.used_and_held & PLACEMENT_HELD_MASK) >> PLACEMENT_HELD_SHIFT)
+    }
+
+    fn set_held(&mut self, held: Option<PieceKind>) {
+        self.used_and_held =
+            (self.used_and_held & !PLACEMENT_HELD_MASK) | (held_code(held) << PLACEMENT_HELD_SHIFT);
+    }
 }
 
 #[derive(Debug)]
@@ -151,6 +183,16 @@ impl CompactPatternUnionFrontier {
         self.states.len() * core::mem::size_of::<PlacementState>()
     }
 
+    /// Returns the opaque owner token used by one exact placement-depth layer.
+    /// The token does not expose or weaken the language/depth identity check;
+    /// it only lets a graph layer retain that shared identity once instead of
+    /// once per hash-table entry.
+    pub fn layer_owner(&self) -> CompactPatternUnionLayerOwner {
+        CompactPatternUnionLayerOwner {
+            owner: Arc::clone(&self.owner),
+        }
+    }
+
     /// Fallible owned copy for callers that reserve the returned payload under
     /// a frontier-memory budget. A failed clone never changes the source.
     pub fn try_clone(&self) -> Result<Self, CompactPatternUnionError> {
@@ -165,6 +207,151 @@ impl CompactPatternUnionFrontier {
         })
     }
 }
+
+/// Opaque identity shared by every compact frontier at one language/depth.
+///
+/// This is deliberately not a constructor for frontiers. Payload ownership,
+/// reattachment and foreign-owner rejection stay inside
+/// [`CompactPatternUnionLayerShard`].
+#[derive(Clone, Debug)]
+pub struct CompactPatternUnionLayerOwner {
+    owner: Arc<FrontierOwner>,
+}
+
+impl CompactPatternUnionLayerOwner {
+    fn matches(&self, frontier: &CompactPatternUnionFrontier) -> bool {
+        Arc::ptr_eq(&self.owner, &frontier.owner)
+    }
+
+    pub fn same_identity(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+    }
+}
+
+/// Borrowed exact supply frontier stored in a graph-layer shard.
+///
+/// Callers can inspect accounting and ask the owning language to merge it,
+/// but cannot detach the payload from its owner or manufacture a frontier.
+pub struct CompactPatternUnionLayerFrontierRef<'a> {
+    owner: &'a Arc<FrontierOwner>,
+    states: &'a [PlacementState],
+}
+
+impl CompactPatternUnionLayerFrontierRef<'_> {
+    pub fn state_count(&self) -> usize {
+        self.states.len()
+    }
+
+    pub fn retained_state_capacity_bytes(&self) -> usize {
+        core::mem::size_of_val(self.states)
+    }
+}
+
+/// One ownership shard for a breadth layer. The owner is retained once by the
+/// surrounding layer while this table stores only exact state slices. On
+/// 64-bit targets that reduces `(K, frontier)` by one pointer without changing
+/// any accepted supply history, geometry key or merge rule.
+pub struct CompactPatternUnionLayerShard<K> {
+    entries: HashMap<K, Box<[PlacementState]>>,
+}
+
+impl<K> CompactPatternUnionLayerShard<K> {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    pub const fn entry_size() -> usize {
+        core::mem::size_of::<(K, Box<[PlacementState]>)>()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.entries.capacity()
+    }
+}
+
+impl<K: Eq + Hash> CompactPatternUnionLayerShard<K> {
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), CompactPatternUnionError> {
+        self.entries
+            .try_reserve(additional)
+            .map_err(|_| CompactPatternUnionError::AllocationFailed)
+    }
+
+    pub fn get<'a>(
+        &'a self,
+        key: &K,
+        owner: &'a CompactPatternUnionLayerOwner,
+    ) -> Option<CompactPatternUnionLayerFrontierRef<'a>> {
+        self.entries
+            .get(key)
+            .map(|states| CompactPatternUnionLayerFrontierRef {
+                owner: &owner.owner,
+                states,
+            })
+    }
+
+    /// Inserts a frontier only when it belongs to the surrounding layer.
+    /// Returns true when an existing key was replaced.
+    pub fn insert(
+        &mut self,
+        key: K,
+        frontier: CompactPatternUnionFrontier,
+        owner: &CompactPatternUnionLayerOwner,
+    ) -> Result<bool, CompactPatternUnionError> {
+        if !owner.matches(&frontier) {
+            return Err(CompactPatternUnionError::ForeignFrontier);
+        }
+        Ok(self.entries.insert(key, frontier.states).is_some())
+    }
+
+    pub fn into_iter(
+        self,
+        owner: CompactPatternUnionLayerOwner,
+    ) -> CompactPatternUnionLayerIntoIter<K> {
+        CompactPatternUnionLayerIntoIter {
+            owner,
+            entries: self.entries.into_iter(),
+        }
+    }
+}
+
+impl<K> Default for CompactPatternUnionLayerShard<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct CompactPatternUnionLayerIntoIter<K> {
+    owner: CompactPatternUnionLayerOwner,
+    entries: std::collections::hash_map::IntoIter<K, Box<[PlacementState]>>,
+}
+
+impl<K> Iterator for CompactPatternUnionLayerIntoIter<K> {
+    type Item = (K, CompactPatternUnionFrontier);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.entries.next().map(|(key, states)| {
+            (
+                key,
+                CompactPatternUnionFrontier {
+                    owner: Arc::clone(&self.owner.owner),
+                    states,
+                },
+            )
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.entries.size_hint()
+    }
+}
+
+impl<K> ExactSizeIterator for CompactPatternUnionLayerIntoIter<K> {}
 
 // This key is only for an in-memory graph x supply memo in the same family.
 // It is not a stable digest, wire identity, or a license to merge geometry
@@ -274,15 +461,13 @@ impl CompactPatternUnionLanguage {
         states
             .try_reserve_exact(1)
             .map_err(|_| CompactPatternUnionError::AllocationFailed)?;
-        states.push(PlacementState {
-            draw: DrawState {
-                atom: 0,
-                used: 0,
-                remaining: atoms[0].choices,
-                consumed: 0,
-            },
-            held: initial.hold_piece,
-        });
+        states.push(PlacementState::new(
+            0,
+            0,
+            atoms[0].choices,
+            0,
+            initial.hold_piece,
+        ));
         check_cancelled(cancelled)?;
         let frontier = CompactPatternUnionFrontier {
             owner: Arc::clone(&depth_owners[0]),
@@ -332,20 +517,50 @@ impl CompactPatternUnionLanguage {
         {
             return Err(CompactPatternUnionError::ForeignFrontier);
         }
+        self.merge_states(&left.owner, &left.states, &right.states, cancelled)
+    }
+
+    /// Exact union against a frontier retained in a layer shard. This is the
+    /// same operation as [`Self::merge`]; only the repeated owner pointer has
+    /// moved from every hash entry to the surrounding layer.
+    pub fn merge_layer<G: Fn() -> bool>(
+        &self,
+        left: CompactPatternUnionLayerFrontierRef<'_>,
+        right: &CompactPatternUnionFrontier,
+        cancelled: &G,
+    ) -> Result<CompactPatternUnionFrontier, CompactPatternUnionError> {
+        check_cancelled(cancelled)?;
+        if left.owner.placed_pieces != right.placed_pieces() {
+            return Err(CompactPatternUnionError::PlacementDepthMismatch);
+        }
+        if !Arc::ptr_eq(left.owner, &right.owner)
+            || self
+                .depth_owners
+                .get(left.owner.placed_pieces)
+                .is_none_or(|owner| !Arc::ptr_eq(owner, left.owner))
+        {
+            return Err(CompactPatternUnionError::ForeignFrontier);
+        }
+        self.merge_states(left.owner, left.states, &right.states, cancelled)
+    }
+
+    fn merge_states<G: Fn() -> bool>(
+        &self,
+        owner: &Arc<FrontierOwner>,
+        left: &[PlacementState],
+        right: &[PlacementState],
+        cancelled: &G,
+    ) -> Result<CompactPatternUnionFrontier, CompactPatternUnionError> {
+        check_cancelled(cancelled)?;
         let mut states = Vec::new();
         let limit = self.limits.frontier_states.get();
         states
-            .try_reserve_exact(
-                left.states
-                    .len()
-                    .saturating_add(right.states.len())
-                    .min(limit),
-            )
+            .try_reserve_exact(left.len().saturating_add(right.len()).min(limit))
             .map_err(|_| CompactPatternUnionError::AllocationFailed)?;
         let (mut l, mut r) = (0, 0);
-        while l < left.states.len() || r < right.states.len() {
+        while l < left.len() || r < right.len() {
             check_cancelled(cancelled)?;
-            let item = match (left.states.get(l), right.states.get(r)) {
+            let item = match (left.get(l), right.get(r)) {
                 (Some(a), Some(b)) if a == b => {
                     l += 1;
                     r += 1;
@@ -375,7 +590,7 @@ impl CompactPatternUnionLanguage {
         }
         check_cancelled(cancelled)?;
         Ok(CompactPatternUnionFrontier {
-            owner: Arc::clone(&left.owner),
+            owner: Arc::clone(owner),
             states: states.into_boxed_slice(),
         })
     }
@@ -412,15 +627,16 @@ impl CompactPatternUnionLanguage {
         let mut attempts = 0usize;
         for state in frontier.states.iter() {
             check_cancelled(cancelled)?;
+            let held = state.held();
             let execution = SupplyExecutionState {
-                cursor: state.draw.consumed,
-                hold_piece: state.held,
-                hold_empty: state.held.is_none(),
+                cursor: state.consumed,
+                hold_piece: held,
+                hold_empty: held.is_none(),
                 ..self.initial
             };
             for current in PieceKind::STANDARD_TETROMINOES {
                 check_cancelled(cancelled)?;
-                let Some(after_current) = self.draw(state.draw, current) else {
+                let Some(after_current) = self.draw(*state, current) else {
                     continue;
                 };
                 if current == desired && execution.hold_policy != HoldPolicy::Required {
@@ -437,7 +653,7 @@ impl CompactPatternUnionLanguage {
                 if execution.hold_policy == HoldPolicy::Forbidden {
                     continue;
                 }
-                if state.held == Some(desired) {
+                if held == Some(desired) {
                     self.append_step(
                         &mut states,
                         &mut attempts,
@@ -447,7 +663,7 @@ impl CompactPatternUnionLanguage {
                         None,
                         after_current,
                     )?;
-                } else if state.held.is_none() {
+                } else if held.is_none() {
                     if let Some(after_next) = self.draw(after_current, desired) {
                         self.append_step(
                             &mut states,
@@ -469,17 +685,18 @@ impl CompactPatternUnionLanguage {
         })
     }
 
-    fn draw(&self, mut state: DrawState, piece: PieceKind) -> Option<DrawState> {
+    fn draw(&self, mut state: PlacementState, piece: PieceKind) -> Option<PlacementState> {
         if state.consumed >= self.sequence_pieces || state.remaining & piece_bit(piece) == 0 {
             return None;
         }
         let atom = self.atoms.get(usize::from(state.atom))?;
         state.remaining &= !piece_bit(piece);
-        state.used += 1;
+        let used = state.used() + 1;
+        state.set_used(used);
         state.consumed += 1;
-        if state.used == atom.draws {
+        if used == atom.draws {
             state.atom += 1;
-            state.used = 0;
+            state.set_used(0);
             state.remaining = self
                 .atoms
                 .get(usize::from(state.atom))
@@ -497,7 +714,7 @@ impl CompactPatternUnionLanguage {
         kind: SupplyBranchKind,
         current: PieceKind,
         next: Option<PieceKind>,
-        draw: DrawState,
+        mut state: PlacementState,
     ) -> Result<(), CompactPatternUnionError> {
         *attempts = attempts
             .checked_add(1)
@@ -511,13 +728,10 @@ impl CompactPatternUnionLanguage {
         let step = SupplyExecutionAutomaton::sequence()
             .transition(execution, kind, current, next)
             .map_err(CompactPatternUnionError::Supply)?;
-        if step.next_state.cursor != draw.consumed {
+        if step.next_state.cursor != state.consumed {
             return Err(CompactPatternUnionError::InconsistentSource);
         }
-        let state = PlacementState {
-            draw,
-            held: step.next_state.hold_piece,
-        };
+        state.set_held(step.next_state.hold_piece);
         let Err(index) = states.binary_search(&state) else {
             return Ok(());
         };
@@ -662,5 +876,32 @@ const fn piece_bit(piece: PieceKind) -> u8 {
         PieceKind::Z => 16,
         PieceKind::J => 32,
         PieceKind::L => 64,
+    }
+}
+
+const fn held_code(piece: Option<PieceKind>) -> u8 {
+    match piece {
+        None => 0,
+        Some(PieceKind::I) => 1,
+        Some(PieceKind::O) => 2,
+        Some(PieceKind::T) => 3,
+        Some(PieceKind::S) => 4,
+        Some(PieceKind::Z) => 5,
+        Some(PieceKind::J) => 6,
+        Some(PieceKind::L) => 7,
+    }
+}
+
+const fn held_from_code(code: u8) -> Option<PieceKind> {
+    match code {
+        0 => None,
+        1 => Some(PieceKind::I),
+        2 => Some(PieceKind::O),
+        3 => Some(PieceKind::T),
+        4 => Some(PieceKind::S),
+        5 => Some(PieceKind::Z),
+        6 => Some(PieceKind::J),
+        7 => Some(PieceKind::L),
+        _ => unreachable!(),
     }
 }

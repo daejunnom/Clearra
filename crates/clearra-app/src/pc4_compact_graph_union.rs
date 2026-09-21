@@ -21,7 +21,8 @@ use clearra_pc4_tablebase::{
 };
 use clearra_supply::pattern_universe::{
     CompactPatternUnionError, CompactPatternUnionFrontier, CompactPatternUnionLanguage,
-    CompactPatternUnionLimits,
+    CompactPatternUnionLayerFrontierRef, CompactPatternUnionLayerIntoIter,
+    CompactPatternUnionLayerOwner, CompactPatternUnionLayerShard, CompactPatternUnionLimits,
 };
 
 use super::{
@@ -166,6 +167,10 @@ const _: [(); 1] = [(); (core::mem::size_of::<CompactPatternUnionFrontier>() <= 
 const _: [(); 56] = [(); core::mem::size_of::<(StateKey, CompactPatternUnionFrontier)>()];
 #[cfg(target_pointer_width = "32")]
 const _: [(); 40] = [(); core::mem::size_of::<(StateKey, CompactPatternUnionFrontier)>()];
+#[cfg(target_pointer_width = "64")]
+const _: [(); 48] = [(); CompactPatternUnionLayerShard::<StateKey>::entry_size()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 36] = [(); CompactPatternUnionLayerShard::<StateKey>::entry_size()];
 
 impl StateKey {
     fn new(
@@ -443,11 +448,216 @@ const fn pc4_piece_from_code(code: u8) -> Option<PieceKind> {
     }
 }
 
-/// Moving a completed layer is cooperative too: a large retained frontier
-/// must not become one uninterruptible O(layer size) queue conversion.
-struct LayerPromotion {
-    entries: std::collections::hash_map::IntoIter<StateKey, CompactPatternUnionFrontier>,
+// Keeping a breadth layer in one HashMap makes `into_iter` retain the entire
+// bucket allocation until its final entry is promoted. At the widest PC4
+// layer that overlaps a full old table with a growing successor table and can
+// exceed the bounded frontier even though live state count stays bounded. A
+// fixed shard count preserves one exact merge owner per StateKey while letting
+// completed old shards return their bucket allocation immediately.
+// Full Jstris qualification showed why powers of two alone do not remove the
+// last breadth-layer cliff: around 1.845M live successor keys, both 64 and 128
+// shards place the average shard just beyond a hash-table growth boundary and
+// retain 3,239,936 aggregate slots. A 192-shard follow-up crossed a later
+// frontier by only 64,978 bytes while retaining 2,365,440 successor slots for
+// 1,384,912 live keys. That measurement predated the layer-owner split: every
+// entry was then 56 bytes because it repeated the same Arc owner. The exact
+// layer shard now retains that owner once and its entry is 48 bytes. A later
+// 160-way proof reached a different overlap with 143 still-live 28,672-slot
+// promotion shards plus 69 successor shards and missed 256 MiB by 92,616
+// bytes. Restoring 192 owners moves both measured overlaps back below the
+// 14,336-slot per-shard boundary; the old 192-way cliff is more than covered
+// by the eight bytes removed from each retained entry. This changes storage
+// granularity only: every StateKey still has one deterministic merge owner and
+// no search state or solution identity is altered.
+const PC4_LAYER_SHARDS: usize = 192;
+
+struct LayerFrontier {
+    // Build the directory as a dynamic boxed slice. `Box<[T; N]>` still
+    // constructs its fixed array value on the caller stack before moving it,
+    // which overflowed the deliberately small product/test worker stack.
+    // Entry and nested payload capacities remain charged independently below.
+    shards: Box<[CompactPatternUnionLayerShard<StateKey>]>,
+    owner: Option<CompactPatternUnionLayerOwner>,
+    len: usize,
+}
+
+impl LayerFrontier {
+    fn new() -> Self {
+        let mut shards = Vec::with_capacity(PC4_LAYER_SHARDS);
+        shards.resize_with(PC4_LAYER_SHARDS, CompactPatternUnionLayerShard::new);
+        Self {
+            shards: shards.into_boxed_slice(),
+            owner: None,
+            len: 0,
+        }
+    }
+
+    fn shard_index(key: &StateKey) -> usize {
+        // Only selects an ownership shard; HashMap still performs the exact
+        // key comparison. Mix every compact layout word with the qualified
+        // field/frame word so both field-heavy and layout-heavy layers spread.
+        let mut mixed = key.field_frame.wrapping_mul(0x9e37_79b9);
+        for word in key.layout.words {
+            mixed ^= word.wrapping_add(0x9e37_79b9).rotate_left(13);
+            mixed = mixed.wrapping_mul(0x85eb_ca6b).rotate_left(7);
+        }
+        // The measured layout intentionally is not a power of two: a
+        // mask would map only 128 owners and recreate the observed capacity
+        // cliff. Modulo is paid once per outer lookup/insert and keeps every
+        // shard reachable without changing HashMap's exact key comparison.
+        (mixed as usize) % PC4_LAYER_SHARDS
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn capacity(&self) -> Result<usize, CompactGraphUnionError> {
+        self.shards.iter().try_fold(0usize, |total, shard| {
+            total
+                .checked_add(shard.capacity())
+                .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))
+        })
+    }
+
+    fn directory_bytes() -> Result<usize, CompactGraphUnionError> {
+        Ok(capacity_bytes::<CompactPatternUnionLayerShard<StateKey>>(
+            PC4_LAYER_SHARDS,
+        )?)
+    }
+
+    fn retained_capacity_bytes(&self) -> Result<usize, CompactGraphUnionError> {
+        self.capacity()?
+            .checked_mul(CompactPatternUnionLayerShard::<StateKey>::entry_size())
+            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))
+    }
+
+    fn get(&self, key: &StateKey) -> Option<CompactPatternUnionLayerFrontierRef<'_>> {
+        self.owner
+            .as_ref()
+            .and_then(|owner| self.shards[Self::shard_index(key)].get(key, owner))
+    }
+
+    fn reserve_for(&mut self, key: &StateKey) -> Result<(), CompactGraphUnionError> {
+        self.shards[Self::shard_index(key)]
+            .try_reserve(1)
+            .map_err(CompactGraphUnionError::Supply)
+    }
+
+    fn additional_capacity_for(&self, key: &StateKey) -> usize {
+        let shard = &self.shards[Self::shard_index(key)];
+        (shard.len() + 1).saturating_sub(shard.capacity())
+    }
+
+    fn insert(
+        &mut self,
+        key: StateKey,
+        supply: CompactPatternUnionFrontier,
+    ) -> Result<bool, CompactGraphUnionError> {
+        let incoming_owner = supply.layer_owner();
+        if let Some(owner) = &self.owner {
+            if !owner.same_identity(&incoming_owner) {
+                return Err(CompactGraphUnionError::Supply(
+                    CompactPatternUnionError::ForeignFrontier,
+                ));
+            }
+        } else {
+            self.owner = Some(incoming_owner);
+        }
+        let owner = self.owner.as_ref().expect("layer owner installed");
+        let replaced = self.shards[Self::shard_index(&key)]
+            .insert(key, supply, owner)
+            .map_err(CompactGraphUnionError::Supply)?;
+        if !replaced {
+            self.len += 1;
+        }
+        Ok(replaced)
+    }
+
+    fn into_promotion(self) -> Result<LayerPromotion, CompactGraphUnionError> {
+        let table_capacity = self.capacity()?;
+        let owner = self
+            .owner
+            .ok_or_else(|| contract("pc4_compact_union_nonempty_layer_owner_missing"))?;
+        let shards = self
+            .shards
+            .into_vec()
+            .into_iter()
+            .map(|table| {
+                let table_capacity = table.capacity();
+                Some(PromotionShard {
+                    entries: table.into_iter(owner.clone()),
+                    table_capacity,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Ok(LayerPromotion {
+            shards,
+            shard_index: 0,
+            table_capacity,
+        })
+    }
+}
+
+impl Default for LayerFrontier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct PromotionShard {
+    entries: CompactPatternUnionLayerIntoIter<StateKey>,
     table_capacity: usize,
+}
+
+/// Moving a completed layer is cooperative too: a large retained frontier
+/// must not become one uninterruptible O(layer size) queue conversion. Shards
+/// additionally make the old allocation releasable throughout that move.
+struct LayerPromotion {
+    shards: Box<[Option<PromotionShard>]>,
+    shard_index: usize,
+    table_capacity: usize,
+}
+
+impl LayerPromotion {
+    fn directory_bytes() -> Result<usize, CompactGraphUnionError> {
+        Ok(capacity_bytes::<Option<PromotionShard>>(PC4_LAYER_SHARDS)?)
+    }
+
+    fn next(
+        &mut self,
+    ) -> Result<Option<(StateKey, CompactPatternUnionFrontier)>, CompactGraphUnionError> {
+        while self.shard_index < self.shards.len() {
+            let index = self.shard_index;
+            let (entry, exhausted) = {
+                let shard = self.shards[index]
+                    .as_mut()
+                    .expect("unvisited promotion shard");
+                let entry = shard.entries.next();
+                let exhausted = shard.entries.len() == 0;
+                (entry, exhausted)
+            };
+            if exhausted {
+                let shard = self.shards[index]
+                    .take()
+                    .expect("promotion shard exists until exhausted");
+                self.table_capacity = self
+                    .table_capacity
+                    .checked_sub(shard.table_capacity)
+                    .ok_or_else(|| contract("pc4_compact_union_frontier_accounting_failed"))?;
+                self.shard_index += 1;
+            }
+            if entry.is_some() {
+                return Ok(entry);
+            }
+        }
+        Ok(None)
+    }
 }
 
 struct Work {
@@ -540,7 +750,7 @@ pub(crate) struct Pc4CompactGraphUnion {
     ready: VecDeque<Work>,
     waiting: HashMap<u32, Vec<Work>>,
     waiting_count: usize,
-    next_layer: HashMap<StateKey, CompactPatternUnionFrontier>,
+    next_layer: LayerFrontier,
     promotion: Option<LayerPromotion>,
     candidates: HashSet<StandardBoard64TilingIdentity>,
     canonicalizer: Option<CooperativeCandidateCanonicalizer>,
@@ -593,9 +803,13 @@ impl Pc4CompactGraphUnion {
     }
 
     #[cfg(test)]
-    pub(crate) fn resident_capacity_blocks_cold_front(&self) -> bool {
+    pub(crate) fn resident_capacity_blocks_cold_front(&self, cache: &Pc4LookupGraphCache) -> bool {
         self.residents == self.limits.resident_work.get()
             && self.ready.front().is_some_and(|task| !task.resident)
+            && !self
+                .waiting
+                .keys()
+                .any(|field| cache.contains_field_id(*field))
     }
 
     pub(crate) fn prepare<G: Pc4GraphCandidateGuard>(
@@ -655,11 +869,18 @@ impl Pc4CompactGraphUnion {
             .map_err(|_| contract("pc4_compact_union_row_frame_invalid"))?;
         let retained_supply_states = supply.state_count();
         let mut retention = FrontierRetention::new(limits.frontier_bytes);
+        let next_layer = LayerFrontier::new();
         let initial_payload = supply.retained_state_capacity_bytes();
-        retention.authorize(capacity_bytes::<Work>(1)?, initial_payload)?;
+        let initial_outer = capacity_bytes::<Work>(1)?
+            .checked_add(LayerFrontier::directory_bytes()?)
+            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+        retention.authorize(initial_outer, initial_payload)?;
         let mut ready = VecDeque::new();
         ready.try_reserve(1).map_err(|_| allocation())?;
-        retention.retain(capacity_bytes::<Work>(ready.capacity())?, initial_payload)?;
+        let retained_outer = capacity_bytes::<Work>(ready.capacity())?
+            .checked_add(LayerFrontier::directory_bytes()?)
+            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+        retention.retain(retained_outer, initial_payload)?;
         ready.push_back(Work::new(
             StateKey::new(layout, start_field, frame)?,
             supply,
@@ -680,7 +901,7 @@ impl Pc4CompactGraphUnion {
             ready,
             waiting: HashMap::new(),
             waiting_count: 0,
-            next_layer: HashMap::new(),
+            next_layer,
             promotion: None,
             candidates: HashSet::new(),
             canonicalizer: None,
@@ -737,6 +958,27 @@ impl Pc4CompactGraphUnion {
         self.usage
     }
 
+    #[cfg(test)]
+    pub(crate) fn retained_promotion_capacity_for_test(&self) -> Option<usize> {
+        self.promotion.as_ref().map(|layer| layer.table_capacity)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completion_state_for_test(&self) -> String {
+        format!(
+            "terminated={} completed={} ready={} waiting={} next={} promotion={} residents={} pins={} canonicalizer={}",
+            self.terminated,
+            self.completed,
+            self.ready.len(),
+            self.waiting.len(),
+            self.next_layer.len(),
+            self.promotion.is_some(),
+            self.residents,
+            self.pins.len(),
+            self.canonicalizer.is_some(),
+        )
+    }
+
     fn render_failure_diagnostic(&self, error: &CompactGraphUnionError) -> String {
         format!(
             "error={error:?} outer_bytes={} nested_bytes={} retained_supply_states={} ready={}/{} waiting_fields={}/{} waiting_work={} next_layer={}/{} promotion_capacity={} pins={}/{} candidates={}/{} usage={:?}",
@@ -749,7 +991,7 @@ impl Pc4CompactGraphUnion {
             self.waiting.capacity(),
             self.waiting_count,
             self.next_layer.len(),
-            self.next_layer.capacity(),
+            self.next_layer.capacity().unwrap_or(usize::MAX),
             self.promotion.as_ref().map_or(0, |layer| layer.table_capacity),
             self.pins.len(),
             self.pins.capacity(),
@@ -779,7 +1021,7 @@ impl Pc4CompactGraphUnion {
             self.completed = false;
             self.ready = VecDeque::new();
             self.waiting = HashMap::new();
-            self.next_layer = HashMap::new();
+            self.next_layer = LayerFrontier::new();
             self.promotion = None;
             self.candidates = HashSet::new();
             self.canonicalizer = None;
@@ -843,12 +1085,21 @@ impl Pc4CompactGraphUnion {
             }
             self.start_verified = true;
         }
-        if cache.admission_revision() != self.cache_revision_seen || self.ready.is_empty() {
+        let partially_woken_residents = self.residents == self.limits.resident_work.get()
+            && self.ready.len() < self.limits.resident_work.get();
+        if cache.admission_revision() != self.cache_revision_seen
+            || self.ready.is_empty()
+            || partially_woken_residents
+        {
             // The host bounds waiting fields with its I/O watermarks. Wake
             // known records without allocating a second list of all waiters.
             // Keep the ready backing store within the resident-work window:
             // waking every task for one admitted field at once can leave a
             // 128-slot deque behind even though at most 64 tasks may run.
+            // If a partial wake filled that window, later work can free a
+            // slot while more waiters for the SAME cached record remain. Such
+            // an idempotent record has no new admission revision, so resident
+            // saturation must also reopen this bounded wake scan.
             while self.ready.len() < self.limits.resident_work.get() {
                 let Some(id) = self
                     .waiting
@@ -912,12 +1163,7 @@ impl Pc4CompactGraphUnion {
                 self.usage.work,
             )?;
             if self.promotion.is_some() && self.ready.len() < self.limits.resident_work.get() {
-                let entry = self
-                    .promotion
-                    .as_mut()
-                    .expect("checked promotion")
-                    .entries
-                    .next();
+                let entry = self.promotion.as_mut().expect("checked promotion").next()?;
                 if let Some((key, supply)) = entry {
                     // Keep the old hash allocation and nested supply payloads
                     // under their existing credit while streaming only a
@@ -949,7 +1195,7 @@ impl Pc4CompactGraphUnion {
                     // retaining both candidate buffers during canonicalization.
                     self.ready = VecDeque::new();
                     self.waiting = HashMap::new();
-                    self.next_layer = HashMap::new();
+                    self.next_layer = LayerFrontier::new();
                     self.pins = HashMap::new();
                     self.canonicalizer = Some(
                         CooperativeCandidateCanonicalizer::begin(
@@ -960,11 +1206,16 @@ impl Pc4CompactGraphUnion {
                     );
                     return Ok(CompactGraphUnionStep::Progress);
                 }
+                // Account for both fixed directories during the consuming
+                // handoff: replacement next-layer directory, old directory,
+                // and promotion directory are briefly live together.
+                let directory_handoff = LayerFrontier::directory_bytes()?
+                    .checked_add(LayerPromotion::directory_bytes()?)
+                    .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+                self.authorize_frontier(directory_handoff)?;
                 let old_layer = core::mem::take(&mut self.next_layer);
-                self.promotion = Some(LayerPromotion {
-                    table_capacity: old_layer.capacity(),
-                    entries: old_layer.into_iter(),
-                });
+                self.promotion = Some(old_layer.into_promotion()?);
+                self.retention.observe(self.frontier_outer_bytes()?)?;
                 continue;
             }
             let mut task = self.ready.pop_front().expect("ready layer");
@@ -1183,7 +1434,7 @@ impl Pc4CompactGraphUnion {
                     )?;
                     let merged = self
                         .language
-                        .merge(previous, supply, &|| {
+                        .merge_layer(previous, supply, &|| {
                             PcCandidatePageGuard::is_cancelled(guard)
                         })
                         .map_err(CompactGraphUnionError::Supply)?;
@@ -1191,16 +1442,20 @@ impl Pc4CompactGraphUnion {
                         merged.state_count(),
                         merged.retained_state_capacity_bytes(),
                     )?;
-                    self.next_layer.insert(key, merged);
+                    if !self.next_layer.insert(key, merged)? {
+                        return Err(contract("pc4_compact_union_merge_owner_missing"));
+                    }
                     self.retained_supply_states -= old_len;
                     self.retention.release(old_bytes)?;
                     self.usage.merged_states += 1;
                 } else {
-                    self.reserve_next_layer()?;
+                    self.reserve_next_layer(&key)?;
                     self.authorize_frontier(supply.retained_state_capacity_bytes())?;
                     let copy = supply.try_clone().map_err(CompactGraphUnionError::Supply)?;
                     self.retain_supply(copy.state_count(), copy.retained_state_capacity_bytes())?;
-                    self.next_layer.insert(key, copy);
+                    if self.next_layer.insert(key, copy)? {
+                        return Err(contract("pc4_compact_union_duplicate_insert"));
+                    }
                     self.usage.generated_states += 1;
                 }
             }
@@ -1222,18 +1477,26 @@ impl Pc4CompactGraphUnion {
     fn frontier_outer_bytes(&self) -> Result<usize, CompactGraphUnionError> {
         let ready = capacity_bytes::<Work>(self.ready.capacity())?;
         let waiting = capacity_bytes::<(u32, Vec<Work>)>(self.waiting.capacity())?;
-        let next =
-            capacity_bytes::<(StateKey, CompactPatternUnionFrontier)>(self.next_layer.capacity())?;
-        let promotion = capacity_bytes::<(StateKey, CompactPatternUnionFrontier)>(
-            self.promotion
-                .as_ref()
-                .map_or(0, |layer| layer.table_capacity),
-        )?;
+        let next = self.next_layer.retained_capacity_bytes()?;
+        let promotion = self.promotion.as_ref().map_or(Ok(0), |layer| {
+            layer
+                .table_capacity
+                .checked_mul(CompactPatternUnionLayerShard::<StateKey>::entry_size())
+                .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))
+        })?;
+        let directories = LayerFrontier::directory_bytes()?
+            .checked_add(if self.promotion.is_some() {
+                LayerPromotion::directory_bytes()?
+            } else {
+                0
+            })
+            .ok_or_else(|| FrontierRetentionError::Overflow)?;
         let pins = capacity_bytes::<(u32, usize)>(self.pins.capacity())?;
         ready
             .checked_add(waiting)
             .and_then(|n| n.checked_add(next))
             .and_then(|n| n.checked_add(promotion))
+            .and_then(|n| n.checked_add(directories))
             .and_then(|n| n.checked_add(pins))
             .ok_or_else(|| FrontierRetentionError::Overflow.into())
     }
@@ -1383,11 +1646,14 @@ impl Pc4CompactGraphUnion {
         Ok(())
     }
 
-    fn reserve_next_layer(&mut self) -> Result<(), CompactGraphUnionError> {
-        self.authorize_frontier(capacity_bytes::<(StateKey, CompactPatternUnionFrontier)>(
-            (self.next_layer.len() + 1).saturating_sub(self.next_layer.capacity()),
-        )?)?;
-        self.next_layer.try_reserve(1).map_err(|_| allocation())?;
+    fn reserve_next_layer(&mut self, key: &StateKey) -> Result<(), CompactGraphUnionError> {
+        let additional = self
+            .next_layer
+            .additional_capacity_for(key)
+            .checked_mul(CompactPatternUnionLayerShard::<StateKey>::entry_size())
+            .ok_or_else(|| contract("pc4_compact_union_counter_overflow"))?;
+        self.authorize_frontier(additional)?;
+        self.next_layer.reserve_for(key)?;
         let outer = self.frontier_outer_bytes()?;
         self.retention.observe(outer)?;
         Ok(())
