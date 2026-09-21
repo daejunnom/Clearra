@@ -398,6 +398,31 @@ ed25519-dalek.workspace = true
                     )
                 )
 
+    def test_cargo_lock_package_identities_preserve_source_boundary(self) -> None:
+        material = """version = 4
+
+[[package]]
+name = "local"
+version = "0.1.0"
+
+[[package]]
+name = "registry"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abc"
+"""
+        self.assertEqual(
+            MANAGE.cargo_lock_package_identities(material),
+            {
+                ("local", "0.1.0", "workspace"),
+                (
+                    "registry",
+                    "2.0.0",
+                    "registry+https://github.com/rust-lang/crates.io-index",
+                ),
+            },
+        )
+
     def test_package_tarball_inspection_seals_members_and_identity(self) -> None:
         parent = ROOT / "_local" / "tmp" / "management-tests"
         parent.mkdir(parents=True, exist_ok=True)

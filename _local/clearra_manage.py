@@ -1551,6 +1551,23 @@ def cargo_dependency_admission(arguments: Sequence[str]) -> dict[str, Any] | Non
     return exact_cargo_dependency_admission(arguments, manifests, lock_material)
 
 
+def cargo_lock_package_identities(material: str) -> set[tuple[str, str, str]]:
+    identities: set[tuple[str, str, str]] = set()
+    for block in re.split(r"(?m)^\[\[package]]\s*$", material)[1:]:
+        fields: dict[str, str] = {}
+        for key in ("name", "version", "source"):
+            match = re.search(
+                rf'(?m)^{key}\s*=\s*"([^"\r\n]+)"\s*$', block
+            )
+            if match:
+                fields[key] = match.group(1)
+        if "name" in fields and "version" in fields:
+            identities.add(
+                (fields["name"], fields["version"], fields.get("source", "workspace"))
+            )
+    return identities
+
+
 def dependency_changed_paths() -> list[str]:
     changed = {
         value
@@ -1592,12 +1609,21 @@ def dependency_update(
         shared_root = pathlib.Path(
             os.environ.get("CARGO_HOME", str(pathlib.Path.home() / ".cargo"))
         )
-        command = (
-            "cargo",
-            f"+{policy['toolchains']['rust']}",
-            "update",
-            *values,
-        )
+        if admission is None:
+            command = (
+                "cargo",
+                f"+{policy['toolchains']['rust']}",
+                "update",
+                *values,
+            )
+        else:
+            command = (
+                "cargo",
+                f"+{policy['toolchains']['rust']}",
+                "metadata",
+                "--format-version",
+                "1",
+            )
         environment = os.environ.copy()
         environment["CARGO_TARGET_DIR"] = str(
             ROOT / "build" / "cargo" / "host" / "dependency-update"
@@ -1607,6 +1633,53 @@ def dependency_update(
     shared_after = tree_identity_snapshot(shared_root, max_depth=1)
     after = dependency_authority_snapshot(manager, policy)
     changed = dependency_changed_paths()
+    admission_validation = None
+    if manager == "cargo" and admission is not None:
+        lock_path = ROOT / "Cargo.lock"
+        before_lock = ""
+        for path in dependency_authority_paths("cargo"):
+            if path == lock_path and path.is_file():
+                before_file = next(
+                    (
+                        item
+                        for item in before["files"]
+                        if item["path"] == "Cargo.lock"
+                    ),
+                    None,
+                )
+                if before_file is not None:
+                    # The pre-update material is recovered from HEAD so the
+                    # post-update file can be compared without a side copy.
+                    before_result = run(
+                        ("git", "show", "HEAD:Cargo.lock"), check=False
+                    )
+                    if before_result.returncode == 0:
+                        before_lock = before_result.stdout
+                break
+        after_lock = (
+            lock_path.read_text(encoding="utf-8", errors="strict")
+            if lock_path.is_file()
+            else ""
+        )
+        before_packages = cargo_lock_package_identities(before_lock)
+        after_packages = cargo_lock_package_identities(after_lock)
+        missing_previous = sorted(before_packages - after_packages)
+        target = (
+            admission["package"],
+            admission["precise_version"],
+        )
+        target_matches = sorted(
+            identity
+            for identity in after_packages
+            if identity[:2] == target
+        )
+        admission_validation = {
+            "before_package_count": len(before_packages),
+            "after_package_count": len(after_packages),
+            "missing_previous": ["@".join(value) for value in missing_previous],
+            "target_matches": ["@".join(value) for value in target_matches],
+            "accepted": not missing_previous and len(target_matches) == 1,
+        }
     if manager == "pnpm":
         unexpected = [
             path
@@ -1629,6 +1702,7 @@ def dependency_update(
             "before": before,
             "after": after,
             "admission": admission,
+            "admission_validation": admission_validation,
             "changed_paths": changed,
             "unexpected_paths": unexpected,
             "shared_store_changes": tree_identity_delta(
@@ -1640,6 +1714,11 @@ def dependency_update(
     if unexpected:
         raise ManagementError(
             "dependency update changed files outside its authority; "
+            f"receipt={receipt}"
+        )
+    if admission_validation is not None and not admission_validation["accepted"]:
+        raise ManagementError(
+            "exact dependency admission changed prior Cargo.lock identities; "
             f"receipt={receipt}"
         )
     if (
