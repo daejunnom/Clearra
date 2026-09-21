@@ -57,7 +57,7 @@ test("local-services watcher is one hidden 60-second owner for ports 4194 and 87
   assert.match(installer, /-RestartCount 3/u);
   assert.match(installer, /-RestartInterval \(New-TimeSpan -Minutes 1\)/u);
   assert.match(installer, /-RepetitionInterval \(New-TimeSpan -Minutes 5\)/u);
-  assert.match(installer, /_local\\clearra_manage\.py/u);
+  assert.match(installer, /scripts\\management\\clearra_manage\.py/u);
   assert.match(installer, /clearra-local-services-watchdog\.json/u);
   assert.match(watcher, /Clearra\\logs\\local-services-v2\.log/u);
   assert.match(installer, /Clearra\\state\\local-services-v2/u);

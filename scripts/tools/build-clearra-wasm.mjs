@@ -124,7 +124,7 @@ async function buildWithWsl() {
   await assertDefaultRustBuildEnvironment();
   const args = [
     '-B',
-    resolve(root, '_local', 'clearra_manage.py'),
+    resolve(root, 'scripts', 'management', 'clearra_manage.py'),
     'runtime',
     'wsl',
     'run',
