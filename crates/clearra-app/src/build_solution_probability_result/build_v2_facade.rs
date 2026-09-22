@@ -65,9 +65,9 @@ use super::{
     },
     build_v2_options::{BuildExecutionSemantics, BuildV2OptionRequest},
     build_v2_result::{
-        prepare_build_coverage_portfolio_v2_result_with_memory_guard,
-        BuildCoveragePortfolioV2Preparation, BuildCoveragePortfolioV2PreparationAdvance,
-        BuildCoveragePortfolioV2Result,
+        prepare_build_coverage_portfolio_v2_result_with_pins_and_memory_guard,
+        BuildCoveragePortfolioResultError, BuildCoveragePortfolioV2Preparation,
+        BuildCoveragePortfolioV2PreparationAdvance, BuildCoveragePortfolioV2Result,
     },
     build_v2_supplied_result::{
         validate_build_colored_replay_allow_empty, validate_build_supplied_cover_percent_v1_result,
@@ -1014,6 +1014,8 @@ impl BuildSetupCoverScoreV1 {
 pub struct BuildCoverV2Request {
     query: BuildProbabilityQuery,
     objective: BuildObjective,
+    pinned_candidate_keys: Vec<String>,
+    expected_source_set_sha256: Option<String>,
 }
 
 impl BuildCoverV2Request {
@@ -1034,7 +1036,51 @@ impl BuildCoverV2Request {
             return Err(BuildCoverV2FacadeError::QueryNotPortfolioCapable);
         }
         validated_query_snapshot(&query, objective)?;
-        Ok(Self { query, objective })
+        Ok(Self {
+            query,
+            objective,
+            pinned_candidate_keys: Vec::new(),
+            expected_source_set_sha256: None,
+        })
+    }
+
+    /// Pins are resolved only after the full Build producer has completed.
+    /// The reducer must never treat a supplied subset as the candidate family.
+    pub fn with_pinned_candidate_keys(mut self, keys: Vec<String>) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
+        self.pinned_candidate_keys = keys
+            .into_iter()
+            .filter(|key| seen.insert(key.clone()))
+            .collect();
+        self
+    }
+
+    pub fn with_expected_source_set_sha256(mut self, digest: String) -> Self {
+        self.expected_source_set_sha256 = Some(digest);
+        self
+    }
+
+    pub fn pinned_candidate_keys(&self) -> &[String] {
+        &self.pinned_candidate_keys
+    }
+
+    pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = self
+            .query
+            .checked_retained_capacity_bytes()?
+            .checked_add(
+                (self.pinned_candidate_keys.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<String>() as u128)?,
+            )?
+            .checked_add(
+                self.expected_source_set_sha256
+                    .as_ref()
+                    .map_or(0, |digest| digest.capacity() as u128),
+            )?;
+        for key in &self.pinned_candidate_keys {
+            bytes = bytes.checked_add(key.capacity() as u128)?;
+        }
+        Some(bytes)
     }
 
     pub const fn query(&self) -> &BuildProbabilityQuery {
@@ -1083,7 +1129,7 @@ impl BuildCoverV2Request {
     ) -> Result<BuildCoverV2Preparation, BuildCoverV2FacadeError> {
         guard(
             (core::mem::size_of::<Self>() as u128)
-                .checked_add(self.query.checked_retained_capacity_bytes().ok_or(
+                .checked_add(self.checked_retained_capacity_bytes().ok_or(
                     BuildCoverV2FacadeError::PreparationRejected {
                         reason: "retained-capacity-overflow",
                     },
@@ -1114,14 +1160,24 @@ impl BuildCoverV2Request {
         .map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
             reason: "result-identity-rejected",
         })?;
-        let inner = prepare_build_coverage_portfolio_v2_result_with_memory_guard(
+        let inner = prepare_build_coverage_portfolio_v2_result_with_pins_and_memory_guard(
             authority,
             result,
             expected_problem,
+            self.pinned_candidate_keys,
+            self.expected_source_set_sha256.as_deref(),
             guard,
         )
-        .map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
-            reason: "source-evidence-rejected",
+        .map_err(|error| BuildCoverV2FacadeError::PreparationRejected {
+            reason: match error {
+                BuildCoveragePortfolioResultError::SourceSetHashMismatch => {
+                    "source-set-hash-mismatch"
+                }
+                BuildCoveragePortfolioResultError::PinnedCandidateInvalid => {
+                    "pinned-candidate-invalid"
+                }
+                _ => "source-evidence-rejected",
+            },
         })?;
         Ok(BuildCoverV2Preparation { inner })
     }
@@ -2525,6 +2581,51 @@ mod tests {
                 .expect("checked dispatch Host payload")
                 .content(),
             clearra_host_contract::ProductResultPayloadContent::BuildCoveragePortfolioV2(_)
+        ));
+    }
+
+    #[test]
+    fn pinned_build_cover_replays_the_full_source_and_checks_its_hash() {
+        let _resource_guard = build_probability_resource_test_guard();
+        let executor = AppCoreExecutorService::wasm_cpu();
+        let control = ExecutionControl::default();
+        let source = BuildCoverV2Request::new(one_piece_query(), BuildObjective::MinCover)
+            .expect("valid full Build request")
+            .execute(&executor, &control)
+            .expect("complete Build source");
+        let key = source.canonical_candidate_keys()[0].clone();
+        let hash = source.normalized_solution_set_hash().to_owned();
+
+        let pinned = BuildCoverV2Request::new(one_piece_query(), BuildObjective::MinCover)
+            .expect("valid full Build request")
+            .with_pinned_candidate_keys(vec![key.clone(), key.clone()])
+            .with_expected_source_set_sha256(hash.clone())
+            .execute(&executor, &control)
+            .expect("pin is revalidated against the full producer");
+        assert_eq!(pinned.normalized_solution_set_hash(), hash);
+        assert_eq!(
+            pinned.source_candidate_count(),
+            source.source_candidate_count()
+        );
+        assert_eq!(pinned.canonical_candidate_keys(), &[key.clone()]);
+        assert_eq!(
+            pinned
+                .portfolio_alternative_owner()
+                .expect("pinned page source")
+                .pinned_candidate_ids(),
+            &[1],
+        );
+
+        let stale = BuildCoverV2Request::new(one_piece_query(), BuildObjective::MinCover)
+            .expect("valid full Build request")
+            .with_pinned_candidate_keys(vec![key])
+            .with_expected_source_set_sha256("0".repeat(64))
+            .execute(&executor, &control);
+        assert!(matches!(
+            stale,
+            Err(BuildCoverV2FacadeError::PreparationRejected {
+                reason: "source-set-hash-mismatch"
+            })
         ));
     }
 

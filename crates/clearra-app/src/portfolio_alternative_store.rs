@@ -5,9 +5,10 @@ use std::sync::Arc;
 use clearra_coverage::{
     cover::{
         ExactAtMostQuery, ExactAtMostReceipt, ExactAtMostTask, ExactMinimumCoverEnumerationStop,
-        ExactMinimumCoverPortfolioEnumerator, ExactMinimumCoverPortfolioError,
-        ExactMinimumCoverPortfolioPage, ExactMinimumCoverPortfolioPreparationAdvance,
-        ExactMinimumCoverPortfolioPreparationSession, PinnedMinimumCoverInput,
+        ExactMinimumCoverError, ExactMinimumCoverPortfolioEnumerator,
+        ExactMinimumCoverPortfolioError, ExactMinimumCoverPortfolioPage,
+        ExactMinimumCoverPortfolioPreparationAdvance, ExactMinimumCoverPortfolioPreparationSession,
+        PinnedMinimumCoverInput,
     },
     pattern::pattern_bitset::PatternBitSet,
 };
@@ -510,7 +511,25 @@ impl CoveragePortfolioAlternativeSetPreparation {
         candidate_keys: Vec<String>,
         required: PatternBitSet,
         rows: Vec<PatternBitSet>,
+        pinned_keys: Vec<String>,
+    ) -> Result<(Self, usize, Vec<String>), PortfolioAlternativeError> {
+        Self::new_pinned_with_memory_guard(
+            identity,
+            candidate_keys,
+            required,
+            rows,
+            pinned_keys,
+            &mut |_| Ok(()),
+        )
+    }
+
+    pub(crate) fn new_pinned_with_memory_guard(
+        identity: PortfolioAlternativeSetIdentity,
+        candidate_keys: Vec<String>,
+        required: PatternBitSet,
+        rows: Vec<PatternBitSet>,
         mut pinned_keys: Vec<String>,
+        memory_guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
     ) -> Result<(Self, usize, Vec<String>), PortfolioAlternativeError> {
         let requested_pin_order = pinned_keys.clone();
         pinned_keys.sort_unstable();
@@ -547,11 +566,12 @@ impl CoveragePortfolioAlternativeSetPreparation {
             identity.universe_identity(),
             identity.build_identity(),
         )?;
-        let preparation = Self::new(
+        let preparation = Self::new_with_memory_guard(
             pinned_identity,
             candidate_keys,
             augmented_required,
             augmented_rows,
+            memory_guard,
         )?;
         Ok((preparation, original_pattern_count, requested_pin_order))
     }

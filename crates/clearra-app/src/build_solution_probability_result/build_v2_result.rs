@@ -193,6 +193,8 @@ pub(crate) enum BuildCoveragePortfolioResultError {
     IncompleteEvidence,
     PatternUniverseInvalid,
     NormalizedSolutionSetHashInvalid,
+    SourceSetHashMismatch,
+    PinnedCandidateInvalid,
     ProbabilityUnionInvalid,
     // Preserves the exact-cover failure category at this product boundary.
     #[allow(dead_code)]
@@ -235,10 +237,29 @@ pub(crate) fn prepare_build_coverage_portfolio_v2_result(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_build_coverage_portfolio_v2_result_with_memory_guard(
     authority: ValidatedBuildTargetSearchResultAuthority,
     result: &CoreExecutionResult,
     expected_problem: &clearra_problem::SearchProblem,
+    guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
+) -> Result<BuildCoveragePortfolioV2Preparation, BuildCoveragePortfolioResultError> {
+    prepare_build_coverage_portfolio_v2_result_with_pins_and_memory_guard(
+        authority,
+        result,
+        expected_problem,
+        Vec::new(),
+        None,
+        guard,
+    )
+}
+
+pub(crate) fn prepare_build_coverage_portfolio_v2_result_with_pins_and_memory_guard(
+    authority: ValidatedBuildTargetSearchResultAuthority,
+    result: &CoreExecutionResult,
+    expected_problem: &clearra_problem::SearchProblem,
+    pinned_candidate_keys: Vec<String>,
+    expected_source_set_sha256: Option<&str>,
     guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
 ) -> Result<BuildCoveragePortfolioV2Preparation, BuildCoveragePortfolioResultError> {
     if authority.contract() != BuildTargetSearchContract::Cover {
@@ -373,6 +394,15 @@ pub(crate) fn prepare_build_coverage_portfolio_v2_result_with_memory_guard(
     {
         return Err(BuildCoveragePortfolioResultError::NormalizedSolutionSetHashInvalid);
     }
+    if expected_source_set_sha256.is_some_and(|expected| expected != normalized_solution_set_hash) {
+        return Err(BuildCoveragePortfolioResultError::SourceSetHashMismatch);
+    }
+    if pinned_candidate_keys
+        .iter()
+        .any(|key| !candidate_keys.contains(key))
+    {
+        return Err(BuildCoveragePortfolioResultError::PinnedCandidateInvalid);
+    }
 
     let mut reducer_live = (core::mem::size_of::<BuildCoveragePortfolioV2Preparation>() as u128)
         .checked_add(
@@ -485,23 +515,42 @@ pub(crate) fn prepare_build_coverage_portfolio_v2_result_with_memory_guard(
         .checked_sub(core::mem::size_of::<CoveragePortfolioAlternativeSetPreparation>() as u128)
         .and_then(|bytes| bytes.checked_add(projection.checked_retained_capacity_bytes()?))
         .ok_or_else(overflow)?;
-    let portfolio = CoveragePortfolioAlternativeSetPreparation::new_with_memory_guard(
-        identity,
-        candidate_keys,
-        required,
-        rows,
-        &mut |peak| {
-            guard(
-                outer
-                    .checked_add(peak)
-                    .ok_or(ExactMinimumCoverError::ProjectionOverflow)?,
+    let mut portfolio_guard = |peak| {
+        guard(
+            outer
+                .checked_add(peak)
+                .ok_or(ExactMinimumCoverError::ProjectionOverflow)?,
+        )
+    };
+    let (portfolio, pin_publication) = if pinned_candidate_keys.is_empty() {
+        (
+            CoveragePortfolioAlternativeSetPreparation::new_with_memory_guard(
+                identity,
+                candidate_keys,
+                required,
+                rows,
+                &mut portfolio_guard,
             )
-        },
-    )
-    .map_err(BuildCoveragePortfolioResultError::Portfolio)?;
+            .map_err(BuildCoveragePortfolioResultError::Portfolio)?,
+            None,
+        )
+    } else {
+        let (preparation, original_pattern_count, ordered_keys) =
+            CoveragePortfolioAlternativeSetPreparation::new_pinned_with_memory_guard(
+                identity,
+                candidate_keys,
+                required,
+                rows,
+                pinned_candidate_keys,
+                &mut portfolio_guard,
+            )
+            .map_err(BuildCoveragePortfolioResultError::Portfolio)?;
+        (preparation, Some((original_pattern_count, ordered_keys)))
+    };
     Ok(BuildCoveragePortfolioV2Preparation {
         projection: Some(projection),
         portfolio,
+        pin_publication,
     })
 }
 
@@ -533,6 +582,7 @@ pub(crate) enum BuildCoveragePortfolioV2PreparationAdvance {
 pub(crate) struct BuildCoveragePortfolioV2Preparation {
     projection: Option<BuildCoveragePortfolioProjection>,
     portfolio: CoveragePortfolioAlternativeSetPreparation,
+    pin_publication: Option<(usize, Vec<String>)>,
 }
 
 impl BuildCoveragePortfolioV2Preparation {
@@ -550,7 +600,17 @@ impl BuildCoveragePortfolioV2Preparation {
             .checked_add(self.projection.as_ref().map_or(
                 Some(0),
                 BuildCoveragePortfolioProjection::checked_retained_capacity_bytes,
-            )?)
+            )?)?
+            .checked_add(self.checked_pin_retained_capacity_bytes()?)
+    }
+
+    fn checked_pin_retained_capacity_bytes(&self) -> Option<u128> {
+        self.pin_publication.as_ref().map_or(Some(0), |(_, keys)| {
+            keys.iter().try_fold(
+                (keys.capacity() as u128).checked_mul(core::mem::size_of::<String>() as u128)?,
+                |total, key| total.checked_add(key.capacity() as u128),
+            )
+        })
     }
 
     pub(crate) fn advance_with_memory_guard(
@@ -571,6 +631,7 @@ impl BuildCoveragePortfolioV2Preparation {
                 Some(0),
                 BuildCoveragePortfolioProjection::checked_retained_capacity_bytes,
             )
+            .and_then(|bytes| bytes.checked_add(self.checked_pin_retained_capacity_bytes()?))
             .ok_or_else(overflow)?;
         let outer = (core::mem::size_of::<Self>() as u128)
             .checked_sub(core::mem::size_of::<CoveragePortfolioAlternativeSetPreparation>() as u128)
@@ -603,6 +664,36 @@ impl BuildCoveragePortfolioV2Preparation {
                     .projection
                     .take()
                     .ok_or(BuildCoveragePortfolioResultError::IncompleteEvidence)?;
+                let portfolio = if let Some((original_pattern_count, pinned_keys)) =
+                    self.pin_publication.take()
+                {
+                    let clone_bytes = portfolio
+                        .coverage_rows()
+                        .iter()
+                        .try_fold(
+                            (portfolio.coverage_rows().len() as u128)
+                                .checked_mul(core::mem::size_of::<PatternBitSet>() as u128)
+                                .ok_or_else(overflow)?,
+                            |total, row| total.checked_add(row.checked_storage_retained_bytes()?),
+                        )
+                        .ok_or_else(overflow)?;
+                    guard(
+                        self.portfolio
+                            .checked_retained_capacity_bytes()
+                            .and_then(|bytes| bytes.checked_add(projection_heap))
+                            .and_then(|bytes| {
+                                bytes.checked_add(portfolio.checked_retained_capacity_bytes()?)
+                            })
+                            .and_then(|bytes| bytes.checked_add(clone_bytes))
+                            .ok_or_else(overflow)?,
+                    )
+                    .map_err(BuildCoveragePortfolioResultError::MinimumCover)?;
+                    portfolio
+                        .into_pinned_public(original_pattern_count, &pinned_keys)
+                        .map_err(BuildCoveragePortfolioResultError::Portfolio)?
+                } else {
+                    portfolio
+                };
                 let selected = portfolio.canonical_page().portfolio().candidate_ids();
                 let mut key_bytes = (selected.len() as u128)
                     .checked_mul(core::mem::size_of::<String>() as u128)
