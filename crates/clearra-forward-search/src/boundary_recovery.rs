@@ -26,7 +26,9 @@ use crate::{
     search::t_corner_counts,
 };
 
-const MAX_QUEUE_PIECES: usize = 14;
+// Five stage-one 7-bags plus the adjacent stage-two bag remain addressable.
+// Search still has a finite state budget and reports exhaustion as incomplete.
+const MAX_QUEUE_PIECES: usize = 42;
 const MAX_SEARCH_STATES: usize = 1_000_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,6 +76,95 @@ pub enum BoundaryRecoveryError {
     InvalidStateLimit,
     UnsupportedRuleProfile,
     Cancelled,
+}
+
+/// Rebinds the same diagram to permutations of complete seven-piece bags.
+/// Source-token indices change with each permutation, while each placement
+/// keeps its (bag, piece) identity and lock-time geometry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundaryRecoveryBagRolePlan {
+    reference: BoundaryRecoveryQuery,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundaryRecoveryBagRoleError {
+    InvalidReference(BoundaryRecoveryError),
+    RequiresCompleteSevenBags,
+    RequiresExactRoles,
+    AmbiguousReferenceBag,
+}
+
+impl BoundaryRecoveryBagRolePlan {
+    pub fn new(reference: BoundaryRecoveryQuery) -> Result<Self, BoundaryRecoveryBagRoleError> {
+        reference
+            .validate()
+            .map_err(BoundaryRecoveryBagRoleError::InvalidReference)?;
+        if reference.queue.len() % 7 != 0
+            || reference.stage_one_queue_len % 7 != 0
+            || reference.required_placements != reference.queue.len()
+        {
+            return Err(BoundaryRecoveryBagRoleError::RequiresCompleteSevenBags);
+        }
+        if reference.placement_role_masks.len() != reference.required_placements {
+            return Err(BoundaryRecoveryBagRoleError::RequiresExactRoles);
+        }
+        for bag in reference.queue.chunks_exact(7) {
+            let mut seen = 0_u8;
+            for piece in bag {
+                let bit = 1_u8 << piece_index(*piece);
+                if seen & bit != 0 {
+                    return Err(BoundaryRecoveryBagRoleError::AmbiguousReferenceBag);
+                }
+                seen |= bit;
+            }
+        }
+        Ok(Self { reference })
+    }
+
+    /// `None` means this sequence lacks a required bag role. It is a proven
+    /// diagram mismatch, not an invalid universe identity or a search timeout.
+    pub fn query_for_sequence(&self, queue: &[PieceKind]) -> Option<BoundaryRecoveryQuery> {
+        if queue.len() != self.reference.queue.len() {
+            return None;
+        }
+        let mut query = self.reference.clone();
+        query.queue = queue.to_vec();
+        let mut roles = vec![Board256Mask::EMPTY; queue.len()];
+        let mut mapped_borrow = None;
+        for (bag_index, bag) in queue.chunks_exact(7).enumerate() {
+            let reference = &self.reference.queue[bag_index * 7..][..7];
+            let mut seen = 0_u8;
+            for (target_offset, piece) in bag.iter().enumerate() {
+                let bit = 1_u8 << piece_index(*piece);
+                if seen & bit != 0 {
+                    return None;
+                }
+                seen |= bit;
+                let source_offset = reference.iter().position(|source| source == piece)?;
+                let source_index = bag_index * 7 + source_offset;
+                let target_index = bag_index * 7 + target_offset;
+                roles[target_index] = self.reference.placement_role_masks[source_index];
+                if source_index == self.reference.borrow_source_index {
+                    mapped_borrow = Some(target_index);
+                }
+            }
+        }
+        query.placement_role_masks = roles;
+        query.borrow_source_index = mapped_borrow?;
+        Some(query)
+    }
+}
+
+fn piece_index(piece: PieceKind) -> u8 {
+    match piece {
+        PieceKind::I => 0,
+        PieceKind::J => 1,
+        PieceKind::L => 2,
+        PieceKind::O => 3,
+        PieceKind::S => 4,
+        PieceKind::T => 5,
+        PieceKind::Z => 6,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,7 +219,7 @@ struct State {
     active: Option<Token>,
     hold: Option<Token>,
     next_queue_index: u8,
-    placed_mask: u16,
+    placed_mask: u64,
     checkpoint_step: Option<u8>,
     checkpoint_is_pc: bool,
     borrowed_count: u8,
@@ -240,7 +331,15 @@ impl BoundaryRecoveryQuery {
         if self.max_early_placements == 0 {
             return Ok(report(normal, normal_states, 0, false));
         }
-        let (recovery, recovery_states) = Pass::new(self, control, 1)?.run()?;
+        // The declared state budget covers both passes together. Exhausting
+        // it after proving normal failure cannot prove recovery failure.
+        let remaining_states = self.max_states.saturating_sub(normal_states);
+        if remaining_states == 0 {
+            return Ok(report(PassResult::Incomplete, normal_states, 0, true));
+        }
+        let mut recovery_query = self.clone();
+        recovery_query.max_states = remaining_states;
+        let (recovery, recovery_states) = Pass::new(&recovery_query, control, 1)?.run()?;
         Ok(report(recovery, normal_states, recovery_states, true))
     }
 }
@@ -356,7 +455,7 @@ impl<'a> Pass<'a> {
             return Err(BoundaryRecoveryError::Cancelled);
         }
         if state.placed_mask.count_ones() as usize == self.query.required_placements {
-            let required_mask = (1_u16 << self.query.required_placements) - 1;
+            let required_mask = (1_u64 << self.query.required_placements) - 1;
             if state.checkpoint_step.is_some()
                 && state.placed_mask == required_mask
                 && state.board.words() == self.query.final_board.words()
@@ -466,8 +565,8 @@ impl<'a> Pass<'a> {
                     compact_tag(stage_one_placed, cleared_rows, self.query.height);
                 let stage_two_board =
                     compact_tag(stage_two_placed, cleared_rows, self.query.height);
-                let placed_mask = state.placed_mask | (1_u16 << choice.token.index);
-                let stage_one_mask = (1_u16 << self.query.stage_one_queue_len) - 1;
+                let placed_mask = state.placed_mask | (1_u64 << choice.token.index);
+                let stage_one_mask = (1_u64 << self.query.stage_one_queue_len) - 1;
                 let checkpoint_reached = state.checkpoint_step.is_none()
                     && placed_mask & stage_one_mask == stage_one_mask
                     && stage_one_board.is_empty();
@@ -735,5 +834,118 @@ mod tests {
         query.preserve_b2b_by_stage = [true, false];
         let report = query.search(&control()).unwrap();
         assert_eq!(report.status, BoundaryRecoveryStatus::NoPath);
+    }
+
+    #[test]
+    fn five_stage_one_bags_and_one_adjacent_bag_fit_without_bitmask_wraparound() {
+        let mut query = two_stage_query();
+        query.queue = (0..42)
+            .map(|index| {
+                [
+                    PieceKind::I,
+                    PieceKind::J,
+                    PieceKind::L,
+                    PieceKind::O,
+                    PieceKind::S,
+                    PieceKind::T,
+                    PieceKind::Z,
+                ][index % 7]
+            })
+            .collect();
+        query.stage_one_queue_len = 35;
+        query.required_placements = 42;
+        query.max_early_placements = 0;
+        query.max_states = 1;
+        assert_eq!(
+            query.search(&control()).unwrap().status,
+            BoundaryRecoveryStatus::Incomplete
+        );
+
+        query.queue.push(PieceKind::I);
+        assert_eq!(
+            query.search(&control()),
+            Err(BoundaryRecoveryError::QueueTooLong)
+        );
+    }
+
+    #[test]
+    fn bag_roles_follow_piece_identity_and_selected_borrow_across_permutations() {
+        let mut reference = two_stage_query();
+        reference.height = 8;
+        reference.initial_board = Board256Mask::EMPTY;
+        reference.final_board = Board256Mask::EMPTY;
+        reference.queue = vec![
+            PieceKind::I,
+            PieceKind::J,
+            PieceKind::L,
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::T,
+            PieceKind::Z,
+            PieceKind::Z,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::O,
+            PieceKind::L,
+            PieceKind::J,
+            PieceKind::I,
+        ];
+        reference.stage_one_queue_len = 7;
+        reference.required_placements = 14;
+        reference.borrow_source_index = 10;
+        reference.placement_role_masks = (0..14)
+            .map(|index| Board256Mask::from_words([0xf_u64 << (index * 4), 0, 0, 0]))
+            .collect();
+        reference.borrow_placement_mask = reference.placement_role_masks[10];
+        let plan = BoundaryRecoveryBagRolePlan::new(reference.clone()).unwrap();
+        let mut sequence = reference.queue.clone();
+        sequence[..7].reverse();
+        sequence[7..].rotate_left(3);
+        let projected = plan.query_for_sequence(&sequence).unwrap();
+        assert_eq!(projected.queue, sequence);
+        assert_eq!(
+            projected.placement_role_masks[0],
+            reference.placement_role_masks[6]
+        );
+        assert_eq!(projected.borrow_source_index, 7);
+        assert_eq!(
+            projected.placement_role_masks[7],
+            reference.borrow_placement_mask
+        );
+        assert_eq!(
+            projected.borrow_placement_mask,
+            reference.borrow_placement_mask
+        );
+
+        sequence[7] = PieceKind::I;
+        assert!(plan.query_for_sequence(&sequence).is_none());
+    }
+
+    #[test]
+    fn exact_early_roles_can_prove_recovery_only_after_normal_failure() {
+        let mut query = two_stage_query();
+        query.queue.push(PieceKind::T);
+        query.hold_enabled = true;
+        let (PassResult::Found { steps, .. }, _) =
+            Pass::new(&query, &control(), 1).unwrap().run().unwrap()
+        else {
+            panic!("expected an early-placement witness");
+        };
+        query.placement_role_masks = vec![Board256Mask::EMPTY; query.required_placements];
+        for step in steps {
+            query.placement_role_masks[step.source_queue_index] =
+                Board256Mask::from_words(step.placement_mask);
+        }
+        query.borrow_placement_mask = query.placement_role_masks[query.borrow_source_index];
+        let report = query.search(&control()).unwrap();
+        assert_eq!(report.status, BoundaryRecoveryStatus::NonPcRecovery);
+        assert!(report.normal_states > 0);
+        assert!(report.recovery_states > 0);
+
+        query.max_states = report.normal_states;
+        let bounded = query.search(&control()).unwrap();
+        assert_eq!(bounded.status, BoundaryRecoveryStatus::Incomplete);
+        assert_eq!(bounded.recovery_states, 0);
+        assert!(bounded.normal_states <= query.max_states);
     }
 }

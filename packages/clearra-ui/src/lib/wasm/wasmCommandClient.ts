@@ -454,9 +454,9 @@ export type ClearraBoundaryRecoveryStepPayload = {
 };
 
 export type ClearraBoundaryRecoveryPayload = {
-  status: 'normal' | 'pc-preserving-recovery' | 'non-pc-recovery' | 'no-path-within-declared-scope' | 'incomplete';
-  knowledge_basis: 'full-fixed-queue';
-  placement_role_scope: 'occupancy-only' | 'exact-lock-time';
+  status: 'normal' | 'pc-preserving-recovery' | 'non-pc-recovery' | 'no-path-within-declared-scope' | 'incomplete' | 'population-complete' | 'population-incomplete';
+  knowledge_basis: 'full-fixed-queue' | 'full-pattern-universe';
+  placement_role_scope: 'occupancy-only' | 'exact-lock-time' | 'bag-piece-exact-lock-time';
   max_early_placements: 0 | 1;
   borrow_source_index: number;
   borrow_placement_mask: string;
@@ -466,6 +466,40 @@ export type ClearraBoundaryRecoveryPayload = {
   checkpoint_is_pc: boolean | null;
   borrowed_stage_two_count: number;
   steps: ClearraBoundaryRecoveryStepPayload[];
+  population?: ClearraBoundaryRecoveryPopulationPayload;
+};
+
+export type ClearraBoundaryRecoveryPopulationExamplePayload = {
+  pattern_index: number;
+  queue: string;
+  status: string;
+  stage_one_checkpoint_step: number | null;
+  checkpoint_is_pc: boolean | null;
+  borrowed_stage_two_count: number;
+  steps: ClearraBoundaryRecoveryStepPayload[];
+};
+
+export type ClearraBoundaryRecoveryPopulationPayload = {
+  materialized_pattern_count: number;
+  total_possible_pattern_count: string;
+  evaluated_pattern_count: number;
+  state_count: number;
+  complete: boolean;
+  normal_count: number;
+  pc_preserving_recovery_count: number;
+  non_pc_recovery_count: number;
+  no_path_count: number;
+  incomplete_count: number;
+  diagram_unavailable_count: number;
+  normal_probability: string;
+  pc_preserving_recovery_probability: string;
+  non_pc_recovery_probability: string;
+  additional_recovery_probability: string;
+  total_response_probability: string;
+  no_path_probability: string;
+  unknown_probability: string;
+  normal_example?: ClearraBoundaryRecoveryPopulationExamplePayload;
+  recovery_example?: ClearraBoundaryRecoveryPopulationExamplePayload;
 };
 
 export type ClearraProductResultPayload =

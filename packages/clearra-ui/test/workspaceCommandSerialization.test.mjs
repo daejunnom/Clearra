@@ -27,6 +27,7 @@ import {
   createBoundaryRecoveryRequest,
   validateBoundaryRecoveryRequest
 } from '../src/lib/workspace/boundaryRecoveryModel.ts';
+import { validateBoundaryRecoveryPayload } from '../src/lib/workspace/boundaryRecoveryPayloadValidation.ts';
 
 const canonicalGuiPcFullSolutionArguments = readFileSync(
   new URL('../../../tests/fixtures/contracts/gui_pc_full_solution_argv.tsv', import.meta.url),
@@ -73,6 +74,63 @@ test('boundary recovery exact roles serialize every source mask without a duplic
   assert.deepEqual(boundaryRecoveryDesktopRequest(request, 'ko').arguments, args);
   assert.deepEqual(tokenizeBrowserCommandForContract(boundaryRecoveryCommand(request)), args);
   assert.deepEqual(validateBoundaryRecoveryRequest({ ...request, placementRoleMasks: [0xfn] }), ['placement-roles']);
+});
+
+test('boundary recovery pattern mode preserves full-bag roles and finite budgets in both hosts', () => {
+  const request = {
+    ...createBoundaryRecoveryRequest(),
+    queue: 'IJLOSTZIJLOSTZ', queuePattern: 'IJLOSTZP7',
+    height: 8, stageOneCount: 7, placements: 14,
+    borrowSourcePosition: 8, maxEarlyPlacements: 0,
+    placementRoleMasks: Array.from({ length: 14 }, () => 0xfn),
+    maxPatternEvaluations: 2, maxTotalStates: 1000
+  };
+  assert.deepEqual(validateBoundaryRecoveryRequest(request), []);
+  const args = boundaryRecoveryArguments(request);
+  assert.deepEqual(args.slice(args.indexOf('--queue-pattern'), args.indexOf('--queue-pattern') + 2),
+    ['--queue-pattern', 'IJLOSTZP7']);
+  assert.deepEqual(args.slice(args.indexOf('--max-total-states'), args.indexOf('--max-total-states') + 2),
+    ['--max-total-states', '1000']);
+  assert.deepEqual(boundaryRecoveryDesktopRequest(request, 'ko').arguments, args);
+  assert.deepEqual(tokenizeBrowserCommandForContract(boundaryRecoveryCommand(request)), args);
+  assert.deepEqual(validateBoundaryRecoveryRequest({ ...request, placementRoleMasks: [] }), ['pattern-roles']);
+  const alternatives = { ...request, queuePattern: 'IJLOSTZIJLOSTZ;IJLOSTZIIIIIII' };
+  assert.match(boundaryRecoveryCommand(alternatives), /--queue-pattern "IJLOSTZIJLOSTZ;IJLOSTZIIIIIII"/u);
+  assert.deepEqual(tokenizeBrowserCommandForContract(boundaryRecoveryCommand(alternatives)),
+    boundaryRecoveryArguments(alternatives));
+});
+
+test('weighted recovery payload keeps unresolved supply distinct from proven no-path supply', () => {
+  const payload = {
+    contract: 'boundary-recovery.v1', result_kind: 'boundary-recovery',
+    content: { payload_kind: 'boundary-recovery', payload: {
+      status: 'population-incomplete', knowledge_basis: 'full-pattern-universe',
+      placement_role_scope: 'bag-piece-exact-lock-time', max_early_placements: 0,
+      borrow_source_index: 0, borrow_placement_mask: '0x0',
+      normal_states: 0, recovery_states: 0, stage_one_checkpoint_step: null,
+      checkpoint_is_pc: null, borrowed_stage_two_count: 0, steps: [],
+      population: {
+        materialized_pattern_count: 2, total_possible_pattern_count: '2',
+        evaluated_pattern_count: 1, state_count: 10, complete: false,
+        normal_count: 0, pc_preserving_recovery_count: 0, non_pc_recovery_count: 0,
+        no_path_count: 1, incomplete_count: 0, diagram_unavailable_count: 0,
+        normal_probability: '0.00000000000000000',
+        pc_preserving_recovery_probability: '0.00000000000000000',
+        non_pc_recovery_probability: '0.00000000000000000',
+        additional_recovery_probability: '0.00000000000000000',
+        total_response_probability: '0.00000000000000000',
+        no_path_probability: '0.50000000000000000',
+        unknown_probability: '0.50000000000000000'
+      }
+    } }
+  };
+  assert.equal(validateBoundaryRecoveryPayload(payload), null);
+  assert.equal(validateBoundaryRecoveryPayload({
+    ...payload, content: { ...payload.content, payload: {
+      ...payload.content.payload,
+      population: { ...payload.content.payload.population, no_path_count: 0 }
+    } }
+  }), 'invalid boundary recovery payload');
 });
 const canonicalGuiBuildProbabilityB2bArguments = readFileSync(
   new URL('../../../tests/fixtures/contracts/gui_build_probability_b2b_argv.tsv', import.meta.url),

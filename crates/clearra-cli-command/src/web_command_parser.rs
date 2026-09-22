@@ -2254,6 +2254,9 @@ fn parse_boundary_recovery_command(
     let mut final_board = None;
     let mut height = None;
     let mut queue = None;
+    let mut queue_pattern = None;
+    let mut max_pattern_evaluations = 100_usize;
+    let mut max_total_states = 1_000_000_usize;
     let mut stage_one_queue_len = None;
     let mut required_placements = None;
     let mut max_early_placements = 1_u8;
@@ -2315,6 +2318,17 @@ fn parse_boundary_recovery_command(
                         )
                     })?,
                 );
+            }
+            "--queue-pattern" => {
+                queue_pattern = Some(next_value(tokens, &mut cursor, option)?.to_owned());
+            }
+            "--max-pattern-evaluations" => {
+                max_pattern_evaluations =
+                    parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
+            }
+            "--max-total-states" => {
+                max_total_states =
+                    parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
             }
             "--stage-one-count" => {
                 stage_one_queue_len = Some(parse_positive(
@@ -2463,27 +2477,46 @@ fn parse_boundary_recovery_command(
             .copied()
             .ok_or_else(|| required("--borrow-placement-mask or complete --role-mask set"))?
     };
-    Ok(WebCommandRequest::boundary_recovery(
-        BoundaryRecoveryQuery {
-            initial_board: initial_board.ok_or_else(|| required("--initial-board-mask"))?,
-            final_board: final_board.ok_or_else(|| required("--target-board-mask"))?,
-            height: height.ok_or_else(|| required("--height"))?,
-            queue: queue.ok_or_else(|| required("--queue"))?,
-            stage_one_queue_len: stage_one_queue_len
-                .ok_or_else(|| required("--stage-one-count"))?,
-            required_placements,
-            placement_role_masks,
-            max_early_placements,
-            borrow_source_index,
-            borrow_placement_mask,
-            hold_enabled,
-            rule_profile,
-            spin_profile,
-            preserve_b2b_by_stage,
-            initial_b2b,
-            max_states,
-        },
-    ))
+    let query = BoundaryRecoveryQuery {
+        initial_board: initial_board.ok_or_else(|| required("--initial-board-mask"))?,
+        final_board: final_board.ok_or_else(|| required("--target-board-mask"))?,
+        height: height.ok_or_else(|| required("--height"))?,
+        queue: queue.ok_or_else(|| required("--queue"))?,
+        stage_one_queue_len: stage_one_queue_len.ok_or_else(|| required("--stage-one-count"))?,
+        required_placements,
+        placement_role_masks,
+        max_early_placements,
+        borrow_source_index,
+        borrow_placement_mask,
+        hold_enabled,
+        rule_profile,
+        spin_profile,
+        preserve_b2b_by_stage,
+        initial_b2b,
+        max_states,
+    };
+    if let Some(pattern) = queue_pattern {
+        if max_pattern_evaluations > 100_000 || max_total_states > 100_000_000 {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "boundary recovery pattern limits exceed the supported scope",
+            ));
+        }
+        Ok(WebCommandRequest::boundary_recovery_pattern(
+            query,
+            pattern,
+            max_pattern_evaluations,
+            max_total_states,
+        ))
+    } else {
+        if seen.contains("--max-pattern-evaluations") || seen.contains("--max-total-states") {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "pattern limits require --queue-pattern",
+            ));
+        }
+        Ok(WebCommandRequest::boundary_recovery(query))
+    }
 }
 
 fn parse_forward_command(

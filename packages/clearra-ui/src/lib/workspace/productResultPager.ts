@@ -812,6 +812,15 @@ export function productResultIdentity(payload: ClearraProductResultPayload | nul
   }
   if (payload.content.payload_kind === 'boundary-recovery') {
     const report = payload.content.payload;
+    if (report.population) {
+      const population = report.population;
+      return [payload.contract, payload.result_kind, report.status, report.placement_role_scope,
+        population.total_possible_pattern_count, population.evaluated_pattern_count,
+        population.state_count, population.normal_probability,
+        population.pc_preserving_recovery_probability, population.non_pc_recovery_probability,
+        population.unknown_probability, population.normal_example?.queue ?? '',
+        population.recovery_example?.queue ?? ''].join(':');
+    }
     return [payload.contract, payload.result_kind, report.status, report.knowledge_basis, report.placement_role_scope, report.max_early_placements, report.borrow_source_index, report.borrow_placement_mask, report.normal_states, report.recovery_states,
       ...report.steps.map((step) => `${step.source_queue_index}:${step.piece}:${step.placement_mask}:${step.board_after_mask}`)].join(':');
   }

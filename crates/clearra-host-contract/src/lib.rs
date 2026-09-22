@@ -32,7 +32,10 @@ pub use app_contract::{AppRequest, AppResponse, AppStatus, Diagnostic, Diagnosti
 pub use app_result::AppResult;
 pub use backend_policy::BackendPolicy;
 pub use backend_report::BackendReport;
-pub use boundary_recovery_payload::{BoundaryRecoveryPayload, BoundaryRecoveryStepPayload};
+pub use boundary_recovery_payload::{
+    BoundaryRecoveryPayload, BoundaryRecoveryPopulationExamplePayload,
+    BoundaryRecoveryPopulationPayload, BoundaryRecoveryStepPayload,
+};
 pub use build_v2_product_payload::{
     BuildV2CandidateCoveragePayload, BuildV2CompletenessPayload, BuildV2PayloadKind,
     BuildV2ProductPayload, BuildV2ProductPayloadError, BuildV2ScoreWinnerPayload,

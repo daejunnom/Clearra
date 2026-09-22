@@ -89,3 +89,36 @@ fn complete_diagram_roles_bind_each_source_token_to_its_lock_mask() {
         [0x300c000, 0, 0, 0]
     );
 }
+
+#[test]
+fn pattern_recovery_keeps_unknown_weight_and_rejects_nonmatching_diagram_bags() {
+    let mut command = String::from(
+        "clearra recovery boundary --initial-board-mask 0x0 --target-board-mask 0x0 --height 8 --queue IJLOSTZIJLOSTZ --queue-pattern \"IJLOSTZIJLOSTZ;IJLOSTZIIIIIII\" --stage-one-count 7 --placements 14 --max-early-placements 0 --no-hold --max-states 1 --max-pattern-evaluations 2 --max-total-states 2",
+    );
+    for position in 1..=14 {
+        command.push_str(&format!(" --role-mask {position}:0xf"));
+    }
+    let request = CliCommandParser::parse(&command)
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let response = AppContext::default().run(request);
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    let fields = response.render_model().unwrap().message().unwrap().fields();
+    assert!(
+        fields
+            .iter()
+            .any(|field| field.key() == "status"
+                && field.value().as_text() == "population-incomplete")
+    );
+    assert!(fields.iter().any(
+        |field| field.key() == "total_possible_pattern_count" && field.value().as_text() == "2"
+    ));
+    assert!(fields
+        .iter()
+        .any(|field| field.key() == "unknown_probability"
+            && field.value().as_text() == "0.50000000000000000"));
+
+    let without_pattern = command.replace(" --queue-pattern \"IJLOSTZIJLOSTZ;IJLOSTZIIIIIII\"", "");
+    assert!(CliCommandParser::parse(&without_pattern).is_err());
+}

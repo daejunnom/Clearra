@@ -40,6 +40,9 @@
   $: workerController.setWorkerFactory(workerFactory);
   $: runtimeView = runtime === 'web' ? workspaceViewFromWasm($wasmWorkerState) : workspaceViewFromDesktop($desktopJobState);
   $: payload = boundaryRecoveryPayload(runtimeView.response);
+  $: example = payload?.population?.recovery_example ?? payload?.population?.normal_example;
+  $: displaySteps = payload?.population ? (example?.steps ?? []) : (payload?.steps ?? []);
+  $: displayCheckpoint = payload?.population ? example?.stage_one_checkpoint_step : payload?.stage_one_checkpoint_step;
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: validation = validateBoundaryRecoveryRequest(request);
   $: label = (key: ComponentMessageKey) => componentMessage(language, key);
@@ -103,7 +106,7 @@
   }
 
   function setPlacements(value: number) {
-    const placements = Math.max(2, Math.min(14, Math.trunc(value || 2)));
+    const placements = Math.max(2, Math.min(42, Math.trunc(value || 2)));
     request = {
       ...request, placements,
       placementRoleMasks: request.placementRoleMasks.length === 0 ? [] :
@@ -153,7 +156,9 @@
       'pc-preserving-recovery': 'recoveryPcPreserving',
       'non-pc-recovery': 'recoveryNonPc',
       'no-path-within-declared-scope': 'recoveryNoPath',
-      incomplete: 'recoveryIncomplete'
+      incomplete: 'recoveryIncomplete',
+      'population-complete': 'recoveryPopulationComplete',
+      'population-incomplete': 'recoveryPopulationIncomplete'
     };
     return label(key[status] ?? 'recoveryIncomplete');
   }
@@ -232,12 +237,16 @@
       <input value={request.queue} placeholder="IOTSZJL" spellcheck="false"
         on:input={(event) => request = { ...request, queue: (event.currentTarget as HTMLInputElement).value }} />
     </label>
+    <label><span>{label('recoveryQueuePattern')}</span>
+      <input value={request.queuePattern} placeholder="IJLOSTZP7" spellcheck="false"
+        on:input={(event) => request = { ...request, queuePattern: (event.currentTarget as HTMLInputElement).value }} />
+    </label>
     <label><span>{label('recoveryStageOneCount')}</span>
-      <input type="number" min="1" max="13" value={request.stageOneCount}
+      <input type="number" min="1" max="41" value={request.stageOneCount}
         on:input={(event) => request = { ...request, stageOneCount: Number((event.currentTarget as HTMLInputElement).value) }} />
     </label>
     <label><span>{label('recoveryPlacements')}</span>
-      <input type="number" min="2" max="14" value={request.placements}
+      <input type="number" min="2" max="42" value={request.placements}
         on:input={(event) => setPlacements(Number((event.currentTarget as HTMLInputElement).value))} />
     </label>
     <label><span>{label('recoveryBorrowPosition')}</span>
@@ -267,19 +276,37 @@
       <input type="number" min="1" max="1000000" value={request.maxStates}
         on:input={(event) => request = { ...request, maxStates: Number((event.currentTarget as HTMLInputElement).value) }} />
     </label>
+    {#if request.queuePattern.trim()}
+      <label><span>{label('recoveryPatternEvaluations')}</span>
+        <input type="number" min="1" max="100000" value={request.maxPatternEvaluations}
+          on:input={(event) => request = { ...request, maxPatternEvaluations: Number((event.currentTarget as HTMLInputElement).value) }} />
+      </label>
+      <label><span>{label('recoveryTotalStates')}</span>
+        <input type="number" min="1" max="100000000" value={request.maxTotalStates}
+          on:input={(event) => request = { ...request, maxTotalStates: Number((event.currentTarget as HTMLInputElement).value) }} />
+      </label>
+    {/if}
     {#if validation.length > 0}<p role="alert">{label('recoveryInvalid')}</p>{/if}
   </section>
   <section slot="result" class="recovery-result" aria-live="polite">
     <h2>{label('boundaryRecovery')}</h2>
     {#if payload}
       <p class="outcome">{statusLabel(payload.status)}</p>
-      <p>{label('recoveryBorrowed')}: {payload.borrowed_stage_two_count} · {label('recoveryCheckpoint')}: {payload.stage_one_checkpoint_step ?? '—'} · PC: {payload.checkpoint_is_pc === null ? '—' : payload.checkpoint_is_pc}</p>
-      <p>Full fixed queue · {payload.placement_role_scope} · {payload.normal_states} + {payload.recovery_states} states</p>
-      {#if payload.steps.length > 0}
+      {#if payload.population}
+        <p>{payload.population.evaluated_pattern_count} / {payload.population.total_possible_pattern_count} · {payload.population.state_count} states · full future queue knowledge</p>
+        <p>{label('recoveryNormalProbability')}: {(Number(payload.population.normal_probability) * 100).toFixed(2)}% · {label('recoveryAdditionalProbability')}: {(Number(payload.population.additional_recovery_probability) * 100).toFixed(2)}%</p>
+        <p>{label('recoveryTotalResponseProbability')}: {(Number(payload.population.total_response_probability) * 100).toFixed(2)}% · {label('recoveryUnknownProbability')}: {(Number(payload.population.unknown_probability) * 100).toFixed(2)}%</p>
+        <p>PC-preserving recovery: {(Number(payload.population.pc_preserving_recovery_probability) * 100).toFixed(2)}% · non-PC recovery: {(Number(payload.population.non_pc_recovery_probability) * 100).toFixed(2)}% · no path: {(Number(payload.population.no_path_probability) * 100).toFixed(2)}%</p>
+        {#if example}<p>Example queue: <code>{example.queue}</code> · {statusLabel(example.status)}</p>{/if}
+      {:else}
+        <p>{label('recoveryBorrowed')}: {payload.borrowed_stage_two_count} · {label('recoveryCheckpoint')}: {payload.stage_one_checkpoint_step ?? '—'} · PC: {payload.checkpoint_is_pc === null ? '—' : payload.checkpoint_is_pc}</p>
+        <p>Full fixed queue · {payload.placement_role_scope} · {payload.normal_states} + {payload.recovery_states} states</p>
+      {/if}
+      {#if displaySteps.length > 0}
         <h3>{label('recoveryTimeline')}</h3>
         <ol>
-          {#each payload.steps as step, index}
-            <li><strong>{step.piece}</strong> · queue #{step.source_queue_index + 1} · {step.hold_decision} · ({step.x}, {step.y}) · {step.cleared_lines}L · B2B {step.b2b_active_after ? '✓' : '—'}{payload.stage_one_checkpoint_step === index + 1 ? ' · checkpoint' : ''}<code>{step.board_after_mask}</code></li>
+          {#each displaySteps as step, index}
+            <li><strong>{step.piece}</strong> · queue #{step.source_queue_index + 1} · {step.hold_decision} · ({step.x}, {step.y}) · {step.cleared_lines}L · B2B {step.b2b_active_after ? '✓' : '—'}{displayCheckpoint === index + 1 ? ' · checkpoint' : ''}<code>{step.board_after_mask}</code></li>
           {/each}
         </ol>
       {/if}

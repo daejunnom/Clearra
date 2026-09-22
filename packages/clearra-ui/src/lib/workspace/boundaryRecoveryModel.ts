@@ -10,6 +10,7 @@ export type BoundaryRecoveryRequest = {
   targetBoardMask: bigint;
   height: number;
   queue: string;
+  queuePattern: string;
   stageOneCount: number;
   placements: number;
   /** Empty keeps occupancy-only search; otherwise one exact lock-time mask per source token. */
@@ -24,6 +25,8 @@ export type BoundaryRecoveryRequest = {
   preserveB2BStageTwo: boolean;
   initialB2B: boolean;
   maxStates: number;
+  maxPatternEvaluations: number;
+  maxTotalStates: number;
 };
 
 export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
@@ -32,6 +35,7 @@ export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
     targetBoardMask: 0n,
     height: 8,
     queue: '',
+    queuePattern: '',
     stageOneCount: 1,
     placements: 2,
     placementRoleMasks: [],
@@ -44,20 +48,30 @@ export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
     preserveB2BStageOne: false,
     preserveB2BStageTwo: false,
     initialB2B: true,
-    maxStates: 100_000
+    maxStates: 100_000,
+    maxPatternEvaluations: 100,
+    maxTotalStates: 1_000_000
   };
 }
 
 export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest): string[] {
   const errors: string[] = [];
   const queue = request.queue.trim().toUpperCase();
-  if (!/^[IJLOSTZ]{2,14}$/u.test(queue)) errors.push('queue');
+  if (!/^[IJLOSTZ]{2,42}$/u.test(queue)) errors.push('queue');
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 25) errors.push('height');
   if (!Number.isInteger(request.stageOneCount) || request.stageOneCount < 1 || request.stageOneCount >= request.placements) errors.push('stage-one');
   if (!Number.isInteger(request.placements) || request.placements > queue.length) errors.push('placements');
   if (request.maxEarlyPlacements !== 0 && request.maxEarlyPlacements !== 1) errors.push('max-early');
   if (request.maxEarlyPlacements === 1 && (!Number.isInteger(request.borrowSourcePosition) || request.borrowSourcePosition <= request.stageOneCount || request.borrowSourcePosition > request.placements)) errors.push('borrow-source');
   if (!Number.isInteger(request.maxStates) || request.maxStates < 1 || request.maxStates > 1_000_000) errors.push('max-states');
+  if (request.queuePattern.trim()) {
+    if (queue.length % 7 !== 0 || request.stageOneCount % 7 !== 0 || request.placements !== queue.length ||
+        request.placementRoleMasks.length !== queue.length ||
+        !Array.from({ length: queue.length / 7 }, (_, bag) => queue.slice(bag * 7, bag * 7 + 7))
+          .every((bag) => new Set(bag).size === 7)) errors.push('pattern-roles');
+    if (!Number.isInteger(request.maxPatternEvaluations) || request.maxPatternEvaluations < 1 || request.maxPatternEvaluations > 100_000) errors.push('max-pattern-evaluations');
+    if (!Number.isInteger(request.maxTotalStates) || request.maxTotalStates < 1 || request.maxTotalStates > 100_000_000) errors.push('max-total-states');
+  }
   const fieldLimit = 1n << BigInt(Math.max(1, Math.min(25, request.height)) * 10);
   if (request.initialBoardMask < 0n || request.initialBoardMask >= fieldLimit || request.targetBoardMask < 0n || request.targetBoardMask >= fieldLimit) errors.push('board');
   if (request.maxEarlyPlacements === 1 && request.placementRoleMasks.length === 0 &&
@@ -100,6 +114,11 @@ export function boundaryRecoveryArguments(request: BoundaryRecoveryRequest): str
   }
   if (request.preserveB2BStageOne) args.push('--preserve-b2b-stage-one');
   if (request.preserveB2BStageTwo) args.push('--preserve-b2b-stage-two');
+  if (request.queuePattern.trim()) {
+    args.push('--queue-pattern', request.queuePattern.trim());
+    args.push('--max-pattern-evaluations', String(request.maxPatternEvaluations));
+    args.push('--max-total-states', String(request.maxTotalStates));
+  }
   return args;
 }
 

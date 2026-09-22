@@ -1,8 +1,11 @@
 use clearra_forward_search::{
-    BoundaryRecoveryError, BoundaryRecoveryQuery, BoundaryRecoveryStatus,
+    BoundaryRecoveryError, BoundaryRecoveryPatternError, BoundaryRecoveryPatternQuery,
+    BoundaryRecoveryPopulationError, BoundaryRecoveryQuery, BoundaryRecoveryStatus,
+    BoundaryRecoveryStep,
 };
 use clearra_host_contract::{
-    BoundaryRecoveryPayload, BoundaryRecoveryStepPayload, ProductResultPayload,
+    BoundaryRecoveryPayload, BoundaryRecoveryPopulationExamplePayload,
+    BoundaryRecoveryPopulationPayload, BoundaryRecoveryStepPayload, ProductResultPayload,
     ProductResultPayloadContent,
 };
 use clearra_output::model::{RenderField, RenderFieldValue};
@@ -18,11 +21,38 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundaryRecoveryAppCommand {
     query: BoundaryRecoveryQuery,
+    pattern: Option<BoundaryRecoveryPatternOptions>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BoundaryRecoveryPatternOptions {
+    source: String,
+    max_pattern_evaluations: usize,
+    max_total_states: usize,
 }
 
 impl BoundaryRecoveryAppCommand {
     pub fn new(query: BoundaryRecoveryQuery) -> Self {
-        Self { query }
+        Self {
+            query,
+            pattern: None,
+        }
+    }
+
+    pub fn new_pattern(
+        query: BoundaryRecoveryQuery,
+        source: String,
+        max_pattern_evaluations: usize,
+        max_total_states: usize,
+    ) -> Self {
+        Self {
+            query,
+            pattern: Some(BoundaryRecoveryPatternOptions {
+                source,
+                max_pattern_evaluations,
+                max_total_states,
+            }),
+        }
     }
 
     pub fn query(&self) -> &BoundaryRecoveryQuery {
@@ -32,6 +62,9 @@ impl BoundaryRecoveryAppCommand {
 
 impl RunnableAppCommand for BoundaryRecoveryAppCommand {
     fn run(self, context: &AppExecutionContext<'_>) -> AppResponse {
+        if let Some(pattern) = &self.pattern {
+            return self.run_pattern(context, pattern);
+        }
         let report = match self.query.search(context.execution_control) {
             Ok(report) => report,
             Err(BoundaryRecoveryError::Cancelled) => {
@@ -57,25 +90,7 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
             BoundaryRecoveryStatus::NoPath => "no-path-within-declared-scope",
             BoundaryRecoveryStatus::Incomplete => "incomplete",
         };
-        let public_steps = report
-            .steps
-            .iter()
-            .map(|step| BoundaryRecoveryStepPayload {
-                source_queue_index: step.source_queue_index as u8,
-                piece: step.piece.as_ascii().to_string(),
-                rotation: step.rotation.quarter_turns(),
-                x: step.x,
-                y: step.y,
-                hold_decision: step.hold_decision.to_owned(),
-                placement_mask: mask_hex(step.placement_mask),
-                cleared_row_mask: step.cleared_row_mask,
-                board_after_mask: mask_hex(step.board_after),
-                cleared_lines: step.cleared_lines,
-                recognized_spin: step.recognized_spin,
-                b2b_active_after: step.b2b_active_after,
-                stage_one_complete_after: step.stage_one_complete_after,
-            })
-            .collect();
+        let public_steps = report.steps.iter().map(public_step).collect();
         let public = BoundaryRecoveryPayload {
             status: status.to_owned(),
             knowledge_basis: "full-fixed-queue".to_owned(),
@@ -94,6 +109,7 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
             checkpoint_is_pc: report.checkpoint_is_pc,
             borrowed_stage_two_count: report.borrowed_stage_two_count,
             steps: public_steps,
+            population: None,
         };
         let steps = report.steps.iter().map(|step| {
             RenderFieldValue::object([
@@ -190,6 +206,186 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
             None,
         )
     }
+}
+
+impl BoundaryRecoveryAppCommand {
+    fn run_pattern(
+        &self,
+        context: &AppExecutionContext<'_>,
+        options: &BoundaryRecoveryPatternOptions,
+    ) -> AppResponse {
+        let search = BoundaryRecoveryPatternQuery {
+            reference: self.query.clone(),
+            queue_pattern: options.source.clone(),
+            max_pattern_evaluations: options.max_pattern_evaluations,
+            max_total_states: options.max_total_states,
+        };
+        let report = match search.search(context.execution_control) {
+            Ok(report) => report,
+            Err(BoundaryRecoveryPatternError::Population(
+                BoundaryRecoveryPopulationError::Cancelled,
+            )) => {
+                return AppResponse::failed(
+                    AppStatus::ExecutionFailed,
+                    AppError::new(AppErrorCode::ExecutionFailed, "boundary recovery cancelled"),
+                );
+            }
+            Err(error) => {
+                return AppResponse::failed(
+                    AppStatus::ValidationFailed,
+                    AppError::new(
+                        AppErrorCode::InvalidInput,
+                        format!("invalid boundary recovery pattern: {error:?}"),
+                    ),
+                );
+            }
+        };
+        let status = if report.complete {
+            "population-complete"
+        } else {
+            "population-incomplete"
+        };
+        let population = BoundaryRecoveryPopulationPayload {
+            materialized_pattern_count: report.materialized_pattern_count,
+            total_possible_pattern_count: report.total_possible_pattern_count.to_string(),
+            evaluated_pattern_count: report.evaluated_pattern_count,
+            state_count: report.state_count,
+            complete: report.complete,
+            normal_count: report.normal_count,
+            pc_preserving_recovery_count: report.pc_preserving_recovery_count,
+            non_pc_recovery_count: report.non_pc_recovery_count,
+            no_path_count: report.no_path_count,
+            incomplete_count: report.incomplete_count,
+            diagram_unavailable_count: report.diagram_unavailable_count,
+            normal_probability: probability_text(report.normal_probability.get()),
+            pc_preserving_recovery_probability: probability_text(
+                report.pc_preserving_recovery_probability.get(),
+            ),
+            non_pc_recovery_probability: probability_text(report.non_pc_recovery_probability.get()),
+            additional_recovery_probability: probability_text(
+                report.additional_recovery_probability.get(),
+            ),
+            total_response_probability: probability_text(report.total_response_probability.get()),
+            no_path_probability: probability_text(report.no_path_probability.get()),
+            unknown_probability: probability_text(report.unknown_probability.get()),
+            normal_example: report.normal_example.map(public_example),
+            recovery_example: report.recovery_example.map(public_example),
+        };
+        let public = BoundaryRecoveryPayload {
+            status: status.to_owned(),
+            knowledge_basis: "full-pattern-universe".to_owned(),
+            placement_role_scope: "bag-piece-exact-lock-time".to_owned(),
+            max_early_placements: self.query.max_early_placements,
+            borrow_source_index: self.query.borrow_source_index as u8,
+            borrow_placement_mask: mask_hex(self.query.borrow_placement_mask.words()),
+            normal_states: 0,
+            recovery_states: 0,
+            stage_one_checkpoint_step: None,
+            checkpoint_is_pc: None,
+            borrowed_stage_two_count: 0,
+            steps: Vec::new(),
+            population: Some(Box::new(population)),
+        };
+        let population = public
+            .population
+            .as_ref()
+            .expect("population constructed above");
+        let fields = vec![
+            RenderField::new("contract", "boundary-recovery.v1"),
+            RenderField::new("status", status),
+            RenderField::new("knowledge_basis", "full-pattern-universe"),
+            RenderField::new("placement_role_scope", "bag-piece-exact-lock-time"),
+            RenderField::new("complete", population.complete),
+            RenderField::new(
+                "evaluated_pattern_count",
+                population.evaluated_pattern_count,
+            ),
+            RenderField::new(
+                "total_possible_pattern_count",
+                population.total_possible_pattern_count.clone(),
+            ),
+            RenderField::new("normal_probability", population.normal_probability.clone()),
+            RenderField::new(
+                "pc_preserving_recovery_probability",
+                population.pc_preserving_recovery_probability.clone(),
+            ),
+            RenderField::new(
+                "non_pc_recovery_probability",
+                population.non_pc_recovery_probability.clone(),
+            ),
+            RenderField::new(
+                "additional_recovery_probability",
+                population.additional_recovery_probability.clone(),
+            ),
+            RenderField::new(
+                "total_response_probability",
+                population.total_response_probability.clone(),
+            ),
+            RenderField::new(
+                "unknown_probability",
+                population.unknown_probability.clone(),
+            ),
+        ];
+        AppResponse::success(AppRenderModel::BoundaryRecovery(AppMessage::new(
+            AppResultKind::BoundaryRecovery,
+            fields,
+        )))
+        .with_public_product_result(
+            ProductResultPayload::new(
+                "boundary-recovery.v1",
+                AppResultKind::BoundaryRecovery.as_str(),
+                ProductResultPayloadContent::BoundaryRecovery(public),
+            ),
+            None,
+        )
+    }
+}
+
+fn public_step(step: &BoundaryRecoveryStep) -> BoundaryRecoveryStepPayload {
+    BoundaryRecoveryStepPayload {
+        source_queue_index: step.source_queue_index as u8,
+        piece: step.piece.as_ascii().to_string(),
+        rotation: step.rotation.quarter_turns(),
+        x: step.x,
+        y: step.y,
+        hold_decision: step.hold_decision.to_owned(),
+        placement_mask: mask_hex(step.placement_mask),
+        cleared_row_mask: step.cleared_row_mask,
+        board_after_mask: mask_hex(step.board_after),
+        cleared_lines: step.cleared_lines,
+        recognized_spin: step.recognized_spin,
+        b2b_active_after: step.b2b_active_after,
+        stage_one_complete_after: step.stage_one_complete_after,
+    }
+}
+
+fn public_example(
+    (pattern_index, queue, report): (
+        usize,
+        Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
+        clearra_forward_search::BoundaryRecoveryReport,
+    ),
+) -> BoundaryRecoveryPopulationExamplePayload {
+    let status = match report.status {
+        BoundaryRecoveryStatus::Normal => "normal",
+        BoundaryRecoveryStatus::PcPreservingRecovery => "pc-preserving-recovery",
+        BoundaryRecoveryStatus::NonPcRecovery => "non-pc-recovery",
+        BoundaryRecoveryStatus::NoPath => "no-path-within-declared-scope",
+        BoundaryRecoveryStatus::Incomplete => "incomplete",
+    };
+    BoundaryRecoveryPopulationExamplePayload {
+        pattern_index,
+        queue: queue.iter().map(|piece| piece.as_ascii()).collect(),
+        status: status.to_owned(),
+        stage_one_checkpoint_step: report.stage_one_checkpoint_step,
+        checkpoint_is_pc: report.checkpoint_is_pc,
+        borrowed_stage_two_count: report.borrowed_stage_two_count,
+        steps: report.steps.iter().map(public_step).collect(),
+    }
+}
+
+fn probability_text(value: f64) -> String {
+    format!("{value:.17}")
 }
 
 fn mask_hex(words: [u64; 4]) -> String {

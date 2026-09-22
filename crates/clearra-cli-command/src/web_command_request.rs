@@ -62,6 +62,7 @@ pub struct WebCommandRequest {
     setup_score: Option<WebSetupScoreInput>,
     forward_search: Option<ForwardSearchQuery>,
     boundary_recovery: Option<BoundaryRecoveryQuery>,
+    boundary_recovery_pattern: Option<(String, usize, usize)>,
     spin_structure: Option<SpinStructureQuery>,
     spin_structure_product_mode: SpinStructureProductMode,
     percent_query: Option<PcScenarioQuery>,
@@ -127,6 +128,7 @@ impl WebCommandRequest {
             setup_score: None,
             forward_search: None,
             boundary_recovery: None,
+            boundary_recovery_pattern: None,
             spin_structure: None,
             spin_structure_product_mode: SpinStructureProductMode::Search,
             percent_query: None,
@@ -193,6 +195,7 @@ impl WebCommandRequest {
             setup_score: None,
             forward_search: None,
             boundary_recovery: None,
+            boundary_recovery_pattern: None,
             spin_structure: None,
             spin_structure_product_mode: SpinStructureProductMode::Search,
             percent_query: None,
@@ -397,6 +400,18 @@ impl WebCommandRequest {
         request.command_kind = "boundary-recovery".to_owned();
         request.allow_backend_fallback = false;
         request.boundary_recovery = Some(query);
+        request
+    }
+
+    pub fn boundary_recovery_pattern(
+        query: BoundaryRecoveryQuery,
+        pattern: String,
+        max_pattern_evaluations: usize,
+        max_total_states: usize,
+    ) -> Self {
+        let mut request = Self::boundary_recovery(query);
+        request.boundary_recovery_pattern =
+            Some((pattern, max_pattern_evaluations, max_total_states));
         request
     }
 
@@ -1423,8 +1438,20 @@ impl WebCommandRequest {
                     "boundary recovery is missing its typed query",
                 )
             })?;
+            let command = if let Some((pattern, max_patterns, max_states)) =
+                &self.boundary_recovery_pattern
+            {
+                BoundaryRecoveryAppCommand::new_pattern(
+                    query,
+                    pattern.clone(),
+                    *max_patterns,
+                    *max_states,
+                )
+            } else {
+                BoundaryRecoveryAppCommand::new(query)
+            };
             return self.attach_product_capability_contract(AppRequest::new(
-                AppCommand::BoundaryRecovery(BoundaryRecoveryAppCommand::new(query)),
+                AppCommand::BoundaryRecovery(command),
             ));
         }
         if matches!(self.command_kind.as_str(), "damage" | "spin-finder" | "ren") {
