@@ -30,7 +30,7 @@ pub(crate) fn pc_replay_source_hasher(
         b"count:distinct-visible-language/lexical-rank/v1",
     )?;
     bytes(&mut hash, problem.problem_id().as_str().as_bytes())?;
-    bytes(&mut hash, problem.board_profile().as_str().as_bytes())?;
+    bytes(&mut hash, problem.board_profile().id().as_str().as_bytes())?;
     hash.update(problem.initial_board().occupied_mask().to_le_bytes());
     hash.update(problem.visible_height().to_le_bytes());
     hash.update(problem.search_height().to_le_bytes());
