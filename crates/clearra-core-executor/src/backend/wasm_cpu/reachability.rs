@@ -5,8 +5,8 @@ use clearra_rules::kicks::{KickTableProfile, KickTableProfileId, KickTransition}
 use std::sync::Arc;
 
 use crate::conditioned_reachability::{
-    conditioned_reachability_epoch, conditioned_reachability_snapshot,
-    ConditionedReachabilityLookup, QualifiedBoardConditionedReachability,
+    conditioned_reachability_snapshot, ConditionedReachabilityLookup,
+    QualifiedBoardConditionedReachability,
 };
 
 use super::{
@@ -450,7 +450,7 @@ pub(super) struct ReachabilityWorkspace {
     templates: [Option<ReachabilityTemplate>; 7],
     kick_profile_id: KickTableProfileId,
     conditioned: Option<Arc<QualifiedBoardConditionedReachability>>,
-    conditioned_epoch: u64,
+    conditioned_profile: Option<KickTableProfileId>,
     generated_states: usize,
     metrics: ReachabilityMetrics,
 }
@@ -463,7 +463,7 @@ impl Default for ReachabilityWorkspace {
             templates: std::array::from_fn(|_| None),
             kick_profile_id: KickTableProfileId::SrsPlus,
             conditioned: None,
-            conditioned_epoch: 0,
+            conditioned_profile: None,
             generated_states: 0,
             metrics: ReachabilityMetrics::default(),
         }
@@ -663,8 +663,9 @@ impl ReachabilityWorkspace {
     }
 
     pub fn configure_kick_profile(&mut self, profile_id: KickTableProfileId) {
-        let epoch = conditioned_reachability_epoch();
-        if self.kick_profile_id == profile_id && self.conditioned_epoch == epoch {
+        // Pin one immutable pack for the complete workspace/session. A host
+        // update becomes visible only to a new workspace, never mid-result.
+        if self.conditioned_profile == Some(profile_id) {
             return;
         }
         if self.kick_profile_id != profile_id {
@@ -675,7 +676,7 @@ impl ReachabilityWorkspace {
         self.conditioned = crate::search_prune_policy::conditioned_reachability_enabled()
             .then(|| conditioned_reachability_snapshot(profile_id))
             .flatten();
-        self.conditioned_epoch = epoch;
+        self.conditioned_profile = Some(profile_id);
     }
 
     pub const fn generated_state_count(&self) -> usize {

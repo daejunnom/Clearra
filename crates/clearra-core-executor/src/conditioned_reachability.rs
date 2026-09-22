@@ -9,10 +9,7 @@ use clearra_accelerator_activation::{AcceleratorProduct, VerifiedAcceleratorAuth
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_rules::kicks::KickTableProfileId;
 use sha2::{Digest, Sha256};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, OnceLock, RwLock,
-};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::legal_board::{accelerator_profile_name, built_in_rule_identity, ProviderStatus};
 
@@ -25,6 +22,44 @@ const MAX_PACK_BYTES: usize = 16 * 1024 * 1024;
 const PROFILE_SLOTS: usize = 5;
 pub const CONDITIONED_REACHABILITY_COMPLETENESS_SCOPE: &str =
     "width-10-height-1-6-spawn-to-lock-boolean-complete-records";
+
+/// The bounded exact-cache candidate has one deliberately narrow evidence
+/// contract. Other evidence modes stay on the existing exact traversal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConditionedEvidenceLevel {
+    Boolean,
+    Witness,
+    Spin,
+    Finesse,
+    CountAll,
+}
+
+/// Entry poses are the exact collision-free sky seeds compiled by the same
+/// profile-bound reachability template as the fallback search. This is not an
+/// arbitrary local window and may not be substituted for another entry set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConditionedEntryPoseSet {
+    ProfileSkySeeds,
+    Explicit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConditionedTargetScope {
+    AllGroundedLocks,
+    SelectedLocks,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConditionedReachabilityQuery {
+    pub width: u8,
+    pub height: u8,
+    pub board: u64,
+    pub piece: PieceKind,
+    pub kick_profile: KickTableProfileId,
+    pub entry_poses: ConditionedEntryPoseSet,
+    pub target_scope: ConditionedTargetScope,
+    pub evidence: ConditionedEvidenceLevel,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConditionedReachabilityRecord {
@@ -61,6 +96,7 @@ pub enum ConditionedReachabilityAssetError {
     NonCanonicalOrder,
     NotQualified,
     ActiveSessionTooLarge,
+    ActiveSessionInUse,
     RegistryUnavailable,
 }
 
@@ -81,6 +117,7 @@ impl ConditionedReachabilityAssetError {
             Self::NonCanonicalOrder => "conditioned_reachability_asset_order_noncanonical",
             Self::NotQualified => "conditioned_reachability_asset_not_qualified",
             Self::ActiveSessionTooLarge => "conditioned_reachability_active_session_too_large",
+            Self::ActiveSessionInUse => "conditioned_reachability_active_session_in_use",
             Self::RegistryUnavailable => "conditioned_reachability_registry_unavailable",
         }
     }
@@ -164,7 +201,16 @@ impl QualifiedBoardConditionedReachability {
         piece: PieceKind,
         kick_profile: KickTableProfileId,
     ) -> ConditionedReachabilityLookup {
-        self.pack.lookup(width, height, board, piece, kick_profile)
+        self.pack.lookup_query(ConditionedReachabilityQuery {
+            width,
+            height,
+            board,
+            piece,
+            kick_profile,
+            entry_poses: ConditionedEntryPoseSet::ProfileSkySeeds,
+            target_scope: ConditionedTargetScope::AllGroundedLocks,
+            evidence: ConditionedEvidenceLevel::Boolean,
+        })
     }
 }
 
@@ -267,16 +313,40 @@ impl BoardConditionedReachability {
         piece: PieceKind,
         kick_profile: KickTableProfileId,
     ) -> ConditionedReachabilityLookup {
-        if kick_profile != self.binding.kick_profile {
+        self.lookup_query(ConditionedReachabilityQuery {
+            width,
+            height,
+            board,
+            piece,
+            kick_profile,
+            entry_poses: ConditionedEntryPoseSet::ProfileSkySeeds,
+            target_scope: ConditionedTargetScope::AllGroundedLocks,
+            evidence: ConditionedEvidenceLevel::Boolean,
+        })
+    }
+
+    pub fn lookup_query(
+        &self,
+        query: ConditionedReachabilityQuery,
+    ) -> ConditionedReachabilityLookup {
+        if query.kick_profile != self.binding.kick_profile {
             return ConditionedReachabilityLookup::PassThrough(ProviderStatus::SnapshotMismatch);
         }
-        if width != 10
-            || !(1..=6).contains(&height)
-            || board >> (u32::from(width) * u32::from(height)) != 0
+        if query.entry_poses != ConditionedEntryPoseSet::ProfileSkySeeds
+            || query.target_scope != ConditionedTargetScope::AllGroundedLocks
+            || query.evidence != ConditionedEvidenceLevel::Boolean
+            || query.width != 10
+            || !(1..=6).contains(&query.height)
+            || query.board >> (u32::from(query.width) * u32::from(query.height)) != 0
         {
             return ConditionedReachabilityLookup::PassThrough(ProviderStatus::OutOfScope);
         }
-        let wanted = (width, height, board, piece_code(piece));
+        let wanted = (
+            query.width,
+            query.height,
+            query.board,
+            piece_code(query.piece),
+        );
         let mut low = 0;
         let mut high = self.record_count;
         while low < high {
@@ -302,11 +372,20 @@ impl BoardConditionedReachability {
 pub fn built_in_conditioned_reachability_binding(
     kick_profile: KickTableProfileId,
 ) -> Result<ConditionedReachabilityBinding, ConditionedReachabilityAssetError> {
-    let rule_identity = built_in_rule_identity(kick_profile)
+    let base_rule_identity = built_in_rule_identity(kick_profile)
         .map_err(|_| ConditionedReachabilityAssetError::UnsupportedProfile)?;
+    let mut digest = Sha256::new();
+    digest.update(b"clearra.conditioned-reachability.relation-schema.v2\0");
+    digest.update(base_rule_identity);
+    digest.update(
+        b"entry=profile-sky-seeds\0target=all-grounded-locks\0evidence=boolean\0\
+dependency=complete-board-plus-closed-left-right-bottom-open-top\0\
+transition=translation-plus-first-success-ordered-kick\0\
+goal=independent-spawn-to-lock\0coordinate=board64-bottom-left\0",
+    );
     Ok(ConditionedReachabilityBinding {
         kick_profile,
-        rule_identity,
+        rule_identity: digest.finalize().into(),
     })
 }
 
@@ -386,7 +465,6 @@ struct Registry {
 }
 
 static REGISTRY: OnceLock<RwLock<Registry>> = OnceLock::new();
-static REGISTRY_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 pub fn install_conditioned_reachability_pack(
     pack: QualifiedBoardConditionedReachability,
@@ -404,8 +482,17 @@ pub fn install_conditioned_reachability_pack(
     let mut guard = registry
         .write()
         .map_err(|_| ConditionedReachabilityAssetError::RegistryUnavailable)?;
+    if let Some(active) = guard.slots[slot].as_ref() {
+        if active.generation_identity() == pack.generation_identity()
+            && active.signed_catalog_identity() == pack.signed_catalog_identity()
+        {
+            return Ok(Some(Arc::clone(active)));
+        }
+        if Arc::strong_count(active) > 1 {
+            return Err(ConditionedReachabilityAssetError::ActiveSessionInUse);
+        }
+    }
     let prior = guard.slots[slot].replace(Arc::new(pack));
-    REGISTRY_EPOCH.fetch_add(1, Ordering::Release);
     Ok(prior)
 }
 
@@ -417,13 +504,14 @@ pub fn remove_conditioned_reachability_pack(
     let mut guard = registry
         .write()
         .map_err(|_| ConditionedReachabilityAssetError::RegistryUnavailable)?;
+    if guard.slots[slot]
+        .as_ref()
+        .is_some_and(|active| Arc::strong_count(active) > 1)
+    {
+        return Err(ConditionedReachabilityAssetError::ActiveSessionInUse);
+    }
     let prior = guard.slots[slot].take();
-    REGISTRY_EPOCH.fetch_add(1, Ordering::Release);
     Ok(prior)
-}
-
-pub(crate) fn conditioned_reachability_epoch() -> u64 {
-    REGISTRY_EPOCH.load(Ordering::Acquire)
 }
 
 pub(crate) fn conditioned_reachability_snapshot(
@@ -652,6 +740,31 @@ mod tests {
         assert_eq!(
             pack.lookup(10, 4, 0b11, PieceKind::I, KickTableProfileId::SrsPlus),
             ConditionedReachabilityLookup::PassThrough(ProviderStatus::Miss)
+        );
+        assert_eq!(
+            pack.lookup_query(ConditionedReachabilityQuery {
+                width: 10,
+                height: 4,
+                board: 0b111,
+                piece: PieceKind::I,
+                kick_profile: KickTableProfileId::SrsPlus,
+                entry_poses: ConditionedEntryPoseSet::ProfileSkySeeds,
+                target_scope: ConditionedTargetScope::AllGroundedLocks,
+                evidence: ConditionedEvidenceLevel::Witness,
+            }),
+            ConditionedReachabilityLookup::PassThrough(ProviderStatus::OutOfScope)
+        );
+    }
+
+    #[test]
+    fn relation_binding_fingerprints_more_than_the_base_kick_table() {
+        let srs_plus =
+            built_in_conditioned_reachability_binding(KickTableProfileId::SrsPlus).unwrap();
+        let srs_x = built_in_conditioned_reachability_binding(KickTableProfileId::SrsX).unwrap();
+        assert_ne!(srs_plus.rule_identity, srs_x.rule_identity);
+        assert_ne!(
+            srs_plus.rule_identity,
+            built_in_rule_identity(KickTableProfileId::SrsPlus).unwrap()
         );
     }
 

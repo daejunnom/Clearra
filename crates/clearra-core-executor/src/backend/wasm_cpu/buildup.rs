@@ -31,9 +31,7 @@ use clearra_supply::{
 };
 
 use crate::{
-    legal_board::{
-        qualified_legal_board_epoch, qualified_legal_board_snapshot, QualifiedExactLegalBoard,
-    },
+    legal_board::{qualified_legal_board_snapshot, QualifiedExactLegalBoard},
     performance::{ExecutorSearchStage, SearchStageSpan},
     CorePathStep,
 };
@@ -515,18 +513,18 @@ pub(super) struct BuildUpWorkspace {
     projection_state_generations: Vec<u32>,
     projection_generation: u32,
     legal_board: Option<Arc<QualifiedExactLegalBoard>>,
-    legal_board_epoch: u64,
     legal_board_profile: Option<clearra_rules::kicks::KickTableProfileId>,
 }
 
 impl BuildUpWorkspace {
     fn configure_legal_board(&mut self, profile: clearra_rules::kicks::KickTableProfileId) {
-        let epoch = qualified_legal_board_epoch();
-        if self.legal_board_epoch == epoch && self.legal_board_profile == Some(profile) {
+        // A workspace is one execution-session owner. Snapshot the immutable
+        // generation once so a concurrent install can never mix generations
+        // between candidates in the same result.
+        if self.legal_board_profile == Some(profile) {
             return;
         }
         self.legal_board = qualified_legal_board_snapshot(profile);
-        self.legal_board_epoch = epoch;
         self.legal_board_profile = Some(profile);
     }
 

@@ -12,10 +12,7 @@ use clearra_rules::kicks::{
     KickTableProfile, KickTableProfileId, KickTransition, NoKick, SrsKicks,
 };
 use sha2::{Digest, Sha256};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, OnceLock, RwLock,
-};
+use std::sync::{Arc, OnceLock, RwLock};
 
 const MAGIC: &[u8; 8] = b"CLLB0001";
 const VERSION: u32 = 1;
@@ -37,6 +34,7 @@ const PROFILE_SLOTS: usize = 5;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProviderStatus {
     Ready,
+    LoadedComplete,
     NotLoaded,
     OutOfScope,
     NotQualified,
@@ -289,6 +287,7 @@ pub enum LegalBoardAssetError {
     LayerArea,
     TerminalDomainIncomplete,
     ActiveSessionTooLarge,
+    ActiveSessionInUse,
     RegistryUnavailable,
 }
 
@@ -310,6 +309,7 @@ impl LegalBoardAssetError {
             Self::LayerArea => "legal_board_asset_layer_area_mismatch",
             Self::TerminalDomainIncomplete => "legal_board_asset_terminal_domain_incomplete",
             Self::ActiveSessionTooLarge => "legal_board_active_session_too_large",
+            Self::ActiveSessionInUse => "legal_board_active_session_in_use",
             Self::RegistryUnavailable => "legal_board_registry_unavailable",
         }
     }
@@ -412,7 +412,6 @@ struct LegalBoardRegistry {
 }
 
 static LEGAL_BOARD_REGISTRY: OnceLock<RwLock<LegalBoardRegistry>> = OnceLock::new();
-static LEGAL_BOARD_REGISTRY_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 pub fn install_qualified_exact_legal_board(
     board: QualifiedExactLegalBoard,
@@ -432,8 +431,17 @@ pub fn install_qualified_exact_legal_board(
     let mut guard = registry
         .write()
         .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
+    if let Some(active) = guard.slots[slot].as_ref() {
+        if active.generation_identity() == board.generation_identity()
+            && active.signed_catalog_identity() == board.signed_catalog_identity()
+        {
+            return Ok(Some(Arc::clone(active)));
+        }
+        if Arc::strong_count(active) > 1 {
+            return Err(LegalBoardAssetError::ActiveSessionInUse);
+        }
+    }
     let prior = guard.slots[slot].replace(Arc::new(board));
-    LEGAL_BOARD_REGISTRY_EPOCH.fetch_add(1, Ordering::Release);
     Ok(prior)
 }
 
@@ -445,13 +453,14 @@ pub fn remove_qualified_exact_legal_board(
     let mut guard = registry
         .write()
         .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
+    if guard.slots[slot]
+        .as_ref()
+        .is_some_and(|active| Arc::strong_count(active) > 1)
+    {
+        return Err(LegalBoardAssetError::ActiveSessionInUse);
+    }
     let prior = guard.slots[slot].take();
-    LEGAL_BOARD_REGISTRY_EPOCH.fetch_add(1, Ordering::Release);
     Ok(prior)
-}
-
-pub(crate) fn qualified_legal_board_epoch() -> u64 {
-    LEGAL_BOARD_REGISTRY_EPOCH.load(Ordering::Acquire)
 }
 
 pub(crate) fn qualified_legal_board_snapshot(
