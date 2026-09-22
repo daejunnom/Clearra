@@ -259,7 +259,7 @@ pub(crate) fn prepare_build_coverage_portfolio_v2_result_with_pins_and_memory_gu
     result: &CoreExecutionResult,
     expected_problem: &clearra_problem::SearchProblem,
     pinned_candidate_keys: Vec<String>,
-    expected_source_set_sha256: Option<&str>,
+    expected_source_set_hash: Option<&str>,
     guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
 ) -> Result<BuildCoveragePortfolioV2Preparation, BuildCoveragePortfolioResultError> {
     if authority.contract() != BuildTargetSearchContract::Cover {
@@ -394,7 +394,7 @@ pub(crate) fn prepare_build_coverage_portfolio_v2_result_with_pins_and_memory_gu
     {
         return Err(BuildCoveragePortfolioResultError::NormalizedSolutionSetHashInvalid);
     }
-    if expected_source_set_sha256.is_some_and(|expected| expected != normalized_solution_set_hash) {
+    if expected_source_set_hash.is_some_and(|expected| expected != normalized_solution_set_hash) {
         return Err(BuildCoveragePortfolioResultError::SourceSetHashMismatch);
     }
     if pinned_candidate_keys

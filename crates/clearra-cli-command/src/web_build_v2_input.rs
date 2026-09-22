@@ -9,6 +9,7 @@ use clearra_app::{
     FIELD_DOCUMENT_MAX_INPUT_BYTES,
 };
 use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{PcExecutionPolicy, PcQueueInput};
 use clearra_problem::BuildSolutionProbabilityPolicy;
@@ -20,6 +21,7 @@ use crate::{WebBuildProbabilityInput, WebCommandError, WebCommandErrorCode};
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum WebBuildV2Capability {
     Cover,
+    PinnedMinimals,
     Setup,
     Congruent,
     CongruentCover,
@@ -37,6 +39,7 @@ impl WebBuildV2Capability {
     pub const fn capability_id(self) -> &'static str {
         match self {
             Self::Cover => "build.cover",
+            Self::PinnedMinimals => "build.pinned-minimals",
             Self::Setup => "build.setup",
             Self::Congruent => "build.congruent",
             Self::CongruentCover => "build.congruent-cover",
@@ -53,7 +56,9 @@ impl WebBuildV2Capability {
 
     pub const fn default_objective(self) -> BuildObjective {
         match self {
-            Self::Cover | Self::CongruentCover | Self::SetupCover => BuildObjective::MinCover,
+            Self::Cover | Self::PinnedMinimals | Self::CongruentCover | Self::SetupCover => {
+                BuildObjective::MinCover
+            }
             Self::Setup | Self::Congruent | Self::SetupCoverPercent => BuildObjective::Unique,
             Self::SetupCoverScore | Self::EvaluateScore => BuildObjective::MaxScoreCover,
             Self::EvaluateCover | Self::EvaluateB2bCover => BuildObjective::All,
@@ -64,10 +69,12 @@ impl WebBuildV2Capability {
 
     pub const fn supports_objective(self, objective: BuildObjective) -> bool {
         match self {
-            Self::Cover | Self::CongruentCover | Self::SetupCover => matches!(
-                objective,
-                BuildObjective::MinCover | BuildObjective::MaxProbabilityMinimum
-            ),
+            Self::Cover | Self::PinnedMinimals | Self::CongruentCover | Self::SetupCover => {
+                matches!(
+                    objective,
+                    BuildObjective::MinCover | BuildObjective::MaxProbabilityMinimum
+                )
+            }
             Self::Setup | Self::Congruent | Self::SetupCoverPercent => {
                 matches!(objective, BuildObjective::All | BuildObjective::Unique)
             }
@@ -132,6 +139,8 @@ pub struct WebBuildV2Input {
     score_profile: Option<BuildScoreProfile>,
     initial_b2b: Option<u16>,
     pinned_candidate_keys: Vec<String>,
+    pinned_colored_identities: Vec<StandardBoard64ColoredTilingIdentity>,
+    expected_source_set_hash: Option<String>,
 }
 
 impl WebBuildV2Input {
@@ -157,7 +166,20 @@ impl WebBuildV2Input {
             score_profile: None,
             initial_b2b: None,
             pinned_candidate_keys: Vec::new(),
+            pinned_colored_identities: Vec::new(),
+            expected_source_set_hash: None,
         })
+    }
+
+    pub fn pinned_minimals(
+        base_words: [u64; 4],
+        target_words: [u64; 4],
+        visible_height: u16,
+        objective: BuildObjective,
+    ) -> Result<Self, WebCommandError> {
+        let mut input = Self::cover(base_words, target_words, visible_height, objective)?;
+        input.capability = WebBuildV2Capability::PinnedMinimals;
+        Ok(input)
     }
 
     pub fn target_document(
@@ -191,6 +213,8 @@ impl WebBuildV2Input {
             score_profile: score_capable.then_some(BuildScoreProfile::default()),
             initial_b2b: score_capable.then_some(0),
             pinned_candidate_keys: Vec::new(),
+            pinned_colored_identities: Vec::new(),
+            expected_source_set_hash: None,
         })
     }
 
@@ -239,6 +263,8 @@ impl WebBuildV2Input {
             score_profile: score_capable.then_some(BuildScoreProfile::default()),
             initial_b2b: score_capable.then_some(0),
             pinned_candidate_keys: Vec::new(),
+            pinned_colored_identities: Vec::new(),
+            expected_source_set_hash: None,
         })
     }
 
@@ -253,7 +279,7 @@ impl WebBuildV2Input {
     ) -> Result<Self, WebCommandError> {
         if self.capability != WebBuildV2Capability::EvaluateMinimals && !keys.is_empty() {
             return Err(invalid(
-                "only build.evaluate.minimals accepts pinned candidates",
+                "only build.evaluate.minimals accepts supplied candidate keys",
             ));
         }
         if !keys.is_empty() {
@@ -285,9 +311,12 @@ impl WebBuildV2Input {
         format: FieldDocumentFormat,
         document: &str,
     ) -> Result<Self, WebCommandError> {
-        if self.capability != WebBuildV2Capability::EvaluateMinimals {
+        if !matches!(
+            self.capability,
+            WebBuildV2Capability::EvaluateMinimals | WebBuildV2Capability::PinnedMinimals
+        ) {
             return Err(invalid(
-                "only build.evaluate.minimals accepts a pinned solution document",
+                "only build.evaluate.minimals and build.pinned-minimals accept a pinned solution document",
             ));
         }
         let decoded = decode_document(format, document, "pinned solution")?;
@@ -299,7 +328,29 @@ impl WebBuildV2Input {
             normalized.identities().iter().copied(),
         )
         .map_err(|error| invalid(format!("invalid pinned solution document: {error:?}")))?;
-        self.with_pinned_candidate_keys(pins.candidate_keys().to_vec())
+        if self.capability == WebBuildV2Capability::PinnedMinimals {
+            let mut selected = self;
+            selected.pinned_colored_identities = pins.identities().to_vec();
+            Ok(selected)
+        } else {
+            self.with_pinned_candidate_keys(pins.candidate_keys().to_vec())
+        }
+    }
+
+    pub fn with_expected_source_set_hash(
+        mut self,
+        digest: String,
+    ) -> Result<Self, WebCommandError> {
+        let valid_hash = digest
+            .strip_prefix("cts1:")
+            .is_some_and(|hex| hex.len() == 16 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if self.capability != WebBuildV2Capability::PinnedMinimals || !valid_hash {
+            return Err(invalid(
+                "build.pinned-minimals requires the canonical cts1:<16 hex digits> source-set hash",
+            ));
+        }
+        self.expected_source_set_hash = Some(digest.to_ascii_lowercase());
+        Ok(self)
     }
 
     /// CLI-facing one-based indices in the canonical supplied candidate map.
@@ -349,7 +400,10 @@ impl WebBuildV2Input {
         mut self,
         source_piece_count: usize,
     ) -> Result<Self, WebCommandError> {
-        if self.capability != WebBuildV2Capability::Cover {
+        if !matches!(
+            self.capability,
+            WebBuildV2Capability::Cover | WebBuildV2Capability::PinnedMinimals
+        ) {
             return Err(invalid(
                 "document-backed Build v2 derives its source-piece count from the document",
             ));
@@ -427,6 +481,22 @@ impl WebBuildV2Input {
             (WebBuildV2Capability::Cover, WebBuildV2Source::BaseTarget) => {
                 BuildCoverV2Request::new(query, self.objective)
                     .map(BuildV2AppCommand::build_cover)
+                    .map_err(|error| request_error(self.capability, error))
+            }
+            (WebBuildV2Capability::PinnedMinimals, WebBuildV2Source::BaseTarget) => {
+                if self.pinned_colored_identities.is_empty() {
+                    return Err(invalid("build.pinned-minimals requires selected solutions"));
+                }
+                BuildCoverV2Request::new(query, self.objective)
+                    .map(|request| {
+                        let request = request
+                            .with_pinned_colored_identities(self.pinned_colored_identities.clone());
+                        let request = match &self.expected_source_set_hash {
+                            Some(digest) => request.with_expected_source_set_hash(digest.clone()),
+                            None => request,
+                        };
+                        BuildV2AppCommand::build_cover(request)
+                    })
                     .map_err(|error| request_error(self.capability, error))
             }
             (WebBuildV2Capability::Setup, WebBuildV2Source::Target(target)) => {

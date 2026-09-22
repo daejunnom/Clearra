@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
 use clearra_coverage::{
     cover::ExactMinimumCoverError,
     pattern::{pattern_bitset::PatternBitSet, weighted_pattern_set::WeightedPatternSet},
@@ -1015,7 +1016,8 @@ pub struct BuildCoverV2Request {
     query: BuildProbabilityQuery,
     objective: BuildObjective,
     pinned_candidate_keys: Vec<String>,
-    expected_source_set_sha256: Option<String>,
+    pinned_colored_identities: Vec<StandardBoard64ColoredTilingIdentity>,
+    expected_source_set_hash: Option<String>,
 }
 
 impl BuildCoverV2Request {
@@ -1040,7 +1042,8 @@ impl BuildCoverV2Request {
             query,
             objective,
             pinned_candidate_keys: Vec::new(),
-            expected_source_set_sha256: None,
+            pinned_colored_identities: Vec::new(),
+            expected_source_set_hash: None,
         })
     }
 
@@ -1055,13 +1058,32 @@ impl BuildCoverV2Request {
         self
     }
 
-    pub fn with_expected_source_set_sha256(mut self, digest: String) -> Self {
-        self.expected_source_set_sha256 = Some(digest);
+    pub fn with_expected_source_set_hash(mut self, digest: String) -> Self {
+        self.expected_source_set_hash = Some(digest);
+        self
+    }
+
+    /// A colored document may merge touching copies of the same tetromino.
+    /// Resolve it against the regenerated complete source, rejecting a drawing
+    /// that has zero or multiple placement-level meanings.
+    pub fn with_pinned_colored_identities(
+        mut self,
+        identities: Vec<StandardBoard64ColoredTilingIdentity>,
+    ) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
+        self.pinned_colored_identities = identities
+            .into_iter()
+            .filter(|identity| seen.insert(*identity))
+            .collect();
         self
     }
 
     pub fn pinned_candidate_keys(&self) -> &[String] {
         &self.pinned_candidate_keys
+    }
+
+    pub fn pinned_colored_identities(&self) -> &[StandardBoard64ColoredTilingIdentity] {
+        &self.pinned_colored_identities
     }
 
     pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
@@ -1073,9 +1095,14 @@ impl BuildCoverV2Request {
                     .checked_mul(core::mem::size_of::<String>() as u128)?,
             )?
             .checked_add(
-                self.expected_source_set_sha256
+                self.expected_source_set_hash
                     .as_ref()
                     .map_or(0, |digest| digest.capacity() as u128),
+            )?
+            .checked_add(
+                (self.pinned_colored_identities.capacity() as u128).checked_mul(
+                    core::mem::size_of::<StandardBoard64ColoredTilingIdentity>() as u128,
+                )?,
             )?;
         for key in &self.pinned_candidate_keys {
             bytes = bytes.checked_add(key.capacity() as u128)?;
@@ -1127,20 +1154,85 @@ impl BuildCoverV2Request {
         expected_problem: &clearra_problem::SearchProblem,
         guard: &mut impl FnMut(u128) -> Result<(), ExactMinimumCoverError>,
     ) -> Result<BuildCoverV2Preparation, BuildCoverV2FacadeError> {
-        guard(
-            (core::mem::size_of::<Self>() as u128)
-                .checked_add(self.checked_retained_capacity_bytes().ok_or(
-                    BuildCoverV2FacadeError::PreparationRejected {
-                        reason: "retained-capacity-overflow",
-                    },
-                )?)
-                .ok_or(BuildCoverV2FacadeError::PreparationRejected {
-                    reason: "retained-capacity-overflow",
-                })?,
-        )
-        .map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
+        let retained_overflow = || BuildCoverV2FacadeError::PreparationRejected {
+            reason: "retained-capacity-overflow",
+        };
+        let request_bytes = (core::mem::size_of::<Self>() as u128)
+            .checked_add(
+                self.checked_retained_capacity_bytes()
+                    .ok_or_else(retained_overflow)?,
+            )
+            .ok_or_else(retained_overflow)?;
+        guard(request_bytes).map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
             reason: "memory-guard-rejected",
         })?;
+        let mut pinned_candidate_keys = self.pinned_candidate_keys;
+        if !self.pinned_colored_identities.is_empty() {
+            if !pinned_candidate_keys.is_empty()
+                || result.normalized_solution_keys().len()
+                    != result.normalized_solution_identities().len()
+            {
+                return Err(BuildCoverV2FacadeError::PreparationRejected {
+                    reason: "pinned-source-selection-conflict",
+                });
+            }
+            let requested_headers = (self.pinned_colored_identities.len() as u128)
+                .checked_mul(core::mem::size_of::<String>() as u128)
+                .ok_or_else(retained_overflow)?;
+            guard(
+                request_bytes
+                    .checked_add(requested_headers)
+                    .ok_or_else(retained_overflow)?,
+            )
+            .map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
+                reason: "memory-guard-rejected",
+            })?;
+            pinned_candidate_keys
+                .try_reserve_exact(self.pinned_colored_identities.len())
+                .map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
+                    reason: "pinned-key-allocation-failed",
+                })?;
+            let actual_headers = (pinned_candidate_keys.capacity() as u128)
+                .checked_mul(core::mem::size_of::<String>() as u128)
+                .ok_or_else(retained_overflow)?;
+            let mut copied_key_bytes = 0_u128;
+            for drawing in self.pinned_colored_identities {
+                let mut match_key = None;
+                for (key, identity) in result
+                    .normalized_solution_keys()
+                    .iter()
+                    .zip(result.normalized_solution_identities())
+                {
+                    if StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(
+                        *identity,
+                    ) == drawing
+                    {
+                        if match_key.is_some() {
+                            return Err(BuildCoverV2FacadeError::PreparationRejected {
+                                reason: "pinned-drawing-ambiguous",
+                            });
+                        }
+                        match_key = Some(key);
+                    }
+                }
+                let key = match_key.ok_or(BuildCoverV2FacadeError::PreparationRejected {
+                    reason: "pinned-drawing-not-in-source",
+                })?;
+                copied_key_bytes = copied_key_bytes
+                    .checked_add(key.len() as u128)
+                    .ok_or_else(retained_overflow)?;
+                guard(
+                    request_bytes
+                        .checked_add(actual_headers)
+                        .and_then(|bytes| bytes.checked_add(copied_key_bytes))
+                        .ok_or_else(retained_overflow)?,
+                )
+                .map_err(|_| BuildCoverV2FacadeError::PreparationRejected {
+                    reason: "memory-guard-rejected",
+                })?;
+                pinned_candidate_keys.push(key.clone());
+            }
+        }
         let snapshot =
             validated_owned_query_snapshot(self.query, self.objective).map_err(|_| {
                 BuildCoverV2FacadeError::PreparationRejected {
@@ -1164,8 +1256,8 @@ impl BuildCoverV2Request {
             authority,
             result,
             expected_problem,
-            self.pinned_candidate_keys,
-            self.expected_source_set_sha256.as_deref(),
+            pinned_candidate_keys,
+            self.expected_source_set_hash.as_deref(),
             guard,
         )
         .map_err(|error| BuildCoverV2FacadeError::PreparationRejected {
@@ -2599,7 +2691,7 @@ mod tests {
         let pinned = BuildCoverV2Request::new(one_piece_query(), BuildObjective::MinCover)
             .expect("valid full Build request")
             .with_pinned_candidate_keys(vec![key.clone(), key.clone()])
-            .with_expected_source_set_sha256(hash.clone())
+            .with_expected_source_set_hash(hash.clone())
             .execute(&executor, &control)
             .expect("pin is revalidated against the full producer");
         assert_eq!(pinned.normalized_solution_set_hash(), hash);
@@ -2619,7 +2711,7 @@ mod tests {
         let stale = BuildCoverV2Request::new(one_piece_query(), BuildObjective::MinCover)
             .expect("valid full Build request")
             .with_pinned_candidate_keys(vec![key])
-            .with_expected_source_set_sha256("0".repeat(64))
+            .with_expected_source_set_hash("cts1:0000000000000000".to_owned())
             .execute(&executor, &control);
         assert!(matches!(
             stale,

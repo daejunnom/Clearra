@@ -2872,6 +2872,7 @@ fn parse_build_v2_command(
     })?;
     let (capability, options) = match subcommand.as_str() {
         "cover" => (WebBuildV2Capability::Cover, &tokens[1..]),
+        "pinned-minimals" => (WebBuildV2Capability::PinnedMinimals, &tokens[1..]),
         "setup" => (WebBuildV2Capability::Setup, &tokens[1..]),
         "congruent" => (WebBuildV2Capability::Congruent, &tokens[1..]),
         "congruent-cover" => (WebBuildV2Capability::CongruentCover, &tokens[1..]),
@@ -2917,6 +2918,7 @@ fn parse_build_v2_command(
     let mut solution_document = None;
     let mut pin_solution_format = None;
     let mut pin_solution_document = None;
+    let mut expected_source_set_hash = None;
     let mut pinned_candidate_ordinals = Vec::new();
     let mut queue = None;
     let mut patterns = None;
@@ -2996,7 +2998,15 @@ fn parse_build_v2_command(
                 let value = next_value(options, &mut cursor, "--solution-document")?.to_owned();
                 set_build_v2_option(&mut solution_document, value, "--solution-document")?;
             }
-            "--pin-solution-format" => {
+            "--pin-solution-format" | "--required-format" => {
+                if (option == "--required-format")
+                    != (capability == WebBuildV2Capability::PinnedMinimals)
+                {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("{} does not accept {option}", capability.capability_id()),
+                    ));
+                }
                 let value = next_value(options, &mut cursor, "--pin-solution-format")?;
                 let format = FieldDocumentFormat::parse(value).map_err(|_| {
                     WebCommandError::new(
@@ -3008,9 +3018,21 @@ fn parse_build_v2_command(
                 })?;
                 set_build_v2_option(&mut pin_solution_format, format, "--pin-solution-format")?;
             }
-            "--pin-solution-document" => {
+            "--pin-solution-document" | "--required-document" => {
+                if (option == "--required-document")
+                    != (capability == WebBuildV2Capability::PinnedMinimals)
+                {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("{} does not accept {option}", capability.capability_id()),
+                    ));
+                }
                 let value = next_value(options, &mut cursor, "--pin-solution-document")?.to_owned();
                 set_build_v2_option(&mut pin_solution_document, value, "--pin-solution-document")?;
+            }
+            "--expected-source-set-hash" => {
+                let value = next_value(options, &mut cursor, option)?.to_owned();
+                set_build_v2_option(&mut expected_source_set_hash, value, option)?;
             }
             "--pin-candidate" => {
                 pinned_candidate_ordinals.push(parse_positive(
@@ -3251,7 +3273,10 @@ fn parse_build_v2_command(
         ));
     }
 
-    let mut input = if capability == WebBuildV2Capability::Cover {
+    let mut input = if matches!(
+        capability,
+        WebBuildV2Capability::Cover | WebBuildV2Capability::PinnedMinimals
+    ) {
         if target_format.is_some()
             || target_document.is_some()
             || solution_format.is_some()
@@ -3262,12 +3287,16 @@ fn parse_build_v2_command(
                 "build.cover accepts base/target masks, not a target or solution document",
             ));
         }
-        let input = WebBuildV2Input::cover(
-            base_words.ok_or_else(|| missing_build_v2_option(capability, "--base-mask"))?,
-            target_words.ok_or_else(|| missing_build_v2_option(capability, "--target-mask"))?,
-            visible_height.ok_or_else(|| missing_build_v2_option(capability, "--height"))?,
-            objective,
-        )?;
+        let base = base_words.ok_or_else(|| missing_build_v2_option(capability, "--base-mask"))?;
+        let target =
+            target_words.ok_or_else(|| missing_build_v2_option(capability, "--target-mask"))?;
+        let height =
+            visible_height.ok_or_else(|| missing_build_v2_option(capability, "--height"))?;
+        let input = if capability == WebBuildV2Capability::PinnedMinimals {
+            WebBuildV2Input::pinned_minimals(base, target, height, objective)?
+        } else {
+            WebBuildV2Input::cover(base, target, height, objective)?
+        };
         match source_piece_count {
             Some(count) => input.with_source_piece_count(count)?,
             None => input,
@@ -3329,6 +3358,14 @@ fn parse_build_v2_command(
             "--pin-solution-format and --pin-solution-document must be supplied together",
         ));
     }
+    if capability == WebBuildV2Capability::PinnedMinimals
+        && (pin_solution_document.is_none() || !pinned_candidate_ordinals.is_empty())
+    {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            "build.pinned-minimals requires --required-format and --required-document; candidate ordinals cannot identify the regenerated full source",
+        ));
+    }
     if pin_solution_document.is_some() && !pinned_candidate_ordinals.is_empty() {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
@@ -3338,6 +3375,9 @@ fn parse_build_v2_command(
     if let (Some(format), Some(document)) = (pin_solution_format, pin_solution_document.as_deref())
     {
         input = input.with_pinned_solution_document(format, document)?;
+    }
+    if let Some(digest) = expected_source_set_hash {
+        input = input.with_expected_source_set_hash(digest)?;
     }
     input = input
         .with_pinned_candidate_ordinals(pinned_candidate_ordinals)?
