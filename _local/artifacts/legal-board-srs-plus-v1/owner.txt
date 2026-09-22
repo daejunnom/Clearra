@@ -1,3 +1,0 @@
-clearra local benchmark legal-board reverse domain
-profile=srs-plus
-scope=10x4 empty-origin local-search-ab only
