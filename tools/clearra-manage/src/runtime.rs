@@ -163,6 +163,11 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
     if policy.runtime_policy.memory_pressure.automatic_retry {
         return Err(Error::policy("automatic retry must remain disabled"));
     }
+    if profile.hard_containment_required && !platform_hard_containment_available()? {
+        return Err(Error::runtime(
+            "E_CLEARRA_HARD_CONTAINMENT_UNAVAILABLE: this profile requires a Windows Job Object or an inherited finite Linux cgroup",
+        ));
+    }
 
     let snapshot = memory_snapshot()?;
     let admission = calculate_admission(policy, &options.profile, snapshot)?;
@@ -625,6 +630,62 @@ pub fn current_memory_snapshot() -> Result<MemorySnapshot> {
     memory_snapshot()
 }
 
+#[cfg(windows)]
+fn platform_hard_containment_available() -> Result<bool> {
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_hard_containment_available() -> Result<bool> {
+    let membership = fs::read_to_string("/proc/self/cgroup")
+        .map_err(|error| Error::io("read Linux cgroup membership", error))?;
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| Error::runtime("cgroup v2 membership is unavailable"))?;
+    let root = Path::new("/sys/fs/cgroup");
+    let directory = root.join(relative.trim_start_matches('/'));
+    Ok(
+        inherited_finite_cgroup_limit(&directory, root, "memory.max")
+            && inherited_finite_cgroup_limit(&directory, root, "pids.max"),
+    )
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn platform_hard_containment_available() -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn finite_cgroup_limit(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .as_deref()
+        .and_then(finite_cgroup_limit_value)
+        .is_some()
+}
+
+#[cfg(target_os = "linux")]
+fn inherited_finite_cgroup_limit(directory: &Path, root: &Path, name: &str) -> bool {
+    let mut cursor = directory.to_path_buf();
+    if !cursor.starts_with(root) {
+        return false;
+    }
+    loop {
+        if finite_cgroup_limit(&cursor.join(name)) {
+            return true;
+        }
+        if cursor == root || !cursor.pop() || !cursor.starts_with(root) {
+            return false;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn finite_cgroup_limit_value(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok().filter(|value| *value > 0)
+}
+
 #[cfg(target_os = "linux")]
 fn memory_snapshot() -> Result<MemorySnapshot> {
     let contents = fs::read_to_string("/proc/meminfo")
@@ -965,5 +1026,17 @@ mod tests {
     #[test]
     fn resource_profile_fixture_retains_no_retry() {
         assert_eq!(profile().oom_policy, "fail-no-retry");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_cgroup_limit_rejects_unbounded_or_invalid_values() {
+        assert_eq!(finite_cgroup_limit_value("max\n"), None);
+        assert_eq!(finite_cgroup_limit_value("0\n"), None);
+        assert_eq!(finite_cgroup_limit_value("invalid\n"), None);
+        assert_eq!(
+            finite_cgroup_limit_value("1073741824\n"),
+            Some(1_073_741_824)
+        );
     }
 }

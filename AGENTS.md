@@ -67,9 +67,11 @@ clearra-manage runtime run --producer <label> --profile <profile> \
   --timeout <seconds> -- <command>
 ```
 
-The supervisor owns the complete tree, applies a Windows Job Object or Linux
-process group boundary, enforces the declared hard memory/process/output/time
-limits, and never retries OOM with changed resources. It may request
+The supervisor owns the complete tree and never retries OOM with changed
+resources. Windows uses a Job Object for hard aggregate memory and process
+limits. Linux uses a process group with low-frequency aggregate enforcement;
+profiles that require hard containment start only inside an inherited finite
+cgroup. Output and time limits remain finite on both platforms. It may request
 cooperative GC during host pressure, but records GC only when the child writes
 the matching acknowledgement. If the small recovery reserve remains
 unavailable, it fail-closes only the owned tree.

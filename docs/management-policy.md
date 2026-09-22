@@ -72,11 +72,13 @@ Short builds, unit tests, formatting, linting, and processes already inside a
 finite CI/container boundary do not require the runtime wrapper solely because
 they launch another program.
 
-The Windows implementation uses a Job Object with kill-on-close, aggregate
+The Windows implementation uses a Job Object with kill-on-close, hard aggregate
 memory, and active-process limits. Linux uses an owned process group and
-aggregate `/proc` accounting. The supervisor applies a hard per-tree limit,
-checks host pressure at the low frequency declared in the manifest, and never
-changes worker count or retries an OOM with different resources.
+low-frequency aggregate `/proc` accounting. A Linux profile marked as requiring
+hard containment starts only when the manager inherits a cgroup v2 with finite
+`memory.max` and `pids.max`; otherwise it fails before spawning the child. The
+supervisor checks host pressure at the low frequency declared in the manifest
+and never changes worker count or retries an OOM with different resources.
 
 At low host memory, the supervisor writes a cooperative full-GC request and
 waits for the configured grace period. It records GC only if the child writes
