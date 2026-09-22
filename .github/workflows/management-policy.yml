@@ -13,9 +13,6 @@ concurrency:
   group: clearra-management-policy-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
-env:
-  CARGO_TARGET_DIR: build/cargo/ci
-
 jobs:
   windows-runtime:
     name: Clearra management Windows runtime
@@ -35,13 +32,13 @@ jobs:
         run: |
           cargo test --locked -p clearra-manage
           cargo build --locked --release -p clearra-manage
-          $manager = Join-Path $env:CARGO_TARGET_DIR 'release/clearra-manage.exe'
+          $manager = 'build/cargo/default/release/clearra-manage.exe'
           & $manager --root . storage audit
           & $manager --root . runtime audit
       - name: Verify Windows Job Object ownership
         shell: pwsh
         run: |
-          $manager = Join-Path $env:CARGO_TARGET_DIR 'release/clearra-manage.exe'
+          $manager = 'build/cargo/default/release/clearra-manage.exe'
           & $manager --root . runtime run --producer management-test --profile control --timeout 30 -- `
             pwsh -NoProfile -NonInteractive -Command "Write-Output 'job-object-ok'"
           if ($LASTEXITCODE -ne 0) { throw 'normal Job Object fixture failed' }
@@ -96,7 +93,7 @@ jobs:
           cargo test --locked -p clearra-manage
           cargo clippy --locked -p clearra-manage -- -D warnings
           cargo build --locked --release -p clearra-manage
-          manager="$CARGO_TARGET_DIR/release/clearra-manage"
+          manager="build/cargo/default/release/clearra-manage"
           echo "CLEARRA_MANAGE_BIN=$GITHUB_WORKSPACE/$manager" >> "$GITHUB_ENV"
           "$manager" --root . storage audit
           "$manager" --root . storage verify --path _local/artifacts/test/management-policy
