@@ -120,7 +120,7 @@ jobs:
           pnpm --filter @clearra/ui run test
           pnpm --filter @clearra/discord-bot run test:built
           node --test scripts/tools/managed-shell-builds.test.mjs scripts/windows/clearra-local-services-watchdog.test.mjs
-          node --test scripts/tools/clearra-build-policy.test.mjs
+          node --test --test-name-pattern="bare Cargo writes under the declared build root" scripts/tools/clearra-build-policy.test.mjs
           pwsh -NoProfile -File scripts/architecture/validate_managed_build_contract.test.ps1
           pwsh -NoProfile -File scripts/test_artifact_path_policy.ps1
           bash -n scripts/runtime/clearra-wsl-sanitize.sh scripts/runtime/clearra-wsl-session.sh scripts/runtime/clearra-wsl-provision.sh scripts/runtime/clearra-wsl-guest.sh
