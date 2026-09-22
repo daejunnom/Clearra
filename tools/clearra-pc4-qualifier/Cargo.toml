@@ -5,17 +5,37 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = ["full-qualifier"]
+full-qualifier = [
+    "dep:clearra-app",
+    "dep:clearra-objectives",
+    "dep:clearra-pc-graph",
+    "dep:clearra-piece-registry",
+    "dep:clearra-problem",
+    "dep:serde_json",
+]
+
+[[bin]]
+name = "clearra-pc4-qualifier"
+path = "src/main.rs"
+required-features = ["full-qualifier"]
+
+[[bin]]
+name = "clearra-pc4-legal-board"
+path = "src/bin/clearra-pc4-legal-board.rs"
+
 [dependencies]
-clearra-app = { path = "../../crates/clearra-app", features = ["online-pc4-tablebase", "parallel"] }
+clearra-app = { path = "../../crates/clearra-app", features = ["online-pc4-tablebase", "parallel"], optional = true }
 clearra-core-domain = { path = "../../crates/clearra-core-domain" }
 clearra-core-executor = { path = "../../crates/clearra-core-executor", features = ["parallel"] }
-clearra-objectives = { path = "../../crates/clearra-objectives" }
+clearra-objectives = { path = "../../crates/clearra-objectives", optional = true }
 clearra-pc4-tablebase = { path = "../../crates/clearra-pc4-tablebase" }
-clearra-pc-graph = { path = "../../crates/clearra-pc-graph" }
-clearra-piece-registry = { path = "../../crates/clearra-piece-registry" }
-clearra-problem = { path = "../../crates/clearra-problem" }
+clearra-pc-graph = { path = "../../crates/clearra-pc-graph", optional = true }
+clearra-piece-registry = { path = "../../crates/clearra-piece-registry", optional = true }
+clearra-problem = { path = "../../crates/clearra-problem", optional = true }
 clearra-rules = { path = "../../crates/clearra-rules" }
-serde_json.workspace = true
+serde_json = { workspace = true, optional = true }
 sha2 = "0.10.9"
 
 [lints]

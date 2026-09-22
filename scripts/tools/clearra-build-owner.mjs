@@ -14,6 +14,7 @@ const buildInputRoots = ['apps', 'assets', 'core-c', 'crates', 'packages', 'scri
 const buildInputFiles = ['Cargo.toml', 'Cargo.lock', 'CMakeLists.txt', 'package.json', 'rust-toolchain.toml', '.cargo/config.toml'];
 const generatedDirectories = new Set(['.git', '.cache', '.svelte-kit', '.vite-temp', '_local', 'dist', 'dist-server',
   'node_modules', 'build', 'models', 'checkpoints']);
+const generatedInputRelativeDirectories = new Set(['apps/clearra-web/static/wasm']);
 
 function secretOrGeneratedInput(path) {
   const name = basename(path);
@@ -21,7 +22,9 @@ function secretOrGeneratedInput(path) {
     /(credential|service[-_]?account|api[-_]?key|^id_(rsa|dsa|ecdsa|ed25519)(\.|$)|^authorized_keys$)/iu.test(name) ||
     /^\.(pem|key|pfx|p12)$/iu.test(extname(name));
 }
-function generatedInputDirectory(path) {
+function generatedInputDirectory(path, sourceRoot) {
+  const relativePath = relative(sourceRoot, path).replaceAll('\\', '/');
+  if (generatedInputRelativeDirectories.has(relativePath)) return true;
   const name = basename(path);
   if (generatedDirectories.has(name)) return true;
   return ['target', 'coverage'].includes(name) && !['src', 'fixtures', 'golden'].includes(basename(dirname(path)));
@@ -51,7 +54,7 @@ async function collectBuildInputFiles(sourceRoot) {
         const path = resolve(directory, entry.name);
         if (entry.isSymbolicLink()) throw new Error(`Clearra compiler snapshot refuses a linked input: ${path}`);
         if (entry.isDirectory()) {
-          if (!generatedInputDirectory(path)) pending.push(path);
+          if (!generatedInputDirectory(path, sourceRoot)) pending.push(path);
         } else if (entry.isFile() && !secretOrGeneratedInput(path)) inputs.push(path);
       }
     }

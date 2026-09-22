@@ -419,9 +419,13 @@ function postHeartbeat(
 
 function exactTaskProgress(): ClearraDistributedVerifierProgress {
   return {
-    candidateCount: 0, buildNodes: 0, coverageChecks: 0,
-    availability: { candidateCount: false, buildNodes: false, coverageChecks: false },
-    exactness: { candidateCount: false, buildNodes: false, coverageChecks: false }
+    geometryNodes: 0, candidateCount: 0, buildNodes: 0, coverageChecks: 0,
+    availability: {
+      geometryNodes: false, candidateCount: false, buildNodes: false, coverageChecks: false
+    },
+    exactness: {
+      geometryNodes: false, candidateCount: false, buildNodes: false, coverageChecks: false
+    }
   };
 }
 

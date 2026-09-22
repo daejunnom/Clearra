@@ -3158,8 +3158,23 @@ pub extern "C" fn clearra_wasm_distributed_verifier_progress_candidate_count() -
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_progress_geometry_nodes() -> u32 {
+    AbiU32Count::legacy_or(
+        verifier_progress_count(|value| value.progress().geometry_nodes),
+        0,
+    )
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_verifier_progress_available() -> u32 {
     ABI_STATE.with(|state| state.borrow().distributed_verifier.is_some().into())
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_progress_geometry_nodes_exact() -> u32 {
+    AbiU32Count::exact_or_false(verifier_progress_count(|value| {
+        value.progress().geometry_nodes
+    }))
 }
 
 #[no_mangle]

@@ -13,7 +13,7 @@ use super::{
 // The selected v2 profile skips this optional exact prepass. Returning
 // Unknown supplies no negative evidence; the complete BuildUp traversal keeps
 // authority over physical transitions, hold history and completion.
-const PRODUCT_REALIZATION_FEASIBILITY_PREPASS_ENABLED: bool = false;
+const PRODUCT_COMPLETE_REALIZATION_FEASIBILITY_PREPASS_ENABLED: bool = false;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FeasibilityKind {
@@ -79,7 +79,7 @@ impl RealizationFeasibilityWorkspace {
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
     ) -> bool {
-        if !PRODUCT_REALIZATION_FEASIBILITY_PREPASS_ENABLED {
+        if !crate::search_prune_policy::dependency_relaxation_enabled() {
             return false;
         }
         let operation_count = candidate.row_ids().len();
@@ -98,41 +98,17 @@ impl RealizationFeasibilityWorkspace {
             }
         }
 
-        let all_placed = if operation_count == u16::BITS as usize {
-            u16::MAX
-        } else {
-            (1_u16 << operation_count) - 1
-        };
-        let mut placed = 0_u16;
-        while placed != all_placed {
-            let mut deleted_rows = 0_u16;
-            for (row, contributors) in row_contributors
-                .iter()
-                .copied()
-                .take(usize::from(catalog.height()))
-                .enumerate()
-            {
-                if contributors != 0 && contributors & !placed == 0 {
-                    deleted_rows |= 1_u16 << row;
-                }
-            }
-
-            let mut ready = 0_u16;
-            for (operation_index, row_id) in candidate.row_ids().iter().copied().enumerate() {
-                let operation_bit = 1_u16 << operation_index;
-                if placed & operation_bit != 0 {
-                    continue;
-                }
-                if catalog.realization_requirement_is_satisfied(row_id, deleted_rows) {
-                    ready |= operation_bit;
-                }
-            }
-            if ready == 0 {
-                return true;
-            }
-            placed |= ready;
-        }
-        false
+        dependency_relaxation_stalls(
+            operation_count,
+            catalog.height(),
+            &row_contributors,
+            |operation_index, deleted_rows| {
+                catalog.realization_requirement_is_satisfied(
+                    candidate.row_ids()[operation_index],
+                    deleted_rows,
+                )
+            },
+        )
     }
 
     pub fn analyze(
@@ -159,7 +135,7 @@ impl RealizationFeasibilityWorkspace {
                 "wasm_realization_feasibility_projection_invalid",
             ));
         }
-        if !PRODUCT_REALIZATION_FEASIBILITY_PREPASS_ENABLED {
+        if !PRODUCT_COMPLETE_REALIZATION_FEASIBILITY_PREPASS_ENABLED {
             return Ok(RealizationFeasibility {
                 kind: FeasibilityKind::Unknown,
                 explored_states: 0,
@@ -517,6 +493,58 @@ impl RealizationFeasibilityWorkspace {
     }
 }
 
+/// Computes the least fixed point of the relaxed inverse-lock-clear
+/// dependency system.
+///
+/// An operation may enter the closure when at least one of its concrete ILC
+/// realizations requires only rows already proved deleted. A row is deleted
+/// only after every operation contributing cells to that target row has
+/// entered the closure. Because both transitions are monotone, failure to add
+/// any operation is a finite impossibility certificate rather than a search
+/// heuristic. In particular, `A requires row(B)` and `B requires row(A)` is
+/// the `2 > 3 > 2` cycle: neither operation can be the first one placed.
+fn dependency_relaxation_stalls(
+    operation_count: usize,
+    height: u8,
+    row_contributors: &[u16; 16],
+    mut requirement_is_satisfied: impl FnMut(usize, u16) -> bool,
+) -> bool {
+    let all_placed = if operation_count == u16::BITS as usize {
+        u16::MAX
+    } else {
+        (1_u16 << operation_count) - 1
+    };
+    let mut placed = 0_u16;
+    while placed != all_placed {
+        let mut deleted_rows = 0_u16;
+        for (row, contributors) in row_contributors
+            .iter()
+            .copied()
+            .take(usize::from(height))
+            .enumerate()
+        {
+            if contributors != 0 && contributors & !placed == 0 {
+                deleted_rows |= 1_u16 << row;
+            }
+        }
+
+        let mut ready = 0_u16;
+        for operation_index in 0..operation_count {
+            let operation_bit = 1_u16 << operation_index;
+            if placed & operation_bit == 0
+                && requirement_is_satisfied(operation_index, deleted_rows)
+            {
+                ready |= operation_bit;
+            }
+        }
+        if ready == 0 {
+            return true;
+        }
+        placed |= ready;
+    }
+    false
+}
+
 fn reserve_storage<T: Copy>(storage: &mut Vec<T>, len: usize, empty: T) -> bool {
     if storage.len() >= len {
         return true;
@@ -535,9 +563,43 @@ fn lowest_target_row(width: u8, cells: u64) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildPartialDependencyGraph, FeasibilityKind, RealizationFeasibility,
-        RealizationFeasibilityWorkspace,
+        dependency_relaxation_stalls, BuildPartialDependencyGraph, FeasibilityKind,
+        RealizationFeasibility, RealizationFeasibilityWorkspace,
     };
+
+    #[test]
+    fn relaxed_ilc_rejects_the_two_row_dependency_cycle() {
+        // Operation 0 (the image's T) completes target row 2 but requires row
+        // 3 deleted. Operation 1 (Z) completes target row 3 but requires row 2
+        // deleted. Extra requirements on rows 1/4 cannot break this core
+        // 2 -> 3 -> 2 cycle, so the monotone closure has no first operation.
+        let mut contributors = [0_u16; 16];
+        contributors[1] = 0b01;
+        contributors[2] = 0b10;
+        let required_rows = [1_u16 << 2, 1_u16 << 1];
+
+        assert!(dependency_relaxation_stalls(
+            2,
+            4,
+            &contributors,
+            |operation, deleted| required_rows[operation] & !deleted == 0,
+        ));
+    }
+
+    #[test]
+    fn relaxed_ilc_accepts_an_acyclic_dependency_chain() {
+        let mut contributors = [0_u16; 16];
+        contributors[1] = 0b01;
+        contributors[2] = 0b10;
+        let required_rows = [0_u16, 1_u16 << 1];
+
+        assert!(!dependency_relaxation_stalls(
+            2,
+            4,
+            &contributors,
+            |operation, deleted| required_rows[operation] & !deleted == 0,
+        ));
+    }
 
     #[test]
     fn partial_dependency_graph_preserves_two_parents_of_one_child() {

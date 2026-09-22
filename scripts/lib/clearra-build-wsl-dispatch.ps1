@@ -9,6 +9,7 @@ function New-ClearraManagedWslEntryArguments(
         'wasm-build',
         'core-c-tests',
         'native-cargo',
+        'legal-board-generate',
         'oracle-local-layers-v080',
         'pc-runtime-build-batch',
         'posix-syntax-audit'

@@ -395,22 +395,24 @@ impl ProjectionCatalog {
     }
 
     fn cheap_counts_may_match(&self, counts: [u8; 7], demand: ResidualProjection) -> bool {
-        if demand.checker_delta % 2 != 0 {
-            return false;
-        }
-        if let Some(domain) = self.column_checker_domain(counts) {
-            let checker_bit = i16::from(demand.checker_delta.div_euclid(2) + CHECKER_OFFSET);
-            if !(0..128).contains(&checker_bit)
-                || domain[usize::from(demand.column_mod_four_residue)]
-                    & (1_u128 << checker_bit as u32)
-                    == 0
+        if crate::search_prune_policy::additive_parity_enabled() {
+            if demand.checker_delta % 2 != 0 {
+                return false;
+            }
+            if let Some(domain) = self.column_checker_domain(counts) {
+                let checker_bit = i16::from(demand.checker_delta.div_euclid(2) + CHECKER_OFFSET);
+                if !(0..128).contains(&checker_bit)
+                    || domain[usize::from(demand.column_mod_four_residue)]
+                        & (1_u128 << checker_bit as u32)
+                        == 0
+                {
+                    return false;
+                }
+            } else if self.column_mod_four_domain(counts) & (1_u8 << demand.column_mod_four_residue)
+                == 0
             {
                 return false;
             }
-        } else if self.column_mod_four_domain(counts) & (1_u8 << demand.column_mod_four_residue)
-            == 0
-        {
-            return false;
         }
         self.cheap_bounds_allow(counts, demand.signature)
     }
@@ -482,7 +484,7 @@ impl ProjectionReachabilityCache {
         remaining: u64,
     ) -> bool {
         let demand = catalog.project_residual(remaining);
-        if demand.checker_delta % 2 != 0 {
+        if crate::search_prune_policy::additive_parity_enabled() && demand.checker_delta % 2 != 0 {
             return true;
         }
         let mut saw_target = false;
@@ -507,7 +509,7 @@ impl ProjectionReachabilityCache {
         remaining: ExtendedBoard,
     ) -> bool {
         let demand = catalog.project_extended_residual(remaining);
-        if demand.checker_delta % 2 != 0 {
+        if crate::search_prune_policy::additive_parity_enabled() && demand.checker_delta % 2 != 0 {
             return true;
         }
         let mut saw_target = false;

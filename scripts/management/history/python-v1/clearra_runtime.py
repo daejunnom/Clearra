@@ -3118,6 +3118,7 @@ class WslSupervisor:
             "wasm-build": ("--staging",),
             "pc-runtime-build-batch": ("--host-output",),
             "oracle-local-layers-v080": ("--output",),
+            "legal-board-generate": ("--layers",),
         }.get(entry, ())
         for path_option in output_path_options:
             option_indexes = [

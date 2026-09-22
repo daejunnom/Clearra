@@ -38,7 +38,11 @@ const STREAMING_CANDIDATE_BATCH_SIZE = 1_024;
 const STREAMING_STARTUP_BATCH_SIZE = 64;
 const TARGET_BATCHES_PER_VERIFIER = 4;
 const TARGET_ROOT_BATCHES_PER_VERIFIER = 4;
-const MAX_ROOT_TASK_BATCH_SIZE = 64;
+// Full 4L P7P4 exact A/B found five natural roots to be the throughput
+// optimum: one-root packets paid too many durable journal transactions, while
+// larger packets stranded indivisible geometry work behind one verifier. Keep
+// that measured ceiling and still narrow the final tail below it.
+const MAX_ROOT_TASK_BATCH_SIZE = 5;
 const HOST_YIELD_BUDGET_MS = 8;
 const PROGRESS_REFRESH_MS = 50;
 const SHARED_RESOURCE_WAIT_TIMEOUT_MS = 5_000;
@@ -319,6 +323,7 @@ export class DistributedWasmJobRunner {
     let activeMinimumWave: MinimumWaveProfile | null = null;
     let previousMinimumWaveEnd: number | null = null;
     let lastVerifierProgress: ClearraVerifierPoolProgress = {
+      geometryNodes: 0,
       candidatesVerified: 0,
       buildNodes: 0,
       coverageChecks: 0,
@@ -363,7 +368,9 @@ export class DistributedWasmJobRunner {
             execution_mode: 'distributed',
             phase: progressPhase,
             producer_complete: producerComplete,
-            geometry_nodes: producer.geometryNodes,
+            geometry_nodes: plan.rootTaskParallel === true
+              ? verifier.geometryNodes
+              : producer.geometryNodes,
             candidates_emitted: producer.candidateCount,
             geometry_family_count: producer.candidateFamilyCount,
             candidates_verified: verifier.candidatesVerified,
@@ -387,8 +394,18 @@ export class DistributedWasmJobRunner {
             layer_count: producer.layerCount,
             layer_done: producer.layerDone,
             layer_total: producer.layerTotal,
-            availability: telemetryFlags(producer, verifier, 'availability'),
-            exactness: telemetryFlags(producer, verifier, 'exactness')
+            availability: telemetryFlags(
+              producer,
+              verifier,
+              'availability',
+              plan.rootTaskParallel === true
+            ),
+            exactness: telemetryFlags(
+              producer,
+              verifier,
+              'exactness',
+              plan.rootTaskParallel === true
+            )
           }
         )
       );
@@ -422,8 +439,10 @@ export class DistributedWasmJobRunner {
       emitProgress();
 
       while (!this.cancelled) {
+        const batchProgress = this.wasm.distributed_progress();
         const candidateBatchSize = distributedCandidateBatchSize(
-          this.wasm.distributed_progress().candidateFamilyCount,
+          batchProgress.candidateFamilyCount,
+          batchProgress.coverageChecks,
           effectiveVerifierCount,
           dispatchedBatches,
           plan.rootTaskParallel === true
@@ -877,6 +896,7 @@ export class DistributedWasmJobRunner {
 
 function emptyVerifierProgressFlags() {
   return {
+    geometryNodes: false,
     candidatesVerified: false,
     buildNodes: false,
     coverageChecks: false
@@ -886,12 +906,15 @@ function emptyVerifierProgressFlags() {
 function telemetryFlags(
   producer: ClearraDistributedCoreProgress,
   verifier: ClearraVerifierPoolProgress,
-  kind: 'availability' | 'exactness'
+  kind: 'availability' | 'exactness',
+  rootTaskParallel: boolean
 ): ClearraSearchProgressTelemetryFlags {
   const producerFlags = producer[kind];
   const verifierFlags = verifier[kind];
   return {
-    geometry_nodes: producerFlags.geometryNodes,
+    geometry_nodes: rootTaskParallel
+      ? verifierFlags.geometryNodes
+      : producerFlags.geometryNodes,
     candidates_emitted: producerFlags.candidateCount,
     geometry_family_count: producerFlags.candidateFamilyCount,
     candidates_verified: verifierFlags.candidatesVerified,
@@ -924,12 +947,17 @@ function distributedCoordinatorIsActive(
 
 function distributedCandidateBatchSize(
   candidateFamilyCount: string | null,
+  emittedCandidateCount: number,
   verifierCount: number,
   dispatchedBatches: number,
   rootTaskParallel: boolean
 ): number {
   if (rootTaskParallel) {
-    return distributedRootTaskBatchSize(candidateFamilyCount, verifierCount);
+    return distributedRootTaskBatchSize(
+      candidateFamilyCount,
+      emittedCandidateCount,
+      verifierCount
+    );
   }
   if (verifierCount <= 1) return MAX_CANDIDATE_BATCH_SIZE;
   // Each batch carries a durable publish/start/result protocol. A streaming
@@ -965,24 +993,37 @@ function distributedCandidateBatchSize(
 
 function distributedRootTaskBatchSize(
   rootCount: string | null,
+  emittedRootCount: number,
   verifierCount: number
 ): number {
   if (rootCount === null || verifierCount <= 0) return 1;
   try {
     const roots = BigInt(rootCount);
     if (roots <= 0n) return 1;
+    const emitted = Number.isSafeInteger(emittedRootCount) && emittedRootCount > 0
+      ? BigInt(emittedRootCount)
+      : 0n;
+    const remaining = roots > emitted ? roots - emitted : 0n;
+    if (remaining === 0n) return 1;
     // A root is an independently compiled geometry and verification search.
-    // Four dispatch waves per verifier leave work available to late workers
-    // without paying one durable transaction per root. The count scales with
-    // both the natural root family and the active verifier pool; very large
-    // families are capped to bound each transaction. Small searches retain
+    // Four dispatch waves per verifier establish the balancing target without
+    // paying one durable transaction per root. The measured five-root ceiling
+    // below is the stronger bound for large families. Small searches retain
     // their natural roots and never create synthetic sub-roots.
     const targetBatches = BigInt(verifierCount * TARGET_ROOT_BATCHES_PER_VERIFIER);
     const balanced = (roots + targetBatches - 1n) / targetBatches;
+    // Natural roots cannot be stolen out of an in-flight transaction. Keep the
+    // throughput-sized four-wave batches in the first half, then continuously
+    // narrow the unclaimed tail to two waves. This preserves amortization for
+    // the bulk while ensuring the final expensive roots remain independently
+    // available to whichever verifier becomes ready first.
+    const tailTargetBatches = BigInt(verifierCount * 2);
+    const tailBalanced = (remaining + tailTargetBatches - 1n) / tailTargetBatches;
+    const scheduled = balanced < tailBalanced ? balanced : tailBalanced;
     return Number(
-      balanced > BigInt(MAX_ROOT_TASK_BATCH_SIZE)
+      scheduled > BigInt(MAX_ROOT_TASK_BATCH_SIZE)
         ? BigInt(MAX_ROOT_TASK_BATCH_SIZE)
-        : balanced
+        : scheduled
     );
   } catch {
     return 1;

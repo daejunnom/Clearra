@@ -144,6 +144,7 @@ export type ClearraDistributedCoreProgressFlags = {
 };
 
 export type ClearraDistributedVerifierProgress = {
+  geometryNodes: number;
   candidateCount: number;
   buildNodes: number;
   coverageChecks: number;
@@ -152,6 +153,7 @@ export type ClearraDistributedVerifierProgress = {
 };
 
 export type ClearraDistributedVerifierProgressFlags = {
+  geometryNodes: boolean;
   candidateCount: boolean;
   buildNodes: boolean;
   coverageChecks: boolean;
@@ -273,6 +275,8 @@ type ClearraRawWasmExports = {
   clearra_wasm_distributed_verifier_last_candidate_count_available: () => number;
   clearra_wasm_distributed_verifier_last_candidate_count_exact: () => number;
   clearra_wasm_distributed_verifier_continue: () => number;
+  clearra_wasm_distributed_verifier_progress_geometry_nodes: () => number;
+  clearra_wasm_distributed_verifier_progress_geometry_nodes_exact: () => number;
   clearra_wasm_distributed_verifier_progress_candidate_count: () => number;
   clearra_wasm_distributed_verifier_progress_available: () => number;
   clearra_wasm_distributed_verifier_progress_candidate_count_exact: () => number;
@@ -323,6 +327,7 @@ export const CLEARRA_WASM_AVAILABILITY_EXACTNESS_EXPORTS = Object.freeze([
   'clearra_wasm_distributed_verifier_last_candidate_count_available',
   'clearra_wasm_distributed_verifier_last_candidate_count_exact',
   'clearra_wasm_distributed_verifier_progress_available',
+  'clearra_wasm_distributed_verifier_progress_geometry_nodes_exact',
   'clearra_wasm_distributed_verifier_progress_candidate_count_exact',
   'clearra_wasm_distributed_verifier_progress_build_nodes_exact',
   'clearra_wasm_distributed_verifier_progress_coverage_checks_exact',
@@ -1448,6 +1453,9 @@ function wrapRawModule(
       const available =
         raw.clearra_wasm_distributed_verifier_progress_available() !== 0;
       return {
+        geometryNodes: normalizeWasmU32(
+          raw.clearra_wasm_distributed_verifier_progress_geometry_nodes()
+        ),
         candidateCount: normalizeWasmU32(
           raw.clearra_wasm_distributed_verifier_progress_candidate_count()
         ),
@@ -1458,11 +1466,15 @@ function wrapRawModule(
           raw.clearra_wasm_distributed_verifier_progress_coverage_checks()
         ),
         availability: {
+          geometryNodes: available,
           candidateCount: available,
           buildNodes: available,
           coverageChecks: available
         },
         exactness: {
+          geometryNodes:
+            available &&
+            raw.clearra_wasm_distributed_verifier_progress_geometry_nodes_exact() !== 0,
           candidateCount:
             available &&
             raw.clearra_wasm_distributed_verifier_progress_candidate_count_exact() !== 0,

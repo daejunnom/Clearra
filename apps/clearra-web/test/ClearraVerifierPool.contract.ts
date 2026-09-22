@@ -269,15 +269,18 @@ class StreamingVerifierWorker {
 
 function exactVerifierProgress(candidateCount: number) {
   return {
+    geometryNodes: 0,
     candidateCount,
     buildNodes: 0,
     coverageChecks: 0,
     availability: {
+      geometryNodes: true,
       candidateCount: true,
       buildNodes: true,
       coverageChecks: true
     },
     exactness: {
+      geometryNodes: true,
       candidateCount: true,
       buildNodes: true,
       coverageChecks: true
@@ -750,15 +753,18 @@ await bounded(
 await bounded('heartbeat idle', heartbeatPool.waitForIdle());
 assert.equal(heartbeatWorkers.length, 1);
 assert.deepEqual(heartbeatPool.progressSnapshot(), {
+  geometryNodes: 0,
   candidatesVerified: 1,
   buildNodes: 0,
   coverageChecks: 0,
   availability: {
+    geometryNodes: true,
     candidatesVerified: true,
     buildNodes: true,
     coverageChecks: true
   },
   exactness: {
+    geometryNodes: true,
     candidatesVerified: true,
     buildNodes: true,
     coverageChecks: true
@@ -771,6 +777,7 @@ assert.deepEqual(heartbeatPool.progressSnapshot(), {
 await bounded('heartbeat finish', heartbeatPool.finish(() => undefined));
 
 class FinishGateVerifierWorker extends FakeVerifierWorker {
+  readonly finishOffered = signal();
   private pendingFinish: WorkerMessage | null = null;
 
   constructor() {
@@ -780,6 +787,7 @@ class FinishGateVerifierWorker extends FakeVerifierWorker {
   override postMessage(message: WorkerMessage) {
     if (message.type === 'finish') {
       this.pendingFinish = message;
+      this.finishOffered.resolve();
       return;
     }
     super.postMessage(message);
@@ -807,15 +815,12 @@ await bounded(
   )
 );
 const gatedFinish = finishGatePool.finish(() => undefined);
-await bounded(
-  'finish gate becomes active',
-  (async () => {
-    while (finishGatePool.progressSnapshot().activeWorkers !== 1) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-  })()
+await bounded('finish offer reaches worker', finishGateWorker.finishOffered.promise);
+assert.equal(
+  finishGatePool.progressSnapshot().activeWorkers,
+  0,
+  'a staged durable request is not active CPU work before its execution grant'
 );
-assert.equal(finishGatePool.progressSnapshot().activeWorkers, 1);
 finishGateWorker.releaseFinish();
 await bounded('finish gate release', gatedFinish);
 
@@ -1189,15 +1194,18 @@ class SaturatedTelemetryVerifierWorker extends FakeVerifierWorker {
       candidateCountExact: false,
       partial: null,
       progress: {
+        geometryNodes: 0xffff_ffff,
         candidateCount: 0xffff_ffff,
         buildNodes: 0xffff_ffff,
         coverageChecks: 0xffff_ffff,
         availability: {
+          geometryNodes: false,
           candidateCount: false,
           buildNodes: false,
           coverageChecks: false
         },
         exactness: {
+          geometryNodes: false,
           candidateCount: false,
           buildNodes: false,
           coverageChecks: false
@@ -1237,15 +1245,18 @@ await Promise.all([
 ]);
 await bounded('saturated telemetry idle', saturatedTelemetryPool.waitForIdle());
 const saturatedTelemetrySnapshot = saturatedTelemetryPool.progressSnapshot();
+assert.equal(saturatedTelemetrySnapshot.geometryNodes, 0xffff_ffff);
 assert.equal(saturatedTelemetrySnapshot.candidatesVerified, 0x1_0000_0000);
 assert.equal(saturatedTelemetrySnapshot.buildNodes, 0xffff_ffff);
 assert.equal(saturatedTelemetrySnapshot.coverageChecks, 0xffff_ffff);
 assert.deepEqual(saturatedTelemetrySnapshot.availability, {
+  geometryNodes: false,
   candidatesVerified: false,
   buildNodes: false,
   coverageChecks: false
 });
 assert.deepEqual(saturatedTelemetrySnapshot.exactness, {
+  geometryNodes: false,
   candidatesVerified: false,
   buildNodes: false,
   coverageChecks: false

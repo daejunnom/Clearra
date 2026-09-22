@@ -24,6 +24,7 @@ pub mod performance;
 pub mod problem_lowering;
 pub mod resource;
 pub mod result_views;
+mod search_prune_policy;
 pub mod service;
 pub mod setup_finder_report;
 pub mod solution_probability;
@@ -91,6 +92,11 @@ pub use performance::{
 pub use result_views::{
     BackendReport, BuildUpResult, BuildVariantView, CoverageResult, CoverageRowView,
     ObjectiveResult, PackingCandidateView, PackingResult, ReplayTrace, SearchExecutionReport,
+};
+#[cfg(feature = "local-search-ab")]
+pub use search_prune_policy::{
+    install_local_pc4_legal_board_index, local_search_prune_policy, set_local_search_prune_policy,
+    LocalPc4LegalBoardIndex, LocalSearchPrunePolicy,
 };
 pub use service::{
     CoverService, CoverServiceError, PcFailedQueueExecution, PcFailedQueueExecutionError,

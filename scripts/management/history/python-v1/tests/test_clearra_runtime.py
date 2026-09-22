@@ -526,6 +526,26 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn('"--cargo-version",', runtime)
         self.assertRegex(cargo, r"^\d+\.\d+\.\d+$")
 
+    def test_legal_board_wsl_entry_is_source_bound_and_benchmark_bounded(self) -> None:
+        entry = self.policy["runtime_policy"]["wsl"]["entrypoints"][
+            "legal-board-generate"
+        ]
+        self.assertEqual(entry["profile"], "benchmark-search")
+        self.assertTrue(entry["requires_source"])
+        self.assertEqual(entry["timeout_seconds"], 7200)
+        runtime = (ROOT / "scripts" / "management" / "clearra_runtime.py").read_text(
+            encoding="utf-8"
+        )
+        guest = (ROOT / "scripts" / "runtime" / "clearra-wsl-guest.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"legal-board-generate": ("--layers",)', runtime)
+        self.assertIn("legal-board-generate)", guest)
+        self.assertIn(
+            'exec bash "$SOURCE_ROOT/scripts/tools/wsl-legal-board-generate.sh"',
+            guest,
+        )
+
     def test_existing_dedicated_distribution_must_use_the_managed_install_root(self) -> None:
         supervisor = object.__new__(RUNTIME.WslSupervisor)
         supervisor._distro_storage_snapshot = lambda _distribution: {
