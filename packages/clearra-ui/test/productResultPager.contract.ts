@@ -98,6 +98,18 @@ for (const capability of buildV2Capabilities) {
 
 const buildCover = buildCoveragePortfolioPayload();
 assert.equal(validateProductResultPayload(buildCover), null);
+const pinnedBuild = structuredClone(buildCover);
+pinnedBuild.contract = 'build.pinned-minimals';
+pinnedBuild.result_kind = 'build-pinned-minimum-cover.v1';
+pinnedBuild.content.payload.pinned_candidate_keys = ['candidate-a'];
+pinnedBuild.content.payload.additional_candidate_keys = [];
+assert.equal(validateProductResultPayload(pinnedBuild), null);
+const missingPinnedSelection = structuredClone(pinnedBuild);
+missingPinnedSelection.content.payload.pinned_candidate_keys = [];
+assert.equal(
+  validateProductResultPayload(missingPinnedSelection),
+  'invalid Build coverage portfolio payload'
+);
 const emptyBuildCover = buildCoveragePortfolioPayload();
 Object.assign(emptyBuildCover.content.payload, {
   source_candidate_count: '0', selected_candidate_count: '0', required_pattern_count: '0',

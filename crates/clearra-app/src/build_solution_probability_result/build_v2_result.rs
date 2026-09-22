@@ -98,6 +98,7 @@ pub(crate) struct BuildCoveragePortfolioV2Result {
     union_probability: String,
     normalized_solution_set_hash: String,
     canonical_candidate_keys: Vec<String>,
+    pinned_candidate_keys: Vec<String>,
     alternatives: Arc<CoveragePortfolioAlternativeSet>,
     completeness: BuildCoveragePortfolioCompletenessEvidence,
 }
@@ -147,6 +148,10 @@ impl BuildCoveragePortfolioV2Result {
 
     pub(crate) fn canonical_candidate_keys(&self) -> &[String] {
         &self.canonical_candidate_keys
+    }
+
+    pub(crate) fn pinned_candidate_keys(&self) -> &[String] {
+        &self.pinned_candidate_keys
     }
 
     // Retained as the borrowed counterpart to the shared-owner paging seam.
@@ -664,6 +669,7 @@ impl BuildCoveragePortfolioV2Preparation {
                     .projection
                     .take()
                     .ok_or(BuildCoveragePortfolioResultError::IncompleteEvidence)?;
+                let mut pinned_keys_for_result = Vec::new();
                 let portfolio = if let Some((original_pattern_count, pinned_keys)) =
                     self.pin_publication.take()
                 {
@@ -688,9 +694,11 @@ impl BuildCoveragePortfolioV2Preparation {
                             .ok_or_else(overflow)?,
                     )
                     .map_err(BuildCoveragePortfolioResultError::MinimumCover)?;
-                    portfolio
+                    let portfolio = portfolio
                         .into_pinned_public(original_pattern_count, &pinned_keys)
-                        .map_err(BuildCoveragePortfolioResultError::Portfolio)?
+                        .map_err(BuildCoveragePortfolioResultError::Portfolio)?;
+                    pinned_keys_for_result = pinned_keys;
+                    portfolio
                 } else {
                     portfolio
                 };
@@ -800,6 +808,7 @@ impl BuildCoveragePortfolioV2Preparation {
                         union_probability: projection.union_probability,
                         normalized_solution_set_hash: projection.normalized_solution_set_hash,
                         canonical_candidate_keys,
+                        pinned_candidate_keys: pinned_keys_for_result,
                         alternatives,
                         completeness: BuildCoveragePortfolioCompletenessEvidence {
                             source_universe_complete: true,

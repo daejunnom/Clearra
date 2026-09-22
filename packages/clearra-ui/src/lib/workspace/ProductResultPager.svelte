@@ -97,7 +97,9 @@
     ? buildV2.pinned_candidate_keys ?? []
     : payload?.content.payload_kind === 'coverage-portfolio'
       ? payload.content.payload.pinned_candidate_keys ?? []
-      : [];
+      : payload?.content.payload_kind === 'build-coverage-portfolio-v2'
+        ? payload.content.payload.pinned_candidate_keys ?? []
+        : [];
   $: coverageSolutionCaptions = pinnedPortfolioKeys.length
     ? coverageSolutionKeys.map((key) => componentMessage(
         language,

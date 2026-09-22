@@ -268,12 +268,27 @@ fn build_pinned_minimals_replays_the_full_source_with_a_separate_required_docume
     );
     let response = context.run(request);
     assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    let product = response.product_capability_result().unwrap();
+    assert_eq!(product.contract().as_str(), "build.pinned-minimals");
+    assert_eq!(
+        product.result_kind().as_str(),
+        "build-pinned-minimum-cover.v1"
+    );
+    let public = product.public_result_payload().unwrap();
+    assert_eq!(public.contract(), "build.pinned-minimals");
+    assert_eq!(public.result_kind(), "build-pinned-minimum-cover.v1");
+    let host = response.to_host_response();
+    assert_eq!(
+        host.product_result_payload().unwrap().result_kind(),
+        "build-pinned-minimum-cover.v1"
+    );
     let portfolio = response
         .product_capability_result()
         .and_then(|result| result.build_coverage_portfolio_v2())
         .expect("complete full-source Build portfolio");
     assert_eq!(portfolio.source_candidate_count(), 2);
     assert_eq!(portfolio.selected_candidate_count(), 1);
+    assert_eq!(portfolio.pinned_candidate_keys().len(), 1);
     assert!(portfolio.completeness().complete());
     let ordinary = CliCommandParser::parse(&base.replace("pinned-minimals", "cover"))
         .unwrap()

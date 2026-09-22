@@ -56,6 +56,7 @@ pub enum ProductCapabilityResultKind {
     PcB2bPreservingWitnessV1,
     PcB2bPreservationProbabilityV1,
     BuildCoveragePortfolioV2,
+    BuildPinnedMinimumCoverV1,
     BuildSetupFamilyV1,
 }
 
@@ -75,6 +76,7 @@ impl ProductCapabilityResultKind {
             Self::PcB2bPreservingWitnessV1 => "pc-b2b-preserving-witness.v1",
             Self::PcB2bPreservationProbabilityV1 => "pc-b2b-preservation-probability.v1",
             Self::BuildCoveragePortfolioV2 => "build-coverage-portfolio.v2",
+            Self::BuildPinnedMinimumCoverV1 => "build-pinned-minimum-cover.v1",
             Self::BuildSetupFamilyV1 => "build-target-family.v2",
         }
     }
@@ -371,9 +373,31 @@ impl ProductCapabilityResult {
         if owner.set_identity_sha256().len() != 64 {
             return Err(ProductCapabilityContractError::ResponseResultContractMismatch);
         }
+        let pinned_keys = report.pinned_candidate_keys();
+        if pinned_keys.iter().any(|key| {
+            !report.canonical_candidate_keys().contains(key)
+                || pinned_keys
+                    .iter()
+                    .filter(|candidate| *candidate == key)
+                    .count()
+                    != 1
+        }) {
+            return Err(ProductCapabilityContractError::ResponseResultContractMismatch);
+        }
+        let (contract, result_kind) = if pinned_keys.is_empty() {
+            (
+                ProductCapabilityContract::BuildCover,
+                ProductCapabilityResultKind::BuildCoveragePortfolioV2,
+            )
+        } else {
+            (
+                ProductCapabilityContract::BuildPinnedMinimals,
+                ProductCapabilityResultKind::BuildPinnedMinimumCoverV1,
+            )
+        };
         Ok(Self {
-            contract: ProductCapabilityContract::BuildCover,
-            result_kind: ProductCapabilityResultKind::BuildCoveragePortfolioV2,
+            contract,
+            result_kind,
             command_kind: AppCommandKind::BuildProbability,
             query: QueryEnvelope::BuildCoverage,
             pc_probability_v2: None,
@@ -455,11 +479,15 @@ impl ProductCapabilityResult {
             (
                 ProductCapabilityContract::BuildCover,
                 ProductCapabilityResultKind::BuildCoveragePortfolioV2,
+            )
+            | (
+                ProductCapabilityContract::BuildPinnedMinimals,
+                ProductCapabilityResultKind::BuildPinnedMinimumCoverV1,
             ) => {
                 let report = self.build_coverage_portfolio_v2.as_deref()?;
                 let owner = report.portfolio_alternative_owner()?;
                 let completeness = report.completeness();
-                let payload = BuildCoveragePortfolioV2Payload::try_new(
+                let mut payload = BuildCoveragePortfolioV2Payload::try_new(
                     report.contract_id(),
                     report.objective().as_str(),
                     report.probability_basis(),
@@ -484,6 +512,18 @@ impl ProductCapabilityResult {
                     Some(owner.set_identity_sha256().to_owned()),
                 )
                 .ok()?;
+                if self.contract == ProductCapabilityContract::BuildPinnedMinimals {
+                    let pinned = report.pinned_candidate_keys();
+                    let additional = report
+                        .canonical_candidate_keys()
+                        .iter()
+                        .filter(|key| !pinned.contains(key))
+                        .cloned()
+                        .collect();
+                    payload = payload
+                        .with_pinned_selection(pinned.to_vec(), additional)
+                        .ok()?;
+                }
                 Some(ProductResultPayload::new(
                     self.contract.as_str(),
                     self.result_kind.as_str(),
@@ -897,6 +937,10 @@ impl ProductCapabilityResult {
             (
                 ProductCapabilityContract::BuildCover,
                 ProductCapabilityResultKind::BuildCoveragePortfolioV2,
+            )
+            | (
+                ProductCapabilityContract::BuildPinnedMinimals,
+                ProductCapabilityResultKind::BuildPinnedMinimumCoverV1,
             ) => self
                 .build_coverage_portfolio_v2
                 .as_ref()
@@ -1037,6 +1081,9 @@ impl ProductCapabilityResult {
             }
             ProductCapabilityContract::BuildCover => {
                 unreachable!("build cover uses the direct validated facade constructor")
+            }
+            ProductCapabilityContract::BuildPinnedMinimals => {
+                unreachable!("pinned build uses the direct validated facade constructor")
             }
             ProductCapabilityContract::BuildSetup => {
                 unreachable!("build setup uses the direct validated facade constructor")

@@ -138,6 +138,8 @@ export type ClearraBuildCoveragePortfolioV2Payload = {
   };
   page_source_available: boolean;
   page_source_identity_sha256: string | null;
+  pinned_candidate_keys?: string[];
+  additional_candidate_keys?: string[];
 };
 
 export type ClearraBuildSetupFamilyV1Payload = {
@@ -520,8 +522,8 @@ export type ClearraProductResultPayload =
       };
     }
   | {
-      contract: 'build.cover';
-      result_kind: 'build-coverage-portfolio.v2';
+      contract: 'build.cover' | 'build.pinned-minimals';
+      result_kind: 'build-coverage-portfolio.v2' | 'build-pinned-minimum-cover.v1';
       content: {
         payload_kind: 'build-coverage-portfolio-v2';
         payload: ClearraBuildCoveragePortfolioV2Payload;

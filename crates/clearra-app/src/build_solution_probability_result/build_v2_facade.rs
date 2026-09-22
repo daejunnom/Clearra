@@ -2171,6 +2171,10 @@ impl BuildCoveragePortfolioV2 {
         self.result.canonical_candidate_keys()
     }
 
+    pub fn pinned_candidate_keys(&self) -> &[String] {
+        self.result.pinned_candidate_keys()
+    }
+
     pub fn completeness(&self) -> BuildCoveragePortfolioCompleteness {
         let evidence = self.result.completeness();
         BuildCoveragePortfolioCompleteness {

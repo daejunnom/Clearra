@@ -1649,6 +1649,7 @@ pub enum BuildCoveragePortfolioPayloadError {
     CanonicalFirstCandidateMissing,
     CompletenessInvalid,
     PageSourceInvalid,
+    PinnedSelectionInvalid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1667,6 +1668,16 @@ pub struct BuildCoveragePortfolioV2Payload {
     completeness: BuildCoverageCompletenessPayload,
     page_source_available: bool,
     page_source_identity_sha256: Option<String>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    pinned_candidate_keys: Vec<String>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    additional_candidate_keys: Vec<String>,
 }
 
 impl BuildCoveragePortfolioV2Payload {
@@ -1700,9 +1711,47 @@ impl BuildCoveragePortfolioV2Payload {
             completeness,
             page_source_available,
             page_source_identity_sha256,
+            pinned_candidate_keys: Vec::new(),
+            additional_candidate_keys: Vec::new(),
         };
         payload.validate()?;
         Ok(payload)
+    }
+
+    pub fn with_pinned_selection(
+        mut self,
+        pinned_candidate_keys: Vec<String>,
+        additional_candidate_keys: Vec<String>,
+    ) -> Result<Self, BuildCoveragePortfolioPayloadError> {
+        let selected = decimal_u128(&self.selected_candidate_count)
+            .ok_or(BuildCoveragePortfolioPayloadError::PinnedSelectionInvalid)?;
+        if pinned_candidate_keys.is_empty()
+            || (pinned_candidate_keys.len() as u128)
+                .checked_add(additional_candidate_keys.len() as u128)
+                != Some(selected)
+            || !pinned_candidate_keys
+                .iter()
+                .chain(additional_candidate_keys.iter())
+                .any(|key| key == &self.canonical_first_candidate_id)
+        {
+            return Err(BuildCoveragePortfolioPayloadError::PinnedSelectionInvalid);
+        }
+        for (index, key) in pinned_candidate_keys.iter().enumerate() {
+            if key.is_empty()
+                || pinned_candidate_keys[..index].contains(key)
+                || additional_candidate_keys.contains(key)
+            {
+                return Err(BuildCoveragePortfolioPayloadError::PinnedSelectionInvalid);
+            }
+        }
+        for (index, key) in additional_candidate_keys.iter().enumerate() {
+            if key.is_empty() || additional_candidate_keys[..index].contains(key) {
+                return Err(BuildCoveragePortfolioPayloadError::PinnedSelectionInvalid);
+            }
+        }
+        self.pinned_candidate_keys = pinned_candidate_keys;
+        self.additional_candidate_keys = additional_candidate_keys;
+        Ok(self)
     }
 
     fn validate(&self) -> Result<(), BuildCoveragePortfolioPayloadError> {
@@ -1818,6 +1867,13 @@ impl BuildCoveragePortfolioV2Payload {
         self.page_source_identity_sha256.as_deref()
     }
 
+    pub fn pinned_candidate_keys(&self) -> &[String] {
+        &self.pinned_candidate_keys
+    }
+    pub fn additional_candidate_keys(&self) -> &[String] {
+        &self.additional_candidate_keys
+    }
+
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
         let mut total = [
             &self.contract,
@@ -1837,6 +1893,14 @@ impl BuildCoveragePortfolioV2Payload {
         })?;
         if let Some(identity) = &self.page_source_identity_sha256 {
             total = total.checked_add(identity.capacity() as u128)?;
+        }
+        for keys in [&self.pinned_candidate_keys, &self.additional_candidate_keys] {
+            total = total.checked_add(
+                (keys.capacity() as u128).checked_mul(core::mem::size_of::<String>() as u128)?,
+            )?;
+            for key in keys {
+                total = total.checked_add(key.capacity() as u128)?;
+            }
         }
         Some(total)
     }
@@ -3437,6 +3501,36 @@ mod tests {
         assert_eq!(
             build.page_source_identity_sha256(),
             Some("b".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn pinned_build_payload_separates_required_and_additional_members() {
+        let pinned = build_payload()
+            .with_pinned_selection(
+                vec!["candidate-0001".to_owned()],
+                vec!["candidate-0002".to_owned()],
+            )
+            .expect("complete pinned selection");
+        let payload = ProductResultPayload::new(
+            "build.pinned-minimals",
+            "build-pinned-minimum-cover.v1",
+            ProductResultPayloadContent::BuildCoveragePortfolioV2(pinned),
+        );
+        let json = serde_json::to_string(&payload).expect("serialize pinned product");
+        let decoded: ProductResultPayload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, payload);
+        let ProductResultPayloadContent::BuildCoveragePortfolioV2(build) = decoded.content() else {
+            panic!("pinned Build payload kind");
+        };
+        assert_eq!(build.pinned_candidate_keys(), ["candidate-0001"]);
+        assert_eq!(build.additional_candidate_keys(), ["candidate-0002"]);
+        assert_eq!(
+            build_payload().with_pinned_selection(
+                vec!["candidate-0001".to_owned()],
+                vec!["candidate-0001".to_owned()],
+            ),
+            Err(BuildCoveragePortfolioPayloadError::PinnedSelectionInvalid)
         );
     }
 

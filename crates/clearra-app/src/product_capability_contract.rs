@@ -40,6 +40,7 @@ pub enum ProductCapabilityContract {
     PcAllSpinSolution,
     PcAllSpinPreservationChance,
     BuildCover,
+    BuildPinnedMinimals,
     BuildSetup,
 }
 
@@ -59,6 +60,7 @@ impl ProductCapabilityContract {
             Self::PcAllSpinSolution => "pc.allspin-sol",
             Self::PcAllSpinPreservationChance => "pc.allspin-pres-chance",
             Self::BuildCover => "build.cover",
+            Self::BuildPinnedMinimals => "build.pinned-minimals",
             Self::BuildSetup => "build.setup",
         }
     }

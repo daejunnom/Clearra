@@ -948,8 +948,21 @@ export function validateProductResultPayload(
   if (payload.content.payload_kind === 'build-coverage-portfolio-v2') {
     const portfolio = payload.content.payload;
     const complete = portfolio.completeness;
-    return payload.contract === 'build.cover' &&
-      payload.result_kind === 'build-coverage-portfolio.v2' &&
+    const pinned = portfolio.pinned_candidate_keys ?? [];
+    const additional = portfolio.additional_candidate_keys ?? [];
+    const selectedKeys = [...pinned, ...additional];
+    const pinnedResult = payload.contract === 'build.pinned-minimals' &&
+      payload.result_kind === 'build-pinned-minimum-cover.v1';
+    const ordinaryResult = payload.contract === 'build.cover' &&
+      payload.result_kind === 'build-coverage-portfolio.v2';
+    const selectionValid = pinnedResult
+      ? pinned.length > 0 &&
+        selectedKeys.length.toString() === portfolio.selected_candidate_count &&
+        new Set(selectedKeys).size === selectedKeys.length &&
+        selectedKeys.every(validArtifactIdentity) &&
+        selectedKeys.includes(portfolio.canonical_first_candidate_id)
+      : pinned.length === 0 && additional.length === 0;
+    return (pinnedResult || ordinaryResult) && selectionValid &&
       portfolio.contract === 'build-coverage-portfolio.v2' &&
       ['min-cover', 'max-probability-minimum'].includes(portfolio.objective) &&
       [

@@ -623,9 +623,9 @@ impl WebCommandRequest {
             ProductCapabilityContract::PcSaves | ProductCapabilityContract::PcBestSave => {
                 PcResultProjection::Standard
             }
-            ProductCapabilityContract::BuildCover | ProductCapabilityContract::BuildSetup => {
-                PcResultProjection::Standard
-            }
+            ProductCapabilityContract::BuildCover
+            | ProductCapabilityContract::BuildPinnedMinimals
+            | ProductCapabilityContract::BuildSetup => PcResultProjection::Standard,
         };
         self.product_capability_contract = Some(contract);
         self

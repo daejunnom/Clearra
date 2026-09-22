@@ -144,6 +144,10 @@ pub(super) fn materialize_response(response: &AppResponse) -> Option<BoundSoluti
             (
                 ProductCapabilityContract::BuildCover,
                 ProductCapabilityResultKind::BuildCoveragePortfolioV2,
+            )
+            | (
+                ProductCapabilityContract::BuildPinnedMinimals,
+                ProductCapabilityResultKind::BuildPinnedMinimumCoverV1,
             ) => {
                 let report = product.build_coverage_portfolio_v2()?;
                 if !report.completeness().complete() {
