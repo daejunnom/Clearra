@@ -45,6 +45,25 @@ impl PcMinimalsIngressOrigin {
     }
 }
 
+pub(crate) fn validate_pinned_minimum_keys(
+    keys: &[String],
+    minimals_requested: bool,
+) -> Result<(), &'static str> {
+    if !keys.is_empty() && !minimals_requested {
+        return Err("pinned solutions require pc minimals");
+    }
+    if keys.iter().collect::<std::collections::BTreeSet<_>>().len() != keys.len() {
+        return Err("pinned solutions must be unique");
+    }
+    if keys
+        .iter()
+        .any(|key| NormalizedTilingSolutionKey::parse_canonical(key).is_err())
+    {
+        return Err("pinned PC solution key is invalid");
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PcMinimumCoverQuerySnapshot {
     Opening(Arc<OpeningPcSearchQuery>),
@@ -362,6 +381,7 @@ pub(crate) enum PcMinimumCoverV2PreparationAdvance {
 pub(crate) struct PcMinimumCoverV2Preparation {
     projection: Option<PcMinimumCoverResultProjection>,
     portfolio: CoveragePortfolioAlternativeSetPreparation,
+    pin_publication: Option<(usize, Vec<String>)>,
 }
 
 impl PcMinimumCoverV2Preparation {
@@ -373,9 +393,20 @@ impl PcMinimumCoverV2Preparation {
     }
 
     pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let pin_bytes = self.checked_pin_retained_capacity_bytes()?;
         self.portfolio
             .checked_retained_capacity_bytes()?
-            .checked_add(self.checked_projection_retained_capacity_bytes()?)
+            .checked_add(self.checked_projection_retained_capacity_bytes()?)?
+            .checked_add(pin_bytes)
+    }
+
+    fn checked_pin_retained_capacity_bytes(&self) -> Option<u128> {
+        self.pin_publication.as_ref().map_or(Some(0), |(_, keys)| {
+            keys.iter().try_fold(
+                (keys.capacity() as u128).checked_mul(core::mem::size_of::<String>() as u128)?,
+                |total, key| total.checked_add(key.capacity() as u128),
+            )
+        })
     }
 
     fn checked_projection_retained_capacity_bytes(&self) -> Option<u128> {
@@ -385,19 +416,44 @@ impl PcMinimumCoverV2Preparation {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new(source: ValidatedPcMinimumCoverSource) -> Result<Self, &'static str> {
+        Self::new_with_pins(source, Vec::new())
+    }
+
+    pub(crate) fn new_with_pins(
+        source: ValidatedPcMinimumCoverSource,
+        pinned_keys: Vec<String>,
+    ) -> Result<Self, &'static str> {
         let (projection, identity, candidate_keys, required_patterns, rows) =
             source.into_portfolio_input();
-        let portfolio = CoveragePortfolioAlternativeSetPreparation::new(
-            identity,
-            candidate_keys,
-            required_patterns,
-            rows,
-        )
-        .map_err(|_| "pc minimals portfolio alternative set validation failed")?;
+        let (portfolio, pin_publication) = if pinned_keys.is_empty() {
+            (
+                CoveragePortfolioAlternativeSetPreparation::new(
+                    identity,
+                    candidate_keys,
+                    required_patterns,
+                    rows,
+                )
+                .map_err(|_| "pc minimals portfolio alternative set validation failed")?,
+                None,
+            )
+        } else {
+            let (portfolio, original_pattern_count, pinned_keys) =
+                CoveragePortfolioAlternativeSetPreparation::new_pinned(
+                    identity,
+                    candidate_keys,
+                    required_patterns,
+                    rows,
+                    pinned_keys,
+                )
+                .map_err(|_| "pc pinned minimals candidate map is invalid")?;
+            (portfolio, Some((original_pattern_count, pinned_keys)))
+        };
         Ok(Self {
             projection: Some(projection),
             portfolio,
+            pin_publication,
         })
     }
 
@@ -423,6 +479,7 @@ impl PcMinimumCoverV2Preparation {
     ) -> Result<PcMinimumCoverV2PreparationAdvance, &'static str> {
         let outer_live = self
             .checked_projection_retained_capacity_bytes()
+            .and_then(|bytes| bytes.checked_add(self.checked_pin_retained_capacity_bytes()?))
             .and_then(|bytes| bytes.checked_add(core::mem::size_of::<Self>() as u128))
             .and_then(|bytes| {
                 bytes.checked_sub(
@@ -475,6 +532,37 @@ impl PcMinimumCoverV2Preparation {
                     .projection
                     .take()
                     .ok_or("pc minimals product preparation completed more than once")?;
+                let portfolio = if let Some((original_pattern_count, pinned_keys)) =
+                    self.pin_publication.take()
+                {
+                    let additional_rows = (portfolio.coverage_rows().len() as u128)
+                        .checked_mul(core::mem::size_of::<PatternBitSet>() as u128)
+                        .and_then(|headers| {
+                            portfolio
+                                .coverage_rows()
+                                .iter()
+                                .try_fold(headers, |total, row| {
+                                    total.checked_add(row.checked_storage_retained_bytes()?)
+                                })
+                        })
+                        .ok_or("pc_minimum_cover_memory_projection_overflow")?;
+                    memory_guard(
+                        residual_owner
+                            .checked_add(
+                                portfolio
+                                    .checked_retained_capacity_bytes()
+                                    .ok_or("pc_minimum_cover_memory_projection_overflow")?,
+                            )
+                            .and_then(|bytes| bytes.checked_add(additional_rows))
+                            .ok_or("pc_minimum_cover_memory_projection_overflow")?,
+                    )
+                    .map_err(|_| "pc_minimum_cover_memory_limit_exceeded")?;
+                    portfolio
+                        .into_pinned_public(original_pattern_count, &pinned_keys)
+                        .map_err(|_| "pc pinned minimals publication failed")?
+                } else {
+                    portfolio
+                };
                 let arc_peak = projection
                     .checked_retained_capacity_bytes()
                     .and_then(|bytes| {

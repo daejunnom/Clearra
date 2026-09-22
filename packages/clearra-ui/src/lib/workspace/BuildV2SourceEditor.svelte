@@ -7,6 +7,7 @@
     type BuildV2Request
   } from './buildV2Model';
   import type { WorkspaceLanguage } from './workspaceI18n';
+  import BuildV2PinnedSelector from './BuildV2PinnedSelector.svelte';
 
   export let request: BuildV2Request;
   export let language: WorkspaceLanguage = 'en';
@@ -104,6 +105,9 @@
         on:input={(event) => dispatch('change', { solutionDocument: (event.currentTarget as HTMLTextAreaElement).value })}
       ></textarea>
     </label>
+    {#if request.capability === 'build.evaluate.minimals'}
+      <BuildV2PinnedSelector {request} {language} on:change={(event) => dispatch('change', event.detail)} />
+    {/if}
   {/if}
 </section>
 

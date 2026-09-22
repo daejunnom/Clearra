@@ -539,6 +539,15 @@ impl ProductCapabilityResult {
                         .to_string(),
                     members,
                     true,
+                )
+                .with_pinned_candidate_keys(
+                    set.pinned_candidate_ids()
+                        .iter()
+                        .map(|candidate_id| {
+                            let index = usize::try_from(candidate_id.checked_sub(1)?).ok()?;
+                            Some(set.candidates().get(index)?.normalized_key().to_owned())
+                        })
+                        .collect::<Option<Vec<_>>>()?,
                 );
                 let page_payload = match canonical_candidate {
                     Some((canonical_candidate_id, canonical_solution_key)) => page_payload
@@ -1361,7 +1370,7 @@ impl ProductCapabilityResult {
             | (QueryEnvelope::PcScenario, AppRenderModel::Scenario(result)) => result,
             _ => return Err(ProductCapabilityContractError::ResponseRenderFamilyMismatch),
         };
-        let (query, origin) = validated.pc_minimum_cover_binding().ok_or(
+        let (query, origin, pinned_keys) = validated.pc_minimum_cover_binding().ok_or(
             ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch(
                 "validated pc.minimals query binding is missing",
             ),
@@ -1369,7 +1378,7 @@ impl ProductCapabilityResult {
         let source = validate_pc_minimum_cover_v2_source(query, origin, core_result)
             .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)?;
         Self::validate_pc_minimum_cover_resources(response)?;
-        let report = PcMinimumCoverV2Preparation::new(source)
+        let report = PcMinimumCoverV2Preparation::new_with_pins(source, pinned_keys.to_vec())
             .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)?;
         Ok(PcMinimumCoverProductPreparation {
             validated: Some(validated),

@@ -63,6 +63,7 @@ impl ProductResultPayload {
     serde(tag = "payload_kind", content = "payload", rename_all = "kebab-case")
 )]
 pub enum ProductResultPayloadContent {
+    BoundaryRecovery(crate::BoundaryRecoveryPayload),
     CoveragePortfolio(CoveragePortfolioPagePayload),
     BuildCoveragePortfolioV2(BuildCoveragePortfolioV2Payload),
     BuildSetupFamilyV1(BuildSetupFamilyV1Payload),
@@ -85,6 +86,7 @@ pub enum ProductResultPayloadContent {
 impl ProductResultPayloadContent {
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
         match self {
+            Self::BoundaryRecovery(payload) => payload.checked_retained_capacity_bytes(),
             Self::CoveragePortfolio(payload) => payload.checked_retained_capacity_bytes(),
             Self::BuildCoveragePortfolioV2(payload) => payload.checked_retained_capacity_bytes(),
             Self::BuildSetupFamilyV1(payload) => payload.checked_retained_capacity_bytes(),
@@ -2765,6 +2767,11 @@ pub struct CoveragePortfolioPagePayload {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     canonical_witness: Option<ProductCandidateMemberPayload>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    pinned_candidate_keys: Vec<String>,
 }
 
 impl CoveragePortfolioPagePayload {
@@ -2802,7 +2809,17 @@ impl CoveragePortfolioPagePayload {
             page_handle_available,
             canonical_selection: None,
             canonical_witness: None,
+            pinned_candidate_keys: Vec::new(),
         }
+    }
+
+    pub fn with_pinned_candidate_keys(mut self, keys: Vec<String>) -> Self {
+        self.pinned_candidate_keys = keys;
+        self
+    }
+
+    pub fn pinned_candidate_keys(&self) -> &[String] {
+        &self.pinned_candidate_keys
     }
 
     /// Attaches a product-specific, upstream-selected witness without asking
@@ -2913,6 +2930,13 @@ impl CoveragePortfolioPagePayload {
         )?;
         for member in &self.members {
             bytes = bytes.checked_add(member.checked_retained_capacity_bytes()?)?;
+        }
+        bytes = bytes.checked_add(
+            (self.pinned_candidate_keys.capacity() as u128)
+                .checked_mul(core::mem::size_of::<String>() as u128)?,
+        )?;
+        for key in &self.pinned_candidate_keys {
+            bytes = bytes.checked_add(key.capacity() as u128)?;
         }
         Some(bytes)
     }

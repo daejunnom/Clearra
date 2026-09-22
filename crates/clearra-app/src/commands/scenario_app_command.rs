@@ -15,6 +15,7 @@ use crate::{
     },
     pc_allspin_result::project_pc_allspin_result,
     pc_chance_probability_result::PcChanceCompiledAuthority,
+    pc_minimum_cover_result::validate_pinned_minimum_keys,
     pc_result_projection::{
         validate_scenario_pc_result_projection, PcResultProjection, ValidatedPcResultProjection,
     },
@@ -29,6 +30,7 @@ pub struct ScenarioAppCommand {
     query: Arc<PcScenarioQuery>,
     render_contract: Option<ScenarioAppRenderContract>,
     result_projection: PcResultProjection,
+    pinned_minimum_keys: Vec<String>,
 }
 
 impl ScenarioAppCommand {
@@ -37,6 +39,7 @@ impl ScenarioAppCommand {
             query: Arc::new(query),
             render_contract: None,
             result_projection: PcResultProjection::Standard,
+            pinned_minimum_keys: Vec::new(),
         }
     }
 }
@@ -54,6 +57,11 @@ impl ScenarioAppCommand {
     pub const fn with_score_minimals_result(self) -> Self {
         self.with_result_projection(PcResultProjection::pc_score_minimals())
     }
+
+    pub fn with_pinned_minimum_keys(mut self, keys: Vec<String>) -> Self {
+        self.pinned_minimum_keys = keys;
+        self
+    }
 }
 impl ScenarioAppCommand {
     pub fn query(&self) -> &PcScenarioQuery {
@@ -66,6 +74,10 @@ impl ScenarioAppCommand {
 
     pub const fn result_projection(&self) -> PcResultProjection {
         self.result_projection
+    }
+
+    pub fn pinned_minimum_keys(&self) -> &[String] {
+        &self.pinned_minimum_keys
     }
 
     pub const fn score_minimals_requested(&self) -> bool {
@@ -81,6 +93,10 @@ impl ScenarioAppCommand {
     pub(crate) fn validated_result_projection(
         &self,
     ) -> Result<ValidatedPcResultProjection, &'static str> {
+        validate_pinned_minimum_keys(
+            &self.pinned_minimum_keys,
+            self.result_projection.minimals_origin().is_some(),
+        )?;
         if !self.result_projection.is_standard() && self.render_contract.is_some() {
             return Err(if self.result_projection.chance_origin().is_some() {
                 "pc chance does not accept a scenario render contract"

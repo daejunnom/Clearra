@@ -1914,7 +1914,7 @@ fn canonical_result_rotation(piece: PieceKind, rotation: RotationState) -> Rotat
     }
 }
 
-fn t_corner_counts(
+pub(crate) fn t_corner_counts(
     board: ForwardBoard,
     height: u8,
     piece: PieceKind,

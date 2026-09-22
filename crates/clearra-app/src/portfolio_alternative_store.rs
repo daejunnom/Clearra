@@ -7,7 +7,7 @@ use clearra_coverage::{
         ExactAtMostQuery, ExactAtMostReceipt, ExactAtMostTask, ExactMinimumCoverEnumerationStop,
         ExactMinimumCoverPortfolioEnumerator, ExactMinimumCoverPortfolioError,
         ExactMinimumCoverPortfolioPage, ExactMinimumCoverPortfolioPreparationAdvance,
-        ExactMinimumCoverPortfolioPreparationSession,
+        ExactMinimumCoverPortfolioPreparationSession, PinnedMinimumCoverInput,
     },
     pattern::pattern_bitset::PatternBitSet,
 };
@@ -503,6 +503,57 @@ impl CoveragePortfolioAlternativeSetPreparation {
         rows: Vec<PatternBitSet>,
     ) -> Result<Self, PortfolioAlternativeError> {
         Self::new_with_memory_guard(identity, candidate_keys, required, rows, &mut |_| Ok(()))
+    }
+
+    pub(crate) fn new_pinned(
+        identity: PortfolioAlternativeSetIdentity,
+        candidate_keys: Vec<String>,
+        required: PatternBitSet,
+        rows: Vec<PatternBitSet>,
+        mut pinned_keys: Vec<String>,
+    ) -> Result<(Self, usize, Vec<String>), PortfolioAlternativeError> {
+        let requested_pin_order = pinned_keys.clone();
+        pinned_keys.sort_unstable();
+        if pinned_keys.is_empty() || pinned_keys.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(PortfolioAlternativeError::PinnedCandidateMapInvalid);
+        }
+        let pinned_indices = pinned_keys
+            .iter()
+            .map(|pin| {
+                candidate_keys
+                    .iter()
+                    .position(|candidate| candidate == pin)
+                    .ok_or(PortfolioAlternativeError::PinnedCandidateMapInvalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let original_pattern_count = required.pattern_count();
+        let constrained = PinnedMinimumCoverInput::new(required, rows, pinned_indices)
+            .map_err(|_| PortfolioAlternativeError::PinnedCandidateMapInvalid)?;
+        let (augmented_required, augmented_rows) = constrained.into_augmented_parts();
+        let mut hasher = Sha256::new();
+        hasher.update(b"clearra.pinned-minimals.v1\0");
+        hasher.update((pinned_keys.len() as u64).to_be_bytes());
+        for key in &pinned_keys {
+            update_length_delimited(&mut hasher, key.as_bytes());
+        }
+        let pinned_digest = format!("{:x}", hasher.finalize());
+        let pinned_identity = PortfolioAlternativeSetIdentity::new(
+            format!(
+                "{}:pinned-minimals.v1:{pinned_digest}",
+                identity.query_identity()
+            ),
+            identity.source_identity(),
+            identity.profile_identity(),
+            identity.universe_identity(),
+            identity.build_identity(),
+        )?;
+        let preparation = Self::new(
+            pinned_identity,
+            candidate_keys,
+            augmented_required,
+            augmented_rows,
+        )?;
+        Ok((preparation, original_pattern_count, requested_pin_order))
     }
 
     /// The callback owns this constructor's whole inline plus heap peak,
@@ -1061,6 +1112,7 @@ impl CoveragePortfolioAlternativeSetPreparation {
                         candidate_map_sha256: self.candidate_map_sha256.clone(),
                         candidates: core::mem::take(&mut self.candidates).into(),
                         public_candidate_ids: None,
+                        pinned_candidate_ids: Arc::from([]),
                         required: self.required.clone(),
                         rows: core::mem::take(&mut self.rows).into(),
                         optimal_cardinality,
@@ -1117,6 +1169,9 @@ pub struct CoveragePortfolioAlternativeSet {
     /// candidate ID. Coverage enumeration always remains dense; only the
     /// transport-facing member identity is projected through this map.
     public_candidate_ids: Option<Arc<[u64]>>,
+    /// Immutable original candidate IDs required in every portfolio. Private
+    /// selector bits are removed from public coverage rows and queue counts.
+    pinned_candidate_ids: Arc<[u64]>,
     required: PatternBitSet,
     rows: Arc<[PatternBitSet]>,
     optimal_cardinality: usize,
@@ -1182,6 +1237,160 @@ impl CoveragePortfolioAlternativeSet {
         }
     }
 
+    /// Reoptimizes the full source coverage matrix with mandatory candidates.
+    /// Every pinned row receives one private required bit, so the existing
+    /// exact all-optima cursor proves the conditional minimum directly. The
+    /// private bits are stripped from public coverage and probability inputs.
+    pub fn new_canonical_with_pinned_keys(
+        identity: PortfolioAlternativeSetIdentity,
+        candidate_keys: Vec<String>,
+        required: PatternBitSet,
+        rows: Vec<PatternBitSet>,
+        mut pinned_keys: Vec<String>,
+    ) -> Result<Self, PortfolioAlternativeError> {
+        let requested_pin_order = pinned_keys.clone();
+        pinned_keys.sort_unstable();
+        if pinned_keys.is_empty() || pinned_keys.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(PortfolioAlternativeError::PinnedCandidateMapInvalid);
+        }
+        let pinned_indices = pinned_keys
+            .iter()
+            .map(|pin| {
+                candidate_keys
+                    .iter()
+                    .position(|candidate| candidate == pin)
+                    .ok_or(PortfolioAlternativeError::PinnedCandidateMapInvalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let original_pattern_count = required.pattern_count();
+        let original_required = required.clone();
+        let constrained = PinnedMinimumCoverInput::new(required, rows, pinned_indices)
+            .map_err(|_| PortfolioAlternativeError::PinnedCandidateMapInvalid)?;
+        let (augmented_required, augmented_rows) = constrained.into_augmented_parts();
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"clearra.pinned-minimals.v1\0");
+        hasher.update((pinned_keys.len() as u64).to_be_bytes());
+        for key in &pinned_keys {
+            update_length_delimited(&mut hasher, key.as_bytes());
+        }
+        let pinned_digest = format!("{:x}", hasher.finalize());
+        let pinned_identity = PortfolioAlternativeSetIdentity::new(
+            format!(
+                "{}:pinned-minimals.v1:{pinned_digest}",
+                identity.query_identity()
+            ),
+            identity.source_identity(),
+            identity.profile_identity(),
+            identity.universe_identity(),
+            identity.build_identity(),
+        )?;
+        let mut set = Self::new_canonical(
+            pinned_identity,
+            candidate_keys,
+            augmented_required,
+            augmented_rows,
+        )?;
+        let mut original_rows = Vec::new();
+        original_rows
+            .try_reserve_exact(set.rows.len())
+            .map_err(|_| PortfolioAlternativeError::AllocationFailed)?;
+        for row in set.rows.iter() {
+            let words = (0..original_pattern_count.div_ceil(u64::BITS as usize))
+                .map(|word| row.word_at(word))
+                .collect();
+            original_rows.push(
+                PatternBitSet::from_words(original_pattern_count, words)
+                    .map_err(|_| PortfolioAlternativeError::PatternUniverseMismatch)?,
+            );
+        }
+        let pinned_candidate_ids = requested_pin_order
+            .iter()
+            .map(|key| {
+                set.candidates
+                    .iter()
+                    .find(|candidate| candidate.normalized_key == *key)
+                    .map(PortfolioCandidate::candidate_id)
+                    .ok_or(PortfolioAlternativeError::PinnedCandidateMapInvalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if pinned_candidate_ids.len() != pinned_keys.len()
+            || pinned_candidate_ids.iter().any(|candidate_id| {
+                !set.canonical_page
+                    .portfolio
+                    .candidate_ids
+                    .contains(candidate_id)
+            })
+        {
+            return Err(PortfolioAlternativeError::CanonicalPortfolioMismatch);
+        }
+        set.required = original_required;
+        set.rows = original_rows.into();
+        set.pinned_candidate_ids = pinned_candidate_ids.into();
+        Ok(set)
+    }
+
+    /// Publishes only the original queue universe after the guarded exact
+    /// preparation proves the private pinned-row requirements. The retained
+    /// cursor still uses the private bits to enumerate all conditional ties.
+    pub(crate) fn into_pinned_public(
+        mut self,
+        original_pattern_count: usize,
+        pinned_keys: &[String],
+    ) -> Result<Self, PortfolioAlternativeError> {
+        if pinned_keys.is_empty()
+            || self
+                .required
+                .pattern_count()
+                .checked_sub(original_pattern_count)
+                != Some(pinned_keys.len())
+        {
+            return Err(PortfolioAlternativeError::PinnedCandidateMapInvalid);
+        }
+        let word_count = original_pattern_count.div_ceil(u64::BITS as usize);
+        let required_words = (0..word_count)
+            .map(|word| self.required.word_at(word))
+            .collect();
+        let original_required = PatternBitSet::from_words(original_pattern_count, required_words)
+            .map_err(|_| PortfolioAlternativeError::PatternUniverseMismatch)?;
+        let mut original_rows = Vec::new();
+        original_rows
+            .try_reserve_exact(self.rows.len())
+            .map_err(|_| PortfolioAlternativeError::AllocationFailed)?;
+        for row in self.rows.iter() {
+            let words = (0..word_count).map(|word| row.word_at(word)).collect();
+            original_rows.push(
+                PatternBitSet::from_words(original_pattern_count, words)
+                    .map_err(|_| PortfolioAlternativeError::PatternUniverseMismatch)?,
+            );
+        }
+        let pinned_candidate_ids = pinned_keys
+            .iter()
+            .map(|key| {
+                self.candidates
+                    .iter()
+                    .find(|candidate| candidate.normalized_key == *key)
+                    .map(PortfolioCandidate::candidate_id)
+                    .ok_or(PortfolioAlternativeError::PinnedCandidateMapInvalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if pinned_candidate_ids.len() != pinned_keys.len()
+            || pinned_candidate_ids.iter().any(|candidate_id| {
+                !self
+                    .canonical_page
+                    .portfolio
+                    .candidate_ids
+                    .contains(candidate_id)
+            })
+        {
+            return Err(PortfolioAlternativeError::CanonicalPortfolioMismatch);
+        }
+        self.required = original_required;
+        self.rows = original_rows.into();
+        self.pinned_candidate_ids = pinned_candidate_ids.into();
+        Ok(self)
+    }
+
     pub const fn contract_id(&self) -> &'static str {
         self.contract_id
     }
@@ -1200,6 +1409,10 @@ impl CoveragePortfolioAlternativeSet {
 
     pub fn candidates(&self) -> &[PortfolioCandidate] {
         &self.candidates
+    }
+
+    pub fn pinned_candidate_ids(&self) -> &[u64] {
+        &self.pinned_candidate_ids
     }
 
     /// Attaches a product-owned public candidate identity without changing
@@ -1322,6 +1535,10 @@ impl CoveragePortfolioAlternativeSet {
                     .checked_mul(core::mem::size_of::<u64>() as u128)?,
             )?;
         }
+        bytes = bytes.checked_add(
+            (self.pinned_candidate_ids.len() as u128)
+                .checked_mul(core::mem::size_of::<u64>() as u128)?,
+        )?;
         for candidate in self.candidates.iter() {
             bytes = bytes.checked_add(candidate.normalized_key.capacity() as u128)?;
         }
@@ -2813,6 +3030,7 @@ pub enum PortfolioAlternativeError {
     CandidateMapLengthMismatch,
     CandidateMapNotCanonical,
     PublicCandidateMapInvalid,
+    PinnedCandidateMapInvalid,
     CandidateCountOverflow,
     PatternUniverseMismatch,
     Enumeration(ExactMinimumCoverPortfolioError),
@@ -2838,6 +3056,7 @@ impl PortfolioAlternativeError {
             Self::CandidateMapLengthMismatch => "portfolio-candidate-map-length-mismatch",
             Self::CandidateMapNotCanonical => "portfolio-candidate-map-not-canonical",
             Self::PublicCandidateMapInvalid => "portfolio-public-candidate-map-invalid",
+            Self::PinnedCandidateMapInvalid => "portfolio-pinned-candidate-map-invalid",
             Self::CandidateCountOverflow => "portfolio-candidate-count-overflow",
             Self::PatternUniverseMismatch => "portfolio-pattern-universe-mismatch",
             Self::Enumeration(_) => "portfolio-enumeration-failed",

@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
-  import { BuildProbabilityWorkspace, BuildV2Workspace, CtkDrawerWorkspace, DocumentUtilityWorkspace, ForwardSearchWorkspace, OperationSequenceWorkspace, PAGES_ESSENTIAL_WORKSPACE_MODES, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SequenceDependenciesWorkspace, SetupFinderWorkspace, SetupScoreWorkspace, SolverWorkspace, SpinStructureWorkspace, WORKSPACE_MODE_VISIBILITY_CONTEXT } from '@clearra/ui/workspace';
+  import { BoundaryRecoveryWorkspace, BuildProbabilityWorkspace, BuildV2Workspace, CtkDrawerWorkspace, DocumentUtilityWorkspace, ForwardSearchWorkspace, OperationSequenceWorkspace, PAGES_ESSENTIAL_WORKSPACE_MODES, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SequenceDependenciesWorkspace, SetupFinderWorkspace, SetupScoreWorkspace, SolverWorkspace, SpinStructureWorkspace, WORKSPACE_MODE_VISIBILITY_CONTEXT } from '@clearra/ui/workspace';
   import {
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     sharedBrowserHostCapabilitySnapshot
@@ -41,7 +41,7 @@
 
   onMount(() => {
     const removeWasmArtifactHotUpdate = installWasmArtifactHotUpdate(import.meta.hot, import.meta.env.MODE);
-    if (!['pc', 'setup', 'setup-score', 'spin-structure', 'build', 'build-probability', 'sequence', 'sequence-dependencies', 'parity', 'fumen', 'render', 'to-gray', 'mirror', 'damage', 'spin-finder', 'ren', 'ctk', 'player'].includes(selectedTool ?? '')) {
+    if (!['pc', 'setup', 'setup-score', 'spin-structure', 'build', 'build-probability', 'recovery', 'sequence', 'sequence-dependencies', 'parity', 'fumen', 'render', 'to-gray', 'mirror', 'damage', 'spin-finder', 'ren', 'ctk', 'player'].includes(selectedTool ?? '')) {
       void goto(`${base}/?tool=pc`, { replaceState: true, noScroll: true, keepFocus: true });
     }
     return removeWasmArtifactHotUpdate;
@@ -52,6 +52,8 @@
   <BuildV2Workspace {workerFactory} />
 {:else if selectedTool === 'build-probability'}
   <BuildProbabilityWorkspace {workerFactory} />
+{:else if selectedTool === 'recovery'}
+  <BoundaryRecoveryWorkspace {workerFactory} />
 {:else if selectedTool === 'sequence-dependencies'}
   <SequenceDependenciesWorkspace {workerFactory} />
 {:else if selectedTool === 'sequence'}

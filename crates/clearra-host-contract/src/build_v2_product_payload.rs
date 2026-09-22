@@ -258,6 +258,7 @@ pub struct BuildV2ProductPayload {
     b2b_preservation_required: Option<bool>,
     candidates: Vec<BuildV2CandidateCoveragePayload>,
     canonical_candidate_keys: Vec<String>,
+    pinned_candidate_keys: Vec<String>,
     winners: Vec<BuildV2ScoreWinnerPayload>,
     completeness: BuildV2CompletenessPayload,
     page_source_available: bool,
@@ -305,6 +306,7 @@ impl BuildV2ProductPayload {
             b2b_preservation_required,
             candidates,
             canonical_candidate_keys: Vec::new(),
+            pinned_candidate_keys: Vec::new(),
             winners: Vec::new(),
             completeness,
             page_source_available: false,
@@ -351,6 +353,7 @@ impl BuildV2ProductPayload {
             b2b_preservation_required: None,
             candidates: Vec::new(),
             canonical_candidate_keys: Vec::new(),
+            pinned_candidate_keys: Vec::new(),
             winners: Vec::new(),
             completeness,
             page_source_available: false,
@@ -399,6 +402,7 @@ impl BuildV2ProductPayload {
             b2b_preservation_required: None,
             candidates: Vec::new(),
             canonical_candidate_keys,
+            pinned_candidate_keys: Vec::new(),
             winners: Vec::new(),
             completeness,
             page_source_available: true,
@@ -451,6 +455,7 @@ impl BuildV2ProductPayload {
             b2b_preservation_required: None,
             candidates: Vec::new(),
             canonical_candidate_keys,
+            pinned_candidate_keys: Vec::new(),
             winners,
             completeness,
             page_source_available: true,
@@ -517,6 +522,7 @@ impl BuildV2ProductPayload {
             b2b_preservation_required,
             candidates,
             canonical_candidate_keys,
+            pinned_candidate_keys: Vec::new(),
             winners,
             completeness,
             page_source_available,
@@ -527,6 +533,17 @@ impl BuildV2ProductPayload {
     fn finish(value: Self) -> Result<Self, BuildV2ProductPayloadError> {
         value.validate()?;
         Ok(value)
+    }
+
+    /// Marks the mandatory subset of a supplied Build minimum. Empty pins
+    /// preserve the ordinary payload and its serialized representation.
+    pub fn with_pinned_candidate_keys(
+        mut self,
+        keys: Vec<String>,
+    ) -> Result<Self, BuildV2ProductPayloadError> {
+        self.pinned_candidate_keys = keys;
+        self.validate()?;
+        Ok(self)
     }
 
     fn validate(&self) -> Result<(), BuildV2ProductPayloadError> {
@@ -745,6 +762,20 @@ impl BuildV2ProductPayload {
                 }
             }
         }
+        if !self.pinned_candidate_keys.is_empty()
+            && (self.kind != BuildV2PayloadKind::Portfolio
+                || self.capability_id != "build.evaluate.minimals"
+                || self
+                    .pinned_candidate_keys
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+                || self
+                    .pinned_candidate_keys
+                    .iter()
+                    .any(|key| self.canonical_candidate_keys.binary_search(key).is_err()))
+        {
+            return Err(BuildV2ProductPayloadError::CandidateKeyInvalid);
+        }
         Ok(())
     }
 
@@ -906,6 +937,10 @@ impl BuildV2ProductPayload {
     pub fn canonical_candidate_keys(&self) -> &[String] {
         &self.canonical_candidate_keys
     }
+
+    pub fn pinned_candidate_keys(&self) -> &[String] {
+        &self.pinned_candidate_keys
+    }
     pub fn winners(&self) -> &[BuildV2ScoreWinnerPayload] {
         &self.winners
     }
@@ -960,6 +995,13 @@ impl BuildV2ProductPayload {
                 .checked_mul(core::mem::size_of::<String>() as u128)?,
         )?;
         for key in &self.canonical_candidate_keys {
+            total = total.checked_add(key.capacity() as u128)?;
+        }
+        total = total.checked_add(
+            (self.pinned_candidate_keys.capacity() as u128)
+                .checked_mul(core::mem::size_of::<String>() as u128)?,
+        )?;
+        for key in &self.pinned_candidate_keys {
             total = total.checked_add(key.capacity() as u128)?;
         }
         total = total.checked_add(

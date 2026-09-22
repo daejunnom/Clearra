@@ -10,6 +10,7 @@ import type {
   ClearraSolutionSetArtifactPayload
 } from '../wasm/wasmCommandClient';
 import { validatePcReplayPage } from './pcReplayPager';
+import { validateBoundaryRecoveryPayload } from './boundaryRecoveryPayloadValidation';
 
 export const PRODUCT_MEMBER_PAGE_SIZE = 100;
 
@@ -809,6 +810,11 @@ export function productResultIdentity(payload: ClearraProductResultPayload | nul
       ...payload.content.payload.documents.map((document) => document.canonical_sha256)
     ].join(':');
   }
+  if (payload.content.payload_kind === 'boundary-recovery') {
+    const report = payload.content.payload;
+    return [payload.contract, payload.result_kind, report.status, report.knowledge_basis, report.max_early_placements, report.borrow_source_index, report.borrow_placement_mask, report.normal_states, report.recovery_states,
+      ...report.steps.map((step) => `${step.source_queue_index}:${step.piece}:${step.placement_mask}:${step.board_after_mask}`)].join(':');
+  }
   return [payload.contract, payload.result_kind, payload.content.payload.sha256].join(':');
 }
 
@@ -1113,6 +1119,9 @@ export function validateProductResultPayload(
       set.documents.every((document) => validateFieldDocument(document) === null)
       ? null
       : 'invalid field document set payload';
+  }
+  if (payload.content.payload_kind === 'boundary-recovery') {
+    return validateBoundaryRecoveryPayload(payload);
   }
   const artifact = payload.content.payload;
   return artifact.render_exact === true &&

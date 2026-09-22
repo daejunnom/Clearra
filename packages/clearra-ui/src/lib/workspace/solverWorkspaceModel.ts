@@ -42,6 +42,7 @@ export type SolverWorkspaceRequest = {
   holdPiece?: SolverHoldPiece;
   queueKnowledge: QueueKnowledge;
   scoreMode: ScoreMode;
+  pinnedSolutionKeys: string[];
   scoreProfile: ScoreProfile;
   rule: RuleProfile;
   spinProfile: SpinProfile;
@@ -79,6 +80,7 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
     holdEnabled: true,
     queueKnowledge: 'oracle',
     scoreMode: 'off',
+    pinnedSolutionKeys: [],
     scoreProfile: 'tetrio',
     rule: 'srs-plus',
     spinProfile: 't-spins',
@@ -581,6 +583,9 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
     tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
     if (request.maxPatterns !== undefined) {
       tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
+    }
+    for (const key of new Set(request.pinnedSolutionKeys)) {
+      tokens.push('--pin-key', key);
     }
   } else if (request.scoreMode !== 'tiling') {
     tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all');

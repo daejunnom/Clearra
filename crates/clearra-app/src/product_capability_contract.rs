@@ -99,6 +99,7 @@ impl ProductCapabilityContract {
                     ValidatedProductCapabilityPayload::PcMinimalsOpening {
                         query: command.query_arc(),
                         projection,
+                        pinned_keys: Arc::from(command.pinned_minimum_keys()),
                     }
                 } else if projection.projection().path_origin().is_some() {
                     ValidatedProductCapabilityPayload::PcPathOpening {
@@ -150,6 +151,7 @@ impl ProductCapabilityContract {
                     ValidatedProductCapabilityPayload::PcMinimalsScenario {
                         query: command.query_arc(),
                         projection,
+                        pinned_keys: Arc::from(command.pinned_minimum_keys()),
                     }
                 } else if projection.projection().path_origin().is_some() {
                     ValidatedProductCapabilityPayload::PcPathScenario {
@@ -393,10 +395,12 @@ enum ValidatedProductCapabilityPayload {
     PcMinimalsOpening {
         query: Arc<OpeningPcSearchQuery>,
         projection: ValidatedPcResultProjection,
+        pinned_keys: Arc<[String]>,
     },
     PcMinimalsScenario {
         query: Arc<PcScenarioQuery>,
         projection: ValidatedPcResultProjection,
+        pinned_keys: Arc<[String]>,
     },
     PcPathOpening {
         query: Arc<OpeningPcSearchQuery>,
@@ -563,21 +567,35 @@ impl ValidatedProductCapabilityPayload {
 
     fn pc_minimum_cover_binding(
         &self,
-    ) -> Option<(PcMinimumCoverQueryBinding<'_>, PcMinimalsIngressOrigin)> {
+    ) -> Option<(
+        PcMinimumCoverQueryBinding<'_>,
+        PcMinimalsIngressOrigin,
+        &[String],
+    )> {
         match self {
-            Self::PcMinimalsOpening { query, projection } => Some((
+            Self::PcMinimalsOpening {
+                query,
+                projection,
+                pinned_keys,
+            } => Some((
                 PcMinimumCoverQueryBinding::Opening(query),
                 projection
                     .projection()
                     .minimals_origin()
                     .expect("pc minimals opening payload carries minimum-cover projection"),
+                pinned_keys,
             )),
-            Self::PcMinimalsScenario { query, projection } => Some((
+            Self::PcMinimalsScenario {
+                query,
+                projection,
+                pinned_keys,
+            } => Some((
                 PcMinimumCoverQueryBinding::Scenario(query),
                 projection
                     .projection()
                     .minimals_origin()
                     .expect("pc minimals scenario payload carries minimum-cover projection"),
+                pinned_keys,
             )),
             _ => None,
         }
@@ -854,7 +872,11 @@ impl ValidatedProductCapabilityContract {
 
     pub(crate) fn pc_minimum_cover_binding(
         &self,
-    ) -> Option<(PcMinimumCoverQueryBinding<'_>, PcMinimalsIngressOrigin)> {
+    ) -> Option<(
+        PcMinimumCoverQueryBinding<'_>,
+        PcMinimalsIngressOrigin,
+        &[String],
+    )> {
         self.payload.pc_minimum_cover_binding()
     }
 

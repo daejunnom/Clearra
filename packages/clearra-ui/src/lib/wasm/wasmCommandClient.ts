@@ -62,6 +62,7 @@ export type ClearraCoveragePortfolioPagePayload = {
   total_member_pages: string;
   members: ClearraProductCandidateMemberPayload[];
   page_handle_available: boolean;
+  pinned_candidate_keys?: string[];
 };
 
 export type ClearraBuildV2CompletenessPayload = {
@@ -110,6 +111,7 @@ export type ClearraBuildV2ProductPayload = {
   b2b_preservation_required: boolean | null;
   candidates: ClearraBuildV2CandidateCoveragePayload[];
   canonical_candidate_keys: string[];
+  pinned_candidate_keys?: string[];
   winners: ClearraBuildV2ScoreWinnerPayload[];
   completeness: ClearraBuildV2CompletenessPayload;
   page_source_available: boolean;
@@ -435,7 +437,45 @@ export type ClearraRenderArtifactPayload = {
   transport_max_bytes: number;
 };
 
+export type ClearraBoundaryRecoveryStepPayload = {
+  source_queue_index: number;
+  piece: string;
+  rotation: number;
+  x: number;
+  y: number;
+  hold_decision: string;
+  placement_mask: string;
+  cleared_row_mask: number;
+  board_after_mask: string;
+  cleared_lines: number;
+  recognized_spin: boolean;
+  b2b_active_after: boolean;
+  stage_one_complete_after: boolean;
+};
+
+export type ClearraBoundaryRecoveryPayload = {
+  status: 'normal' | 'pc-preserving-recovery' | 'non-pc-recovery' | 'no-path-within-declared-scope' | 'incomplete';
+  knowledge_basis: 'full-fixed-queue';
+  max_early_placements: 0 | 1;
+  borrow_source_index: number;
+  borrow_placement_mask: string;
+  normal_states: number;
+  recovery_states: number;
+  stage_one_checkpoint_step: number | null;
+  checkpoint_is_pc: boolean | null;
+  borrowed_stage_two_count: number;
+  steps: ClearraBoundaryRecoveryStepPayload[];
+};
+
 export type ClearraProductResultPayload =
+  | {
+      contract: 'boundary-recovery.v1';
+      result_kind: 'boundary-recovery';
+      content: {
+        payload_kind: 'boundary-recovery';
+        payload: ClearraBoundaryRecoveryPayload;
+      };
+    }
   | {
       contract: string;
       result_kind: string;

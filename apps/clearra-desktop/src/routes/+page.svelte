@@ -8,6 +8,7 @@
     CtkDrawerWorkspace,
     DocumentUtilityWorkspace,
     ForwardSearchWorkspace,
+    BoundaryRecoveryWorkspace,
     OperationSequenceWorkspace,
     PlayerWorkspace,
     SequenceDependenciesWorkspace,
@@ -18,7 +19,7 @@
   } from '@clearra/ui/workspace';
   import { onMount } from 'svelte';
 
-  const tools = ['pc', 'setup', 'setup-score', 'spin-structure', 'build', 'build-probability', 'sequence', 'sequence-dependencies', 'parity', 'fumen', 'render', 'to-gray', 'mirror', 'damage', 'spin-finder', 'ren', 'ctk', 'player'] as const;
+  const tools = ['pc', 'setup', 'setup-score', 'spin-structure', 'build', 'build-probability', 'recovery', 'sequence', 'sequence-dependencies', 'parity', 'fumen', 'render', 'to-gray', 'mirror', 'damage', 'spin-finder', 'ren', 'ctk', 'player'] as const;
 
   $: selectedTool = $page.url.searchParams.get('tool') ?? 'pc';
 
@@ -33,6 +34,8 @@
   <BuildV2Workspace runtime="desktop" />
 {:else if selectedTool === 'build-probability'}
   <BuildProbabilityWorkspace runtime="desktop" />
+{:else if selectedTool === 'recovery'}
+  <BoundaryRecoveryWorkspace runtime="desktop" />
 {:else if selectedTool === 'sequence-dependencies'}
   <SequenceDependenciesWorkspace runtime="desktop" />
 {:else if selectedTool === 'sequence'}

@@ -45,6 +45,8 @@ export type BuildV2Request = {
   targetDocument: string;
   solutionFormat: BuildV2DocumentFormat;
   solutionDocument: string;
+  pinSolutionFormat: BuildV2DocumentFormat;
+  pinSolutionDocument: string;
   queue: string;
   holdEnabled: boolean;
   holdPiece: 'empty' | 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
@@ -66,6 +68,7 @@ export type BuildV2ValidationCode =
   | 'source_pieces_invalid'
   | 'target_document_invalid'
   | 'solution_document_invalid'
+  | 'pin_solution_document_invalid'
   | 'objective_invalid'
   | 'initial_b2b_invalid'
   | 'worker_count_invalid';
@@ -145,6 +148,8 @@ export function createDefaultBuildV2Request(): BuildV2Request {
     targetDocument: '',
     solutionFormat: 'ctk3',
     solutionDocument: '',
+    pinSolutionFormat: 'ctk3',
+    pinSolutionDocument: '',
     queue: 'I',
     holdEnabled: true,
     holdPiece: 'empty',
@@ -235,6 +240,13 @@ export function buildV2ValidationCodes(request: BuildV2Request): BuildV2Validati
     errors.push('solution_document_invalid');
   }
   if (
+    request.capability === 'build.evaluate.minimals' &&
+    request.pinSolutionDocument.trim() &&
+    !validBuildV2Document(request.pinSolutionFormat, request.pinSolutionDocument)
+  ) {
+    errors.push('pin_solution_document_invalid');
+  }
+  if (
     buildV2ScoreCapable(request.capability) &&
     (!Number.isInteger(request.initialB2B) || request.initialB2B < 0 || request.initialB2B > 65535)
   ) {
@@ -276,6 +288,14 @@ export function buildV2CommandArguments(request: BuildV2Request): string[] {
       '--solution-document',
       request.solutionDocument.trim()
     );
+    if (request.capability === 'build.evaluate.minimals' && request.pinSolutionDocument.trim()) {
+      tokens.push(
+        '--pin-solution-format',
+        request.pinSolutionFormat,
+        '--pin-solution-document',
+        request.pinSolutionDocument.trim()
+      );
+    }
   }
   const parsedQueue = parseBrowserQueueInput(request.queue);
   tokens.push(

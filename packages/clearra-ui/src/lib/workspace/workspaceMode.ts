@@ -15,5 +15,6 @@ export type WorkspaceMode =
   | 'damage'
   | 'spin-finder'
   | 'ren'
+  | 'recovery'
   | 'ctk'
   | 'player';

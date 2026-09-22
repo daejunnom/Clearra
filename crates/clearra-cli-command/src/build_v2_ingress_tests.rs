@@ -1,6 +1,6 @@
 use clearra_app::{
-    encode_ctk3_compact, AppCommand, BuildObjective, BuildV2AppRequest, Ctk3Color, Ctk3Document,
-    Ctk3Page, Ctk3Piece, QueryEnvelope,
+    encode_ctk3_compact, AppCommand, AppContext, AppCoreExecutorService, AppServices, AppStatus,
+    BuildObjective, BuildV2AppRequest, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece, QueryEnvelope,
 };
 use clearra_pc_graph::request::{RequestedSearchBackend, SupplyWindowSize};
 
@@ -145,6 +145,74 @@ fn every_canonical_build_v2_path_lowers_to_its_exact_app_request_variant() {
             "{command_text}"
         );
     }
+}
+
+#[test]
+fn build_minimals_pin_is_bound_to_a_candidate_from_the_supplied_document() {
+    let document = colored_target_document();
+    let base = format!(
+        "clearra build evaluate minimals --solution-format ctk3 \
+         --solution-document {document} --queue I --no-hold"
+    );
+    let ordinary = CliCommandParser::parse(&base)
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let AppCommand::BuildV2(command) = ordinary.command() else {
+        panic!("expected Build v2 command");
+    };
+    let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
+        panic!("expected supplied minimum request");
+    };
+    let pinned_key = &request.supplied().candidate_keys()[0];
+    let pinned = CliCommandParser::parse(&format!("{base} --pin-candidate 1"))
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let AppCommand::BuildV2(command) = pinned.command() else {
+        panic!("expected pinned Build v2 command");
+    };
+    let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
+        panic!("expected pinned supplied minimum request");
+    };
+    assert_eq!(request.pinned_candidate_keys(), [pinned_key.clone()]);
+    let response = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    )
+    .run(pinned);
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    assert!(response.public_result_payload().is_some());
+    let duplicate = CliCommandParser::parse(&format!("{base} --pin-candidate 1 --pin-candidate 1"))
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let AppCommand::BuildV2(command) = duplicate.command() else {
+        panic!("expected duplicate-normalized Build v2 command");
+    };
+    let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
+        panic!("expected duplicate-normalized supplied minimum request");
+    };
+    assert_eq!(request.pinned_candidate_keys(), [pinned_key.clone()]);
+    assert!(CliCommandParser::parse(&format!("{base} --pin-candidate 999")).is_err());
+
+    let document_pinned = CliCommandParser::parse(&format!(
+        "{base} --pin-solution-format ctk3 --pin-solution-document {document}"
+    ))
+    .unwrap()
+    .to_app_request()
+    .unwrap();
+    let AppCommand::BuildV2(command) = document_pinned.command() else {
+        panic!("expected document-pinned Build v2 command");
+    };
+    let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
+        panic!("expected document-pinned supplied minimum request");
+    };
+    assert_eq!(request.pinned_candidate_keys(), [pinned_key.clone()]);
+    assert!(CliCommandParser::parse(&format!("{base} --pin-solution-format ctk3")).is_err());
+    assert!(CliCommandParser::parse(&format!(
+        "{base} --pin-candidate 1 --pin-solution-format ctk3 --pin-solution-document {document}"
+    ))
+    .is_err());
 }
 
 #[test]

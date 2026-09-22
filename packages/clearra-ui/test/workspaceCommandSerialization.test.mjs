@@ -20,11 +20,45 @@ import {
   buildProbabilityRequestForDesktop,
   createDefaultBuildProbabilityRequest
 } from '../src/lib/workspace/buildProbabilityModel.ts';
+import {
+  boundaryRecoveryArguments,
+  boundaryRecoveryCommand,
+  boundaryRecoveryDesktopRequest,
+  createBoundaryRecoveryRequest,
+  validateBoundaryRecoveryRequest
+} from '../src/lib/workspace/boundaryRecoveryModel.ts';
 
 const canonicalGuiPcFullSolutionArguments = readFileSync(
   new URL('../../../tests/fixtures/contracts/gui_pc_full_solution_argv.tsv', import.meta.url),
   'utf8'
 ).trimEnd().split('\t');
+
+test('boundary recovery keeps one fixed queue and independent bag B2B choices across browser and Desktop', () => {
+  const request = {
+    ...createBoundaryRecoveryRequest(),
+    initialBoardMask: 0x3f0n,
+    targetBoardMask: 0xc030n,
+    height: 4,
+    queue: 'IO',
+    stageOneCount: 1,
+    placements: 2,
+    maxEarlyPlacements: 1,
+    borrowSourcePosition: 2,
+    borrowPlacementMask: 0x300c000n,
+    holdEnabled: false,
+    preserveB2BStageOne: true,
+    preserveB2BStageTwo: false
+  };
+  assert.deepEqual(validateBoundaryRecoveryRequest(request), []);
+  const arguments_ = boundaryRecoveryArguments(request);
+  assert.deepEqual(arguments_.slice(0, 3), ['clearra', 'recovery', 'boundary']);
+  assert.deepEqual(arguments_.slice(arguments_.indexOf('--queue'), arguments_.indexOf('--queue') + 2), ['--queue', 'IO']);
+  assert.deepEqual(arguments_.slice(arguments_.indexOf('--borrow-source-position'), arguments_.indexOf('--borrow-source-position') + 2), ['--borrow-source-position', '2']);
+  assert.equal(arguments_.includes('--preserve-b2b-stage-one'), true);
+  assert.equal(arguments_.includes('--preserve-b2b-stage-two'), false);
+  assert.deepEqual(boundaryRecoveryDesktopRequest(request, 'ko').arguments, arguments_);
+  assert.deepEqual(tokenizeBrowserCommandForContract(boundaryRecoveryCommand(request)), arguments_);
+});
 const canonicalGuiBuildProbabilityB2bArguments = readFileSync(
   new URL('../../../tests/fixtures/contracts/gui_build_probability_b2b_argv.tsv', import.meta.url),
   'utf8'
@@ -124,6 +158,29 @@ test('minimum-cover GUI emits one canonical pc minimals command without a DTO co
     'command',
     'language'
   ]);
+});
+
+test('PC mandatory solutions stay bound to minimum-cover argv in browser and Desktop', () => {
+  const key = 'ctk1|I:000003c0';
+  const secondKey = 'ctk1|O:00000033';
+  const base = {
+    ...createDefaultWorkspaceRequest(),
+    scoreMode: 'minimum-cover',
+    pinnedSolutionKeys: [secondKey, key, secondKey]
+  };
+  const arguments_ = buildWorkspaceCommandArguments(base);
+  assert.deepEqual(arguments_.slice(arguments_.indexOf('--pin-key')), [
+    '--pin-key', secondKey, '--pin-key', key
+  ]);
+  assert.deepEqual(
+    tokenizeBrowserCommandForContract(buildWorkspaceCommand(base)),
+    arguments_
+  );
+  assert.deepEqual(workspaceRequestForDesktop(base, 'ko').arguments, arguments_);
+  assert.equal(
+    buildWorkspaceCommandArguments({ ...base, scoreMode: 'off' }).includes('--pin-key'),
+    false
+  );
 });
 
 test('queue-less Build minimum uses its finite standard bag as the sole source window', () => {

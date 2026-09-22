@@ -105,6 +105,7 @@ pub enum BuildCoverV2FacadeError {
 pub enum BuildEvaluateMinimalsV1FacadeError {
     QueryNotPortfolioCapable,
     SuppliedInputDoesNotMatchQuery,
+    PinnedCandidateInvalid,
     QuerySnapshotRejected { detail: String },
     QueryCompileFailed { detail: String },
     ExecutionFailed { detail: String },
@@ -1197,6 +1198,7 @@ impl BuildCoverV2Preparation {
 pub struct BuildEvaluateMinimalsV1Request {
     query: BuildProbabilityQuery,
     supplied: BuildSuppliedSolutionSetV1,
+    pinned_candidate_keys: Vec<String>,
 }
 
 impl BuildEvaluateMinimalsV1Request {
@@ -1214,7 +1216,31 @@ impl BuildEvaluateMinimalsV1Request {
             return Err(BuildEvaluateMinimalsV1FacadeError::SuppliedInputDoesNotMatchQuery);
         }
         validated_supplied_minimals_snapshot(&query, &supplied)?;
-        Ok(Self { query, supplied })
+        Ok(Self {
+            query,
+            supplied,
+            pinned_candidate_keys: Vec::new(),
+        })
+    }
+
+    pub fn with_pinned_candidate_keys(
+        mut self,
+        mut keys: Vec<String>,
+    ) -> Result<Self, BuildEvaluateMinimalsV1FacadeError> {
+        let mut seen = std::collections::BTreeSet::new();
+        keys.retain(|key| seen.insert(key.clone()));
+        if keys
+            .iter()
+            .any(|key| !self.supplied.candidate_keys().contains(key))
+        {
+            return Err(BuildEvaluateMinimalsV1FacadeError::PinnedCandidateInvalid);
+        }
+        self.pinned_candidate_keys = keys;
+        Ok(self)
+    }
+
+    pub fn pinned_candidate_keys(&self) -> &[String] {
+        &self.pinned_candidate_keys
     }
 
     pub const fn query(&self) -> &BuildProbabilityQuery {
@@ -1272,6 +1298,7 @@ impl BuildEvaluateMinimalsV1Request {
             &query,
             &self.supplied,
             &result,
+            &self.pinned_candidate_keys,
         )
         .map_err(|error| BuildEvaluateMinimalsV1FacadeError::ResultRejected {
             detail: format!("evidence:{error:?}"),
@@ -1327,6 +1354,10 @@ impl BuildSuppliedMinimumCoverV1 {
 
     pub fn canonical_candidate_keys(&self) -> &[String] {
         self.result.canonical_candidate_keys()
+    }
+
+    pub fn pinned_candidate_keys(&self) -> &[String] {
+        self.result.pinned_candidate_keys()
     }
 
     pub fn completeness(&self) -> BuildSuppliedReplayCompleteness {
@@ -2797,7 +2828,6 @@ mod tests {
         )
         .expect("same-board colored candidates");
         let input_identity = supplied.input_identity_sha256().to_owned();
-
         let output = BuildEvaluateMinimalsV1Request::new(one_piece_query(), supplied)
             .expect("query-bound supplied request")
             .execute(

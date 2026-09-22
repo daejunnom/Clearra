@@ -370,6 +370,19 @@ fn write_coverage_portfolio_runtime_page(
     object.boolean("enumeration_complete", page.enumeration_complete());
     object.string("member_page_number", &member_page_number.to_string());
     object.string("total_member_pages", &total_member_pages.to_string());
+    if !source.pinned_candidate_ids().is_empty() {
+        object.array("pinned_candidate_keys", |output| {
+            output.push('[');
+            for (index, candidate_id) in source.pinned_candidate_ids().iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                let candidate = &candidates[(*candidate_id as usize) - 1];
+                write_json_string(output, candidate.normalized_key());
+            }
+            output.push(']');
+        });
+    }
     object.array("members", |output| {
         output.push('[');
         for (member_index, candidate_id) in page.portfolio().candidate_ids()
@@ -1083,6 +1096,41 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
     object.string("contract", payload.contract());
     object.string("result_kind", payload.result_kind());
     object.object("content", |nested| match payload.content() {
+        ProductResultPayloadContent::BoundaryRecovery(report) => {
+            nested.string("payload_kind", "boundary-recovery");
+            nested.object("payload", |result| {
+                result.string("status", &report.status);
+                result.string("knowledge_basis", &report.knowledge_basis);
+                result.number("normal_states", report.normal_states);
+                result.number("max_early_placements", report.max_early_placements);
+                result.number("borrow_source_index", report.borrow_source_index);
+                result.string("borrow_placement_mask", &report.borrow_placement_mask);
+                result.number("recovery_states", report.recovery_states);
+                result.optional_number(
+                    "stage_one_checkpoint_step",
+                    report.stage_one_checkpoint_step,
+                );
+                result.optional_boolean("checkpoint_is_pc", report.checkpoint_is_pc);
+                result.number("borrowed_stage_two_count", report.borrowed_stage_two_count);
+                result.array("steps", |output| {
+                    write_object_array(output, &report.steps, |object, step| {
+                        object.number("source_queue_index", step.source_queue_index);
+                        object.string("piece", &step.piece);
+                        object.number("rotation", step.rotation);
+                        object.number("x", step.x);
+                        object.number("y", step.y);
+                        object.string("hold_decision", &step.hold_decision);
+                        object.string("placement_mask", &step.placement_mask);
+                        object.number("cleared_row_mask", step.cleared_row_mask);
+                        object.string("board_after_mask", &step.board_after_mask);
+                        object.number("cleared_lines", step.cleared_lines);
+                        object.boolean("recognized_spin", step.recognized_spin);
+                        object.boolean("b2b_active_after", step.b2b_active_after);
+                        object.boolean("stage_one_complete_after", step.stage_one_complete_after);
+                    });
+                });
+            });
+        }
         ProductResultPayloadContent::CoveragePortfolio(page) => {
             nested.string("payload_kind", "coverage-portfolio");
             nested.object("payload", |page_object| {
@@ -1107,6 +1155,11 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                     })
                 });
                 page_object.boolean("page_handle_available", page.page_handle_available());
+                if !page.pinned_candidate_keys().is_empty() {
+                    page_object.array("pinned_candidate_keys", |output| {
+                        write_string_array(output, page.pinned_candidate_keys())
+                    });
+                }
                 if let Some(selection) = page.canonical_selection() {
                     page_object.string("canonical_selection", selection);
                 }
@@ -1620,6 +1673,11 @@ fn write_build_v2_payload(
     object.array("canonical_candidate_keys", |output| {
         write_string_array(output, payload.canonical_candidate_keys())
     });
+    if !payload.pinned_candidate_keys().is_empty() {
+        object.array("pinned_candidate_keys", |output| {
+            write_string_array(output, payload.pinned_candidate_keys())
+        });
+    }
     object.array("winners", |output| {
         write_object_array(output, payload.winners(), |row, winner| {
             row.string("pattern_id", winner.pattern_id());

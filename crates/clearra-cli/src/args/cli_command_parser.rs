@@ -64,6 +64,17 @@ pub(crate) fn parse_command(
         "spin-structure" if has_help(command_args) => {
             Ok(ParsedCliCommand::Help(CliHelpTopic::SpinStructure))
         }
+        "recovery"
+            if command_args.first().map(String::as_str) == Some("boundary")
+                && has_help(command_args) =>
+        {
+            Ok(ParsedCliCommand::Help(CliHelpTopic::Product(
+                super::ProductHelpTopic::BoundaryRecovery,
+            )))
+        }
+        "recovery" if command_args.first().map(String::as_str) == Some("boundary") => Ok(
+            ParsedCliCommand::Product(product_tokens(command, command_args)),
+        ),
         "build" | "build-probability" | "finesse" | "damage" | "spin-finder" | "ren"
         | "spin-structure" | "chance" | "minimals" | "score" | "special-minimals"
         | "special_minimals" | "special-cover" | "special_cover" | "score-minimals"

@@ -5,6 +5,7 @@ export { default as SpinStructureWorkspace } from './SpinStructureWorkspace.svel
 export { default as BuildProbabilityWorkspace } from './BuildProbabilityWorkspace.svelte';
 export { default as BuildV2Workspace } from './BuildV2Workspace.svelte';
 export { default as ForwardSearchWorkspace } from './ForwardSearchWorkspace.svelte';
+export { default as BoundaryRecoveryWorkspace } from './BoundaryRecoveryWorkspace.svelte';
 export { default as OperationSequenceWorkspace } from './OperationSequenceWorkspace.svelte';
 export { default as SequenceDependenciesWorkspace } from './SequenceDependenciesWorkspace.svelte';
 export { default as DocumentUtilityWorkspace } from './DocumentUtilityWorkspace.svelte';

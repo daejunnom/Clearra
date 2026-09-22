@@ -1,3 +1,4 @@
+pub mod boundary_recovery_app_command;
 pub mod build_probability_app_command;
 pub mod build_v2_app_command;
 pub mod continue_app_command;
@@ -31,6 +32,7 @@ pub mod setup_score_app_command;
 pub mod spin_structure_app_command;
 pub mod verify_app_command;
 
+pub use boundary_recovery_app_command::BoundaryRecoveryAppCommand;
 pub use build_probability_app_command::{BuildProbabilityAppCommand, BuildProbabilityResultMode};
 pub use build_v2_app_command::{BuildV2AppCommand, BuildV2AppRequest};
 pub use continue_app_command::ContinueAppCommand;

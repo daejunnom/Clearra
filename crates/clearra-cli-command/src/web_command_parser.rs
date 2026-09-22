@@ -10,8 +10,8 @@ use clearra_app::{
 use clearra_core_domain::board::standard_pc_board::Board256Mask;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_forward_search::{
-    ForwardLineClearPolicy, ForwardPieceSource, ForwardSearchMode, ForwardSearchQuery,
-    ForwardSpinCategory, ForwardSpinLineRequirement, ForwardSpinTarget,
+    BoundaryRecoveryQuery, ForwardLineClearPolicy, ForwardPieceSource, ForwardSearchMode,
+    ForwardSearchQuery, ForwardSpinCategory, ForwardSpinLineRequirement, ForwardSpinTarget,
 };
 use clearra_fumen::SourceFumenColoredFieldSet;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
@@ -351,6 +351,9 @@ impl WebCommandParser {
             "ren" => {
                 parse_forward_command(&tokens[cursor..], false, true, worker_hardware_limit.max(1))
             }
+            "recovery" if tokens.get(cursor).map(String::as_str) == Some("boundary") => {
+                parse_boundary_recovery_command(&tokens[cursor + 1..])
+            }
             "spin-structure" => match tokens.get(cursor).map(String::as_str) {
                 Some("search") => parse_spin_structure_command(
                     &tokens[cursor + 1..],
@@ -564,7 +567,15 @@ fn parse_pc_minimals_command(
     tokens: &[String],
     worker_hardware_limit: usize,
 ) -> Result<WebCommandRequest, WebCommandError> {
-    for token in tokens {
+    let mut forwarded = Vec::with_capacity(tokens.len() + 2);
+    let mut pinned_keys = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < tokens.len() {
+        let token = &tokens[cursor];
+        if token == "--pin-key" {
+            pinned_keys.push(next_value(tokens, &mut cursor, "--pin-key")?.to_owned());
+            continue;
+        }
         if matches!(
             token.as_str(),
             "--objective"
@@ -579,14 +590,15 @@ fn parse_pc_minimals_command(
                 format!("pc minimals does not accept an explicit {token} override"),
             ));
         }
+        forwarded.push(token.clone());
+        cursor += 1;
     }
-    let mut forwarded = Vec::with_capacity(tokens.len() + 2);
-    forwarded.extend_from_slice(tokens);
     forwarded.extend(["--objective".to_owned(), "minimum-cover".to_owned()]);
-    parse_pc_command(&forwarded, worker_hardware_limit, false).map(|request| {
+    parse_pc_command(&forwarded, worker_hardware_limit, false).and_then(|request| {
         request
             .with_count_policy(PcCountPolicy::CountUnique)
             .with_pc_minimals_product_capability(PcMinimalsIngressOrigin::CanonicalPcMinimals)
+            .with_pc_minimum_pins(pinned_keys)
     })
 }
 
@@ -2234,6 +2246,201 @@ fn setup_next_cycle_remaining_count(cycle: u8) -> usize {
     }
 }
 
+fn parse_boundary_recovery_command(
+    tokens: &[String],
+) -> Result<WebCommandRequest, WebCommandError> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut initial_board = None;
+    let mut final_board = None;
+    let mut height = None;
+    let mut queue = None;
+    let mut stage_one_queue_len = None;
+    let mut required_placements = None;
+    let mut max_early_placements = 1_u8;
+    let mut borrow_source_index = None;
+    let mut borrow_placement_mask = None;
+    let mut hold_enabled = true;
+    let mut rule_profile = RuleProfileId::SrsPlus;
+    let mut spin_profile = SpinProfileId::AllSpinPlus;
+    let mut preserve_b2b_by_stage = [false; 2];
+    let mut initial_b2b = true;
+    let mut max_states = 100_000;
+    let mut cursor = 0;
+    while cursor < tokens.len() {
+        let option_cursor = cursor;
+        let option = tokens[cursor].as_str();
+        if !option.starts_with("--") {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("unexpected boundary recovery token '{option}'"),
+            ));
+        }
+        if !seen.insert(option) {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("repeated boundary recovery option '{option}'"),
+            ));
+        }
+        match option {
+            "--initial-board-mask" => {
+                initial_board = Some(Board256Mask::from_words(parse_board_words(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?));
+            }
+            "--target-board-mask" => {
+                final_board = Some(Board256Mask::from_words(parse_board_words(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?));
+            }
+            "--height" => {
+                height = Some(parse_positive(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?);
+            }
+            "--queue" => {
+                queue = Some(
+                    clearra_supply::queue::queue_parser::parse_piece_sequence(next_value(
+                        tokens,
+                        &mut cursor,
+                        option,
+                    )?)
+                    .map_err(|error| {
+                        WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            format!("invalid boundary recovery queue: {error:?}"),
+                        )
+                    })?,
+                );
+            }
+            "--stage-one-count" => {
+                stage_one_queue_len = Some(parse_positive(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?);
+            }
+            "--placements" => {
+                required_placements = Some(parse_positive(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?);
+            }
+            "--max-early-placements" => {
+                max_early_placements = match next_value(tokens, &mut cursor, option)? {
+                    "0" => 0,
+                    "1" => 1,
+                    _ => {
+                        return Err(WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            "--max-early-placements must be 0 or 1",
+                        ))
+                    }
+                };
+            }
+            "--borrow-source-position" => {
+                let position: usize =
+                    parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
+                borrow_source_index = Some(position - 1);
+            }
+            "--borrow-placement-mask" => {
+                borrow_placement_mask = Some(Board256Mask::from_words(parse_board_words(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?));
+            }
+            "--hold" => hold_enabled = true,
+            "--no-hold" => hold_enabled = false,
+            "--rule" => {
+                let value = next_value(tokens, &mut cursor, option)?;
+                rule_profile = RuleProfileId::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid boundary recovery rule '{value}'"),
+                    )
+                })?;
+            }
+            "--spin-profile" => {
+                let value = next_value(tokens, &mut cursor, option)?;
+                spin_profile = SpinProfileId::parse(value).ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("invalid boundary recovery spin profile '{value}'"),
+                    )
+                })?;
+            }
+            "--preserve-b2b-stage-one" => preserve_b2b_by_stage[0] = true,
+            "--preserve-b2b-stage-two" => preserve_b2b_by_stage[1] = true,
+            "--initial-b2b" => {
+                let value = next_value(tokens, &mut cursor, option)?;
+                initial_b2b = match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => {
+                        return Err(WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            "--initial-b2b must be 0 or 1",
+                        ))
+                    }
+                };
+            }
+            "--max-states" => {
+                max_states = parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
+            }
+            _ => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("unsupported boundary recovery option '{option}'"),
+                ))
+            }
+        }
+        if cursor == option_cursor {
+            cursor += 1;
+        }
+    }
+    if seen.contains("--hold") && seen.contains("--no-hold") {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "boundary recovery cannot combine --hold with --no-hold",
+        ));
+    }
+    let required = |name| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            format!("boundary recovery requires {name}"),
+        )
+    };
+    Ok(WebCommandRequest::boundary_recovery(
+        BoundaryRecoveryQuery {
+            initial_board: initial_board.ok_or_else(|| required("--initial-board-mask"))?,
+            final_board: final_board.ok_or_else(|| required("--target-board-mask"))?,
+            height: height.ok_or_else(|| required("--height"))?,
+            queue: queue.ok_or_else(|| required("--queue"))?,
+            stage_one_queue_len: stage_one_queue_len
+                .ok_or_else(|| required("--stage-one-count"))?,
+            required_placements: required_placements.ok_or_else(|| required("--placements"))?,
+            max_early_placements,
+            borrow_source_index: if max_early_placements == 0 {
+                borrow_source_index.unwrap_or(0)
+            } else {
+                borrow_source_index.ok_or_else(|| required("--borrow-source-position"))?
+            },
+            borrow_placement_mask: if max_early_placements == 0 {
+                borrow_placement_mask.unwrap_or(Board256Mask::EMPTY)
+            } else {
+                borrow_placement_mask.ok_or_else(|| required("--borrow-placement-mask"))?
+            },
+            hold_enabled,
+            rule_profile,
+            spin_profile,
+            preserve_b2b_by_stage,
+            initial_b2b,
+            max_states,
+        },
+    ))
+}
+
 fn parse_forward_command(
     tokens: &[String],
     spin_finder: bool,
@@ -2630,6 +2837,9 @@ fn parse_build_v2_command(
     let mut target_document = None;
     let mut solution_format = None;
     let mut solution_document = None;
+    let mut pin_solution_format = None;
+    let mut pin_solution_document = None;
+    let mut pinned_candidate_ordinals = Vec::new();
     let mut queue = None;
     let mut patterns = None;
     let mut hold_piece = None;
@@ -2707,6 +2917,28 @@ fn parse_build_v2_command(
             "--solution-document" => {
                 let value = next_value(options, &mut cursor, "--solution-document")?.to_owned();
                 set_build_v2_option(&mut solution_document, value, "--solution-document")?;
+            }
+            "--pin-solution-format" => {
+                let value = next_value(options, &mut cursor, "--pin-solution-format")?;
+                let format = FieldDocumentFormat::parse(value).map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!(
+                            "invalid --pin-solution-format value '{value}'; expected ctk3 or fumen"
+                        ),
+                    )
+                })?;
+                set_build_v2_option(&mut pin_solution_format, format, "--pin-solution-format")?;
+            }
+            "--pin-solution-document" => {
+                let value = next_value(options, &mut cursor, "--pin-solution-document")?.to_owned();
+                set_build_v2_option(&mut pin_solution_document, value, "--pin-solution-document")?;
+            }
+            "--pin-candidate" => {
+                pinned_candidate_ordinals.push(parse_positive(
+                    next_value(options, &mut cursor, "--pin-candidate")?,
+                    "--pin-candidate",
+                )?);
             }
             "--queue" => {
                 let value = next_value(options, &mut cursor, "--queue")?.to_owned();
@@ -3013,7 +3245,24 @@ fn parse_build_v2_command(
         )?
     };
 
+    if pin_solution_format.is_some() != pin_solution_document.is_some() {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--pin-solution-format and --pin-solution-document must be supplied together",
+        ));
+    }
+    if pin_solution_document.is_some() && !pinned_candidate_ordinals.is_empty() {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "use either --pin-solution-document or --pin-candidate",
+        ));
+    }
+    if let (Some(format), Some(document)) = (pin_solution_format, pin_solution_document.as_deref())
+    {
+        input = input.with_pinned_solution_document(format, document)?;
+    }
     input = input
+        .with_pinned_candidate_ordinals(pinned_candidate_ordinals)?
         .with_queue_knowledge(queue_knowledge.unwrap_or_default())
         .with_hold_piece(hold_piece)
         .with_allow_hold(hold_enabled);

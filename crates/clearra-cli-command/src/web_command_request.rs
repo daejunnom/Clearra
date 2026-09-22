@@ -1,9 +1,9 @@
 // SRP rationale: this module has one change reason: lowering canonical CLI commands into typed application requests.
 use clearra_app::{
-    AppCommand, AppRequest, BuildProbabilityAppCommand, DamageAppCommand,
-    FieldDocumentTransformAppCommand, FieldDocumentTransformKind, FumenAppCommand,
-    OperationDocumentProblem, OperationSequenceAppCommand, ParityAppCommand, PcAppCommand,
-    PcChanceIngressOrigin, PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin,
+    AppCommand, AppRequest, BoundaryRecoveryAppCommand, BuildProbabilityAppCommand,
+    DamageAppCommand, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
+    FumenAppCommand, OperationDocumentProblem, OperationSequenceAppCommand, ParityAppCommand,
+    PcAppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin,
     PcPathIngressOrigin, PcResultProjection, PcSaveIngressOrigin, PcScoreIngressOrigin,
     PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, PercentAppCommand,
     ProductCapabilityContract, RenAppCommand, RenderAppCommand, RequestStructuralProfiles,
@@ -13,7 +13,8 @@ use clearra_app::{
 };
 use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_forward_search::{ForwardSearchMode, ForwardSearchQuery};
+use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
+use clearra_forward_search::{BoundaryRecoveryQuery, ForwardSearchMode, ForwardSearchQuery};
 use clearra_objectives::policy::{
     objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
 };
@@ -51,6 +52,7 @@ pub struct WebCommandRequest {
     count_policy: PcCountPolicy,
     objective: ObjectivePolicy,
     pc_result_projection: PcResultProjection,
+    pc_minimum_pins: Vec<String>,
     pc_failed_queue_origin: Option<PcFailedQueueIngressOrigin>,
     product_capability_contract: Option<ProductCapabilityContract>,
     queue_observation_policy: QueueObservationPolicy,
@@ -59,6 +61,7 @@ pub struct WebCommandRequest {
     build_v2: Option<WebBuildV2Input>,
     setup_score: Option<WebSetupScoreInput>,
     forward_search: Option<ForwardSearchQuery>,
+    boundary_recovery: Option<BoundaryRecoveryQuery>,
     spin_structure: Option<SpinStructureQuery>,
     spin_structure_product_mode: SpinStructureProductMode,
     percent_query: Option<PcScenarioQuery>,
@@ -114,6 +117,7 @@ impl WebCommandRequest {
             count_policy: PcCountPolicy::CountUnique,
             objective: ObjectivePolicy::unique(),
             pc_result_projection: PcResultProjection::Standard,
+            pc_minimum_pins: Vec::new(),
             pc_failed_queue_origin: None,
             product_capability_contract: None,
             queue_observation_policy: QueueObservationPolicy::default(),
@@ -122,6 +126,7 @@ impl WebCommandRequest {
             build_v2: None,
             setup_score: None,
             forward_search: None,
+            boundary_recovery: None,
             spin_structure: None,
             spin_structure_product_mode: SpinStructureProductMode::Search,
             percent_query: None,
@@ -178,6 +183,7 @@ impl WebCommandRequest {
             count_policy: PcCountPolicy::CountUnique,
             objective: ObjectivePolicy::unique(),
             pc_result_projection: PcResultProjection::Standard,
+            pc_minimum_pins: Vec::new(),
             pc_failed_queue_origin: None,
             product_capability_contract: None,
             queue_observation_policy: QueueObservationPolicy::default(),
@@ -186,6 +192,7 @@ impl WebCommandRequest {
             build_v2: None,
             setup_score: None,
             forward_search: None,
+            boundary_recovery: None,
             spin_structure: None,
             spin_structure_product_mode: SpinStructureProductMode::Search,
             percent_query: None,
@@ -385,6 +392,14 @@ impl WebCommandRequest {
     }
 }
 impl WebCommandRequest {
+    pub fn boundary_recovery(query: BoundaryRecoveryQuery) -> Self {
+        let mut request = Self::pc(query.height, RequestedSearchBackend::Cpu);
+        request.command_kind = "boundary-recovery".to_owned();
+        request.allow_backend_fallback = false;
+        request.boundary_recovery = Some(query);
+        request
+    }
+
     pub fn forward(command_kind: &str, query: ForwardSearchQuery) -> Self {
         let mut request = Self::pc(0, RequestedSearchBackend::Cpu);
         request.command_kind = command_kind.to_owned();
@@ -611,6 +626,27 @@ impl WebCommandRequest {
         self.pc_result_projection = PcResultProjection::MinimumCoverV2(origin);
         self.product_capability_contract = Some(ProductCapabilityContract::PcMinimals);
         self
+    }
+
+    pub fn with_pc_minimum_pins(mut self, mut keys: Vec<String>) -> Result<Self, WebCommandError> {
+        if self.pc_result_projection.minimals_origin().is_none() && !keys.is_empty() {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "pins require pc minimals",
+            ));
+        }
+        for key in &keys {
+            NormalizedTilingSolutionKey::parse_canonical(key).map_err(|_| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "invalid normalized PC solution key",
+                )
+            })?;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        keys.retain(|key| seen.insert(key.clone()));
+        self.pc_minimum_pins = keys;
+        Ok(self)
     }
 
     pub fn with_pc_path_product_capability(mut self, origin: PcPathIngressOrigin) -> Self {
@@ -1380,6 +1416,17 @@ impl WebCommandRequest {
             };
             return self.attach_product_capability_contract(request);
         }
+        if self.command_kind == "boundary-recovery" {
+            let query = self.boundary_recovery.clone().ok_or_else(|| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "boundary recovery is missing its typed query",
+                )
+            })?;
+            return self.attach_product_capability_contract(AppRequest::new(
+                AppCommand::BoundaryRecovery(BoundaryRecoveryAppCommand::new(query)),
+            ));
+        }
         if matches!(self.command_kind.as_str(), "damage" | "spin-finder" | "ren") {
             let query = self.forward_search.clone().ok_or_else(|| {
                 WebCommandError::new(
@@ -1791,7 +1838,8 @@ impl WebCommandRequest {
                 })
             } else {
                 let command = ScenarioAppCommand::new(query)
-                    .with_result_projection(self.pc_result_projection);
+                    .with_result_projection(self.pc_result_projection)
+                    .with_pinned_minimum_keys(self.pc_minimum_pins.clone());
                 command.validate_result_projection().map_err(|reason| {
                     WebCommandError::new(WebCommandErrorCode::InvalidValue, reason)
                 })?;
@@ -1842,8 +1890,9 @@ impl WebCommandRequest {
                     .with_failed_pattern_limit(self.percent_failed_pattern_limit),
             })
         } else {
-            let command =
-                PcAppCommand::new(query).with_result_projection(self.pc_result_projection);
+            let command = PcAppCommand::new(query)
+                .with_result_projection(self.pc_result_projection)
+                .with_pinned_minimum_keys(self.pc_minimum_pins.clone());
             command.validate_result_projection().map_err(|reason| {
                 WebCommandError::new(WebCommandErrorCode::InvalidValue, reason)
             })?;

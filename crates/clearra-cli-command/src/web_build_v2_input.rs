@@ -131,6 +131,7 @@ pub struct WebBuildV2Input {
     queue_knowledge: BuildQueueKnowledge,
     score_profile: Option<BuildScoreProfile>,
     initial_b2b: Option<u16>,
+    pinned_candidate_keys: Vec<String>,
 }
 
 impl WebBuildV2Input {
@@ -155,6 +156,7 @@ impl WebBuildV2Input {
             queue_knowledge: BuildQueueKnowledge::Oracle,
             score_profile: None,
             initial_b2b: None,
+            pinned_candidate_keys: Vec::new(),
         })
     }
 
@@ -188,6 +190,7 @@ impl WebBuildV2Input {
             queue_knowledge: BuildQueueKnowledge::Oracle,
             score_profile: score_capable.then_some(BuildScoreProfile::default()),
             initial_b2b: score_capable.then_some(0),
+            pinned_candidate_keys: Vec::new(),
         })
     }
 
@@ -235,12 +238,96 @@ impl WebBuildV2Input {
             queue_knowledge: BuildQueueKnowledge::Oracle,
             score_profile: score_capable.then_some(BuildScoreProfile::default()),
             initial_b2b: score_capable.then_some(0),
+            pinned_candidate_keys: Vec::new(),
         })
     }
 
     pub fn with_queue_knowledge(mut self, queue_knowledge: BuildQueueKnowledge) -> Self {
         self.queue_knowledge = queue_knowledge;
         self
+    }
+
+    pub fn with_pinned_candidate_keys(
+        mut self,
+        mut keys: Vec<String>,
+    ) -> Result<Self, WebCommandError> {
+        if self.capability != WebBuildV2Capability::EvaluateMinimals && !keys.is_empty() {
+            return Err(invalid(
+                "only build.evaluate.minimals accepts pinned candidates",
+            ));
+        }
+        if !keys.is_empty() {
+            let WebBuildV2Source::Supplied(supplied) = &self.source else {
+                return Err(invalid(
+                    "pinned candidates require a supplied solution document",
+                ));
+            };
+            if keys
+                .iter()
+                .any(|key| !supplied.candidate_keys().contains(key))
+            {
+                return Err(invalid(
+                    "pinned solution is not in the supplied solution document",
+                ));
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        keys.retain(|key| seen.insert(key.clone()));
+        self.pinned_candidate_keys = keys;
+        Ok(self)
+    }
+
+    /// The second CLI input contains the solutions to keep in every minimum
+    /// portfolio. Decode it through the same normalization as the first input
+    /// so document order and command-line escaping never identify a solution.
+    pub fn with_pinned_solution_document(
+        self,
+        format: FieldDocumentFormat,
+        document: &str,
+    ) -> Result<Self, WebCommandError> {
+        if self.capability != WebBuildV2Capability::EvaluateMinimals {
+            return Err(invalid(
+                "only build.evaluate.minimals accepts a pinned solution document",
+            ));
+        }
+        let decoded = decode_document(format, document, "pinned solution")?;
+        let normalized = decoded.target();
+        let pins = BuildSuppliedSolutionSetV1::new(
+            normalized.visible_height(),
+            normalized.page_count(),
+            normalized.document_hash().to_owned(),
+            normalized.identities().iter().copied(),
+        )
+        .map_err(|error| invalid(format!("invalid pinned solution document: {error:?}")))?;
+        self.with_pinned_candidate_keys(pins.candidate_keys().to_vec())
+    }
+
+    /// CLI-facing one-based indices in the canonical supplied candidate map.
+    /// Normalized solution keys may contain command-control characters, so
+    /// they are never required as raw command-line tokens.
+    pub fn with_pinned_candidate_ordinals(
+        self,
+        ordinals: Vec<usize>,
+    ) -> Result<Self, WebCommandError> {
+        if ordinals.is_empty() {
+            return Ok(self);
+        }
+        let WebBuildV2Source::Supplied(supplied) = &self.source else {
+            return Err(invalid(
+                "pinned candidates require a supplied solution document",
+            ));
+        };
+        let keys = ordinals
+            .into_iter()
+            .map(|ordinal| {
+                ordinal
+                    .checked_sub(1)
+                    .and_then(|index| supplied.candidate_keys().get(index))
+                    .cloned()
+                    .ok_or_else(|| invalid("pinned candidate ordinal is out of range"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.with_pinned_candidate_keys(keys)
     }
 
     pub fn with_hold_piece(mut self, hold_piece: Option<PieceKind>) -> Self {
@@ -386,6 +473,9 @@ impl WebBuildV2Input {
             }
             (WebBuildV2Capability::EvaluateMinimals, WebBuildV2Source::Supplied(supplied)) => {
                 BuildEvaluateMinimalsV1Request::new(query, supplied.clone())
+                    .and_then(|request| {
+                        request.with_pinned_candidate_keys(self.pinned_candidate_keys.clone())
+                    })
                     .map(BuildV2AppCommand::build_evaluate_minimals)
                     .map_err(|error| request_error(self.capability, error))
             }

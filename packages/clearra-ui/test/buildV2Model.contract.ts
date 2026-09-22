@@ -73,6 +73,22 @@ const nonScore = buildV2RequestForDesktop(validRequest('build.evaluate.cover'), 
 assert.equal(nonScore.arguments.includes('--score-profile'), false);
 assert.equal(nonScore.arguments.includes('--initial-b2b'), false);
 
+const pinnedMinimum = {
+  ...validRequest('build.evaluate.minimals'),
+  pinSolutionDocument: 'ctk3_selected'
+};
+assert.deepEqual(buildV2ValidationCodes(pinnedMinimum), []);
+assert.equal(optionValue(buildV2CommandArguments(pinnedMinimum), '--pin-solution-format'), 'ctk3');
+assert.equal(
+  optionValue(buildV2RequestForDesktop(pinnedMinimum, 'ko').arguments, '--pin-solution-document'),
+  'ctk3_selected'
+);
+assert.equal(
+  buildV2CommandArguments({ ...pinnedMinimum, capability: 'build.evaluate.cover' })
+    .includes('--pin-solution-document'),
+  false
+);
+
 const spacedDocument = {
   ...validRequest('build.setup'),
   targetDocument: 'ctk3_test with-space'

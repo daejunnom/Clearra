@@ -311,6 +311,11 @@ fn command_profile_expectations(command: &AppCommand) -> CommandProfileExpectati
         AppCommand::Damage(command) => profiles_for_forward(command.query()),
         AppCommand::SpinFinder(command) => profiles_for_forward(command.query()),
         AppCommand::Ren(command) => profiles_for_forward(command.query()),
+        AppCommand::BoundaryRecovery(command) => CommandProfileExpectations {
+            rule: Some(command.query().rule_profile),
+            spin: Some(command.query().spin_profile),
+            score: None,
+        },
         AppCommand::SpinStructure(command) => CommandProfileExpectations {
             rule: Some(command.query().rule_profile),
             spin: Some(command.query().mode.profile().id()),
