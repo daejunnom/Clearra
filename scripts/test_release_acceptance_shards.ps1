@@ -152,4 +152,17 @@ if ($rustExact.IndexOf('if ($result.ExitCode -ne 0)', [System.StringComparison]:
 }
 Write-Output 'release_acceptance_shard_test=rust-collects-package-failures-without-authority status=passed'
 
+foreach ($marker in @(
+    'ClearraReleaseAcceptanceMode',
+    'clearra-accelerator-product-host',
+    'clearra-accelerator-release-gate',
+    '--require-all-v0.8.1',
+    'v0.8.1 accelerator qualification gate failed'
+)) {
+    if ($rustExact.IndexOf($marker, [System.StringComparison]::Ordinal) -lt 0) {
+        throw "RustExactTests is missing the v0.8.1 accelerator release gate marker '$marker'."
+    }
+}
+Write-Output 'release_acceptance_shard_test=v081-accelerator-qualification-fail-closed status=passed'
+
 & (Join-Path $PSScriptRoot 'test_independent_gate_sequence.ps1')

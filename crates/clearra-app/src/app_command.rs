@@ -67,6 +67,47 @@ pub enum AppCommand {
 }
 
 impl AppCommand {
+    /// Returns the request-owned exact accelerator policy for command families
+    /// that lower to the PC/BuildUp executor. Hosts use this before loading a
+    /// profile asset, so an explicit per-request disable performs no disk or
+    /// network work and cannot inherit a previous session's snapshot.
+    pub fn exact_accelerator_policy(&self) -> Option<(bool, bool)> {
+        let policy = match self {
+            Self::Pc(command) => command.query().execution_policy(),
+            Self::Scenario(command) => command.query().execution_policy(),
+            Self::Path(command) => command.query().execution_policy(),
+            Self::Percent(command) => {
+                return command
+                    .query()
+                    .map(|query| query.execution_policy())
+                    .or_else(|| {
+                        command
+                            .opening_query()
+                            .map(|query| query.execution_policy())
+                    })
+                    .map(|policy| {
+                        (
+                            policy.exact_legal_board_enabled(),
+                            policy.conditioned_reachability_enabled(),
+                        )
+                    });
+            }
+            Self::BuildProbability(command) => command.query().core_query().execution_policy(),
+            Self::Setup(command) => {
+                return Some((
+                    command.query().exact_legal_board_enabled(),
+                    command.query().conditioned_reachability_enabled(),
+                ));
+            }
+            _ => return None,
+        };
+        Some((
+            policy.exact_legal_board_enabled(),
+            policy.conditioned_reachability_enabled(),
+        ))
+    }
+}
+impl AppCommand {
     pub fn kind(&self) -> AppCommandKind {
         match self {
             Self::Pc(_) | Self::Scenario(_) => AppCommandKind::Pc,

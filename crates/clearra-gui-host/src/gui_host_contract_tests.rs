@@ -851,6 +851,29 @@ mod case_gui_worker_policy_preserves_auto_and_full_cpu_opt_in {
     }
 }
 
+mod case_gui_exact_accelerators_are_independently_disableable {
+    use crate::request::BackendRequestBuilder;
+
+    use super::*;
+
+    #[test]
+    fn gui_exact_accelerators_are_independently_disableable() {
+        let default = BackendRequestBuilder::build_execution_policy(&GuiBackendForm::default())
+            .expect("default GUI execution policy");
+        assert!(default.exact_legal_board_enabled());
+        assert!(default.conditioned_reachability_enabled());
+
+        let disabled = BackendRequestBuilder::build_execution_policy(
+            &GuiBackendForm::default()
+                .with_exact_legal_board_enabled(false)
+                .with_conditioned_reachability_enabled(false),
+        )
+        .expect("disabled exact accelerators");
+        assert!(!disabled.exact_legal_board_enabled());
+        assert!(!disabled.conditioned_reachability_enabled());
+    }
+}
+
 mod case_gui_app_state_preserves_execution_job_and_diagnostics {
     use super::*;
 

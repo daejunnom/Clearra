@@ -20,6 +20,11 @@ import {
   buildProbabilityRequestForDesktop,
   createDefaultBuildProbabilityRequest
 } from '../src/lib/workspace/buildProbabilityModel.ts';
+import {
+  buildSetupFinderCommandArguments,
+  createDefaultSetupFinderRequest,
+  setupFinderRequestForDesktop
+} from '../src/lib/workspace/setupFinderModel.ts';
 
 const canonicalGuiPcFullSolutionArguments = readFileSync(
   new URL('../../../tests/fixtures/contracts/gui_pc_full_solution_argv.tsv', import.meta.url),
@@ -165,6 +170,57 @@ test('Build B2B emits the canonical serial and distributed WASM argv in browser 
       tokenizeBrowserCommandForContract(serializeCliCommandArguments(arguments_)),
       arguments_
     );
+  }
+});
+
+test('exact accelerator opt-outs serialize identically for PC, Build minimum, and Setup', () => {
+  const expected = ['--no-legal-board', '--no-conditioned-reachability'];
+  const cases = [
+    {
+      arguments: buildWorkspaceCommandArguments({
+        ...createDefaultWorkspaceRequest(),
+        legalBoardEnabled: false,
+        conditionedReachabilityEnabled: false
+      }),
+      desktop: workspaceRequestForDesktop({
+        ...createDefaultWorkspaceRequest(),
+        legalBoardEnabled: false,
+        conditionedReachabilityEnabled: false
+      }, 'en').arguments
+    },
+    {
+      arguments: buildProbabilityCommandArguments({
+        ...createDefaultBuildProbabilityRequest(),
+        resultMode: 'minimum-solutions',
+        aggregation: 'buildability',
+        legalBoardEnabled: false,
+        conditionedReachabilityEnabled: false
+      }),
+      desktop: buildProbabilityRequestForDesktop({
+        ...createDefaultBuildProbabilityRequest(),
+        resultMode: 'minimum-solutions',
+        aggregation: 'buildability',
+        legalBoardEnabled: false,
+        conditionedReachabilityEnabled: false
+      }, 'en').arguments
+    },
+    {
+      arguments: buildSetupFinderCommandArguments({
+        ...createDefaultSetupFinderRequest(),
+        legalBoardEnabled: false,
+        conditionedReachabilityEnabled: false
+      }),
+      desktop: setupFinderRequestForDesktop({
+        ...createDefaultSetupFinderRequest(),
+        legalBoardEnabled: false,
+        conditionedReachabilityEnabled: false
+      }, 'en').arguments
+    }
+  ];
+
+  for (const entry of cases) {
+    assert.deepEqual(entry.desktop, entry.arguments);
+    for (const option of expected) assert.equal(entry.arguments.includes(option), true);
   }
 });
 

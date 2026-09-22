@@ -42,6 +42,7 @@ path = "tests/canonical_witness_contract.rs"
 required-features = ["wasm-cpu-runtime"]
 
 [dependencies]
+clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
 clearra-app = { path = "../clearra-app" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }

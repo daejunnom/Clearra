@@ -12,6 +12,12 @@ mod boundary;
 mod boundary_completion;
 mod boundary_dead;
 mod boundary_dead_store;
+// The package also compiles `domain.rs` into the small asset-generator
+// library, where the legal-board-only entry points are consumed.  The full
+// qualification binary deliberately owns a separate module instance and does
+// not expose those library entry points, so they are expected dead code in
+// this one compilation unit.
+#[allow(dead_code)]
 mod domain;
 mod indexed_path;
 mod offline_family;

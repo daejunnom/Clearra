@@ -53,6 +53,23 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
                 matches!(format, crate::output::RenderFormat::Json),
             );
         }
+        if let ParsedCliCommand::ReachabilityPack(args) = &command {
+            if explicit_ties.active()
+                || solution_artifact_output.is_some()
+                || solution_stdout_format.is_some()
+                || include_solution_data
+            {
+                return CliOutput::error(
+                    CliErrorCode::CliInvalidValue,
+                    "reachability-pack management does not return a solution set",
+                );
+            }
+            return crate::conditioned_reachability_assets::run(
+                args,
+                language,
+                matches!(format, crate::output::RenderFormat::Json),
+            );
+        }
         if let ParsedCliCommand::Tablebase(args) = &command {
             if explicit_ties.active()
                 || solution_artifact_output.is_some()
@@ -131,6 +148,15 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
                 Err(error) => CliOutput::error(error.code(), error.reason()),
             };
         }
+        let tablebase_requested = command_requests_tablebase(&command);
+        let offline_fallback_requested = command_requests_offline_fallback(&command);
+        if offline_fallback_requested && !tablebase_requested {
+            return CliOutput::error(
+                CliErrorCode::CliInvalidValue,
+                "--offline-fallback requires --tablebase",
+            );
+        }
+        let command = command_without_offline_fallback_marker(command);
         let (command, typed_document_plan) = match prepare_native_typed_utility(command) {
             Ok(prepared) => prepared,
             Err(output) => return output,
@@ -169,15 +195,22 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
                         .windows(2)
                         .any(|pair| pair[0] == "pc" && pair[1] == "tiling")
         );
-        #[cfg(feature = "online-pc4-tablebase")]
-        let online_tablebase = command_requests_tablebase(&command);
+        let offline_command =
+            offline_fallback_requested.then(|| command_without_tablebase(command.clone()));
         #[cfg(not(feature = "online-pc4-tablebase"))]
-        if command_requests_tablebase(&command) {
-            return CliOutput::error(
-                CliErrorCode::TablebaseLookupFailed,
-                tablebase_lookup_failure_message("pc4_online_unavailable", language),
-            );
-        }
+        let command = if tablebase_requested {
+            if !offline_fallback_requested {
+                return CliOutput::error(
+                    CliErrorCode::TablebaseLookupFailed,
+                    tablebase_lookup_failure_message("pc4_online_unavailable", language),
+                );
+            }
+            offline_command
+                .clone()
+                .expect("explicit fallback command for unavailable tablebase")
+        } else {
+            command
+        };
 
         let assembly = match CliAppRequestAssembler::assemble(command, format) {
             Ok(assembly) => assembly,
@@ -189,13 +222,35 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
             .request()
             .with_language(language)
             .with_file_policy(AppFilePolicy::new(verbose_paths));
-        let context = product_app_context()
-            .with_language(language)
-            .with_file_policy(AppFilePolicy::new(verbose_paths));
+        crate::legal_board_assets::activate_for_request(&request);
+        crate::conditioned_reachability_assets::activate_for_request(&request);
         #[cfg(feature = "online-pc4-tablebase")]
-        let response = if online_tablebase {
+        let (response, offline_fallback_reason) = if tablebase_requested {
+            let context = product_app_context()
+                .with_language(language)
+                .with_file_policy(AppFilePolicy::new(verbose_paths));
             match crate::tablebase_download::execute(context, request) {
-                Ok(response) => response,
+                Ok(response) => (response, None),
+                Err(reason) if offline_fallback_requested && offline_fallback_allowed(reason) => {
+                    let fallback = match CliAppRequestAssembler::assemble(
+                        offline_command.expect("authorized fallback command"),
+                        format,
+                    ) {
+                        Ok(assembly) => assembly,
+                        Err(output) => return output,
+                    };
+                    let request = fallback
+                        .request()
+                        .with_language(language)
+                        .with_file_policy(AppFilePolicy::new(verbose_paths));
+                    crate::legal_board_assets::activate_for_request(&request);
+                    crate::conditioned_reachability_assets::activate_for_request(&request);
+                    let response = product_app_context()
+                        .with_language(language)
+                        .with_file_policy(AppFilePolicy::new(verbose_paths))
+                        .run(request);
+                    (response, Some(reason))
+                }
                 Err(reason) => {
                     return CliOutput::error(
                         CliErrorCode::TablebaseLookupFailed,
@@ -204,19 +259,39 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
                 }
             }
         } else {
-            context.run(request)
+            (
+                product_app_context()
+                    .with_language(language)
+                    .with_file_policy(AppFilePolicy::new(verbose_paths))
+                    .run(request),
+                None,
+            )
         };
         #[cfg(not(feature = "online-pc4-tablebase"))]
-        let response = context.run(request);
+        let (response, offline_fallback_reason) = (
+            product_app_context()
+                .with_language(language)
+                .with_file_policy(AppFilePolicy::new(verbose_paths))
+                .run(request),
+            (tablebase_requested && offline_fallback_requested).then_some("pc4_online_unavailable"),
+        );
         if let Some(plan) = typed_document_plan.as_ref() {
             if response.status() == AppStatus::Success {
-                return render_typed_document_utility_success(&response, plan, render_format);
+                return with_offline_fallback_warning(
+                    render_typed_document_utility_success(&response, plan, render_format),
+                    offline_fallback_reason,
+                    language,
+                );
             }
-            return AppResponseRenderer::render_with_solution_data(
-                response,
-                render_format,
-                default_error,
-                false,
+            return with_offline_fallback_warning(
+                AppResponseRenderer::render_with_solution_data(
+                    response,
+                    render_format,
+                    default_error,
+                    false,
+                ),
+                offline_fallback_reason,
+                language,
             );
         }
         let explicit_portfolio = if response.status() == AppStatus::Success {
@@ -236,21 +311,31 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
             explicit_ties.requested() && explicit_ties.snapshot_path().is_none();
         if let Some(document_format) = solution_stdout_format {
             if response.status() != AppStatus::Success {
-                return AppResponseRenderer::render_with_solution_data(
-                    response,
-                    render_format,
-                    default_error,
-                    false,
+                return with_offline_fallback_warning(
+                    AppResponseRenderer::render_with_solution_data(
+                        response,
+                        render_format,
+                        default_error,
+                        false,
+                    ),
+                    offline_fallback_reason,
+                    language,
                 );
             }
             let encoded = match explicit_portfolio.as_ref() {
                 Some(portfolio) => encode_explicit_portfolio_document(portfolio, document_format),
                 None => encode_response_document(&response, document_format),
             };
-            return match encoded {
-                Ok(document) => CliOutput::success(document),
-                Err(error) => CliOutput::error(CliErrorCode::CliArtifactInvalid, error.as_str()),
-            };
+            return with_offline_fallback_warning(
+                match encoded {
+                    Ok(document) => CliOutput::success(document),
+                    Err(error) => {
+                        CliOutput::error(CliErrorCode::CliArtifactInvalid, error.as_str())
+                    }
+                },
+                offline_fallback_reason,
+                language,
+            );
         }
         let prepared_artifact = if response.status() == AppStatus::Success {
             match solution_artifact_output.as_ref() {
@@ -294,11 +379,12 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
             };
             output = output.with_pending_solution_artifact(pending);
         }
-        if tiling_only {
+        let output = if tiling_only {
             output.with_surrounding_warning(TILING_ONLY_WARNING)
         } else {
             output
-        }
+        };
+        with_offline_fallback_warning(output, offline_fallback_reason, language)
     });
     if localize_text {
         output.localized_for(language)
@@ -340,6 +426,98 @@ fn tablebase_lookup_failure_message(reason: &str, language: LanguageId) -> &'sta
     }
 }
 
+#[cfg_attr(not(feature = "online-pc4-tablebase"), allow(dead_code))]
+fn offline_fallback_allowed(reason: &str) -> bool {
+    !reason.eq_ignore_ascii_case("tablebase: search cancelled")
+        && !reason.eq_ignore_ascii_case("pc4_online_cancelled")
+}
+
+fn with_offline_fallback_warning(
+    output: CliOutput,
+    reason: Option<&str>,
+    language: LanguageId,
+) -> CliOutput {
+    if reason.is_none() {
+        return output;
+    }
+    let warning = match language {
+        LanguageId::Ko => "테이블베이스 조회를 완료하지 못해 명시적으로 요청한 오프라인 exact 탐색을 실행했습니다. Ctrl+C로 중단할 수 있습니다.",
+        LanguageId::Ja => "テーブルベースの照会を完了できなかったため、明示的に指定されたオフラインexact探索を実行しました。Ctrl+Cで中断できます。",
+        LanguageId::En => "The tablebase lookup did not complete, so the explicitly requested offline exact search was run. Press Ctrl+C to stop it.",
+    };
+    output.with_surrounding_warning(warning)
+}
+
+fn command_requests_offline_fallback(command: &ParsedCliCommand) -> bool {
+    match command {
+        ParsedCliCommand::Pc(args) => args.offline_fallback_requested(),
+        ParsedCliCommand::FailedQueue(args) => args.pc().offline_fallback_requested(),
+        ParsedCliCommand::Setup(args) => args.offline_fallback_requested(),
+        ParsedCliCommand::Product(tokens) => {
+            tokens.iter().any(|token| token == "--offline-fallback")
+        }
+        _ => false,
+    }
+}
+
+fn command_without_offline_fallback_marker(command: ParsedCliCommand) -> ParsedCliCommand {
+    match command {
+        ParsedCliCommand::Pc(args) => {
+            ParsedCliCommand::Pc(args.with_offline_fallback_requested(false))
+        }
+        ParsedCliCommand::FailedQueue(args) => {
+            ParsedCliCommand::FailedQueue(crate::args::FailedQueueArgs::new(
+                args.pc().clone().with_offline_fallback_requested(false),
+                args.patterns().map(ToOwned::to_owned),
+                args.failed_pattern_limit(),
+            ))
+        }
+        ParsedCliCommand::Setup(args) => {
+            ParsedCliCommand::Setup(args.with_offline_fallback_requested(false))
+        }
+        ParsedCliCommand::Product(mut tokens) => {
+            tokens.retain(|token| token != "--offline-fallback");
+            ParsedCliCommand::Product(tokens)
+        }
+        command => command,
+    }
+}
+
+#[cfg_attr(not(feature = "online-pc4-tablebase"), allow(dead_code))]
+fn command_without_tablebase(command: ParsedCliCommand) -> ParsedCliCommand {
+    match command {
+        ParsedCliCommand::Pc(args) => ParsedCliCommand::Pc(
+            args.with_tablebase_requested(Some(false))
+                .with_offline_fallback_requested(false),
+        ),
+        ParsedCliCommand::FailedQueue(args) => {
+            ParsedCliCommand::FailedQueue(crate::args::FailedQueueArgs::new(
+                args.pc()
+                    .clone()
+                    .with_tablebase_requested(Some(false))
+                    .with_offline_fallback_requested(false),
+                args.patterns().map(ToOwned::to_owned),
+                args.failed_pattern_limit(),
+            ))
+        }
+        ParsedCliCommand::Setup(args) => ParsedCliCommand::Setup(
+            args.with_tablebase_requested(Some(false))
+                .with_offline_fallback_requested(false),
+        ),
+        ParsedCliCommand::Product(mut tokens) => {
+            tokens.retain(|token| {
+                !matches!(
+                    token.as_str(),
+                    "--tablebase" | "--tb" | "--no-tablebase" | "--no-tb" | "--offline-fallback"
+                )
+            });
+            tokens.push("--no-tablebase".to_owned());
+            ParsedCliCommand::Product(tokens)
+        }
+        command => command,
+    }
+}
+
 fn command_requests_tablebase(command: &ParsedCliCommand) -> bool {
     match command {
         ParsedCliCommand::Pc(args) => args.tablebase_requested() == Some(true),
@@ -369,6 +547,96 @@ fn product_app_context() -> AppContext {
     #[cfg(not(feature = "wasm-cpu-runtime"))]
     {
         AppContext::default()
+    }
+}
+
+#[cfg(test)]
+mod offline_fallback_contract_tests {
+    use super::{
+        command_requests_offline_fallback, command_requests_tablebase,
+        command_without_offline_fallback_marker, command_without_tablebase,
+        offline_fallback_allowed,
+    };
+    use crate::args::{CliParser, ParsedCliCommand};
+
+    #[test]
+    fn explicit_product_fallback_marker_is_host_only_and_rebuilds_an_offline_command() {
+        let source = ParsedCliCommand::Product(vec![
+            "pc".to_owned(),
+            "minimals".to_owned(),
+            "--lines".to_owned(),
+            "4".to_owned(),
+            "--tablebase".to_owned(),
+            "--offline-fallback".to_owned(),
+        ]);
+        assert!(command_requests_tablebase(&source));
+        assert!(command_requests_offline_fallback(&source));
+
+        let online = command_without_offline_fallback_marker(source);
+        let ParsedCliCommand::Product(online_tokens) = &online else {
+            panic!("expected product command");
+        };
+        assert!(online_tokens.iter().any(|token| token == "--tablebase"));
+        assert!(!online_tokens
+            .iter()
+            .any(|token| token == "--offline-fallback"));
+
+        let offline = command_without_tablebase(online);
+        let ParsedCliCommand::Product(offline_tokens) = offline else {
+            panic!("expected product command");
+        };
+        assert!(!offline_tokens
+            .iter()
+            .any(|token| matches!(token.as_str(), "--tablebase" | "--tb")));
+        assert_eq!(
+            offline_tokens
+                .iter()
+                .filter(|token| token.as_str() == "--no-tablebase")
+                .count(),
+            1
+        );
+        assert!(offline_fallback_allowed("pc4_online_offline"));
+        assert!(!offline_fallback_allowed("tablebase: search cancelled"));
+        assert!(!offline_fallback_allowed("pc4_online_cancelled"));
+    }
+
+    #[test]
+    fn typed_pc_and_setup_fallback_preserve_the_request_and_disable_only_tablebase() {
+        for source in [
+            [
+                "clearra",
+                "pc",
+                "--lines",
+                "4",
+                "--tablebase",
+                "--offline-fallback",
+            ]
+            .as_slice(),
+            [
+                "clearra",
+                "setup",
+                "--remaining",
+                "IOTSZJL",
+                "--tablebase",
+                "--offline-fallback",
+            ]
+            .as_slice(),
+        ] {
+            let command = CliParser::parse(source.iter().copied())
+                .expect("explicit typed fallback")
+                .into_command();
+            assert!(command_requests_tablebase(&command));
+            assert!(command_requests_offline_fallback(&command));
+
+            let stripped = command_without_tablebase(command);
+            assert!(!command_requests_tablebase(&stripped));
+            assert!(!command_requests_offline_fallback(&stripped));
+            match stripped {
+                ParsedCliCommand::Pc(args) => assert_eq!(args.lines(), 4),
+                ParsedCliCommand::Setup(args) => assert_eq!(args.remaining(), "IOTSZJL"),
+                _ => panic!("unexpected rewritten command"),
+            }
+        }
     }
 }
 
@@ -983,5 +1251,29 @@ mod tests {
             assert!(message.contains("--tablebase"));
             assert!(!message.contains("pc4_online_"));
         }
+    }
+
+    #[test]
+    fn explicit_cli_fallback_runs_the_same_request_without_tablebase() {
+        let invocation = CliParser::parse(
+            "clearra --format json pc --lines 1 --board-mask 0x3f0 --height 1 --pieces 1 \
+             --queue I --no-hold --backend cpu --workers 1 --tablebase --offline-fallback"
+                .split_whitespace(),
+        )
+        .expect("explicit offline fallback command");
+        let output = route_invocation(invocation);
+        assert_eq!(
+            output.exit_code(),
+            ExitCode::Success,
+            "stderr={} stdout={}",
+            output.stderr(),
+            output.stdout()
+        );
+        assert!(output.stderr().is_empty());
+        assert!(output.warning_before().contains("offline exact search"));
+        assert_eq!(output.warning_before(), output.warning_after());
+        let value: serde_json::Value =
+            serde_json::from_str(output.stdout()).expect("fallback JSON response");
+        assert!(value["kind"].is_string());
     }
 }

@@ -32,6 +32,8 @@ export type SetupFinderRequest = {
   lengthPreference: SetupLengthPreference;
   maxSetupPieces: number;
   tablebaseEnabled: boolean;
+  legalBoardEnabled: boolean;
+  conditionedReachabilityEnabled: boolean;
   useAllLogicalProcessors: boolean;
 };
 
@@ -77,6 +79,8 @@ export function createDefaultSetupFinderRequest(): SetupFinderRequest {
     lengthPreference: 'auto',
     maxSetupPieces: 9,
     tablebaseEnabled: false,
+    legalBoardEnabled: true,
+    conditionedReachabilityEnabled: true,
     useAllLogicalProcessors: false
   };
 }
@@ -221,6 +225,12 @@ function buildSetupFinderCommandArgumentsWithRoute(
   }
   tokens.push('--rule', request.rule);
   tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
+  if (!request.legalBoardEnabled) {
+    tokens.push('--no-legal-board');
+  }
+  if (!request.conditionedReachabilityEnabled) {
+    tokens.push('--no-conditioned-reachability');
+  }
   if (!canonicalRankedRoute && request.candidatePriority !== 'all') {
     tokens.push('--priority', request.candidatePriority);
   }

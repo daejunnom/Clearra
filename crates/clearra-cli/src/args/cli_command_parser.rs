@@ -14,6 +14,7 @@ pub(crate) fn parse_command(
 ) -> Result<ParsedCliCommand, CliParseError> {
     match command {
         "legal-board" => Ok(ParsedCliCommand::LegalBoard(command_args.to_vec())),
+        "reachability-pack" => Ok(ParsedCliCommand::ReachabilityPack(command_args.to_vec())),
         "tablebase" => Ok(ParsedCliCommand::Tablebase(command_args.to_vec())),
         "pc" if pc_product_help_topic(command_args).is_some() && has_help(command_args) => {
             Ok(ParsedCliCommand::Help(CliHelpTopic::Product(

@@ -469,6 +469,9 @@ static REGISTRY: OnceLock<RwLock<Registry>> = OnceLock::new();
 pub fn install_conditioned_reachability_pack(
     pack: QualifiedBoardConditionedReachability,
 ) -> Result<Option<Arc<QualifiedBoardConditionedReachability>>, ConditionedReachabilityAssetError> {
+    let _mutation = crate::legal_board::accelerator_registry_mutation_lock()
+        .lock()
+        .map_err(|_| ConditionedReachabilityAssetError::RegistryUnavailable)?;
     let slot = profile_slot(pack.binding().kick_profile)?;
     let combined = pack.shared_bytes().saturating_add(
         crate::legal_board::qualified_legal_board_snapshot(pack.binding().kick_profile)
@@ -499,6 +502,9 @@ pub fn install_conditioned_reachability_pack(
 pub fn remove_conditioned_reachability_pack(
     profile: KickTableProfileId,
 ) -> Result<Option<Arc<QualifiedBoardConditionedReachability>>, ConditionedReachabilityAssetError> {
+    let _mutation = crate::legal_board::accelerator_registry_mutation_lock()
+        .lock()
+        .map_err(|_| ConditionedReachabilityAssetError::RegistryUnavailable)?;
     let slot = profile_slot(profile)?;
     let registry = REGISTRY.get_or_init(|| RwLock::new(Registry::default()));
     let mut guard = registry
@@ -524,6 +530,15 @@ pub(crate) fn conditioned_reachability_snapshot(
         .ok()?
         .slots[slot]
         .clone()
+}
+
+/// Host-side fast path for an already pinned immutable generation. Workers
+/// continue to clone only the shared owner rather than reload the pack.
+pub fn active_conditioned_reachability_identity(
+    profile: KickTableProfileId,
+) -> Option<([u8; 32], [u8; 32])> {
+    let pack = conditioned_reachability_snapshot(profile)?;
+    Some((pack.generation_identity(), pack.signed_catalog_identity()))
 }
 
 fn validate_record(

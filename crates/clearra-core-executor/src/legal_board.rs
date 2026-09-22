@@ -12,7 +12,7 @@ use clearra_rules::kicks::{
     KickTableProfile, KickTableProfileId, KickTransition, NoKick, SrsKicks,
 };
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 const MAGIC: &[u8; 8] = b"CLLB0001";
 const VERSION: u32 = 1;
@@ -412,10 +412,22 @@ struct LegalBoardRegistry {
 }
 
 static LEGAL_BOARD_REGISTRY: OnceLock<RwLock<LegalBoardRegistry>> = OnceLock::new();
+static ACCELERATOR_REGISTRY_MUTATION: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub(crate) fn accelerator_registry_mutation_lock() -> &'static Mutex<()> {
+    ACCELERATOR_REGISTRY_MUTATION.get_or_init(|| Mutex::new(()))
+}
 
 pub fn install_qualified_exact_legal_board(
     board: QualifiedExactLegalBoard,
 ) -> Result<Option<Arc<QualifiedExactLegalBoard>>, LegalBoardAssetError> {
+    // Legal-board and conditioned-reachability live in separate registries,
+    // but their 128 MiB limit is one transaction. Serialize both install and
+    // removal paths so concurrent cross-product installs cannot each observe
+    // the other registry before publication and exceed the combined limit.
+    let _mutation = accelerator_registry_mutation_lock()
+        .lock()
+        .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
     let slot = profile_slot(board.binding().kick_profile)?;
     let combined = board.shared_bytes().saturating_add(
         crate::conditioned_reachability::conditioned_reachability_snapshot(
@@ -448,6 +460,9 @@ pub fn install_qualified_exact_legal_board(
 pub fn remove_qualified_exact_legal_board(
     profile: KickTableProfileId,
 ) -> Result<Option<Arc<QualifiedExactLegalBoard>>, LegalBoardAssetError> {
+    let _mutation = accelerator_registry_mutation_lock()
+        .lock()
+        .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
     let slot = profile_slot(profile)?;
     let registry = LEGAL_BOARD_REGISTRY.get_or_init(|| RwLock::new(LegalBoardRegistry::default()));
     let mut guard = registry
@@ -473,6 +488,16 @@ pub(crate) fn qualified_legal_board_snapshot(
         .ok()?
         .slots[slot]
         .clone()
+}
+
+/// Host-side fast path for an already pinned immutable generation. This does
+/// not expose the payload and lets repeated native requests avoid rereading a
+/// complete bundle merely to rediscover the same signed identity.
+pub fn active_qualified_exact_legal_board_identity(
+    profile: KickTableProfileId,
+) -> Option<([u8; 32], [u8; 32])> {
+    let board = qualified_legal_board_snapshot(profile)?;
+    Some((board.generation_identity(), board.signed_catalog_identity()))
 }
 
 impl ExactLegalBoard {

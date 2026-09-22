@@ -349,6 +349,11 @@ fn compile_condition(
     .with_exact_pieces(Some(10))
     .with_supply_window_size(SupplyWindowSize::new(sequence_len))
     .with_count_policy(PcCountPolicy::CountUnique)
+    .with_execution_policy(
+        clearra_pc_graph::request::PcExecutionPolicy::mvp_default()
+            .with_exact_legal_board_enabled(query.exact_legal_board_enabled())
+            .with_conditioned_reachability_enabled(query.conditioned_reachability_enabled()),
+    )
     .with_retained_trace_limit(query.limits().post_pc_retained_trace_limit());
     let problem = ProblemCompiler::compile_scenario_pc(&scenario)
         .map_err(SetupConditionCompileError::Problem)?;

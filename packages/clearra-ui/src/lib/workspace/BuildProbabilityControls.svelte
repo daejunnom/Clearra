@@ -124,6 +124,7 @@
           <option value="srs">SRS</option>
           <option value="srs-x">SRS-X</option>
           <option value="jstris-180">Jstris 180</option>
+          <option value="no-kick">No kick</option>
         </select>
       </label>
       <label class="workspace-field">
@@ -260,6 +261,33 @@
       </label>
       <small class="workspace-field-help">{label('precomputeBuildDependenciesHelp')}</small>
     </div>
+    <div class="accelerator-control">
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.legalBoardEnabled}
+          disabled={request.resultMode === 'minimum-solutions' || request.aggregation === 'tiling'}
+          on:change={(event) => patch({
+            legalBoardEnabled: (event.currentTarget as HTMLInputElement).checked
+          })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('exactLegalBoard')}</span>
+      </label>
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.conditionedReachabilityEnabled}
+          disabled={request.resultMode === 'minimum-solutions' || request.aggregation === 'tiling'}
+          on:change={(event) => patch({
+            conditionedReachabilityEnabled: (event.currentTarget as HTMLInputElement).checked
+          })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('conditionedReachability')}</span>
+      </label>
+      <small class="workspace-field-help">{label('exactAcceleratorsHelp')}</small>
+    </div>
   </section>
 
   {#if validationCodes.length}
@@ -275,4 +303,5 @@
   .solution-probabilities-control fieldset { border: 0; margin: 0; min-width: 0; padding: 0; }
   .worker-policy-control { display: grid; gap: 5px; margin-top: 14px; }
   .dependency-analysis-control { display: grid; gap: 5px; margin-top: 14px; }
+  .accelerator-control { display: grid; gap: 5px; margin-top: 14px; }
 </style>

@@ -22,7 +22,7 @@ export type ScoreMode =
   | 'score-minimals'
   | 'failed-queue';
 export type ScoreProfile = 'guideline' | 'jstris-ultra' | 'tetrio';
-export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x' | 'jstris-180';
+export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x' | 'jstris-180' | 'no-kick';
 export type SpinProfile =
   | 't-spins'
   | 't-spins-plus'
@@ -54,6 +54,8 @@ export type SolverWorkspaceRequest = {
   useAllLogicalProcessors: boolean;
   tablebaseEnabled: boolean;
   precomputeBuildDependencies: boolean;
+  legalBoardEnabled: boolean;
+  conditionedReachabilityEnabled: boolean;
   /** Exact pattern-universe ceiling for generated factorized inputs. */
   maxPatterns?: number;
 };
@@ -90,7 +92,9 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
     workers: defaultWorkerCount(),
     useAllLogicalProcessors: false,
     tablebaseEnabled: false,
-    precomputeBuildDependencies: false
+    precomputeBuildDependencies: false,
+    legalBoardEnabled: true,
+    conditionedReachabilityEnabled: true
   };
 }
 
@@ -117,7 +121,9 @@ export function normalizeWorkspaceRequest(
       initialB2B: 0,
       solutionProbabilities: false,
       tablebaseEnabled: false,
-      precomputeBuildDependencies: false
+      precomputeBuildDependencies: false,
+      legalBoardEnabled: false,
+      conditionedReachabilityEnabled: false
     };
   }
   if (request.scoreMode === 'path') {
@@ -604,6 +610,14 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
     tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
     if (request.maxPatterns !== undefined) {
       tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
+    }
+  }
+  if (request.scoreMode !== 'tiling') {
+    if (!request.legalBoardEnabled) {
+      tokens.push('--no-legal-board');
+    }
+    if (!request.conditionedReachabilityEnabled) {
+      tokens.push('--no-conditioned-reachability');
     }
   }
   return tokens;

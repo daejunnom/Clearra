@@ -1,8 +1,11 @@
+mod accelerator_asset_store;
+mod accelerator_download_transport;
 pub mod args;
 pub mod assemble;
 mod cli_entry;
 mod cli_routing;
 pub mod commands;
+mod conditioned_reachability_assets;
 pub mod error;
 #[cfg(test)]
 mod execution_resource_test_support;

@@ -1924,6 +1924,8 @@ fn parse_setup_command(
     let mut automatic_worker_limit = None;
     let mut use_all_logical_processors = false;
     let mut tablebase_requested = false;
+    let mut exact_legal_board_enabled = true;
+    let mut conditioned_reachability_enabled = true;
     let mut cursor = 0_usize;
     while cursor < tokens.len() {
         match tokens[cursor].as_str() {
@@ -2045,6 +2047,22 @@ fn parse_setup_command(
             }
             "--no-tablebase" | "--no-tb" => {
                 tablebase_requested = false;
+                cursor += 1;
+            }
+            "--legal-board" => {
+                exact_legal_board_enabled = true;
+                cursor += 1;
+            }
+            "--no-legal-board" => {
+                exact_legal_board_enabled = false;
+                cursor += 1;
+            }
+            "--conditioned-reachability" => {
+                conditioned_reachability_enabled = true;
+                cursor += 1;
+            }
+            "--no-conditioned-reachability" => {
+                conditioned_reachability_enabled = false;
                 cursor += 1;
             }
             flag if flag.starts_with("--") => {
@@ -2173,7 +2191,9 @@ fn parse_setup_command(
         .with_queue_observation_policy(queue_observation_policy)
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_use_all_logical_processors(use_all_logical_processors)
-        .with_tablebase_requested(tablebase_requested);
+        .with_tablebase_requested(tablebase_requested)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled);
     if let Some((source, _)) = queue_based_source {
         request = request.with_setup_queue_based_source(source);
     }
@@ -3117,6 +3137,8 @@ fn parse_build_probability_command(
     let mut preserve_back_to_back = false;
     let mut precompute_build_dependencies = false;
     let mut build_dependency_option_requested = false;
+    let mut exact_legal_board_enabled = true;
+    let mut conditioned_reachability_enabled = true;
     let mut solution_probabilities = false;
     let mut queue_knowledge = None;
     let mut finesse_metric = FinesseMetric::Off;
@@ -3376,6 +3398,22 @@ fn parse_build_probability_command(
                 build_dependency_option_requested = true;
                 cursor += 1;
             }
+            "--legal-board" => {
+                exact_legal_board_enabled = true;
+                cursor += 1;
+            }
+            "--no-legal-board" => {
+                exact_legal_board_enabled = false;
+                cursor += 1;
+            }
+            "--conditioned-reachability" => {
+                conditioned_reachability_enabled = true;
+                cursor += 1;
+            }
+            "--no-conditioned-reachability" => {
+                conditioned_reachability_enabled = false;
+                cursor += 1;
+            }
             "--solution-probabilities" => {
                 if solution_probabilities {
                     return Err(WebCommandError::new(
@@ -3584,6 +3622,8 @@ fn parse_build_probability_command(
         .with_use_all_logical_processors(use_all_logical_processors)
         .with_cpu_warmup(cpu_warmup)
         .with_precompute_build_dependencies(precompute_build_dependencies)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled)
         .with_solution_probabilities(solution_probabilities)
         .with_queue_observation_policy(queue_knowledge);
     if matches!(
@@ -4149,12 +4189,23 @@ fn parse_pc_allspin_command(
                 };
                 next_unique_pc_allspin_value(tokens, &mut cursor, &mut seen, canonical, option)?;
             }
-            "--no-hold" | "--use-all-cpu-threads" | "--cpu-warmup" | "--gpu-warmup" => {
+            "--no-hold"
+            | "--use-all-cpu-threads"
+            | "--cpu-warmup"
+            | "--gpu-warmup"
+            | "--legal-board"
+            | "--no-legal-board"
+            | "--conditioned-reachability"
+            | "--no-conditioned-reachability" => {
                 let canonical = match option {
                     "--no-hold" => "hold-policy",
                     "--use-all-cpu-threads" => "logical-processors",
                     "--cpu-warmup" => "cpu-warmup",
                     "--gpu-warmup" => "gpu-warmup",
+                    "--legal-board" | "--no-legal-board" => "legal-board-policy",
+                    "--conditioned-reachability" | "--no-conditioned-reachability" => {
+                        "conditioned-reachability-policy"
+                    }
                     _ => unreachable!("matched PC All-Spin flag"),
                 };
                 record_pc_allspin_option(&mut seen, canonical, option)?;
@@ -4350,6 +4401,10 @@ fn parse_pc_command(
     let mut gpu_warmup = false;
     let mut tablebase_requested = false;
     let mut precompute_build_dependencies = false;
+    let mut exact_legal_board_enabled = true;
+    let mut conditioned_reachability_enabled = true;
+    let mut exact_legal_board_option_requested = false;
+    let mut conditioned_reachability_option_requested = false;
     let mut solution_probabilities = false;
     let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut virtual_files = Vec::new();
@@ -4532,6 +4587,26 @@ fn parse_pc_command(
                 tablebase_requested = false;
                 cursor += 1;
             }
+            "--legal-board" => {
+                exact_legal_board_enabled = true;
+                exact_legal_board_option_requested = true;
+                cursor += 1;
+            }
+            "--no-legal-board" => {
+                exact_legal_board_enabled = false;
+                exact_legal_board_option_requested = true;
+                cursor += 1;
+            }
+            "--conditioned-reachability" => {
+                conditioned_reachability_enabled = true;
+                conditioned_reachability_option_requested = true;
+                cursor += 1;
+            }
+            "--no-conditioned-reachability" => {
+                conditioned_reachability_enabled = false;
+                conditioned_reachability_option_requested = true;
+                cursor += 1;
+            }
             "--build-dependency-dag" => {
                 precompute_build_dependencies = true;
                 cursor += 1;
@@ -4698,6 +4773,14 @@ fn parse_pc_command(
             (initial_b2b.is_some(), "--initial-b2b"),
             (tablebase_requested, "--tablebase"),
             (precompute_build_dependencies, "--build-dependency-dag"),
+            (
+                exact_legal_board_option_requested && exact_legal_board_enabled,
+                "--legal-board",
+            ),
+            (
+                conditioned_reachability_option_requested && conditioned_reachability_enabled,
+                "--conditioned-reachability",
+            ),
             (solution_probabilities, "--solution-probabilities"),
             (
                 queue_observation_policy.requires_observation_policy(),
@@ -4757,6 +4840,8 @@ fn parse_pc_command(
         .with_gpu_warmup(gpu_warmup)
         .with_tablebase_requested(tablebase_requested)
         .with_precompute_build_dependencies(precompute_build_dependencies)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled)
         .with_solution_probabilities(solution_probabilities)
         .with_queue_observation_policy(queue_observation_policy)
         .with_hold_enabled(hold_enabled)

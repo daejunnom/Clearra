@@ -30,6 +30,18 @@ fn mvp_execution_policy_comes_from_profile_defaults() {
     assert_eq!(policy.backend_fallback(), BackendFallbackPolicy::Allow);
     assert!(policy.allow_backend_fallback());
     assert!(!policy.precompute_build_dependencies());
+    assert!(policy.exact_legal_board_enabled());
+    assert!(policy.conditioned_reachability_enabled());
+}
+
+#[test]
+fn exact_accelerators_can_be_disabled_independently_per_request() {
+    let policy = PcExecutionPolicy::mvp_default()
+        .with_exact_legal_board_enabled(false)
+        .with_conditioned_reachability_enabled(false);
+
+    assert!(!policy.exact_legal_board_enabled());
+    assert!(!policy.conditioned_reachability_enabled());
 }
 
 #[test]

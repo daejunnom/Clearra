@@ -21,7 +21,10 @@ pub struct PcArgs {
     cpu_warmup: Option<bool>,
     gpu_warmup: Option<bool>,
     tablebase_requested: Option<bool>,
+    offline_fallback_requested: bool,
     precompute_build_dependencies: Option<bool>,
+    exact_legal_board_enabled: Option<bool>,
+    conditioned_reachability_enabled: Option<bool>,
     deterministic: Option<bool>,
     max_frontier_states: Option<usize>,
     max_candidates: Option<usize>,
@@ -55,7 +58,10 @@ impl PcArgs {
             cpu_warmup: None,
             gpu_warmup: None,
             tablebase_requested: None,
+            offline_fallback_requested: false,
             precompute_build_dependencies: None,
+            exact_legal_board_enabled: None,
+            conditioned_reachability_enabled: None,
             deterministic: None,
             max_frontier_states: None,
             max_candidates: None,
@@ -157,8 +163,20 @@ impl PcArgs {
         self.tablebase_requested
     }
 
+    pub const fn offline_fallback_requested(&self) -> bool {
+        self.offline_fallback_requested
+    }
+
     pub fn precompute_build_dependencies(&self) -> Option<bool> {
         self.precompute_build_dependencies
+    }
+
+    pub fn exact_legal_board_enabled(&self) -> Option<bool> {
+        self.exact_legal_board_enabled
+    }
+
+    pub fn conditioned_reachability_enabled(&self) -> Option<bool> {
+        self.conditioned_reachability_enabled
     }
 }
 impl PcArgs {
@@ -213,7 +231,10 @@ impl PcArgs {
             || self.cpu_warmup.is_some()
             || self.gpu_warmup.is_some()
             || self.tablebase_requested.is_some()
+            || self.offline_fallback_requested
             || self.precompute_build_dependencies.is_some()
+            || self.exact_legal_board_enabled.is_some()
+            || self.conditioned_reachability_enabled.is_some()
             || self.deterministic.is_some()
             || self.max_frontier_states.is_some()
             || self.max_candidates.is_some()
@@ -320,8 +341,23 @@ impl PcArgs {
         self
     }
 
+    pub fn with_offline_fallback_requested(mut self, value: bool) -> Self {
+        self.offline_fallback_requested = value;
+        self
+    }
+
     pub fn with_precompute_build_dependencies(mut self, value: Option<bool>) -> Self {
         self.precompute_build_dependencies = value;
+        self
+    }
+
+    pub fn with_exact_legal_board_enabled(mut self, value: Option<bool>) -> Self {
+        self.exact_legal_board_enabled = value;
+        self
+    }
+
+    pub fn with_conditioned_reachability_enabled(mut self, value: Option<bool>) -> Self {
+        self.conditioned_reachability_enabled = value;
         self
     }
 }

@@ -228,8 +228,34 @@
           <option value="srs">SRS</option>
           <option value="srs-x">SRS-X</option>
           <option value="jstris-180">Jstris 180</option>
+          <option value="no-kick">No kick</option>
         </select>
       </label>
+      <div class="accelerator-control">
+        <label class="workspace-switch-label">
+          <input
+            type="checkbox"
+            checked={request.legalBoardEnabled}
+            on:change={(event) => update({
+              legalBoardEnabled: (event.currentTarget as HTMLInputElement).checked
+            })}
+          />
+          <span class="workspace-switch" aria-hidden="true"></span>
+          <span>{label('exactLegalBoard')}</span>
+        </label>
+        <label class="workspace-switch-label">
+          <input
+            type="checkbox"
+            checked={request.conditionedReachabilityEnabled}
+            on:change={(event) => update({
+              conditionedReachabilityEnabled: (event.currentTarget as HTMLInputElement).checked
+            })}
+          />
+          <span class="workspace-switch" aria-hidden="true"></span>
+          <span>{label('conditionedReachability')}</span>
+        </label>
+        <small class="workspace-field-help">{label('exactAcceleratorsHelp')}</small>
+      </div>
       <label class="workspace-field wide priority-field">
         <span>{label('setupCandidatePriority')}</span>
         <select

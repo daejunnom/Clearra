@@ -63,10 +63,11 @@ pub use clearra_replay::{
     SpinCoverageExecutionGraph,
 };
 pub use conditioned_reachability::{
-    built_in_conditioned_reachability_binding, derive_exact_conditioned_reachability_record,
-    encode_conditioned_reachability, install_conditioned_reachability_pack,
-    remove_conditioned_reachability_pack, BoardConditionedReachability, ConditionedEntryPoseSet,
-    ConditionedEvidenceLevel, ConditionedReachabilityAssetError, ConditionedReachabilityBinding,
+    active_conditioned_reachability_identity, built_in_conditioned_reachability_binding,
+    derive_exact_conditioned_reachability_record, encode_conditioned_reachability,
+    install_conditioned_reachability_pack, remove_conditioned_reachability_pack,
+    BoardConditionedReachability, ConditionedEntryPoseSet, ConditionedEvidenceLevel,
+    ConditionedReachabilityAssetError, ConditionedReachabilityBinding,
     ConditionedReachabilityExpectation, ConditionedReachabilityLookup,
     ConditionedReachabilityQuery, ConditionedReachabilityRecord, ConditionedTargetScope,
     QualifiedBoardConditionedReachability, CONDITIONED_REACHABILITY_COMPLETENESS_SCOPE,
@@ -84,7 +85,8 @@ pub use finesse_report::{
     FinesseRepresentativeWitness, FinesseSearchSolutionFilterError, FinesseSolutionAverage,
 };
 pub use legal_board::{
-    accelerator_profile_name, built_in_binding as built_in_legal_board_binding,
+    accelerator_profile_name, active_qualified_exact_legal_board_identity,
+    built_in_binding as built_in_legal_board_binding,
     built_in_rule_identity as built_in_legal_board_rule_identity,
     encode_exact_intersection as encode_exact_legal_board_intersection,
     install_qualified_exact_legal_board, remove_qualified_exact_legal_board, CompletionCapability,

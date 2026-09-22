@@ -86,6 +86,8 @@ pub struct WebCommandRequest {
     gpu_warmup: bool,
     tablebase_requested: bool,
     precompute_build_dependencies: bool,
+    exact_legal_board_enabled: bool,
+    conditioned_reachability_enabled: bool,
     solution_probabilities: bool,
     verify_scope: Option<String>,
     operation_sequence: Option<OperationDocumentProblem>,
@@ -149,6 +151,8 @@ impl WebCommandRequest {
             gpu_warmup: false,
             tablebase_requested: false,
             precompute_build_dependencies: false,
+            exact_legal_board_enabled: true,
+            conditioned_reachability_enabled: true,
             solution_probabilities: false,
             verify_scope: None,
             operation_sequence: None,
@@ -213,6 +217,8 @@ impl WebCommandRequest {
             gpu_warmup: false,
             tablebase_requested: false,
             precompute_build_dependencies: false,
+            exact_legal_board_enabled: true,
+            conditioned_reachability_enabled: true,
             solution_probabilities: false,
             verify_scope: scope,
             operation_sequence: None,
@@ -516,6 +522,16 @@ impl WebCommandRequest {
 
     pub fn with_precompute_build_dependencies(mut self, value: bool) -> Self {
         self.precompute_build_dependencies = value;
+        self
+    }
+
+    pub fn with_exact_legal_board_enabled(mut self, value: bool) -> Self {
+        self.exact_legal_board_enabled = value;
+        self
+    }
+
+    pub fn with_conditioned_reachability_enabled(mut self, value: bool) -> Self {
+        self.conditioned_reachability_enabled = value;
         self
     }
 
@@ -1462,7 +1478,9 @@ impl WebCommandRequest {
                 .with_rule(self.rule)
                 .with_remaining_pieces(remaining)
                 .with_queue_observation_policy(self.queue_observation_policy)
-                .with_tablebase_requested(self.tablebase_requested);
+                .with_tablebase_requested(self.tablebase_requested)
+                .with_exact_legal_board_enabled(self.exact_legal_board_enabled)
+                .with_conditioned_reachability_enabled(self.conditioned_reachability_enabled);
             match self.setup_search_mode {
                 SetupSearchMode::ShapeOracle => {
                     if self.setup_queue_based_source.is_some() {
@@ -1551,7 +1569,9 @@ impl WebCommandRequest {
             .with_cpu_warmup(self.cpu_warmup)
             .with_gpu_warmup(self.gpu_warmup)
             .with_tablebase_requested(self.tablebase_requested)
-            .with_precompute_build_dependencies(self.precompute_build_dependencies);
+            .with_precompute_build_dependencies(self.precompute_build_dependencies)
+            .with_exact_legal_board_enabled(self.exact_legal_board_enabled)
+            .with_conditioned_reachability_enabled(self.conditioned_reachability_enabled);
         if let Some(max_patterns) = self.max_patterns {
             policy = policy.with_max_patterns(max_patterns);
         }

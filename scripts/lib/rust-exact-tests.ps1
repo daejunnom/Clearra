@@ -76,6 +76,26 @@ function Invoke-RustExactTestsGate {
         if ($passed -lt 1) {
             throw 'Rust exact test stage executed zero tests'
         }
+        $releaseAcceptance = Get-Variable `
+            -Name ClearraReleaseAcceptanceMode `
+            -Scope Script `
+            -ErrorAction SilentlyContinue
+        if ($null -ne $releaseAcceptance -and [bool]$releaseAcceptance.Value) {
+            $acceleratorGate = Invoke-AdversarialCargoProcessOnce `
+                -CargoPath $CargoPath `
+                -Arguments @(
+                    'run',
+                    '--locked',
+                    '--offline',
+                    '--package', 'clearra-accelerator-product-host',
+                    '--bin', 'clearra-accelerator-release-gate',
+                    '--', '--require-all-v0.8.1'
+                )
+            $acceleratorGate.Output | Write-Output
+            if ($acceleratorGate.ExitCode -ne 0) {
+                throw "v0.8.1 accelerator qualification gate failed with exit code $($acceleratorGate.ExitCode)"
+            }
+        }
         Assert-AdversarialRustCasesInOutput `
             -Output $output `
             -RequiredCases @(Get-AdversarialRustCases) `

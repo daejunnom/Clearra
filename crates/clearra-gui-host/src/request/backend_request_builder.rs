@@ -52,6 +52,8 @@ impl BackendRequestBuilder {
             .with_max_patterns(form.pattern_budget() as usize)
             .with_precompute_build_dependencies(form.precompute_build_dependencies())
             .with_tablebase_requested(form.tablebase_requested())
+            .with_exact_legal_board_enabled(form.exact_legal_board_enabled())
+            .with_conditioned_reachability_enabled(form.conditioned_reachability_enabled())
             .with_allow_backend_fallback(form.allow_fallback());
 
         if let Some(workers) = form.workers_requested() {
@@ -106,6 +108,8 @@ impl BackendRequestBuilder {
             .with_use_all_logical_processors(form.use_all_logical_processors())
             .with_deterministic(form.deterministic())
             .with_tablebase_requested(form.tablebase_requested())
+            .with_exact_legal_board_enabled(form.exact_legal_board_enabled())
+            .with_conditioned_reachability_enabled(form.conditioned_reachability_enabled())
             .with_allow_backend_fallback(false)
             .with_max_patterns(PC_SCORE_MAX_PATTERNS);
         if let Some(workers) = form.workers_requested() {

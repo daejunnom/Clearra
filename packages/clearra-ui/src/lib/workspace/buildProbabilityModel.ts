@@ -51,6 +51,8 @@ export type BuildProbabilityRequest = {
   preserveB2B: boolean;
   solutionProbabilities: boolean;
   precomputeBuildDependencies: boolean;
+  legalBoardEnabled: boolean;
+  conditionedReachabilityEnabled: boolean;
   finesse: BuildProbabilityFinesseMetric;
   patternKnowledge: BuildProbabilityPatternKnowledge;
   workers: number;
@@ -104,6 +106,8 @@ export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest 
     preserveB2B: false,
     solutionProbabilities: false,
     precomputeBuildDependencies: false,
+    legalBoardEnabled: true,
+    conditionedReachabilityEnabled: true,
     finesse: DEFAULT_BUILD_PROBABILITY_FINESSE,
     patternKnowledge: DEFAULT_BUILD_PROBABILITY_PATTERN_KNOWLEDGE,
     workers: defaultWorkerCount(),
@@ -325,6 +329,14 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
     // Transmit the selected product explicitly, including All Solutions. This
     // keeps the GUI -> CLI boundary independent from the parser's default.
     tokens.push('--result-mode', request.resultMode);
+  }
+  if (request.aggregation !== 'tiling') {
+    if (!request.legalBoardEnabled) {
+      tokens.push('--no-legal-board');
+    }
+    if (!request.conditionedReachabilityEnabled) {
+      tokens.push('--no-conditioned-reachability');
+    }
   }
   if (request.resultMode === 'field-average-score') {
     tokens.push(

@@ -106,14 +106,31 @@ impl std::error::Error for ProductCatalogError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QualifiedProductMetadata {
     ExactLegalBoard {
+        active_session_shared_bytes: u64,
         chain_identity: [u8; 32],
         layer_counts: [u64; 11],
         layer_payload_identities: [[u8; 32]; 11],
     },
     BoardConditionedReachability {
+        active_session_shared_bytes: u64,
         query_set_identity: [u8; 32],
         record_count: u64,
     },
+}
+
+impl QualifiedProductMetadata {
+    pub const fn active_session_shared_bytes(&self) -> u64 {
+        match self {
+            Self::ExactLegalBoard {
+                active_session_shared_bytes,
+                ..
+            }
+            | Self::BoardConditionedReachability {
+                active_session_shared_bytes,
+                ..
+            } => *active_session_shared_bytes,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -327,6 +344,7 @@ fn parse_qualified_metadata(
 ) -> Result<QualifiedProductMetadata, ProductCatalogError> {
     let common = match kind {
         ProductCatalogKind::ExactLegalBoard => &[
+            "active_session_shared_bytes",
             "chain_identity",
             "generation_identity",
             "layer_counts",
@@ -338,6 +356,7 @@ fn parse_qualified_metadata(
             "url",
         ][..],
         ProductCatalogKind::BoardConditionedReachability => &[
+            "active_session_shared_bytes",
             "generation_identity",
             "payload_bytes",
             "payload_identity",
@@ -366,30 +385,44 @@ fn parse_qualified_metadata(
     }
     match kind {
         ProductCatalogKind::ExactLegalBoard => {
+            let active_session_shared_bytes = canonical_u64(value, "active_session_shared_bytes")?;
             let chain_identity = identity(value, "chain_identity")?;
             let layer_counts = fixed_u64_array::<11>(&value["layer_counts"])?;
             let layer_payload_identities =
                 fixed_identity_array::<11>(&value["layer_payload_identities"])?;
-            if chain_identity == [0; 32] || layer_counts.contains(&0) {
+            if active_session_shared_bytes == 0
+                || active_session_shared_bytes > 128 * 1024 * 1024
+                || active_session_shared_bytes < authority.payload_bytes()
+                || chain_identity == [0; 32]
+                || layer_counts.contains(&0)
+            {
                 return Err(ProductCatalogError::new(
                     "accelerator_catalog_legal_metadata",
                 ));
             }
             Ok(QualifiedProductMetadata::ExactLegalBoard {
+                active_session_shared_bytes,
                 chain_identity,
                 layer_counts,
                 layer_payload_identities,
             })
         }
         ProductCatalogKind::BoardConditionedReachability => {
+            let active_session_shared_bytes = canonical_u64(value, "active_session_shared_bytes")?;
             let query_set_identity = identity(value, "query_set_identity")?;
             let record_count = canonical_u64(value, "record_count")?;
-            if query_set_identity == [0; 32] || record_count == 0 {
+            if active_session_shared_bytes == 0
+                || active_session_shared_bytes > 128 * 1024 * 1024
+                || active_session_shared_bytes < authority.payload_bytes()
+                || query_set_identity == [0; 32]
+                || record_count == 0
+            {
                 return Err(ProductCatalogError::new(
                     "accelerator_catalog_conditioned_metadata",
                 ));
             }
             Ok(QualifiedProductMetadata::BoardConditionedReachability {
+                active_session_shared_bytes,
                 query_set_identity,
                 record_count,
             })

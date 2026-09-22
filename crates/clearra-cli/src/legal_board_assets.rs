@@ -2,20 +2,47 @@
 //! Search requests never call this module and no network access occurs until a
 //! profile has a signed, release-qualified catalog entry.
 
-use crate::{error::CliErrorCode, output::CliOutput};
+use crate::{
+    accelerator_asset_store::{self, LocalAssetState},
+    error::CliErrorCode,
+    output::CliOutput,
+};
+use clearra_accelerator_product_host::ProductCatalogKind;
 use clearra_i18n::LanguageId;
 use clearra_pc4_qualifier::{generate_legal_board, LegalBoardGenerationOptions};
 use clearra_rules::kicks::KickTableProfileId;
 use serde_json::{json, Value};
-use std::{
-    fs,
-    path::PathBuf,
-    sync::{Arc, OnceLock},
-};
+use std::{fs, path::PathBuf, sync::Arc};
 
-const CATALOG: &str = include_str!("../../../config/legal-board-product-catalog.v1.json");
 const PROFILES: [&str; 5] = ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"];
-static CATALOG_VALUE: OnceLock<Result<Value, &'static str>> = OnceLock::new();
+const PRODUCT: ProductCatalogKind = ProductCatalogKind::ExactLegalBoard;
+const MAX_PRODUCT_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
+
+pub(crate) fn activate_for_request(request: &clearra_app::AppRequest) {
+    if !request
+        .command()
+        .exact_accelerator_policy()
+        .is_some_and(|(enabled, _)| enabled)
+    {
+        return;
+    }
+    if !matches!(
+        request.command_kind(),
+        clearra_host_contract::AppCommandKind::Pc
+            | clearra_host_contract::AppCommandKind::Path
+            | clearra_host_contract::AppCommandKind::Percent
+            | clearra_host_contract::AppCommandKind::Setup
+            | clearra_host_contract::AppCommandKind::BuildProbability
+    ) {
+        return;
+    }
+    let profile = request.request_profiles().rule().as_str();
+    let Ok(base) = default_directory() else {
+        return;
+    };
+    let root = accelerator_asset_store::profile_root(&base, PRODUCT, profile);
+    let _ = accelerator_asset_store::activate_installed(PRODUCT, profile, &root);
+}
 
 pub(crate) fn run(args: &[String], language: LanguageId, json_output: bool) -> CliOutput {
     if args.is_empty()
@@ -91,32 +118,29 @@ fn execute(args: &[String]) -> Result<Value, &'static str> {
     if action != "generate" && (workers.is_some() || max_new_steps.is_some()) {
         return Err("legal-board: worker and step options belong only to generate");
     }
-    let catalog = catalog_entry(profile)?;
     if action == "check" {
+        let catalog = accelerator_asset_store::catalog_summary(PRODUCT, profile)?;
         return Ok(json!({
             "action": action,
             "profile": profile,
-            "catalog_status": catalog["status"],
-            "compressed_bytes": catalog["compressed_bytes"],
+            "catalog_status": catalog.state.as_str(),
+            "catalog_identity": accelerator_asset_store::hex(catalog.catalog_identity),
+            "compressed_bytes": catalog.payload_bytes,
+            "generation_identity": catalog.generation_identity.map(accelerator_asset_store::hex),
             "network_used": false,
-            "qualified": catalog["status"] == "qualified",
+            "qualified": catalog.state == LocalAssetState::Ready,
         }));
-    }
-    if action == "download" {
-        // A candidate or unsigned ledger must never become a negative-filter
-        // authority merely because its URL is reachable.
-        if catalog["status"] != "qualified" {
-            return Err("legal-board: this profile has no signed qualified Release asset");
-        }
-        return Err(
-            "legal-board: qualified download transport is not present in this catalog generation",
-        );
     }
 
     let base = directory.map(Ok).unwrap_or_else(default_directory)?;
     let root = checked_profile_root(&base, profile)?;
     match action {
-        "status" => status(profile, &root, catalog),
+        "download" => report_value(
+            "download",
+            profile,
+            accelerator_asset_store::download(PRODUCT, profile, &root)?,
+        ),
+        "status" => status(profile, &root),
         "remove" => remove(profile, &root),
         "generate" => generate(
             profile,
@@ -126,26 +150,6 @@ fn execute(args: &[String]) -> Result<Value, &'static str> {
         ),
         _ => unreachable!(),
     }
-}
-
-fn catalog_entry(profile: &str) -> Result<&'static Value, &'static str> {
-    let catalog = CATALOG_VALUE
-        .get_or_init(|| {
-            serde_json::from_str(CATALOG).map_err(|_| "legal-board: embedded catalog is invalid")
-        })
-        .as_ref()
-        .map_err(|error| *error)?;
-    if catalog["schema"] != "clearra.legal-board.product-catalog.v1" {
-        return Err("legal-board: embedded catalog schema is invalid");
-    }
-    let profiles = catalog["profiles"]
-        .as_array()
-        .filter(|values| values.len() == PROFILES.len())
-        .ok_or("legal-board: embedded profile catalog is incomplete")?;
-    profiles
-        .iter()
-        .find(|entry| entry["profile"] == profile)
-        .ok_or("legal-board: profile is absent from the embedded catalog")
 }
 
 fn default_directory() -> Result<PathBuf, &'static str> {
@@ -174,36 +178,32 @@ fn checked_profile_root(base: &std::path::Path, profile: &str) -> Result<PathBuf
     if !PROFILES.contains(&profile) {
         return Err("legal-board: unknown profile");
     }
-    if base.exists() {
-        let metadata = fs::symlink_metadata(base)
-            .map_err(|_| "legal-board: could not inspect storage root")?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err("legal-board: storage root must be a real directory");
-        }
-    }
-    Ok(base.join("legal-board-v1").join(profile))
+    accelerator_asset_store::validate_real_directory_if_present(base)?;
+    let root = accelerator_asset_store::profile_root(base, PRODUCT, profile);
+    accelerator_asset_store::validate_real_directory_if_present(&root)?;
+    Ok(root)
 }
 
-fn status(profile: &str, root: &std::path::Path, catalog: &Value) -> Result<Value, &'static str> {
-    if !root.exists() {
-        return Ok(json!({
-            "action": "status", "profile": profile, "installed": false,
-            "catalog_status": catalog["status"], "qualified": false
-        }));
-    }
-    reject_link(root)?;
+fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> {
+    let installed = accelerator_asset_store::status(PRODUCT, profile, root)?;
     let mut forward_layers = 0_u8;
     let mut legal_layers = 0_u8;
-    for layer in 0_u8..=10 {
-        forward_layers += u8::from(
-            root.join(format!("forward-reachable-layer-{layer:02}.bin"))
-                .is_file(),
-        );
-        legal_layers += u8::from(root.join(format!("legal-layer-{layer:02}.bin")).is_file());
+    if root.exists() {
+        reject_link(root)?;
+        for layer in 0_u8..=10 {
+            forward_layers += u8::from(
+                root.join(format!("forward-reachable-layer-{layer:02}.bin"))
+                    .is_file(),
+            );
+            legal_layers += u8::from(root.join(format!("legal-layer-{layer:02}.bin")).is_file());
+        }
     }
     let bundle = root.join(format!("legal-board-{profile}.cllb"));
     let bundle_bytes = bundle.metadata().ok().map(|metadata| metadata.len());
-    let candidate_validation = if bundle_bytes.is_some() {
+    let candidate_validation = if bundle_bytes.is_some_and(|bytes| bytes > MAX_PRODUCT_BUNDLE_BYTES)
+    {
+        "oversized_unqualified_candidate"
+    } else if bundle_bytes.is_some() {
         let bytes = fs::read(&bundle).map_err(|_| "legal-board: candidate bundle is unreadable")?;
         let kick_profile = KickTableProfileId::parse(profile)
             .ok_or("legal-board: profile is not connected to a kick table")?;
@@ -223,8 +223,13 @@ fn status(profile: &str, root: &std::path::Path, catalog: &Value) -> Result<Valu
         "not_loaded"
     };
     Ok(json!({
-        "action": "status", "profile": profile, "installed": bundle_bytes.is_some(),
-        "qualified": false, "catalog_status": catalog["status"],
+        "action": "status", "profile": profile, "installed": installed.installed,
+        "qualified": installed.state == LocalAssetState::Ready,
+        "catalog_status": accelerator_asset_store::catalog_summary(PRODUCT, profile)?.state.as_str(),
+        "validation": installed.state.as_str(),
+        "installed_payload_bytes": installed.payload_bytes,
+        "installed_generation_identity": installed.generation_identity.map(accelerator_asset_store::hex),
+        "catalog_identity": accelerator_asset_store::hex(installed.catalog_identity),
         "forward_layer_count": forward_layers, "legal_layer_count": legal_layers,
         "candidate_bundle_bytes": bundle_bytes,
         "candidate_validation": candidate_validation,
@@ -235,7 +240,19 @@ fn status(profile: &str, root: &std::path::Path, catalog: &Value) -> Result<Valu
 fn remove(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> {
     if root.exists() {
         reject_link(root)?;
-        fs::remove_dir_all(root).map_err(|_| "legal-board: could not remove owned profile data")?;
+        accelerator_asset_store::remove(PRODUCT, profile, root)?;
+        for layer in 0_u8..=10 {
+            remove_file_if_present(&root.join(format!("forward-reachable-layer-{layer:02}.bin")))?;
+            remove_file_if_present(&root.join(format!("legal-layer-{layer:02}.bin")))?;
+        }
+        remove_file_if_present(&root.join(format!("legal-board-{profile}.cllb")))?;
+        remove_file_if_present(&root.join(format!("legal-board-{profile}.catalog.json")))?;
+        remove_file_if_present(&root.join("store.lock"))?;
+        match fs::remove_dir(root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("legal-board: profile directory contains unexpected files"),
+        }
     }
     Ok(json!({ "action": "remove", "profile": profile, "removed": true, "installed": false }))
 }
@@ -249,12 +266,7 @@ fn generate(
     if !(1..=64).contains(&workers) || !(1..=21).contains(&max_new_steps) {
         return Err("legal-board: generate limits are workers 1..=64 and max-new-steps 1..=21");
     }
-    if let Some(parent) = root.parent() {
-        fs::create_dir_all(parent).map_err(|_| "legal-board: could not create storage parent")?;
-        reject_link(parent)?;
-    }
-    fs::create_dir_all(root).map_err(|_| "legal-board: could not create profile storage")?;
-    reject_link(root)?;
+    accelerator_asset_store::ensure_real_directory(root)?;
     let kick_profile = KickTableProfileId::parse(profile)
         .ok_or("legal-board: profile is not connected to a kick table")?;
     let bundle = root.join(format!("legal-board-{profile}.cllb"));
@@ -268,7 +280,32 @@ fn generate(
         max_new_steps,
     })
     .map_err(|_| "legal-board: local candidate generation failed")?;
-    status(profile, root, catalog_entry(profile)?)
+    status(profile, root)
+}
+
+fn report_value(
+    action: &str,
+    profile: &str,
+    report: accelerator_asset_store::LocalAssetReport,
+) -> Result<Value, &'static str> {
+    Ok(json!({
+        "action": action,
+        "profile": profile,
+        "installed": report.installed,
+        "qualified": report.state == LocalAssetState::Ready,
+        "validation": report.state.as_str(),
+        "installed_payload_bytes": report.payload_bytes,
+        "installed_generation_identity": report.generation_identity.map(accelerator_asset_store::hex),
+        "catalog_identity": accelerator_asset_store::hex(report.catalog_identity),
+    }))
+}
+
+fn remove_file_if_present(path: &std::path::Path) -> Result<(), &'static str> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("legal-board: could not remove managed candidate file"),
+    }
 }
 
 fn reject_link(path: &std::path::Path) -> Result<(), &'static str> {

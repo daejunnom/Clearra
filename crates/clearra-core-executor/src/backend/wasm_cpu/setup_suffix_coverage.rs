@@ -185,7 +185,10 @@ impl SetupSuffixCoverageSession {
 
         let mut reachability = ReachabilityWorkspace::default();
         reachability.configure(catalog.skeleton_count());
-        reachability.configure_kick_profile(problem.kick_profile().profile_id());
+        reachability.configure_kick_profile(
+            problem.kick_profile().profile_id(),
+            problem.backend_policy().conditioned_reachability_enabled(),
+        );
         let prefix_node_count = prefix.nodes.len();
         let mut layers = Vec::new();
         layers

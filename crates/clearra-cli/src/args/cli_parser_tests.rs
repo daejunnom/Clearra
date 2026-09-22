@@ -5,7 +5,7 @@ use clearra_i18n::LanguageId;
 use super::*;
 
 #[test]
-fn top_level_help_lists_both_finesse_modes_and_build_probability_entry() {
+fn top_level_help_lists_search_and_explicit_data_lifecycle_entries() {
     let output = CliHelpTopic::TopLevel.into_output(LanguageId::En);
 
     assert!(output
@@ -17,6 +17,12 @@ fn top_level_help_lists_both_finesse_modes_and_build_probability_entry() {
     assert!(output
         .stdout()
         .contains("build-probability finesse: add --finesse inputs"));
+    for command in ["tablebase", "legal-board", "reachability-pack"] {
+        assert!(
+            output.stdout().contains(command),
+            "top-level help omitted {command}"
+        );
+    }
 }
 
 #[test]
@@ -650,6 +656,54 @@ fn tablebase_use_is_explicit_for_pc_and_setup() {
 }
 
 #[test]
+fn offline_fallback_is_explicit_and_requires_tablebase() {
+    let ParsedCliCommand::Pc(pc) = CliParser::parse([
+        "clearra",
+        "pc",
+        "--lines",
+        "4",
+        "--tablebase",
+        "--offline-fallback",
+    ])
+    .expect("authorized PC fallback invocation")
+    .into_command() else {
+        panic!("expected pc command");
+    };
+    assert!(pc.offline_fallback_requested());
+
+    let ParsedCliCommand::Setup(setup) = CliParser::parse([
+        "clearra",
+        "setup",
+        "--remaining",
+        "IOTSZJL",
+        "--tablebase",
+        "--offline-fallback",
+    ])
+    .expect("authorized setup fallback invocation")
+    .into_command() else {
+        panic!("expected setup command");
+    };
+    assert!(setup.offline_fallback_requested());
+
+    for command in ["pc", "setup"] {
+        let mut args = vec!["clearra", command];
+        if command == "pc" {
+            args.extend(["--lines", "4"]);
+        } else {
+            args.extend(["--remaining", "IOTSZJL"]);
+        }
+        args.push("--offline-fallback");
+        assert_eq!(
+            CliParser::parse(args),
+            Err(CliParseError::InvalidValue {
+                option: "--offline-fallback",
+                value: "requires --tablebase".to_owned(),
+            })
+        );
+    }
+}
+
+#[test]
 fn build_dependency_dag_is_explicit_for_pc() {
     let ParsedCliCommand::Pc(default_pc) = CliParser::parse(["clearra", "pc", "--lines", "4"])
         .expect("default PC invocation")
@@ -676,6 +730,48 @@ fn build_dependency_dag_is_explicit_for_pc() {
         panic!("expected pc command");
     };
     assert_eq!(disabled_pc.precompute_build_dependencies(), Some(false));
+}
+
+#[test]
+fn exact_accelerators_default_on_and_can_be_disabled_independently() {
+    let ParsedCliCommand::Pc(default_pc) = CliParser::parse(["clearra", "pc", "--lines", "4"])
+        .expect("default PC invocation")
+        .into_command()
+    else {
+        panic!("expected pc command");
+    };
+    assert_eq!(default_pc.exact_legal_board_enabled(), None);
+    assert_eq!(default_pc.conditioned_reachability_enabled(), None);
+
+    let ParsedCliCommand::Pc(disabled_pc) = CliParser::parse([
+        "clearra",
+        "pc",
+        "--lines",
+        "4",
+        "--no-legal-board",
+        "--no-conditioned-reachability",
+    ])
+    .expect("disabled accelerator invocation")
+    .into_command() else {
+        panic!("expected pc command");
+    };
+    assert_eq!(disabled_pc.exact_legal_board_enabled(), Some(false));
+    assert_eq!(disabled_pc.conditioned_reachability_enabled(), Some(false));
+}
+
+#[test]
+fn tiling_only_rejects_enabled_exact_accelerators() {
+    for option in ["--legal-board", "--conditioned-reachability"] {
+        let error = CliParser::parse(["clearra", "pc", "--lines", "4", "--tiling-only", option])
+            .expect_err("tiling-only accelerator must fail closed");
+        assert_eq!(
+            error,
+            CliParseError::InvalidValue {
+                option,
+                value: "not available with tiling-only search".to_owned(),
+            }
+        );
+    }
 }
 
 #[test]

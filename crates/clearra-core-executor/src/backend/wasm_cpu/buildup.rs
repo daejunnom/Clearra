@@ -514,18 +514,26 @@ pub(super) struct BuildUpWorkspace {
     projection_generation: u32,
     legal_board: Option<Arc<QualifiedExactLegalBoard>>,
     legal_board_profile: Option<clearra_rules::kicks::KickTableProfileId>,
+    legal_board_enabled: Option<bool>,
 }
 
 impl BuildUpWorkspace {
-    fn configure_legal_board(&mut self, profile: clearra_rules::kicks::KickTableProfileId) {
+    fn configure_legal_board(
+        &mut self,
+        profile: clearra_rules::kicks::KickTableProfileId,
+        enabled: bool,
+    ) {
         // A workspace is one execution-session owner. Snapshot the immutable
         // generation once so a concurrent install can never mix generations
         // between candidates in the same result.
-        if self.legal_board_profile == Some(profile) {
+        if self.legal_board_profile == Some(profile) && self.legal_board_enabled == Some(enabled) {
             return;
         }
-        self.legal_board = qualified_legal_board_snapshot(profile);
+        self.legal_board = enabled
+            .then(|| qualified_legal_board_snapshot(profile))
+            .flatten();
         self.legal_board_profile = Some(profile);
+        self.legal_board_enabled = Some(enabled);
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -1231,10 +1239,14 @@ fn verify_candidate_for_completion_mode(
         return Ok(infeasible_candidate_result(0));
     }
     workspace.reachability.configure(candidate.row_ids().len());
-    workspace
-        .reachability
-        .configure_kick_profile(kick_profile_id);
-    workspace.configure_legal_board(kick_profile_id);
+    workspace.reachability.configure_kick_profile(
+        kick_profile_id,
+        problem.backend_policy().conditioned_reachability_enabled(),
+    );
+    workspace.configure_legal_board(
+        kick_profile_id,
+        problem.backend_policy().exact_legal_board_enabled(),
+    );
     let projection_span =
         SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmCandidateProjection, profile_scale);
     let mut projection = CandidateProjection::compile(catalog, candidate, workspace, completion)?;
@@ -3544,9 +3556,10 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
     }
 
     workspace.reachability.configure(candidate.row_ids().len());
-    workspace
-        .reachability
-        .configure_kick_profile(problem.kick_profile().profile_id());
+    workspace.reachability.configure_kick_profile(
+        problem.kick_profile().profile_id(),
+        problem.backend_policy().conditioned_reachability_enabled(),
+    );
     let mut projection = CandidateProjection::compile(catalog, &candidate, workspace, completion)?;
     let graph = match BuildOrderGraph::build(
         problem,

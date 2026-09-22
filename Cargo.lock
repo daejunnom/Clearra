@@ -208,6 +208,7 @@ dependencies = [
 name = "clearra-cli"
 version = "0.8.1"
 dependencies = [
+ "clearra-accelerator-product-host",
  "clearra-app",
  "clearra-build-coverage",
  "clearra-cli-command",

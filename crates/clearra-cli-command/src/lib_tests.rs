@@ -624,10 +624,40 @@ fn tiling_only_rejects_buildup_and_probability_options() {
         "--queue-knowledge visible-7",
         "--tablebase",
         "--build-dependency-dag",
+        "--legal-board",
+        "--conditioned-reachability",
     ] {
         let command = format!("clearra pc --lines 2 --queue IIOOO --tiling-only {option}");
         let error = CliCommandParser::parse(&command).expect_err(option);
         assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
+    }
+}
+
+#[test]
+fn exact_accelerator_policy_is_default_on_and_independently_disableable() {
+    let default_pc = CliCommandParser::parse("clearra pc --lines 4 --backend cpu")
+        .expect("default PC command")
+        .to_app_request()
+        .expect("default PC request");
+    assert_eq!(
+        default_pc.command().exact_accelerator_policy(),
+        Some((true, true))
+    );
+
+    for source in [
+        "clearra pc --lines 4 --backend cpu --no-legal-board --no-conditioned-reachability",
+        "clearra setup --remaining IOTSZJL --no-legal-board --no-conditioned-reachability",
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --no-legal-board --no-conditioned-reachability",
+    ] {
+        let request = CliCommandParser::parse(source)
+            .expect(source)
+            .to_app_request()
+            .expect("accelerator policy AppRequest");
+        assert_eq!(
+            request.command().exact_accelerator_policy(),
+            Some((false, false)),
+            "{source}"
+        );
     }
 }
 

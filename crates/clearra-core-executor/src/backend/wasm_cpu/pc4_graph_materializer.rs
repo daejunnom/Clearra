@@ -151,7 +151,11 @@ pub fn materialize_pc4_ilc_transition(
     let expected_board = compact_target_board(WIDTH, HEIGHT, target_cells, target_deleted);
     let mut reachability = ReachabilityWorkspace::default();
     reachability.configure(1);
-    reachability.configure_kick_profile(kick_profile);
+    // Tablebase edge materialization is an independent qualification boundary.
+    // Do not make it silently depend on the separately versioned conditioned-
+    // reachability product; product search may opt into that accelerator only
+    // through its typed execution policy.
+    reachability.configure_kick_profile(kick_profile, false);
 
     let mut placements = Vec::new();
     // Reverse the target's normalization for every possible set of physical

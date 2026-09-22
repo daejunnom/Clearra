@@ -37,7 +37,10 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
     let mut cpu_warmup = None;
     let mut gpu_warmup = None;
     let mut tablebase_requested = None;
+    let mut offline_fallback_requested = false;
     let mut precompute_build_dependencies = None;
+    let mut exact_legal_board_enabled = None;
+    let mut conditioned_reachability_enabled = None;
     let mut cpu_threads = None;
     let mut no_gpu = false;
     let mut deterministic = None;
@@ -151,12 +154,32 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
                 tablebase_requested = Some(false);
                 index += 1;
             }
+            "--offline-fallback" => {
+                offline_fallback_requested = true;
+                index += 1;
+            }
             "--build-dependency-dag" => {
                 precompute_build_dependencies = Some(true);
                 index += 1;
             }
             "--no-build-dependency-dag" => {
                 precompute_build_dependencies = Some(false);
+                index += 1;
+            }
+            "--legal-board" => {
+                exact_legal_board_enabled = Some(true);
+                index += 1;
+            }
+            "--no-legal-board" => {
+                exact_legal_board_enabled = Some(false);
+                index += 1;
+            }
+            "--conditioned-reachability" => {
+                conditioned_reachability_enabled = Some(true);
+                index += 1;
+            }
+            "--no-conditioned-reachability" => {
+                conditioned_reachability_enabled = Some(false);
                 index += 1;
             }
             "--no-gpu" => {
@@ -258,6 +281,12 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
             value: "requires --score".to_owned(),
         });
     }
+    if offline_fallback_requested && tablebase_requested != Some(true) {
+        return Err(CliParseError::InvalidValue {
+            option: "--offline-fallback",
+            value: "requires --tablebase".to_owned(),
+        });
+    }
     if objective.trim().to_ascii_lowercase().replace('_', "-") == "tiling" {
         let incompatible = [
             (score_requested, "--score"),
@@ -268,9 +297,15 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
             (rule.is_some(), "--rule"),
             (kick_profile_json.is_some(), "--kick-profile-json"),
             (tablebase_requested == Some(true), "--tablebase"),
+            (offline_fallback_requested, "--offline-fallback"),
             (
                 precompute_build_dependencies == Some(true),
                 "--build-dependency-dag",
+            ),
+            (exact_legal_board_enabled == Some(true), "--legal-board"),
+            (
+                conditioned_reachability_enabled == Some(true),
+                "--conditioned-reachability",
             ),
             (solution_probabilities, "--solution-probabilities"),
             (
@@ -304,7 +339,10 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
         .with_cpu_warmup(cpu_warmup)
         .with_gpu_warmup(gpu_warmup)
         .with_tablebase_requested(tablebase_requested)
+        .with_offline_fallback_requested(offline_fallback_requested)
         .with_precompute_build_dependencies(precompute_build_dependencies)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled)
         .with_deterministic(deterministic)
         .with_max_frontier_states(max_frontier_states)
         .with_max_candidates(max_candidates)

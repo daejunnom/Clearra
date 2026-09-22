@@ -44,6 +44,8 @@ pub struct GuiBackendForm {
     deterministic: bool,
     precompute_build_dependencies: bool,
     tablebase_requested: bool,
+    exact_legal_board_enabled: bool,
+    conditioned_reachability_enabled: bool,
     memory_budget_mb: u32,
     candidate_budget: u32,
     pattern_budget: u32,
@@ -160,6 +162,16 @@ impl GuiBackendForm {
         self.tablebase_requested = value;
         self
     }
+
+    pub const fn with_exact_legal_board_enabled(mut self, value: bool) -> Self {
+        self.exact_legal_board_enabled = value;
+        self
+    }
+
+    pub const fn with_conditioned_reachability_enabled(mut self, value: bool) -> Self {
+        self.conditioned_reachability_enabled = value;
+        self
+    }
 }
 impl GuiBackendForm {
     pub const fn workers_requested(&self) -> Option<u16> {
@@ -188,6 +200,14 @@ impl GuiBackendForm {
 impl GuiBackendForm {
     pub const fn tablebase_requested(&self) -> bool {
         self.tablebase_requested
+    }
+
+    pub const fn exact_legal_board_enabled(&self) -> bool {
+        self.exact_legal_board_enabled
+    }
+
+    pub const fn conditioned_reachability_enabled(&self) -> bool {
+        self.conditioned_reachability_enabled
     }
 }
 impl GuiBackendForm {
@@ -219,6 +239,8 @@ impl Default for GuiBackendForm {
             deterministic: true,
             precompute_build_dependencies: false,
             tablebase_requested: false,
+            exact_legal_board_enabled: true,
+            conditioned_reachability_enabled: true,
             memory_budget_mb: 0,
             candidate_budget: 4096,
             pattern_budget: 1024,

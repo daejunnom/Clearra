@@ -62,6 +62,8 @@ mod policy {
         cpu_warmup: bool,
         gpu_warmup: bool,
         tablebase_requested: bool,
+        exact_legal_board_enabled: bool,
+        conditioned_reachability_enabled: bool,
         precompute_build_dependencies: bool,
         deterministic: bool,
         max_nodes: usize,
@@ -146,6 +148,16 @@ mod policy {
     impl PcExecutionPolicy {
         pub fn tablebase_requested(&self) -> bool {
             self.tablebase_requested
+        }
+    }
+    impl PcExecutionPolicy {
+        pub fn exact_legal_board_enabled(&self) -> bool {
+            self.exact_legal_board_enabled
+        }
+    }
+    impl PcExecutionPolicy {
+        pub fn conditioned_reachability_enabled(&self) -> bool {
+            self.conditioned_reachability_enabled
         }
     }
     impl PcExecutionPolicy {
@@ -277,6 +289,18 @@ mod policy {
         }
     }
     impl PcExecutionPolicy {
+        pub fn with_exact_legal_board_enabled(mut self, value: bool) -> Self {
+            self.exact_legal_board_enabled = value;
+            self
+        }
+    }
+    impl PcExecutionPolicy {
+        pub fn with_conditioned_reachability_enabled(mut self, value: bool) -> Self {
+            self.conditioned_reachability_enabled = value;
+            self
+        }
+    }
+    impl PcExecutionPolicy {
         pub fn with_precompute_build_dependencies(mut self, value: bool) -> Self {
             self.precompute_build_dependencies = value;
             self
@@ -353,6 +377,8 @@ mod policy {
                 cpu_warmup: false,
                 gpu_warmup: false,
                 tablebase_requested: false,
+                exact_legal_board_enabled: true,
+                conditioned_reachability_enabled: true,
                 precompute_build_dependencies: false,
                 deterministic: defaults.execution_deterministic(),
                 max_nodes: defaults.max_nodes(),
