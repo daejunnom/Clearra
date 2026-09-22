@@ -52,6 +52,7 @@ jobs:
           $timeoutExitCode = $LASTEXITCODE
           $ErrorActionPreference = $previousErrorAction
           if ($timeoutExitCode -eq 0) { throw 'timeout fixture unexpectedly succeeded' }
+          exit 0
 
   management-policy:
     name: Clearra management policy
