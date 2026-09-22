@@ -221,7 +221,9 @@ impl CliAppRequestAssembler {
                 default_format,
                 CliErrorCode::CliCommandUnsupported,
             )),
-            ParsedCliCommand::Help(_) | ParsedCliCommand::Tablebase(_) => {
+            ParsedCliCommand::Help(_)
+            | ParsedCliCommand::LegalBoard(_)
+            | ParsedCliCommand::Tablebase(_) => {
                 unreachable!("native management and help are handled before app assembly")
             }
         }

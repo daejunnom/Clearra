@@ -15,6 +15,7 @@ full-qualifier = [
     "dep:clearra-problem",
     "dep:serde_json",
 ]
+legal-board-assets = ["dep:serde_json"]
 
 [[bin]]
 name = "clearra-pc4-qualifier"
@@ -24,6 +25,7 @@ required-features = ["full-qualifier"]
 [[bin]]
 name = "clearra-pc4-legal-board"
 path = "src/bin/clearra-pc4-legal-board.rs"
+required-features = ["legal-board-assets"]
 
 [dependencies]
 clearra-app = { path = "../../crates/clearra-app", features = ["online-pc4-tablebase", "parallel"], optional = true }

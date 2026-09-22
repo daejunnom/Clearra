@@ -17,6 +17,7 @@ members = [
     "crates/clearra-pc-graph",
     "crates/clearra-pc4-tablebase",
     "crates/clearra-pc4-activation",
+    "crates/clearra-accelerator-activation",
     "crates/clearra-pc4-product-host",
     "crates/clearra-pc-next-probability",
     "crates/clearra-two-line",

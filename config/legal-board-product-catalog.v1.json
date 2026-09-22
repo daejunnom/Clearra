@@ -1,0 +1,10 @@
+{
+  "schema": "clearra.legal-board.product-catalog.v1",
+  "profiles": [
+    { "profile": "srs", "status": "not_qualified", "compressed_bytes": null, "generation_identity": null, "url": null },
+    { "profile": "srs-plus", "status": "not_qualified", "compressed_bytes": null, "generation_identity": null, "url": null },
+    { "profile": "srs-x", "status": "not_qualified", "compressed_bytes": null, "generation_identity": null, "url": null },
+    { "profile": "jstris-180", "status": "not_qualified", "compressed_bytes": null, "generation_identity": null, "url": null },
+    { "profile": "no-kick", "status": "not_qualified", "compressed_bytes": null, "generation_identity": null, "url": null }
+  ]
+}

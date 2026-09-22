@@ -4,6 +4,7 @@ pub mod area;
 pub mod backend;
 pub mod board;
 pub mod buildup;
+mod conditioned_reachability;
 pub mod core_execution_result;
 pub mod core_executor;
 pub mod core_postprocess_execution;
@@ -15,6 +16,7 @@ pub mod diagnostics;
 #[cfg(test)]
 mod execution_worker_limit;
 pub mod finesse_report;
+mod legal_board;
 pub mod memory;
 pub mod order_language;
 pub mod packing;
@@ -60,6 +62,14 @@ pub use clearra_replay::{
     ScoringExecutionEdge, ScoringExecutionNode, ScoringLockEvidence, SpinCoverageExecutionBatch,
     SpinCoverageExecutionGraph,
 };
+pub use conditioned_reachability::{
+    built_in_conditioned_reachability_binding, encode_conditioned_reachability,
+    install_conditioned_reachability_pack, remove_conditioned_reachability_pack,
+    BoardConditionedReachability, ConditionedReachabilityAssetError,
+    ConditionedReachabilityBinding, ConditionedReachabilityExpectation,
+    ConditionedReachabilityLookup, ConditionedReachabilityRecord,
+    QualifiedBoardConditionedReachability, CONDITIONED_REACHABILITY_COMPLETENESS_SCOPE,
+};
 pub use core_execution_result::{
     CoreExecutionResult, CorePathStep, PcScoreDistributedMergeEvidence,
     PcTilingMemoryAdmissionEvidence,
@@ -71,6 +81,16 @@ pub use core_postprocess_spin_coverage::CorePostProcessSpinCoverage;
 pub use finesse_report::{
     FinessePolicyResult, FinesseReport, FinesseReportInput, FinesseReportPlacement,
     FinesseRepresentativeWitness, FinesseSearchSolutionFilterError, FinesseSolutionAverage,
+};
+pub use legal_board::{
+    built_in_binding as built_in_legal_board_binding,
+    built_in_rule_identity as built_in_legal_board_rule_identity,
+    encode_exact_intersection as encode_exact_legal_board_intersection,
+    install_qualified_exact_legal_board, remove_qualified_exact_legal_board, CompletionCapability,
+    ExactLegalBoard, LegalBoardAssetError, LegalBoardBinding, LegalBoardDecision,
+    LegalBoardExpectation, LegalBoardQuery, OriginalRowFrame, ProviderStatus,
+    QualifiedExactLegalBoard, RowCodecError, UnsupportedLegalBoardProfile,
+    EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE,
 };
 pub use memory::ScopeGuard;
 pub use packing::{PackingExecutionPlan, PackingRunResult, PackingRunner, PackingState};

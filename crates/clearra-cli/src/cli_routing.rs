@@ -36,6 +36,23 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
     let explicit_ties = invocation.explicit_ties().clone();
     let output = file_input_guard::with_verbose_paths(verbose_paths, || {
         let command = invocation.into_command();
+        if let ParsedCliCommand::LegalBoard(args) = &command {
+            if explicit_ties.active()
+                || solution_artifact_output.is_some()
+                || solution_stdout_format.is_some()
+                || include_solution_data
+            {
+                return CliOutput::error(
+                    CliErrorCode::CliInvalidValue,
+                    "legal-board management does not return a solution set",
+                );
+            }
+            return crate::legal_board_assets::run(
+                args,
+                language,
+                matches!(format, crate::output::RenderFormat::Json),
+            );
+        }
         if let ParsedCliCommand::Tablebase(args) = &command {
             if explicit_ties.active()
                 || solution_artifact_output.is_some()

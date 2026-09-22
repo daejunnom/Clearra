@@ -2,7 +2,10 @@
 
 use std::sync::{Mutex, MutexGuard};
 #[cfg(feature = "local-search-ab")]
-use std::{path::Path, time::Instant};
+use std::{path::Path, sync::Arc, time::Instant};
+
+#[cfg(feature = "local-search-ab")]
+use clearra_core_executor::{built_in_legal_board_binding, LegalBoardExpectation};
 
 use clearra_core_domain::{
     execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
@@ -23,8 +26,6 @@ use clearra_pc_graph::request::{
 use clearra_problem::ProblemCompiler;
 #[cfg(feature = "local-search-ab")]
 use clearra_rules::kicks::KickTableProfileId;
-#[cfg(feature = "local-search-ab")]
-use sha2::{Digest, Sha256};
 
 const P7P4_UNIQUE_TILING_COUNT: usize = 456_923;
 const P7P4_NORMALIZED_SET_HASH: &str = "cts1:98ebe8726537b29f";
@@ -448,9 +449,10 @@ fn p7p4_prune_matrix_two_runs_per_pair() {
     // Load the pre-generated legal-board index only after the parity matrix.
     // This keeps its retained memory and cache footprint out of all eight
     // parity samples while still excluding generation time from the ABBA run.
-    let legal_root = std::env::var_os("CLEARRA_LOCAL_PC4_LEGAL_BOARD_ROOT")
-        .expect("set CLEARRA_LOCAL_PC4_LEGAL_BOARD_ROOT to the complete SRS+ reverse-domain root");
-    install_local_pc4_legal_board_index(load_legal_board_index(Path::new(&legal_root))).unwrap();
+    let legal_bundle = std::env::var_os("CLEARRA_LOCAL_PC4_LEGAL_BOARD_BUNDLE").expect(
+        "set CLEARRA_LOCAL_PC4_LEGAL_BOARD_BUNDLE to the exact SRS+ F-intersection-R bundle",
+    );
+    install_local_pc4_legal_board_index(load_legal_board_index(Path::new(&legal_bundle))).unwrap();
 
     let mut legal_records = Vec::new();
     for legal_board in [false, true, true, false] {
@@ -538,53 +540,15 @@ fn assert_p7p4_exact(result: &clearra_core_executor::CoreExecutionResult) {
 }
 
 #[cfg(feature = "local-search-ab")]
-fn load_legal_board_index(root: &Path) -> LocalPc4LegalBoardIndex {
-    let mut layers: [Vec<u64>; 11] = std::array::from_fn(|_| Vec::new());
-    let mut binding = None;
-    let mut input_digest = [0_u8; 32];
-    for layer in (0_u8..=10).rev() {
-        let bytes = std::fs::read(root.join(format!("reverse-layer-{layer:02}.bin")))
-            .expect("read complete legal-board reverse layer");
-        assert!(bytes.len() >= 128);
-        assert_eq!(&bytes[..8], b"PC4DOM02");
-        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
-        assert_eq!(
-            u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
-            u32::from(layer)
-        );
-        let count = usize::try_from(u64::from_le_bytes(bytes[16..24].try_into().unwrap())).unwrap();
-        assert_eq!(bytes.len(), 128 + count * 8);
-        let observed_binding: [u8; 32] = bytes[24..56].try_into().unwrap();
-        assert_eq!(*binding.get_or_insert(observed_binding), observed_binding);
-        assert_eq!(bytes[56], if layer == 10 { 1 } else { 3 });
-        assert!(bytes[57..64].iter().all(|byte| *byte == 0));
-        let observed_input: [u8; 32] = bytes[64..96].try_into().unwrap();
-        assert_eq!(observed_input, input_digest);
-        assert!(bytes[96..128].iter().all(|byte| *byte == 0));
-
-        let mut prior = None;
-        for field in bytes[128..].chunks_exact(8) {
-            let hydra = u64::from_le_bytes(field.try_into().unwrap());
-            assert_eq!(hydra.count_ones(), u32::from(layer) * 4);
-            assert!(prior.is_none_or(|value| value < hydra));
-            prior = Some(hydra);
-            layers[usize::from(layer)].push(hydra_to_clearra(hydra));
-        }
-        input_digest = Sha256::digest(&bytes).into();
-    }
-    LocalPc4LegalBoardIndex::new(KickTableProfileId::SrsPlus, layers)
-        .expect("complete SRS+ legal-board index")
-}
-
-#[cfg(feature = "local-search-ab")]
-fn hydra_to_clearra(hash: u64) -> u64 {
-    let mut board = 0_u64;
-    for y in 0..4 {
-        for x in 0..10 {
-            if hash & (1_u64 << (y * 10 + 9 - x)) != 0 {
-                board |= 1_u64 << (y * 10 + x);
-            }
-        }
-    }
-    board
+fn load_legal_board_index(path: &Path) -> LocalPc4LegalBoardIndex {
+    let bytes = std::fs::read(path).expect("read exact legal-board bundle");
+    let binding = built_in_legal_board_binding(KickTableProfileId::SrsPlus).unwrap();
+    LocalPc4LegalBoardIndex::load_bundle(
+        Arc::from(bytes),
+        LegalBoardExpectation {
+            binding,
+            generation_identity: None,
+        },
+    )
+    .expect("complete SRS+ exact legal-board bundle")
 }

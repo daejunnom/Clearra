@@ -9,6 +9,7 @@ mod execution_resource_test_support;
 pub mod exit;
 pub mod fixture;
 mod input;
+mod legal_board_assets;
 pub mod output;
 mod rules;
 mod scoring;

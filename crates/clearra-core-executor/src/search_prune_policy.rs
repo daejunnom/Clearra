@@ -6,9 +6,11 @@ use core::sync::atomic::{AtomicU8, Ordering};
 #[cfg(feature = "local-search-ab")]
 use std::sync::{Arc, OnceLock};
 
+use crate::legal_board::{
+    CompletionCapability, LegalBoardDecision, LegalBoardQuery, QualifiedExactLegalBoard,
+};
 #[cfg(feature = "local-search-ab")]
-use clearra_rules::kicks::KickTableProfileId;
-
+use crate::legal_board::{ExactLegalBoard, LegalBoardExpectation};
 #[cfg(feature = "local-search-ab")]
 const ADDITIVE_PARITY: u8 = 1 << 0;
 #[cfg(feature = "local-search-ab")]
@@ -77,48 +79,31 @@ impl LocalSearchPrunePolicy {
     }
 }
 
-/// Immutable, profile-bound reverse-completable board domain used only by a
-/// local benchmark binary. Product builds neither expose an installer nor pay
-/// a lookup cost. Each layer contains sorted Clearra Board64 masks after line
-/// clears have been normalized into a full bottom-row prefix.
+/// Immutable, exact `F_k ∩ R_k` legal-board bundle used only by a local A/B
+/// binary until the product installer and signed catalog are qualified.
 #[cfg(feature = "local-search-ab")]
 #[derive(Debug)]
 pub struct LocalPc4LegalBoardIndex {
-    kick_profile: KickTableProfileId,
-    layers: [Vec<u64>; 11],
+    board: ExactLegalBoard,
 }
 
 #[cfg(feature = "local-search-ab")]
 impl LocalPc4LegalBoardIndex {
-    pub fn new(
-        kick_profile: KickTableProfileId,
-        mut layers: [Vec<u64>; 11],
+    pub fn load_bundle(
+        bytes: Arc<[u8]>,
+        expectation: LegalBoardExpectation,
     ) -> Result<Self, &'static str> {
-        for (layer, fields) in layers.iter_mut().enumerate() {
-            fields.sort_unstable();
-            fields.dedup();
-            if fields
-                .iter()
-                .any(|field| field.count_ones() != (layer as u32) * 4)
-            {
-                return Err("local_legal_board_layer_area_mismatch");
-            }
-        }
-        if layers[0].binary_search(&0).is_err()
-            || layers[10].binary_search(&((1_u64 << 40) - 1)).is_err()
-        {
-            return Err("local_legal_board_terminal_domain_incomplete");
-        }
-        Ok(Self {
-            kick_profile,
-            layers,
-        })
+        let board = ExactLegalBoard::load(bytes, expectation)
+            .map_err(|_| "local_legal_board_bundle_invalid")?;
+        Ok(Self { board })
     }
 
-    fn contains(&self, depth: usize, normalized_board: u64) -> bool {
-        self.layers
-            .get(depth)
-            .is_some_and(|layer| layer.binary_search(&normalized_board).is_ok())
+    pub fn compressed_bytes(&self) -> usize {
+        self.board.compressed_bytes()
+    }
+
+    pub fn sparse_index_bytes(&self) -> usize {
+        self.board.sparse_index_bytes()
     }
 }
 
@@ -180,77 +165,82 @@ pub(crate) fn dependency_relaxation_enabled() -> bool {
     }
 }
 
-/// Returns false only inside the explicitly local A/B feature and only for an
-/// empty-origin 10x4 query bound to the installed kick profile. Missing data,
-/// arbitrary initial fields, 5L+ targets, profile mismatch, or malformed
-/// normalization all fail open to the ordinary exact BuildUp traversal.
+/// Returns false only for a qualified exact-intersection asset and its closed
+/// empty-origin 10x4 domain. Local A/B builds additionally require their
+/// explicit feature bit. Every scope, profile, state, or asset miss fails open
+/// to the ordinary exact BuildUp traversal.
 #[inline(always)]
 pub(crate) fn local_pc4_legal_board_allows(
+    qualified: Option<&QualifiedExactLegalBoard>,
     width: u8,
     height: u8,
     initial_board: u64,
     kick_profile: clearra_rules::kicks::KickTableProfileId,
+    clear_to_empty_completion: bool,
     physical_board: u64,
     deleted_rows: u16,
     depth: usize,
 ) -> bool {
     #[cfg(feature = "local-search-ab")]
     {
-        if LOCAL_POLICY.load(Ordering::Relaxed) & LEGAL_BOARD == 0
-            || width != 10
-            || height != 4
-            || initial_board != 0
-            || depth > 10
-        {
+        if LOCAL_POLICY.load(Ordering::Relaxed) & LEGAL_BOARD == 0 {
             return true;
         }
-        let Some(index) = LOCAL_PC4_LEGAL_BOARD.get() else {
-            return true;
-        };
-        if index.kick_profile != kick_profile {
-            return true;
-        }
-        if deleted_rows >> height != 0 {
-            return true;
-        }
-        let row_mask = (1_u64 << width) - 1;
-        let mut normalized_board = 0_u64;
-        let mut physical_row = 0_u32;
-        for target_row in 0..height {
-            let row = if deleted_rows & (1_u16 << target_row) != 0 {
-                row_mask
-            } else {
-                let row = (physical_board >> (physical_row * u32::from(width))) & row_mask;
-                physical_row += 1;
-                row
-            };
-            normalized_board |= row << (u32::from(target_row) * u32::from(width));
-        }
-        if physical_board >> (physical_row * u32::from(width)) != 0 {
-            return true;
-        }
-        if normalized_board.count_ones() != (depth as u32) * 4 {
-            return true;
-        }
-        return index.contains(depth, normalized_board);
-    }
-    #[cfg(not(feature = "local-search-ab"))]
-    {
-        let _ = (
+        let query = LegalBoardQuery {
             width,
             height,
             initial_board,
             kick_profile,
             physical_board,
-            deleted_rows,
-            depth,
-        );
-        true
+            deleted_original_rows: deleted_rows,
+            placed_piece_count: depth,
+            completion: if clear_to_empty_completion {
+                CompletionCapability::ClearToEmpty
+            } else {
+                CompletionCapability::Other
+            },
+        };
+        if let Some(index) = LOCAL_PC4_LEGAL_BOARD.get() {
+            return !matches!(
+                index.board.decide(query),
+                LegalBoardDecision::VerifiedAbsent
+            );
+        }
+        let Some(index) = qualified else {
+            return true;
+        };
+        return !matches!(index.decide(query), LegalBoardDecision::VerifiedAbsent);
+    }
+    #[cfg(not(feature = "local-search-ab"))]
+    {
+        let Some(index) = qualified else {
+            return true;
+        };
+        !matches!(
+            index.decide(LegalBoardQuery {
+                width,
+                height,
+                initial_board,
+                kick_profile,
+                physical_board,
+                deleted_original_rows: deleted_rows,
+                placed_piece_count: depth,
+                completion: if clear_to_empty_completion {
+                    CompletionCapability::ClearToEmpty
+                } else {
+                    CompletionCapability::Other
+                },
+            }),
+            LegalBoardDecision::VerifiedAbsent
+        )
     }
 }
 
 #[cfg(all(test, feature = "local-search-ab"))]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::legal_board::{built_in_binding, encode_exact_intersection, LegalBoardExpectation};
     use clearra_rules::kicks::KickTableProfileId;
 
     use super::{
@@ -263,11 +253,21 @@ mod tests {
         let mut layers: [Vec<u64>; 11] = std::array::from_fn(|_| Vec::new());
         layers[0].push(0);
         layers[1].push(0b1111);
-        let non_prefix_cleared_target = (((1_u64 << 10) - 1) << 20) | (0b11 << 30);
-        layers[3].push(non_prefix_cleared_target);
+        let bottom_prefix_target = ((1_u64 << 10) - 1) | (0b11 << 30);
+        layers[3].push(bottom_prefix_target);
         layers[10].push((1_u64 << 40) - 1);
+        let binding = built_in_binding(KickTableProfileId::SrsPlus).unwrap();
+        let bytes = encode_exact_intersection(binding, &layers).unwrap();
+        let generation = bytes[80..112].try_into().unwrap();
         install_local_pc4_legal_board_index(
-            LocalPc4LegalBoardIndex::new(KickTableProfileId::SrsPlus, layers).unwrap(),
+            LocalPc4LegalBoardIndex::load_bundle(
+                Arc::from(bytes),
+                LegalBoardExpectation {
+                    binding,
+                    generation_identity: Some(generation),
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
         let previous = set_local_search_prune_policy(
@@ -275,55 +275,78 @@ mod tests {
         );
 
         assert!(local_pc4_legal_board_allows(
+            None,
             10,
             4,
             0,
             KickTableProfileId::SrsPlus,
+            true,
             0b1111,
             0,
             1,
         ));
         assert!(local_pc4_legal_board_allows(
+            None,
             10,
             4,
             0,
             KickTableProfileId::SrsPlus,
+            true,
             0b11 << 20,
             1 << 2,
             3,
         ));
         assert!(!local_pc4_legal_board_allows(
+            None,
             10,
             4,
             0,
             KickTableProfileId::SrsPlus,
+            true,
             0b11110,
             0,
             1,
         ));
         assert!(local_pc4_legal_board_allows(
+            None,
             10,
             5,
             0,
             KickTableProfileId::SrsPlus,
+            true,
             0b11110,
             0,
             1,
         ));
         assert!(local_pc4_legal_board_allows(
+            None,
             10,
             4,
             1,
             KickTableProfileId::SrsPlus,
+            true,
             0b11110,
             0,
             1,
         ));
         assert!(local_pc4_legal_board_allows(
+            None,
             10,
             4,
             0,
             KickTableProfileId::Jstris180,
+            true,
+            0b11110,
+            0,
+            1,
+        ));
+        assert!(local_pc4_legal_board_allows(
+            None,
+            10,
+            4,
+            0,
+            KickTableProfileId::SrsPlus,
+            false,
             0b11110,
             0,
             1,

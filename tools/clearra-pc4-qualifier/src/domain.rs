@@ -1,14 +1,11 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_core_domain::piece::rotation::RotationState;
 use clearra_core_executor::{
     enumerate_pc4_ilc_geometric_predecessor_fields, enumerate_pc4_ilc_target_fields,
 };
 use clearra_pc4_tablebase::{
     clearra_board64_mask_to_hydra_field_hash_v1, hydra_field_hash_v1_to_clearra_board64_mask,
 };
-use clearra_rules::kicks::{
-    KickTableProfile, KickTableProfileId, KickTransition, NoKick, SrsKicks,
-};
+use clearra_rules::kicks::KickTableProfileId;
 use sha2::{Digest, Sha256};
 use std::{
     cmp::Reverse,
@@ -67,50 +64,18 @@ impl DomainBinding {
     /// Any ordered kick-offset change produces a different identity and makes
     /// existing layer files fail closed instead of being silently reused.
     pub(crate) fn legal_board(kick_profile: KickTableProfileId) -> Result<Self, String> {
-        let profile: KickTableProfile = match kick_profile {
-            KickTableProfileId::Srs90 => SrsKicks::profile(),
-            KickTableProfileId::SrsPlus => SrsKicks::srs_plus_profile(),
-            KickTableProfileId::SrsX => SrsKicks::srs_x_profile(),
-            KickTableProfileId::Jstris180 => SrsKicks::jstris_180_profile(),
-            KickTableProfileId::NoKick => NoKick::profile(),
-            KickTableProfileId::Asc
-            | KickTableProfileId::Ars
-            | KickTableProfileId::Imported
-            | KickTableProfileId::Custom => {
-                return Err(
-                    "legal-board generation requires a connected built-in profile".to_owned(),
-                )
-            }
-        };
-        let mut digest = Sha256::new();
-        digest.update(b"clearra.pc4.legal-board.reverse-domain.v1\0width=10\0height=4\0");
-        digest.update(kick_profile.as_str().as_bytes());
-        digest.update([0]);
-        for piece in PieceKind::STANDARD_TETROMINOES {
-            for from in RotationState::ALL {
-                for to in RotationState::ALL {
-                    if from == to {
-                        continue;
-                    }
-                    digest.update([
-                        piece.as_ascii() as u8,
-                        from.quarter_turns(),
-                        to.quarter_turns(),
-                    ]);
-                    if let Some(sequence) =
-                        profile.sequence_for(KickTransition::new(piece, from, to))
-                    {
-                        digest.update((sequence.len() as u32).to_le_bytes());
-                        for offset in sequence.offsets() {
-                            digest.update([offset.dx() as u8, offset.dy() as u8]);
-                        }
-                    } else {
-                        digest.update(u32::MAX.to_le_bytes());
-                    }
-                }
-            }
+        let identity = clearra_core_executor::built_in_legal_board_rule_identity(kick_profile)
+            .map_err(|_| {
+                "legal-board generation requires a connected built-in profile".to_owned()
+            })?;
+        Ok(Self::new(identity, kick_profile))
+    }
+
+    pub(crate) const fn legal_board_binding(self) -> clearra_core_executor::LegalBoardBinding {
+        clearra_core_executor::LegalBoardBinding {
+            kick_profile: self.kick_profile,
+            rule_identity: self.identity,
         }
-        Ok(Self::new(digest.finalize().into(), kick_profile))
     }
 }
 
@@ -154,6 +119,9 @@ pub(crate) enum DomainDerivation {
     ForwardSeed = 2,
     ReverseStep = 3,
     ForwardStep = 4,
+    ForwardReachableStep = 5,
+    LegalTerminalSeed = 6,
+    LegalPredecessorStep = 7,
 }
 
 impl DomainDerivation {
@@ -163,6 +131,9 @@ impl DomainDerivation {
             2 => Ok(Self::ForwardSeed),
             3 => Ok(Self::ReverseStep),
             4 => Ok(Self::ForwardStep),
+            5 => Ok(Self::ForwardReachableStep),
+            6 => Ok(Self::LegalTerminalSeed),
+            7 => Ok(Self::LegalPredecessorStep),
             _ => Err("domain derivation invalid".to_owned()),
         }
     }
@@ -265,15 +236,18 @@ pub(crate) fn step(
             return Err("reverse domain step does not accept --filter".to_owned())
         }
         (DomainDirection::Forward, Some(path)) => Some(read(path, binding, Some(output_layer))?),
-        (DomainDirection::Forward, None) => {
-            return Err("forward domain step requires the reverse layer as --filter".to_owned())
-        }
+        // An unfiltered forward step is the product generator's F_k domain.
+        // The older filtered form remains readable for historical evidence,
+        // but exact legal layers are now derived in a separate backward pass
+        // that is restricted to these complete forward layers.
+        (DomainDirection::Forward, None) => None,
     };
     if output_path.exists() {
         let existing = read(output_path, binding, Some(output_layer))?;
         let expected_derivation = match direction {
             DomainDirection::Reverse => DomainDerivation::ReverseStep,
-            DomainDirection::Forward => DomainDerivation::ForwardStep,
+            DomainDirection::Forward if filter.is_some() => DomainDerivation::ForwardStep,
+            DomainDirection::Forward => DomainDerivation::ForwardReachableStep,
         };
         let expected_filter = filter.as_ref().map_or([0; 32], |value| value.file_digest);
         if existing.derivation != expected_derivation
@@ -315,10 +289,7 @@ pub(crate) fn step(
                 binding,
                 output_layer,
                 &input.fields,
-                &filter
-                    .as_ref()
-                    .expect("forward filter checked above")
-                    .fields,
+                filter.as_ref().map(|value| value.fields.as_slice()),
                 workers,
             )?,
             0,
@@ -327,7 +298,8 @@ pub(crate) fn step(
     validate_fields(output_layer, &fields)?;
     let derivation = match direction {
         DomainDirection::Reverse => DomainDerivation::ReverseStep,
-        DomainDirection::Forward => DomainDerivation::ForwardStep,
+        DomainDirection::Forward if filter.is_some() => DomainDerivation::ForwardStep,
+        DomainDirection::Forward => DomainDerivation::ForwardReachableStep,
     };
     let filter_digest = filter.as_ref().map_or([0; 32], |value| value.file_digest);
     let identity = write(
@@ -358,7 +330,7 @@ fn generate_forward_layer(
     binding: DomainBinding,
     output_layer: u8,
     input: &[u64],
-    filter: &[u64],
+    filter: Option<&[u64]>,
     workers: usize,
 ) -> Result<Vec<u64>, String> {
     let cursor = AtomicUsize::new(0);
@@ -388,7 +360,9 @@ fn generate_forward_layer(
                                 let candidate_hash =
                                     clearra_board64_mask_to_hydra_field_hash_v1(candidate)
                                         .map_err(|error| error.reason().to_owned())?;
-                                if filter.binary_search(&candidate_hash).is_ok() {
+                                if filter.is_none_or(|allowed| {
+                                    allowed.binary_search(&candidate_hash).is_ok()
+                                }) {
                                     output.insert(candidate_hash);
                                 }
                             }
@@ -401,6 +375,161 @@ fn generate_forward_layer(
         join_workers(handles)
     })?;
     Ok(merge_sorted(partials))
+}
+
+/// Seed `L_10` from the complete forward domain. This deliberately does not
+/// trust a reverse seed: a terminal field is a legal board only when it was
+/// reached from the empty origin under the exact profile.
+pub(crate) fn legal_terminal_seed(
+    binding: DomainBinding,
+    forward_path: &Path,
+    output_path: &Path,
+) -> Result<SeedReport, String> {
+    let forward = read(forward_path, binding, Some(10))?;
+    if output_path.exists() {
+        let existing = read(output_path, binding, Some(10))?;
+        if existing.derivation != DomainDerivation::LegalTerminalSeed
+            || existing.input_digest != forward.file_digest
+            || existing.filter_digest != [0; 32]
+        {
+            return Err(
+                "existing legal terminal is not bound to the current forward domain".to_owned(),
+            );
+        }
+        return Ok(SeedReport {
+            disposition: "already-complete",
+            layer: 10,
+            field_count: existing.fields.len(),
+            file_identity: existing.file_identity,
+        });
+    }
+    if forward.fields.binary_search(&FIELD_MASK).is_err() {
+        return Err("complete forward domain does not reach the full four-line field".to_owned());
+    }
+    let identity = write(
+        output_path,
+        binding,
+        10,
+        &[FIELD_MASK],
+        DomainDerivation::LegalTerminalSeed,
+        forward.file_digest,
+        [0; 32],
+    )?;
+    Ok(SeedReport {
+        disposition: "created",
+        layer: 10,
+        field_count: 1,
+        file_identity: identity,
+    })
+}
+
+/// Derive `L_k` without materialising the much larger unrestricted `R_k`.
+/// A source is admitted iff it belongs to complete `F_k` and one exact ILC
+/// placement reaches the already-complete `L_(k+1)` layer.
+pub(crate) fn legal_predecessor_step(
+    binding: DomainBinding,
+    forward_source_path: &Path,
+    legal_target_path: &Path,
+    output_path: &Path,
+    requested_workers: usize,
+) -> Result<StepReport, String> {
+    if requested_workers == 0 || requested_workers > MAX_WORKERS {
+        return Err("domain worker count outside 1..=64".to_owned());
+    }
+    let forward = read(forward_source_path, binding, None)?;
+    if forward.layer >= 10 {
+        return Err("legal predecessor source must be below layer ten".to_owned());
+    }
+    let target_layer = forward.layer + 1;
+    let target = read(legal_target_path, binding, Some(target_layer))?;
+    if output_path.exists() {
+        let existing = read(output_path, binding, Some(forward.layer))?;
+        if existing.derivation != DomainDerivation::LegalPredecessorStep
+            || existing.input_digest != forward.file_digest
+            || existing.filter_digest != target.file_digest
+        {
+            return Err(
+                "existing legal predecessor layer is not bound to its current inputs".to_owned(),
+            );
+        }
+        return Ok(StepReport {
+            disposition: "already-complete",
+            input_layer: target_layer,
+            output_layer: forward.layer,
+            input_field_count: target.fields.len(),
+            output_field_count: existing.fields.len(),
+            candidate_pair_count: 0,
+            workers: 0,
+            file_identity: existing.file_identity,
+        });
+    }
+    let available = thread::available_parallelism().map_or(1, usize::from);
+    let workers = requested_workers
+        .min(available)
+        .min(forward.fields.len().max(1));
+    let cursor = AtomicUsize::new(0);
+    let partials = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for _ in 0..workers {
+            let cursor = &cursor;
+            let sources = &forward.fields;
+            let targets = &target.fields;
+            handles.push(scope.spawn(move || {
+                let mut admitted = Vec::new();
+                loop {
+                    let begin = cursor.fetch_add(8, Ordering::Relaxed);
+                    if begin >= sources.len() {
+                        break;
+                    }
+                    for &field_hash in &sources[begin..sources.len().min(begin + 8)] {
+                        let cells = hydra_field_hash_v1_to_clearra_board64_mask(field_hash)
+                            .map_err(|error| error.reason().to_owned())?;
+                        let mut reaches_legal_target = false;
+                        'pieces: for piece in PieceKind::STANDARD_TETROMINOES {
+                            for candidate in
+                                enumerate_pc4_ilc_target_fields(cells, piece, binding.kick_profile)
+                                    .map_err(|error| error.reason().to_owned())?
+                            {
+                                let candidate_hash =
+                                    clearra_board64_mask_to_hydra_field_hash_v1(candidate)
+                                        .map_err(|error| error.reason().to_owned())?;
+                                if targets.binary_search(&candidate_hash).is_ok() {
+                                    reaches_legal_target = true;
+                                    break 'pieces;
+                                }
+                            }
+                        }
+                        if reaches_legal_target {
+                            admitted.push(field_hash);
+                        }
+                    }
+                }
+                Ok(admitted)
+            }));
+        }
+        join_workers(handles)
+    })?;
+    let fields = merge_sorted(partials);
+    validate_fields(forward.layer, &fields)?;
+    let identity = write(
+        output_path,
+        binding,
+        forward.layer,
+        &fields,
+        DomainDerivation::LegalPredecessorStep,
+        forward.file_digest,
+        target.file_digest,
+    )?;
+    Ok(StepReport {
+        disposition: "created",
+        input_layer: target_layer,
+        output_layer: forward.layer,
+        input_field_count: target.fields.len(),
+        output_field_count: fields.len(),
+        candidate_pair_count: forward.fields.len(),
+        workers,
+        file_identity: identity,
+    })
 }
 
 fn generate_reverse_layer(
@@ -1578,6 +1707,64 @@ mod tests {
         assert_eq!(forward_file.derivation, DomainDerivation::ForwardSeed);
         fs::remove_file(reverse).unwrap();
         fs::remove_file(forward).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn legal_backtrace_is_restricted_to_the_complete_forward_source() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::SrsPlus).unwrap();
+        let root = test_root("legal-backtrace");
+        fs::create_dir(&root).unwrap();
+        let forward_ten = root.join("forward-10.bin");
+        let legal_ten = root.join("legal-10.bin");
+        let forward_nine = root.join("forward-09.bin");
+        let legal_nine = root.join("legal-09.bin");
+
+        write(
+            &forward_ten,
+            binding,
+            10,
+            &[FIELD_MASK],
+            DomainDerivation::ForwardReachableStep,
+            [1; 32],
+            [0; 32],
+        )
+        .unwrap();
+        legal_terminal_seed(binding, &forward_ten, &legal_ten).unwrap();
+
+        let (all_predecessors, _) =
+            generate_reverse_layer_bounded(binding, 9, &[FIELD_MASK], 2, 1).unwrap();
+        let selected = [
+            all_predecessors[0],
+            all_predecessors[all_predecessors.len() - 1],
+        ];
+        write(
+            &forward_nine,
+            binding,
+            9,
+            &selected,
+            DomainDerivation::ForwardReachableStep,
+            [2; 32],
+            [0; 32],
+        )
+        .unwrap();
+        legal_predecessor_step(binding, &forward_nine, &legal_ten, &legal_nine, 2).unwrap();
+        let observed = read(&legal_nine, binding, Some(9)).unwrap();
+
+        assert_eq!(observed.fields, selected);
+        assert_eq!(observed.derivation, DomainDerivation::LegalPredecessorStep);
+        assert_eq!(
+            observed.input_digest,
+            read(&forward_nine, binding, Some(9)).unwrap().file_digest
+        );
+        assert_eq!(
+            observed.filter_digest,
+            read(&legal_ten, binding, Some(10)).unwrap().file_digest
+        );
+
+        for path in [forward_ten, legal_ten, forward_nine, legal_nine] {
+            fs::remove_file(path).unwrap();
+        }
         fs::remove_dir(root).unwrap();
     }
 

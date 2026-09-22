@@ -2,6 +2,12 @@ use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState}
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_replay::{RotationRequest, ScoringLockEvidence};
 use clearra_rules::kicks::{KickTableProfile, KickTableProfileId, KickTransition};
+use std::sync::Arc;
+
+use crate::conditioned_reachability::{
+    conditioned_reachability_epoch, conditioned_reachability_snapshot,
+    ConditionedReachabilityLookup, QualifiedBoardConditionedReachability,
+};
 
 use super::{
     catalog::{GeometryCatalog, InstantiatedRealization},
@@ -429,6 +435,8 @@ pub(super) struct ReachabilityMetrics {
     pub cache_reachable_hits: usize,
     pub cache_unreachable_hits: usize,
     pub cache_key_misses: usize,
+    pub conditioned_complete_hits: usize,
+    pub conditioned_misses: usize,
     pub partial_searches: usize,
     pub exhaustive_searches: usize,
 }
@@ -441,6 +449,8 @@ pub(super) struct ReachabilityWorkspace {
     scratch: ReachabilityScratch,
     templates: [Option<ReachabilityTemplate>; 7],
     kick_profile_id: KickTableProfileId,
+    conditioned: Option<Arc<QualifiedBoardConditionedReachability>>,
+    conditioned_epoch: u64,
     generated_states: usize,
     metrics: ReachabilityMetrics,
 }
@@ -452,6 +462,8 @@ impl Default for ReachabilityWorkspace {
             scratch: ReachabilityScratch::default(),
             templates: std::array::from_fn(|_| None),
             kick_profile_id: KickTableProfileId::SrsPlus,
+            conditioned: None,
+            conditioned_epoch: 0,
             generated_states: 0,
             metrics: ReachabilityMetrics::default(),
         }
@@ -545,6 +557,30 @@ impl ReachabilityWorkspace {
         x: i8,
         y: i8,
     ) -> bool {
+        if let Some(conditioned) = self.conditioned.as_ref() {
+            match conditioned.lookup(
+                catalog.width(),
+                catalog.height(),
+                board,
+                piece,
+                self.kick_profile_id,
+            ) {
+                ConditionedReachabilityLookup::Complete(anchors) => {
+                    self.metrics.conditioned_complete_hits =
+                        self.metrics.conditioned_complete_hits.saturating_add(1);
+                    return anchors_contain(anchors, catalog.width(), rotation, x, y);
+                }
+                ConditionedReachabilityLookup::PassThrough(status) => {
+                    self.metrics.conditioned_misses = self
+                        .metrics
+                        .conditioned_misses
+                        .saturating_add(usize::from(matches!(
+                            status,
+                            crate::legal_board::ProviderStatus::Miss
+                        )));
+                }
+            }
+        }
         let (exhaustive, admit, key_present) =
             match self
                 .cache
@@ -627,12 +663,17 @@ impl ReachabilityWorkspace {
     }
 
     pub fn configure_kick_profile(&mut self, profile_id: KickTableProfileId) {
-        if self.kick_profile_id == profile_id {
+        let epoch = conditioned_reachability_epoch();
+        if self.kick_profile_id == profile_id && self.conditioned_epoch == epoch {
             return;
         }
-        self.kick_profile_id = profile_id;
-        self.templates = std::array::from_fn(|_| None);
-        self.cache = ReachabilityCache::default();
+        if self.kick_profile_id != profile_id {
+            self.kick_profile_id = profile_id;
+            self.templates = std::array::from_fn(|_| None);
+            self.cache = ReachabilityCache::default();
+        }
+        self.conditioned = conditioned_reachability_snapshot(profile_id);
+        self.conditioned_epoch = epoch;
     }
 
     pub const fn generated_state_count(&self) -> usize {
@@ -661,6 +702,14 @@ impl ReachabilityWorkspace {
             ReachabilityTemplate::compile(catalog.width(), catalog.height(), piece, profile_id)
         })
     }
+}
+
+fn anchors_contain(anchors: [u64; 4], width: u8, rotation: RotationState, x: i8, y: i8) -> bool {
+    if x < 0 || y < 0 || x >= width as i8 {
+        return false;
+    }
+    let anchor = y as usize * width as usize + x as usize;
+    anchor < 64 && anchors[rotation.quarter_turns() as usize] & (1_u64 << anchor) != 0
 }
 
 const INVALID_STATE_MASK: u64 = u64::MAX;

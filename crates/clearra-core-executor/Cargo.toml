@@ -22,6 +22,7 @@ experimental-native-gpu = ["clearra-core-ffi/experimental-native-gpu"]
 local-search-ab = []
 
 [dependencies]
+clearra-accelerator-activation = { path = "../clearra-accelerator-activation" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-core-ffi = { path = "../clearra-core-ffi" }

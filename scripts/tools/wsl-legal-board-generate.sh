@@ -52,8 +52,8 @@ esac
     printf 'Legal-board workers must be within 1..nproc; no silent reduction is permitted\n' >&2
     exit 2
 }
-[[ "$MAX_NEW_STEPS" =~ ^[1-9][0-9]*$ && "$MAX_NEW_STEPS" -le 10 ]] || {
-    printf 'Legal-board max-new-steps must be within 1..10\n' >&2
+[[ "$MAX_NEW_STEPS" =~ ^[1-9][0-9]*$ && "$MAX_NEW_STEPS" -le 21 ]] || {
+    printf 'Legal-board max-new-steps must be within 1..21\n' >&2
     exit 2
 }
 
@@ -78,6 +78,7 @@ mkdir -p "$BUILD_TRANSACTION/legal-board-generator"
 
 bash "$AUTHORITY_ROOT/scripts/tools/wsl-native-cargo.sh" \
     build --locked --release --no-default-features \
+    --features legal-board-assets \
     --package clearra-pc4-qualifier --bin clearra-pc4-legal-board
 
 BINARY="$MANAGED_CARGO_TARGET/release/clearra-pc4-legal-board"

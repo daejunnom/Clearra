@@ -132,6 +132,7 @@ impl ParsedCliInvocation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParsedCliCommand {
+    LegalBoard(Vec<String>),
     Tablebase(Vec<String>),
     Pc(PcArgs),
     PcScenario(PcScenarioArgs),
@@ -226,11 +227,11 @@ impl CliHelpTopic {
         );
         let download_hint = if matches!(self, Self::TopLevel) {
             match language {
-                LanguageId::Ko => "\n킥테이블별 TB 다운로드·상태·삭제: clearra tablebase --help",
+                LanguageId::Ko => "\n킥테이블별 TB 다운로드·상태·삭제: clearra tablebase --help\nLegal-board 설치·검증·생성: clearra legal-board --help",
                 LanguageId::Ja => {
-                    "\nキックテーブル別TBのダウンロード・状態確認・削除: clearra tablebase --help"
+                    "\nキックテーブル別TBのダウンロード・状態確認・削除: clearra tablebase --help\nLegal-boardのインストール・検証・生成: clearra legal-board --help"
                 }
-                _ => "\nPer-kick-table TB downloads, status and removal: clearra tablebase --help",
+                _ => "\nPer-kick-table TB downloads, status and removal: clearra tablebase --help\nLegal-board installation, verification and generation: clearra legal-board --help",
             }
         } else {
             ""

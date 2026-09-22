@@ -2332,3 +2332,18 @@ fn spin_structure_help_freezes_the_three_closed_route_contracts() {
     ));
     assert!(help.contains("every equal-cardinality optimum"));
 }
+
+#[test]
+fn legal_board_lifecycle_routes_to_the_native_management_boundary() {
+    let invocation = CliParser::parse(["clearra", "legal-board", "check", "--profile", "srs-plus"])
+        .expect("legal-board lifecycle command");
+
+    assert_eq!(
+        invocation.into_command(),
+        ParsedCliCommand::LegalBoard(vec![
+            "check".to_string(),
+            "--profile".to_string(),
+            "srs-plus".to_string(),
+        ])
+    );
+}
