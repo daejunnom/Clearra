@@ -183,6 +183,24 @@ pub struct LegalBoardBinding {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnsupportedLegalBoardProfile;
 
+/// Canonical public profile identifier shared by catalogs, download stores,
+/// signed statements, and diagnostics.  `srs-90` remains the rules-layer ID;
+/// the accelerator products deliberately use the established public `srs`
+/// slot so a signed SRS asset cannot become impossible to activate merely
+/// because the two layers use different names for the same kick profile.
+pub const fn accelerator_profile_name(
+    kick_profile: KickTableProfileId,
+) -> Result<&'static str, UnsupportedLegalBoardProfile> {
+    match kick_profile {
+        KickTableProfileId::Srs90 => Ok("srs"),
+        KickTableProfileId::SrsPlus => Ok("srs-plus"),
+        KickTableProfileId::SrsX => Ok("srs-x"),
+        KickTableProfileId::Jstris180 => Ok("jstris-180"),
+        KickTableProfileId::NoKick => Ok("no-kick"),
+        _ => Err(UnsupportedLegalBoardProfile),
+    }
+}
+
 /// Fingerprint every movement semantic consumed by the exact legal-board
 /// generator and lookup. Keeping this in the format owner prevents a producer
 /// and consumer from silently calculating different identities.
@@ -343,7 +361,9 @@ impl QualifiedExactLegalBoard {
     ) -> Result<Self, LegalBoardAssetError> {
         let payload_identity: [u8; 32] = Sha256::digest(&*board.bytes).into();
         if authority.product() != AcceleratorProduct::ExactLegalBoard
-            || authority.profile() != board.binding.kick_profile.as_str()
+            || authority.profile()
+                != accelerator_profile_name(board.binding.kick_profile)
+                    .map_err(|_| LegalBoardAssetError::UnsupportedProfile)?
             || authority.generation_identity() != board.generation_identity
             || authority.rule_identity() != board.binding.rule_identity
             || authority.payload_bytes() != board.bytes.len() as u64
@@ -928,6 +948,31 @@ mod tests {
             kick_profile: KickTableProfileId::Jstris180,
             rule_identity: [7; 32],
         }
+    }
+
+    #[test]
+    fn accelerator_profiles_use_the_public_catalog_names() {
+        assert_eq!(
+            accelerator_profile_name(KickTableProfileId::Srs90).unwrap(),
+            "srs"
+        );
+        assert_eq!(
+            accelerator_profile_name(KickTableProfileId::SrsPlus).unwrap(),
+            "srs-plus"
+        );
+        assert_eq!(
+            accelerator_profile_name(KickTableProfileId::SrsX).unwrap(),
+            "srs-x"
+        );
+        assert_eq!(
+            accelerator_profile_name(KickTableProfileId::Jstris180).unwrap(),
+            "jstris-180"
+        );
+        assert_eq!(
+            accelerator_profile_name(KickTableProfileId::NoKick).unwrap(),
+            "no-kick"
+        );
+        assert!(accelerator_profile_name(KickTableProfileId::Custom).is_err());
     }
 
     fn layers() -> [Vec<u64>; LAYER_COUNT] {

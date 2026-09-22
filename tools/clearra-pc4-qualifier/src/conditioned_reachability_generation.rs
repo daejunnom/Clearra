@@ -75,7 +75,8 @@ pub fn generate_conditioned_reachability(
         "status": "candidate_unqualified",
         "release_authority": false,
         "signed": false,
-        "profile": options.profile.as_str(),
+        "profile": clearra_core_executor::accelerator_profile_name(options.profile)
+            .map_err(|_| "unsupported conditioned-reachability profile")?,
         "query_schema": QUERY_SCHEMA,
         "query_count": queries.len(),
         "query_set_identity": hex(input_identity),
@@ -93,7 +94,8 @@ pub fn generate_conditioned_reachability(
     publish_immutable(&options.catalog, &catalog)?;
     println!(
         "profile={} queries={} records={} bytes={} generation={}",
-        options.profile.as_str(),
+        clearra_core_executor::accelerator_profile_name(options.profile)
+            .map_err(|_| "unsupported conditioned-reachability profile")?,
         queries.len(),
         loaded.record_count(),
         encoded.len(),
@@ -139,7 +141,9 @@ fn parse_queries(bytes: &[u8], profile: KickTableProfileId) -> Result<Vec<Query>
     let object = root
         .as_object()
         .ok_or_else(|| "query root must be an object".to_owned())?;
-    if object.len() != 3 || root["schema"] != QUERY_SCHEMA || root["profile"] != profile.as_str() {
+    let profile_name = clearra_core_executor::accelerator_profile_name(profile)
+        .map_err(|_| "unsupported conditioned-reachability profile")?;
+    if object.len() != 3 || root["schema"] != QUERY_SCHEMA || root["profile"] != profile_name {
         return Err("query set schema or profile binding is invalid".to_owned());
     }
     let values = root["queries"]

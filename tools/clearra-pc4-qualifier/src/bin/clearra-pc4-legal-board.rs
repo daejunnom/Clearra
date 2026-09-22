@@ -14,10 +14,12 @@ fn run() -> Result<(), String> {
     let profile = KickTableProfileId::parse(required(&options, "profile")?)
         .ok_or("legal-board profile is not a known kick-table profile")?;
     let layers = absolute(&options, "layers")?;
+    let profile_name = clearra_core_executor::accelerator_profile_name(profile)
+        .map_err(|_| "legal-board profile is unsupported")?;
     let bundle = optional_absolute(&options, "bundle")?
-        .unwrap_or_else(|| layers.join(format!("legal-board-{}.cllb", profile.as_str())));
+        .unwrap_or_else(|| layers.join(format!("legal-board-{profile_name}.cllb")));
     let catalog = optional_absolute(&options, "catalog")?
-        .unwrap_or_else(|| layers.join(format!("legal-board-{}.catalog.json", profile.as_str())));
+        .unwrap_or_else(|| layers.join(format!("legal-board-{profile_name}.catalog.json")));
     generate_legal_board(&LegalBoardGenerationOptions {
         profile,
         layers,

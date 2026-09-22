@@ -23,7 +23,8 @@ pub fn generate_legal_board(options: &LegalBoardGenerationOptions) -> Result<(),
     let binding = domain::DomainBinding::legal_board(options.profile)?;
     println!(
         "pc4_legal_board_generation=begin profile={} binding={}",
-        options.profile.as_str(),
+        clearra_core_executor::accelerator_profile_name(options.profile)
+            .map_err(|_| "unsupported legal-board profile")?,
         binding.identity_string()
     );
     run_exact_layers(binding, options)
@@ -220,7 +221,8 @@ fn publish_exact_bundle(
     let catalog = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": "clearra.legal-board.catalog.candidate.v1",
         "status": "candidate_unqualified",
-        "profile": binding.legal_board_binding().kick_profile.as_str(),
+        "profile": clearra_core_executor::accelerator_profile_name(binding.legal_board_binding().kick_profile)
+            .map_err(|_| "unsupported legal-board profile")?,
         "rule_identity": binding.identity_string(),
         "generation_identity": format!("sha256:{}", hex(&generation)),
         "bundle": {

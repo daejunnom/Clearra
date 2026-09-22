@@ -14,7 +14,7 @@ use std::sync::{
     Arc, OnceLock, RwLock,
 };
 
-use crate::legal_board::{built_in_rule_identity, ProviderStatus};
+use crate::legal_board::{accelerator_profile_name, built_in_rule_identity, ProviderStatus};
 
 const MAGIC: &[u8; 8] = b"CLBR0001";
 const VERSION: u32 = 1;
@@ -116,7 +116,9 @@ impl QualifiedBoardConditionedReachability {
     ) -> Result<Self, ConditionedReachabilityAssetError> {
         let payload_identity: [u8; 32] = Sha256::digest(&*pack.bytes).into();
         if authority.product() != AcceleratorProduct::BoardConditionedReachability
-            || authority.profile() != pack.binding.kick_profile.as_str()
+            || authority.profile()
+                != accelerator_profile_name(pack.binding.kick_profile)
+                    .map_err(|_| ConditionedReachabilityAssetError::UnsupportedProfile)?
             || authority.generation_identity() != pack.generation_identity
             || authority.rule_identity() != pack.binding.rule_identity
             || authority.payload_bytes() != pack.bytes.len() as u64

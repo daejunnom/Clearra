@@ -43,7 +43,7 @@ done
     printf 'Legal-board layers must be an existing validated host directory\n' >&2
     exit 2
 }
-case "$PROFILE" in srs-90 | srs-plus | srs-x | jstris-180 | no-kick) ;; *)
+case "$PROFILE" in srs | srs-plus | srs-x | jstris-180 | no-kick) ;; *)
     printf 'Unsupported legal-board kick profile: %s\n' "$PROFILE" >&2
     exit 2
     ;;
