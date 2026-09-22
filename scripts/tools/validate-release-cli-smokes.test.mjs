@@ -636,8 +636,16 @@ for (const [name, mutate] of [
     (source) =>
       replaceExactlyOnce(
         source,
-        "          node scripts/release/canonical-acceptance-run.mjs \\\n",
-        "          node scripts/release/other-acceptance-run.mjs \\\n",
+        "            node scripts/release/canonical-acceptance-run.mjs \\\n" +
+          "              --repository \"$GITHUB_REPOSITORY\" \\\n" +
+          "              --source-commit \"$checked_sha\" \\\n" +
+          "              --require one \\\n" +
+          "              --format github-output >> \"$GITHUB_OUTPUT\"\n",
+        "            node scripts/release/other-acceptance-run.mjs \\\n" +
+          "              --repository \"$GITHUB_REPOSITORY\" \\\n" +
+          "              --source-commit \"$checked_sha\" \\\n" +
+          "              --require one \\\n" +
+          "              --format github-output >> \"$GITHUB_OUTPUT\"\n",
       ),
   ],
   [

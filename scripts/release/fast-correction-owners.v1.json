@@ -1,0 +1,164 @@
+{
+  "schema_id": "clearra.fast-correction-owners.v1",
+  "authority_bundle": [
+    ".github/workflows/fast-correction.yml",
+    "scripts/release/fast-correction-authority.mjs",
+    "scripts/release/fast-correction-evidence.mjs",
+    "scripts/release/fast-correction-owners.v1.json",
+    "scripts/release/fast-correction-plan.mjs"
+  ],
+  "full_required": {
+    "exact": [
+      ".gitmodules",
+      "Cargo.lock",
+      "Cargo.toml",
+      "package-lock.json",
+      "package.json",
+      "apps/clearra-web/package.json",
+      "apps/clearra-web/wasmArtifactGuard.ts"
+    ],
+    "prefix": [
+      ".cargo/",
+      "apps/clearra-cli/",
+      "apps/clearra-desktop/",
+      "apps/clearra-discord-bot/",
+      "apps/clearra-web/src/workers/",
+      "apps/clearra-web/static/tablebase/",
+      "benchmarks/",
+      "core-c/",
+      "crates/",
+      "fuzz/",
+      "packages/clearra-ui/",
+      "packages/ctk3/",
+      "scripts/lib/"
+    ],
+    "suffix": [
+      "/Cargo.toml",
+      "/package-lock.json",
+      "/package.json"
+    ]
+  },
+  "owners": [
+    {
+      "id": "documentation",
+      "exact": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "CODE_OF_CONDUCT.md",
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "README.md",
+        "SECURITY.md"
+      ],
+      "prefix": [
+        "docs/"
+      ],
+      "suffix": []
+    },
+    {
+      "id": "release-workflow",
+      "exact": [
+        ".github/workflows/discord-deploy-recovery.yml",
+        ".github/workflows/discord-deploy.yml",
+        ".github/workflows/finalize-release-publication.yml",
+        ".github/workflows/pages-rollback.yml",
+        ".github/workflows/pages.yml",
+        ".github/workflows/release-cli.yml",
+        "scripts/tools/run-release-regression-tests.mjs",
+        "scripts/tools/run-release-regression-tests.test.mjs",
+        "scripts/tools/validate-release-cli-smokes.mjs",
+        "scripts/tools/validate-release-cli-smokes.test.mjs"
+      ],
+      "prefix": [],
+      "suffix": []
+    },
+    {
+      "id": "pages",
+      "exact": [
+        "apps/clearra-web/scripts/prepare-pages-fallback.mjs",
+        "apps/clearra-web/src/app.html",
+        "apps/clearra-web/svelte.config.js",
+        "apps/clearra-web/tsconfig.contract.json",
+        "apps/clearra-web/tsconfig.json",
+        "apps/clearra-web/vite.config.ts"
+      ],
+      "prefix": [
+        "apps/clearra-web/src/lib/",
+        "apps/clearra-web/src/routes/",
+        "apps/clearra-web/static/",
+        "apps/clearra-web/test/"
+      ],
+      "suffix": []
+    }
+  ],
+  "workflow_deployments": {
+    ".github/workflows/discord-deploy.yml": "discord",
+    ".github/workflows/pages.yml": "pages"
+  },
+  "selection": {
+    "integrity": {
+      "tests": [
+        {
+          "id": "diff-check",
+          "command": "git diff --check BASE..CANDIDATE --"
+        }
+      ],
+      "builds": [],
+      "deployments": []
+    },
+    "release-workflow": {
+      "tests": [
+        {
+          "id": "release-regressions",
+          "command": "node scripts/tools/run-release-regression-tests.mjs"
+        },
+        {
+          "id": "release-workflow-smoke",
+          "command": "node scripts/tools/validate-release-cli-smokes.mjs"
+        }
+      ],
+      "builds": [],
+      "deployments": []
+    },
+    "discord-control": {
+      "tests": [],
+      "builds": [],
+      "deployments": [
+        {
+          "id": "discord-accepted-product-redeploy",
+          "command": ".github/workflows/discord-deploy.yml dual-authority dispatch"
+        }
+      ]
+    },
+    "pages-control": {
+      "tests": [],
+      "builds": [],
+      "deployments": [
+        {
+          "id": "pages-accepted-product-redeploy",
+          "command": ".github/workflows/pages.yml dual-authority dispatch"
+        }
+      ]
+    },
+    "pages": {
+      "tests": [
+        {
+          "id": "pages-workspace-contracts",
+          "command": "npm test --workspace @clearra/web"
+        }
+      ],
+      "builds": [
+        {
+          "id": "pages-wasm-vite-build",
+          "command": "npm run build --workspace @clearra/web"
+        }
+      ],
+      "deployments": [
+        {
+          "id": "github-pages-forward",
+          "command": "actions/upload-pages-artifact@v3 -> actions/deploy-pages@v4"
+        }
+      ]
+    }
+  }
+}

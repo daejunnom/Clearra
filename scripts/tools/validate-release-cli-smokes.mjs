@@ -1312,6 +1312,8 @@ requireExactYamlKeySet(
   [
     "accepted_run_id",
     "accepted_run_attempt",
+    "workflow_source_sha",
+    "authority_mode",
     "rollback_report_artifact_id",
     "rollback_report_artifact_name",
     "rollback_report_artifact_digest",
@@ -1325,6 +1327,20 @@ requireExactYamlScalar(
   "accepted_run_id",
   "${{ steps.accepted_run.outputs.accepted_run_id }}",
   "Pages bound accepted run ID output",
+  6,
+);
+requireExactYamlScalar(
+  pagesAcceptedOutputs,
+  "workflow_source_sha",
+  "${{ steps.accepted_run.outputs.workflow_source_sha }}",
+  "Pages workflow source output",
+  6,
+);
+requireExactYamlScalar(
+  pagesAcceptedOutputs,
+  "authority_mode",
+  "${{ steps.accepted_run.outputs.authority_mode }}",
+  "Pages authority mode output",
   6,
 );
 for (const [key, value] of [

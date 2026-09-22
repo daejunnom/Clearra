@@ -96,7 +96,7 @@ test("prestage and live recovery artifacts bracket every protected runtime trans
 
 test("ordinary cancellation preserves in-job path and catalog compensation", () => {
   assert.match(primary, /promote:\n(?:\s+#.*\n)*\s+if: always\(\) && needs\.candidate\.result == 'success'/u);
-  assert.match(primary, /sync-observe:\n(?:\s+#.*\n)*\s+if: always\(\) && needs\.promote\.result == 'success'/u);
+  assert.match(primary, /sync-observe:[\s\S]*?if: >-\n\s+always\(\) &&\n\s+needs\.promote\.result == 'success' &&\n\s+needs\.authority\.outputs\.fast_control != 'true'/u);
   assert.match(primary, /Compensate any protected-path failure[^\n]*\n\s+if: failure\(\) \|\| cancelled\(\)/u);
   assert.match(primary, /Compensate catalog mutation[^\n]*\n\s+if: failure\(\) \|\| cancelled\(\)/u);
   assert.doesNotMatch(primary, /^  rollback-after-sync:/mu);

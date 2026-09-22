@@ -14,8 +14,16 @@ on:
   workflow_dispatch:
     inputs:
       accepted_sha:
-        description: Exact current main commit with one canonical workflow_dispatch acceptance
+        description: Canonical product SHA, or latest accepted production base for a qualified workflow-only correction
         required: true
+        type: string
+      fast_correction_run_id:
+        description: Optional successful Fast Correction Gate run qualifying this Discord workflow commit
+        required: false
+        type: string
+      fast_correction_run_attempt:
+        description: Exact fast correction run attempt; required with fast_correction_run_id
+        required: false
         type: string
 
 permissions:
@@ -38,6 +46,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_commit: ${{ steps.authority.outputs.source_commit }}
+      workflow_source_commit: ${{ steps.authority.outputs.workflow_source_commit }}
+      fast_control: ${{ steps.authority.outputs.fast_control }}
       accepted_run_id: ${{ steps.authority.outputs.accepted_run_id }}
       accepted_run_attempt: ${{ steps.authority.outputs.accepted_run_attempt }}
       deploy_discord: ${{ steps.impact.outputs.deploy_discord }}
@@ -56,19 +66,20 @@ jobs:
           AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
           AUTOMATIC_RUN_ID: ${{ github.event.workflow_run.id }}
           AUTOMATIC_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          FAST_RUN_ID: ${{ inputs.fast_correction_run_id }}
+          FAST_RUN_ATTEMPT: ${{ inputs.fast_correction_run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
           git fetch --force --tags origin main
+          current_main="$(git rev-parse origin/main)"
+          fast_control=false
           if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            [[ -z "$FAST_RUN_ID" && -z "$FAST_RUN_ATTEMPT" ]]
             source_commit="$AUTOMATIC_SHA"
-          else
-            source_commit="$MANUAL_SHA"
-          fi
-          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo 'accepted_sha must be a full lowercase commit ID' >&2; exit 2; }
-          [[ "$(git rev-parse origin/main)" == "$source_commit" ]] || { echo 'Discord source must be exact current main' >&2; exit 2; }
-          git checkout --detach "$source_commit"
-          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            workflow_source_commit="$AUTOMATIC_SHA"
+            [[ "$current_main" == "$source_commit" ]] || { echo 'Discord source must be exact current main' >&2; exit 2; }
+            git checkout --detach "$source_commit"
             node scripts/release/canonical-acceptance-run.mjs \
               --repository "$GITHUB_REPOSITORY" \
               --source-commit "$source_commit" \
@@ -76,20 +87,95 @@ jobs:
               --expected-run-id "$AUTOMATIC_RUN_ID" \
               --expected-run-attempt "$AUTOMATIC_RUN_ATTEMPT" \
               --format github-output >> "$GITHUB_OUTPUT"
-          else
+          elif [[ -z "$FAST_RUN_ID" && -z "$FAST_RUN_ATTEMPT" ]]; then
+            source_commit="$MANUAL_SHA"
+            workflow_source_commit="$MANUAL_SHA"
+            [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo 'accepted_sha must be a full lowercase commit ID' >&2; exit 2; }
+            [[ "$current_main" == "$source_commit" && "$GITHUB_SHA" == "$source_commit" ]] || { echo 'Discord source must be exact current main' >&2; exit 2; }
+            git checkout --detach "$source_commit"
             node scripts/release/canonical-acceptance-run.mjs \
               --repository "$GITHUB_REPOSITORY" \
               --source-commit "$source_commit" \
               --require one \
               --format github-output >> "$GITHUB_OUTPUT"
+          else
+            [[ "$MANUAL_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'accepted_sha must be a full lowercase commit ID' >&2; exit 2; }
+            [[ "$FAST_RUN_ID" =~ ^[1-9][0-9]*$ && "$FAST_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+              echo 'both fast correction run ID and attempt are required' >&2
+              exit 2
+            }
+            [[ "$GITHUB_SHA" == "$current_main" ]] || { echo 'fast Discord workflow must execute from exact current main' >&2; exit 2; }
+            git merge-base --is-ancestor "$MANUAL_SHA" "$current_main"
+            fast_root="$RUNNER_TEMP/fast-discord-authority"
+            mkdir -p "$fast_root"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAST_RUN_ID/attempts/$FAST_RUN_ATTEMPT" > "$fast_root/run.json"
+            jq -e --arg id "$FAST_RUN_ID" --arg attempt "$FAST_RUN_ATTEMPT" --arg sha "$current_main" '
+              (.id|tostring)==$id and (.run_attempt|tostring)==$attempt and
+              .event=="workflow_dispatch" and .head_branch=="main" and .head_sha==$sha and
+              .path==".github/workflows/fast-correction.yml" and
+              .status=="completed" and .conclusion=="success"
+            ' "$fast_root/run.json" >/dev/null
+            artifact_name="fast-correction-evidence-$current_main-run-$FAST_RUN_ID-attempt-$FAST_RUN_ATTEMPT"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAST_RUN_ID/artifacts?name=$artifact_name&per_page=100" > "$fast_root/artifacts.json"
+            jq -e --arg name "$artifact_name" '
+              .total_count==1 and (.artifacts|length)==1 and .artifacts[0].name==$name and
+              .artifacts[0].expired==false and (.artifacts[0].digest|test("^sha256:[0-9a-f]{64}$"))
+            ' "$fast_root/artifacts.json" >/dev/null
+            gh run download "$FAST_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$artifact_name" --dir "$fast_root/evidence"
+            node scripts/release/fast-correction-authority.mjs \
+              --plan "$fast_root/evidence/fast-correction-plan.json" \
+              --evidence "$fast_root/evidence/fast-correction-evidence.json" \
+              --expected-base "$MANUAL_SHA" \
+              --expected-candidate "$current_main" \
+              --expected-run-id "$FAST_RUN_ID" \
+              --expected-run-attempt "$FAST_RUN_ATTEMPT" \
+              --required-control discord \
+              --format github-output > "$fast_root/authority.outputs"
+            cat "$fast_root/authority.outputs" >> "$GITHUB_OUTPUT"
+            accepted_run_id="$(awk -F= '$1=="accepted_run_id"{print $2}' "$fast_root/authority.outputs")"
+            accepted_run_attempt="$(awk -F= '$1=="accepted_run_attempt"{print $2}' "$fast_root/authority.outputs")"
+            node scripts/release/canonical-acceptance-run.mjs \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$MANUAL_SHA" \
+              --require one \
+              --expected-run-id "$accepted_run_id" \
+              --expected-run-attempt "$accepted_run_attempt"
+            mkdir -p discord-fast-control-authority
+            cp "$fast_root/evidence/fast-correction-plan.json" discord-fast-control-authority/
+            cp "$fast_root/evidence/fast-correction-evidence.json" discord-fast-control-authority/
+            cp "$fast_root/authority.outputs" discord-fast-control-authority/fast-control-authority.outputs
+            source_commit="$MANUAL_SHA"
+            workflow_source_commit="$current_main"
+            fast_control=true
+            git checkout --detach "$source_commit"
           fi
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "workflow_source_commit=$workflow_source_commit" >> "$GITHUB_OUTPUT"
+          echo "fast_control=$fast_control" >> "$GITHUB_OUTPUT"
+      - name: Upload qualified Discord workflow/product dual authority
+        if: steps.authority.outputs.fast_control == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-fast-control-authority-${{ steps.authority.outputs.source_commit }}-workflow-${{ steps.authority.outputs.workflow_source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: discord-fast-control-authority
+          if-no-files-found: error
+          retention-days: 90
       - name: Classify deployment impact from the last production tag
         id: impact
         env:
           SOURCE_COMMIT: ${{ steps.authority.outputs.source_commit }}
+          FAST_CONTROL: ${{ steps.authority.outputs.fast_control }}
         shell: bash
-        run: node scripts/release/deployment-impact.mjs --source-commit "$SOURCE_COMMIT" --format github-output >> "$GITHUB_OUTPUT"
+        run: |
+          if [[ "$FAST_CONTROL" == true ]]; then
+            echo 'impact_scope=discord-workflow-control' >> "$GITHUB_OUTPUT"
+            echo 'deploy_discord=true' >> "$GITHUB_OUTPUT"
+            echo 'deploy_pages=false' >> "$GITHUB_OUTPUT"
+            echo 'deploy_gui=false' >> "$GITHUB_OUTPUT"
+            echo 'deploy_cli=false' >> "$GITHUB_OUTPUT"
+          else
+            node scripts/release/deployment-impact.mjs --source-commit "$SOURCE_COMMIT" --format github-output >> "$GITHUB_OUTPUT"
+          fi
       - name: Reject unresolved earlier Discord recovery debt before candidate work
         if: steps.impact.outputs.deploy_discord == 'true'
         env:
@@ -927,7 +1013,13 @@ jobs:
   sync-observe:
     # Preserve the running protected job on ordinary cancellation so its
     # TERM/INT trap and cancelled() catalog compensation can finish.
-    if: always() && needs.promote.result == 'success'
+    # A workflow-only correction redeploys an already accepted product and
+    # therefore must not repeat global command mutation or release checkpoint
+    # publication. Its dual authority is retained by the dedicated artifact.
+    if: >-
+      always() &&
+      needs.promote.result == 'success' &&
+      needs.authority.outputs.fast_control != 'true'
     needs: [authority, candidate, promote]
     runs-on: ubuntu-latest
     timeout-minutes: 50

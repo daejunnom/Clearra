@@ -1,0 +1,546 @@
+name: Fast Correction Gate and Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      accepted_base_sha:
+        description: Exact latest production tag commit with one canonical acceptance
+        required: true
+        type: string
+      rollback_snapshot_sha:
+        description: Exact Pages source active before a Pages correction; blank for non-Pages lanes
+        required: false
+        type: string
+      rollback_capture_run_id:
+        description: Successful Pages rollback capture run ID; blank for non-Pages lanes
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: fast-correction
+  cancel-in-progress: false
+
+jobs:
+  authority:
+    runs-on: ubuntu-latest
+    outputs:
+      accepted_base_sha: ${{ steps.plan.outputs.accepted_base_sha }}
+      accepted_base_tag: ${{ steps.plan.outputs.accepted_base_tag }}
+      accepted_run_id: ${{ steps.plan.outputs.accepted_run_id }}
+      accepted_run_attempt: ${{ steps.plan.outputs.accepted_run_attempt }}
+      candidate_sha: ${{ steps.plan.outputs.candidate_sha }}
+      decision: ${{ steps.plan.outputs.decision }}
+      lane: ${{ steps.plan.outputs.lane }}
+      deploy_pages: ${{ steps.plan.outputs.deploy_pages }}
+      plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
+      plan_artifact_id: ${{ steps.plan-artifact.outputs.artifact-id }}
+      plan_artifact_digest: ${{ steps.plan-artifact.outputs.artifact-digest }}
+    steps:
+      - name: Check out the candidate without executing it
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          path: candidate-source
+      - name: Check out the accepted production authority
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.accepted_base_sha }}
+          fetch-depth: 0
+          path: accepted-base
+      - name: Resolve exact immutable base and closed correction plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_BASE_SHA: ${{ inputs.accepted_base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == '1' ]] || {
+            echo 'fast correction forbids workflow reruns; dispatch a fresh run after failure' >&2
+            exit 2
+          }
+          [[ "$GITHUB_REF" == 'refs/heads/main' && "$GITHUB_REF_TYPE" == 'branch' ]] || {
+            echo 'fast correction must be dispatched from main' >&2
+            exit 2
+          }
+          [[ "$REQUESTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'accepted_base_sha must be a full lowercase commit ID' >&2
+            exit 2
+          }
+          candidate_sha="$(git -C candidate-source rev-parse HEAD)"
+          [[ "$candidate_sha" == "$GITHUB_SHA" ]] || {
+            echo 'candidate checkout differs from workflow SHA' >&2
+            exit 2
+          }
+          git -C candidate-source fetch --no-tags --depth=1 origin main
+          [[ "$(git -C candidate-source rev-parse origin/main)" == "$candidate_sha" ]] || {
+            echo 'fast correction candidate must be exact current main' >&2
+            exit 2
+          }
+          [[ "$(git -C accepted-base rev-parse HEAD)" == "$REQUESTED_BASE_SHA" ]] || {
+            echo 'accepted base checkout differs from requested SHA' >&2
+            exit 2
+          }
+          git -C candidate-source merge-base --is-ancestor "$REQUESTED_BASE_SHA" "$candidate_sha" || {
+            echo 'accepted production base is not an ancestor of the candidate' >&2
+            exit 2
+          }
+          mapfile -t authority_paths < <(
+            node -e "const fs=require('fs'); const m=JSON.parse(fs.readFileSync(process.argv[1])); for (const p of m.authority_bundle) console.log(p)" \
+              accepted-base/scripts/release/fast-correction-owners.v1.json
+          )
+          [[ "${#authority_paths[@]}" -gt 0 ]] || {
+            echo 'accepted fast correction authority bundle is empty' >&2
+            exit 2
+          }
+          git -C candidate-source diff --quiet "$REQUESTED_BASE_SHA..$candidate_sha" -- "${authority_paths[@]}" || {
+            echo 'fast correction authority differs from the accepted production base; full canonical acceptance is required' >&2
+            exit 2
+          }
+          node accepted-base/scripts/release/canonical-acceptance-run.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$REQUESTED_BASE_SHA" \
+            --require one \
+            --format github-output > "$RUNNER_TEMP/base-acceptance.outputs"
+          cat "$RUNNER_TEMP/base-acceptance.outputs" >> "$GITHUB_OUTPUT"
+          plan_path="$RUNNER_TEMP/fast-correction-plan.json"
+          node accepted-base/scripts/release/fast-correction-plan.mjs \
+            --repository candidate-source \
+            --base "$REQUESTED_BASE_SHA" \
+            --candidate "$candidate_sha" \
+            --manifest accepted-base/scripts/release/fast-correction-owners.v1.json \
+            --output "$plan_path" \
+            --format github-output > "$RUNNER_TEMP/fast-correction.outputs"
+          cat "$RUNNER_TEMP/fast-correction.outputs" >> "$GITHUB_OUTPUT"
+          accepted_base_tag="$(node -e "const p=require(process.argv[1]); process.stdout.write(p.accepted_base_tag)" "$plan_path")"
+          echo "accepted_base_sha=$REQUESTED_BASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "accepted_base_tag=$accepted_base_tag" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          mkdir -p fast-correction-plan
+          cp -- "$plan_path" fast-correction-plan/fast-correction-plan.json
+      - name: Upload the immutable correction plan
+        id: plan-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-correction-plan-${{ steps.plan.outputs.candidate_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: fast-correction-plan/fast-correction-plan.json
+          if-no-files-found: error
+          retention-days: 90
+
+  integrity:
+    needs: authority
+    if: needs.authority.outputs.decision == 'fast-eligible'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Reject whitespace and conflict-marker damage in the exact diff
+        env:
+          BASE_SHA: ${{ needs.authority.outputs.accepted_base_sha }}
+          CANDIDATE_SHA: ${{ needs.authority.outputs.candidate_sha }}
+        run: git diff --check "$BASE_SHA..$CANDIDATE_SHA" --
+
+  release-workflow-checks:
+    needs: authority
+    if: needs.authority.outputs.decision == 'fast-eligible' && contains(needs.authority.outputs.lane, 'release-workflow')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.candidate_sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run the closed release regression pool
+        run: node scripts/tools/run-release-regression-tests.mjs
+      - name: Validate release workflow and packaged-product contracts
+        run: node scripts/tools/validate-release-cli-smokes.mjs
+
+  pages-build:
+    needs: [authority, integrity, release-workflow-checks]
+    if: >-
+      always() &&
+      needs.authority.result == 'success' &&
+      needs.authority.outputs.decision == 'fast-eligible' &&
+      needs.authority.outputs.deploy_pages == 'true' &&
+      needs.integrity.result == 'success' &&
+      (needs.release-workflow-checks.result == 'success' || needs.release-workflow-checks.result == 'skipped')
+    runs-on: ubuntu-latest
+    outputs:
+      build_artifact_id: ${{ steps.build-artifact.outputs.artifact-id }}
+      build_artifact_digest: ${{ steps.build-artifact.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.candidate_sha }}
+          path: candidate-source
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.accepted_base_sha }}
+          path: accepted-base
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: candidate-source/package-lock.json
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/wasm-bindgen
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/Clearra/build/cargo-target-wasm
+          key: fast-pages-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('candidate-source/Cargo.lock', 'candidate-source/package-lock.json') }}
+      - name: Install the unchanged WASM toolchain boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add wasm32-unknown-unknown
+          if ! command -v wasm-bindgen >/dev/null || [[ "$(wasm-bindgen --version)" != 'wasm-bindgen 0.2.126' ]]; then
+            cargo install wasm-bindgen-cli --version 0.2.126 --locked
+          fi
+      - name: Install the JavaScript workspace
+        working-directory: candidate-source
+        run: npm ci --ignore-scripts
+      - name: Test only the affected Pages workspace
+        working-directory: candidate-source
+        run: npm test --workspace @clearra/web
+      - name: Build only the affected Pages product
+        working-directory: candidate-source
+        env:
+          CLEARRA_SOURCE_COMMIT: ${{ needs.authority.outputs.candidate_sha }}
+          CLEARRA_ENGINE_BUILD_ID: ${{ needs.authority.outputs.candidate_sha }}
+          CLEARRA_WEB_BASE_PATH: /${{ github.event.repository.name }}
+        run: npm run build --workspace @clearra/web
+      - name: Stamp and verify the candidate Pages build with accepted-base authority code
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ needs.authority.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          version="$(awk '/^\[workspace.package\]/{owner=1; next} owner && /^version = /{gsub(/[\" ]/, "", $3); print $3; exit}' candidate-source/Cargo.toml)"
+          [[ -n "$version" ]]
+          node accepted-base/scripts/release/accepted-pages-build.mjs \
+            --stamp candidate-source/apps/clearra-web/build \
+            --source-commit "$CANDIDATE_SHA" \
+            --accepted-run-id "$GITHUB_RUN_ID" \
+            --accepted-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --base-path "/${GITHUB_REPOSITORY#*/}" \
+            --version "$version"
+          node accepted-base/scripts/release/accepted-pages-build.mjs \
+            --verify candidate-source/apps/clearra-web/build \
+            --source-commit "$CANDIDATE_SHA" \
+            --accepted-run-id "$GITHUB_RUN_ID" \
+            --accepted-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --base-path "/${GITHUB_REPOSITORY#*/}" \
+            --version "$version"
+      - name: Upload the exact focused Pages build
+        id: build-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-pages-build-${{ needs.authority.outputs.candidate_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: candidate-source/apps/clearra-web/build
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 90
+
+  pages-deploy:
+    needs: [authority, pages-build]
+    if: needs.pages-build.result == 'success'
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.accepted_base_sha }}
+          path: authority-source
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.candidate_sha }}
+          fetch-depth: 0
+          path: candidate-source
+      - name: Require explicit durable rollback inputs for a Pages correction
+        env:
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}
+        run: |
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'rollback_snapshot_sha is required for Pages correction' >&2; exit 2; }
+          [[ "$CAPTURE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'rollback_capture_run_id is required for Pages correction' >&2; exit 2; }
+      - name: Resolve sealed rollback capture report
+        id: rollback-report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_AUTHORITY_MODE: resolve-forward
+          AUTHORITY_SHA: ${{ needs.authority.outputs.candidate_sha }}
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}
+        run: node authority-source/scripts/release/pages-rollback-authority.mjs
+      - name: Download sealed rollback capture report
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.rollback-report.outputs.report_artifact_name }}
+          path: rollback-report
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.rollback_capture_run_id }}
+      - name: Verify durable rollback capture
+        id: rollback-authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_AUTHORITY_MODE: forward
+          PAGES_AUTHORITY_PHASE: initial
+          AUTHORITY_SHA: ${{ needs.authority.outputs.candidate_sha }}
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          CURRENT_PAGES_SHA: ${{ inputs.rollback_snapshot_sha }}
+          CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}
+          CAPTURE_REPORT_PATH: rollback-report/pages-rollback-capture-authority.json
+          CAPTURE_REPORT_ARTIFACT_ID: ${{ steps.rollback-report.outputs.report_artifact_id }}
+          CAPTURE_REPORT_ARTIFACT_NAME: ${{ steps.rollback-report.outputs.report_artifact_name }}
+          CAPTURE_REPORT_ARTIFACT_DIGEST: ${{ steps.rollback-report.outputs.report_artifact_digest }}
+          RESTORE_AUTHORIZATION: ""
+        run: node authority-source/scripts/release/pages-rollback-authority.mjs
+      - name: Download durable rollback package
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.rollback-authority.outputs.capture_artifact_name }}
+          path: rollback-capture
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.rollback_capture_run_id }}
+      - name: Verify exact rollback package
+        env:
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          SNAPSHOT_TAR_SHA256: ${{ steps.rollback-authority.outputs.capture_tar_sha256 }}
+          PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture
+        run: node authority-source/scripts/release/pages-rollback-package.mjs
+      - name: Download the focused Pages build
+        uses: actions/download-artifact@v4
+        with:
+          name: fast-pages-build-${{ needs.authority.outputs.candidate_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: pages-build
+      - name: Download and revalidate the immutable correction plan
+        uses: actions/download-artifact@v4
+        with:
+          name: fast-correction-plan-${{ needs.authority.outputs.candidate_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: fast-correction-plan
+      - name: Revalidate main, canonical base, plan, build, and rollback immediately before deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ needs.authority.outputs.accepted_base_sha }}
+          CANDIDATE_SHA: ${{ needs.authority.outputs.candidate_sha }}
+          ACCEPTED_RUN_ID: ${{ needs.authority.outputs.accepted_run_id }}
+          ACCEPTED_RUN_ATTEMPT: ${{ needs.authority.outputs.accepted_run_attempt }}
+          EXPECTED_PLAN_SHA256: ${{ needs.authority.outputs.plan_sha256 }}
+          SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
+          SNAPSHOT_TAR_SHA256: ${{ steps.rollback-authority.outputs.capture_tar_sha256 }}
+          PAGES_ROLLBACK_PACKAGE_DIR: rollback-capture
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" == "$CANDIDATE_SHA" ]] || {
+            echo 'main drifted after fast correction qualification' >&2
+            exit 2
+          }
+          node authority-source/scripts/release/canonical-acceptance-run.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$BASE_SHA" \
+            --require one \
+            --expected-run-id "$ACCEPTED_RUN_ID" \
+            --expected-run-attempt "$ACCEPTED_RUN_ATTEMPT"
+          node authority-source/scripts/release/fast-correction-plan.mjs \
+            --repository candidate-source \
+            --base "$BASE_SHA" \
+            --candidate "$CANDIDATE_SHA" \
+            --manifest authority-source/scripts/release/fast-correction-owners.v1.json \
+            --output "$RUNNER_TEMP/predeploy-plan.json" >/dev/null
+          [[ "$(sha256sum "$RUNNER_TEMP/predeploy-plan.json" | awk '{print $1}')" == "$(sha256sum fast-correction-plan/fast-correction-plan.json | awk '{print $1}')" ]] || {
+            echo 'fast correction plan bytes changed before deployment' >&2
+            exit 2
+          }
+          [[ "$(node -e "const p=require(process.argv[1]); process.stdout.write(p.plan_sha256)" "$RUNNER_TEMP/predeploy-plan.json")" == "$EXPECTED_PLAN_SHA256" ]]
+          version="$(awk '/^\[workspace.package\]/{owner=1; next} owner && /^version = /{gsub(/[\" ]/, "", $3); print $3; exit}' candidate-source/Cargo.toml)"
+          node authority-source/scripts/release/accepted-pages-build.mjs \
+            --verify pages-build \
+            --source-commit "$CANDIDATE_SHA" \
+            --accepted-run-id "$GITHUB_RUN_ID" \
+            --accepted-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --base-path "/${GITHUB_REPOSITORY#*/}" \
+            --version "$version"
+          node authority-source/scripts/release/pages-rollback-package.mjs
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload Pages artifact
+        id: pages-artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages-build
+      - name: Resolve Pages artifact REST digest
+        id: pages-artifact-authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.pages-artifact.outputs.artifact_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")"
+          [[ "$(jq -r '.id | tostring' <<<"$artifact")" == "$ARTIFACT_ID" ]]
+          [[ "$(jq -r '.name' <<<"$artifact")" == 'github-pages' ]]
+          [[ "$(jq -r '.workflow_run.id | tostring' <<<"$artifact")" == "$GITHUB_RUN_ID" ]]
+          digest="$(jq -r '.digest' <<<"$artifact")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "artifact_digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Require public readback of the exact focused identity
+        id: public-readback
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity_url="${PAGE_URL%/}/clearra-build-identity.json"
+          matched=false
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error \
+              "$identity_url?authority=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$attempt" \
+              --output "$RUNNER_TEMP/live-pages-identity.json" && \
+               cmp --silent pages-build/clearra-build-identity.json "$RUNNER_TEMP/live-pages-identity.json"; then
+              matched=true
+              break
+            fi
+            sleep 10
+          done
+          [[ "$matched" == true ]] || { echo 'public Pages identity did not converge to the focused build' >&2; exit 2; }
+          echo "identity_sha256=$(sha256sum "$RUNNER_TEMP/live-pages-identity.json" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Seal base, candidate, diff, selection, build, deploy, and readback provenance
+        env:
+          BASE_ACCEPTED_RUN_ID: ${{ needs.authority.outputs.accepted_run_id }}
+          BASE_ACCEPTED_RUN_ATTEMPT: ${{ needs.authority.outputs.accepted_run_attempt }}
+          BUILD_ARTIFACT_ID: ${{ needs.pages-build.outputs.build_artifact_id }}
+          BUILD_ARTIFACT_DIGEST: ${{ needs.pages-build.outputs.build_artifact_digest }}
+          PAGES_ARTIFACT_ID: ${{ steps.pages-artifact.outputs.artifact_id }}
+          PAGES_ARTIFACT_DIGEST: ${{ steps.pages-artifact-authority.outputs.artifact_digest }}
+          CANDIDATE_SHA: ${{ needs.authority.outputs.candidate_sha }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          LIVE_IDENTITY_SHA256: ${{ steps.public-readback.outputs.identity_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fast-correction-evidence
+          cp fast-correction-plan/fast-correction-plan.json fast-correction-evidence/fast-correction-plan.json
+          node authority-source/scripts/release/fast-correction-evidence.mjs \
+            --plan fast-correction-evidence/fast-correction-plan.json \
+            --base-accepted-run-id "$BASE_ACCEPTED_RUN_ID" \
+            --base-accepted-run-attempt "$BASE_ACCEPTED_RUN_ATTEMPT" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --outcome pages-deployed \
+            --build-artifact-id "$BUILD_ARTIFACT_ID" \
+            --build-artifact-digest "$BUILD_ARTIFACT_DIGEST" \
+            --pages-artifact-id "$PAGES_ARTIFACT_ID" \
+            --pages-artifact-digest "$PAGES_ARTIFACT_DIGEST" \
+            --deployment-id "$CANDIDATE_SHA" \
+            --page-url "$PAGE_URL" \
+            --live-identity-sha256 "$LIVE_IDENTITY_SHA256" \
+            --output fast-correction-evidence/fast-correction-evidence.json
+      - name: Upload sealed Pages correction evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-correction-evidence-${{ needs.authority.outputs.candidate_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: fast-correction-evidence
+          if-no-files-found: error
+          retention-days: 90
+
+  no-deploy-evidence:
+    needs: [authority, integrity, release-workflow-checks]
+    if: >-
+      always() &&
+      needs.authority.result == 'success' &&
+      needs.authority.outputs.decision != 'full-required' &&
+      needs.authority.outputs.deploy_pages != 'true' &&
+      (needs.integrity.result == 'success' || needs.integrity.result == 'skipped') &&
+      (needs.release-workflow-checks.result == 'success' || needs.release-workflow-checks.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.accepted_base_sha }}
+          path: authority-source
+      - uses: actions/download-artifact@v4
+        with:
+          name: fast-correction-plan-${{ needs.authority.outputs.candidate_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: fast-correction-evidence
+      - name: Seal explicit no-product-deploy evidence
+        env:
+          BASE_ACCEPTED_RUN_ID: ${{ needs.authority.outputs.accepted_run_id }}
+          BASE_ACCEPTED_RUN_ATTEMPT: ${{ needs.authority.outputs.accepted_run_attempt }}
+        run: |
+          node authority-source/scripts/release/fast-correction-evidence.mjs \
+            --plan fast-correction-evidence/fast-correction-plan.json \
+            --base-accepted-run-id "$BASE_ACCEPTED_RUN_ID" \
+            --base-accepted-run-attempt "$BASE_ACCEPTED_RUN_ATTEMPT" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --outcome passed-no-deploy \
+            --output fast-correction-evidence/fast-correction-evidence.json
+      - name: Upload sealed no-deploy correction evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-correction-evidence-${{ needs.authority.outputs.candidate_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: fast-correction-evidence
+          if-no-files-found: error
+          retention-days: 90
+
+  full-required:
+    needs: authority
+    if: needs.authority.outputs.decision == 'full-required'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authority.outputs.accepted_base_sha }}
+          path: authority-source
+      - uses: actions/download-artifact@v4
+        with:
+          name: fast-correction-plan-${{ needs.authority.outputs.candidate_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: fast-correction-evidence
+      - name: Seal the fail-closed full-canonical decision
+        env:
+          BASE_ACCEPTED_RUN_ID: ${{ needs.authority.outputs.accepted_run_id }}
+          BASE_ACCEPTED_RUN_ATTEMPT: ${{ needs.authority.outputs.accepted_run_attempt }}
+        run: |
+          node authority-source/scripts/release/fast-correction-evidence.mjs \
+            --plan fast-correction-evidence/fast-correction-plan.json \
+            --base-accepted-run-id "$BASE_ACCEPTED_RUN_ID" \
+            --base-accepted-run-attempt "$BASE_ACCEPTED_RUN_ATTEMPT" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --outcome full-required \
+            --output fast-correction-evidence/fast-correction-evidence.json
+      - name: Upload the blocked decision evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-correction-evidence-${{ needs.authority.outputs.candidate_sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: fast-correction-evidence
+          if-no-files-found: error
+          retention-days: 90
+      - name: Require the full canonical release path
+        run: |
+          echo 'The closed owner classifier requires a fresh canonical Publish Product Release run for this candidate.' >&2
+          echo 'The fast workflow deliberately does not auto-dispatch or approve the privileged full/deployment path.' >&2
+          exit 2

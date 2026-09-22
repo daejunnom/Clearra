@@ -34,6 +34,15 @@ fast feedback but do not satisfy this release gate; see `docs/test-policy.md`
 for the focused path map. Cross-boundary changes combine focused scopes, while
 the full matrix remains reserved for canonical predeployment acceptance.
 
+After an annotated production release, `docs/fast-correction-deploy.md` defines
+a smaller deployment gate for closed documentation, release-workflow YAML, and
+Pages-only ownership. The accepted production tag supplies immutable classifier
+code and the canonical product authority. The candidate supplies only a
+hash-bound diff and, for workflow-only corrections, a separate workflow source
+identity. This evidence cannot publish release assets or satisfy a later release
+gate. Every unowned or high-risk path and every classifier-authority change
+fails closed with `full-required`.
+
 ## Blocking Conditions
 
 The following conditions block release:

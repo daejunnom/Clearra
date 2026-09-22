@@ -15,6 +15,14 @@ on:
         description: Successful Pages rollback capture workflow run ID
         required: true
         type: string
+      fast_correction_run_id:
+        description: Optional successful Fast Correction Gate run that qualifies a Pages-workflow-only candidate
+        required: false
+        type: string
+      fast_correction_run_attempt:
+        description: Exact fast correction run attempt; required with fast_correction_run_id
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -31,6 +39,8 @@ jobs:
     outputs:
       accepted_run_id: ${{ steps.accepted_run.outputs.accepted_run_id }}
       accepted_run_attempt: ${{ steps.accepted_run.outputs.accepted_run_attempt }}
+      workflow_source_sha: ${{ steps.accepted_run.outputs.workflow_source_sha }}
+      authority_mode: ${{ steps.accepted_run.outputs.authority_mode }}
       rollback_report_artifact_id: ${{ steps.rollback-report.outputs.report_artifact_id }}
       rollback_report_artifact_name: ${{ steps.rollback-report.outputs.report_artifact_name }}
       rollback_report_artifact_digest: ${{ steps.rollback-report.outputs.report_artifact_digest }}
@@ -47,7 +57,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ inputs.accepted_sha }}
+          FAST_RUN_ID: ${{ inputs.fast_correction_run_id }}
+          FAST_RUN_ATTEMPT: ${{ inputs.fast_correction_run_attempt }}
         run: |
+          set -euo pipefail
           if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo 'Pages accepted SHA must be a full lowercase commit ID' >&2
             exit 2
@@ -58,21 +71,71 @@ jobs:
             exit 2
           fi
           git fetch --no-tags --depth=1 origin main
-          if [[ "$(git rev-parse origin/main)" != "$checked_sha" ]]; then
-            echo 'Pages source must be the exact current main commit' >&2
-            exit 2
+          workflow_source_sha="$(git rev-parse origin/main)"
+          if [[ -z "$FAST_RUN_ID" && -z "$FAST_RUN_ATTEMPT" ]]; then
+            if [[ "$workflow_source_sha" != "$checked_sha" || "$GITHUB_SHA" != "$checked_sha" ]]; then
+              echo 'canonical Pages source must be the exact current main commit' >&2
+              exit 2
+            fi
+            node scripts/release/canonical-acceptance-run.mjs \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$checked_sha" \
+              --require one \
+              --format github-output >> "$GITHUB_OUTPUT"
+            echo 'authority_mode=canonical' >> "$GITHUB_OUTPUT"
+          else
+            [[ "$FAST_RUN_ID" =~ ^[1-9][0-9]*$ && "$FAST_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+              echo 'both fast correction run ID and attempt are required' >&2
+              exit 2
+            }
+            [[ "$GITHUB_SHA" == "$workflow_source_sha" ]] || {
+              echo 'fast Pages workflow must execute from exact current main' >&2
+              exit 2
+            }
+            git merge-base --is-ancestor "$checked_sha" "$workflow_source_sha"
+            fast_root="$RUNNER_TEMP/fast-pages-authority"
+            mkdir -p "$fast_root"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAST_RUN_ID/attempts/$FAST_RUN_ATTEMPT" > "$fast_root/run.json"
+            jq -e --arg id "$FAST_RUN_ID" --arg attempt "$FAST_RUN_ATTEMPT" --arg sha "$workflow_source_sha" '
+              (.id|tostring)==$id and (.run_attempt|tostring)==$attempt and
+              .event=="workflow_dispatch" and .head_branch=="main" and .head_sha==$sha and
+              .path==".github/workflows/fast-correction.yml" and
+              .status=="completed" and .conclusion=="success"
+            ' "$fast_root/run.json" >/dev/null
+            artifact_name="fast-correction-evidence-$workflow_source_sha-run-$FAST_RUN_ID-attempt-$FAST_RUN_ATTEMPT"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAST_RUN_ID/artifacts?name=$artifact_name&per_page=100" > "$fast_root/artifacts.json"
+            jq -e --arg name "$artifact_name" '
+              .total_count==1 and (.artifacts|length)==1 and .artifacts[0].name==$name and
+              .artifacts[0].expired==false and (.artifacts[0].digest|test("^sha256:[0-9a-f]{64}$"))
+            ' "$fast_root/artifacts.json" >/dev/null
+            gh run download "$FAST_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$artifact_name" --dir "$fast_root/evidence"
+            node scripts/release/fast-correction-authority.mjs \
+              --plan "$fast_root/evidence/fast-correction-plan.json" \
+              --evidence "$fast_root/evidence/fast-correction-evidence.json" \
+              --expected-base "$checked_sha" \
+              --expected-candidate "$workflow_source_sha" \
+              --expected-run-id "$FAST_RUN_ID" \
+              --expected-run-attempt "$FAST_RUN_ATTEMPT" \
+              --required-control pages \
+              --format github-output > "$fast_root/authority.outputs"
+            cat "$fast_root/authority.outputs" >> "$GITHUB_OUTPUT"
+            accepted_run_id="$(awk -F= '$1=="accepted_run_id"{print $2}' "$fast_root/authority.outputs")"
+            accepted_run_attempt="$(awk -F= '$1=="accepted_run_attempt"{print $2}' "$fast_root/authority.outputs")"
+            node scripts/release/canonical-acceptance-run.mjs \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$checked_sha" \
+              --require one \
+              --expected-run-id "$accepted_run_id" \
+              --expected-run-attempt "$accepted_run_attempt"
+            echo 'authority_mode=fast-workflow' >> "$GITHUB_OUTPUT"
           fi
-          node scripts/release/canonical-acceptance-run.mjs \
-            --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$checked_sha" \
-            --require one \
-            --format github-output >> "$GITHUB_OUTPUT"
+          echo "workflow_source_sha=$workflow_source_sha" >> "$GITHUB_OUTPUT"
       - name: Resolve sealed rollback capture report before Pages build
         id: rollback-report
         env:
           GH_TOKEN: ${{ github.token }}
           PAGES_AUTHORITY_MODE: resolve-forward
-          AUTHORITY_SHA: ${{ inputs.accepted_sha }}
+          AUTHORITY_SHA: ${{ steps.accepted_run.outputs.workflow_source_sha }}
           SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
           CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}
         run: node scripts/release/pages-rollback-authority.mjs
@@ -90,7 +153,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PAGES_AUTHORITY_MODE: forward
           PAGES_AUTHORITY_PHASE: initial
-          AUTHORITY_SHA: ${{ inputs.accepted_sha }}
+          AUTHORITY_SHA: ${{ steps.accepted_run.outputs.workflow_source_sha }}
           SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
           CURRENT_PAGES_SHA: ${{ inputs.rollback_snapshot_sha }}
           CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}
@@ -172,13 +235,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ inputs.accepted_sha }}
+          WORKFLOW_SOURCE_SHA: ${{ needs.accepted-source.outputs.workflow_source_sha }}
           ACCEPTED_RUN_ID: ${{ needs.accepted-source.outputs.accepted_run_id }}
           ACCEPTED_RUN_ATTEMPT: ${{ needs.accepted-source.outputs.accepted_run_attempt }}
         shell: bash
         run: |
           main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
-          if [[ "$main_sha" != "$EXPECTED_SHA" ]]; then
-            echo 'Pages source is no longer the exact current main commit' >&2
+          if [[ "$main_sha" != "$WORKFLOW_SOURCE_SHA" ]]; then
+            echo 'Pages workflow source is no longer the exact current main commit' >&2
             exit 2
           fi
           node authority-source/scripts/release/canonical-acceptance-run.mjs \
@@ -214,7 +278,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PAGES_AUTHORITY_MODE: forward
           PAGES_AUTHORITY_PHASE: predeploy
-          AUTHORITY_SHA: ${{ inputs.accepted_sha }}
+          AUTHORITY_SHA: ${{ needs.accepted-source.outputs.workflow_source_sha }}
           SNAPSHOT_SHA: ${{ inputs.rollback_snapshot_sha }}
           CURRENT_PAGES_SHA: ${{ inputs.rollback_snapshot_sha }}
           CAPTURE_RUN_ID: ${{ inputs.rollback_capture_run_id }}

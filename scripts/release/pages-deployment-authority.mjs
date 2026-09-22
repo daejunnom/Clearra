@@ -136,9 +136,11 @@ export function validatePagesDeploymentAuthorityReport(report, {
   if (report.workflow_path !== expectedPath) {
     throw new Error("Pages deployment workflow path differs from its mode");
   }
-  const expectedDeploymentId = report.mode === "forward"
-    ? sourceCommit
-    : workflowSourceCommit;
+  // A workflow-only fast correction can redeploy the immutable accepted Pages
+  // product from its canonical base while the Actions deployment itself is
+  // created by the newer, closed-diff workflow commit. Standard canonical
+  // deployment has equal source/workflow commits, so this remains compatible.
+  const expectedDeploymentId = workflowSourceCommit;
   if (report.deployment_id !== expectedDeploymentId) {
     throw new Error("Pages deployment ID differs from the deploy action build version");
   }
@@ -194,7 +196,7 @@ export async function producePagesDeploymentAuthority(input, {
   const workflowPath = mode === "forward"
     ? ".github/workflows/pages.yml"
     : ".github/workflows/pages-rollback.yml";
-  const deploymentId = mode === "forward" ? sourceCommit : workflowSourceCommit;
+  const deploymentId = workflowSourceCommit;
   const maximumAttempts = requireAttemptCount(attempts);
 
   const [workflowRun, artifact, pagesConfiguration] = await Promise.all([

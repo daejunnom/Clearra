@@ -38,8 +38,10 @@ function identity(sourceCommit = SOURCE, { legacyRestore = false } = {}) {
   };
 }
 
-function fixture({ mode = "forward" } = {}) {
-  const workflowSourceCommit = mode === "forward" ? SOURCE : AUTHORITY;
+function fixture({
+  mode = "forward",
+  workflowSourceCommit = mode === "forward" ? SOURCE : AUTHORITY,
+} = {}) {
   const workflowPath = mode === "forward"
     ? ".github/workflows/pages.yml"
     : ".github/workflows/pages-rollback.yml";
@@ -136,6 +138,16 @@ test("restore authority derives accepted identity and queries the deploy action 
   assert.equal(report.accepted_run_id, null);
   assert.equal(report.workflow_path, ".github/workflows/pages-rollback.yml");
   validatePagesDeploymentAuthorityReport(report);
+});
+
+test("workflow-only correction keeps accepted product source while binding the deploy action SHA", async () => {
+  const { input, dependencies } = fixture({ workflowSourceCommit: AUTHORITY });
+  const report = await producePagesDeploymentAuthority(input, dependencies);
+  assert.equal(report.source_commit, SOURCE);
+  assert.equal(report.workflow_source_commit, AUTHORITY);
+  assert.equal(report.deployment_id, AUTHORITY);
+  assert.equal(report.accepted_run_id, "11111");
+  validatePagesDeploymentAuthorityReport(report, { expectedSourceCommit: SOURCE });
 });
 
 test("rejects artifact digest, run attempt, deployment status, and public identity drift", async () => {

@@ -66,6 +66,16 @@ the frozen predeployment boundary described below.
 
 ## Single Full Gate Per Exact Commit
 
+Post-release documentation, closed release-workflow YAML, and Pages-only
+corrections may use the structurally classified fast path described in
+`docs/fast-correction-deploy.md`. That path runs accepted-base classifier code,
+not a user performance flag. Any native/core/Rust/WASM/performance/shared schema,
+dependency, unknown, rename, submodule, symlink, or classifier-authority change
+returns `full-required` and cannot execute a product deployment. A qualifying
+workflow-only change may reuse the accepted base product artifact through a
+separately sealed base-product/current-workflow dual authority; it never becomes
+new release acceptance.
+
 The `Publish Product Release` workflow has two deliberately different modes:
 
 1. `workflow_dispatch` is the canonical predeployment acceptance run. It runs
