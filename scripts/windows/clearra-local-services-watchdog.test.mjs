@@ -41,7 +41,8 @@ test("local-services watcher is one hidden 60-second owner for ports 4194 and 87
 
   assert.match(launcher, /exitCode = shell\.Run\(command, 0, True\)/u);
   assert.match(launcher, /WScript\.Quit exitCode/u);
-  assert.match(launcher, /runtime run --producer management --profile local-service --timeout 7200/u);
+  assert.match(launcher, /runtime run --producer local-watchdog --profile local-service --timeout 7200/u);
+  assert.match(launcher, /" --root " & Quote\(WScript\.Arguments\(3\)\)/u);
   assert.match(launcher, /powershell\.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden/u);
   assert.match(installer, /\$legacyTaskNames = @\("Clearra Local Runtime"\)/u);
   assert.match(installer, /\$existingTaskWasRunning/u);
@@ -57,7 +58,8 @@ test("local-services watcher is one hidden 60-second owner for ports 4194 and 87
   assert.match(installer, /-RestartCount 3/u);
   assert.match(installer, /-RestartInterval \(New-TimeSpan -Minutes 1\)/u);
   assert.match(installer, /-RepetitionInterval \(New-TimeSpan -Minutes 5\)/u);
-  assert.match(installer, /scripts\\management\\clearra_manage\.py/u);
+  assert.match(installer, /Get-ClearraManageExecutable/u);
+  assert.match(installer, /clearra-manage\.exe/u);
   assert.match(installer, /clearra-local-services-watchdog\.json/u);
   assert.match(watcher, /Clearra\\logs\\local-services-v2\.log/u);
   assert.match(installer, /Clearra\\state\\local-services-v2/u);
@@ -67,6 +69,7 @@ test("local-services watcher is one hidden 60-second owner for ports 4194 and 87
   assert.match(watcher, /Assert-ManagedStateInput -Path \$ConfigPath/u);
   assert.match(launcher, /-ConfigPath/u);
   assert.match(installer, /wscript\.exe/u);
+  assert.match(installer, /\$configurationTarget, \$repoRoot/u);
   assert.doesNotMatch(installer, /Register-ScheduledTask[\s\S]*cmd\.exe/iu);
 });
 
@@ -75,6 +78,8 @@ test("occupied GUI port is preserved without attempting a replacement process", 
   const temporaryRoot = outputRoots.temporary ?? join(root, "_local", "tmp", "management");
   await mkdir(temporaryRoot, { recursive: true });
   const directory = await mkdtemp(join(temporaryRoot, "watchdog-test-"));
+  const managerPath = process.env.CLEARRA_MANAGE_BIN
+    ?? join(root, "build", "cargo", "default", "release", "clearra-manage.exe");
   const logPath = join(directory, "watchdog.log");
   const server = createServer();
   await new Promise((resolveListen, reject) => {
@@ -94,6 +99,7 @@ test("occupied GUI port is preserved without attempting a replacement process", 
       "-GuiPort", String(address.port),
       "-RepoRoot", root,
       "-NodePath", join(directory, "missing-node.exe"),
+      "-ManagerPath", managerPath,
       "-EventLogPath", logPath,
     ]);
     assert.equal(result.code, 0, result.stderr);

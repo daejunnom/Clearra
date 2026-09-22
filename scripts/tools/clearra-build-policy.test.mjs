@@ -216,7 +216,7 @@ test('Node and PowerShell reuse the same lease without nested completion', { ski
   await product.finish(true);
 });
 
-test('bare Cargo fails before compiling or creating a target directory', async t => {
+test('bare Cargo writes under the declared build root without a mandatory wrapper', async t => {
   const options = await fixture(t);
   await mkdir(join(options.sourceRoot, '.cargo'));
   await mkdir(join(options.sourceRoot, 'src'));
@@ -229,7 +229,7 @@ test('bare Cargo fails before compiling or creating a target directory', async t
   delete environment.CARGO_TARGET_DIR;
   const result = spawnSync('cargo', ['check', '--offline'], { cwd: options.sourceRoot, env: environment, encoding: 'utf8', windowsHide: true });
   if (result.error?.code === 'ENOENT') { t.skip('Cargo is not installed on this policy-only host'); return; }
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /clearra-build-root-required/u);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok((await stat(join(options.sourceRoot, 'build', 'cargo', 'default'))).isDirectory());
   await assert.rejects(stat(join(options.sourceRoot, 'target')), { code: 'ENOENT' });
 });

@@ -16,6 +16,7 @@ import {
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 import { finesseSourceSnapshot } from '../benchmark/finesse-source-snapshot.mjs';
 import { enterManagedBuildOrRelaunch } from './clearra-build-policy.mjs';
+import { clearraManageExecutable } from '../management/clearra-manage-path.mjs';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
 const scriptRoot = resolve(scriptDir, '..', '..');
@@ -123,8 +124,7 @@ try {
 async function buildWithWsl() {
   await assertDefaultRustBuildEnvironment();
   const args = [
-    '-B',
-    resolve(root, 'scripts', 'management', 'clearra_manage.py'),
+    '--root', root,
     'runtime',
     'wsl',
     'run',
@@ -140,7 +140,7 @@ async function buildWithWsl() {
   ];
   if (options.verify) args.push('--verify');
   if (options.stageProfiling) args.push('--stage-profiling');
-  await run(process.env.PYTHON || 'python', args);
+  await run(clearraManageExecutable(root), args);
   const identityPath = resolve(stagingDir, '.clearra-wsl-toolchain.json');
   const identity = JSON.parse(await readFile(identityPath, 'utf8'));
   await rm(identityPath, { force: true });

@@ -12,17 +12,18 @@ param(
 $ErrorActionPreference = "Stop"
 $sourceDirectory = Split-Path -Parent $PSCommandPath
 $repoRoot = Split-Path -Parent (Split-Path -Parent $sourceDirectory)
+. (Join-Path $repoRoot 'scripts/lib/clearra-manage-command.ps1')
 $runtimeDirectory = Join-Path $env:LOCALAPPDATA "Clearra\state\local-services-v2"
 $watcherSource = Join-Path $sourceDirectory "clearra-local-services-watchdog.ps1"
 $launcherSource = Join-Path $sourceDirectory "launch-clearra-local-services-watchdog.vbs"
 $watcherTarget = Join-Path $runtimeDirectory "clearra-local-services-watchdog.ps1"
 $launcherTarget = Join-Path $runtimeDirectory "launch-clearra-local-services-watchdog.vbs"
 $configurationTarget = Join-Path $runtimeDirectory "clearra-local-services-watchdog.json"
+$managerTarget = Join-Path $runtimeDirectory "clearra-manage.exe"
 $node = Get-Command node.exe -ErrorAction Stop
 $nodePath = $node.Source
-$pythonPath = (Get-Command python.exe -ErrorAction Stop).Source
-$managerPath = Join-Path $repoRoot 'scripts\management\clearra_manage.py'
-& $pythonPath -B $managerPath storage verify --path $runtimeDirectory | Out-Null
+$managerPath = Get-ClearraManageExecutable -RepositoryRoot $repoRoot
+& $managerPath --root $repoRoot storage verify --path $runtimeDirectory | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw 'E_CLEARRA_STORAGE_PATH_NOT_ALLOWED: watchdog state path failed management verification.'
 }
@@ -41,7 +42,7 @@ function Get-ListenerOwner {
 
 foreach ($path in @(
     $watcherSource, $launcherSource, $nodePath,
-    $pythonPath, $managerPath, $SshKeyPath
+    $managerPath, $SshKeyPath
 )) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required local-services file is unavailable: $path"
@@ -55,6 +56,7 @@ $configuration = [ordered]@{
     repo_root = $repoRoot
     node_path = $nodePath
     ssh_path = "$env:WINDIR\System32\OpenSSH\ssh.exe"
+    manager_path = $managerTarget
     ssh_key_path = $SshKeyPath
     ssh_destination = $SshDestination
 }
@@ -67,17 +69,20 @@ $stageId = [guid]::NewGuid().ToString("N")
 $watcherStaged = Join-Path $runtimeDirectory ".$stageId.watchdog.tmp"
 $launcherStaged = Join-Path $runtimeDirectory ".$stageId.launcher.tmp"
 $configurationStaged = Join-Path $runtimeDirectory ".$stageId.configuration.tmp"
+$managerStaged = Join-Path $runtimeDirectory ".$stageId.manager.tmp"
 try {
     Copy-Item -LiteralPath $watcherSource -Destination $watcherStaged
     Copy-Item -LiteralPath $launcherSource -Destination $launcherStaged
+    Copy-Item -LiteralPath $managerPath -Destination $managerStaged
     $configuration | ConvertTo-Json | Set-Content `
         -LiteralPath $configurationStaged `
         -Encoding UTF8
     Move-Item -LiteralPath $watcherStaged -Destination $watcherTarget -Force
     Move-Item -LiteralPath $launcherStaged -Destination $launcherTarget -Force
+    Move-Item -LiteralPath $managerStaged -Destination $managerTarget -Force
     Move-Item -LiteralPath $configurationStaged -Destination $configurationTarget -Force
 } finally {
-    foreach ($stagedPath in @($watcherStaged, $launcherStaged, $configurationStaged)) {
+    foreach ($stagedPath in @($watcherStaged, $launcherStaged, $managerStaged, $configurationStaged)) {
         if (Test-Path -LiteralPath $stagedPath) {
             Remove-Item -LiteralPath $stagedPath -Force
         }
@@ -116,7 +121,7 @@ foreach ($legacyTaskName in $legacyTaskNames) {
 $action = New-ScheduledTaskAction `
     -Execute "$env:WINDIR\System32\wscript.exe" `
     -Argument ('"{0}" "{1}" "{2}" "{3}" "{4}"' -f `
-        $launcherTarget, $pythonPath, $managerPath, $watcherTarget, $configurationTarget) `
+        $launcherTarget, $managerTarget, $watcherTarget, $configurationTarget, $repoRoot) `
     -WorkingDirectory $runtimeDirectory
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $leaseRecoveryTrigger = New-ScheduledTaskTrigger `

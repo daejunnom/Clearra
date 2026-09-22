@@ -73,16 +73,16 @@ $windowsTarget = 'C:\accepted\clearra-oracle-release-deploy-v080'
 $windowsContract = Invoke-ExtractedWrapperFunction `
     -Path $wrapper `
     -FunctionName 'Get-OraclePosixSyntaxAuditContract' `
-    -Arguments @('windows', $windowsTarget)
+    -Arguments @('windows', $windowsTarget, $repositoryRoot)
 if ($null -ne $windowsContract.ProjectionCommand -or
     @($windowsContract.ProjectionArguments).Count -ne 0 -or
-    [IO.Path]::GetFileName($windowsContract.SyntaxCommand) -notin @('python', 'python.exe')) {
+    [IO.Path]::GetFileName($windowsContract.SyntaxCommand) -cne 'clearra-manage.exe') {
     throw 'Windows release-deploy syntax-audit command contract drifted.'
 }
 Assert-ExactStringSequence `
     -Actual @($windowsContract.SyntaxArguments) `
     -Expected @(
-        '-B', (Join-Path $repositoryRoot 'scripts/management/clearra_manage.py'),
+        '--root', $repositoryRoot,
         'runtime', 'wsl', 'run', '--entry', 'posix-syntax-audit', '--',
         '--host-path', $windowsTarget
     ) `
@@ -97,7 +97,7 @@ $linuxTarget = '/tmp/accepted/clearra-oracle-release-deploy-v080'
 $linuxContract = Invoke-ExtractedWrapperFunction `
     -Path $wrapper `
     -FunctionName 'Get-OraclePosixSyntaxAuditContract' `
-    -Arguments @('linux', $linuxTarget)
+    -Arguments @('linux', $linuxTarget, $repositoryRoot)
 if ($null -ne $linuxContract.ProjectionCommand -or
     @($linuxContract.ProjectionArguments).Count -ne 0 -or
     $linuxContract.SyntaxCommand -cne '/usr/bin/dash') {

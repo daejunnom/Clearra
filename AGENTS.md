@@ -1,92 +1,92 @@
-# Clearra repository management rules
+# Clearra repository rules
 
-`config/clearra-management.v1.json` is the authority for generated paths,
-toolchain versions, package managers, and Git convergence. Repository-provided
-tools and automated agents must use `python -B scripts/management/clearra_manage.py` for
-storage, dependency, toolchain, and Git management operations.
+`config/clearra-management.v1.json` governs only two things:
 
-Before adding or running a tool that writes files or starts another process,
-register its source path, producer ID, output class, and lifecycle in the
-manifest. Run it through `python -B scripts/management/clearra_manage.py storage run
---producer <id> -- <command>`. Do not write raw reports into `docs/research/`;
-only a person-reviewed summary selected for version control belongs there.
+1. where Clearra-generated output may be written; and
+2. memory, timeout, descendant-process, and WSL lifetime limits for risky runs.
 
-Do not run raw `git pull`, destructive `git reset`, `git branch -D`, force
-pushes, or branch/worktree deletion. Use the management entry point with the
-`git inventory`, `git converge`, `git review`, `git upload`, `git promote`, and
-`git finalize` subcommands; unresolved unique commits or dirty worktrees are
-blockers. Record every selected or excluded item with `git review`; do not edit
-the review JSON by hand. `git promote` performs one exact-SHA check lookup and
-must not be wrapped in a polling loop.
-Remote material may remain as a working copy only in the default checkout's
-local `main` after exact-SHA CI, remote readback, local fast-forward, and an
-independent checkout all agree.
+The active manager is the Rust binary in `tools/clearra-manage`. The Python v1
+implementation under `scripts/management/history/python-v1/` is historical
+source and must not be used as an execution entrypoint.
 
-pnpm is the workspace package manager. Do not run `npm install`, `npm ci`, or
-general `npm exec`. npm is reserved for registry inspection and publication of
-an already verified tarball. Installs must use the frozen pnpm lockfile. Use
-`deps update` for a receipted lockfile update and `package pack` followed by
-`package publish --apply` for publication; never publish a workspace directory.
+## Work that does not require the manager
 
-Do not run `rustup update`, floating Rust toolchains, or `cargo install` into
-the shared Cargo binary directory. The exact Rust toolchain is declared in
-`rust-toolchain.toml`; Clearra-owned Cargo tools use the managed tool root.
+Ordinary read-only filesystem commands and source inspection are unrestricted.
+This includes `Get-ChildItem`, `rg`, `git status`, `git diff`, and equivalent
+tools. They do not create Clearra artifacts and must not be wrapped by the
+manager.
 
-Every new writer must add a producer and output class to the management
-manifest before it writes. A path-policy warning may mention the local
-`--force-unmanaged-output` escape hatch, but the warning must also state that
-forcing is not recommended. CI, release, deployment, Git ref mutations,
-credential paths, and link escapes never accept that override.
+Git is not a management-CLI domain. Prefer the Codex Git integration when it
+is available; ordinary `git` and `gh` commands are also allowed. Normal branch
+creation, fetch, add, commit, and non-force push do not need a receipt or a
+registered process profile. Do not force-push, discard uncommitted work, or
+delete an unreviewed branch/worktree unless the user explicitly authorizes it.
+Promotion to `main` remains a normal exact-SHA fast-forward after the required
+CI check; the Rust manager does not proxy or poll GitHub.
 
-Every process execution point must also register a resource profile and the
-complete tree-ownership, timeout, termination-grace, hard-memory, output-limit,
-and no-OOM-retry contract in `config/clearra-management.v1.json`. Launch host
-commands with `python -B scripts/management/clearra_manage.py runtime run --producer <id>
---profile <profile> -- <command>`; the compatible `storage run` command
-delegates to the same supervisor. Do not add raw `spawn`, `Start-Process`,
-`subprocess`, `std::process`, workflow/Docker launchers, or shell `exec` sites
-without that registration.
+Cargo, pnpm, npm metadata queries, toolchain checks, package packing, and
+publishing are not management-CLI domains. Use their native commands and the
+committed lockfiles. Cargo defaults to `build/cargo/default` through
+`.cargo/config.toml`, so direct Cargo commands retain the output-path contract.
 
-The documented `storage audit|verify|clean`, `toolchain`, `deps`, `package`, and
-`git` management subcommands enter their manifest-selected supervisor profile
-automatically when called directly. `storage run` and `runtime run` are the
-supervisor entrypoints themselves. If an outer managed command already owns the
-tree, nested management commands inherit that boundary and do not create a
-second supervisor.
-The manifest automatically marks the `release-evidence` producer, applied
-package publication, `main` promotion, and applied ruleset changes as release
-contexts. Do not clear `CLEARRA_RELEASE` or bypass the finite cgroup/Job Object
-requirement for those operations.
+Short-lived builds, formatting, linting, unit tests, source generators that
+already write exclusively inside a declared root, and programs already inside
+a finite CI/container memory boundary do not need `runtime run` merely because
+they start a process.
 
-`scripts/management/clearra_runtime.py` is the only production source allowed to invoke
-the WSL host executable. Do not invoke raw `wsl`, its `.exe` launcher, arbitrary
-`bash -lc`, or the global WSL shutdown command. WSL work must use a registered
-fixed guest entrypoint through `python -B scripts/management/clearra_manage.py runtime wsl
-run --entry <id> -- <arguments>`. Clearra owns only the dedicated
-`Clearra-Build` distribution, terminates only that distribution after each
-lease, and treats `.wslconfig` as read-only. A new WSL entrypoint must declare
-its profile and source requirement in the manifest before it runs.
+## Generated output paths
 
-Do not silently lower worker counts, enable normal-path `MemoryHigh` or RSS
-sampling, or retry an OOM with different resources. Admission failure and OOM
-must remain distinct typed failures, and the outer process boundary owns all
-descendants without adding supervisor work to solver hot paths.
-General host work reserves only the manifest's critical start margin; do not
-restore full-working-set preallocation. The supervisor samples host or cgroup
-availability at the low frequency in the manifest, requests cooperative full
-GC where a runtime acknowledges that protocol, remeasures, and fail-closes only
-the Clearra-owned tree if the small recovery reserve is still unavailable.
-Never claim that a child performed full GC without its matching acknowledgement.
-Benchmark search uses the same critical-start-margin and bounded GC recovery
-policy. It still requires an explicit timeout, preserves the requested worker
-count, and records pressure recovery in the receipt so a benchmark result can
-identify an intervened run.
+Clearra-generated files must stay inside a repository or platform root declared
+in `config/clearra-management.v1.json`. Use the prebuilt manager when a caller
+accepts an output path or when the path is otherwise uncertain:
 
-Never read, archive, print, or otherwise inspect `.env` files, keys, service
-account files, API keys, or credential files. Report only that a prohibited
-path blocked the operation.
+```text
+clearra-manage storage verify --path <path>
+clearra-manage storage audit
+```
 
-Local port ownership is fixed: `4194` is the local product-test GUI, `4195` is
-the finite A/B benchmark GUI, and `8790` is the Discord bot management surface
-reached through its managed local SSH forward. Do not substitute one port for
-another or let the benchmark helper adopt the product or management listener.
+Path verification rejects traversal, symlink/junction escapes, and credential
+paths. The local interactive override requires both
+`--force-unmanaged-output` and `--force-reason`; its warning states that forcing
+is not recommended. CI, release/deployment output, credential paths, and link
+escapes must never use the override.
+
+Do not write raw execution output directly into `docs/research/`. Only a
+human-reviewed summary selected for version control belongs there. Never read,
+archive, print, or inspect `.env` files, keys, service-account files, API keys,
+or credential files.
+
+## Memory and process-tree supervision
+
+Use `clearra-manage runtime run` for work that can consume large or unbounded
+memory, has a long-lived lease, launches a descendant tree that must die with
+its owner, or runs a benchmark whose worker and memory identity must be kept:
+
+```text
+clearra-manage runtime run --producer <label> --profile <profile> \
+  --timeout <seconds> -- <command>
+```
+
+The supervisor owns the complete tree, applies a Windows Job Object or Linux
+process group boundary, enforces the declared hard memory/process/output/time
+limits, and never retries OOM with changed resources. It may request
+cooperative GC during host pressure, but records GC only when the child writes
+the matching acknowledgement. If the small recovery reserve remains
+unavailable, it fail-closes only the owned tree.
+
+Do not silently reduce requested worker counts. Solver hot paths remain free of
+supervisor code; containment belongs at the outer process boundary.
+
+WSL execution is always a supervised case. `clearra-manage runtime wsl run`
+owns only `Clearra-Build`, uses a fixed registered guest entrypoint, and
+terminates only that distribution after the lease. Never call global
+`wsl --shutdown`. Other distributions and `.wslconfig` are outside Clearra's
+ownership.
+
+## Fixed local ports
+
+- `4194`: local product-test GUI
+- `4195`: finite local benchmark/A/B GUI
+- `8790`: Discord bot management surface through its local SSH forward
+
+Do not substitute these ports or let one role adopt another role's listener.

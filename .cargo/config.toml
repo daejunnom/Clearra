@@ -1,6 +1,7 @@
-# The managed owner supplies CARGO_TARGET_DIR, the platform guard and transaction.
-# Unmanaged Cargo fails before compilation instead of creating another target.
-# This prevents accidental bypass; it is not an operating-system sandbox.
+# Cargo is an ordinary developer tool.  Its default output still belongs to the
+# repository's declared build root, so direct cargo commands cannot create a
+# repository-local `target/` directory.  Callers may override CARGO_TARGET_DIR
+# with another declared Clearra build/cache root when isolation is useful.
 [build]
-rustc-wrapper = "clearra-build-root-required"
-incremental = false
+target-dir = "build/cargo/default"
+incremental = true

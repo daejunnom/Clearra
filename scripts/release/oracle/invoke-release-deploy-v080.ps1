@@ -130,16 +130,22 @@ function Get-OraclePosixSyntaxAuditContract {
         [string] $Platform,
 
         [Parameter(Mandatory = $true)]
-        [string] $Path
+        [string] $Path,
+
+        [string] $RepositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
     )
     if ($Platform -ceq 'windows') {
-        $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
+        $manager = if (-not [string]::IsNullOrWhiteSpace($env:CLEARRA_MANAGE_BIN)) {
+            [System.IO.Path]::GetFullPath($env:CLEARRA_MANAGE_BIN)
+        } else {
+            Join-Path $RepositoryRoot 'build/cargo/default/release/clearra-manage.exe'
+        }
         return [pscustomobject]@{
             ProjectionCommand = $null
             ProjectionArguments = [string[]]@()
-            SyntaxCommand = (Get-Command 'python' -ErrorAction Stop).Source
+            SyntaxCommand = $manager
             SyntaxArguments = [string[]]@(
-                '-B', (Join-Path $repositoryRoot 'scripts/management/clearra_manage.py'),
+                '--root', $RepositoryRoot,
                 'runtime', 'wsl', 'run', '--entry', 'posix-syntax-audit', '--',
                 '--host-path', $Path
             )

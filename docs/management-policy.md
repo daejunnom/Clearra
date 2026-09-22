@@ -1,112 +1,135 @@
 # Clearra management policy
 
-`config/clearra-management.v1.json` is the single policy source for generated
-paths, toolchain versions, package authority, and lossless Git convergence.
-`python -B scripts/management/clearra_manage.py` is the common entry point. A new writer or
-process launcher must register its source path, producer, output class, and
-lifecycle before CI accepts it.
+`config/clearra-management.v1.json` is the policy source for two bounded
+concerns: generated-output locations and runtime memory/process-tree safety.
+The active implementation is the Rust crate in `tools/clearra-manage`.
 
-## Storage and toolchains
+The Python v1 implementation is retained under
+`scripts/management/history/python-v1/` only as historical source. It is not an
+active entrypoint, is not invoked by CI, and must not be used by product or
+release scripts.
 
-Managed repository output is limited to these roots:
+## Deliberate scope boundary
 
-| Root | Purpose | Lifetime |
-| --- | --- | --- |
-| `build/<producer>/<profile>` | Cargo targets, project tools, package and container staging, publication inputs | reproducible until receipted cleanup |
-| `coverage/<producer>` | coverage output | ephemeral until receipted cleanup |
-| `_local/artifacts/<class>/<run-id>` | test, benchmark, analysis, and raw research evidence | retained evidence |
-| `_local/state/<producer>/<run-id>` | locks, checkpoints, and transaction receipts | transaction lifetime |
-| `_local/tmp/<producer>/<run-id>` | atomic-write and process temporary files | process lifetime |
-| `docs/research` | reviewed summaries selected for Git | source controlled |
+The manager validates:
 
-The product build owner also has a registered Clearra-only external cache at
-the platform `Clearra/build` root. npm, pnpm, Cargo, and rustup keep their normal
-shared user stores. The management command records identity and byte deltas but
-never cleans another project's entries.
+- repository and Clearra-owned external output roots;
+- traversal, symlink, junction, reparse-point, and credential-path escapes;
+- hard memory, process-count, output-size, timeout, and descendant-tree limits;
+- cooperative GC requests and acknowledgements under host pressure;
+- ownership and termination of the dedicated `Clearra-Build` WSL distribution.
 
-Use these checks before a managed operation:
+The manager does not govern filesystem reads, Git, dependency management,
+toolchain installation, package publication, or every ordinary child process.
+`Get-ChildItem`, `rg`, `git`, `gh`, Cargo, pnpm, and similar native tools may be
+used directly. This boundary avoids routing cheap read-only and source-control
+work through a general Python policy layer.
 
-```text
-python -B scripts/management/clearra_manage.py storage audit
-python -B scripts/management/clearra_manage.py storage verify
-python -B scripts/management/clearra_manage.py toolchain check
-python -B scripts/management/clearra_manage.py deps verify
-```
+## Build and output paths
 
-Run a registered producer with:
+Generated repository output is limited to the roots declared in the manifest:
 
-```text
-python -B scripts/management/clearra_manage.py storage run --producer cargo -- cargo check --workspace --locked
-```
+| Root | Purpose |
+| --- | --- |
+| `build/` | Cargo targets, bundles, package/container staging, project tools |
+| `coverage/` | coverage output |
+| `_local/artifacts/` | test, benchmark, analysis, and raw research evidence |
+| `_local/state/` | locks, checkpoints, and receipts |
+| `_local/tmp/` | transaction-scoped temporary output |
+| registered product paths | workspace package links and explicit web/desktop output |
 
-The local TTY-only unmanaged-output override is intentionally unavailable to
-CI, release, deployment, Git ref changes, credential paths, and link or mount
-escapes. Its warning states that forcing is not recommended.
+Cargo uses `build/cargo/default` by default through `.cargo/config.toml`.
+Specialized build owners may select another declared Clearra build/cache root.
+The default keeps direct `cargo` commands safe without a compiler wrapper and
+allows incremental compilation.
 
-## Dependency and package changes
-
-pnpm is the sole workspace installer. Frozen installs use:
+Inspect or validate paths with the prebuilt executable:
 
 ```text
-python -B scripts/management/clearra_manage.py deps install
+clearra-manage storage audit
+clearra-manage storage verify --path <path>
 ```
 
-Only the dependency-update command may mutate lockfiles. It starts from a clean
-worktree, records before and after package graphs and authority-file hashes,
-and rejects changes outside the selected manager's files:
+On a local interactive terminal, an unmanaged path can be allowed for one call
+with both `--force-unmanaged-output` and `--force-reason`. The manager records
+the reason and prints that forcing is not recommended. Credential paths,
+symlink/junction escapes, CI, release, and deployment contexts cannot use this
+override.
+
+## Runtime supervision
+
+Use the supervisor for a run that can consume large or unbounded memory, owns a
+long-lived service, creates a descendant tree that must end with its owner, or
+performs a benchmark whose resource identity matters:
 
 ```text
-python -B scripts/management/clearra_manage.py deps update --manager pnpm -- ctk3 --latest
-python -B scripts/management/clearra_manage.py deps update --manager cargo -- -p package-name --precise 1.2.3
+clearra-manage runtime audit
+clearra-manage runtime run --producer <label> --profile <profile> \
+  --timeout <seconds> -- <command> [arguments]
 ```
 
-Publishing is a two-step exact-tarball operation. `pack` runs pnpm, rejects
-lifecycle changes to tracked source, checks every tar member, and seals the
-package name, version, content list, source SHA, tree, and tarball digest.
-`publish` defaults to validation only. `--apply` verifies the same source and
-tarball again, checks the exact npm version and registry identity, then invokes
-`npm publish <exact-tarball> --provenance --ignore-scripts` once.
+Short builds, unit tests, formatting, linting, and processes already inside a
+finite CI/container boundary do not require the runtime wrapper solely because
+they launch another program.
+
+The Windows implementation uses a Job Object with kill-on-close, aggregate
+memory, and active-process limits. Linux uses an owned process group and
+aggregate `/proc` accounting. The supervisor applies a hard per-tree limit,
+checks host pressure at the low frequency declared in the manifest, and never
+changes worker count or retries an OOM with different resources.
+
+At low host memory, the supervisor writes a cooperative full-GC request and
+waits for the configured grace period. It records GC only if the child writes
+the matching acknowledgement. If the small physical or commit reserve remains
+unavailable, it terminates only the Clearra-owned tree with a typed fail-close
+reason. Start admission uses the smaller critical reserve rather than reserving
+an entire projected working set.
+
+Runtime receipts are written to the Clearra-owned platform state root and
+include the sanitized command, profile, admission values, observed peak,
+pressure/GC state, exit reason, and tree-stop result. Secret values are
+redacted.
+
+## WSL
+
+All WSL work uses a fixed manifest entrypoint:
 
 ```text
-python -B scripts/management/clearra_manage.py package pack --package ctk3
-python -B scripts/management/clearra_manage.py package publish --receipt <pack-receipt>
-python -B scripts/management/clearra_manage.py package publish --receipt <pack-receipt> --apply
+clearra-manage runtime wsl verify
+clearra-manage runtime wsl run --entry <registered-id> -- <arguments>
 ```
 
-## Lossless Git convergence
+The Rust manager is the only production source that invokes the WSL host
+executable. A lease owns only `Clearra-Build`, verifies its compatible
+toolchain marker, runs a fixed guest entrypoint, and terminates that distribution
+on every exit path. It never calls global `wsl --shutdown`, changes
+`.wslconfig`, or stops another distribution.
 
-Run the phases explicitly. None of these commands polls CI.
+Provisioning remains an explicit administrator/bootstrap operation rather than
+a recurring build command. The retained Python history is not a provisioning
+fallback.
 
-1. `git inventory --fetch` fetches all branches and tags without pruning,
-   removes shallow history, checks object closure, and records all refs,
-   worktrees, and dirty states.
-2. `git converge` creates safety refs, a verified bundle, uncommitted patches,
-   a source archive, and a review ledger. It makes no branch decision.
-3. `git review` records each inclusion or exclusion with an immutable decision
-   receipt. A dirty worktree can be selected only after `--record-worktree`
-   proves that its archived state reconstructs an exact candidate tree.
-4. `git converge --apply` replays selected linear history on the current
-   `codex/converge-*` branch. A conflict records stage blobs and worktree
-   hashes, preserves a safety ref, aborts, and restores the initial candidate.
-5. Push the candidate normally. The push starts the required candidate CI; do
-   not poll it.
-6. `git promote` later reads required checks once for the exact candidate SHA.
-   Only a successful closed check set proceeds. It verifies the GitHub ruleset
-   and maintainer set, uses a normal fast-forward `candidate:main` push, reads
-   remote main back, advances the clean default local main, and retains an
-   independently validated checkout.
-7. `git finalize` is a dry run. After reviewing its complete removal plan,
-   `git finalize --apply` removes only reviewed or proven-equivalent branches,
-   clean worktrees, the retained verification checkout, and safety state. It
-   finishes only when remote main and the default local main are the sole
-   working copies with the same commit and tree.
+## Git and release promotion
 
-Examples for review decisions:
+Git operations use the Codex Git integration when available or ordinary
+`git`/`gh` commands. The manager does not proxy branch, worktree, fetch, commit,
+push, or GitHub API operations. Destructive ref changes and force pushes still
+require explicit user authorization.
+
+Promotion to `main` uses a normal fast-forward after the required check succeeds
+for the exact candidate SHA. Verify the remote SHA after push and update the
+default checkout with `--ff-only`. CI polling is a caller policy, not a manager
+feature.
+
+## Building the manager
+
+The exact Rust toolchain remains pinned by `rust-toolchain.toml`:
 
 ```text
-python -B scripts/management/clearra_manage.py git review --safety-receipt <receipt> --candidate <branch> --decide-ref refs/heads/topic --decision selected --reason "required source change"
-python -B scripts/management/clearra_manage.py git review --safety-receipt <receipt> --candidate <branch> --decide-worktree <absolute-path> --decision excluded --reason "generated local experiment"
+cargo build --locked -p clearra-manage --release
+cargo test --locked -p clearra-manage
 ```
 
-Raw `git pull`, destructive reset, force push, pre-verification deletion,
-prune, and GC are outside this contract.
+The binary is emitted under `build/cargo/default/release/`. PowerShell and Node
+callers use the checked-in resolver helpers and may override the path with
+`CLEARRA_MANAGE_BIN` for a verified prebuilt binary.

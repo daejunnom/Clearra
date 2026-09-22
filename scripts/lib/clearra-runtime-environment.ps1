@@ -43,9 +43,10 @@ function Assert-ClearraRuntimeEnvironmentAvailable(
             if ($WslDistribution -cne 'Clearra-Build') {
                 throw 'Only the managed Clearra-Build distribution is available to Clearra.'
             }
-            if ($null -eq (Get-Command 'python' -ErrorAction SilentlyContinue)) {
-                throw 'The managed WSL runtime requires Python on the Windows host.'
-            }
+            $repositoryRoot = [System.IO.Path]::GetFullPath(
+                (Join-Path $script:ClearraWslDispatchRoot '../..')
+            )
+            [void](Get-ClearraManageExecutable -RepositoryRoot $repositoryRoot)
         }
         'wasm' {
             if ($null -eq (Get-Command 'node' -ErrorAction SilentlyContinue)) {
@@ -64,10 +65,10 @@ function Sync-ClearraWslExt4Workspace(
         throw 'Only the managed Clearra-Build distribution is available to Clearra.'
     }
     $root = [System.IO.Path]::GetFullPath($RepositoryRoot)
-    $python = (Get-Command 'python' -ErrorAction Stop).Source
+    $manager = Get-ClearraManageExecutable -RepositoryRoot $root
     $arguments = New-ClearraManagedWslEntryArguments `
         -RepositoryRoot $root -Entry 'sync-workspace'
-    $output = @(& $python @arguments 2>&1)
+    $output = @(& $manager @arguments 2>&1)
     $exitCode = $LASTEXITCODE
     $text = ($output | ForEach-Object { $_.ToString() }) -join "`n"
     if ($exitCode -ne 0) { throw "Managed WSL source synchronization failed ($exitCode).`n$text" }

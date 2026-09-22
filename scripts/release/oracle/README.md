@@ -226,8 +226,9 @@ node scripts/tools/accepted-ctk3-dist.mjs `
   --expected-run-attempt $acceptedRunAttempt
 if ($LASTEXITCODE -ne 0) { throw 'accepted CTK3 artifact authority failed' }
 
-$python = (Get-Command python -ErrorAction Stop).Source
-& $python -B scripts/management/clearra_manage.py runtime wsl run `
+. .\scripts\lib\clearra-manage-command.ps1
+$manager = Get-ClearraManageExecutable -RepositoryRoot $repository
+& $manager --root $repository runtime wsl run `
   --entry oracle-local-layers-v080 -- `
   --accepted-ctk3 $acceptedCtk3Directory `
   --output $evidenceDirectory `
@@ -503,7 +504,9 @@ node --test apps/clearra-discord-bot/test/oracle-candidate-observation.test.mjs
 pwsh -NoProfile -File scripts/release/oracle/invoke-freeze-v080.test.ps1
 pwsh -NoProfile -File scripts/release/oracle/invoke-inactive-stage-v080.test.ps1
 pwsh -NoProfile -File scripts/release/oracle/invoke-release-deploy-v080.test.ps1
-python -B scripts/management/clearra_manage.py runtime wsl run --entry posix-syntax-audit -- `
+. .\scripts\lib\clearra-manage-command.ps1
+$manager = Get-ClearraManageExecutable -RepositoryRoot $PWD
+& $manager --root $PWD runtime wsl run --entry posix-syntax-audit -- `
   --shell bash --host-path scripts/release/oracle/create-local-layers-v080.sh `
   --shell bash --host-path scripts/release/oracle/create-actions-layers-v080.sh `
   --shell dash --host-path scripts/release/oracle/clearra-oracle-freeze-v080 `

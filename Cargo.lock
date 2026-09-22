@@ -399,6 +399,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clearra-manage"
+version = "0.8.1"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "windows-sys",
+]
+
+[[package]]
 name = "clearra-objectives"
 version = "0.8.1"
 dependencies = [

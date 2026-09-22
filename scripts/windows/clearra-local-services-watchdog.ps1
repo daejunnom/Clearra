@@ -15,6 +15,7 @@ param(
     [string]$SshPath = "$env:WINDIR\System32\OpenSSH\ssh.exe",
     [string]$SshKeyPath = "",
     [string]$SshDestination = "",
+    [string]$ManagerPath = "",
     [string]$ConfigPath = "",
     [string]$EventLogPath = "$env:LOCALAPPDATA\Clearra\logs\local-services-v2.log",
     [switch]$DisableTunnel,
@@ -62,18 +63,22 @@ if ($ConfigPath) {
     $RepoRoot = [string]$configuration.repo_root
     $NodePath = [string]$configuration.node_path
     $SshPath = [string]$configuration.ssh_path
+    $ManagerPath = [string]$configuration.manager_path
     $SshKeyPath = [string]$configuration.ssh_key_path
     $SshDestination = [string]$configuration.ssh_destination
 }
 if (-not $RepoRoot -or -not $NodePath) {
     throw "RepoRoot and NodePath are required."
 }
-$pythonPath = (Get-Command 'python' -ErrorAction Stop).Source
-$managerPath = Join-Path $RepoRoot 'scripts\management\clearra_manage.py'
+$managerPath = if (-not [string]::IsNullOrWhiteSpace($ManagerPath)) {
+    $ManagerPath
+} else {
+    Join-Path $env:LOCALAPPDATA 'Clearra\state\local-services-v2\clearra-manage.exe'
+}
 if (-not (Test-Path -LiteralPath $managerPath -PathType Leaf)) {
     throw 'The Clearra management entrypoint is unavailable.'
 }
-& $pythonPath -B $managerPath storage verify --path $EventLogPath | Out-Null
+& $managerPath --root $RepoRoot storage verify --path $EventLogPath | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw 'E_CLEARRA_STORAGE_PATH_NOT_ALLOWED: watchdog log path failed management verification.'
 }

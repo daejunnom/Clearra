@@ -13,24 +13,45 @@ concurrency:
   group: clearra-management-policy-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
+env:
+  CARGO_TARGET_DIR: build/cargo/ci
+
 jobs:
   windows-runtime:
     name: Clearra management Windows runtime
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13.7"
-      - name: Verify Windows Job Object process ownership
+      - name: Install the exact Rust toolchain
         shell: pwsh
         run: >-
-          python -B scripts/management/clearra_manage.py runtime run
-          --producer management --profile control --timeout 300 --
-          python -B -m unittest discover -s scripts/management/tests -p "test_clearra_runtime.py" -v
+          rustup toolchain install 1.98.1 --profile minimal
+          --component rustfmt --component clippy
+      - name: Build and test the Rust manager
+        shell: pwsh
+        run: |
+          cargo test --locked -p clearra-manage
+          cargo build --locked --release -p clearra-manage
+          $manager = Join-Path $env:CARGO_TARGET_DIR 'release/clearra-manage.exe'
+          & $manager --root . storage audit
+          & $manager --root . runtime audit
+      - name: Verify Windows Job Object ownership
+        shell: pwsh
+        run: |
+          $manager = Join-Path $env:CARGO_TARGET_DIR 'release/clearra-manage.exe'
+          & $manager --root . runtime run --producer management-test --profile control --timeout 30 -- `
+            pwsh -NoProfile -NonInteractive -Command "Write-Output 'job-object-ok'"
+          if ($LASTEXITCODE -ne 0) { throw 'normal Job Object fixture failed' }
+          $previousErrorAction = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          & $manager --root . runtime run --producer management-test --profile control --timeout 1 -- `
+            pwsh -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30"
+          $timeoutExitCode = $LASTEXITCODE
+          $ErrorActionPreference = $previousErrorAction
+          if ($timeoutExitCode -eq 0) { throw 'timeout fixture unexpectedly succeeded' }
 
   management-policy:
     name: Clearra management policy
@@ -45,6 +66,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
+      - name: Install the exact Rust toolchain
+        run: >-
+          rustup toolchain install 1.98.1 --profile minimal
+          --component rustfmt --component clippy
+          --target wasm32-unknown-unknown
       - name: Bind exact Corepack pnpm
         shell: pwsh
         run: |
@@ -56,51 +82,57 @@ jobs:
         shell: pwsh
         run: |
           "path=$(pnpm store path --silent)" >> $env:GITHUB_OUTPUT
-      - name: Cache only the exact pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.pnpm-store.outputs.path }}
-          key: clearra-pnpm-${{ runner.os }}-${{ runner.arch }}-node-22.23.2-pnpm-11.5.0-${{ hashFiles('pnpm-lock.yaml') }}
-      - name: Restore exact Cargo inputs and managed binaries
+      - name: Cache the pnpm and Cargo download stores
         uses: actions/cache@v4
         with:
           path: |
+            ${{ steps.pnpm-store.outputs.path }}
             ~/.cargo/registry
             ~/.cargo/git
-            build/tools/cargo/wasm-bindgen-cli/0.2.126
-          key: clearra-cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-wasm-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock') }}
-      - name: Synchronize and verify exact managed toolchains
-        run: >-
-          python -B scripts/management/clearra_manage.py runtime run
-          --producer management --profile build-test --timeout 5400 --
-          python -B scripts/management/clearra_manage.py toolchain sync
-      - name: Verify management contracts
+          key: clearra-management-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-node-22.23.2-pnpm-11.5.0-${{ hashFiles('Cargo.lock', 'pnpm-lock.yaml') }}
+      - name: Verify the focused management contract
         run: |
-          python -B scripts/management/clearra_manage.py runtime run --producer management --profile build-test --timeout 5400 -- python -B -m unittest discover -s scripts/management/tests -v
-          python -B scripts/management/clearra_manage.py runtime run --producer management --profile build-test --timeout 5400 -- python -B scripts/management/clearra_manage.py deps verify
-          python -B scripts/management/clearra_manage.py runtime run --producer management --profile control --timeout 300 -- python -B scripts/management/clearra_manage.py storage verify --path _local/artifacts/test/management-policy
+          cargo test --locked -p clearra-manage
+          cargo clippy --locked -p clearra-manage -- -D warnings
+          cargo build --locked --release -p clearra-manage
+          manager="$CARGO_TARGET_DIR/release/clearra-manage"
+          echo "CLEARRA_MANAGE_BIN=$GITHUB_WORKSPACE/$manager" >> "$GITHUB_ENV"
+          "$manager" --root . storage audit
+          "$manager" --root . storage verify --path _local/artifacts/test/management-policy
+          "$manager" --root . runtime audit
+          if "$manager" --root . git inventory; then
+            echo 'Rust manager unexpectedly accepted the removed Git domain' >&2
+            exit 1
+          fi
+          test ! -e scripts/management/clearra_manage.py
+          test -e scripts/management/history/python-v1/clearra_manage.py
+          if git grep -n -E 'scripts/management/(clearra_manage|clearra_runtime|clearra_process_wrapper)\.py|clearra-build-root-required' -- README.md docs package.json scripts apps ':!scripts/management/history/**'; then
+            echo 'An active source still references the retired Python manager or Cargo blocker' >&2
+            exit 1
+          fi
       - name: Install the frozen workspace without lifecycle scripts
         run: |
-          python -B scripts/management/clearra_manage.py runtime run --producer frontend --profile build-test --timeout 5400 -- python -B scripts/management/clearra_manage.py deps install --clean-links
-          python -B scripts/management/clearra_manage.py runtime run --producer management --profile control --timeout 300 -- git diff --exit-code
-      - name: Verify frozen reinstall is idempotent
+          pnpm install --frozen-lockfile --ignore-scripts
+          git diff --exit-code
+          pnpm install --frozen-lockfile --ignore-scripts
+          git diff --exit-code
+      - name: Validate package and workflow behavior
         run: |
-          python -B scripts/management/clearra_manage.py runtime run --producer frontend --profile build-test --timeout 5400 -- python -B scripts/management/clearra_manage.py deps install
-          python -B scripts/management/clearra_manage.py runtime run --producer management --profile control --timeout 300 -- git diff --exit-code
-      - name: Validate package and workflow migration
-        run: |
-          python -B scripts/management/clearra_manage.py runtime run --producer ctk3 --profile build-test --timeout 5400 -- pnpm --filter ctk3 run test
-          python -B scripts/management/clearra_manage.py runtime run --producer frontend --profile build-test --timeout 5400 -- pnpm --filter @clearra/ui run test
-          python -B scripts/management/clearra_manage.py runtime run --producer discord-container --profile build-test --timeout 5400 -- pnpm --filter @clearra/discord-bot run test:built
-          python -B scripts/management/clearra_manage.py runtime run --producer management --profile build-test --timeout 5400 -- node --test scripts/tools/managed-shell-builds.test.mjs scripts/windows/clearra-local-services-watchdog.test.mjs
-          python -B scripts/management/clearra_manage.py runtime run --producer management --profile control --timeout 300 -- pwsh -NoProfile -File scripts/test_artifact_path_policy.ps1
-          python -B scripts/management/clearra_manage.py runtime run --producer management --profile control --timeout 300 -- bash -n scripts/runtime/clearra-wsl-sanitize.sh scripts/runtime/clearra-wsl-session.sh scripts/runtime/clearra-wsl-provision.sh scripts/runtime/clearra-wsl-guest.sh
-          python -B scripts/management/clearra_manage.py runtime run --producer discord-container --profile build-test --timeout 5400 -- pnpm deploy --filter @clearra/discord-bot --prod build/discord-container/ci-deploy
-          python -B scripts/management/clearra_manage.py runtime run --producer discord-container --profile build-test --timeout 5400 -- pnpm --dir build/discord-container/ci-deploy exec node --input-type=module -e "await import('./src/clearra/command.mjs'); await import('./src/job-service/server.mjs'); await import('ctk3')"
-          python -B scripts/management/clearra_manage.py runtime run --producer ctk3 --profile build-test --timeout 5400 -- node --test scripts/tools/accepted-ctk3-dist.test.mjs
-          python -B scripts/management/clearra_manage.py runtime run --producer management --profile build-test --timeout 5400 -- node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/cloud/accepted-build-inputs.test.mjs
-          python -B scripts/management/clearra_manage.py runtime run --producer management --profile build-test --timeout 5400 -- node scripts/tools/validate-release-cli-smokes.mjs
+          pnpm --filter ctk3 run test
+          pnpm --filter @clearra/ui run test
+          pnpm --filter @clearra/discord-bot run test:built
+          node --test scripts/tools/managed-shell-builds.test.mjs scripts/windows/clearra-local-services-watchdog.test.mjs
+          node --test scripts/tools/clearra-build-policy.test.mjs
+          pwsh -NoProfile -File scripts/architecture/validate_managed_build_contract.test.ps1
+          pwsh -NoProfile -File scripts/test_artifact_path_policy.ps1
+          bash -n scripts/runtime/clearra-wsl-sanitize.sh scripts/runtime/clearra-wsl-session.sh scripts/runtime/clearra-wsl-provision.sh scripts/runtime/clearra-wsl-guest.sh
+          pnpm deploy --filter @clearra/discord-bot --prod build/discord-container/ci-deploy
+          pnpm --dir build/discord-container/ci-deploy exec node --input-type=module -e "await import('./src/clearra/command.mjs'); await import('./src/job-service/server.mjs'); await import('ctk3')"
+          node --test scripts/tools/accepted-ctk3-dist.test.mjs
+          node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/cloud/accepted-build-inputs.test.mjs
+          node scripts/tools/validate-release-cli-smokes.mjs
       - name: Verify locked Rust workspace
         run: |
-          python -B scripts/management/clearra_manage.py storage run --producer cargo -- cargo fmt --all --check
-          python -B scripts/management/clearra_manage.py storage run --producer cargo -- cargo check --workspace --locked
+          cargo fmt --all --check
+          cargo check --workspace --locked
+          git diff --exit-code

@@ -275,7 +275,7 @@ function Invoke-WslEnvironment {
     }
     $sessionOutput = Join-Path $outputRoot '_wsl-managed-session'
     New-Item -ItemType Directory -Force -Path $sessionOutput | Out-Null
-    $python = (Get-Command 'python' -ErrorAction Stop).Source
+    $manager = Get-ClearraManageExecutable -RepositoryRoot $Root
     $arguments = New-ClearraManagedWslEntryArguments `
         -RepositoryRoot $Root `
         -Entry 'pc-runtime-build-batch' `
@@ -284,7 +284,7 @@ function Invoke-WslEnvironment {
         $cargoFeatures, $linuxReportRoot, $Backend, $GpuDevice,
         $workerSelection, $inventoryMode, $profileMode
     )
-    $batch = Invoke-CapturedCommand $python $arguments
+    $batch = Invoke-CapturedCommand $manager $arguments
     $prepareTime = [regex]::Match($batch.output, '(?m)^wsl_preparation_elapsed_ns=(\d+)\s*$')
     $batchTime = [regex]::Match($batch.output, '(?m)^wsl_host_batch_elapsed_ns=(\d+)\s*$')
     if (-not $prepareTime.Success -or -not $batchTime.Success) {

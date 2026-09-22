@@ -142,7 +142,9 @@ Test, benchmark, analysis, and research run evidence belongs under
 be committed under `docs/research`. See
 [docs/management-policy.md](docs/management-policy.md) for the command and
 lifecycle contract.
-`scripts/management/clearra_manage.py` and `scripts/management/tests/` are reviewed management source.
+`tools/clearra-manage` is the active Rust manager for output-path validation and
+runtime memory/process-tree safety. The former Python implementation is retained
+under `scripts/management/history/python-v1/` as non-executable history.
 The remaining `_local/` subdirectories are reserved for Git-ignored,
 nonproduct artifacts, state, and temporary output under the management policy.
 They are not product dependencies, and accepted product archives and Docker
@@ -154,8 +156,8 @@ The web app builds the Rust command runtime before Vite. This browser artifact
 is independent of the Windows native product and is never a Windows fallback:
 
 ```text
-python -B scripts/management/clearra_manage.py toolchain sync
-python -B scripts/management/clearra_manage.py deps install
+pnpm install --frozen-lockfile --ignore-scripts
+cargo build --locked -p clearra-manage --release
 pnpm --filter @clearra/web run build
 ```
 

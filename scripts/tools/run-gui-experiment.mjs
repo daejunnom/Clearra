@@ -132,7 +132,7 @@ if (process.argv[1] && resolve(process.argv[1]) === SELF) {
     if (process.env.CLEARRA_RUNTIME_SUPERVISED !== '1' ||
         process.env.CLEARRA_RUNTIME_PROFILE !== 'local-service') {
       throw new Error(
-        'The 4195 A/B benchmark GUI must run through clearra_manage.py runtime run with the local-service profile'
+        'The 4195 A/B benchmark GUI must run through clearra-manage runtime run with the local-service profile'
       );
     }
     const options = experimentOptions(process.argv.slice(child ? 3 : 2));

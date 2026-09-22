@@ -10,7 +10,7 @@ const options = parseArgs(process.argv.slice(2));
 if (process.env.CLEARRA_RUNTIME_SUPERVISED !== '1' ||
     process.env.CLEARRA_RUNTIME_PROFILE !== 'benchmark-search') {
   throw new Error(
-    'browser benchmarks require: python -B scripts/management/clearra_manage.py runtime run ' +
+    'browser benchmarks require: clearra-manage runtime run ' +
     '--producer benchmark --profile benchmark-search --timeout <seconds> -- <command>'
   );
 }

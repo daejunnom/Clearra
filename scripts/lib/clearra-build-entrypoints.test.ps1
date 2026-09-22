@@ -116,7 +116,7 @@ try {
         -Entry 'core-c-tests' `
         -CommandArguments @('--workers', '1', '--fixture-path', $unicodeArgument))
     $expectedPrefix = @(
-        '-B', (Join-Path $entryAuthority 'scripts/management/clearra_manage.py'),
+        '--root', $entryAuthority,
         'runtime', 'wsl', 'run', '--entry', 'core-c-tests', '--'
     )
     Assert-ArtifactPathCondition `

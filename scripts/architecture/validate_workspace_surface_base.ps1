@@ -4,11 +4,11 @@
 $cargoConfig = Read-Text ".cargo/config.toml"
 $activeCargoConfig = ($cargoConfig -split "`r?`n" |
     Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
-if ($activeCargoConfig -match '(?m)^\s*target-dir\s*=') {
-    Add-ArchitectureError ".cargo/config.toml must not force a repository-local Cargo target-dir; scripts set CARGO_TARGET_DIR when needed"
+if ($activeCargoConfig -notmatch '(?m)^\s*target-dir\s*=\s*"build/cargo/default"\s*$') {
+    Add-ArchitectureError ".cargo/config.toml must keep direct Cargo output under build/cargo/default"
 }
-if ($cargoConfig -notlike "*CARGO_TARGET_DIR*") {
-    Add-ArchitectureError ".cargo/config.toml must document that Clearra runners set CARGO_TARGET_DIR explicitly"
+if ($activeCargoConfig -notmatch '(?m)^\s*incremental\s*=\s*true\s*$') {
+    Add-ArchitectureError ".cargo/config.toml must preserve incremental builds for ordinary direct Cargo use"
 }
 if ($cargoConfig -like "*MANIFESTINPUT*" -or $cargoConfig -like "*windows-as-invoker.manifest*") {
     Add-ArchitectureError ".cargo/config.toml must not hard-code Windows manifest paths; scripts/verify.ps1 injects an absolute linker flag"
@@ -67,8 +67,8 @@ $legacyDeletes = $null -ne $legacyCleanup -and (
 if ($artifactCache -match 'budget-reset|post-run-budget-reset|workspace-or-schema-reset' -or $legacyDeletes) {
     Add-ArchitectureError "generation retention must not reset the entire build root or silently delete legacy source-local outputs"
 }
-if ($activeCargoConfig -notmatch 'rustc-wrapper\s*=\s*"clearra-build-root-required"') {
-    Add-ArchitectureError "unmanaged Cargo must fail before compiling into a new output tree"
+if ($activeCargoConfig -match '(?m)^\s*(rustc-wrapper|rustc-workspace-wrapper)\s*=') {
+    Add-ArchitectureError "ordinary Cargo must not be blocked by a mandatory compiler wrapper"
 }
 $clearraRunner = Read-Text "scripts/clearra.ps1"
 foreach ($requiredRunnerCachePolicy in @(

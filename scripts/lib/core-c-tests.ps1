@@ -131,12 +131,12 @@ function Invoke-CoreCTestWsl(
     if (-not [string]::IsNullOrWhiteSpace($testName)) {
         $commandArguments += @('--test', $testName)
     }
-    $python = (Get-Command 'python' -ErrorAction Stop).Source
+    $manager = Get-ClearraManageExecutable -RepositoryRoot $repositoryRoot
     $arguments = New-ClearraManagedWslEntryArguments `
         -RepositoryRoot $repositoryRoot `
         -Entry 'core-c-tests' `
         -CommandArguments $commandArguments
-    $result = Invoke-CoreCNativeCapture $python $arguments 'managed WSL aggregate C tests'
+    $result = Invoke-CoreCNativeCapture $manager $arguments 'managed WSL aggregate C tests'
     if ($result.ExitCode -ne 0) {
         Write-CoreCFailureExcerpt $result.Output
         throw "WSL aggregate C tests failed with exit code $($result.ExitCode)"
@@ -152,7 +152,7 @@ function Invoke-CoreCTestWsl(
         -InternalTestCount $internalTestCount `
         -BuildDir 'Clearra-Build managed ext4 transaction' `
         -Output $result.Output `
-        -Command "python -B scripts/management/clearra_manage.py runtime wsl run --entry core-c-tests"
+        -Command "clearra-manage runtime wsl run --entry core-c-tests"
 }
 function Invoke-CoreCTest(
     [string]$BuildDir,
