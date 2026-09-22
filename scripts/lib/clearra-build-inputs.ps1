@@ -15,7 +15,20 @@ function Test-ClearraSecretOrGeneratedInput([System.IO.FileInfo]$File) {
     return $false
 }
 
-function Test-ClearraGeneratedInputDirectory([System.IO.DirectoryInfo]$Directory) {
+function Test-ClearraGeneratedInputDirectory(
+    [System.IO.DirectoryInfo]$Directory,
+    [string]$RepositoryRoot
+) {
+    $webPublicWasm = [System.IO.Path]::GetFullPath(
+        (Join-Path $RepositoryRoot 'apps/clearra-web/static/wasm')
+    )
+    if ([System.String]::Equals(
+            $Directory.FullName,
+            $webPublicWasm,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        return $true
+    }
     if ($Directory.Name -in @(
             '.git', '.cache', '.svelte-kit', '.vite-temp', '_local', 'dist', 'dist-server',
             'node_modules', 'build', 'models', 'checkpoints'
@@ -59,7 +72,7 @@ function Get-ClearraBuildInputFiles([string]$RepositoryRoot) {
                     if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
                         throw "Clearra compiler snapshot refuses a linked input directory: $($entry.FullName)"
                     }
-                    if (-not (Test-ClearraGeneratedInputDirectory $entry)) {
+                    if (-not (Test-ClearraGeneratedInputDirectory $entry $repository)) {
                         $pending.Push($entry)
                     }
                     continue

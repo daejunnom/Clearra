@@ -1,18 +1,21 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::piece::rotation::RotationState;
 use clearra_core_executor::{
     enumerate_pc4_ilc_geometric_predecessor_fields, enumerate_pc4_ilc_target_fields,
 };
 use clearra_pc4_tablebase::{
     clearra_board64_mask_to_hydra_field_hash_v1, hydra_field_hash_v1_to_clearra_board64_mask,
 };
-use clearra_rules::kicks::KickTableProfileId;
+use clearra_rules::kicks::{
+    KickTableProfile, KickTableProfileId, KickTransition, NoKick, SrsKicks,
+};
 use sha2::{Digest, Sha256};
 use std::{
     cmp::Reverse,
-    collections::{BTreeSet, BinaryHeap},
-    fs::{self, OpenOptions},
-    io::{BufWriter, Write},
-    path::Path,
+    collections::{BTreeSet, BinaryHeap, HashSet},
+    fs::{self, File, OpenOptions},
+    io::{BufReader, BufWriter, Read, Write},
+    path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
     thread,
 };
@@ -20,8 +23,22 @@ use std::{
 const MAGIC: &[u8; 8] = b"PC4DOM02";
 const VERSION: u32 = 2;
 const HEADER_BYTES: usize = 128;
+const PAIR_RUN_MAGIC: &[u8; 8] = b"LBRUN001";
+const PAIR_RUN_HEADER_BYTES: usize = 136;
+const PAIR_RUN_RECORD_BYTES: usize = 9;
+const VALIDATION_RUN_MAGIC: &[u8; 8] = b"LBVAL001";
+const VALIDATION_RUN_HEADER_BYTES: usize = 168;
 const FIELD_MASK: u64 = (1_u64 << 40) - 1;
 const MAX_WORKERS: usize = 64;
+const REVERSE_VALIDATION_BATCH_SIZE: usize = 131_072;
+#[cfg(not(test))]
+const PAIR_RUN_FAN_IN: usize = 32;
+#[cfg(test)]
+const PAIR_RUN_FAN_IN: usize = 2;
+#[cfg(not(test))]
+const REVERSE_TARGET_CHUNK_SIZE: usize = 512;
+#[cfg(test)]
+const REVERSE_TARGET_CHUNK_SIZE: usize = 2;
 
 #[derive(Clone, Copy)]
 pub(crate) struct DomainBinding {
@@ -43,6 +60,57 @@ impl DomainBinding {
 
     pub(crate) const fn raw_identity(self) -> [u8; 32] {
         self.identity
+    }
+
+    /// Binds an independently generated legal-board domain to the exact
+    /// Clearra movement table rather than to an upstream dataset generation.
+    /// Any ordered kick-offset change produces a different identity and makes
+    /// existing layer files fail closed instead of being silently reused.
+    pub(crate) fn legal_board(kick_profile: KickTableProfileId) -> Result<Self, String> {
+        let profile: KickTableProfile = match kick_profile {
+            KickTableProfileId::Srs90 => SrsKicks::profile(),
+            KickTableProfileId::SrsPlus => SrsKicks::srs_plus_profile(),
+            KickTableProfileId::SrsX => SrsKicks::srs_x_profile(),
+            KickTableProfileId::Jstris180 => SrsKicks::jstris_180_profile(),
+            KickTableProfileId::NoKick => NoKick::profile(),
+            KickTableProfileId::Asc
+            | KickTableProfileId::Ars
+            | KickTableProfileId::Imported
+            | KickTableProfileId::Custom => {
+                return Err(
+                    "legal-board generation requires a connected built-in profile".to_owned(),
+                )
+            }
+        };
+        let mut digest = Sha256::new();
+        digest.update(b"clearra.pc4.legal-board.reverse-domain.v1\0width=10\0height=4\0");
+        digest.update(kick_profile.as_str().as_bytes());
+        digest.update([0]);
+        for piece in PieceKind::STANDARD_TETROMINOES {
+            for from in RotationState::ALL {
+                for to in RotationState::ALL {
+                    if from == to {
+                        continue;
+                    }
+                    digest.update([
+                        piece.as_ascii() as u8,
+                        from.quarter_turns(),
+                        to.quarter_turns(),
+                    ]);
+                    if let Some(sequence) =
+                        profile.sequence_for(KickTransition::new(piece, from, to))
+                    {
+                        digest.update((sequence.len() as u32).to_le_bytes());
+                        for offset in sequence.offsets() {
+                            digest.update([offset.dx() as u8, offset.dy() as u8]);
+                        }
+                    } else {
+                        digest.update(u32::MAX.to_le_bytes());
+                    }
+                }
+            }
+        }
+        Ok(Self::new(digest.finalize().into(), kick_profile))
     }
 }
 
@@ -214,6 +282,9 @@ pub(crate) fn step(
         {
             return Err("existing domain step is not bound to its current inputs".to_owned());
         }
+        if direction == DomainDirection::Reverse {
+            cleanup_reverse_spill(output_path)?;
+        }
         return Ok(StepReport {
             disposition: "already-complete",
             input_layer: input.layer,
@@ -231,9 +302,14 @@ pub(crate) fn step(
         .min(available)
         .min(input.fields.len().max(1));
     let (fields, candidate_pair_count) = match direction {
-        DomainDirection::Reverse => {
-            generate_reverse_layer(binding, output_layer, &input.fields, workers)?
-        }
+        DomainDirection::Reverse => generate_reverse_layer(
+            binding,
+            output_layer,
+            &input.fields,
+            input.file_digest,
+            output_path,
+            workers,
+        )?,
         DomainDirection::Forward => (
             generate_forward_layer(
                 binding,
@@ -263,6 +339,9 @@ pub(crate) fn step(
         input.file_digest,
         filter_digest,
     )?;
+    if direction == DomainDirection::Reverse {
+        cleanup_reverse_spill(output_path)?;
+    }
     Ok(StepReport {
         disposition: "created",
         input_layer: input.layer,
@@ -328,93 +407,909 @@ fn generate_reverse_layer(
     binding: DomainBinding,
     output_layer: u8,
     input: &[u64],
+    input_digest: [u8; 32],
+    output_path: &Path,
     workers: usize,
 ) -> Result<(Vec<u64>, usize), String> {
-    let candidate_cursor = AtomicUsize::new(0);
-    let candidate_partials = thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for _ in 0..workers {
-            let cursor = &candidate_cursor;
-            handles.push(scope.spawn(move || {
-                let mut candidates = Vec::new();
-                loop {
-                    let index = cursor.fetch_add(1, Ordering::Relaxed);
-                    let Some(&target_hash) = input.get(index) else {
-                        break;
-                    };
-                    let target = hydra_field_hash_v1_to_clearra_board64_mask(target_hash)
-                        .map_err(|error| error.reason().to_owned())?;
-                    for piece in PieceKind::STANDARD_TETROMINOES {
-                        for source in enumerate_pc4_ilc_geometric_predecessor_fields(
-                            target,
-                            piece,
-                            binding.kick_profile,
-                        )
-                        .map_err(|error| error.reason().to_owned())?
-                        {
-                            if source.count_ones() != u32::from(output_layer) * 4 {
-                                return Err(
-                                    "geometric predecessor belongs to the wrong area layer"
-                                        .to_owned(),
-                                );
-                            }
-                            let source_hash = clearra_board64_mask_to_hydra_field_hash_v1(source)
-                                .map_err(|error| error.reason().to_owned())?;
-                            candidates.push((source_hash, piece));
-                        }
-                    }
-                }
-                candidates.sort_unstable();
-                candidates.dedup();
-                Ok(candidates)
-            }));
-        }
-        join_workers(handles)
-    })?;
-    let candidate_pairs = merge_sorted(candidate_partials);
-    let candidate_pair_count = candidate_pairs.len();
+    generate_reverse_layer_spilled(
+        binding,
+        output_layer,
+        input,
+        input_digest,
+        output_path,
+        workers,
+        REVERSE_TARGET_CHUNK_SIZE,
+    )
+}
 
-    let validation_workers = workers.min(candidate_pair_count.max(1));
-    let validation_cursor = AtomicUsize::new(0);
-    let validated_partials = thread::scope(|scope| {
+struct PairRunReader {
+    reader: BufReader<File>,
+    remaining: usize,
+    expected_payload_digest: [u8; 32],
+    payload_digest: Sha256,
+    verified: bool,
+}
+
+impl PairRunReader {
+    fn open(
+        path: &Path,
+        binding: DomainBinding,
+        input_digest: [u8; 32],
+        output_layer: u8,
+        expected_start: usize,
+        expected_end: usize,
+    ) -> Result<Self, String> {
+        let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("legal-board pair run symlink or non-file rejected".to_owned());
+        }
+        let file = File::open(path).map_err(io_error)?;
+        // Thousands of checkpoint runs may participate in a large layer.
+        // Keep the per-run buffer modest so resumability does not turn into a
+        // new aggregate memory spike during the k-way merge.
+        let mut reader = BufReader::with_capacity(8 * 1024, file);
+        let mut header = [0_u8; PAIR_RUN_HEADER_BYTES];
+        reader.read_exact(&mut header).map_err(io_error)?;
+        if header[..8] != *PAIR_RUN_MAGIC
+            || read_u32(&header[8..12])? != VERSION
+            || read_u32(&header[12..16])? != u32::from(output_layer)
+            || read_u64(&header[16..24])?
+                != u64::try_from(expected_start).map_err(|_| "pair run start overflow")?
+            || read_u64(&header[24..32])?
+                != u64::try_from(expected_end).map_err(|_| "pair run end overflow")?
+            || header[40..72] != binding.identity
+            || header[72..104] != input_digest
+        {
+            return Err("legal-board pair run binding mismatch".to_owned());
+        }
+        let count =
+            usize::try_from(read_u64(&header[32..40])?).map_err(|_| "pair run count overflow")?;
+        let expected_len = PAIR_RUN_HEADER_BYTES
+            .checked_add(
+                count
+                    .checked_mul(PAIR_RUN_RECORD_BYTES)
+                    .ok_or("pair run length overflow")?,
+            )
+            .ok_or("pair run length overflow")?;
+        if metadata.len() != u64::try_from(expected_len).map_err(|_| "pair run length overflow")? {
+            return Err("legal-board pair run length mismatch".to_owned());
+        }
+        Ok(Self {
+            reader,
+            remaining: count,
+            expected_payload_digest: header[104..136]
+                .try_into()
+                .map_err(|_| "pair run digest width mismatch")?,
+            payload_digest: Sha256::new(),
+            verified: false,
+        })
+    }
+
+    fn next_pair(&mut self) -> Result<Option<(u64, u8)>, String> {
+        if self.remaining == 0 {
+            if !self.verified {
+                let observed: [u8; 32] = self.payload_digest.clone().finalize().into();
+                if observed != self.expected_payload_digest {
+                    return Err("legal-board pair run digest mismatch".to_owned());
+                }
+                self.verified = true;
+            }
+            return Ok(None);
+        }
+        let mut encoded = [0_u8; PAIR_RUN_RECORD_BYTES];
+        self.reader.read_exact(&mut encoded).map_err(io_error)?;
+        self.payload_digest.update(encoded);
+        self.remaining -= 1;
+        let source_hash = read_u64(&encoded[..8])?;
+        let piece = PieceKind::from_ascii(char::from(encoded[8]))
+            .map_err(|_| "legal-board pair run piece invalid".to_owned())?;
+        let piece_index = PieceKind::STANDARD_TETROMINOES
+            .iter()
+            .position(|candidate| *candidate == piece)
+            .ok_or("legal-board pair run piece is not standard")?;
+        Ok(Some((
+            source_hash,
+            u8::try_from(piece_index).map_err(|_| "piece index overflow")?,
+        )))
+    }
+}
+
+fn reverse_spill_root(output_path: &Path) -> Result<PathBuf, String> {
+    let parent = output_path
+        .parent()
+        .ok_or("legal-board output has no parent")?;
+    let output_name = output_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("legal-board output name must be UTF-8")?;
+    Ok(parent.join(format!(".{output_name}.legal-board-spill-v1")))
+}
+
+fn prepare_reverse_spill(output_path: &Path) -> Result<PathBuf, String> {
+    let root = reverse_spill_root(output_path)?;
+    if root.exists() {
+        let metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("legal-board spill root must be a real directory".to_owned());
+        }
+    } else {
+        fs::create_dir(&root).map_err(io_error)?;
+    }
+    Ok(root)
+}
+
+fn cleanup_reverse_spill(output_path: &Path) -> Result<(), String> {
+    let root = reverse_spill_root(output_path)?;
+    if !root.exists() {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("legal-board spill cleanup rejected non-directory".to_owned());
+    }
+    fs::remove_dir_all(root).map_err(io_error)
+}
+
+fn pair_run_path(root: &Path, start: usize, end: usize) -> PathBuf {
+    root.join(format!("pairs-{start:010}-{end:010}.bin"))
+}
+
+fn write_pair_run(
+    path: &Path,
+    binding: DomainBinding,
+    input_digest: [u8; 32],
+    output_layer: u8,
+    start: usize,
+    end: usize,
+    pairs: &[(u64, PieceKind)],
+) -> Result<(), String> {
+    if path.exists() {
+        return Err("refusing to overwrite a legal-board pair run".to_owned());
+    }
+    if pairs.windows(2).any(|window| window[0] >= window[1]) {
+        return Err("legal-board pair run is not sorted and unique".to_owned());
+    }
+    let mut payload_digest = Sha256::new();
+    for &(source_hash, piece) in pairs {
+        payload_digest.update(source_hash.to_le_bytes());
+        payload_digest.update([piece.as_ascii() as u8]);
+    }
+    let payload_digest: [u8; 32] = payload_digest.finalize().into();
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("legal-board pair run name must be UTF-8")?;
+    let pending = path.with_file_name(format!(".{name}.pending-{}", std::process::id()));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pending)
+        .map_err(io_error)?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+    let result = (|| {
+        writer.write_all(PAIR_RUN_MAGIC).map_err(io_error)?;
+        writer.write_all(&VERSION.to_le_bytes()).map_err(io_error)?;
+        writer
+            .write_all(&u32::from(output_layer).to_le_bytes())
+            .map_err(io_error)?;
+        writer
+            .write_all(
+                &u64::try_from(start)
+                    .map_err(|_| "pair run start overflow")?
+                    .to_le_bytes(),
+            )
+            .map_err(io_error)?;
+        writer
+            .write_all(
+                &u64::try_from(end)
+                    .map_err(|_| "pair run end overflow")?
+                    .to_le_bytes(),
+            )
+            .map_err(io_error)?;
+        writer
+            .write_all(
+                &u64::try_from(pairs.len())
+                    .map_err(|_| "pair run count overflow")?
+                    .to_le_bytes(),
+            )
+            .map_err(io_error)?;
+        writer.write_all(&binding.identity).map_err(io_error)?;
+        writer.write_all(&input_digest).map_err(io_error)?;
+        writer.write_all(&payload_digest).map_err(io_error)?;
+        for &(source_hash, piece) in pairs {
+            writer
+                .write_all(&source_hash.to_le_bytes())
+                .map_err(io_error)?;
+            writer
+                .write_all(&[piece.as_ascii() as u8])
+                .map_err(io_error)?;
+        }
+        writer.flush().map_err(io_error)?;
+        writer.get_ref().sync_all().map_err(io_error)
+    })();
+    if let Err(error) = result {
+        drop(writer);
+        let _ = fs::remove_file(&pending);
+        return Err(error);
+    }
+    drop(writer);
+    fs::rename(&pending, path).map_err(io_error)
+}
+
+fn piece_from_index(index: u8) -> Result<PieceKind, String> {
+    PieceKind::STANDARD_TETROMINOES
+        .get(usize::from(index))
+        .copied()
+        .ok_or("legal-board pair run piece index invalid".to_owned())
+}
+
+fn merge_pair_run_group(
+    runs: &[(PathBuf, usize, usize)],
+    binding: DomainBinding,
+    input_digest: [u8; 32],
+    output_layer: u8,
+) -> Result<Vec<(u64, PieceKind)>, String> {
+    let mut readers = runs
+        .iter()
+        .map(|(path, start, end)| {
+            PairRunReader::open(path, binding, input_digest, output_layer, *start, *end)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut heap = BinaryHeap::new();
+    for (run_index, reader) in readers.iter_mut().enumerate() {
+        if let Some(pair) = reader.next_pair()? {
+            heap.push(Reverse((pair, run_index)));
+        }
+    }
+    let mut merged = Vec::new();
+    let mut last_pair = None;
+    while let Some(Reverse((pair, run_index))) = heap.pop() {
+        if let Some(next) = readers[run_index].next_pair()? {
+            heap.push(Reverse((next, run_index)));
+        }
+        if last_pair == Some(pair) {
+            continue;
+        }
+        last_pair = Some(pair);
+        merged.push((pair.0, piece_from_index(pair.1)?));
+    }
+    Ok(merged)
+}
+
+fn reduce_pair_runs(
+    root: &Path,
+    mut runs: Vec<(PathBuf, usize, usize)>,
+    binding: DomainBinding,
+    input_digest: [u8; 32],
+    output_layer: u8,
+) -> Result<Vec<(PathBuf, usize, usize)>, String> {
+    let mut pass = 0_usize;
+    while runs.len() > PAIR_RUN_FAN_IN {
+        let mut reduced = Vec::with_capacity(runs.len().div_ceil(PAIR_RUN_FAN_IN));
+        for group in runs.chunks(PAIR_RUN_FAN_IN) {
+            let start = group
+                .first()
+                .map(|(_, start, _)| *start)
+                .ok_or("legal-board merge group empty")?;
+            let end = group
+                .last()
+                .map(|(_, _, end)| *end)
+                .ok_or("legal-board merge group empty")?;
+            let path = root.join(format!("merged-{pass:02}-{start:010}-{end:010}.bin"));
+            if path.exists() {
+                PairRunReader::open(&path, binding, input_digest, output_layer, start, end)?;
+                eprintln!(
+                    "legal_board_pair_merge=reused layer={} pass={} start={} end={}",
+                    output_layer, pass, start, end
+                );
+            } else {
+                let merged = merge_pair_run_group(group, binding, input_digest, output_layer)?;
+                write_pair_run(
+                    &path,
+                    binding,
+                    input_digest,
+                    output_layer,
+                    start,
+                    end,
+                    &merged,
+                )?;
+                eprintln!(
+                    "legal_board_pair_merge=created layer={} pass={} start={} end={} pairs={}",
+                    output_layer,
+                    pass,
+                    start,
+                    end,
+                    merged.len()
+                );
+            }
+            reduced.push((path, start, end));
+        }
+        runs = reduced;
+        pass += 1;
+    }
+    Ok(runs)
+}
+
+fn validation_run_path(root: &Path, start: usize, end: usize) -> PathBuf {
+    root.join(format!("validated-{start:012}-{end:012}.bin"))
+}
+
+fn validation_candidate_digest(candidates: &[(u64, u8)]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for &(source_hash, piece_bits) in candidates {
+        digest.update(source_hash.to_le_bytes());
+        digest.update([piece_bits]);
+    }
+    digest.finalize().into()
+}
+
+fn write_validation_run(
+    path: &Path,
+    binding: DomainBinding,
+    input_digest: [u8; 32],
+    output_layer: u8,
+    start: usize,
+    end: usize,
+    candidate_digest: [u8; 32],
+    fields: &[u64],
+) -> Result<(), String> {
+    if path.exists() {
+        return Err("refusing to overwrite a legal-board validation run".to_owned());
+    }
+    validate_fields(output_layer, fields)?;
+    let mut payload_digest = Sha256::new();
+    for &field in fields {
+        payload_digest.update(field.to_le_bytes());
+    }
+    let payload_digest: [u8; 32] = payload_digest.finalize().into();
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("legal-board validation run name must be UTF-8")?;
+    let pending = path.with_file_name(format!(".{name}.pending-{}", std::process::id()));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pending)
+        .map_err(io_error)?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+    let result = (|| {
+        writer.write_all(VALIDATION_RUN_MAGIC).map_err(io_error)?;
+        writer.write_all(&VERSION.to_le_bytes()).map_err(io_error)?;
+        writer
+            .write_all(&u32::from(output_layer).to_le_bytes())
+            .map_err(io_error)?;
+        writer
+            .write_all(
+                &u64::try_from(start)
+                    .map_err(|_| "validation run start overflow")?
+                    .to_le_bytes(),
+            )
+            .map_err(io_error)?;
+        writer
+            .write_all(
+                &u64::try_from(end)
+                    .map_err(|_| "validation run end overflow")?
+                    .to_le_bytes(),
+            )
+            .map_err(io_error)?;
+        writer
+            .write_all(
+                &u64::try_from(fields.len())
+                    .map_err(|_| "validation run count overflow")?
+                    .to_le_bytes(),
+            )
+            .map_err(io_error)?;
+        writer.write_all(&binding.identity).map_err(io_error)?;
+        writer.write_all(&input_digest).map_err(io_error)?;
+        writer.write_all(&candidate_digest).map_err(io_error)?;
+        writer.write_all(&payload_digest).map_err(io_error)?;
+        for &field in fields {
+            writer.write_all(&field.to_le_bytes()).map_err(io_error)?;
+        }
+        writer.flush().map_err(io_error)?;
+        writer.get_ref().sync_all().map_err(io_error)
+    })();
+    if let Err(error) = result {
+        drop(writer);
+        let _ = fs::remove_file(&pending);
+        return Err(error);
+    }
+    drop(writer);
+    fs::rename(&pending, path).map_err(io_error)
+}
+
+fn read_validation_run(
+    path: &Path,
+    binding: DomainBinding,
+    input_digest: [u8; 32],
+    output_layer: u8,
+    start: usize,
+    end: usize,
+    candidate_digest: [u8; 32],
+) -> Result<Vec<u64>, String> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("legal-board validation run symlink or non-file rejected".to_owned());
+    }
+    let mut reader = BufReader::with_capacity(64 * 1024, File::open(path).map_err(io_error)?);
+    let mut header = [0_u8; VALIDATION_RUN_HEADER_BYTES];
+    reader.read_exact(&mut header).map_err(io_error)?;
+    if header[..8] != *VALIDATION_RUN_MAGIC
+        || read_u32(&header[8..12])? != VERSION
+        || read_u32(&header[12..16])? != u32::from(output_layer)
+        || read_u64(&header[16..24])?
+            != u64::try_from(start).map_err(|_| "validation run start overflow")?
+        || read_u64(&header[24..32])?
+            != u64::try_from(end).map_err(|_| "validation run end overflow")?
+        || header[40..72] != binding.identity
+        || header[72..104] != input_digest
+        || header[104..136] != candidate_digest
+    {
+        return Err("legal-board validation run binding mismatch".to_owned());
+    }
+    let count =
+        usize::try_from(read_u64(&header[32..40])?).map_err(|_| "validation run count overflow")?;
+    let expected_len = VALIDATION_RUN_HEADER_BYTES
+        .checked_add(
+            count
+                .checked_mul(8)
+                .ok_or("validation run length overflow")?,
+        )
+        .ok_or("validation run length overflow")?;
+    if metadata.len()
+        != u64::try_from(expected_len).map_err(|_| "validation run length overflow")?
+    {
+        return Err("legal-board validation run length mismatch".to_owned());
+    }
+    let mut payload_digest = Sha256::new();
+    let mut fields = Vec::new();
+    fields
+        .try_reserve_exact(count)
+        .map_err(|_| "validation run allocation failed")?;
+    for _ in 0..count {
+        let mut encoded = [0_u8; 8];
+        reader.read_exact(&mut encoded).map_err(io_error)?;
+        payload_digest.update(encoded);
+        fields.push(u64::from_le_bytes(encoded));
+    }
+    let observed_digest: [u8; 32] = payload_digest.finalize().into();
+    if observed_digest != header[136..168] {
+        return Err("legal-board validation run digest mismatch".to_owned());
+    }
+    validate_fields(output_layer, &fields)?;
+    Ok(fields)
+}
+
+fn validate_reverse_checkpoint(
+    root: &Path,
+    binding: DomainBinding,
+    input: &[u64],
+    input_digest: [u8; 32],
+    output_layer: u8,
+    candidates: &[(u64, u8)],
+    workers: usize,
+    start: usize,
+    end: usize,
+) -> Result<Vec<u64>, String> {
+    let candidate_digest = validation_candidate_digest(candidates);
+    let path = validation_run_path(root, start, end);
+    if path.exists() {
+        let fields = read_validation_run(
+            &path,
+            binding,
+            input_digest,
+            output_layer,
+            start,
+            end,
+            candidate_digest,
+        )?;
+        eprintln!(
+            "legal_board_validation_run=reused layer={} start={} end={} fields={}",
+            output_layer,
+            start,
+            end,
+            fields.len()
+        );
+        return Ok(fields);
+    }
+    let fields = validate_reverse_sources(binding, input, candidates, workers)?;
+    write_validation_run(
+        &path,
+        binding,
+        input_digest,
+        output_layer,
+        start,
+        end,
+        candidate_digest,
+        &fields,
+    )?;
+    eprintln!(
+        "legal_board_validation_run=created layer={} start={} end={} fields={}",
+        output_layer,
+        start,
+        end,
+        fields.len()
+    );
+    Ok(fields)
+}
+
+fn validate_reverse_sources(
+    binding: DomainBinding,
+    input: &[u64],
+    candidates: &[(u64, u8)],
+    workers: usize,
+) -> Result<Vec<u64>, String> {
+    let cursor = AtomicUsize::new(0);
+    let partials = thread::scope(|scope| {
         let mut handles = Vec::new();
-        for _ in 0..validation_workers {
-            let cursor = &validation_cursor;
-            let candidate_pairs = &candidate_pairs;
+        for _ in 0..workers.min(candidates.len().max(1)) {
+            let cursor = &cursor;
             handles.push(scope.spawn(move || {
                 let mut validated = Vec::new();
                 loop {
-                    let begin = cursor.fetch_add(4, Ordering::Relaxed);
-                    if begin >= candidate_pairs.len() {
+                    let begin = cursor.fetch_add(16, Ordering::Relaxed);
+                    if begin >= candidates.len() {
                         break;
                     }
-                    for &(source_hash, piece) in
-                        &candidate_pairs[begin..candidate_pairs.len().min(begin + 4)]
+                    for (offset, &(source_hash, piece_bits)) in candidates
+                        [begin..candidates.len().min(begin + 16)]
+                        .iter()
+                        .enumerate()
                     {
                         let source = hydra_field_hash_v1_to_clearra_board64_mask(source_hash)
                             .map_err(|error| error.reason().to_owned())?;
-                        let reaches_domain =
-                            enumerate_pc4_ilc_target_fields(source, piece, binding.kick_profile)
-                                .map_err(|error| error.reason().to_owned())?
-                                .into_iter()
-                                .map(clearra_board64_mask_to_hydra_field_hash_v1)
-                                .collect::<Result<Vec<_>, _>>()
-                                .map_err(|error| error.reason().to_owned())?
-                                .into_iter()
-                                .any(|target_hash| input.binary_search(&target_hash).is_ok());
+                        let mut reaches_domain = false;
+                        for (piece_index, piece) in
+                            PieceKind::STANDARD_TETROMINOES.iter().copied().enumerate()
+                        {
+                            if piece_bits & (1_u8 << piece_index) == 0 {
+                                continue;
+                            }
+                            reaches_domain = enumerate_pc4_ilc_target_fields(
+                                source,
+                                piece,
+                                binding.kick_profile,
+                            )
+                            .map_err(|error| error.reason().to_owned())?
+                            .into_iter()
+                            .map(clearra_board64_mask_to_hydra_field_hash_v1)
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|error| error.reason().to_owned())?
+                            .into_iter()
+                            .any(|target_hash| input.binary_search(&target_hash).is_ok());
+                            if reaches_domain {
+                                break;
+                            }
+                        }
                         if reaches_domain {
-                            validated.push(source_hash);
+                            validated.push((begin + offset, source_hash));
                         }
                     }
                 }
-                validated.sort_unstable();
-                validated.dedup();
                 Ok(validated)
             }));
         }
         join_workers(handles)
     })?;
-    Ok((merge_sorted(validated_partials), candidate_pair_count))
+    let mut indexed = partials.into_iter().flatten().collect::<Vec<_>>();
+    indexed.sort_unstable_by_key(|(index, _)| *index);
+    Ok(indexed.into_iter().map(|(_, field)| field).collect())
+}
+
+fn generate_reverse_layer_spilled(
+    binding: DomainBinding,
+    output_layer: u8,
+    input: &[u64],
+    input_digest: [u8; 32],
+    output_path: &Path,
+    workers: usize,
+    target_chunk_size: usize,
+) -> Result<(Vec<u64>, usize), String> {
+    if target_chunk_size == 0 {
+        return Err("reverse target chunk size must be positive".to_owned());
+    }
+    let spill_root = prepare_reverse_spill(output_path)?;
+    let mut run_paths = Vec::new();
+    let mut created_run_count = 0_usize;
+    let mut reused_run_count = 0_usize;
+    for (chunk_index, input_chunk) in input.chunks(target_chunk_size).enumerate() {
+        let start = chunk_index
+            .checked_mul(target_chunk_size)
+            .ok_or("pair run start overflow")?;
+        let end = start
+            .checked_add(input_chunk.len())
+            .ok_or("pair run end overflow")?;
+        let path = pair_run_path(&spill_root, start, end);
+        if path.exists() {
+            PairRunReader::open(&path, binding, input_digest, output_layer, start, end)?;
+            reused_run_count += 1;
+            run_paths.push((path, start, end));
+            continue;
+        }
+        let candidate_cursor = AtomicUsize::new(0);
+        let candidate_partials = thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..workers.min(input_chunk.len().max(1)) {
+                let cursor = &candidate_cursor;
+                handles.push(scope.spawn(move || {
+                    let mut candidates = Vec::new();
+                    loop {
+                        let target_index = cursor.fetch_add(1, Ordering::Relaxed);
+                        let Some(&target_hash) = input_chunk.get(target_index) else {
+                            break;
+                        };
+                        let cells = hydra_field_hash_v1_to_clearra_board64_mask(target_hash)
+                            .map_err(|error| error.reason().to_owned())?;
+                        for piece in PieceKind::STANDARD_TETROMINOES {
+                            for source in enumerate_pc4_ilc_geometric_predecessor_fields(
+                                cells,
+                                piece,
+                                binding.kick_profile,
+                            )
+                            .map_err(|error| error.reason().to_owned())?
+                            {
+                                if source.count_ones() != u32::from(output_layer) * 4 {
+                                    return Err(
+                                        "geometric predecessor belongs to the wrong area layer"
+                                            .to_owned(),
+                                    );
+                                }
+                                let source_hash =
+                                    clearra_board64_mask_to_hydra_field_hash_v1(source)
+                                        .map_err(|error| error.reason().to_owned())?;
+                                candidates.push((source_hash, piece));
+                            }
+                        }
+                    }
+                    candidates.sort_unstable();
+                    candidates.dedup();
+                    Ok(candidates)
+                }));
+            }
+            join_workers(handles)
+        })?;
+        let candidate_pairs = merge_sorted(candidate_partials);
+        write_pair_run(
+            &path,
+            binding,
+            input_digest,
+            output_layer,
+            start,
+            end,
+            &candidate_pairs,
+        )?;
+        created_run_count += 1;
+        if created_run_count % 128 == 0 || end == input.len() {
+            eprintln!(
+                "legal_board_pair_run=progress layer={} created={} reused={} end={} pairs_in_latest={}",
+                output_layer,
+                created_run_count,
+                reused_run_count,
+                end,
+                candidate_pairs.len()
+            );
+        }
+        run_paths.push((path, start, end));
+    }
+    eprintln!(
+        "legal_board_pair_run=complete layer={} created={} reused={} total={}",
+        output_layer,
+        created_run_count,
+        reused_run_count,
+        run_paths.len()
+    );
+
+    let run_paths = reduce_pair_runs(&spill_root, run_paths, binding, input_digest, output_layer)?;
+    let mut readers = run_paths
+        .iter()
+        .map(|(path, start, end)| {
+            PairRunReader::open(path, binding, input_digest, output_layer, *start, *end)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut heap = BinaryHeap::new();
+    for (run_index, reader) in readers.iter_mut().enumerate() {
+        if let Some(pair) = reader.next_pair()? {
+            heap.push(Reverse((pair, run_index)));
+        }
+    }
+    let mut fields = Vec::new();
+    let mut batch = Vec::with_capacity(REVERSE_VALIDATION_BATCH_SIZE);
+    let mut current_source = None;
+    let mut current_piece_bits = 0_u8;
+    let mut last_pair = None;
+    let mut candidate_pair_count = 0_usize;
+    let mut source_count = 0_usize;
+    while let Some(Reverse((pair, run_index))) = heap.pop() {
+        if let Some(next) = readers[run_index].next_pair()? {
+            heap.push(Reverse((next, run_index)));
+        }
+        if last_pair == Some(pair) {
+            continue;
+        }
+        last_pair = Some(pair);
+        candidate_pair_count = candidate_pair_count
+            .checked_add(1)
+            .ok_or("candidate pair count overflow")?;
+        if current_source.is_some_and(|source| source != pair.0) {
+            batch.push((current_source.expect("source exists"), current_piece_bits));
+            source_count += 1;
+            if batch.len() == REVERSE_VALIDATION_BATCH_SIZE {
+                let start = source_count - batch.len();
+                fields.extend(validate_reverse_checkpoint(
+                    &spill_root,
+                    binding,
+                    input,
+                    input_digest,
+                    output_layer,
+                    &batch,
+                    workers,
+                    start,
+                    source_count,
+                )?);
+                batch.clear();
+                eprintln!(
+                    "legal_board_validation=progress layer={} sources={} fields={}",
+                    output_layer,
+                    source_count,
+                    fields.len()
+                );
+            }
+            current_piece_bits = 0;
+        }
+        current_source = Some(pair.0);
+        current_piece_bits |= 1_u8 << pair.1;
+    }
+    if let Some(source) = current_source {
+        batch.push((source, current_piece_bits));
+        source_count += 1;
+    }
+    if !batch.is_empty() {
+        let start = source_count - batch.len();
+        fields.extend(validate_reverse_checkpoint(
+            &spill_root,
+            binding,
+            input,
+            input_digest,
+            output_layer,
+            &batch,
+            workers,
+            start,
+            source_count,
+        )?);
+    }
+    eprintln!(
+        "legal_board_validation=complete layer={} pairs={} sources={} fields={}",
+        output_layer,
+        candidate_pair_count,
+        source_count,
+        fields.len()
+    );
+    Ok((fields, candidate_pair_count))
+}
+
+fn generate_reverse_layer_bounded(
+    binding: DomainBinding,
+    output_layer: u8,
+    input: &[u64],
+    workers: usize,
+    target_chunk_size: usize,
+) -> Result<(Vec<u64>, usize), String> {
+    if target_chunk_size == 0 {
+        return Err("reverse target chunk size must be positive".to_owned());
+    }
+    // A complete 4L layer can expand to hundreds of millions of geometric
+    // `(source, piece)` pairs. Keeping every pair, every worker partial, and
+    // the merged copy live at once makes the generator depend on the host's
+    // free working set even though the published domain is much smaller.
+    //
+    // Bound that transient set by target chunks. Each chunk is still claimed
+    // dynamically by all requested workers, validated against the complete
+    // input layer, and deduplicated exactly. Only the final source-field set
+    // crosses chunk boundaries, so chunking changes neither membership nor
+    // the deterministic sorted file identity.
+    let mut validated_fields = HashSet::new();
+    let mut candidate_pair_count = 0_usize;
+
+    for input_chunk in input.chunks(target_chunk_size) {
+        let candidate_cursor = AtomicUsize::new(0);
+        let candidate_partials = thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..workers {
+                let cursor = &candidate_cursor;
+                handles.push(scope.spawn(move || {
+                    let mut candidates = Vec::new();
+                    loop {
+                        let index = cursor.fetch_add(1, Ordering::Relaxed);
+                        let Some(&target_hash) = input_chunk.get(index) else {
+                            break;
+                        };
+                        let target = hydra_field_hash_v1_to_clearra_board64_mask(target_hash)
+                            .map_err(|error| error.reason().to_owned())?;
+                        for piece in PieceKind::STANDARD_TETROMINOES {
+                            for source in enumerate_pc4_ilc_geometric_predecessor_fields(
+                                target,
+                                piece,
+                                binding.kick_profile,
+                            )
+                            .map_err(|error| error.reason().to_owned())?
+                            {
+                                if source.count_ones() != u32::from(output_layer) * 4 {
+                                    return Err(
+                                        "geometric predecessor belongs to the wrong area layer"
+                                            .to_owned(),
+                                    );
+                                }
+                                let source_hash =
+                                    clearra_board64_mask_to_hydra_field_hash_v1(source)
+                                        .map_err(|error| error.reason().to_owned())?;
+                                candidates.push((source_hash, piece));
+                            }
+                        }
+                    }
+                    candidates.sort_unstable();
+                    candidates.dedup();
+                    Ok(candidates)
+                }));
+            }
+            join_workers(handles)
+        })?;
+        let candidate_pairs = merge_sorted(candidate_partials);
+        candidate_pair_count = candidate_pair_count
+            .checked_add(candidate_pairs.len())
+            .ok_or("candidate pair count overflow")?;
+
+        let validation_workers = workers.min(candidate_pairs.len().max(1));
+        let validation_cursor = AtomicUsize::new(0);
+        let validated_partials = thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..validation_workers {
+                let cursor = &validation_cursor;
+                let candidate_pairs = &candidate_pairs;
+                handles.push(scope.spawn(move || {
+                    let mut validated = Vec::new();
+                    loop {
+                        let begin = cursor.fetch_add(4, Ordering::Relaxed);
+                        if begin >= candidate_pairs.len() {
+                            break;
+                        }
+                        for &(source_hash, piece) in
+                            &candidate_pairs[begin..candidate_pairs.len().min(begin + 4)]
+                        {
+                            let source = hydra_field_hash_v1_to_clearra_board64_mask(source_hash)
+                                .map_err(|error| error.reason().to_owned())?;
+                            let reaches_domain = enumerate_pc4_ilc_target_fields(
+                                source,
+                                piece,
+                                binding.kick_profile,
+                            )
+                            .map_err(|error| error.reason().to_owned())?
+                            .into_iter()
+                            .map(clearra_board64_mask_to_hydra_field_hash_v1)
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|error| error.reason().to_owned())?
+                            .into_iter()
+                            .any(|target_hash| input.binary_search(&target_hash).is_ok());
+                            if reaches_domain {
+                                validated.push(source_hash);
+                            }
+                        }
+                    }
+                    validated.sort_unstable();
+                    validated.dedup();
+                    Ok(validated)
+                }));
+            }
+            join_workers(handles)
+        })?;
+        for field in merge_sorted(validated_partials) {
+            validated_fields.insert(field);
+        }
+    }
+
+    let mut fields = validated_fields.into_iter().collect::<Vec<_>>();
+    fields.sort_unstable();
+    Ok((fields, candidate_pair_count))
 }
 
 fn join_workers<T>(
@@ -619,6 +1514,17 @@ mod tests {
         DomainBinding::new([7; 32], KickTableProfileId::Jstris180)
     }
 
+    #[test]
+    fn legal_board_binding_is_stable_and_profile_specific() {
+        let srs_plus_a = DomainBinding::legal_board(KickTableProfileId::SrsPlus).unwrap();
+        let srs_plus_b = DomainBinding::legal_board(KickTableProfileId::SrsPlus).unwrap();
+        let jstris = DomainBinding::legal_board(KickTableProfileId::Jstris180).unwrap();
+
+        assert_eq!(srs_plus_a.raw_identity(), srs_plus_b.raw_identity());
+        assert_ne!(srs_plus_a.raw_identity(), jstris.raw_identity());
+        assert!(DomainBinding::legal_board(KickTableProfileId::Custom).is_err());
+    }
+
     fn test_root(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("clearra-pc4-domain-{name}-{}", std::process::id()))
     }
@@ -686,5 +1592,43 @@ mod tests {
             ]),
             vec![1, 2, 3, 4, 8, 9]
         );
+    }
+
+    #[test]
+    fn reverse_domain_membership_is_independent_of_target_chunk_boundaries() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::SrsPlus).unwrap();
+        let (layer_nine, _) =
+            generate_reverse_layer_bounded(binding, 9, &[FIELD_MASK], 2, 1).unwrap();
+        let input = &layer_nine[..5];
+
+        let (one_target_per_chunk, _) =
+            generate_reverse_layer_bounded(binding, 8, input, 3, 1).unwrap();
+        let (single_chunk, _) =
+            generate_reverse_layer_bounded(binding, 8, input, 3, input.len()).unwrap();
+
+        assert_eq!(one_target_per_chunk, single_chunk);
+    }
+
+    #[test]
+    fn spilled_reverse_domain_matches_in_memory_membership() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::SrsPlus).unwrap();
+        let (layer_nine, _) =
+            generate_reverse_layer_bounded(binding, 9, &[FIELD_MASK], 2, 1).unwrap();
+        let input = &layer_nine[..5];
+        let root = test_root("spilled-reverse");
+        fs::create_dir(&root).unwrap();
+        let output = root.join("layer8.bin");
+
+        let (expected, _) =
+            generate_reverse_layer_bounded(binding, 8, input, 3, input.len()).unwrap();
+        let (observed, _) =
+            generate_reverse_layer_spilled(binding, 8, input, [9; 32], &output, 3, 1).unwrap();
+        let (resumed, _) =
+            generate_reverse_layer_spilled(binding, 8, input, [9; 32], &output, 3, 1).unwrap();
+
+        assert_eq!(observed, expected);
+        assert_eq!(resumed, expected);
+        cleanup_reverse_spill(&output).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 }

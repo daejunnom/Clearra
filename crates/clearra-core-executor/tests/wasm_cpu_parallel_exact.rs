@@ -1,12 +1,19 @@
 #![cfg(feature = "parallel")]
 
 use std::sync::{Mutex, MutexGuard};
+#[cfg(feature = "local-search-ab")]
+use std::{path::Path, time::Instant};
 
 use clearra_core_domain::{
     execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     pc::pc_target::PcTarget,
 };
 use clearra_core_executor::WasmCpuSearchBackend;
+#[cfg(feature = "local-search-ab")]
+use clearra_core_executor::{
+    install_local_pc4_legal_board_index, set_local_search_prune_policy, LocalPc4LegalBoardIndex,
+    LocalSearchPrunePolicy,
+};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
@@ -14,6 +21,10 @@ use clearra_pc_graph::request::{
     WorkerPolicy,
 };
 use clearra_problem::ProblemCompiler;
+#[cfg(feature = "local-search-ab")]
+use clearra_rules::kicks::KickTableProfileId;
+#[cfg(feature = "local-search-ab")]
+use sha2::{Digest, Sha256};
 
 const P7P4_UNIQUE_TILING_COUNT: usize = 456_923;
 const P7P4_NORMALIZED_SET_HASH: &str = "cts1:98ebe8726537b29f";
@@ -342,4 +353,238 @@ fn execute_p7p4(workers: usize, warmup: bool) -> clearra_core_executor::CoreExec
     let cancellation = ExecutionCancellationToken::new();
     WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::new(cancellation))
         .expect("exact CPU search")
+}
+
+#[cfg(feature = "local-search-ab")]
+#[test]
+fn local_prune_ab_modes_preserve_small_exact_set() {
+    let _resource_guard = parallel_exact_test_guard();
+    let previous = set_local_search_prune_policy(LocalSearchPrunePolicy::product_default());
+    let policy = PcExecutionPolicy::mvp_default()
+        .with_requested_backend(RequestedSearchBackend::Cpu)
+        .with_allow_backend_fallback(false)
+        .with_workers(2)
+        .with_worker_hardware_limit(2)
+        .with_use_all_logical_processors(true);
+    let baseline = execute_four_piece_all(policy.clone());
+    for additive_parity in [false, true] {
+        for apdp in [false, true] {
+            for dependency_relaxation in [false, true] {
+                set_local_search_prune_policy(LocalSearchPrunePolicy::new(
+                    additive_parity,
+                    apdp,
+                    dependency_relaxation,
+                ));
+                let candidate = execute_four_piece_all(policy.clone());
+                assert_eq!(
+                    candidate.normalized_solution_identities(),
+                    baseline.normalized_solution_identities(),
+                    "identity mismatch for additive={additive_parity} apdp={apdp} dependency={dependency_relaxation}"
+                );
+                assert_eq!(
+                    candidate.field("normalized_solution_set_hash"),
+                    baseline.field("normalized_solution_set_hash")
+                );
+            }
+        }
+    }
+    set_local_search_prune_policy(previous);
+}
+
+#[cfg(feature = "local-search-ab")]
+#[test]
+#[ignore = "finite local Full 4L P7P4 prune matrix benchmark"]
+fn p7p4_prune_matrix_two_runs_per_pair() {
+    let _resource_guard = parallel_exact_test_guard();
+    let previous = set_local_search_prune_policy(LocalSearchPrunePolicy::product_default());
+    let workers = WorkerPolicy::default_worker_limit();
+    assert!(workers > 1, "P7P4 A/B requires a parallel worker topology");
+    let forward = [(false, false), (false, true), (true, false), (true, true)];
+    let mut parity_records = Vec::new();
+    for repetition in 0..2 {
+        let order: Box<dyn Iterator<Item = (bool, bool)>> = if repetition == 0 {
+            Box::new(forward.into_iter())
+        } else {
+            Box::new(forward.into_iter().rev())
+        };
+        for (additive_parity, apdp) in order {
+            set_local_search_prune_policy(LocalSearchPrunePolicy::new(
+                additive_parity,
+                apdp,
+                false,
+            ));
+            let started = Instant::now();
+            let result = execute_p7p4(workers, true);
+            let elapsed = started.elapsed();
+            assert_p7p4_exact(&result);
+            parity_records.push((additive_parity, apdp, elapsed));
+            eprintln!(
+                "P7P4_PRUNE_AB repetition={} additive_parity={} apdp={} elapsed_ms={} geometry_nodes={:?} domain_pruned={:?} column_pruned={:?} build_nodes={:?}",
+                repetition + 1,
+                additive_parity,
+                apdp,
+                elapsed.as_millis(),
+                result.usize_field("searched_nodes"),
+                result.usize_field("geometry_domain_pruned_states"),
+                result.usize_field("geometry_column_pruned_states"),
+                result.usize_field("total_build_order_nodes")
+            );
+        }
+    }
+
+    let mut pair_best = forward.map(|pair| (pair, std::time::Duration::MAX));
+    for (additive, apdp, elapsed) in parity_records {
+        let slot = pair_best
+            .iter_mut()
+            .find(|(pair, _)| *pair == (additive, apdp))
+            .unwrap();
+        slot.1 = slot.1.min(elapsed);
+    }
+    let ((best_additive, best_apdp), _) = *pair_best
+        .iter()
+        .min_by_key(|(_, elapsed)| *elapsed)
+        .unwrap();
+
+    // Load the pre-generated legal-board index only after the parity matrix.
+    // This keeps its retained memory and cache footprint out of all eight
+    // parity samples while still excluding generation time from the ABBA run.
+    let legal_root = std::env::var_os("CLEARRA_LOCAL_PC4_LEGAL_BOARD_ROOT")
+        .expect("set CLEARRA_LOCAL_PC4_LEGAL_BOARD_ROOT to the complete SRS+ reverse-domain root");
+    install_local_pc4_legal_board_index(load_legal_board_index(Path::new(&legal_root))).unwrap();
+
+    let mut legal_records = Vec::new();
+    for legal_board in [false, true, true, false] {
+        set_local_search_prune_policy(
+            LocalSearchPrunePolicy::new(best_additive, best_apdp, false)
+                .with_legal_board(legal_board),
+        );
+        let started = Instant::now();
+        let result = execute_p7p4(workers, true);
+        let elapsed = started.elapsed();
+        assert_p7p4_exact(&result);
+        legal_records.push((legal_board, elapsed));
+        eprintln!(
+            "P7P4_LEGAL_BOARD_ABBA legal_board={} elapsed_ms={}",
+            legal_board,
+            elapsed.as_millis(),
+        );
+    }
+    let best_legal = [false, true]
+        .into_iter()
+        .min_by_key(|enabled| {
+            legal_records
+                .iter()
+                .filter(|(candidate, _)| candidate == enabled)
+                .map(|(_, elapsed)| *elapsed)
+                .min()
+                .unwrap()
+        })
+        .unwrap();
+
+    let mut dependency_records = Vec::new();
+    for dependency in [false, true] {
+        set_local_search_prune_policy(
+            LocalSearchPrunePolicy::new(best_additive, best_apdp, dependency)
+                .with_legal_board(best_legal),
+        );
+        let started = Instant::now();
+        let result = execute_p7p4(workers, true);
+        let elapsed = started.elapsed();
+        assert_p7p4_exact(&result);
+        dependency_records.push((dependency, elapsed));
+        eprintln!(
+            "P7P4_ILC_CYCLE_AB dependency_relaxation={} elapsed_ms={}",
+            dependency,
+            elapsed.as_millis(),
+        );
+    }
+    let first_a = dependency_records[0].1.as_secs_f64();
+    let first_b = dependency_records[1].1.as_secs_f64();
+    let relative_difference = (first_a - first_b).abs() / first_a.min(first_b).max(0.001);
+    if relative_difference <= 0.05 {
+        for dependency in [true, false] {
+            set_local_search_prune_policy(
+                LocalSearchPrunePolicy::new(best_additive, best_apdp, dependency)
+                    .with_legal_board(best_legal),
+            );
+            let started = Instant::now();
+            let result = execute_p7p4(workers, true);
+            let elapsed = started.elapsed();
+            assert_p7p4_exact(&result);
+            eprintln!(
+                "P7P4_ILC_CYCLE_ABBA dependency_relaxation={} elapsed_ms={}",
+                dependency,
+                elapsed.as_millis(),
+            );
+        }
+    } else {
+        eprintln!(
+            "P7P4_ILC_CYCLE_ABBA skipped=true relative_difference={relative_difference:.6} threshold=0.05"
+        );
+    }
+    set_local_search_prune_policy(previous);
+}
+
+#[cfg(feature = "local-search-ab")]
+fn assert_p7p4_exact(result: &clearra_core_executor::CoreExecutionResult) {
+    assert_eq!(
+        result.usize_field("normalized_unique_solution_count"),
+        Some(P7P4_UNIQUE_TILING_COUNT)
+    );
+    assert_eq!(
+        result.field("normalized_solution_set_hash"),
+        Some(P7P4_NORMALIZED_SET_HASH)
+    );
+}
+
+#[cfg(feature = "local-search-ab")]
+fn load_legal_board_index(root: &Path) -> LocalPc4LegalBoardIndex {
+    let mut layers: [Vec<u64>; 11] = std::array::from_fn(|_| Vec::new());
+    let mut binding = None;
+    let mut input_digest = [0_u8; 32];
+    for layer in (0_u8..=10).rev() {
+        let bytes = std::fs::read(root.join(format!("reverse-layer-{layer:02}.bin")))
+            .expect("read complete legal-board reverse layer");
+        assert!(bytes.len() >= 128);
+        assert_eq!(&bytes[..8], b"PC4DOM02");
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            u32::from(layer)
+        );
+        let count = usize::try_from(u64::from_le_bytes(bytes[16..24].try_into().unwrap())).unwrap();
+        assert_eq!(bytes.len(), 128 + count * 8);
+        let observed_binding: [u8; 32] = bytes[24..56].try_into().unwrap();
+        assert_eq!(*binding.get_or_insert(observed_binding), observed_binding);
+        assert_eq!(bytes[56], if layer == 10 { 1 } else { 3 });
+        assert!(bytes[57..64].iter().all(|byte| *byte == 0));
+        let observed_input: [u8; 32] = bytes[64..96].try_into().unwrap();
+        assert_eq!(observed_input, input_digest);
+        assert!(bytes[96..128].iter().all(|byte| *byte == 0));
+
+        let mut prior = None;
+        for field in bytes[128..].chunks_exact(8) {
+            let hydra = u64::from_le_bytes(field.try_into().unwrap());
+            assert_eq!(hydra.count_ones(), u32::from(layer) * 4);
+            assert!(prior.is_none_or(|value| value < hydra));
+            prior = Some(hydra);
+            layers[usize::from(layer)].push(hydra_to_clearra(hydra));
+        }
+        input_digest = Sha256::digest(&bytes).into();
+    }
+    LocalPc4LegalBoardIndex::new(KickTableProfileId::SrsPlus, layers)
+        .expect("complete SRS+ legal-board index")
+}
+
+#[cfg(feature = "local-search-ab")]
+fn hydra_to_clearra(hash: u64) -> u64 {
+    let mut board = 0_u64;
+    for y in 0..4 {
+        for x in 0..10 {
+            if hash & (1_u64 << (y * 10 + 9 - x)) != 0 {
+                board |= 1_u64 << (y * 10 + x);
+            }
+        }
+    }
+    board
 }

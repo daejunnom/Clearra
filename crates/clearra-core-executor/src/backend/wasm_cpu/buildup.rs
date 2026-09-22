@@ -2714,7 +2714,7 @@ impl BuildOrderGraph {
     // Graph construction keeps admission, projection, and reachability policy explicit.
     #[allow(clippy::too_many_arguments)]
     fn build(
-        _problem: &SearchProblem,
+        problem: &SearchProblem,
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
         projection: &mut CandidateProjection,
@@ -2792,6 +2792,17 @@ impl BuildOrderGraph {
             }
             edge_scratch.clear();
             let (board, deleted_rows) = projection.state(subset);
+            if !crate::search_prune_policy::local_pc4_legal_board_allows(
+                catalog.width(),
+                catalog.height(),
+                catalog.initial_board(),
+                problem.kick_profile().profile_id(),
+                board,
+                deleted_rows,
+                subset.count_ones() as usize,
+            ) {
+                continue;
+            }
             let mut permitted_operations =
                 feasibility.map_or(all_operations & !(subset as u16), |proof| {
                     workspace

@@ -91,6 +91,7 @@ fn run() -> Result<(), String> {
         "domain-step" => run_domain_step(&options),
         "domain-run" => run_domain_run(&options),
         "domain-compare" => run_domain_compare(&options),
+        "legal-board-run" => run_legal_board_run(&options),
         "indexed-path-proof" => run_indexed_path_proof(&options),
         "offline-family-proof" => run_offline_family_proof(&options),
         "offline-family-materialize" => run_offline_family_materialize(&options),
@@ -98,7 +99,7 @@ fn run() -> Result<(), String> {
         "tablebase-family-proof" => run_tablebase_family_proof(&options),
         "target-qualification" => run_target_qualification(&options),
         _ => Err(
-            "expected outgoing-shard, outgoing-proof-shard, outgoing-proof-run, merge-outgoing, merge-outgoing-proof, boundary-dead-proof, domain-seed, domain-step, domain-run, domain-compare, indexed-path-proof, offline-family-proof, offline-family-materialize, offline-family-recover, tablebase-family-proof, or target-qualification".to_owned(),
+            "expected outgoing-shard, outgoing-proof-shard, outgoing-proof-run, merge-outgoing, merge-outgoing-proof, boundary-dead-proof, domain-seed, domain-step, domain-run, domain-compare, legal-board-run, indexed-path-proof, offline-family-proof, offline-family-materialize, offline-family-recover, tablebase-family-proof, or target-qualification".to_owned(),
         ),
     }
 }
@@ -377,6 +378,43 @@ fn run_domain_run(options: &BTreeMap<String, String>) -> Result<(), String> {
     }
     let dataset = Dataset::open(&dataset_root, profile)?;
     let binding = dataset.domain_binding()?;
+    run_domain_layers(binding, direction, &layers, workers, max_new_steps)
+}
+
+fn run_legal_board_run(options: &BTreeMap<String, String>) -> Result<(), String> {
+    let profile = KickTableProfileId::parse(required_option(options, "profile")?)
+        .ok_or("legal-board profile is not a known kick-table profile")?;
+    let layers = absolute_option(options, "layers")?;
+    require_real_directory(&layers)?;
+    let workers = usize::try_from(numeric_option(options, "workers")?)
+        .map_err(|_| "worker count overflow")?;
+    let max_new_steps = usize::try_from(numeric_option(options, "max-new-steps")?)
+        .map_err(|_| "step count overflow")?;
+    if max_new_steps == 0 || max_new_steps > 10 {
+        return Err("max-new-steps outside 1..=10".to_owned());
+    }
+    let binding = domain::DomainBinding::legal_board(profile)?;
+    println!(
+        "pc4_legal_board_generation=begin profile={} binding={}",
+        profile.as_str(),
+        binding.identity_string()
+    );
+    run_domain_layers(
+        binding,
+        domain::DomainDirection::Reverse,
+        &layers,
+        workers,
+        max_new_steps,
+    )
+}
+
+fn run_domain_layers(
+    binding: domain::DomainBinding,
+    direction: domain::DomainDirection,
+    layers: &Path,
+    workers: usize,
+    max_new_steps: usize,
+) -> Result<(), String> {
     let seed_layer = match direction {
         domain::DomainDirection::Reverse => 10,
         domain::DomainDirection::Forward => 0,

@@ -1380,6 +1380,11 @@
       "output_class": "test"
     },
     {
+      "path": "scripts/tools/wsl-legal-board-generate.sh",
+      "producer": "benchmark",
+      "output_class": "research"
+    },
+    {
       "path": "scripts/tools/wsl-pc-runtime-batch.sh",
       "producer": "cargo",
       "output_class": "test"
@@ -3261,6 +3266,20 @@
       "oom_policy": "fail-no-retry"
     },
     {
+      "path": "scripts/tools/wsl-legal-board-generate.sh",
+      "producer": "benchmark",
+      "purpose": "registered-process-execution",
+      "profile": "benchmark-search",
+      "runtime": "wsl-guest",
+      "tree_ownership": "supervisor-inherited",
+      "timeout": 7200,
+      "termination_grace": 10,
+      "memory_enforcement": "wsl-cgroup-v2",
+      "output_limit": 134217728,
+      "oom_policy": "fail-no-retry",
+      "explicit_timeout": true
+    },
+    {
       "path": "scripts/tools/wsl-pc-runtime-batch.sh",
       "producer": "cargo",
       "purpose": "registered-process-execution",
@@ -4154,6 +4173,11 @@
         "native-cargo": {
           "profile": "build-test",
           "requires_source": true
+        },
+        "legal-board-generate": {
+          "profile": "benchmark-search",
+          "requires_source": true,
+          "timeout_seconds": 7200
         }
       }
     },

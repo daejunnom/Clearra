@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { acquireBuildOwner } from './clearra-build-owner.mjs';
+import { acquireBuildOwner, buildCompilerSnapshot } from './clearra-build-owner.mjs';
 import { assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, canonicalBuildRoot, nativeBuildPath } from './clearra-build-policy.mjs';
 
 function cleanBuildEnvironment() {
@@ -106,6 +106,26 @@ test('a moving compiler input cannot seal a reusable experiment snapshot', async
   const next = await acquireBuildOwner(options);
   assert.equal(next.transaction.incremental_seed_session_id, null);
   await next.finish(false);
+});
+
+test('generated public WASM is excluded while source remains compiler input', async t => {
+  const options = await fixture(t);
+  const generated = join(options.sourceRoot, 'apps', 'clearra-web', 'static', 'wasm');
+  const source = join(options.sourceRoot, 'apps', 'clearra-web', 'src');
+  await mkdir(generated, { recursive: true });
+  await mkdir(source, { recursive: true });
+  await writeFile(join(generated, 'clearra_wasm.manifest.json'), '{"generation":1}\n');
+  await writeFile(join(source, 'entry.ts'), 'export const generation = 1;\n');
+
+  const before = await buildCompilerSnapshot(options.sourceRoot, options.environment);
+  await writeFile(join(generated, 'clearra_wasm.manifest.json'), '{"generation":2}\n');
+  const generatedChanged = await buildCompilerSnapshot(options.sourceRoot, options.environment);
+  assert.deepEqual(generatedChanged, before);
+
+  await writeFile(join(source, 'entry.ts'), 'export const generation = 2;\n');
+  const sourceChanged = await buildCompilerSnapshot(options.sourceRoot, options.environment);
+  assert.notEqual(sourceChanged.sourceSha256, before.sourceSha256);
+  assert.equal(sourceChanged.inputFileCount, before.inputFileCount);
 });
 
 test('independent owners cannot steal a purpose; nested owner reuses it', async t => {

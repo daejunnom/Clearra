@@ -171,7 +171,8 @@ impl DomainPropagation {
             result.bumper_cell = cell;
         }
 
-        if result.pivot_required_cells.count_ones() == 3
+        if crate::search_prune_policy::apdp_enabled()
+            && result.pivot_required_cells.count_ones() == 3
             && partial_shape_kind(catalog.width(), result.pivot_required_cells) != 0
             && apdp_domain_is_complete(
                 catalog,

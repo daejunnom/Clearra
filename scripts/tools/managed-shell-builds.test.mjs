@@ -76,6 +76,20 @@ test('WSL runtime batch consumes only the active owner exact benchmark binary', 
   assert.doesNotMatch(source, /\/home\/\*\/\.cache\/Clearra\/build|invoke-clearra-build|cargo build/u);
 });
 
+test('legal-board generation uses one managed Linux build owner and only the validated host output', async () => {
+  const source = await readFile(new URL('./wsl-legal-board-generate.sh', import.meta.url), 'utf8');
+  assert.match(source, /9p \| v9fs \| drvfs \| fuseblk/u);
+  assert.match(source, /\[\[ "\$LAYERS" == \/mnt\/\?\/\*/u);
+  assert.match(source, /--source-root "\$ROOT" --purpose/u);
+  assert.match(source, /-- bash "\$AUTHORITY_ROOT\/scripts\/tools\/wsl-legal-board-generate\.sh"/u);
+  assert.match(source, /clearra-build-paths\.mjs" --source-root "\$ROOT" --field transaction/u);
+  assert.match(source, /clearra-build-paths\.mjs" --source-root "\$ROOT" --field cargo-target/u);
+  assert.match(source, /bash "\$AUTHORITY_ROOT\/scripts\/tools\/wsl-native-cargo\.sh"/u);
+  assert.match(source, /BINARY="\$MANAGED_CARGO_TARGET\/release\/clearra-pc4-legal-board"/u);
+  assert.match(source, /exec "\$BINARY" legal-board-run/u);
+  assert.doesNotMatch(source, /\bwsl(?:\.exe)?\b|--force-unmanaged-output|XDG_CACHE_HOME/u);
+});
+
 test('standalone NoPrepare batch refuses before artifact execution or report mutation', async () => {
   const source = await readFile(new URL('./wsl-pc-runtime-batch.sh', import.meta.url), 'utf8');
   assert.match(source, /\[\[ -n "\$\{CLEARRA_BUILD_SESSION_ID:-\}" \]\]/u);

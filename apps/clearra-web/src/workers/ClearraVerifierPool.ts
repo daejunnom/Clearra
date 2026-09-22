@@ -158,6 +158,7 @@ class VerifierRetiredError extends Error {
 }
 
 export type ClearraVerifierPoolProgress = {
+  geometryNodes: number;
   candidatesVerified: number;
   buildNodes: number;
   coverageChecks: number;
@@ -170,6 +171,7 @@ export type ClearraVerifierPoolProgress = {
 };
 
 export type ClearraVerifierPoolProgressFlags = {
+  geometryNodes: boolean;
   candidatesVerified: boolean;
   buildNodes: boolean;
   coverageChecks: boolean;
@@ -202,6 +204,7 @@ class VerifierClient {
   private requestWatchdogScan: ReturnType<typeof setInterval> | null = null;
   private readonly requestWatchdogScanIntervalMs: number;
   busy = false;
+  private executing = false;
 
   constructor(
     private readonly workerFactory: VerifierWorkerFactory,
@@ -335,6 +338,7 @@ class VerifierClient {
         };
         const onMessage = (event: MessageEvent<VerifierResponse>) => {
           if (event.data.type === 'ready') {
+            this.executing = false;
             delegation.executing?.();
             void this.completeDelegation(delegation)
               .then(() => {
@@ -440,15 +444,18 @@ class VerifierClient {
 
   progressSnapshot(now: number) {
     return {
+      geometryNodes: this.progress.geometryNodes,
       candidatesVerified: this.candidatesVerified,
       buildNodes: this.progress.buildNodes,
       coverageChecks: this.progress.coverageChecks,
       availability: {
+        geometryNodes: this.progress.availability.geometryNodes,
         candidatesVerified: this.initialized && this.candidatesVerifiedAvailable,
         buildNodes: this.progress.availability.buildNodes,
         coverageChecks: this.progress.availability.coverageChecks
       },
       exactness: {
+        geometryNodes: this.progress.exactness.geometryNodes,
         candidatesVerified:
           this.initialized &&
           this.candidatesVerifiedAvailable &&
@@ -457,7 +464,10 @@ class VerifierClient {
         coverageChecks: this.progress.exactness.coverageChecks
       },
       ready: this.initialized,
-      active: this.busy,
+      // `busy` owns the complete durable transaction, including coordinator
+      // journal and result-seal waits. Only `executing` means this Web Worker
+      // has received its run grant and is doing WASM work.
+      active: this.executing,
       batchAgeMs: this.batchStartedAt === null ? 0 : Math.max(0, now - this.batchStartedAt)
     };
   }
@@ -620,11 +630,13 @@ class VerifierClient {
         return;
       }
       if (response.type === 'failed') {
+        this.executing = false;
         pending.delegation.executing?.(true);
         this.deletePendingRequest(requestId);
         void this.failDelegation(pending.delegation, response.message);
         pending.reject(new ClearraWasmRuntimeError(response.code, response.message));
       } else {
+        this.executing = false;
         pending.delegation.executing?.();
         void sealVerifierResponse(pending.operation, pending.delegation, pending.partials, response)
           .then((sealed) => {
@@ -763,6 +775,7 @@ class VerifierClient {
         const worker = this.worker;
         if (!worker) throw new Error('distributed verifier disappeared before start ACK');
         pending.delegation.executing = this.transportProfile.start('run_grant_to_reply', pending.delegation.operation);
+        this.executing = true;
         worker.postMessage({
           type: 'delegation-run',
           taskId,
@@ -889,6 +902,7 @@ class VerifierClient {
     this.lifecycleOwnerId = '';
     this.rootRequestSha256 = null;
     this.busy = false;
+    this.executing = false;
   }
 }
 
@@ -1183,6 +1197,13 @@ export class ClearraVerifierPool {
         exact: snapshot.exactness.candidatesVerified
       }))
     );
+    const geometryNodes = aggregateProgressCounts(
+      snapshots.map((snapshot) => ({
+        value: snapshot.geometryNodes,
+        available: snapshot.availability.geometryNodes,
+        exact: snapshot.exactness.geometryNodes
+      }))
+    );
     const buildNodes = aggregateProgressCounts(
       snapshots.map((snapshot) => ({
         value: snapshot.buildNodes,
@@ -1198,23 +1219,26 @@ export class ClearraVerifierPool {
       }))
     );
     return {
+      geometryNodes: geometryNodes.value,
       candidatesVerified: candidatesVerified.value,
       buildNodes: buildNodes.value,
       coverageChecks: coverageChecks.value,
       availability: {
+        geometryNodes: geometryNodes.available,
         candidatesVerified: candidatesVerified.available,
         buildNodes: buildNodes.available,
         coverageChecks: coverageChecks.available
       },
       exactness: {
+        geometryNodes: geometryNodes.exact,
         candidatesVerified: candidatesVerified.exact,
         buildNodes: buildNodes.exact,
         coverageChecks: coverageChecks.exact
       },
       readyWorkers: readySnapshots.length,
-      // Initialization and finalization are real worker activity too. A worker
-      // does not have to be ready for candidate consumption before it counts as
-      // active CPU work.
+      // Only a granted WASM execution counts as active CPU work. Durable offer,
+      // journal and result-seal waits remain visible through oldestBatchMs, but
+      // must not make an idle worker look computationally active.
       activeWorkers: snapshots.filter((snapshot) => snapshot.active).length,
       workerCount: this.targetWorkerCount,
       oldestBatchMs: snapshots.reduce(
@@ -1361,25 +1385,33 @@ export class ClearraVerifierPool {
 
 function emptyVerifierProgress(): ClearraDistributedVerifierProgress {
   return {
+    geometryNodes: 0,
     candidateCount: 0,
     buildNodes: 0,
     coverageChecks: 0,
-    availability: { candidateCount: false, buildNodes: false, coverageChecks: false },
-    exactness: { candidateCount: false, buildNodes: false, coverageChecks: false }
+    availability: {
+      geometryNodes: false, candidateCount: false, buildNodes: false, coverageChecks: false
+    },
+    exactness: {
+      geometryNodes: false, candidateCount: false, buildNodes: false, coverageChecks: false
+    }
   };
 }
 
 function emptyPoolProgress(): ClearraVerifierPoolProgress {
   return {
+    geometryNodes: 0,
     candidatesVerified: 0,
     buildNodes: 0,
     coverageChecks: 0,
     availability: {
+      geometryNodes: false,
       candidatesVerified: false,
       buildNodes: false,
       coverageChecks: false
     },
     exactness: {
+      geometryNodes: false,
       candidatesVerified: false,
       buildNodes: false,
       coverageChecks: false

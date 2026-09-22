@@ -23,6 +23,7 @@ import {
 } from '../src/workers/clearraWasmRuntime.ts';
 
 const completedProgress: ClearraVerifierPoolProgress = {
+  geometryNodes: 23,
   candidatesVerified: 12,
   buildNodes: 34,
   coverageChecks: 56,
@@ -34,6 +35,7 @@ const completedProgress: ClearraVerifierPoolProgress = {
   oldestBatchMs: 78
 };
 const emptyProgress: ClearraVerifierPoolProgress = {
+  geometryNodes: 0,
   candidatesVerified: 0,
   buildNodes: 0,
   coverageChecks: 0,
@@ -217,7 +219,11 @@ assert.deepEqual(
     (event) => rootEvents.push(event)
   );
   assert.deepEqual(initializedWorkerCounts, [2]);
-  assert.deepEqual(rootBatchSizes, [18], '140 roots use four dispatch waves per compute worker');
+  assert.deepEqual(
+    rootBatchSizes,
+    [5],
+    'large root families retain the measured five-root work-stealing ceiling'
+  );
   assert.equal(rootWorkersUsed, 2);
   const rootSearching = rootEvents.find((event) => event.event === 'progress' &&
     event.progress.telemetry?.phase === 'searching' &&
@@ -455,6 +461,7 @@ const U32_MAX = normalizeWasmU32(-1);
 assert.equal(U32_MAX, 0xffff_ffff);
 let saturatedPoolFinished = false;
 const saturatedProgress: ClearraVerifierPoolProgress = {
+  geometryNodes: U32_MAX,
   candidatesVerified: U32_MAX,
   buildNodes: U32_MAX,
   coverageChecks: U32_MAX,
@@ -1661,6 +1668,7 @@ for (const sample of [
 
 function verifierFlags(value: boolean) {
   return {
+    geometryNodes: value,
     candidatesVerified: value,
     buildNodes: value,
     coverageChecks: value
