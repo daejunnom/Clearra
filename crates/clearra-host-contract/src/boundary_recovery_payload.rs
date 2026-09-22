@@ -36,6 +36,7 @@ impl BoundaryRecoveryStepPayload {
 pub struct BoundaryRecoveryPayload {
     pub status: String,
     pub knowledge_basis: String,
+    pub placement_role_scope: String,
     pub max_early_placements: u8,
     pub borrow_source_index: u8,
     pub borrow_placement_mask: String,
@@ -51,6 +52,7 @@ impl BoundaryRecoveryPayload {
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
         let mut bytes = (self.status.capacity() as u128)
             .checked_add(self.knowledge_basis.capacity() as u128)?
+            .checked_add(self.placement_role_scope.capacity() as u128)?
             .checked_add(self.borrow_placement_mask.capacity() as u128)?
             .checked_add(
                 (self.steps.capacity() as u128)

@@ -59,6 +59,21 @@ test('boundary recovery keeps one fixed queue and independent bag B2B choices ac
   assert.deepEqual(boundaryRecoveryDesktopRequest(request, 'ko').arguments, arguments_);
   assert.deepEqual(tokenizeBrowserCommandForContract(boundaryRecoveryCommand(request)), arguments_);
 });
+test('boundary recovery exact roles serialize every source mask without a duplicate borrow mask', () => {
+  const request = {
+    ...createBoundaryRecoveryRequest(),
+    queue: 'IO', height: 4, placements: 2, stageOneCount: 1,
+    borrowSourcePosition: 2, placementRoleMasks: [0xfn, 0x300c000n]
+  };
+  assert.deepEqual(validateBoundaryRecoveryRequest(request), []);
+  const args = boundaryRecoveryArguments(request);
+  assert.equal(args.includes('--borrow-placement-mask'), false);
+  assert.deepEqual(args.flatMap((value, index) => value === '--role-mask' ? [args[index + 1]] : []),
+    ['1:0x000000000000000f', '2:0x000000000300c000']);
+  assert.deepEqual(boundaryRecoveryDesktopRequest(request, 'ko').arguments, args);
+  assert.deepEqual(tokenizeBrowserCommandForContract(boundaryRecoveryCommand(request)), args);
+  assert.deepEqual(validateBoundaryRecoveryRequest({ ...request, placementRoleMasks: [0xfn] }), ['placement-roles']);
+});
 const canonicalGuiBuildProbabilityB2bArguments = readFileSync(
   new URL('../../../tests/fixtures/contracts/gui_build_probability_b2b_argv.tsv', import.meta.url),
   'utf8'

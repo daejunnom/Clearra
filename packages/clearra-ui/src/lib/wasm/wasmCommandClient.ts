@@ -456,6 +456,7 @@ export type ClearraBoundaryRecoveryStepPayload = {
 export type ClearraBoundaryRecoveryPayload = {
   status: 'normal' | 'pc-preserving-recovery' | 'non-pc-recovery' | 'no-path-within-declared-scope' | 'incomplete';
   knowledge_basis: 'full-fixed-queue';
+  placement_role_scope: 'occupancy-only' | 'exact-lock-time';
   max_early_placements: 0 | 1;
   borrow_source_index: number;
   borrow_placement_mask: string;

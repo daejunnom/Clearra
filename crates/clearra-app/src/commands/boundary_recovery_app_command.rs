@@ -79,6 +79,12 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
         let public = BoundaryRecoveryPayload {
             status: status.to_owned(),
             knowledge_basis: "full-fixed-queue".to_owned(),
+            placement_role_scope: if self.query.placement_role_masks.is_empty() {
+                "occupancy-only"
+            } else {
+                "exact-lock-time"
+            }
+            .to_owned(),
             max_early_placements: self.query.max_early_placements,
             borrow_source_index: self.query.borrow_source_index as u8,
             borrow_placement_mask: mask_hex(self.query.borrow_placement_mask.words()),
@@ -140,6 +146,14 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
             RenderField::new("contract", "boundary-recovery.v1"),
             RenderField::new("status", status),
             RenderField::new("knowledge_basis", "full-fixed-queue"),
+            RenderField::new(
+                "placement_role_scope",
+                if self.query.placement_role_masks.is_empty() {
+                    "occupancy-only"
+                } else {
+                    "exact-lock-time"
+                },
+            ),
             RenderField::new("max_early_placements", self.query.max_early_placements),
             RenderField::new("borrow_source_index", self.query.borrow_source_index),
             RenderField::new(

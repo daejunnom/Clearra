@@ -1101,6 +1101,7 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
             nested.object("payload", |result| {
                 result.string("status", &report.status);
                 result.string("knowledge_basis", &report.knowledge_basis);
+                result.string("placement_role_scope", &report.placement_role_scope);
                 result.number("normal_states", report.normal_states);
                 result.number("max_early_placements", report.max_early_placements);
                 result.number("borrow_source_index", report.borrow_source_index);

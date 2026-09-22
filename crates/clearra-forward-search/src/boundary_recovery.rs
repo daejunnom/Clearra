@@ -40,6 +40,10 @@ pub struct BoundaryRecoveryQuery {
     /// Number of locks needed to reach the declared second-stage target.
     /// Remaining queue tokens are lookahead, not silently consumed.
     pub required_placements: usize,
+    /// Empty means unconstrained geometry. Otherwise exactly one four-cell
+    /// lock-time role belongs to each required source token, in source order.
+    /// Roles are distinct from the supply token and remain bound through hold.
+    pub placement_role_masks: Vec<Board256Mask>,
     /// Zero runs only the normal connection proof; one permits the selected
     /// stage-two placement to be locked before stage-one cleanup.
     pub max_early_placements: u8,
@@ -64,6 +68,7 @@ pub enum BoundaryRecoveryError {
     BoardOutsideField,
     InvalidStageBoundary,
     InvalidBorrowRole,
+    InvalidPlacementRoles,
     InvalidEarlyPlacementLimit,
     QueueTooLong,
     InvalidStateLimit,
@@ -182,6 +187,20 @@ impl BoundaryRecoveryQuery {
         if self.max_early_placements > 1 {
             return Err(BoundaryRecoveryError::InvalidEarlyPlacementLimit);
         }
+        if !self.placement_role_masks.is_empty()
+            && (self.placement_role_masks.len() != self.required_placements
+                || self.placement_role_masks.iter().any(|mask| {
+                    mask.fits_cell_count(cells) != Ok(true)
+                        || mask
+                            .words()
+                            .iter()
+                            .map(|word| word.count_ones())
+                            .sum::<u32>()
+                            != 4
+                }))
+        {
+            return Err(BoundaryRecoveryError::InvalidPlacementRoles);
+        }
         if self.max_early_placements == 1
             && (self.borrow_source_index < self.stage_one_queue_len
                 || self.borrow_source_index >= self.required_placements
@@ -192,7 +211,10 @@ impl BoundaryRecoveryQuery {
                     .iter()
                     .map(|word| word.count_ones())
                     .sum::<u32>()
-                    != 4)
+                    != 4
+                || (!self.placement_role_masks.is_empty()
+                    && self.placement_role_masks[self.borrow_source_index].words()
+                        != self.borrow_placement_mask.words()))
         {
             return Err(BoundaryRecoveryError::InvalidBorrowRole);
         }
@@ -373,6 +395,12 @@ impl<'a> Pass<'a> {
                 .reachable_locks(state.board, choice.token.piece, true, true)
                 .to_vec();
             for lock in locks {
+                if !self.query.placement_role_masks.is_empty()
+                    && lock.mask.words()
+                        != self.query.placement_role_masks[usize::from(choice.token.index)].words()
+                {
+                    continue;
+                }
                 if is_stage_two
                     && state.checkpoint_step.is_none()
                     && lock.mask.words() != self.query.borrow_placement_mask.words()
@@ -574,6 +602,7 @@ mod tests {
             queue: vec![PieceKind::I, PieceKind::O],
             stage_one_queue_len: 1,
             required_placements: 2,
+            placement_role_masks: Vec::new(),
             max_early_placements: 1,
             borrow_source_index: 1,
             borrow_placement_mask: Board256Mask::from_words([0x300c000, 0, 0, 0]),
@@ -669,6 +698,33 @@ mod tests {
         assert_eq!(
             query.search(&control()),
             Err(BoundaryRecoveryError::InvalidBorrowRole)
+        );
+    }
+
+    #[test]
+    fn exact_stage_roles_follow_source_tokens_through_the_same_search() {
+        let mut query = two_stage_query();
+        query.max_early_placements = 0;
+        let ordinary = query.search(&control()).unwrap();
+        query.placement_role_masks = ordinary
+            .steps
+            .iter()
+            .map(|step| Board256Mask::from_words(step.placement_mask))
+            .collect();
+        assert_eq!(
+            query.search(&control()).unwrap().status,
+            BoundaryRecoveryStatus::Normal
+        );
+
+        query.placement_role_masks[1] = Board256Mask::from_words([0xf, 0, 0, 0]);
+        assert_eq!(
+            query.search(&control()).unwrap().status,
+            BoundaryRecoveryStatus::NoPath
+        );
+        query.placement_role_masks.pop();
+        assert_eq!(
+            query.search(&control()),
+            Err(BoundaryRecoveryError::InvalidPlacementRoles)
         );
     }
 

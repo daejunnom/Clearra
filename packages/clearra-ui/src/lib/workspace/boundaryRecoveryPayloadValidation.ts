@@ -6,6 +6,7 @@ export function validateBoundaryRecoveryPayload(product: ClearraProductResultPay
   return product.contract === 'boundary-recovery.v1' &&
     product.result_kind === 'boundary-recovery' &&
     report.knowledge_basis === 'full-fixed-queue' &&
+    ['occupancy-only', 'exact-lock-time'].includes(report.placement_role_scope) &&
     (report.max_early_placements === 0 || report.max_early_placements === 1) &&
     Number.isInteger(report.borrow_source_index) && report.borrow_source_index >= 0 && report.borrow_source_index < 14 &&
     /^0x[0-9a-f]{1,64}$/u.test(report.borrow_placement_mask) &&

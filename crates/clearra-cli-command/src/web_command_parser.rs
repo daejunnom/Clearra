@@ -2259,6 +2259,7 @@ fn parse_boundary_recovery_command(
     let mut max_early_placements = 1_u8;
     let mut borrow_source_index = None;
     let mut borrow_placement_mask = None;
+    let mut placement_roles = std::collections::BTreeMap::new();
     let mut hold_enabled = true;
     let mut rule_profile = RuleProfileId::SrsPlus;
     let mut spin_profile = SpinProfileId::AllSpinPlus;
@@ -2275,7 +2276,7 @@ fn parse_boundary_recovery_command(
                 format!("unexpected boundary recovery token '{option}'"),
             ));
         }
-        if !seen.insert(option) {
+        if option != "--role-mask" && !seen.insert(option) {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::InvalidValue,
                 format!("repeated boundary recovery option '{option}'"),
@@ -2350,6 +2351,28 @@ fn parse_boundary_recovery_command(
                     option,
                 )?));
             }
+            "--role-mask" => {
+                let value = next_value(tokens, &mut cursor, option)?;
+                let (position, mask) = value.split_once(':').ok_or_else(|| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "--role-mask requires POSITION:HEX",
+                    )
+                })?;
+                let position: usize = parse_positive(position, option)?;
+                if placement_roles
+                    .insert(
+                        position,
+                        Board256Mask::from_words(parse_board_words(mask, option)?),
+                    )
+                    .is_some()
+                {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "--role-mask repeats a source position",
+                    ));
+                }
+            }
             "--hold" => hold_enabled = true,
             "--no-hold" => hold_enabled = false,
             "--rule" => {
@@ -2411,6 +2434,35 @@ fn parse_boundary_recovery_command(
             format!("boundary recovery requires {name}"),
         )
     };
+    let required_placements = required_placements.ok_or_else(|| required("--placements"))?;
+    let placement_role_masks = if placement_roles.is_empty() {
+        Vec::new()
+    } else {
+        if placement_roles.len() != required_placements
+            || (1..=required_placements).any(|position| !placement_roles.contains_key(&position))
+        {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "--role-mask must specify every required source position exactly once",
+            ));
+        }
+        placement_roles.into_values().collect()
+    };
+    let borrow_source_index = if max_early_placements == 0 {
+        borrow_source_index.unwrap_or(0)
+    } else {
+        borrow_source_index.ok_or_else(|| required("--borrow-source-position"))?
+    };
+    let borrow_placement_mask = if max_early_placements == 0 {
+        borrow_placement_mask.unwrap_or(Board256Mask::EMPTY)
+    } else if let Some(mask) = borrow_placement_mask {
+        mask
+    } else {
+        placement_role_masks
+            .get(borrow_source_index)
+            .copied()
+            .ok_or_else(|| required("--borrow-placement-mask or complete --role-mask set"))?
+    };
     Ok(WebCommandRequest::boundary_recovery(
         BoundaryRecoveryQuery {
             initial_board: initial_board.ok_or_else(|| required("--initial-board-mask"))?,
@@ -2419,18 +2471,11 @@ fn parse_boundary_recovery_command(
             queue: queue.ok_or_else(|| required("--queue"))?,
             stage_one_queue_len: stage_one_queue_len
                 .ok_or_else(|| required("--stage-one-count"))?,
-            required_placements: required_placements.ok_or_else(|| required("--placements"))?,
+            required_placements,
+            placement_role_masks,
             max_early_placements,
-            borrow_source_index: if max_early_placements == 0 {
-                borrow_source_index.unwrap_or(0)
-            } else {
-                borrow_source_index.ok_or_else(|| required("--borrow-source-position"))?
-            },
-            borrow_placement_mask: if max_early_placements == 0 {
-                borrow_placement_mask.unwrap_or(Board256Mask::EMPTY)
-            } else {
-                borrow_placement_mask.ok_or_else(|| required("--borrow-placement-mask"))?
-            },
+            borrow_source_index,
+            borrow_placement_mask,
             hold_enabled,
             rule_profile,
             spin_profile,

@@ -12,6 +12,8 @@ export type BoundaryRecoveryRequest = {
   queue: string;
   stageOneCount: number;
   placements: number;
+  /** Empty keeps occupancy-only search; otherwise one exact lock-time mask per source token. */
+  placementRoleMasks: bigint[];
   maxEarlyPlacements: 0 | 1;
   borrowSourcePosition: number;
   borrowPlacementMask: bigint;
@@ -32,6 +34,7 @@ export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
     queue: '',
     stageOneCount: 1,
     placements: 2,
+    placementRoleMasks: [],
     maxEarlyPlacements: 1,
     borrowSourcePosition: 2,
     borrowPlacementMask: 0n,
@@ -57,7 +60,13 @@ export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest
   if (!Number.isInteger(request.maxStates) || request.maxStates < 1 || request.maxStates > 1_000_000) errors.push('max-states');
   const fieldLimit = 1n << BigInt(Math.max(1, Math.min(25, request.height)) * 10);
   if (request.initialBoardMask < 0n || request.initialBoardMask >= fieldLimit || request.targetBoardMask < 0n || request.targetBoardMask >= fieldLimit) errors.push('board');
-  if (request.maxEarlyPlacements === 1 && (request.borrowPlacementMask < 0n || request.borrowPlacementMask >= fieldLimit || bitCount(request.borrowPlacementMask) !== 4)) errors.push('borrow-placement');
+  if (request.maxEarlyPlacements === 1 && request.placementRoleMasks.length === 0 &&
+      (request.borrowPlacementMask < 0n || request.borrowPlacementMask >= fieldLimit || bitCount(request.borrowPlacementMask) !== 4)) errors.push('borrow-placement');
+  if (request.placementRoleMasks.length > 0 &&
+      (request.placementRoleMasks.length !== request.placements ||
+       request.placementRoleMasks.some((mask) => mask < 0n || mask >= fieldLimit || bitCount(mask) !== 4))) {
+    errors.push('placement-roles');
+  }
   return errors;
 }
 
@@ -78,13 +87,17 @@ export function boundaryRecoveryArguments(request: BoundaryRecoveryRequest): str
     '--placements', String(request.placements),
     '--max-early-placements', String(request.maxEarlyPlacements),
     '--borrow-source-position', String(request.borrowSourcePosition),
-    '--borrow-placement-mask', boardMaskHex(request.borrowPlacementMask),
     request.holdEnabled ? '--hold' : '--no-hold',
     '--rule', request.rule,
     '--spin-profile', request.spinProfile,
     '--initial-b2b', request.initialB2B ? '1' : '0',
     '--max-states', String(request.maxStates)
   ];
+  if (request.placementRoleMasks.length === 0) {
+    args.push('--borrow-placement-mask', boardMaskHex(request.borrowPlacementMask));
+  } else {
+    request.placementRoleMasks.forEach((mask, index) => args.push('--role-mask', `${index + 1}:${boardMaskHex(mask)}`));
+  }
   if (request.preserveB2BStageOne) args.push('--preserve-b2b-stage-one');
   if (request.preserveB2BStageTwo) args.push('--preserve-b2b-stage-two');
   return args;

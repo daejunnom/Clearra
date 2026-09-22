@@ -33,6 +33,7 @@
   const rules: RuleProfile[] = ['srs-plus', 'srs', 'srs-x', 'jstris-180'];
   const spins: SpinProfile[] = ['t-spins', 't-spins-plus', 'all-spin', 'all-spin-plus', 'all-mini', 'all-mini-plus'];
   let request = createBoundaryRecoveryRequest();
+  let selectedRolePosition = 1;
   let language: WorkspaceLanguage = 'en';
   let disposed = false;
 
@@ -83,7 +84,8 @@
       ...request, height,
       initialBoardMask: trimForwardBoardMask(request.initialBoardMask, height),
       targetBoardMask: trimForwardBoardMask(request.targetBoardMask, height),
-      borrowPlacementMask: trimForwardBoardMask(request.borrowPlacementMask, height)
+      borrowPlacementMask: trimForwardBoardMask(request.borrowPlacementMask, height),
+      placementRoleMasks: request.placementRoleMasks.map((mask) => trimForwardBoardMask(mask, height))
     };
   }
 
@@ -98,6 +100,35 @@
   function importBorrowPlacement(mask: bigint, height: number) {
     const nextHeight = Math.max(request.height, Math.max(1, Math.min(24, height)));
     request = { ...request, height: nextHeight, borrowPlacementMask: trimForwardBoardMask(mask, nextHeight) };
+  }
+
+  function setPlacements(value: number) {
+    const placements = Math.max(2, Math.min(14, Math.trunc(value || 2)));
+    request = {
+      ...request, placements,
+      placementRoleMasks: request.placementRoleMasks.length === 0 ? [] :
+        Array.from({ length: placements }, (_, index) => request.placementRoleMasks[index] ?? 0n)
+    };
+    selectedRolePosition = Math.min(selectedRolePosition, placements);
+  }
+
+  function setExactRoles(enabled: boolean) {
+    request = {
+      ...request,
+      placementRoleMasks: enabled ? Array.from({ length: request.placements }, () => 0n) : []
+    };
+  }
+
+  function setRoleMask(position: number, mask: bigint) {
+    const next = [...request.placementRoleMasks];
+    next[position - 1] = mask;
+    request = { ...request, placementRoleMasks: next };
+  }
+
+  function importRoleMask(mask: bigint, height: number) {
+    const nextHeight = Math.max(request.height, Math.max(1, Math.min(24, height)));
+    request = { ...request, height: nextHeight };
+    setRoleMask(selectedRolePosition, trimForwardBoardMask(mask, nextHeight));
   }
 
   async function run() {
@@ -165,16 +196,38 @@
       on:change={(event) => request = { ...request, targetBoardMask: event.detail.existingMask }}
       on:import={(event) => importBoard(event.detail.existingMask, event.detail.height, true)}
     />
-    <WorkspaceBoardEditor
-      mode="forward" height={request.height} existingMask={request.borrowPlacementMask}
-      targetMask={0n} piecesNeeded={1} {language}
-      labelOverride={label('recoveryBorrowPlacement')} enableGlobalPaste={false}
-      on:change={(event) => request = { ...request, borrowPlacementMask: event.detail.existingMask }}
-      on:import={(event) => importBorrowPlacement(event.detail.existingMask, event.detail.height)}
-    />
+    {#if request.placementRoleMasks.length > 0}
+      <WorkspaceBoardEditor
+        mode="forward" height={request.height} existingMask={request.placementRoleMasks[selectedRolePosition - 1] ?? 0n}
+        targetMask={0n} piecesNeeded={1} {language}
+        labelOverride={`${label('recoveryRolePlacement')} ${selectedRolePosition} (${request.queue[selectedRolePosition - 1]?.toUpperCase() ?? '?'})`}
+        enableGlobalPaste={false}
+        on:change={(event) => setRoleMask(selectedRolePosition, event.detail.existingMask)}
+        on:import={(event) => importRoleMask(event.detail.existingMask, event.detail.height)}
+      />
+    {:else if request.maxEarlyPlacements === 1}
+      <WorkspaceBoardEditor
+        mode="forward" height={request.height} existingMask={request.borrowPlacementMask}
+        targetMask={0n} piecesNeeded={1} {language}
+        labelOverride={label('recoveryBorrowPlacement')} enableGlobalPaste={false}
+        on:change={(event) => request = { ...request, borrowPlacementMask: event.detail.existingMask }}
+        on:import={(event) => importBorrowPlacement(event.detail.existingMask, event.detail.height)}
+      />
+    {/if}
   </div>
   <section slot="controls" class="recovery-controls" aria-label={label('boundaryRecovery')}>
     <p>{label('recoveryScope')}</p>
+    <label class="check"><input type="checkbox" checked={request.placementRoleMasks.length > 0}
+      on:change={(event) => setExactRoles((event.currentTarget as HTMLInputElement).checked)} />{label('recoveryExactRoles')}</label>
+    {#if request.placementRoleMasks.length > 0}
+      <label><span>{label('recoveryRolePosition')}</span>
+        <select value={selectedRolePosition} on:change={(event) => selectedRolePosition = Number((event.currentTarget as HTMLSelectElement).value)}>
+          {#each Array.from({ length: request.placements }, (_, index) => index + 1) as position}
+            <option value={position}>{position} · {request.queue[position - 1]?.toUpperCase() ?? '?'}</option>
+          {/each}
+        </select>
+      </label>
+    {/if}
     <label><span>{label('recoveryQueue')}</span>
       <input value={request.queue} placeholder="IOTSZJL" spellcheck="false"
         on:input={(event) => request = { ...request, queue: (event.currentTarget as HTMLInputElement).value }} />
@@ -185,7 +238,7 @@
     </label>
     <label><span>{label('recoveryPlacements')}</span>
       <input type="number" min="2" max="14" value={request.placements}
-        on:input={(event) => request = { ...request, placements: Number((event.currentTarget as HTMLInputElement).value) }} />
+        on:input={(event) => setPlacements(Number((event.currentTarget as HTMLInputElement).value))} />
     </label>
     <label><span>{label('recoveryBorrowPosition')}</span>
       <input type="number" min={request.stageOneCount + 1} max={request.placements} value={request.borrowSourcePosition}
@@ -221,7 +274,7 @@
     {#if payload}
       <p class="outcome">{statusLabel(payload.status)}</p>
       <p>{label('recoveryBorrowed')}: {payload.borrowed_stage_two_count} · {label('recoveryCheckpoint')}: {payload.stage_one_checkpoint_step ?? '—'} · PC: {payload.checkpoint_is_pc === null ? '—' : payload.checkpoint_is_pc}</p>
-      <p>Full fixed queue · {payload.normal_states} + {payload.recovery_states} states</p>
+      <p>Full fixed queue · {payload.placement_role_scope} · {payload.normal_states} + {payload.recovery_states} states</p>
       {#if payload.steps.length > 0}
         <h3>{label('recoveryTimeline')}</h3>
         <ol>
