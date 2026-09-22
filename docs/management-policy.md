@@ -80,12 +80,20 @@ hard containment starts only when the manager inherits a cgroup v2 with finite
 supervisor checks host pressure at the low frequency declared in the manifest
 and never changes worker count or retries an OOM with different resources.
 
-At low host memory, the supervisor writes a cooperative full-GC request and
-waits for the configured grace period. It records GC only if the child writes
-the matching acknowledgement. If the small physical or commit reserve remains
-unavailable, it terminates only the Clearra-owned tree with a typed fail-close
-reason. Start admission uses the smaller critical reserve rather than reserving
-an entire projected working set.
+At low host memory, the supervisor writes a uniquely identified cooperative
+full-GC request and waits for the configured grace period. It records GC only
+if the child acknowledges that exact request, action, protocol, and completion
+status. A recovered episode is cleared and rearmed, so a later pressure episode
+gets a new request rather than inheriting a stale acknowledgement. If the small
+physical or Windows commit reserve remains unavailable, it terminates only the
+Clearra-owned tree with a typed fail-close reason.
+
+Start admission checks only the smaller critical physical reserve and, on
+Windows, the critical commit reserve. `minimum_memory_mib` describes the
+profile's intended working set; it is not reserved or compared with momentary
+free memory at launch. A configured maximum is a stable process-tree hard cap.
+Only profiles without a configured maximum derive that cap from total physical
+or Windows commit capacity, never from the start snapshot's available bytes.
 
 Runtime receipts are written to the Clearra-owned platform state root and
 include the sanitized command, profile, admission values, observed peak,

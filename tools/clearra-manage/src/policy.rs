@@ -78,11 +78,13 @@ pub struct MemoryPressurePolicy {
     pub sample_interval_seconds: f64,
     pub recovery_grace_seconds: f64,
     pub physical_reserve_mib: u64,
+    pub physical_reserve_fraction: f64,
     pub commit_reserve_mib: u64,
+    pub commit_reserve_fraction: f64,
     pub critical_physical_reserve_mib: u64,
     pub critical_commit_reserve_mib: u64,
     pub cooperative_gc_protocol: String,
-    pub supervisor_full_gc: bool,
+    pub request_cooperative_full_gc: bool,
     pub require_ack_for_child_full_gc_claim: bool,
     pub automatic_retry: bool,
 }
@@ -259,7 +261,21 @@ impl Policy {
         if self.runtime_policy.memory_pressure.automatic_retry {
             return Err(Error::policy("automatic OOM retry must remain disabled"));
         }
-        if !self.runtime_policy.memory_pressure.supervisor_full_gc
+        let pressure = &self.runtime_policy.memory_pressure;
+        if pressure.sample_interval_seconds <= 0.0
+            || !pressure.sample_interval_seconds.is_finite()
+            || pressure.recovery_grace_seconds < 0.0
+            || !pressure.recovery_grace_seconds.is_finite()
+            || !(0.0..=1.0).contains(&pressure.physical_reserve_fraction)
+            || !(0.0..=1.0).contains(&pressure.commit_reserve_fraction)
+            || pressure.physical_reserve_mib < pressure.critical_physical_reserve_mib
+            || pressure.commit_reserve_mib < pressure.critical_commit_reserve_mib
+        {
+            return Err(Error::policy(
+                "invalid memory-pressure timing or reserve fraction",
+            ));
+        }
+        if !pressure.request_cooperative_full_gc
             || !self
                 .runtime_policy
                 .memory_pressure

@@ -76,6 +76,14 @@ cooperative GC during host pressure, but records GC only when the child writes
 the matching acknowledgement. If the small recovery reserve remains
 unavailable, it fail-closes only the owned tree.
 
+Profile minimum memory is a declared working-set contract, not a start-time
+reservation. Start admission checks only the small critical physical reserve
+and, on Windows, the critical commit reserve. A configured maximum remains a
+stable process-tree hard limit and must not be reduced from the momentary free
+memory snapshot. External-process growth is handled by low-frequency runtime
+pressure checks; each new pressure episode gets a fresh full-GC request and an
+exact matching acknowledgement before GC completion is recorded.
+
 Do not silently reduce requested worker counts. Solver hot paths remain free of
 supervisor code; containment belongs at the outer process boundary.
 

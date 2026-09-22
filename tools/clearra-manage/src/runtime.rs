@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::policy::{Policy, ResourceProfile};
+use crate::policy::{MemoryPressurePolicy, Policy, ResourceProfile};
 use crate::storage;
 use crate::{Error, Result};
 
@@ -29,10 +29,46 @@ pub struct MemorySnapshot {
 pub struct Admission {
     pub profile: String,
     pub minimum_bytes: u64,
+    pub maximum_bytes: Option<u64>,
     pub hard_limit_bytes: u64,
+    pub capacity_basis: String,
+    pub start_admission_mode: String,
+    pub physical_pressure_reserve_bytes: u64,
+    pub commit_pressure_reserve_bytes: Option<u64>,
     pub critical_physical_reserve_bytes: u64,
-    pub critical_commit_reserve_bytes: u64,
+    pub critical_commit_reserve_bytes: Option<u64>,
     pub snapshot: MemorySnapshot,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct MemoryPressureStatus {
+    pub physical_reserve_bytes: u64,
+    pub commit_reserve_bytes: Option<u64>,
+    pub critical_physical_reserve_bytes: u64,
+    pub critical_commit_reserve_bytes: Option<u64>,
+    pub physical_low: bool,
+    pub commit_low: bool,
+    pub critical: bool,
+}
+
+impl MemoryPressureStatus {
+    fn under_pressure(self) -> bool {
+        self.physical_low || self.commit_low
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HostMemoryModel {
+    WindowsCommit,
+    Physical,
+}
+
+fn host_memory_model() -> HostMemoryModel {
+    if cfg!(windows) {
+        HostMemoryModel::WindowsCommit
+    } else {
+        HostMemoryModel::Physical
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -66,12 +102,24 @@ pub struct RunOutcome {
     pub memory_pressure_observed: bool,
     pub gc_request_written: bool,
     pub gc_acknowledged: bool,
+    pub memory_pressure_events: u64,
+    pub memory_pressure_recoveries: u64,
+    pub cooperative_gc_requests: u64,
+    pub cooperative_gc_acknowledgements: u64,
+    pub memory_pressure_checks: u64,
+    pub last_memory_pressure_snapshot: Option<MemorySnapshot>,
+    pub last_memory_pressure_status: Option<MemoryPressureStatus>,
     pub automatic_retry: bool,
     pub receipt: PathBuf,
 }
 
 pub fn audit(repository: &Path, policy: &Policy) -> Result<serde_json::Value> {
     let snapshot = memory_snapshot()?;
+    let pressure = memory_pressure_status(
+        &policy.runtime_policy.memory_pressure,
+        snapshot,
+        host_memory_model(),
+    );
     let profiles = policy
         .resource_profiles
         .keys()
@@ -90,6 +138,7 @@ pub fn audit(repository: &Path, policy: &Policy) -> Result<serde_json::Value> {
         "schema_id": "clearra.runtime-audit.v2",
         "repository": repository,
         "snapshot": snapshot,
+        "memory_pressure": pressure,
         "profiles": profiles,
         "scope": ["process-memory", "process-tree", "timeout", "output-limit", "wsl-lifecycle"],
         "excluded_scope": ["git", "filesystem-reading", "dependency-management", "toolchain-installation", "package-publishing", "general-process-registration"],
@@ -103,41 +152,171 @@ pub fn calculate_admission(
 ) -> Result<Admission> {
     let profile = policy.profile(profile_name)?;
     let pressure = &policy.runtime_policy.memory_pressure;
-    let critical_physical = pressure.critical_physical_reserve_mib * MIB;
-    let critical_commit = pressure.critical_commit_reserve_mib * MIB;
-    if snapshot.physical_available_bytes < critical_physical
-        || snapshot.commit_available_bytes < critical_commit
-    {
-        return Err(Error::runtime(
-            "E_CLEARRA_MEMORY_ADMISSION_DENIED: critical host reserve is unavailable",
-        ));
+    calculate_admission_for_profile(
+        profile_name,
+        profile,
+        pressure,
+        snapshot,
+        host_memory_model(),
+    )
+}
+
+fn calculate_admission_for_profile(
+    profile_name: &str,
+    profile: &ResourceProfile,
+    pressure: &MemoryPressurePolicy,
+    snapshot: MemorySnapshot,
+    model: HostMemoryModel,
+) -> Result<Admission> {
+    let status = memory_pressure_status(pressure, snapshot, model);
+    let mut reasons = Vec::new();
+    if snapshot.physical_available_bytes < status.critical_physical_reserve_bytes {
+        reasons.push("physical-available");
     }
-    let physical_cap = snapshot
-        .physical_total_bytes
-        .saturating_sub(pressure.physical_reserve_mib * MIB);
-    let commit_cap = snapshot
-        .commit_limit_bytes
-        .saturating_sub(pressure.commit_reserve_mib * MIB);
-    let dynamic_cap = physical_cap.min(commit_cap);
-    let hard_limit = profile
-        .maximum_memory_mib
-        .map(|value| value * MIB)
-        .unwrap_or(dynamic_cap)
-        .min(dynamic_cap);
+    if status
+        .critical_commit_reserve_bytes
+        .is_some_and(|reserve| snapshot.commit_available_bytes < reserve)
+    {
+        reasons.push("commit-available");
+    }
+    if !reasons.is_empty() {
+        return Err(Error::runtime(format!(
+            "E_CLEARRA_MEMORY_ADMISSION_DENIED: profile={profile_name} start_admission=critical-reserve reasons={} available_bytes={} critical_physical_reserve_bytes={} commit_available_bytes={} critical_commit_reserve_bytes={:?}",
+            reasons.join(","),
+            snapshot.physical_available_bytes,
+            status.critical_physical_reserve_bytes,
+            snapshot.commit_available_bytes,
+            status.critical_commit_reserve_bytes,
+        )));
+    }
+
     let minimum = profile.minimum_memory_mib * MIB;
+    let maximum = profile.maximum_memory_mib.map(|value| value * MIB);
+    // A configured maximum is a stable process-tree bound. It is not a
+    // reservation from the start snapshot: external processes can change the
+    // available memory immediately after launch, so host pressure is handled
+    // continuously below instead.
+    let hard_limit = maximum.unwrap_or_else(|| match model {
+        HostMemoryModel::WindowsCommit => snapshot
+            .commit_limit_bytes
+            .saturating_sub(status.commit_reserve_bytes.unwrap_or(0)),
+        HostMemoryModel::Physical => snapshot
+            .physical_total_bytes
+            .saturating_sub(status.physical_reserve_bytes),
+    });
     if hard_limit < minimum {
         return Err(Error::runtime(format!(
-            "E_CLEARRA_MEMORY_ADMISSION_DENIED: profile {profile_name} requires {minimum} bytes but only {hard_limit} bytes can be bounded safely"
+            "E_CLEARRA_MEMORY_ADMISSION_DENIED: profile={profile_name} declared_minimum_bytes={minimum} stable_capacity_bytes={hard_limit}"
         )));
     }
     Ok(Admission {
         profile: profile_name.to_owned(),
         minimum_bytes: minimum,
+        maximum_bytes: maximum,
         hard_limit_bytes: hard_limit,
-        critical_physical_reserve_bytes: critical_physical,
-        critical_commit_reserve_bytes: critical_commit,
+        capacity_basis: "runtime-pressure".to_owned(),
+        start_admission_mode: "critical-reserve".to_owned(),
+        physical_pressure_reserve_bytes: status.physical_reserve_bytes,
+        commit_pressure_reserve_bytes: status.commit_reserve_bytes,
+        critical_physical_reserve_bytes: status.critical_physical_reserve_bytes,
+        critical_commit_reserve_bytes: status.critical_commit_reserve_bytes,
         snapshot,
     })
+}
+
+fn reserve_from_floor_and_fraction(total: u64, floor_mib: u64, fraction: f64) -> u64 {
+    let proportional = ((total as f64) * fraction).floor() as u64;
+    (floor_mib * MIB).max(proportional)
+}
+
+fn memory_pressure_status(
+    pressure: &MemoryPressurePolicy,
+    snapshot: MemorySnapshot,
+    model: HostMemoryModel,
+) -> MemoryPressureStatus {
+    let physical_reserve = reserve_from_floor_and_fraction(
+        snapshot.physical_total_bytes,
+        pressure.physical_reserve_mib,
+        pressure.physical_reserve_fraction,
+    );
+    let critical_physical = pressure.critical_physical_reserve_mib * MIB;
+    let (commit_reserve, critical_commit) = match model {
+        HostMemoryModel::WindowsCommit => (
+            Some(reserve_from_floor_and_fraction(
+                snapshot.commit_limit_bytes,
+                pressure.commit_reserve_mib,
+                pressure.commit_reserve_fraction,
+            )),
+            Some(pressure.critical_commit_reserve_mib * MIB),
+        ),
+        HostMemoryModel::Physical => (None, None),
+    };
+    let physical_low = snapshot.physical_available_bytes < physical_reserve;
+    let commit_low =
+        commit_reserve.is_some_and(|reserve| snapshot.commit_available_bytes < reserve);
+    let critical = snapshot.physical_available_bytes < critical_physical
+        || critical_commit.is_some_and(|reserve| snapshot.commit_available_bytes < reserve);
+    MemoryPressureStatus {
+        physical_reserve_bytes: physical_reserve,
+        commit_reserve_bytes: commit_reserve,
+        critical_physical_reserve_bytes: critical_physical,
+        critical_commit_reserve_bytes: critical_commit,
+        physical_low,
+        commit_low,
+        critical,
+    }
+}
+
+fn reset_gc_channel(request: &Path, acknowledgement: &Path) {
+    let _ = fs::remove_file(request);
+    let _ = fs::remove_file(acknowledgement);
+}
+
+fn write_gc_request(
+    request: &Path,
+    acknowledgement: &Path,
+    protocol: &str,
+    request_id: &str,
+    child_pid: u32,
+) -> Result<()> {
+    reset_gc_channel(request, acknowledgement);
+    let temporary = request.with_extension("request.tmp");
+    let payload = json!({
+        "schema_id": protocol,
+        "request_id": request_id,
+        "action": "full-gc",
+        "child_pid": child_pid,
+    });
+    fs::write(
+        &temporary,
+        serde_json::to_vec(&payload)
+            .map_err(|error| Error::runtime(format!("serialize GC request: {error}")))?,
+    )
+    .map_err(|error| Error::io("write cooperative GC request", error))?;
+    if let Err(error) = fs::rename(&temporary, request) {
+        let _ = fs::remove_file(&temporary);
+        return Err(Error::io("publish cooperative GC request", error));
+    }
+    Ok(())
+}
+
+fn gc_acknowledged(acknowledgement: &Path, protocol: &str, request_id: &str) -> bool {
+    let Ok(metadata) = fs::metadata(acknowledgement) else {
+        return false;
+    };
+    if metadata.len() > 16 * 1024 {
+        return false;
+    }
+    let Ok(contents) = fs::read(acknowledgement) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    value.get("schema_id").and_then(|value| value.as_str()) == Some(protocol)
+        && value.get("request_id").and_then(|value| value.as_str()) == Some(request_id)
+        && value.get("action").and_then(|value| value.as_str()) == Some("full-gc")
+        && value.get("status").and_then(|value| value.as_str()) == Some("completed")
 }
 
 pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<RunOutcome> {
@@ -207,6 +386,15 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         .env("CLEARRA_RUNTIME_GC_REQUEST_PATH", &gc_request)
         .env("CLEARRA_RUNTIME_GC_ACK_PATH", &gc_ack)
         .env(
+            "CLEARRA_MEMORY_PRESSURE_PROTOCOL",
+            &policy
+                .runtime_policy
+                .memory_pressure
+                .cooperative_gc_protocol,
+        )
+        .env("CLEARRA_MEMORY_PRESSURE_REQUEST_PATH", &gc_request)
+        .env("CLEARRA_MEMORY_PRESSURE_ACK_PATH", &gc_ack)
+        .env(
             "CLEARRA_MANAGED_OUTPUT_ROOTS",
             storage::managed_roots_json(repository, policy)?,
         );
@@ -272,10 +460,21 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
             .sample_interval_seconds
             .max(0.25),
     );
-    let mut next_sample = Instant::now() + sample_interval;
+    // Observe once immediately after the child enters containment. Start
+    // admission only protects the smaller critical reserve; a non-critical
+    // pressure state must therefore request GC without waiting a full sample.
+    let mut next_sample = Instant::now();
     let mut pressure_seen = false;
-    let mut gc_written = false;
-    let mut gc_acknowledged = false;
+    let mut pressure_events = 0u64;
+    let mut pressure_recoveries = 0u64;
+    let mut gc_requests = 0u64;
+    let mut gc_acknowledgements = 0u64;
+    let mut pressure_checks = 0u64;
+    let mut last_pressure_snapshot = None;
+    let mut last_pressure_status = None;
+    let mut active_gc_request: Option<String> = None;
+    let mut active_gc_acknowledged = false;
+    let mut recovery_deadline: Option<Instant> = None;
     let mut observed_peak = 0u64;
     let mut forced_reason: Option<(&'static str, &'static str)> = None;
     let status: ExitStatus;
@@ -304,8 +503,10 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
                 .map_err(|error| Error::io("wait after timeout", error))?;
             break;
         }
-        if Instant::now() >= next_sample {
-            next_sample += sample_interval;
+        let now = Instant::now();
+        let pressure_due = recovery_deadline.is_some_and(|deadline| now >= deadline);
+        if now >= next_sample || pressure_due {
+            next_sample = now + sample_interval;
             if let Some(current) = containment.current_memory_bytes() {
                 observed_peak = observed_peak.max(current);
                 if current > admission.hard_limit_bytes {
@@ -328,26 +529,74 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
                     .map_err(|error| Error::io("wait after process limit", error))?;
                 break;
             }
-            let current = memory_snapshot()?;
-            let pressure = &policy.runtime_policy.memory_pressure;
-            let physical_low =
-                current.physical_available_bytes < pressure.physical_reserve_mib * MIB;
-            let commit_low = current.commit_available_bytes < pressure.commit_reserve_mib * MIB;
-            if physical_low || commit_low {
-                pressure_seen = true;
-                if !gc_written {
-                    fs::write(&gc_request, b"clearra.memory-pressure.v1\n")
-                        .map_err(|error| Error::io("write cooperative GC request", error))?;
-                    gc_written = true;
+            let current = match memory_snapshot() {
+                Ok(value) => value,
+                Err(_) => {
+                    forced_reason = Some((
+                        "memory-pressure-observer",
+                        "E_CLEARRA_MEMORY_PRESSURE_OBSERVER_FAILED",
+                    ));
+                    terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+                    status = child.wait().map_err(|error| {
+                        Error::io("wait after memory-pressure observer failure", error)
+                    })?;
+                    break;
                 }
-                thread::sleep(Duration::from_secs_f64(
-                    pressure.recovery_grace_seconds.max(0.0),
-                ));
-                gc_acknowledged |= gc_ack.is_file();
-                let recovered = memory_snapshot()?;
-                if recovered.physical_available_bytes < pressure.physical_reserve_mib * MIB
-                    || recovered.commit_available_bytes < pressure.commit_reserve_mib * MIB
+            };
+            let pressure = &policy.runtime_policy.memory_pressure;
+            let observation = memory_pressure_status(pressure, current, host_memory_model());
+            pressure_checks += 1;
+            last_pressure_snapshot = Some(current);
+            last_pressure_status = Some(observation);
+
+            if let Some(request_id) = active_gc_request.as_deref() {
+                if !active_gc_acknowledged
+                    && gc_acknowledged(&gc_ack, &pressure.cooperative_gc_protocol, request_id)
                 {
+                    active_gc_acknowledged = true;
+                    gc_acknowledgements += 1;
+                }
+            }
+
+            if !observation.under_pressure() {
+                if active_gc_request.take().is_some() {
+                    pressure_recoveries += 1;
+                    active_gc_acknowledged = false;
+                    recovery_deadline = None;
+                    reset_gc_channel(&gc_request, &gc_ack);
+                }
+            } else {
+                pressure_seen = true;
+                if active_gc_request.is_none() {
+                    pressure_events += 1;
+                    let request_number = gc_requests + 1;
+                    let request_id = format!("{run_id}-{request_number}");
+                    if write_gc_request(
+                        &gc_request,
+                        &gc_ack,
+                        &pressure.cooperative_gc_protocol,
+                        &request_id,
+                        child.id(),
+                    )
+                    .is_err()
+                    {
+                        forced_reason = Some((
+                            "gc-request-failed",
+                            "E_CLEARRA_MEMORY_PRESSURE_GC_REQUEST_FAILED",
+                        ));
+                        terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+                        status = child.wait().map_err(|error| {
+                            Error::io("wait after cooperative GC request failure", error)
+                        })?;
+                        break;
+                    }
+                    gc_requests = request_number;
+                    active_gc_request = Some(request_id);
+                    active_gc_acknowledged = false;
+                    recovery_deadline = Some(
+                        now + Duration::from_secs_f64(pressure.recovery_grace_seconds.max(0.0)),
+                    );
+                } else if recovery_deadline.is_some_and(|deadline| now >= deadline) {
                     forced_reason =
                         Some(("memory-pressure", "E_CLEARRA_MEMORY_PRESSURE_FAIL_CLOSE"));
                     terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
@@ -419,8 +668,15 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         process_tree_stopped: tree_stopped,
         admission,
         memory_pressure_observed: pressure_seen,
-        gc_request_written: gc_written,
-        gc_acknowledged,
+        gc_request_written: gc_requests > 0,
+        gc_acknowledged: gc_acknowledgements > 0,
+        memory_pressure_events: pressure_events,
+        memory_pressure_recoveries: pressure_recoveries,
+        cooperative_gc_requests: gc_requests,
+        cooperative_gc_acknowledgements: gc_acknowledgements,
+        memory_pressure_checks: pressure_checks,
+        last_memory_pressure_snapshot: last_pressure_snapshot,
+        last_memory_pressure_status: last_pressure_status,
         automatic_retry: false,
         receipt: receipt.clone(),
     };
@@ -436,8 +692,7 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
             .map_err(|error| Error::runtime(format!("serialize receipt: {error}")))?,
     )
     .map_err(|error| Error::io("write runtime receipt", error))?;
-    let _ = fs::remove_file(gc_request);
-    let _ = fs::remove_file(gc_ack);
+    reset_gc_channel(&gc_request, &gc_ack);
     Ok(outcome)
 }
 
@@ -1004,6 +1259,32 @@ mod tests {
         }
     }
 
+    fn pressure() -> MemoryPressurePolicy {
+        MemoryPressurePolicy {
+            sample_interval_seconds: 2.0,
+            recovery_grace_seconds: 2.0,
+            physical_reserve_mib: 512,
+            physical_reserve_fraction: 0.03125,
+            commit_reserve_mib: 1024,
+            commit_reserve_fraction: 0.03125,
+            critical_physical_reserve_mib: 128,
+            critical_commit_reserve_mib: 256,
+            cooperative_gc_protocol: "clearra.memory-pressure.v1".to_owned(),
+            request_cooperative_full_gc: true,
+            require_ack_for_child_full_gc_claim: true,
+            automatic_retry: false,
+        }
+    }
+
+    fn snapshot(physical_available_mib: u64, commit_available_mib: u64) -> MemorySnapshot {
+        MemorySnapshot {
+            physical_total_bytes: 16 * 1024 * MIB,
+            physical_available_bytes: physical_available_mib * MIB,
+            commit_limit_bytes: 32 * 1024 * MIB,
+            commit_available_bytes: commit_available_mib * MIB,
+        }
+    }
+
     #[test]
     fn redaction_does_not_record_secret_values() {
         let values = vec![
@@ -1026,6 +1307,145 @@ mod tests {
     #[test]
     fn resource_profile_fixture_retains_no_retry() {
         assert_eq!(profile().oom_policy, "fail-no-retry");
+    }
+
+    #[test]
+    fn startup_does_not_reserve_the_declared_working_set() {
+        let mut build = profile();
+        build.minimum_memory_mib = 3072;
+        build.maximum_memory_mib = Some(6144);
+        let admission = calculate_admission_for_profile(
+            "build-test",
+            &build,
+            &pressure(),
+            snapshot(768, 2048),
+            HostMemoryModel::WindowsCommit,
+        )
+        .expect("critical reserves are enough to start");
+
+        assert_eq!(admission.minimum_bytes, 3072 * MIB);
+        assert_eq!(admission.hard_limit_bytes, 6144 * MIB);
+        assert_eq!(admission.start_admission_mode, "critical-reserve");
+        assert_eq!(admission.capacity_basis, "runtime-pressure");
+    }
+
+    #[test]
+    fn startup_rejects_only_a_missing_critical_reserve() {
+        let error = calculate_admission_for_profile(
+            "control",
+            &profile(),
+            &pressure(),
+            snapshot(127, 4096),
+            HostMemoryModel::WindowsCommit,
+        )
+        .expect_err("physical critical reserve must remain available");
+        assert!(error
+            .to_string()
+            .contains("E_CLEARRA_MEMORY_ADMISSION_DENIED"));
+
+        let error = calculate_admission_for_profile(
+            "control",
+            &profile(),
+            &pressure(),
+            snapshot(4096, 255),
+            HostMemoryModel::WindowsCommit,
+        )
+        .expect_err("commit critical reserve must remain available");
+        assert!(error.to_string().contains("commit-available"));
+    }
+
+    #[test]
+    fn unbounded_limit_uses_stable_capacity_instead_of_start_availability() {
+        let mut benchmark = profile();
+        benchmark.minimum_memory_mib = 4096;
+        benchmark.maximum_memory_mib = None;
+        let windows = calculate_admission_for_profile(
+            "benchmark-search",
+            &benchmark,
+            &pressure(),
+            snapshot(768, 2048),
+            HostMemoryModel::WindowsCommit,
+        )
+        .expect("Windows commit capacity is stable");
+        assert_eq!(windows.hard_limit_bytes, 31 * 1024 * MIB);
+
+        let physical = calculate_admission_for_profile(
+            "benchmark-search",
+            &benchmark,
+            &pressure(),
+            snapshot(768, 2048),
+            HostMemoryModel::Physical,
+        )
+        .expect("physical capacity is stable");
+        assert_eq!(physical.hard_limit_bytes, 15_872 * MIB);
+    }
+
+    #[test]
+    fn pressure_reserve_honors_the_fraction_floor() {
+        let large = MemorySnapshot {
+            physical_total_bytes: 64 * 1024 * MIB,
+            physical_available_bytes: 4096 * MIB,
+            commit_limit_bytes: 64 * 1024 * MIB,
+            commit_available_bytes: 4096 * MIB,
+        };
+        let status = memory_pressure_status(&pressure(), large, HostMemoryModel::WindowsCommit);
+        assert_eq!(status.physical_reserve_bytes, 2048 * MIB);
+        assert_eq!(status.commit_reserve_bytes, Some(2048 * MIB));
+        assert!(!status.under_pressure());
+    }
+
+    #[test]
+    fn full_gc_acknowledgement_must_match_the_request() {
+        let root = state_root()
+            .expect("resolve managed test state")
+            .join("tests")
+            .join(format!("clearra-gc-{}", run_id()));
+        fs::create_dir_all(&root).expect("create fixture root");
+        let request = root.join("request.json");
+        let acknowledgement = root.join("ack.json");
+        write_gc_request(
+            &request,
+            &acknowledgement,
+            "clearra.memory-pressure.v1",
+            "expected",
+            42,
+        )
+        .expect("write request");
+        fs::write(
+            &acknowledgement,
+            br#"{"schema_id":"clearra.memory-pressure.v1","request_id":"wrong","action":"full-gc","status":"completed"}"#,
+        )
+        .expect("write wrong acknowledgement");
+        assert!(!gc_acknowledged(
+            &acknowledgement,
+            "clearra.memory-pressure.v1",
+            "expected"
+        ));
+        fs::write(
+            &acknowledgement,
+            br#"{"schema_id":"clearra.memory-pressure.v1","request_id":"expected","action":"full-gc","status":"completed"}"#,
+        )
+        .expect("write matching acknowledgement");
+        assert!(gc_acknowledged(
+            &acknowledgement,
+            "clearra.memory-pressure.v1",
+            "expected"
+        ));
+        write_gc_request(
+            &request,
+            &acknowledgement,
+            "clearra.memory-pressure.v1",
+            "second",
+            42,
+        )
+        .expect("rearm the pressure channel");
+        assert!(!gc_acknowledged(
+            &acknowledgement,
+            "clearra.memory-pressure.v1",
+            "second"
+        ));
+        reset_gc_channel(&request, &acknowledgement);
+        let _ = fs::remove_dir(root);
     }
 
     #[cfg(target_os = "linux")]

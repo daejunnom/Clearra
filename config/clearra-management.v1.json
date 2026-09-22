@@ -444,7 +444,7 @@
       "critical_physical_reserve_mib": 128,
       "critical_commit_reserve_mib": 256,
       "cooperative_gc_protocol": "clearra.memory-pressure.v1",
-      "supervisor_full_gc": true,
+      "request_cooperative_full_gc": true,
       "require_ack_for_child_full_gc_claim": true,
       "automatic_retry": false
     },
