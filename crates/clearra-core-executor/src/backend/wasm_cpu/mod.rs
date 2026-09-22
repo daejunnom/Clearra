@@ -73,7 +73,9 @@ pub use pc4_graph_materializer::{
     enumerate_pc4_ilc_target_fields, materialize_pc4_ilc_transition, Pc4IlcMaterializationError,
     Pc4IlcPlacement,
 };
-pub(crate) use reachability::{DocumentLockReachability, DocumentReachabilityEngine};
+pub(crate) use reachability::{
+    exact_spawn_lock_anchors, DocumentLockReachability, DocumentReachabilityEngine,
+};
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
 pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
 #[cfg(not(target_family = "wasm"))]

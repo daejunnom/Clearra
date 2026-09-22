@@ -20,6 +20,8 @@ const DEPENDENCY_RELAXATION: u8 = 1 << 2;
 #[cfg(feature = "local-search-ab")]
 const LEGAL_BOARD: u8 = 1 << 3;
 #[cfg(feature = "local-search-ab")]
+const CONDITIONED_REACHABILITY: u8 = 1 << 4;
+#[cfg(feature = "local-search-ab")]
 const PRODUCT_BITS: u8 = ADDITIVE_PARITY | APDP;
 
 #[cfg(feature = "local-search-ab")]
@@ -35,6 +37,7 @@ pub struct LocalSearchPrunePolicy {
     pub apdp: bool,
     pub dependency_relaxation: bool,
     pub legal_board: bool,
+    pub conditioned_reachability: bool,
 }
 
 #[cfg(feature = "local-search-ab")]
@@ -45,6 +48,7 @@ impl LocalSearchPrunePolicy {
             apdp: true,
             dependency_relaxation: false,
             legal_board: false,
+            conditioned_reachability: false,
         }
     }
 
@@ -54,6 +58,7 @@ impl LocalSearchPrunePolicy {
             apdp,
             dependency_relaxation,
             legal_board: false,
+            conditioned_reachability: false,
         }
     }
 
@@ -62,11 +67,17 @@ impl LocalSearchPrunePolicy {
         self
     }
 
+    pub const fn with_conditioned_reachability(mut self, enabled: bool) -> Self {
+        self.conditioned_reachability = enabled;
+        self
+    }
+
     const fn bits(self) -> u8 {
         (self.additive_parity as u8) * ADDITIVE_PARITY
             | (self.apdp as u8) * APDP
             | (self.dependency_relaxation as u8) * DEPENDENCY_RELAXATION
             | (self.legal_board as u8) * LEGAL_BOARD
+            | (self.conditioned_reachability as u8) * CONDITIONED_REACHABILITY
     }
 
     const fn from_bits(bits: u8) -> Self {
@@ -75,6 +86,7 @@ impl LocalSearchPrunePolicy {
             apdp: bits & APDP != 0,
             dependency_relaxation: bits & DEPENDENCY_RELAXATION != 0,
             legal_board: bits & LEGAL_BOARD != 0,
+            conditioned_reachability: bits & CONDITIONED_REACHABILITY != 0,
         }
     }
 }
@@ -162,6 +174,18 @@ pub(crate) fn dependency_relaxation_enabled() -> bool {
     #[cfg(not(feature = "local-search-ab"))]
     {
         false
+    }
+}
+
+#[inline(always)]
+pub(crate) fn conditioned_reachability_enabled() -> bool {
+    #[cfg(feature = "local-search-ab")]
+    {
+        return LOCAL_POLICY.load(Ordering::Relaxed) & CONDITIONED_REACHABILITY != 0;
+    }
+    #[cfg(not(feature = "local-search-ab"))]
+    {
+        true
     }
 }
 

@@ -672,7 +672,9 @@ impl ReachabilityWorkspace {
             self.templates = std::array::from_fn(|_| None);
             self.cache = ReachabilityCache::default();
         }
-        self.conditioned = conditioned_reachability_snapshot(profile_id);
+        self.conditioned = crate::search_prune_policy::conditioned_reachability_enabled()
+            .then(|| conditioned_reachability_snapshot(profile_id))
+            .flatten();
         self.conditioned_epoch = epoch;
     }
 
@@ -702,6 +704,26 @@ impl ReachabilityWorkspace {
             ReachabilityTemplate::compile(catalog.width(), catalog.height(), piece, profile_id)
         })
     }
+}
+
+pub(crate) fn exact_spawn_lock_anchors(
+    width: u8,
+    height: u8,
+    board: u64,
+    piece: PieceKind,
+    profile_id: KickTableProfileId,
+) -> Option<[u64; 4]> {
+    if width != 10
+        || !(1..=6).contains(&height)
+        || board >> (u32::from(width) * u32::from(height)) != 0
+        || builtin_kick_profile(profile_id).is_none()
+    {
+        return None;
+    }
+    let template = ReachabilityTemplate::compile(width, height, piece, profile_id);
+    let mut scratch = ReachabilityScratch::default();
+    let result = search_reachable_locks(&template, board, &mut scratch, None);
+    result.exhaustive.then_some(result.locks.anchors)
 }
 
 fn anchors_contain(anchors: [u64; 4], width: u8, rotation: RotationState, x: i8, y: i8) -> bool {

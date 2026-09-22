@@ -114,12 +114,13 @@ impl QualifiedBoardConditionedReachability {
         pack: BoardConditionedReachability,
         authority: &VerifiedAcceleratorAuthority,
     ) -> Result<Self, ConditionedReachabilityAssetError> {
+        let payload_identity: [u8; 32] = Sha256::digest(&*pack.bytes).into();
         if authority.product() != AcceleratorProduct::BoardConditionedReachability
             || authority.profile() != pack.binding.kick_profile.as_str()
             || authority.generation_identity() != pack.generation_identity
             || authority.rule_identity() != pack.binding.rule_identity
             || authority.payload_bytes() != pack.bytes.len() as u64
-            || authority.payload_identity() != Sha256::digest(&*pack.bytes).into()
+            || authority.payload_identity() != payload_identity
             || authority.completeness_scope() != CONDITIONED_REACHABILITY_COMPLETENESS_SCOPE
             || authority.statement_identity() == [0; 32]
             || authority.qualification_identity() == [0; 32]
@@ -304,6 +305,29 @@ pub fn built_in_conditioned_reachability_binding(
     Ok(ConditionedReachabilityBinding {
         kick_profile,
         rule_identity,
+    })
+}
+
+/// Deterministic producer primitive for one exact sparse-cache record.  This
+/// performs the same exhaustive spawn-to-lock traversal used by the fallback;
+/// qualification must still compare the resulting pack with an independent
+/// primitive reference before signing it.
+pub fn derive_exact_conditioned_reachability_record(
+    width: u8,
+    height: u8,
+    board: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+) -> Result<ConditionedReachabilityRecord, ConditionedReachabilityAssetError> {
+    let reachable_lock_anchors =
+        crate::backend::exact_spawn_lock_anchors(width, height, board, piece, kick_profile)
+            .ok_or(ConditionedReachabilityAssetError::Record)?;
+    Ok(ConditionedReachabilityRecord {
+        width,
+        height,
+        board,
+        piece,
+        reachable_lock_anchors,
     })
 }
 

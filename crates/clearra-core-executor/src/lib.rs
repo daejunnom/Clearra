@@ -63,12 +63,13 @@ pub use clearra_replay::{
     SpinCoverageExecutionGraph,
 };
 pub use conditioned_reachability::{
-    built_in_conditioned_reachability_binding, encode_conditioned_reachability,
-    install_conditioned_reachability_pack, remove_conditioned_reachability_pack,
-    BoardConditionedReachability, ConditionedReachabilityAssetError,
-    ConditionedReachabilityBinding, ConditionedReachabilityExpectation,
-    ConditionedReachabilityLookup, ConditionedReachabilityRecord,
-    QualifiedBoardConditionedReachability, CONDITIONED_REACHABILITY_COMPLETENESS_SCOPE,
+    built_in_conditioned_reachability_binding, derive_exact_conditioned_reachability_record,
+    encode_conditioned_reachability, install_conditioned_reachability_pack,
+    remove_conditioned_reachability_pack, BoardConditionedReachability,
+    ConditionedReachabilityAssetError, ConditionedReachabilityBinding,
+    ConditionedReachabilityExpectation, ConditionedReachabilityLookup,
+    ConditionedReachabilityRecord, QualifiedBoardConditionedReachability,
+    CONDITIONED_REACHABILITY_COMPLETENESS_SCOPE,
 };
 pub use core_execution_result::{
     CoreExecutionResult, CorePathStep, PcScoreDistributedMergeEvidence,

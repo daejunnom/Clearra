@@ -341,12 +341,13 @@ impl QualifiedExactLegalBoard {
         board: ExactLegalBoard,
         authority: &VerifiedAcceleratorAuthority,
     ) -> Result<Self, LegalBoardAssetError> {
+        let payload_identity: [u8; 32] = Sha256::digest(&*board.bytes).into();
         if authority.product() != AcceleratorProduct::ExactLegalBoard
             || authority.profile() != board.binding.kick_profile.as_str()
             || authority.generation_identity() != board.generation_identity
             || authority.rule_identity() != board.binding.rule_identity
             || authority.payload_bytes() != board.bytes.len() as u64
-            || authority.payload_identity() != Sha256::digest(&*board.bytes).into()
+            || authority.payload_identity() != payload_identity
             || authority.completeness_scope() != EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE
             || authority.statement_identity() == [0; 32]
             || authority.qualification_identity() == [0; 32]

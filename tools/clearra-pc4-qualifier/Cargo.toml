@@ -27,6 +27,11 @@ name = "clearra-pc4-legal-board"
 path = "src/bin/clearra-pc4-legal-board.rs"
 required-features = ["legal-board-assets"]
 
+[[bin]]
+name = "clearra-conditioned-reachability"
+path = "src/bin/clearra-conditioned-reachability.rs"
+required-features = ["legal-board-assets"]
+
 [dependencies]
 clearra-app = { path = "../../crates/clearra-app", features = ["online-pc4-tablebase", "parallel"], optional = true }
 clearra-core-domain = { path = "../../crates/clearra-core-domain" }
