@@ -153,6 +153,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clearra-accelerator-product-host"
+version = "0.8.1"
+dependencies = [
+ "clearra-accelerator-activation",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "clearra-app"
 version = "0.8.1"
 dependencies = [

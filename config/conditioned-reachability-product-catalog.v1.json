@@ -1,5 +1,5 @@
 {
-  "product": "exact-legal-board",
+  "product": "board-conditioned-reachability",
   "profiles": [
     { "activation_envelope_json": null, "metadata": null, "profile": "srs", "status": "not_qualified" },
     { "activation_envelope_json": null, "metadata": null, "profile": "srs-plus", "status": "not_qualified" },
@@ -7,5 +7,5 @@
     { "activation_envelope_json": null, "metadata": null, "profile": "jstris-180", "status": "not_qualified" },
     { "activation_envelope_json": null, "metadata": null, "profile": "no-kick", "status": "not_qualified" }
   ],
-  "schema": "clearra.legal-board.product-catalog.v1"
+  "schema": "clearra.conditioned-reachability.product-catalog.v1"
 }
