@@ -4,8 +4,9 @@
 // until the user presses Download.
 import { loadClearraWasmModule, type AcceleratorCatalogPlan } from './clearraWasmRuntime';
 import { acceleratorLocalStatus, removeLocalAccelerator, storeQualifiedAccelerator } from './acceleratorLocalStore';
+import { acceleratorAssetLocation } from './acceleratorAssetLocation';
 
-type Request = { action: 'status' | 'download' | 'remove' | 'cancel'; kind: number; profile: number };
+type Request = { action: 'status' | 'download' | 'remove' | 'cancel'; kind: number; profile: number; base: string };
 const PROFILES = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
 const PRODUCTS = ['exact-legal-board', 'board-conditioned-reachability'];
 const LIMITS = [64 * 1024 * 1024, 16 * 1024 * 1024];
@@ -48,11 +49,12 @@ async function planFor(request: Request) {
   return { wasm, plan };
 }
 
-async function download(plan: AcceleratorCatalogPlan, kind: number, profile: number, signal: AbortSignal) {
+async function download(plan: AcceleratorCatalogPlan, kind: number, profile: number, base: string, signal: AbortSignal) {
   if (plan.state !== 'qualified' || !plan.url || !plan.payload_bytes || !plan.payload_identity) {
     throw new Error('accelerator_not_qualified');
   }
-  const response = await fetch(plan.url, { signal, cache: 'no-store', redirect: 'follow' });
+  const location = acceleratorAssetLocation(plan, base, self.location.origin);
+  const response = await fetch(location, { signal, cache: 'no-store', redirect: 'error' });
   if (!response.ok || !response.body) throw new Error('accelerator_download_response_invalid');
   const length = response.headers.get('content-length');
   if (length !== null && Number(length) !== plan.payload_bytes) throw new Error('accelerator_download_size_mismatch');
@@ -110,7 +112,7 @@ self.onmessage = async ({ data }: MessageEvent<Request>) => {
           displayed.product !== plan.product || displayed.profile !== plan.profile ||
           displayed.catalog_identity !== plan.catalog_identity ||
           displayed.generation !== plan.generation) throw new Error('accelerator_download_check_required');
-      const result = await download(plan, data.kind, data.profile, controller.signal);
+      const result = await download(plan, data.kind, data.profile, data.base, controller.signal);
       postMessage({ type: 'installed', local: await acceleratorLocalStatus(expected.product, expected.profile, plan), ...result });
     } else throw new Error('accelerator_action_invalid');
   } catch (error) {

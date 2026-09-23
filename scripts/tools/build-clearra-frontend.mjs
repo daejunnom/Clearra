@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { enterManagedBuildOrRelaunch } from './clearra-build-policy.mjs';
-import { frontendPaths, stageFrontendPublicAssets, writeFrontendTypeForwarder } from './clearra-frontend-paths.mjs';
+import { frontendPaths, stageFrontendAcceleratorAssets, stageFrontendPublicAssets, writeFrontendTypeForwarder } from './clearra-frontend-paths.mjs';
 
 const self = fileURLToPath(import.meta.url);
 const sourceRoot = resolve(dirname(self), '..', '..');
@@ -39,6 +39,9 @@ export function frontendPlan(options, paths) {
   ];
   if (options.app === 'web' && !options.recovery) {
     commands.push({ kind: 'public-assets', arguments: [] });
+    // Release binaries remain outside Git source history. Stage only signed-
+    // catalogued bytes into the accepted Pages artifact, never into source.
+    if (options.task === 'build') commands.push({ kind: 'accelerator-assets', arguments: [] });
     commands.push({ kind: 'wasm', arguments: ['--environment', options.environment,
       '--destination', resolve(paths.publicDir, 'wasm')] });
   }
@@ -104,6 +107,7 @@ export async function main(args = process.argv.slice(2)) {
   if (options.app === 'web' && ['build', 'dev'].includes(options.task) && !options.recovery) environment.CLEARRA_WEB_PUBLIC_DIR = paths.publicDir;
   await executeFrontendPlan(frontendPlan(options, paths), {
     run: command => command.kind === 'public-assets' ? stageFrontendPublicAssets(paths)
+      : command.kind === 'accelerator-assets' ? stageFrontendAcceleratorAssets(paths)
       : runNode(scripts[command.kind], command.arguments, environment, paths.appRoot),
     afterSync: () => writeFrontendTypeForwarder(paths),
   });

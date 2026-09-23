@@ -22,6 +22,11 @@ on:
       - "scripts/tools/wsl-legal-board-generate.sh"
       - "scripts/tools/clearra-build-owner.mjs"
       - "scripts/tools/clearra-build-policy.test.mjs"
+      - "scripts/tools/build-clearra-frontend.mjs"
+      - "scripts/tools/build-clearra-frontend.test.mjs"
+      - "scripts/tools/clearra-frontend-paths.mjs"
+      - "scripts/release/accepted-pages-build.mjs"
+      - "scripts/release/accepted-pages-build.test.mjs"
       - "config/clearra-management.v1.json"
   workflow_dispatch:
 
@@ -128,7 +133,7 @@ jobs:
       - name: Install locked frontend dependencies without scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Verify build snapshot and generated-input exclusion
-        run: node --test scripts/tools/clearra-build-policy.test.mjs
+        run: node --test scripts/tools/clearra-build-policy.test.mjs scripts/tools/build-clearra-frontend.test.mjs scripts/release/accepted-pages-build.test.mjs
       - name: Verify Web worker types and contracts without building WASM
         run: node scripts/tools/build-clearra-frontend.mjs --app web --task test
   discord-immutable-compute-assets:

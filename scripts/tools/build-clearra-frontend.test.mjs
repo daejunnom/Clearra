@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { stat, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { frontendOptions, frontendPlan, executeFrontendPlan } from './build-clearra-frontend.mjs';
-import { frontendPaths, frontendUiSourceAliases } from './clearra-frontend-paths.mjs';
+import { fetchQualifiedFrontendAccelerator, frontendAcceleratorAssets,
+  frontendPaths, frontendUiSourceAliases } from './clearra-frontend-paths.mjs';
 import { validateManagedFrontendSource } from './validate-managed-frontend-source.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -55,7 +57,8 @@ test('web build, WSL build, dev, sync and tests keep one ordered owner payload',
     const options = frontendOptions(['--app', 'web', '--task', task, '--environment', 'wsl']);
     const plan = frontendPlan(options, paths);
     assert.deepEqual(plan.map(command => command.kind), task === 'build'
-      ? ['sync', 'public-assets', 'wasm', 'vite', 'fallback'] : ['sync', 'public-assets', 'wasm', 'vite']);
+      ? ['sync', 'public-assets', 'accelerator-assets', 'wasm', 'vite', 'fallback']
+      : ['sync', 'public-assets', 'wasm', 'vite']);
     assert.deepEqual(plan.find(command => command.kind === 'wasm').arguments,
       ['--environment', 'wsl', '--destination', resolve(paths.publicDir, 'wasm')]);
     const vite = plan.find(command => command.kind === 'vite').arguments;
@@ -87,6 +90,25 @@ test('the first audit page optimizes its linked-workspace runtime imports togeth
   assert.match(vite, /hmr: mode === 'local-recovery' \|\| mode === 'local-audit' \? false : undefined/u);
 });
 
+test('Pages mirrors only qualified profile assets and rejects changed Release bytes', async () => {
+  const assets = await frontendAcceleratorAssets(root);
+  assert.equal(assets.length, 5);
+  assert.deepEqual(new Set(assets.map(asset => asset.profile)),
+    new Set(['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']));
+  assert.ok(assets.every(asset => asset.product === 'board-conditioned-reachability' &&
+    asset.pathname === `/accel/cr/${asset.profile}/${asset.digest}.bin` &&
+    asset.pathname.length < 98));
+  const bytes = new TextEncoder().encode('exact-release-bytes');
+  const asset = { url: 'https://github.com/daejunnom/Clearra/releases/download/tag/asset.cllr',
+    bytes: bytes.length, digest: createHash('sha256').update(bytes).digest('hex') };
+  const fetcher = async () => new Response(bytes, { headers: { 'content-length': String(bytes.length) } });
+  assert.deepEqual(await fetchQualifiedFrontendAccelerator(asset, fetcher), bytes);
+  await assert.rejects(fetchQualifiedFrontendAccelerator({ ...asset, digest: '0'.repeat(64) }, fetcher),
+    /differs from signed source catalog/u);
+  await assert.rejects(fetchQualifiedFrontendAccelerator({ ...asset, bytes: bytes.length - 1 }, fetcher),
+    /size or status differs/u);
+});
+
 test('web and desktop bundle every declared UI export from original workspace source', async () => {
   const package_ = JSON.parse(await readFile(resolve(root, 'packages/clearra-ui/package.json'), 'utf8'));
   const aliases = frontendUiSourceAliases(root);
@@ -109,7 +131,7 @@ test('type forwarding follows successful sync and every failed payload stops lat
   const commands = frontendPlan(frontendOptions(['--app', 'web']), paths);
   const order = [];
   await executeFrontendPlan(commands, { run: async command => order.push(command.kind), afterSync: async () => order.push('types-forwarded') });
-  assert.deepEqual(order, ['sync', 'types-forwarded', 'public-assets', 'wasm', 'vite', 'fallback']);
+  assert.deepEqual(order, ['sync', 'types-forwarded', 'public-assets', 'accelerator-assets', 'wasm', 'vite', 'fallback']);
   for (const failure of commands.map(command => command.kind)) {
     const seen = [];
     await assert.rejects(executeFrontendPlan(commands, {

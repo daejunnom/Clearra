@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getContext, onDestroy } from 'svelte';
+  import { base } from '$app/paths';
   import type { WorkspaceLanguage } from '@clearra/ui/workspace';
   import {
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
@@ -58,12 +59,12 @@
   function act(action: 'status' | 'download' | 'remove' | 'cancel') {
     if (!worker || (busy && action !== 'cancel')) return;
     if (action !== 'cancel') { busy = true; message = ''; progress = 0; total = 0; }
-    worker.postMessage({ action, kind, profile });
+    worker.postMessage({ action, kind, profile, base });
   }
   function changedSelection() { plan = null; local = null; localInvalid = false; act('status'); }
   onDestroy(() => {
     destroyed = true;
-    if (busy) worker?.postMessage({ action: 'cancel', kind, profile });
+    if (busy) worker?.postMessage({ action: 'cancel', kind, profile, base });
     else { worker?.terminate(); worker = null; }
   });
 </script>
