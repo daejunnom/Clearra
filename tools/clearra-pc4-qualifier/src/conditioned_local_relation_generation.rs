@@ -32,14 +32,14 @@ pub struct ConditionedLocalRelationGenerationOptions {
     pub catalog: PathBuf,
 }
 
-struct Query {
-    width: u8,
-    height: u8,
-    board: u64,
-    frame: LocalRelationRowFrame,
-    piece: PieceKind,
-    window: ConditionedPoseWindow,
-    entries: Vec<ConditionedReachabilityEntryPose>,
+pub(crate) struct Query {
+    pub(crate) width: u8,
+    pub(crate) height: u8,
+    pub(crate) board: u64,
+    pub(crate) frame: LocalRelationRowFrame,
+    pub(crate) piece: PieceKind,
+    pub(crate) window: ConditionedPoseWindow,
+    pub(crate) entries: Vec<ConditionedReachabilityEntryPose>,
 }
 
 pub fn generate_conditioned_local_relation(
@@ -178,7 +178,7 @@ fn parse_queries(raw: &[u8], profile: KickTableProfileId) -> Result<Vec<Query>, 
     Ok(unique.into_values().collect())
 }
 
-fn parse_query(value: &Value) -> Result<Query, String> {
+pub(crate) fn parse_query(value: &Value) -> Result<Query, String> {
     let object = value.as_object().ok_or("query must be an object")?;
     if object.len() != 7 {
         return Err("query has unknown or missing fields".to_owned());
@@ -260,7 +260,7 @@ fn parse_query(value: &Value) -> Result<Query, String> {
     })
 }
 
-fn query_key(query: &Query) -> Vec<u8> {
+pub(crate) fn query_key(query: &Query) -> Vec<u8> {
     let mut key = vec![
         query.width,
         query.height,

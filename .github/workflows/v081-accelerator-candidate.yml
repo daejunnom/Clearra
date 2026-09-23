@@ -31,6 +31,7 @@ jobs:
         run: |
           cargo test --locked -p clearra-pc4-qualifier --lib candidate_queries_bind_profile_row_frame_and_independent_audit --no-default-features --features legal-board-assets
           cargo test --locked -p clearra-pc4-qualifier --lib candidate_producer_publishes_only_audited_immutable_files --no-default-features --features legal-board-assets
+          cargo test --locked -p clearra-pc4-qualifier --lib conditioned_local_coverage_proof --no-default-features --features legal-board-assets
           cargo test --locked -p clearra-pc4-qualifier --lib conditioned_local_pack_and_catalog_are_bound_but_unqualified --no-default-features --features legal-board-assets
           cargo test --locked -p clearra-cli --lib conditioned_reachability_assets --no-default-features
       - name: Verify final legal-board candidate and CLI status boundaries

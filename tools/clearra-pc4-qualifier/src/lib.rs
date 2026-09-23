@@ -2,13 +2,14 @@
 //!
 //! Product search never links these routines into a hot path. The native CLI
 //! exposes them only through explicit legal-board or reachability-pack
-//! candidate-generation requests.
+//! candidate-generation and bounded coverage-proof requests.
 
 // `domain.rs` is also compiled by the full qualification binary.  The small
 // reusable legal-board library intentionally consumes only the forward/legal
 // derivations, so the binary-only validation helpers are dead in this crate
 // compilation unit.
 mod conditioned_local_candidate_validation;
+mod conditioned_local_coverage_proof;
 mod conditioned_local_relation_generation;
 mod conditioned_reachability_generation;
 #[allow(dead_code)]
@@ -18,6 +19,9 @@ mod legal_board_generation;
 
 pub use conditioned_local_candidate_validation::{
     validate_conditioned_local_candidate_catalog, ConditionedLocalCandidateSummary,
+};
+pub use conditioned_local_coverage_proof::{
+    prove_conditioned_local_candidate_coverage, ConditionedLocalCoverageProofOptions,
 };
 pub use conditioned_local_relation_generation::{
     generate_conditioned_local_relation, structurally_valid_conditioned_local_candidate,

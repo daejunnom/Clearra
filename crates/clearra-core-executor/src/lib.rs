@@ -87,7 +87,10 @@ pub use conditioned_local_product::{
 };
 #[cfg(any(test, feature = "qualification-reference"))]
 pub use conditioned_local_qualification::{
-    audit_candidate_local_relation_pack, LocalRelationCandidateAuditError,
+    audit_candidate_local_relation_pack, audited_local_relation_candidate_pack,
+    prove_candidate_local_relation_context_coverage, AuditedLocalRelationCandidatePack,
+    LocalRelationCandidateAuditError, LocalRelationCoverageDomain, LocalRelationCoverageError,
+    LocalRelationCoverageResult,
 };
 pub use conditioned_local_relation::{
     derive_exact_conditioned_local_relation, derive_exact_conditioned_local_relation_with_frame,
