@@ -321,6 +321,9 @@ fn publish_exact_bundle(
     if legal_summaries[10].field_count != 1 {
         return Err("legal-board terminal is not the full four-line field".to_owned());
     }
+    // PC4DOM02 carries right-to-left row storage keys, already sorted in the
+    // exact order required by CLLB0002. Product Board64 masks are converted
+    // only at lookup; mirroring here would break the streaming sort order.
     let encoded = clearra_core_executor::encode_exact_legal_board_intersection_streaming(
         binding.legal_board_binding(),
         |layer, emit| {

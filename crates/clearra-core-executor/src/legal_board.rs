@@ -30,11 +30,12 @@ const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_ACTIVE_ACCELERATOR_BYTES: usize = 128 * 1024 * 1024;
 pub const EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE: &str =
     "empty-origin-10x4-four-lines-f-intersection-r";
-// A hot BuildUp subset may probe the same 4L bundle hundreds of millions of
-// times. Keep the immutable payload compact, but cap the per-probe delta walk
-// at sixteen values; the additional shared index is checked by the 128 MiB
-// active-session admission contract.
-const CHECKPOINT_STRIDE: u64 = 16;
+// Exact diagnostic membership uses sparse checkpoints. Product negative
+// pruning uses the no-false-negative filter below instead of walking deltas
+// for every BuildUp subset.
+const CHECKPOINT_STRIDE: u64 = 256;
+const NEGATIVE_FILTER_KEYS_PER_WORD: u64 = 8;
+const NEGATIVE_FILTER_MAX_WORDS: usize = 1 << 20;
 const EXACT_INTERSECTION_KIND: u8 = 1;
 const PROFILE_SLOTS: usize = 5;
 
@@ -342,6 +343,63 @@ struct Checkpoint {
 struct LayerIndex {
     directory: LayerDirectory,
     checkpoints: Vec<Checkpoint>,
+    negative_filter: NegativeFilter,
+}
+
+/// A per-layer blocked Bloom filter. A false positive merely keeps an
+/// otherwise impossible candidate on the ordinary exact path; a negative is
+/// a proof of absence from the already-authenticated complete layer.
+#[derive(Debug)]
+struct NegativeFilter {
+    words: Vec<u64>,
+}
+
+impl NegativeFilter {
+    fn new(expected_keys: u64) -> Result<Self, LegalBoardAssetError> {
+        let target_words = expected_keys
+            .div_ceil(NEGATIVE_FILTER_KEYS_PER_WORD)
+            .min(NEGATIVE_FILTER_MAX_WORDS as u64)
+            .max(1) as usize;
+        let word_count = target_words.next_power_of_two();
+        let mut words = Vec::new();
+        words
+            .try_reserve_exact(word_count)
+            .map_err(|_| LegalBoardAssetError::TooLarge)?;
+        words.resize(word_count, 0);
+        Ok(Self { words })
+    }
+
+    #[inline]
+    fn insert(&mut self, key: u64) {
+        let (word, mask) = self.location(key);
+        self.words[word] |= mask;
+    }
+
+    #[inline]
+    fn may_contain(&self, key: u64) -> bool {
+        let (word, mask) = self.location(key);
+        self.words[word] & mask == mask
+    }
+
+    #[inline]
+    fn location(&self, key: u64) -> (usize, u64) {
+        let hash = bloom_mix64(key);
+        let word = (hash as usize) & (self.words.len() - 1);
+        let mask = (1_u64 << ((hash >> 32) & 63))
+            | (1_u64 << ((hash >> 38) & 63))
+            | (1_u64 << ((hash >> 44) & 63))
+            | (1_u64 << ((hash >> 50) & 63));
+        (word, mask)
+    }
+}
+
+#[inline]
+fn bloom_mix64(mut key: u64) -> u64 {
+    key ^= key >> 30;
+    key = key.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    key ^= key >> 27;
+    key = key.wrapping_mul(0x94d0_49bb_1331_11eb);
+    key ^ (key >> 31)
 }
 
 /// Shared compressed owner. Clones share payload and sparse indices; no
@@ -406,6 +464,12 @@ impl QualifiedExactLegalBoard {
 
     pub fn decide(&self, query: LegalBoardQuery) -> LegalBoardDecision {
         self.board.decide(query)
+    }
+
+    /// Negative-only hot-path decision. Positive Bloom matches are passed to
+    /// the ordinary exact search, not treated as proof of membership.
+    pub fn decide_negative_only(&self, query: LegalBoardQuery) -> LegalBoardDecision {
+        self.board.decide_negative_only(query)
     }
 
     pub fn shared_bytes(&self) -> usize {
@@ -621,7 +685,10 @@ impl ExactLegalBoard {
     pub fn sparse_index_bytes(&self) -> usize {
         self.layers
             .iter()
-            .map(|layer| layer.checkpoints.capacity() * core::mem::size_of::<Checkpoint>())
+            .map(|layer| {
+                layer.checkpoints.capacity() * core::mem::size_of::<Checkpoint>()
+                    + layer.negative_filter.words.capacity() * core::mem::size_of::<u64>()
+            })
             .sum()
     }
 
@@ -633,39 +700,58 @@ impl ExactLegalBoard {
         self.layers.get(layer).map(|value| value.directory.digest)
     }
 
-    pub fn decide(&self, query: LegalBoardQuery) -> LegalBoardDecision {
+    fn scoped_storage_key(&self, query: LegalBoardQuery) -> Result<(usize, u64), ProviderStatus> {
         if query.width != 10
             || query.height != 4
             || query.initial_board != 0
             || query.placed_piece_count >= LAYER_COUNT
             || query.completion != CompletionCapability::ClearToEmpty
         {
-            return LegalBoardDecision::PassThrough(ProviderStatus::OutOfScope);
+            return Err(ProviderStatus::OutOfScope);
         }
         if query.kick_profile != self.binding.kick_profile {
-            return LegalBoardDecision::PassThrough(ProviderStatus::SnapshotMismatch);
+            return Err(ProviderStatus::SnapshotMismatch);
         }
         let frame = match OriginalRowFrame::from_deleted_rows(query.deleted_original_rows) {
             Ok(value) => value,
-            Err(_) => return LegalBoardDecision::PassThrough(ProviderStatus::OutOfScope),
+            Err(_) => return Err(ProviderStatus::OutOfScope),
         };
         let normalized = match frame.normalize_product_board(query.physical_board) {
             Ok(value) => value,
-            Err(_) => return LegalBoardDecision::PassThrough(ProviderStatus::OutOfScope),
+            Err(_) => return Err(ProviderStatus::OutOfScope),
         };
         if normalized.count_ones() != (query.placed_piece_count as u32) * 4 {
-            return LegalBoardDecision::PassThrough(ProviderStatus::OutOfScope);
+            return Err(ProviderStatus::OutOfScope);
         }
         // The immutable domain layers and bundle encode each 10-bit row in
         // right-to-left storage order. BuildUp owns a left-to-right Board64
         // mask. A row mirror is not generally a legal-board symmetry under
         // ordered kicks, so membership must use the bundle's exact key.
         let storage_key = bundle_key_from_clearra_board(normalized);
-        match layer_contains(
-            &self.bytes,
-            &self.layers[query.placed_piece_count],
-            storage_key,
-        ) {
+        Ok((query.placed_piece_count, storage_key))
+    }
+
+    pub fn decide_negative_only(&self, query: LegalBoardQuery) -> LegalBoardDecision {
+        let (layer, storage_key) = match self.scoped_storage_key(query) {
+            Ok(value) => value,
+            Err(status) => return LegalBoardDecision::PassThrough(status),
+        };
+        if self.layers[layer].negative_filter.may_contain(storage_key) {
+            LegalBoardDecision::CandidateAllowed
+        } else {
+            LegalBoardDecision::VerifiedAbsent
+        }
+    }
+
+    pub fn decide(&self, query: LegalBoardQuery) -> LegalBoardDecision {
+        let (layer, storage_key) = match self.scoped_storage_key(query) {
+            Ok(value) => value,
+            Err(status) => return LegalBoardDecision::PassThrough(status),
+        };
+        if !self.layers[layer].negative_filter.may_contain(storage_key) {
+            return LegalBoardDecision::VerifiedAbsent;
+        }
+        match layer_contains(&self.bytes, &self.layers[layer], storage_key) {
             Ok(true) => LegalBoardDecision::CandidateAllowed,
             Ok(false) => LegalBoardDecision::VerifiedAbsent,
             Err(_) => LegalBoardDecision::PassThrough(ProviderStatus::InvalidAsset),
@@ -908,6 +994,7 @@ fn index_layer(
     let mut cursor = directory.offset;
     let mut prior = 0_u64;
     let mut checkpoints = Vec::new();
+    let mut negative_filter = NegativeFilter::new(directory.count)?;
     for ordinal in 0..directory.count {
         let value_offset = cursor;
         let delta = read_uleb128(bytes, &mut cursor, end)?;
@@ -924,6 +1011,7 @@ fn index_layer(
         if value & !FIELD_MASK != 0 || value.count_ones() != (layer as u32) * 4 {
             return Err(LegalBoardAssetError::LayerArea);
         }
+        negative_filter.insert(value);
         if ordinal % CHECKPOINT_STRIDE == 0 {
             checkpoints.push(Checkpoint {
                 first_value: value,
@@ -940,6 +1028,7 @@ fn index_layer(
     Ok(LayerIndex {
         directory,
         checkpoints,
+        negative_filter,
     })
 }
 
@@ -1188,17 +1277,19 @@ mod tests {
         )
         .unwrap();
         let frame = OriginalRowFrame::from_deleted_rows(1 << 1).unwrap();
+        let query = LegalBoardQuery {
+            width: 10,
+            height: 4,
+            initial_board: 0,
+            kick_profile: KickTableProfileId::Jstris180,
+            physical_board: frame.compact_physical_board(board).unwrap(),
+            deleted_original_rows: 1 << 1,
+            placed_piece_count: 6,
+            completion: CompletionCapability::ClearToEmpty,
+        };
+        assert_eq!(loaded.decide(query), LegalBoardDecision::CandidateAllowed);
         assert_eq!(
-            loaded.decide(LegalBoardQuery {
-                width: 10,
-                height: 4,
-                initial_board: 0,
-                kick_profile: KickTableProfileId::Jstris180,
-                physical_board: frame.compact_physical_board(board).unwrap(),
-                deleted_original_rows: 1 << 1,
-                placed_piece_count: 6,
-                completion: CompletionCapability::ClearToEmpty,
-            }),
+            loaded.decide_negative_only(query),
             LegalBoardDecision::CandidateAllowed
         );
     }
@@ -1219,6 +1310,54 @@ mod tests {
                 assert_eq!(bundle_key_from_clearra_board(expected), board);
             }
         }
+    }
+
+    #[test]
+    fn blocked_negative_filter_never_rejects_inserted_keys() {
+        for size in [1_u64, 7, 8, 9, 127, 1024, 8193] {
+            let mut filter = NegativeFilter::new(size).unwrap();
+            let keys = (0..size)
+                .map(|index| index.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                .collect::<Vec<_>>();
+            for &key in &keys {
+                filter.insert(key);
+            }
+            for &key in &keys {
+                assert!(filter.may_contain(key));
+            }
+        }
+    }
+
+    #[test]
+    fn negative_filter_false_positive_never_becomes_exact_membership() {
+        let encoded = encode_exact_intersection(binding(), &layers()).unwrap();
+        let mut loaded = ExactLegalBoard::load(
+            Arc::from(encoded),
+            LegalBoardExpectation {
+                binding: binding(),
+                generation_identity: None,
+            },
+        )
+        .unwrap();
+        Arc::get_mut(&mut loaded.layers).unwrap()[1]
+            .negative_filter
+            .words
+            .fill(u64::MAX);
+        let absent = LegalBoardQuery {
+            width: 10,
+            height: 4,
+            initial_board: 0,
+            kick_profile: KickTableProfileId::Jstris180,
+            physical_board: 0b11110,
+            deleted_original_rows: 0,
+            placed_piece_count: 1,
+            completion: CompletionCapability::ClearToEmpty,
+        };
+        assert_eq!(
+            loaded.decide_negative_only(absent),
+            LegalBoardDecision::CandidateAllowed
+        );
+        assert_eq!(loaded.decide(absent), LegalBoardDecision::VerifiedAbsent);
     }
 
     #[test]

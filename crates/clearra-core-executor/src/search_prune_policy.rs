@@ -117,6 +117,10 @@ impl LocalPc4LegalBoardIndex {
     pub fn sparse_index_bytes(&self) -> usize {
         self.board.sparse_index_bytes()
     }
+
+    pub fn decide_negative_only(&self, query: LegalBoardQuery) -> LegalBoardDecision {
+        self.board.decide_negative_only(query)
+    }
 }
 
 #[cfg(feature = "local-search-ab")]
@@ -192,7 +196,8 @@ pub(crate) fn conditioned_reachability_enabled() -> bool {
 /// Returns false only for a qualified exact-intersection asset and its closed
 /// empty-origin 10x4 domain. Local A/B builds additionally require their
 /// explicit feature bit. Every scope, profile, state, or asset miss fails open
-/// to the ordinary exact BuildUp traversal.
+/// to the ordinary exact BuildUp traversal. The hot path uses a verified
+/// no-false-negative filter: positive collisions only lose a prune opportunity.
 #[inline(always)]
 pub(crate) fn local_pc4_legal_board_allows(
     qualified: Option<&QualifiedExactLegalBoard>,
@@ -226,14 +231,17 @@ pub(crate) fn local_pc4_legal_board_allows(
         };
         if let Some(index) = LOCAL_PC4_LEGAL_BOARD.get() {
             return !matches!(
-                index.board.decide(query),
+                index.decide_negative_only(query),
                 LegalBoardDecision::VerifiedAbsent
             );
         }
         let Some(index) = qualified else {
             return true;
         };
-        return !matches!(index.decide(query), LegalBoardDecision::VerifiedAbsent);
+        return !matches!(
+            index.decide_negative_only(query),
+            LegalBoardDecision::VerifiedAbsent
+        );
     }
     #[cfg(not(feature = "local-search-ab"))]
     {
@@ -241,7 +249,7 @@ pub(crate) fn local_pc4_legal_board_allows(
             return true;
         };
         !matches!(
-            index.decide(LegalBoardQuery {
+            index.decide_negative_only(LegalBoardQuery {
                 width,
                 height,
                 initial_board,
