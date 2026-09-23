@@ -609,7 +609,7 @@ impl ReachabilityWorkspace {
             frame,
             self.templates[piece_index(piece)].as_mut(),
         ) {
-            let entries = template.sky_entry_poses.get_or_insert_with(|| {
+            template.sky_entry_poses.get_or_insert_with(|| {
                 let mut poses = template
                     .sky_seeds
                     .iter()
@@ -626,49 +626,71 @@ impl ReachabilityWorkspace {
                 poses.sort_unstable_by_key(|pose| (pose.rotation.quarter_turns(), pose.x, pose.y));
                 poses
             });
+            let entries = template.sky_entry_poses.as_deref().unwrap_or(&[]);
             if !entries.is_empty() {
-                let window = ConditionedPoseWindow {
-                    min_x: 0,
-                    max_x: catalog.width() as i8 - 1,
-                    min_y: catalog.height() as i8,
-                    max_y: template.ceiling,
-                };
-                match conditioned.lookup_composed_for_proven_entries(
-                    catalog.width(),
-                    catalog.height(),
-                    board,
-                    frame,
-                    piece,
-                    self.kick_profile_id,
-                    window,
-                    entries,
-                ) {
-                    LocalRelationProductLookup::ComposedForProvenEntries(anchors) => {
-                        self.metrics.conditioned_complete_hits =
-                            self.metrics.conditioned_complete_hits.saturating_add(1);
-                        // The composed relation covers every lock reachable
-                        // from the proven sky entries, including all exits.
-                        // Reuse that complete result for later lock queries
-                        // on this physical board and piece.
-                        self.cache.insert(
-                            board,
-                            piece,
-                            ReachableLocks { anchors },
-                            ReachableLocks::default(),
-                            true,
-                            true,
-                        );
-                        return anchors_contain(anchors, catalog.width(), rotation, x, y);
+                let mut prior_min_y = None;
+                let mut saw_miss = false;
+                // Prefer a closed full-height relation (no continuation),
+                // then a top-half relation, then the original sky window.
+                // Each miss is only an asset miss, never a negative result.
+                for min_y in [0, catalog.height() as i8 / 2, catalog.height() as i8] {
+                    if prior_min_y == Some(min_y) {
+                        continue;
                     }
-                    LocalRelationProductLookup::PassThrough(status) => {
-                        self.metrics.conditioned_misses = self
-                            .metrics
-                            .conditioned_misses
-                            .saturating_add(usize::from(matches!(
-                                status,
-                                crate::legal_board::ProviderStatus::Miss
-                            )));
+                    prior_min_y = Some(min_y);
+                    let window = ConditionedPoseWindow {
+                        min_x: 0,
+                        max_x: catalog.width() as i8 - 1,
+                        min_y,
+                        max_y: template.ceiling,
+                    };
+                    let scratch = &mut self.scratch;
+                    let generated_states = &mut self.generated_states;
+                    match conditioned.lookup_composed_for_proven_entries_with(
+                        catalog.width(),
+                        catalog.height(),
+                        board,
+                        frame,
+                        piece,
+                        self.kick_profile_id,
+                        window,
+                        entries,
+                        |exits| {
+                            let continued = search_reachable_locks_from_entries(
+                                template, board, scratch, exits,
+                            )?;
+                            *generated_states =
+                                generated_states.saturating_add(continued.visited_state_count);
+                            continued.exhaustive.then_some(continued.locks.anchors)
+                        },
+                    ) {
+                        LocalRelationProductLookup::ComposedForProvenEntries(anchors) => {
+                            self.metrics.conditioned_complete_hits =
+                                self.metrics.conditioned_complete_hits.saturating_add(1);
+                            // The relation covers every lock reachable from
+                            // the proven sky entries. Only its first exits
+                            // required exact continuation on the query board.
+                            self.cache.insert(
+                                board,
+                                piece,
+                                ReachableLocks { anchors },
+                                ReachableLocks::default(),
+                                true,
+                                true,
+                            );
+                            return anchors_contain(anchors, catalog.width(), rotation, x, y);
+                        }
+                        LocalRelationProductLookup::PassThrough(status) => {
+                            if status == crate::legal_board::ProviderStatus::InvalidAsset {
+                                break;
+                            }
+                            saw_miss |= status == crate::legal_board::ProviderStatus::Miss;
+                        }
                     }
+                }
+                if saw_miss {
+                    self.metrics.conditioned_misses =
+                        self.metrics.conditioned_misses.saturating_add(1);
                 }
             }
         }
@@ -1925,6 +1947,7 @@ mod tests {
         let bit = 1_u64 << 4;
         assert_eq!(got, reference[0] & bit != 0);
         assert_eq!(workspace.metrics().conditioned_complete_hits, 1);
+        assert!(workspace.generated_state_count() > 0);
         let repeated = workspace.lock_reachable_after_harddrop_miss_in_frame(
             &catalog,
             0,
@@ -1960,6 +1983,127 @@ mod tests {
         drop(frame_miss_workspace);
         assert!(remove_qualified_local_relation_pack(profile)
             .expect("test snapshot released")
+            .is_some());
+    }
+
+    #[test]
+    fn full_height_relation_skips_exact_continuation_without_changing_locks() {
+        let profile = KickTableProfileId::Jstris180;
+        let piece = PieceKind::J;
+        let template = ReachabilityTemplate::compile(10, 4, piece, profile);
+        let window = ConditionedPoseWindow {
+            min_x: 0,
+            max_x: 9,
+            min_y: 0,
+            max_y: template.ceiling,
+        };
+        let mut entries = template
+            .sky_seeds
+            .iter()
+            .map(|&index| {
+                let state = state_from_index(10, template.ceiling, usize::from(index));
+                ConditionedReachabilityEntryPose {
+                    rotation: state.rotation,
+                    x: state.x,
+                    y: state.y,
+                }
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|pose| (pose.rotation.quarter_turns(), pose.x, pose.y));
+        let record =
+            derive_exact_conditioned_local_relation(10, 4, 0, piece, profile, window, &entries)
+                .unwrap();
+        assert!(record.exits().is_empty());
+        let reference = super::exact_spawn_lock_anchors(10, 4, 0, piece, profile).unwrap();
+        assert_eq!(record.grounded_lock_anchors(), reference);
+        let binding = built_in_local_relation_binding(profile).unwrap();
+        let bytes = encode_local_relation_candidate_pack(binding, &[record]).unwrap();
+        let loaded = load_local_relation_candidate_pack(&bytes, binding, None).unwrap();
+        install_qualified_local_relation_pack(qualified_local_relation_for_solver_test(loaded))
+            .unwrap();
+
+        let catalog =
+            super::GeometryCatalog::compile_for_required_cells_on_dimensions(10, 4, 0, 0).unwrap();
+        let mut workspace = ReachabilityWorkspace::default();
+        workspace.configure_kick_profile(profile, true);
+        workspace.prepare_template(&catalog, piece);
+        let got = workspace.lock_reachable_after_harddrop_miss_in_frame(
+            &catalog,
+            0,
+            piece,
+            RotationState::Zero,
+            4,
+            0,
+            Some(LocalRelationRowFrame::new(4, 0).unwrap()),
+        );
+        assert_eq!(got, reference[0] & (1_u64 << 4) != 0);
+        assert_eq!(workspace.metrics().conditioned_complete_hits, 1);
+        assert_eq!(workspace.generated_state_count(), 0);
+        drop(workspace);
+        assert!(remove_qualified_local_relation_pack(profile)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn top_half_relation_continues_from_first_exits_on_the_query_board() {
+        let profile = KickTableProfileId::SrsX;
+        let piece = PieceKind::L;
+        let template = ReachabilityTemplate::compile(10, 4, piece, profile);
+        let window = ConditionedPoseWindow {
+            min_x: 0,
+            max_x: 9,
+            min_y: 2,
+            max_y: template.ceiling,
+        };
+        let mut entries = template
+            .sky_seeds
+            .iter()
+            .map(|&index| {
+                let state = state_from_index(10, template.ceiling, usize::from(index));
+                ConditionedReachabilityEntryPose {
+                    rotation: state.rotation,
+                    x: state.x,
+                    y: state.y,
+                }
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|pose| (pose.rotation.quarter_turns(), pose.x, pose.y));
+        let record =
+            derive_exact_conditioned_local_relation(10, 4, 0, piece, profile, window, &entries)
+                .unwrap();
+        assert!(!record.exits().is_empty());
+        let reference = super::exact_spawn_lock_anchors(10, 4, 0, piece, profile).unwrap();
+        assert_eq!(
+            record.compose_exact_global_lock_anchors_for_board(0),
+            Some(reference)
+        );
+        let binding = built_in_local_relation_binding(profile).unwrap();
+        let bytes = encode_local_relation_candidate_pack(binding, &[record]).unwrap();
+        let loaded = load_local_relation_candidate_pack(&bytes, binding, None).unwrap();
+        install_qualified_local_relation_pack(qualified_local_relation_for_solver_test(loaded))
+            .unwrap();
+
+        let catalog =
+            super::GeometryCatalog::compile_for_required_cells_on_dimensions(10, 4, 0, 0).unwrap();
+        let mut workspace = ReachabilityWorkspace::default();
+        workspace.configure_kick_profile(profile, true);
+        workspace.prepare_template(&catalog, piece);
+        let got = workspace.lock_reachable_after_harddrop_miss_in_frame(
+            &catalog,
+            0,
+            piece,
+            RotationState::Zero,
+            4,
+            0,
+            Some(LocalRelationRowFrame::new(4, 0).unwrap()),
+        );
+        assert_eq!(got, reference[0] & (1_u64 << 4) != 0);
+        assert_eq!(workspace.metrics().conditioned_complete_hits, 1);
+        assert!(workspace.generated_state_count() > 0);
+        drop(workspace);
+        assert!(remove_qualified_local_relation_pack(profile)
+            .unwrap()
             .is_some());
     }
 

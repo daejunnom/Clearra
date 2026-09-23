@@ -126,16 +126,61 @@ impl QualifiedLocalRelationPack {
         window: ConditionedPoseWindow,
         entries: &[ConditionedReachabilityEntryPose],
     ) -> LocalRelationProductLookup {
+        self.lookup_composed_for_proven_entries_with(
+            width,
+            height,
+            board,
+            frame,
+            piece,
+            profile,
+            window,
+            entries,
+            |exits| {
+                crate::backend::exact_entry_lock_anchors(
+                    width, height, board, piece, profile, exits,
+                )
+            },
+        )
+    }
+
+    /// The solver can supply its already compiled exact template and scratch
+    /// for exit continuation. A full-height closed relation has no exits and
+    /// never invokes the continuation. A missing/invalid relation still falls
+    /// through to the existing exact search.
+    #[allow(clippy::too_many_arguments)]
+    pub fn lookup_composed_for_proven_entries_with<F>(
+        &self,
+        width: u8,
+        height: u8,
+        board: u64,
+        frame: LocalRelationRowFrame,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        window: ConditionedPoseWindow,
+        entries: &[ConditionedReachabilityEntryPose],
+        continuation: F,
+    ) -> LocalRelationProductLookup
+    where
+        F: FnOnce(&[ConditionedReachabilityEntryPose]) -> Option<[u64; 4]>,
+    {
         match self
             .pack
             .lookup_with_frame(width, height, board, frame, piece, profile, window, entries)
         {
-            LocalRelationCandidateLookup::Hit(record) => record
-                .compose_exact_global_lock_anchors_for_board(board)
-                .map(LocalRelationProductLookup::ComposedForProvenEntries)
-                .unwrap_or(LocalRelationProductLookup::PassThrough(
-                    ProviderStatus::InvalidAsset,
-                )),
+            LocalRelationCandidateLookup::Hit(record) => {
+                let mut anchors = record.grounded_lock_anchors();
+                if !record.exits().is_empty() {
+                    let Some(continued) = continuation(record.exits()) else {
+                        return LocalRelationProductLookup::PassThrough(
+                            ProviderStatus::InvalidAsset,
+                        );
+                    };
+                    for (local, global) in anchors.iter_mut().zip(continued) {
+                        *local |= global;
+                    }
+                }
+                LocalRelationProductLookup::ComposedForProvenEntries(anchors)
+            }
             LocalRelationCandidateLookup::Miss => {
                 LocalRelationProductLookup::PassThrough(ProviderStatus::Miss)
             }
@@ -400,6 +445,46 @@ mod tests {
                 &[entry],
             ),
             LocalRelationProductLookup::ComposedForProvenEntries(expected)
+        );
+        let mut continued = false;
+        assert_eq!(
+            qualified.lookup_composed_for_proven_entries_with(
+                10,
+                4,
+                0,
+                LocalRelationRowFrame::new(4, 0).unwrap(),
+                PieceKind::T,
+                KickTableProfileId::SrsPlus,
+                window,
+                &[entry],
+                |exits| {
+                    continued = true;
+                    crate::backend::exact_entry_lock_anchors(
+                        10,
+                        4,
+                        0,
+                        PieceKind::T,
+                        KickTableProfileId::SrsPlus,
+                        exits,
+                    )
+                },
+            ),
+            LocalRelationProductLookup::ComposedForProvenEntries(expected)
+        );
+        assert!(continued);
+        assert_eq!(
+            qualified.lookup_composed_for_proven_entries_with(
+                10,
+                4,
+                0,
+                LocalRelationRowFrame::new(4, 0).unwrap(),
+                PieceKind::T,
+                KickTableProfileId::SrsPlus,
+                window,
+                &[entry],
+                |_| None,
+            ),
+            LocalRelationProductLookup::PassThrough(ProviderStatus::InvalidAsset)
         );
         assert_eq!(
             qualified.lookup_composed_for_proven_entries(
