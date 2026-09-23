@@ -109,6 +109,11 @@ fn original_row_correspondence_is_a_distinct_lookup_and_binary_identity() {
 fn reused_local_relation_continues_on_the_query_board_not_the_source_board() {
     let profile = KickTableProfileId::SrsPlus;
     let (record, window, entry) = record(profile);
+    let reference_entry = crate::reachability_reference::ReferenceReachabilityEntryPose {
+        rotation: entry.rotation,
+        x: entry.x,
+        y: entry.y,
+    };
     let reference_source =
         crate::backend::exact_entry_lock_anchors(10, 4, 0, PieceKind::T, profile, &[entry])
             .unwrap();
@@ -140,6 +145,18 @@ fn reused_local_relation_continues_on_the_query_board_not_the_source_board() {
         panic!("unchanged local dependency cells must reuse the relation");
     };
     assert_ne!(expected, reference_source);
+    assert_eq!(
+        crate::reachability_reference::reference_entry_lock_anchors(
+            10,
+            4,
+            query_board,
+            PieceKind::T,
+            profile,
+            &[reference_entry],
+        ),
+        Some(expected),
+        "the independent primitive must agree on the changed global path"
+    );
     assert_eq!(
         found.compose_exact_global_lock_anchors_for_board(query_board),
         Some(expected)
