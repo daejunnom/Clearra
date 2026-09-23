@@ -77,6 +77,27 @@ jobs:
             build/cargo/default/release/clearra-conditioned-local-relation.exe
           if-no-files-found: error
           retention-days: 3
+      # A locally compiled test executable can be denied by Windows App
+      # Control even when its source and compilation passed. This branch-only
+      # artifact lets the exact CI source produce the optimized, non-publishing
+      # local full-family differential binary without storing test data in Git.
+      - name: Build optimized local legal-board differential executable
+        if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923'
+        shell: pwsh
+        run: |
+          cargo test --release --locked -p clearra-core-executor --test legal_board_candidate_exact_set --features parallel,local-search-ab --no-run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tests = @(Get-ChildItem -LiteralPath 'build/cargo/default/release/deps' -Filter 'legal_board_candidate_exact_set-*.exe' -File)
+          if ($tests.Count -ne 1) { throw "expected one optimized legal-board test binary, found $($tests.Count)" }
+          Get-FileHash -LiteralPath $tests[0].FullName -Algorithm SHA256 | Format-List
+      - name: Preserve non-publishing legal-board differential executable
+        if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clearra-legal-board-kat-candidate-${{ github.sha }}
+          path: build/cargo/default/release/deps/legal_board_candidate_exact_set-*.exe
+          if-no-files-found: error
+          retention-days: 3
 
   management-policy:
     name: Clearra management policy
