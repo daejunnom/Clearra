@@ -1431,6 +1431,7 @@ fn validate_reverse_checkpoint(
     root: &Path,
     binding: DomainBinding,
     input: &[u64],
+    target_prefilter: &ForwardBloom,
     input_digest: [u8; 32],
     output_layer: u8,
     candidates: &[(u64, u8)],
@@ -1459,7 +1460,7 @@ fn validate_reverse_checkpoint(
         );
         return Ok(fields);
     }
-    let fields = validate_reverse_sources(binding, input, candidates, workers)?;
+    let fields = validate_reverse_sources(binding, input, target_prefilter, candidates, workers)?;
     write_validation_run(
         &path,
         binding,
@@ -1483,6 +1484,7 @@ fn validate_reverse_checkpoint(
 fn validate_reverse_sources(
     binding: DomainBinding,
     input: &[u64],
+    target_prefilter: &ForwardBloom,
     candidates: &[(u64, u8)],
     workers: usize,
 ) -> Result<Vec<u64>, String> {
@@ -1519,6 +1521,7 @@ fn validate_reverse_sources(
                                 piece,
                                 binding.kick_profile,
                                 input,
+                                target_prefilter,
                             )?;
                             if reaches_domain {
                                 break;
@@ -1545,12 +1548,16 @@ fn reaches_any_domain_target(
     piece: PieceKind,
     kick_profile: KickTableProfileId,
     sorted_target_hashes: &[u64],
+    target_prefilter: &ForwardBloom,
 ) -> Result<bool, String> {
     let mut invalid_target = None;
     let found = workspace
         .any_target(source, piece, kick_profile, |target| {
             match clearra_board64_mask_to_hydra_field_hash_v1(target) {
-                Ok(hash) => sorted_target_hashes.binary_search(&hash).is_ok(),
+                Ok(hash) => {
+                    target_prefilter.may_contain(hash)
+                        && sorted_target_hashes.binary_search(&hash).is_ok()
+                }
                 Err(error) => {
                     invalid_target = Some(error.reason());
                     true
@@ -1572,6 +1579,14 @@ struct ForwardBloom {
 }
 
 impl ForwardBloom {
+    fn from_fields(fields: &[u64]) -> Result<Self, String> {
+        let mut filter = Self::new(fields.len())?;
+        for &field in fields {
+            filter.insert(field);
+        }
+        Ok(filter)
+    }
+
     fn new(expected_fields: usize) -> Result<Self, String> {
         let maximum_bits = FORWARD_BLOOM_MAX_BYTES * 8;
         let wanted_bits = expected_fields.saturating_mul(8).max(64);
@@ -1645,12 +1660,12 @@ mod forward_bloom_tests {
     #[test]
     fn semi_join_never_rejects_an_inserted_field_even_with_collisions() {
         for count in [0, 1, 64, 10_000] {
-            let mut filter = ForwardBloom::new(count).unwrap();
-            for index in 0..count {
-                filter.insert((index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
-            }
-            for index in 0..count {
-                assert!(filter.may_contain((index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+            let fields = (0..count)
+                .map(|index| (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                .collect::<Vec<_>>();
+            let filter = ForwardBloom::from_fields(&fields).unwrap();
+            for field in fields {
+                assert!(filter.may_contain(field));
             }
         }
     }
@@ -1783,6 +1798,11 @@ fn visit_reverse_layer_spilled(
     );
 
     let run_paths = reduce_pair_runs(&spill_root, run_paths, binding, input_digest, output_layer)?;
+    // R_(k+1) is already loaded and verified. A small no-false-negative
+    // admission filter avoids cache-missing binary searches for the many
+    // geometric locks that are not in this exact target domain. The sorted
+    // lookup remains the authority on every possible hit.
+    let target_prefilter = ForwardBloom::from_fields(input)?;
     let mut readers = run_paths
         .iter()
         .map(|(path, start, end)| {
@@ -1833,6 +1853,7 @@ fn visit_reverse_layer_spilled(
                     &spill_root,
                     binding,
                     input,
+                    &target_prefilter,
                     input_digest,
                     output_layer,
                     &batch,
@@ -1866,6 +1887,7 @@ fn visit_reverse_layer_spilled(
             &spill_root,
             binding,
             input,
+            &target_prefilter,
             input_digest,
             output_layer,
             &batch,
@@ -1943,6 +1965,7 @@ fn generate_reverse_layer_bounded(
     // the deterministic sorted file identity.
     let mut validated_fields = HashSet::new();
     let mut candidate_pair_count = 0_usize;
+    let target_prefilter = ForwardBloom::from_fields(input)?;
 
     for input_chunk in input.chunks(target_chunk_size) {
         let candidate_cursor = AtomicUsize::new(0);
@@ -2018,6 +2041,7 @@ fn generate_reverse_layer_bounded(
                                 piece,
                                 binding.kick_profile,
                                 input,
+                                &target_prefilter,
                             )?;
                             if reaches_domain {
                                 validated.push(source_hash);
@@ -2622,21 +2646,25 @@ mod tests {
                         .unwrap();
                     hashes.sort_unstable();
                     for selected in [hashes.first(), hashes.last()].into_iter().flatten() {
+                        let target_prefilter = ForwardBloom::from_fields(&[*selected]).unwrap();
                         assert!(reaches_any_domain_target(
                             &mut workspace,
                             source,
                             piece,
                             profile,
                             &[*selected],
+                            &target_prefilter,
                         )
                         .unwrap());
                     }
+                    let absent_prefilter = ForwardBloom::from_fields(&[u64::MAX]).unwrap();
                     assert!(!reaches_any_domain_target(
                         &mut workspace,
                         source,
                         piece,
                         profile,
                         &[u64::MAX],
+                        &absent_prefilter,
                     )
                     .unwrap());
                 }

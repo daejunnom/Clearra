@@ -190,10 +190,11 @@ in-process 재사용 조건으로 추가했지만, 압축된 재사용 pack과 �
 source 및 첫 후보까지의 **전체** 충돌 의존 셀을 재구성하고, 독립 BFS의
 lock·exit와 저장된 값을 비교한다. compact physical board가 같더라도
 삭제된 원래 행 위치가 다르면 국소 관계 후보의 키가 달라지도록 했다.
-별도 비게시 source CI에서 국소 pack·독립 감사 테스트를 실행한다. 특히
+exact SHA `6f2c44035eebc449b969b79c1540bbe6be551131`의 비게시 CI
+run `35838590580`에서 국소 pack·독립 감사 테스트가 통과했다. 특히
 local dependency 외부가 다른 보드에 relation을 재사용한 뒤 전역 출구를
 합성할 때 저장 당시 보드가 아니라 실제 질의 보드를 사용하도록 경계를
-수정했다. 이 테스트의 성공 여부는 해당 CI 결과로만 판정하며,
+수정했다. 이는 source contract 검증이지 실제 자산 자격이 아니며,
 임의 보드·진입 집합에 대한 완전성, 외부 우회 합성, signed generation,
 16MiB/128MiB 크기·상주량 및 BuildUp 제품 연결은 여전히 미해결이다.
 기존 release gate가 다섯 profile의 sparse spawn-to-lock catalog만으로

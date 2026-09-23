@@ -34,7 +34,9 @@ jobs:
           cargo test --locked -p clearra-core-executor --lib geometric_target_behind_a_narrow_roof_is_not_a_reachable_lock
           cargo test --locked -p clearra-core-executor --lib exact_forward_membership_rejects_the_same_invalid_source_contract
       - name: Compare worker-reused Hydra membership with full target enumeration
-        run: cargo test --locked -p clearra-pc4-qualifier --lib reverse_domain_membership_matches_complete_forward_enumeration --no-default-features --features legal-board-assets
+        run: |
+          cargo test --locked -p clearra-pc4-qualifier --lib reverse_domain_membership_matches_complete_forward_enumeration --no-default-features --features legal-board-assets
+          cargo test --locked -p clearra-pc4-qualifier --lib forward_bloom_tests --no-default-features --features legal-board-assets
       - name: Preserve the original reachability contracts
         run: cargo test --locked -p clearra-core-executor --lib backend::wasm_cpu::reachability
       - name: Audit local relation reuse on the actual query board
