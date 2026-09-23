@@ -354,6 +354,22 @@ impl NegativeFilter {
         self.words[word] & mask == mask
     }
 
+    /// Fold a power-of-two word table by ORing buckets that share the low
+    /// hash bits. Every inserted key keeps all four of its bits; folding can
+    /// increase false positives but cannot create a false negative.
+    fn folded(&self, word_count: usize) -> Result<Self, LegalBoardSynopsisError> {
+        debug_assert!(word_count.is_power_of_two() && word_count <= self.words.len());
+        let mut words = Vec::new();
+        words
+            .try_reserve_exact(word_count)
+            .map_err(|_| LegalBoardSynopsisError::AllocationUnavailable)?;
+        words.resize(word_count, 0);
+        for (index, &word) in self.words.iter().enumerate() {
+            words[index & (word_count - 1)] |= word;
+        }
+        Ok(Self { words })
+    }
+
     #[inline]
     fn location(&self, key: u64) -> (usize, u64) {
         let hash = bloom_mix64(key);
@@ -383,6 +399,56 @@ pub struct ExactLegalBoard {
     binding: LegalBoardBinding,
     generation_identity: [u8; 32],
     layers: Arc<[LayerIndex; LAYER_COUNT]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegalBoardSynopsisError {
+    BudgetTooSmall,
+    AllocationUnavailable,
+}
+
+/// A bounded, negative-only derivative of one signed complete legal-board.
+/// It never claims positive membership. The full asset stays with its owner;
+/// a browser worker transport may share this derivative without giving a
+/// second worker a copy of the complete bundle or sparse index.
+#[derive(Debug)]
+pub struct LegalBoardNegativeSynopsis {
+    binding: LegalBoardBinding,
+    generation_identity: [u8; 32],
+    signed_catalog_identity: [u8; 32],
+    filters: Vec<NegativeFilter>,
+}
+
+impl LegalBoardNegativeSynopsis {
+    pub const fn generation_identity(&self) -> [u8; 32] {
+        self.generation_identity
+    }
+
+    pub const fn signed_catalog_identity(&self) -> [u8; 32] {
+        self.signed_catalog_identity
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        core::mem::size_of::<Self>()
+            + self.filters.capacity() * core::mem::size_of::<NegativeFilter>()
+            + self
+                .filters
+                .iter()
+                .map(|filter| filter.words.capacity() * core::mem::size_of::<u64>())
+                .sum::<usize>()
+    }
+
+    pub fn decide_negative_only(&self, query: LegalBoardQuery) -> LegalBoardDecision {
+        let (layer, storage_key) = match scoped_storage_key_for_binding(self.binding, query) {
+            Ok(value) => value,
+            Err(status) => return LegalBoardDecision::PassThrough(status),
+        };
+        if self.filters[layer].may_contain(storage_key) {
+            LegalBoardDecision::CandidateAllowed
+        } else {
+            LegalBoardDecision::VerifiedAbsent
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -447,6 +513,17 @@ impl QualifiedExactLegalBoard {
 
     pub fn shared_bytes(&self) -> usize {
         self.board.compressed_bytes() + self.board.sparse_index_bytes()
+    }
+
+    /// The source must first pass the signed complete-product admission.
+    /// This derivative may be folded to a host-owned memory budget, but it
+    /// cannot be used to assert that a Bloom-positive state is legal.
+    pub fn negative_synopsis(
+        &self,
+        maximum_bytes: usize,
+    ) -> Result<LegalBoardNegativeSynopsis, LegalBoardSynopsisError> {
+        self.board
+            .negative_synopsis(maximum_bytes, self.signed_catalog_identity)
     }
 }
 
@@ -571,6 +648,53 @@ pub fn active_qualified_exact_legal_board_identity(
 }
 
 impl ExactLegalBoard {
+    fn negative_synopsis(
+        &self,
+        maximum_bytes: usize,
+        signed_catalog_identity: [u8; 32],
+    ) -> Result<LegalBoardNegativeSynopsis, LegalBoardSynopsisError> {
+        let structural_bytes = core::mem::size_of::<LegalBoardNegativeSynopsis>()
+            + LAYER_COUNT * (core::mem::size_of::<NegativeFilter>() + core::mem::size_of::<u64>());
+        if maximum_bytes < structural_bytes {
+            return Err(LegalBoardSynopsisError::BudgetTooSmall);
+        }
+        let mut word_counts: [usize; LAYER_COUNT] =
+            std::array::from_fn(|layer| self.layers[layer].negative_filter.words.len());
+        let mut total_words = word_counts.iter().sum::<usize>();
+        let word_budget = (maximum_bytes
+            - core::mem::size_of::<LegalBoardNegativeSynopsis>()
+            - LAYER_COUNT * core::mem::size_of::<NegativeFilter>())
+            / core::mem::size_of::<u64>();
+        while total_words > word_budget {
+            let (layer, &count) = word_counts
+                .iter()
+                .enumerate()
+                .filter(|(_, count)| **count > 1)
+                .max_by_key(|(_, count)| **count)
+                .ok_or(LegalBoardSynopsisError::BudgetTooSmall)?;
+            let folded_count = count / 2;
+            word_counts[layer] = folded_count;
+            total_words -= folded_count;
+        }
+        let mut filters = Vec::new();
+        filters
+            .try_reserve_exact(LAYER_COUNT)
+            .map_err(|_| LegalBoardSynopsisError::AllocationUnavailable)?;
+        for (layer, &word_count) in word_counts.iter().enumerate() {
+            filters.push(self.layers[layer].negative_filter.folded(word_count)?);
+        }
+        let synopsis = LegalBoardNegativeSynopsis {
+            binding: self.binding,
+            generation_identity: self.generation_identity,
+            signed_catalog_identity,
+            filters,
+        };
+        if synopsis.retained_bytes() > maximum_bytes {
+            return Err(LegalBoardSynopsisError::BudgetTooSmall);
+        }
+        Ok(synopsis)
+    }
+
     pub fn load(
         bytes: Arc<[u8]>,
         expectation: LegalBoardExpectation,
@@ -678,34 +802,7 @@ impl ExactLegalBoard {
     }
 
     fn scoped_storage_key(&self, query: LegalBoardQuery) -> Result<(usize, u64), ProviderStatus> {
-        if query.width != 10
-            || query.height != 4
-            || query.initial_board != 0
-            || query.placed_piece_count >= LAYER_COUNT
-            || query.completion != CompletionCapability::ClearToEmpty
-        {
-            return Err(ProviderStatus::OutOfScope);
-        }
-        if query.kick_profile != self.binding.kick_profile {
-            return Err(ProviderStatus::SnapshotMismatch);
-        }
-        let frame = match OriginalRowFrame::from_deleted_rows(query.deleted_original_rows) {
-            Ok(value) => value,
-            Err(_) => return Err(ProviderStatus::OutOfScope),
-        };
-        let normalized = match frame.normalize_product_board(query.physical_board) {
-            Ok(value) => value,
-            Err(_) => return Err(ProviderStatus::OutOfScope),
-        };
-        if normalized.count_ones() != (query.placed_piece_count as u32) * 4 {
-            return Err(ProviderStatus::OutOfScope);
-        }
-        // The immutable domain layers and bundle encode each 10-bit row in
-        // right-to-left storage order. BuildUp owns a left-to-right Board64
-        // mask. A row mirror is not generally a legal-board symmetry under
-        // ordered kicks, so membership must use the bundle's exact key.
-        let storage_key = bundle_key_from_clearra_board(normalized);
-        Ok((query.placed_piece_count, storage_key))
+        scoped_storage_key_for_binding(self.binding, query)
     }
 
     pub fn decide_negative_only(&self, query: LegalBoardQuery) -> LegalBoardDecision {
@@ -734,6 +831,40 @@ impl ExactLegalBoard {
             Err(_) => LegalBoardDecision::PassThrough(ProviderStatus::InvalidAsset),
         }
     }
+}
+
+fn scoped_storage_key_for_binding(
+    binding: LegalBoardBinding,
+    query: LegalBoardQuery,
+) -> Result<(usize, u64), ProviderStatus> {
+    if query.width != 10
+        || query.height != 4
+        || query.initial_board != 0
+        || query.placed_piece_count >= LAYER_COUNT
+        || query.completion != CompletionCapability::ClearToEmpty
+    {
+        return Err(ProviderStatus::OutOfScope);
+    }
+    if query.kick_profile != binding.kick_profile {
+        return Err(ProviderStatus::SnapshotMismatch);
+    }
+    let frame = match OriginalRowFrame::from_deleted_rows(query.deleted_original_rows) {
+        Ok(value) => value,
+        Err(_) => return Err(ProviderStatus::OutOfScope),
+    };
+    let normalized = match frame.normalize_product_board(query.physical_board) {
+        Ok(value) => value,
+        Err(_) => return Err(ProviderStatus::OutOfScope),
+    };
+    if normalized.count_ones() != (query.placed_piece_count as u32) * 4 {
+        return Err(ProviderStatus::OutOfScope);
+    }
+    // The immutable domain layers and bundle encode each 10-bit row in
+    // right-to-left storage order. BuildUp owns a left-to-right Board64
+    // mask. A row mirror is not generally a legal-board symmetry under
+    // ordered kicks, so membership must use the bundle's exact key.
+    let storage_key = bundle_key_from_clearra_board(normalized);
+    Ok((query.placed_piece_count, storage_key))
 }
 
 /// Encode strictly sorted `L_k = F_k ∩ R_k` storage-key layers. Each row's
@@ -1301,6 +1432,83 @@ mod tests {
             }
             for &key in &keys {
                 assert!(filter.may_contain(key));
+            }
+        }
+    }
+
+    #[test]
+    fn folding_a_negative_filter_preserves_every_inserted_key() {
+        let mut filter = NegativeFilter::new(8193).unwrap();
+        let keys = (0_u64..8193)
+            .map(|index| index.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            .collect::<Vec<_>>();
+        for &key in &keys {
+            filter.insert(key);
+        }
+        assert!(filter.words.len() >= 2048);
+        for target_words in [1, 2, 16, 256, filter.words.len()] {
+            let folded = filter.folded(target_words).unwrap();
+            assert_eq!(folded.words.len(), target_words);
+            assert!(keys.iter().all(|&key| folded.may_contain(key)));
+        }
+    }
+
+    #[test]
+    fn bounded_negative_synopsis_retains_binding_and_never_rejects_known_layers() {
+        let input_layers = layers();
+        let encoded = encode_exact_intersection(binding(), &input_layers).unwrap();
+        let board = ExactLegalBoard::load(
+            Arc::from(encoded),
+            LegalBoardExpectation {
+                binding: binding(),
+                generation_identity: None,
+            },
+        )
+        .unwrap();
+        // Construct the wrapper only inside this unit test. Product code can
+        // obtain it solely through a verified signing authority.
+        let qualified = QualifiedExactLegalBoard {
+            board,
+            signed_catalog_identity: [3; 32],
+            exhaustive_differential_identity: [4; 32],
+        };
+        let minimum_bytes = core::mem::size_of::<LegalBoardNegativeSynopsis>()
+            + LAYER_COUNT * (core::mem::size_of::<NegativeFilter>() + core::mem::size_of::<u64>());
+        assert!(matches!(
+            qualified.negative_synopsis(minimum_bytes - 1),
+            Err(LegalBoardSynopsisError::BudgetTooSmall)
+        ));
+        let synopsis = qualified.negative_synopsis(minimum_bytes).unwrap();
+        assert!(synopsis.retained_bytes() <= minimum_bytes);
+        assert_eq!(
+            synopsis.generation_identity(),
+            qualified.generation_identity()
+        );
+        assert_eq!(synopsis.signed_catalog_identity(), [3; 32]);
+        for (layer, keys) in input_layers.iter().enumerate() {
+            for &storage_key in keys {
+                let query = LegalBoardQuery {
+                    width: 10,
+                    height: 4,
+                    initial_board: 0,
+                    kick_profile: binding().kick_profile,
+                    physical_board: bundle_key_from_clearra_board(storage_key),
+                    deleted_original_rows: 0,
+                    placed_piece_count: layer,
+                    completion: CompletionCapability::ClearToEmpty,
+                };
+                assert_eq!(
+                    synopsis.decide_negative_only(query),
+                    LegalBoardDecision::CandidateAllowed,
+                    "folded synopsis rejected a stored layer {layer} key"
+                );
+                assert_eq!(
+                    synopsis.decide_negative_only(LegalBoardQuery {
+                        initial_board: 1,
+                        ..query
+                    }),
+                    LegalBoardDecision::PassThrough(ProviderStatus::OutOfScope)
+                );
             }
         }
     }

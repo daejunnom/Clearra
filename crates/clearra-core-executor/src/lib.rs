@@ -130,8 +130,9 @@ pub use legal_board::{
     encode_exact_intersection_streaming as encode_exact_legal_board_intersection_streaming,
     install_qualified_exact_legal_board, remove_qualified_exact_legal_board, CompletionCapability,
     ExactLegalBoard, LegalBoardAssetError, LegalBoardBinding, LegalBoardDecision,
-    LegalBoardExpectation, LegalBoardQuery, LegalBoardStreamEncodeError, OriginalRowFrame,
-    ProviderStatus, QualifiedExactLegalBoard, RowCodecError, UnsupportedLegalBoardProfile,
+    LegalBoardExpectation, LegalBoardNegativeSynopsis, LegalBoardQuery,
+    LegalBoardStreamEncodeError, LegalBoardSynopsisError, OriginalRowFrame, ProviderStatus,
+    QualifiedExactLegalBoard, RowCodecError, UnsupportedLegalBoardProfile,
     EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE,
 };
 pub use memory::ScopeGuard;
