@@ -8,7 +8,10 @@ use std::{
     sync::Arc,
 };
 
-const MEET_LAYER: u8 = 6;
+// The exact meet may occur at any interior layer. Five keeps the unrestricted
+// forward frontier one layer smaller; the additional reverse layer remains
+// exact and is checked by the same proof chain before publication.
+const MEET_LAYER: u8 = 5;
 
 #[derive(Clone, Debug)]
 pub struct LegalBoardGenerationOptions {
@@ -98,9 +101,10 @@ fn run_exact_layers(
         }
     }
 
-    // Exact bidirectional meet: F_6 is complete from the empty board and R_7
-    // is complete to the full board. An F_6 state with an exact ILC edge into
-    // R_7 is precisely L_6. This avoids materialising unrestricted F_7..F_10.
+    // Exact bidirectional meet: F_m is complete from the empty board and
+    // R_(m+1) is complete to the full board. An F_m state with an exact ILC
+    // edge into R_(m+1) is precisely L_m. This avoids materializing the
+    // unrestricted forward suffix while preserving the same L_0..L_10.
     let reverse = domain::DomainDirection::Reverse;
     let terminal = domain::seed(
         binding,
@@ -118,7 +122,7 @@ fn run_exact_layers(
         }
     }
 
-    for source_layer in (7_u8..10).rev() {
+    for source_layer in ((MEET_LAYER + 1)..10).rev() {
         let input_layer = source_layer + 1;
         let report = domain::step(
             binding,
@@ -148,9 +152,9 @@ fn run_exact_layers(
 
     let report = domain::legal_predecessor_step(
         binding,
-        &layers.join("forward-reachable-layer-06.bin"),
-        &layers.join("reverse-filter-layer-07.bin"),
-        &layers.join("legal-layer-06.bin"),
+        &layers.join(format!("forward-reachable-layer-{MEET_LAYER:02}.bin")),
+        &layers.join(format!("reverse-filter-layer-{:02}.bin", MEET_LAYER + 1)),
+        &layers.join(format!("legal-layer-{MEET_LAYER:02}.bin")),
         options.workers,
     )?;
     println!(
