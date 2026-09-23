@@ -242,6 +242,32 @@ impl Policy {
                 return Err(Error::policy(format!("zero concurrency for {name}")));
             }
         }
+        for name in [
+            "control",
+            "build-test",
+            "verification",
+            "benchmark-search",
+            "local-service",
+        ] {
+            if self
+                .resource_profiles
+                .get(name)
+                .is_none_or(|profile| profile.maximum_memory_mib.is_some())
+            {
+                return Err(Error::policy(format!(
+                    "local profile {name} must use runtime-pressure memory admission"
+                )));
+            }
+        }
+        if self
+            .resource_profiles
+            .get("cloud-job")
+            .is_none_or(|profile| profile.maximum_memory_mib != Some(16 * 1024))
+        {
+            return Err(Error::policy(
+                "cloud-job must retain the 16 GiB platform memory limit",
+            ));
+        }
         let tree = &self.runtime_policy.process_tree_contract;
         if !tree.windows_job_kill_on_close
             || !tree.windows_aggregate_memory_limit

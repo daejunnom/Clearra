@@ -71,18 +71,24 @@ The supervisor owns the complete tree and never retries OOM with changed
 resources. Windows uses a Job Object for hard aggregate memory and process
 limits. Linux uses a process group with low-frequency aggregate enforcement;
 profiles that require hard containment start only inside an inherited finite
-cgroup. Output and time limits remain finite on both platforms. It may request
-cooperative GC during host pressure, but records GC only when the child writes
-the matching acknowledgement. If the small recovery reserve remains
-unavailable, it fail-closes only the owned tree.
+cgroup. Output and time limits remain finite on both platforms. A directly
+supervised Node root receives a full-GC responder; only its matching PID and
+request acknowledgement proves completion. Other runtimes do not acquire a GC
+claim merely because a request was written. A sustained noncritical warning
+requests reclamation without ending useful work. If a critical reserve or
+owned-tree soft-limit event remains unresolved, fail-close only the owned tree.
 
 Profile minimum memory is a declared working-set contract, not a start-time
 reservation. Start admission checks only the small critical physical reserve
-and, on Windows, the critical commit reserve. A configured maximum remains a
-stable process-tree hard limit and must not be reduced from the momentary free
-memory snapshot. External-process growth is handled by low-frequency runtime
-pressure checks; each new pressure episode gets a fresh full-GC request and an
-exact matching acknowledgement before GC completion is recorded.
+and, on Windows, the critical commit reserve. Local profiles have no fixed
+profile memory maximum: emergency hard containment derives from total physical
+capacity on Linux and total commit capacity on Windows, never the momentary
+free-memory snapshot. WSL's no-swap guest cgroup is bounded by host physical
+capacity. The Cloud Run job retains its fixed 16 GiB platform contract.
+External-process growth and current owned-tree memory are handled by
+low-frequency runtime
+pressure checks. Critical escalation gets a fresh full-GC request, and GC
+completion is recorded only with an exact matching acknowledgement.
 
 Do not silently reduce requested worker counts. Solver hot paths remain free of
 supervisor code; containment belongs at the outer process boundary.

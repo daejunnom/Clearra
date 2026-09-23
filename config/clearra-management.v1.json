@@ -339,7 +339,7 @@
   "resource_profiles": {
     "control": {
       "minimum_memory_mib": 256,
-      "maximum_memory_mib": 512,
+      "maximum_memory_mib": null,
       "timeout_seconds": 300,
       "maximum_timeout_seconds": 300,
       "termination_grace_seconds": 5,
@@ -354,7 +354,7 @@
     },
     "build-test": {
       "minimum_memory_mib": 3072,
-      "maximum_memory_mib": 6144,
+      "maximum_memory_mib": null,
       "timeout_seconds": 5400,
       "maximum_timeout_seconds": 5400,
       "termination_grace_seconds": 10,
@@ -369,7 +369,7 @@
     },
     "verification": {
       "minimum_memory_mib": 768,
-      "maximum_memory_mib": 2048,
+      "maximum_memory_mib": null,
       "timeout_seconds": 5400,
       "maximum_timeout_seconds": 5400,
       "termination_grace_seconds": 10,
@@ -400,7 +400,7 @@
     },
     "local-service": {
       "minimum_memory_mib": 512,
-      "maximum_memory_mib": 2048,
+      "maximum_memory_mib": null,
       "timeout_seconds": 7200,
       "maximum_timeout_seconds": 7200,
       "termination_grace_seconds": 10,

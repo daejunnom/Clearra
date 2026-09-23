@@ -62,12 +62,24 @@ pub fn run_entry(
     let requested_timeout = contract.timeout_seconds.unwrap_or(profile.timeout_seconds);
     let cleanup_budget = 60u64.min(requested_timeout.saturating_sub(1).max(1));
     let guest_timeout = requested_timeout.saturating_sub(cleanup_budget).max(1);
-    let hard_limit = runtime::calculate_admission(
-        policy,
-        &contract.profile,
-        runtime::current_memory_snapshot()?,
-    )?
-    .hard_limit_bytes;
+    let host_snapshot = runtime::current_memory_snapshot()?;
+    let admission = runtime::calculate_admission(policy, &contract.profile, host_snapshot)?;
+    // The guest forbids swap. Its cgroup must therefore remain within host
+    // physical capacity even though the Windows outer Job Object may use the
+    // larger commit limit backed by the user's page file. Neither boundary
+    // depends on free memory at WSL session start.
+    let hard_limit = guest_hard_limit(
+        host_snapshot.physical_total_bytes,
+        admission.physical_pressure_reserve_bytes,
+        admission.hard_limit_bytes,
+        admission.minimum_bytes,
+    )
+    .ok_or_else(|| {
+        Error::runtime(format!(
+            "E_CLEARRA_MEMORY_ADMISSION_DENIED: WSL profile {} exceeds stable guest physical capacity",
+            contract.profile
+        ))
+    })?;
     let unit = format!("clearra-rust-{run_tag}");
     let digest = marker_digest(policy)?;
     let tool = |name: &str| {
@@ -139,6 +151,17 @@ pub fn run_entry(
     drop(temporary_archive);
     termination?;
     result
+}
+
+fn guest_hard_limit(
+    host_physical_total: u64,
+    physical_pressure_reserve: u64,
+    outer_hard_limit: u64,
+    declared_minimum: u64,
+) -> Option<u64> {
+    let guest_cap = host_physical_total.saturating_sub(physical_pressure_reserve);
+    let limit = outer_hard_limit.min(guest_cap);
+    (limit >= declared_minimum).then_some(limit)
 }
 
 fn normalize_entry_arguments(
@@ -501,5 +524,19 @@ mod tests {
     #[test]
     fn control_characters_are_rejected() {
         assert!(reject_control_characters(&[OsString::from("ok\nno")]).is_err());
+    }
+
+    #[test]
+    fn guest_cgroup_uses_total_physical_capacity_not_start_availability() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(
+            guest_hard_limit(16 * GIB, GIB / 2, 31 * GIB, 3 * GIB),
+            Some(16 * GIB - GIB / 2)
+        );
+        assert_eq!(
+            guest_hard_limit(16 * GIB, GIB / 2, 6 * GIB, 3 * GIB),
+            Some(6 * GIB)
+        );
+        assert_eq!(guest_hard_limit(2 * GIB, GIB / 2, 31 * GIB, 3 * GIB), None);
     }
 }
