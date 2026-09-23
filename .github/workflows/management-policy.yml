@@ -17,7 +17,7 @@ jobs:
   windows-runtime:
     name: Clearra management Windows runtime
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,6 +59,22 @@ jobs:
         with:
           name: clearra-manage-candidate-${{ github.sha }}
           path: build/cargo/default/release/clearra-manage.exe
+          if-no-files-found: error
+          retention-days: 3
+      - name: Build exact Windows generators for local candidate qualification
+        if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923'
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p clearra-pc4-qualifier --no-default-features --features legal-board-assets --bin clearra-pc4-legal-board --bin clearra-conditioned-local-relation
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve non-publishing Windows generator candidates
+        if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clearra-accelerator-generators-candidate-${{ github.sha }}
+          path: |
+            build/cargo/default/release/clearra-pc4-legal-board.exe
+            build/cargo/default/release/clearra-conditioned-local-relation.exe
           if-no-files-found: error
           retention-days: 3
 

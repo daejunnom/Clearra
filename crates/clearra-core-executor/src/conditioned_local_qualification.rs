@@ -183,6 +183,58 @@ mod tests {
     }
 
     #[test]
+    fn local_locks_and_first_exits_compose_to_the_exact_global_entry_result() {
+        for profile in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
+            KickTableProfileId::Jstris180,
+            KickTableProfileId::NoKick,
+        ] {
+            for height in 1..=6_u8 {
+                for piece in [PieceKind::T, PieceKind::J, PieceKind::I] {
+                    for board in [0_u64, 1, 0b1001] {
+                        let entry = ConditionedReachabilityEntryPose {
+                            rotation: RotationState::Zero,
+                            x: 4,
+                            y: height as i8,
+                        };
+                        let window = ConditionedPoseWindow {
+                            min_x: 4,
+                            max_x: 4,
+                            min_y: height as i8,
+                            max_y: height as i8,
+                        };
+                        let relation = derive_exact_conditioned_local_relation(
+                            10,
+                            height,
+                            board,
+                            piece,
+                            profile,
+                            window,
+                            &[entry],
+                        )
+                        .expect("entry remains placeable on the selected board");
+                        let expected = crate::backend::exact_entry_lock_anchors(
+                            10,
+                            height,
+                            board,
+                            piece,
+                            profile,
+                            &[entry],
+                        );
+                        assert_eq!(
+                            relation.compose_exact_global_lock_anchors(),
+                            expected,
+                            "{profile:?} {height}L {piece:?} board={board:#x}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn every_piece_and_supported_height_has_a_stable_collision_dependency() {
         for profile in [
             KickTableProfileId::Srs90,
