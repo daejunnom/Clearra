@@ -2033,38 +2033,53 @@ mod tests {
             let pack = load_local_relation_candidate_pack(&bytes, binding, None).unwrap();
             install_qualified_local_relation_pack(qualified_local_relation_for_solver_test(pack))
                 .expect("candidate fits the shared memory contract");
-            for (height, piece, deleted) in [
-                (1, PieceKind::I, 0),
-                (2, PieceKind::T, 1),
-                (4, PieceKind::J, 0),
-                (6, PieceKind::L, 0),
-            ] {
+            let mut checked_contexts = 0;
+            for height in 1..=6 {
                 let catalog = super::GeometryCatalog::compile_for_required_cells_on_dimensions(
                     10, height, 0, 0,
                 )
                 .expect("product dimensions");
-                let frame = LocalRelationRowFrame::new(height, deleted).unwrap();
-                let reference =
-                    super::exact_spawn_lock_anchors(10, height, 0, piece, profile).unwrap();
-                let mut workspace = ReachabilityWorkspace::default();
-                workspace.configure_kick_profile(profile, true);
-                workspace.prepare_template(&catalog, piece);
-                let got = workspace.lock_reachable_after_harddrop_miss_in_frame(
-                    &catalog,
-                    0,
-                    piece,
-                    RotationState::Zero,
-                    4,
-                    0,
-                    Some(frame),
-                );
-                assert_eq!(got, reference[0] & (1_u64 << 4) != 0, "{name} {height}L");
-                assert_eq!(
-                    workspace.metrics().conditioned_complete_hits,
-                    1,
-                    "{name} {height}L did not use its generated pack"
-                );
+                let deleted_frames: &[u16] = if height == 2 { &[0, 1, 2] } else { &[0] };
+                for piece in [
+                    PieceKind::I,
+                    PieceKind::O,
+                    PieceKind::T,
+                    PieceKind::S,
+                    PieceKind::Z,
+                    PieceKind::J,
+                    PieceKind::L,
+                ] {
+                    let reference =
+                        super::exact_spawn_lock_anchors(10, height, 0, piece, profile).unwrap();
+                    for &deleted in deleted_frames {
+                        let frame = LocalRelationRowFrame::new(height, deleted).unwrap();
+                        let mut workspace = ReachabilityWorkspace::default();
+                        workspace.configure_kick_profile(profile, true);
+                        workspace.prepare_template(&catalog, piece);
+                        let got = workspace.lock_reachable_after_harddrop_miss_in_frame(
+                            &catalog,
+                            0,
+                            piece,
+                            RotationState::Zero,
+                            4,
+                            0,
+                            Some(frame),
+                        );
+                        assert_eq!(
+                            got,
+                            reference[0] & (1_u64 << 4) != 0,
+                            "{name} {height}L {piece:?} deleted={deleted}"
+                        );
+                        assert_eq!(
+                            workspace.metrics().conditioned_complete_hits,
+                            1,
+                            "{name} {height}L {piece:?} deleted={deleted} missed its pack"
+                        );
+                        checked_contexts += 1;
+                    }
+                }
             }
+            assert_eq!(checked_contexts, 56, "{name} product context coverage");
             assert!(remove_qualified_local_relation_pack(profile)
                 .unwrap()
                 .is_some());
