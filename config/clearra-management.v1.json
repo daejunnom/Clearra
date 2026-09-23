@@ -3,13 +3,14 @@
   "policy_version": 2,
   "canonical_source": "config/clearra-management.v1.json",
   "managed_scope": [
-    "generated-output-paths",
+    "generated-output-write-paths",
     "process-memory",
     "process-tree",
     "wsl-lifecycle"
   ],
   "excluded_scope": [
     "filesystem-reading",
+    "existing-generated-output-cleanup",
     "git",
     "dependency-management",
     "toolchain-installation",

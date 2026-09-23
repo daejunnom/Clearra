@@ -2,7 +2,7 @@
 
 `config/clearra-management.v1.json` governs only two things:
 
-1. where Clearra-generated output may be written; and
+1. where new Clearra-generated output may be written; and
 2. memory, timeout, descendant-process, and WSL lifetime limits for risky runs.
 
 The active manager is the Rust binary in `tools/clearra-manage`. The Python v1
@@ -38,12 +38,26 @@ they start a process.
 
 Clearra-generated files must stay inside a repository or platform root declared
 in `config/clearra-management.v1.json`. Use the prebuilt manager when a caller
-accepts an output path or when the path is otherwise uncertain:
+accepts an output path or when the destination for a new write is uncertain:
 
 ```text
 clearra-manage storage verify --path <path>
 clearra-manage storage audit
 ```
+
+`storage verify` checks a **new write destination**. It is not a deletion
+authorization check. Do not apply it to a user-requested cleanup of existing
+Clearra temporary output: that would reject legacy files outside today's
+allowed write roots and prevent their removal. For cleanup, first identify the
+exact file or directory and its Clearra ownership from a producer receipt,
+generator path, or other concrete evidence. Check its absolute target and
+ancestors for link/junction escapes, exclude credentials and Git-tracked source,
+and remove only the identified target with native filesystem commands. Before
+recursive deletion or movement on Windows, verify that the resolved absolute
+target remains inside the intended workspace or the explicitly named target
+directory. If ownership or the target boundary cannot be established, leave
+the item in place and report what is missing. Cleanup does not authorize new
+writes outside the declared roots or broad deletion of unrelated files.
 
 Path verification rejects traversal, symlink/junction escapes, and credential
 paths. The local interactive override requires both

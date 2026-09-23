@@ -153,7 +153,7 @@ impl Policy {
             .map(String::as_str)
             .collect::<HashSet<_>>();
         let expected_managed = HashSet::from([
-            "generated-output-paths",
+            "generated-output-write-paths",
             "process-memory",
             "process-tree",
             "wsl-lifecycle",
@@ -170,6 +170,7 @@ impl Policy {
             .collect::<HashSet<_>>();
         for domain in [
             "filesystem-reading",
+            "existing-generated-output-cleanup",
             "git",
             "dependency-management",
             "toolchain-installation",

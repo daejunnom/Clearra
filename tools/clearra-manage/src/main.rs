@@ -123,6 +123,7 @@ fn storage_command(
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "schema_id": "clearra.storage-verification.v2",
+                    "intent": "new-output-write",
                     "path": value.path,
                     "root_id": value.root_id,
                     "lifecycle": value.lifecycle,
@@ -290,10 +291,10 @@ fn require_empty(arguments: &[OsString]) -> Result<()> {
 fn print_help() {
     println!(
         "Clearra Rust management CLI v2\n\n\
-         Scope: generated-output paths and process/WSL memory safety.\n\
+         Scope: generated-output write paths and process/WSL memory safety.\n\
          Git, file reads, dependency installation, toolchain installation, and package publishing are intentionally outside this CLI.\n\n\
          clearra-manage [--root PATH] storage audit\n\
-         clearra-manage [--root PATH] storage verify --path PATH [--force-unmanaged-output --force-reason REASON]\n\
+         clearra-manage [--root PATH] storage verify --path NEW_OUTPUT_PATH [--force-unmanaged-output --force-reason REASON]\n\
          clearra-manage [--root PATH] runtime audit\n\
          clearra-manage [--root PATH] runtime run --producer ID --profile ID [--timeout SECONDS] -- COMMAND...\n\
          clearra-manage [--root PATH] runtime wsl verify\n\
