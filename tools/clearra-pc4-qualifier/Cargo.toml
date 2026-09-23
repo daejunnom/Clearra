@@ -42,6 +42,11 @@ name = "clearra-conditioned-catalog-sign"
 path = "src/bin/clearra-conditioned-catalog-sign.rs"
 required-features = ["legal-board-assets"]
 
+[[bin]]
+name = "clearra-legal-board-catalog-sign"
+path = "src/bin/clearra-legal-board-catalog-sign.rs"
+required-features = ["legal-board-assets"]
+
 [dependencies]
 clearra-app = { path = "../../crates/clearra-app", features = ["online-pc4-tablebase", "parallel"], optional = true }
 clearra-accelerator-activation = { path = "../../crates/clearra-accelerator-activation" }
