@@ -10,6 +10,7 @@ use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_rules::kicks::KickTableProfileId;
 
 use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
+use crate::row_frame::CompactedRowFrame;
 
 /// Inclusive anchor-pose rectangle; the piece footprint may cross its edge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,76 +27,42 @@ pub struct ConditionedPoseWindow {
 /// deliberately separate from the 4L-only legal-board membership codec.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalRelationRowFrame {
-    target_height: u8,
-    deleted_original_rows: u8,
+    frame: CompactedRowFrame,
 }
 
 impl LocalRelationRowFrame {
     pub const fn new(target_height: u8, deleted_original_rows: u16) -> Option<Self> {
-        if target_height < 1
-            || target_height > 6
-            || deleted_original_rows >> target_height != 0
-            || deleted_original_rows.count_ones() >= target_height as u32
-        {
-            return None;
-        }
-        Some(Self {
-            target_height,
-            deleted_original_rows: deleted_original_rows as u8,
-        })
+        let frame = match CompactedRowFrame::new(target_height, deleted_original_rows) {
+            Some(frame) if frame.surviving_rows() != 0 => frame,
+            _ => return None,
+        };
+        Some(Self { frame })
     }
 
     pub const fn target_height(self) -> u8 {
-        self.target_height
+        self.frame.target_height()
     }
 
     pub const fn deleted_original_rows(self) -> u8 {
-        self.deleted_original_rows
+        self.frame.deleted_original_rows()
     }
 
     pub const fn surviving_rows(self) -> u8 {
-        self.target_height - self.deleted_original_rows.count_ones() as u8
+        self.frame.surviving_rows()
     }
 
     /// Map a compact physical row back to the original target-row frame.
     /// Cleared rows have no physical row and must not be fabricated as poses.
     pub const fn original_row_for_physical(self, physical_row: u8) -> Option<u8> {
-        if physical_row >= self.surviving_rows() {
-            return None;
-        }
-        let mut visible = 0_u8;
-        let mut original = 0_u8;
-        while original < self.target_height {
-            if self.deleted_original_rows & (1_u8 << original) == 0 {
-                if visible == physical_row {
-                    return Some(original);
-                }
-                visible += 1;
-            }
-            original += 1;
-        }
-        None
+        self.frame.original_row_for_physical(physical_row)
     }
 
     pub const fn physical_row_for_original(self, original_row: u8) -> Option<u8> {
-        if original_row >= self.target_height
-            || self.deleted_original_rows & (1_u8 << original_row) != 0
-        {
-            return None;
-        }
-        let mut visible = 0_u8;
-        let mut original = 0_u8;
-        while original < original_row {
-            if self.deleted_original_rows & (1_u8 << original) == 0 {
-                visible += 1;
-            }
-            original += 1;
-        }
-        Some(visible)
+        self.frame.physical_row_for_original(original_row)
     }
 
     pub fn accepts_physical_board(self, width: u8, board: u64) -> bool {
-        width == 10 && board >> (u32::from(self.surviving_rows()) * u32::from(width)) == 0
+        self.frame.accepts_physical_board(width, board)
     }
 }
 

@@ -17,6 +17,8 @@ use clearra_rules::kicks::{
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+use crate::row_frame::{CompactedRowFrame, CompactedRowFrameError};
+
 const MAGIC: &[u8; 8] = b"CLLB0002";
 const VERSION: u32 = 2;
 const HEADER_BYTES: usize = 160;
@@ -86,97 +88,68 @@ pub enum RowCodecError {
     MissingClearedBottomPrefix,
 }
 
+impl From<CompactedRowFrameError> for RowCodecError {
+    fn from(error: CompactedRowFrameError) -> Self {
+        match error {
+            CompactedRowFrameError::PhysicalCellsOutsideSurvivingRows => {
+                Self::PhysicalCellsOutsideSurvivingRows
+            }
+            CompactedRowFrameError::MissingClearedBottomPrefix => Self::MissingClearedBottomPrefix,
+        }
+    }
+}
+
 /// Typed correspondence between BuildUp's original logical rows and the
 /// legal-board product's bottom-prefix normalization.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct OriginalRowFrame {
-    deleted_original_rows: u8,
+    frame: CompactedRowFrame,
 }
 
 impl OriginalRowFrame {
     pub fn from_deleted_rows(value: u16) -> Result<Self, RowCodecError> {
-        if value >> 4 != 0 {
-            return Err(RowCodecError::DeletedRowsOutsideFourRowFrame);
-        }
-        Ok(Self {
-            deleted_original_rows: value as u8,
-        })
+        let frame = CompactedRowFrame::new(4, value)
+            .ok_or(RowCodecError::DeletedRowsOutsideFourRowFrame)?;
+        Ok(Self { frame })
     }
 
     pub const fn deleted_original_rows(self) -> u8 {
-        self.deleted_original_rows
+        self.frame.deleted_original_rows()
     }
 
     pub const fn cleared_row_count(self) -> u8 {
-        self.deleted_original_rows.count_ones() as u8
+        self.frame.cleared_rows()
     }
 
     pub const fn surviving_original_rows(self) -> u8 {
-        4 - self.cleared_row_count()
+        self.frame.surviving_rows()
     }
 
     /// Convert a compact physical board to the single canonical graph form:
     /// cleared rows are represented only as a full bottom-row prefix. Their
     /// original positions remain in this frame for replay/witness ownership.
     pub fn normalize_product_board(self, physical_board: u64) -> Result<u64, RowCodecError> {
-        let surviving_bits = u32::from(self.surviving_original_rows()) * 10;
-        if physical_board >> surviving_bits != 0 {
-            return Err(RowCodecError::PhysicalCellsOutsideSurvivingRows);
-        }
-        let prefix_bits = u32::from(self.cleared_row_count()) * 10;
-        let prefix = if prefix_bits == 0 {
-            0
-        } else {
-            (1_u64 << prefix_bits) - 1
-        };
-        Ok((physical_board << prefix_bits) | prefix)
+        self.frame
+            .bottom_prefix_board(physical_board)
+            .map_err(Into::into)
     }
 
     /// Recover the compact physical board from the product membership key.
     /// The original-row map is retained by this typed frame rather than being
     /// encoded into the product board itself.
     pub fn compact_physical_board(self, product_board: u64) -> Result<u64, RowCodecError> {
-        if product_board & !FIELD_MASK != 0 {
-            return Err(RowCodecError::PhysicalCellsOutsideSurvivingRows);
-        }
-        let prefix_bits = u32::from(self.cleared_row_count()) * 10;
-        let prefix = if prefix_bits == 0 {
-            0
-        } else {
-            (1_u64 << prefix_bits) - 1
-        };
-        if product_board & prefix != prefix {
-            return Err(RowCodecError::MissingClearedBottomPrefix);
-        }
-        let physical_board = product_board >> prefix_bits;
-        let surviving_bits = u32::from(self.surviving_original_rows()) * 10;
-        if physical_board >> surviving_bits != 0 {
-            return Err(RowCodecError::PhysicalCellsOutsideSurvivingRows);
-        }
-        Ok(physical_board)
+        self.frame
+            .compact_from_bottom_prefix(product_board)
+            .map_err(Into::into)
     }
 
     /// Reinsert full cleared rows at their original logical positions for
     /// replay coordinates. This representation must never be used as a legal
     /// board membership key.
     pub fn replay_frame_board(self, physical_board: u64) -> Result<u64, RowCodecError> {
-        let surviving_bits = u32::from(self.surviving_original_rows()) * 10;
-        if physical_board >> surviving_bits != 0 {
-            return Err(RowCodecError::PhysicalCellsOutsideSurvivingRows);
-        }
-        let mut replay = 0_u64;
-        let mut physical_row = 0_u32;
-        for original_row in 0_u32..4 {
-            let row = if self.deleted_original_rows & (1 << original_row) != 0 {
-                (1_u64 << 10) - 1
-            } else {
-                let row = (physical_board >> (physical_row * 10)) & ((1_u64 << 10) - 1);
-                physical_row += 1;
-                row
-            };
-            replay |= row << (original_row * 10);
-        }
-        Ok(replay)
+        self.frame
+            .replay_frame_board(physical_board)
+            .map_err(Into::into)
     }
 }
 

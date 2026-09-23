@@ -33,6 +33,7 @@ pub mod problem_lowering;
 pub mod reachability_reference;
 pub mod resource;
 pub mod result_views;
+mod row_frame;
 mod search_prune_policy;
 pub mod service;
 pub mod setup_finder_report;
