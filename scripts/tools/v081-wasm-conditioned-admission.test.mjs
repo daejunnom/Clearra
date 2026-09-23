@@ -16,13 +16,14 @@ test('exact WASM validates and installs a real qualified conditioned pack', asyn
   const wasm = await readFile(resolve(artifactRoot, manifest.wasm.path));
   const bindings = await import(pathToFileURL(resolve(artifactRoot, manifest.bindings.path)).href);
   const raw = await bindings.default({ module_or_path: wasm });
-  const output = () => {
+  const outputText = () => {
     const pointer = raw.clearra_wasm_output_ptr() >>> 0;
     const length = raw.clearra_wasm_output_len() >>> 0;
     const text = encoder.decode(new Uint8Array(raw.memory.buffer, pointer, length));
     assert.equal(raw.clearra_wasm_output_release(), 0);
-    return JSON.parse(text);
+    return text;
   };
+  const output = () => JSON.parse(outputText());
 
   // One real profile is sufficient for this ABI smoke. All five profile
   // payloads have already passed the independent source-bound qualification
@@ -46,7 +47,7 @@ test('exact WASM validates and installs a real qualified conditioned pack', asyn
   new Uint8Array(raw.memory.buffer, pointer, bytes.byteLength).set(bytes);
   const admission = raw.clearra_wasm_accelerator_admit(1, 4, 1);
   if (admission !== 0) {
-    assert.fail(`qualified WASM admission failed: ${JSON.stringify(output())}`);
+    assert.fail(`qualified WASM admission failed: ${outputText()}`);
   }
   assert.deepEqual(output(), {
     state: 'ready',
