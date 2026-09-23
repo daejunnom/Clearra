@@ -1037,8 +1037,12 @@ export function validateProductResultPayload(
   }
   if (payload.content.payload_kind === 'coverage-portfolio') {
     const page = payload.content.payload;
+    const pinnedPc = payload.contract === 'pc.pinned-minimals' &&
+      payload.result_kind === 'pc-pinned-minimum-cover.v1';
+    const pinnedKeys = page.pinned_candidate_keys ?? [];
     const expectedPair =
       (payload.contract === 'pc.minimals' && payload.result_kind === 'pc-minimum-cover.v2') ||
+      pinnedPc ||
       (payload.contract === 'pc.score-minimals' &&
         payload.result_kind === 'pc-score-portfolio.v2') ||
       (payload.contract === 'build.highest-score-minimum-set' &&
@@ -1053,6 +1057,12 @@ export function validateProductResultPayload(
     });
     if (
       !expectedPair ||
+      (pinnedPc
+        ? pinnedKeys.length === 0 ||
+          !canonicalNonNegativeDecimal(page.optimal_cardinality) ||
+          BigInt(pinnedKeys.length) > BigInt(page.optimal_cardinality) ||
+          pinnedKeys.some((key, index) => !key || pinnedKeys.indexOf(key) !== index)
+        : false) ||
       page.set_contract !== 'portfolio-alternative-set.v1' ||
       typeof page.page_handle_available !== 'boolean' ||
       pageValidationError

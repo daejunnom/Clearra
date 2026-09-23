@@ -14,6 +14,7 @@ use clearra_app::{
 use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
+use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
 use clearra_forward_search::{BoundaryRecoveryQuery, ForwardSearchMode, ForwardSearchQuery};
 use clearra_objectives::policy::{
     objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
@@ -53,6 +54,8 @@ pub struct WebCommandRequest {
     objective: ObjectivePolicy,
     pc_result_projection: PcResultProjection,
     pc_minimum_pins: Vec<String>,
+    pc_pinned_drawings: Vec<StandardBoard64ColoredTilingIdentity>,
+    pc_expected_source_set_hash: Option<String>,
     pc_failed_queue_origin: Option<PcFailedQueueIngressOrigin>,
     product_capability_contract: Option<ProductCapabilityContract>,
     queue_observation_policy: QueueObservationPolicy,
@@ -119,6 +122,8 @@ impl WebCommandRequest {
             objective: ObjectivePolicy::unique(),
             pc_result_projection: PcResultProjection::Standard,
             pc_minimum_pins: Vec::new(),
+            pc_pinned_drawings: Vec::new(),
+            pc_expected_source_set_hash: None,
             pc_failed_queue_origin: None,
             product_capability_contract: None,
             queue_observation_policy: QueueObservationPolicy::default(),
@@ -186,6 +191,8 @@ impl WebCommandRequest {
             objective: ObjectivePolicy::unique(),
             pc_result_projection: PcResultProjection::Standard,
             pc_minimum_pins: Vec::new(),
+            pc_pinned_drawings: Vec::new(),
+            pc_expected_source_set_hash: None,
             pc_failed_queue_origin: None,
             product_capability_contract: None,
             queue_observation_policy: QueueObservationPolicy::default(),
@@ -614,6 +621,7 @@ impl WebCommandRequest {
             }
             ProductCapabilityContract::PcChance => PcResultProjection::Standard,
             ProductCapabilityContract::PcMinimals => PcResultProjection::Standard,
+            ProductCapabilityContract::PcPinnedMinimals => PcResultProjection::Standard,
             ProductCapabilityContract::PcFailedQueue => PcResultProjection::Standard,
             ProductCapabilityContract::PcScore => PcResultProjection::Standard,
             ProductCapabilityContract::PcScoreFinder => PcResultProjection::Standard,
@@ -639,8 +647,37 @@ impl WebCommandRequest {
 
     pub fn with_pc_minimals_product_capability(mut self, origin: PcMinimalsIngressOrigin) -> Self {
         self.pc_result_projection = PcResultProjection::MinimumCoverV2(origin);
-        self.product_capability_contract = Some(ProductCapabilityContract::PcMinimals);
+        self.product_capability_contract = Some(match origin {
+            PcMinimalsIngressOrigin::CanonicalPcMinimals => ProductCapabilityContract::PcMinimals,
+            PcMinimalsIngressOrigin::CanonicalPcPinnedMinimals => {
+                ProductCapabilityContract::PcPinnedMinimals
+            }
+        });
         self
+    }
+
+    pub fn with_pc_pinned_drawings(
+        mut self,
+        drawings: Vec<StandardBoard64ColoredTilingIdentity>,
+        expected_source_set_hash: Option<String>,
+    ) -> Result<Self, WebCommandError> {
+        if self.product_capability_contract != Some(ProductCapabilityContract::PcPinnedMinimals)
+            || drawings.is_empty()
+            || expected_source_set_hash.as_deref().is_some_and(|hash| {
+                !hash.strip_prefix("cts1:").is_some_and(|hex| {
+                    hex.len() == 16 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            })
+        {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "pc.pinned-minimals requires selected drawings and an optional canonical cts1 source-set hash",
+            ));
+        }
+        self.pc_pinned_drawings = drawings;
+        self.pc_expected_source_set_hash =
+            expected_source_set_hash.map(|hash| hash.to_ascii_lowercase());
+        Ok(self)
     }
 
     pub fn with_pc_minimum_pins(mut self, mut keys: Vec<String>) -> Result<Self, WebCommandError> {
@@ -812,6 +849,10 @@ impl WebCommandRequest {
             | (
                 PcResultProjection::MinimumCoverV2(_),
                 Some(ProductCapabilityContract::PcMinimals),
+            )
+            | (
+                PcResultProjection::MinimumCoverV2(_),
+                Some(ProductCapabilityContract::PcPinnedMinimals),
             )
             | (
                 PcResultProjection::ChanceProbabilityV2(_),
@@ -1866,7 +1907,11 @@ impl WebCommandRequest {
             } else {
                 let command = ScenarioAppCommand::new(query)
                     .with_result_projection(self.pc_result_projection)
-                    .with_pinned_minimum_keys(self.pc_minimum_pins.clone());
+                    .with_pinned_minimum_keys(self.pc_minimum_pins.clone())
+                    .with_pinned_minimum_drawings(
+                        self.pc_pinned_drawings.clone(),
+                        self.pc_expected_source_set_hash.clone(),
+                    );
                 command.validate_result_projection().map_err(|reason| {
                     WebCommandError::new(WebCommandErrorCode::InvalidValue, reason)
                 })?;
@@ -1919,7 +1964,11 @@ impl WebCommandRequest {
         } else {
             let command = PcAppCommand::new(query)
                 .with_result_projection(self.pc_result_projection)
-                .with_pinned_minimum_keys(self.pc_minimum_pins.clone());
+                .with_pinned_minimum_keys(self.pc_minimum_pins.clone())
+                .with_pinned_minimum_drawings(
+                    self.pc_pinned_drawings.clone(),
+                    self.pc_expected_source_set_hash.clone(),
+                );
             command.validate_result_projection().map_err(|reason| {
                 WebCommandError::new(WebCommandErrorCode::InvalidValue, reason)
             })?;

@@ -278,6 +278,77 @@ fn pc_minimals_rejects_semantic_overrides_and_unaccounted_memory_caps() {
 }
 
 #[test]
+fn pc_pinned_minimals_requires_a_second_drawing_input_and_binds_the_full_source() {
+    let mut cells = vec![clearra_app::Ctk3Color::Empty; 10];
+    cells[..6].fill(clearra_app::Ctk3Color::Gray);
+    cells[6..].fill(clearra_app::Ctk3Color::Piece(clearra_app::Ctk3Piece::I));
+    let document = clearra_app::encode_ctk3_compact(&clearra_app::Ctk3Document::new(
+        10,
+        vec![clearra_app::Ctk3Page::new(1, cells)],
+    ))
+    .unwrap();
+    let base = "clearra pc pinned-minimals --lines 1 --board-mask 0x3f --height 1 --pieces 1 --queue I --hold empty --rule srs-plus --backend cpu --workers 1";
+    assert!(CliCommandParser::parse(base).is_err());
+    assert!(CliCommandParser::parse(&format!(
+        "{base} --required-format ctk3 --required-document {document} --pin-key stale"
+    ))
+    .is_err());
+    assert!(CliCommandParser::parse(&format!(
+        "{base} --required-format ctk3 --required-document {document} --expected-source-set-hash stale"
+    ))
+    .is_err());
+    let parsed = CliCommandParser::parse(&format!(
+        "{base} --required-format ctk3 --required-document {document}"
+    ))
+    .unwrap();
+    let request = parsed.to_app_request().unwrap();
+    assert_eq!(
+        request.product_capability_contract(),
+        Some(ProductCapabilityContract::PcPinnedMinimals)
+    );
+    let AppCommand::Scenario(command) = request.command() else {
+        panic!("expected full-source PC scenario");
+    };
+    assert_eq!(
+        command.result_projection(),
+        PcResultProjection::MinimumCoverV2(PcMinimalsIngressOrigin::CanonicalPcPinnedMinimals)
+    );
+    assert_eq!(command.pinned_minimum_drawings().len(), 1);
+    assert!(command.pinned_minimum_keys().is_empty());
+    let context = clearra_app::AppContext::new(
+        clearra_app::AppServices::default()
+            .with_core_executor(clearra_app::AppCoreExecutorService::wasm_cpu()),
+    );
+    let response = context.run(request);
+    assert_eq!(
+        response.status(),
+        clearra_app::AppStatus::Success,
+        "{response:?}"
+    );
+    let product = response
+        .product_capability_result()
+        .expect("validated PC result");
+    assert_eq!(
+        product.contract(),
+        ProductCapabilityContract::PcPinnedMinimals
+    );
+    assert_eq!(product.result_kind().as_str(), "pc-pinned-minimum-cover.v1");
+    let public = product.public_result_payload().expect("public PC result");
+    assert_eq!(public.contract(), "pc.pinned-minimals");
+    let stale = CliCommandParser::parse(&format!(
+        "{base} --required-format ctk3 --required-document {document} --expected-source-set-hash cts1:aaaaaaaaaaaaaaaa"
+    ))
+    .unwrap()
+    .to_app_request()
+    .unwrap();
+    assert_ne!(
+        context.run(stale).status(),
+        clearra_app::AppStatus::Success,
+        "a changed complete source must invalidate the second input"
+    );
+}
+
+#[test]
 fn pc_path_binds_the_complete_replay_family_contract_without_score_or_ties() {
     let source = concat!(
         "clearra pc path --lines 1 --board-mask 0x3f0 --height 1 ",

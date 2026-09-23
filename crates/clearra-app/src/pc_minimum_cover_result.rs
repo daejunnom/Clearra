@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use clearra_core_domain::solution::normalized_tiling_solution::{
     normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
-    NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
-    NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
+    NormalizedTilingSolutionKey, StandardBoard64ColoredTilingIdentity,
+    StandardBoard64TilingIdentity, NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
 };
 use clearra_core_executor::{
     normalized_solution_probability_reports, CoreExecutionResult, SolutionProbabilityReport,
@@ -35,12 +35,14 @@ pub const PC_MINIMUM_COVER_CANONICAL_SELECTION: &str = "smallest-canonical-candi
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PcMinimalsIngressOrigin {
     CanonicalPcMinimals,
+    CanonicalPcPinnedMinimals,
 }
 
 impl PcMinimalsIngressOrigin {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CanonicalPcMinimals => "canonical-pc-minimals",
+            Self::CanonicalPcPinnedMinimals => "canonical-pc-pinned-minimals",
         }
     }
 }
@@ -455,6 +457,49 @@ impl PcMinimumCoverV2Preparation {
             portfolio,
             pin_publication,
         })
+    }
+
+    /// Resolve a user-selected drawing only against the complete, validated
+    /// producer source. A colored page cannot name a touching same-kind
+    /// placement boundary, so ambiguous matches must be rejected.
+    pub(crate) fn new_with_drawings(
+        source: ValidatedPcMinimumCoverSource,
+        drawings: &[StandardBoard64ColoredTilingIdentity],
+        expected_source_set_hash: Option<&str>,
+    ) -> Result<Self, &'static str> {
+        if drawings.is_empty() {
+            return Err("pc pinned minimals requires at least one selected drawing");
+        }
+        let source_hash =
+            normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
+                &source.source_solution_identities,
+            );
+        if expected_source_set_hash.is_some_and(|expected| expected != source_hash) {
+            return Err("pc pinned minimals source set changed; select drawings again");
+        }
+        let mut pins = Vec::with_capacity(drawings.len());
+        for drawing in drawings {
+            let mut matched = source
+                .source_solution_identities
+                .iter()
+                .zip(&source.candidate_keys)
+                .filter(|(identity, _)| {
+                    StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(**identity)
+                        == *drawing
+                })
+                .map(|(_, key)| key);
+            let key = matched
+                .next()
+                .ok_or("pc pinned drawing is absent from the complete source")?;
+            if matched.next().is_some() {
+                return Err("pc pinned drawing matches multiple normalized solutions");
+            }
+            if pins.contains(key) {
+                return Err("pc pinned drawing was selected more than once");
+            }
+            pins.push(key.clone());
+        }
+        Self::new_with_pins(source, pins)
     }
 
     #[cfg(test)]

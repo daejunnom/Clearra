@@ -234,24 +234,32 @@ test('minimum-cover GUI emits one canonical pc minimals command without a DTO co
 });
 
 test('PC mandatory solutions stay bound to minimum-cover argv in browser and Desktop', () => {
-  const key = 'ctk1|I:000003c0';
-  const secondKey = 'ctk1|O:00000033';
+  const key = 'ctk1|initial=000000000000003f|placements=I:00000000000003c0';
+  const secondKey = 'ctk1|initial=000000000000003f|placements=O:00000000000003c0';
   const base = {
     ...createDefaultWorkspaceRequest(),
     scoreMode: 'minimum-cover',
-    pinnedSolutionKeys: [secondKey, key, secondKey]
+    queue: 'I',
+    pinnedSolutionKeys: [secondKey, key, secondKey],
+    pinnedSolutionDocument: 'ctk3_selected',
+    pinnedSourceSetHash: 'cts1:0123456789abcdef'
   };
+  assert.deepEqual(workspaceValidationCodes(base, 'web'), []);
   const arguments_ = buildWorkspaceCommandArguments(base);
-  assert.deepEqual(arguments_.slice(arguments_.indexOf('--pin-key')), [
-    '--pin-key', secondKey, '--pin-key', key
+  assert.deepEqual(arguments_.slice(0, 3), ['clearra', 'pc', 'pinned-minimals']);
+  assert.deepEqual(arguments_.slice(arguments_.indexOf('--required-format'), arguments_.indexOf('--expected-source-set-hash')), [
+    '--required-format', 'ctk3', '--required-document', arguments_[arguments_.indexOf('--required-document') + 1]
   ]);
+  assert.deepEqual(arguments_.slice(-2), ['--expected-source-set-hash', 'cts1:0123456789abcdef']);
+  assert.equal(arguments_.includes('--pin-key'), false);
+  assert.equal(arguments_[arguments_.indexOf('--required-document') + 1], 'ctk3_selected');
   assert.deepEqual(
     tokenizeBrowserCommandForContract(buildWorkspaceCommand(base)),
     arguments_
   );
   assert.deepEqual(workspaceRequestForDesktop(base, 'ko').arguments, arguments_);
   assert.equal(
-    buildWorkspaceCommandArguments({ ...base, scoreMode: 'off' }).includes('--pin-key'),
+    buildWorkspaceCommandArguments({ ...base, scoreMode: 'off' }).includes('--required-document'),
     false
   );
 });

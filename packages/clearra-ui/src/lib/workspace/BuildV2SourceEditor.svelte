@@ -63,6 +63,29 @@
         }}
       />
     </label>
+    {#if request.capability === 'build.pinned-minimals'}
+      <label>
+        <span>{componentMessage(language, 'suppliedSolutionFormat')}</span>
+        <select
+          value={request.solutionFormat}
+          on:change={(event) => dispatch('change', { solutionFormat: (event.currentTarget as HTMLSelectElement).value as 'ctk3' | 'fumen' })}
+        >
+          <option value="ctk3">CTK3</option>
+          <option value="fumen">Fumen</option>
+        </select>
+      </label>
+      <label>
+        <span>{componentMessage(language, 'suppliedSolutionDocument')}</span>
+        <textarea
+          rows="10"
+          spellcheck="false"
+          value={request.solutionDocument}
+          placeholder={request.solutionFormat === 'ctk3' ? 'ctk3_…' : 'v115@…'}
+          on:input={(event) => dispatch('change', { solutionDocument: (event.currentTarget as HTMLTextAreaElement).value })}
+        ></textarea>
+      </label>
+      <BuildV2PinnedSelector {request} {language} on:change={(event) => dispatch('change', event.detail)} />
+    {/if}
   {:else if sourceKind === 'target-document'}
     <label>
       <span>{componentMessage(language, 'targetDocumentFormat')}</span>

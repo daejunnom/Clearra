@@ -77,6 +77,13 @@ const pinnedMinimum = {
   ...validRequest('build.evaluate.minimals'),
   pinSolutionDocument: 'ctk3_selected'
 };
+const fullSourcePinned = validRequest('build.pinned-minimals');
+assert.equal(optionValue(buildV2CommandArguments(fullSourcePinned), '--required-format'), 'ctk3');
+assert.equal(optionValue(buildV2CommandArguments(fullSourcePinned), '--required-document'), 'ctk3_selected');
+assert.deepEqual(
+  buildV2ValidationCodes({ ...fullSourcePinned, pinSolutionDocument: '' }),
+  ['pin_solution_document_invalid']
+);
 assert.deepEqual(buildV2ValidationCodes(pinnedMinimum), []);
 assert.equal(optionValue(buildV2CommandArguments(pinnedMinimum), '--pin-solution-format'), 'ctk3');
 assert.equal(
@@ -110,6 +117,7 @@ function validRequest(capability: BuildV2Capability): BuildV2Request {
     objective: buildV2DefaultObjective(capability),
     targetDocument: 'ctk3_test',
     solutionDocument: 'ctk3_test',
+    pinSolutionDocument: capability === 'build.pinned-minimals' ? 'ctk3_selected' : '',
     queue: 'I',
     workers: 1
   };
@@ -126,9 +134,9 @@ function optionValue(arguments_: readonly string[], option: string): string | un
   return index < 0 ? undefined : arguments_[index + 1];
 }
 
-assert.equal(BUILD_V2_CAPABILITIES.length, 12);
+assert.equal(BUILD_V2_CAPABILITIES.length, 13);
 assert.deepEqual(buildV2AllowedObjectives('build.cover'), [
   'min-cover',
   'max-probability-minimum'
 ]);
-console.log(JSON.stringify({ build_v2_capabilities: 12, finite_memory_option: 'rejected' }));
+console.log(JSON.stringify({ build_v2_capabilities: 13, finite_memory_option: 'rejected' }));

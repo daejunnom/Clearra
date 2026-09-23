@@ -67,6 +67,10 @@ pub(super) fn materialize_response(response: &AppResponse) -> Option<BoundSoluti
             (
                 ProductCapabilityContract::PcMinimals,
                 ProductCapabilityResultKind::PcMinimumCoverV2,
+            )
+            | (
+                ProductCapabilityContract::PcPinnedMinimals,
+                ProductCapabilityResultKind::PcPinnedMinimumCoverV1,
             ) => {
                 let report = product.pc_minimum_cover_v2()?;
                 return materialize_portfolio_page(

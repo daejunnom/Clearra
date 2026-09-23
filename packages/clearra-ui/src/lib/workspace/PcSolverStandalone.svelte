@@ -36,6 +36,7 @@
   } from './pcSolverLinkState';
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import PcSolverResult from './PcSolverResult.svelte';
+  import { encodeCtkSolutionKeySegment } from './solutionExport';
   import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
   import {
     automaticPcTargetLines,
@@ -187,6 +188,8 @@
     request = withAutomaticTarget({
       ...next,
       pinnedSolutionKeys: sourceChanged ? [] : next.pinnedSolutionKeys,
+      pinnedSolutionDocument: sourceChanged ? undefined : next.pinnedSolutionDocument,
+      pinnedSourceSetHash: sourceChanged ? undefined : next.pinnedSourceSetHash,
       workers: useAllChanged
         ? automaticWorkerAuthority(
             hostCapabilitySnapshot,
@@ -270,7 +273,13 @@
       boardMask: normalized.boardMask,
       pinnedSolutionKeys: normalized.boardMask === request.boardMask
         ? request.pinnedSolutionKeys
-        : []
+        : [],
+      pinnedSolutionDocument: normalized.boardMask === request.boardMask
+        ? request.pinnedSolutionDocument
+        : undefined,
+      pinnedSourceSetHash: normalized.boardMask === request.boardMask
+        ? request.pinnedSourceSetHash
+        : undefined
     };
     completedRowsWarning = normalized.clearedRows;
     if (executionRequest !== request) updateRequest(executionRequest);
@@ -286,10 +295,23 @@
     if (runtimeView.status !== 'completed' || executedScoreMode !== 'off' ||
         runtimeView.searchReport?.count_complete !== true ||
         runtimeView.searchReport?.result_completeness === 'incomplete') return;
+    const sourceHash = runtimeView.searchReport?.normalized_solution_set_hash;
+    if (!sourceHash || !/^cts1:[0-9a-f]{16}$/u.test(sourceHash)) return;
     const pins = new Set(request.pinnedSolutionKeys);
     if (pins.has(key)) pins.delete(key);
     else pins.add(key);
-    updateRequest({ ...request, pinnedSolutionKeys: [...pins] });
+    let document: string | undefined;
+    try {
+      document = pins.size ? encodeCtkSolutionKeySegment([...pins]) : undefined;
+    } catch {
+      return;
+    }
+    updateRequest({
+      ...request,
+      pinnedSolutionKeys: [...pins],
+      pinnedSolutionDocument: document,
+      pinnedSourceSetHash: pins.size ? sourceHash : undefined
+    });
   }
 
   function cancel() {
@@ -497,7 +519,7 @@
           <div class="pinned-summary" role="status">
             <strong>{componentMessage(language, 'mandatorySolutions')}: {request.pinnedSolutionKeys.length}</strong>
             <span>{componentMessage(language, 'runPinnedMinimum')}</span>
-            <button type="button" on:click={() => updateRequest({ ...request, pinnedSolutionKeys: [] })}>
+            <button type="button" on:click={() => updateRequest({ ...request, pinnedSolutionKeys: [], pinnedSolutionDocument: undefined, pinnedSourceSetHash: undefined })}>
               {componentMessage(language, 'clearMandatorySelection')}
             </button>
           </div>

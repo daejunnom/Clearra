@@ -242,6 +242,7 @@ impl PreparedDistributedSearch {
             .is_some_and(|contract| {
                 matches!(contract.contract(),
                     crate::product_capability_contract::ProductCapabilityContract::PcMinimals
+                    | crate::product_capability_contract::ProductCapabilityContract::PcPinnedMinimals
                     | crate::product_capability_contract::ProductCapabilityContract::PcPath
                     | crate::product_capability_contract::ProductCapabilityContract::PcScoreMinimals)
             })

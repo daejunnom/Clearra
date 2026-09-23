@@ -43,6 +43,8 @@ export type SolverWorkspaceRequest = {
   queueKnowledge: QueueKnowledge;
   scoreMode: ScoreMode;
   pinnedSolutionKeys: string[];
+  pinnedSolutionDocument?: string;
+  pinnedSourceSetHash?: string;
   scoreProfile: ScoreProfile;
   rule: RuleProfile;
   spinProfile: SpinProfile;
@@ -61,6 +63,7 @@ export type SolverWorkspaceRequest = {
 
 export type WorkspaceValidationCode =
   | 'queue_invalid'
+  | 'pinned_solution_document_invalid'
   | 'visible-seven-minimum-cover-unsupported'
   | 'pc-score-finder-fixed-queue-required'
   | 'target_lines_invalid'
@@ -477,6 +480,13 @@ export function workspaceValidationCodes(
   ) {
     errors.push('visible-seven-minimum-cover-unsupported');
   }
+  if (request.scoreMode === 'minimum-cover' && request.pinnedSolutionKeys.length > 0 &&
+      (!request.pinnedSolutionDocument ||
+        !/^ctk3(?:b_|_|@)/u.test(request.pinnedSolutionDocument) ||
+        (request.pinnedSourceSetHash !== undefined &&
+          !/^cts1:[0-9a-f]{16}$/u.test(request.pinnedSourceSetHash)))) {
+    errors.push('pinned_solution_document_invalid');
+  }
   const parsedQueue = request.queue.trim() ? parseBrowserQueueInput(request.queue) : null;
   if (request.scoreMode === 'score-finder' && parsedQueue?.kind !== 'fixed') {
     errors.push('pc-score-finder-fixed-queue-required');
@@ -518,7 +528,7 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
       : request.scoreMode === 'path'
         ? 'path'
       : request.scoreMode === 'minimum-cover'
-        ? 'minimals'
+        ? request.pinnedSolutionKeys.length ? 'pinned-minimals' : 'minimals'
         : request.scoreMode === 'summary'
           ? 'score'
           : request.scoreMode === 'score-finder'
@@ -584,8 +594,12 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
     if (request.maxPatterns !== undefined) {
       tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
     }
-    for (const key of new Set(request.pinnedSolutionKeys)) {
-      tokens.push('--pin-key', key);
+    const pinned = [...new Set(request.pinnedSolutionKeys)];
+    if (pinned.length) {
+      tokens.push('--required-format', 'ctk3', '--required-document', request.pinnedSolutionDocument ?? '');
+      if (request.pinnedSourceSetHash) {
+        tokens.push('--expected-source-set-hash', request.pinnedSourceSetHash);
+      }
     }
   } else if (request.scoreMode !== 'tiling') {
     tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all');

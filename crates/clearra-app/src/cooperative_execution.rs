@@ -783,9 +783,14 @@ impl CooperativeSearchResponseKind {
                 result_projection: projection,
                 ..
             } => match projection.projection() {
-                PcResultProjection::MinimumCoverV2(_) => {
-                    Some(ProductCapabilityContract::PcMinimals)
-                }
+                PcResultProjection::MinimumCoverV2(origin) => Some(match origin {
+                    crate::PcMinimalsIngressOrigin::CanonicalPcMinimals => {
+                        ProductCapabilityContract::PcMinimals
+                    }
+                    crate::PcMinimalsIngressOrigin::CanonicalPcPinnedMinimals => {
+                        ProductCapabilityContract::PcPinnedMinimals
+                    }
+                }),
                 PcResultProjection::PathFamilyV2(_) => Some(ProductCapabilityContract::PcPath),
                 PcResultProjection::AllSpinSolution(_) => {
                     Some(ProductCapabilityContract::PcAllSpinSolution)
@@ -3364,7 +3369,11 @@ impl CooperativeAppExecution {
                             .product_capability_contract
                             .as_ref()
                             .is_some_and(|contract| {
-                                contract.contract() == ProductCapabilityContract::PcMinimals
+                                matches!(
+                                    contract.contract(),
+                                    ProductCapabilityContract::PcMinimals
+                                        | ProductCapabilityContract::PcPinnedMinimals
+                                )
                             })
                     {
                         let command_kind = postprocess.command_kind;

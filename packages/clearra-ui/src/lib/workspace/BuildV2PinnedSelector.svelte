@@ -17,7 +17,12 @@
   let selected = new Map<number, Ctk3Page>();
   let error = '';
   let generation = 0;
-  $: source = `${request.solutionFormat}:${request.solutionDocument}`;
+  $: source = [
+    request.solutionFormat, request.solutionDocument,
+    request.capability, request.baseMask.toString(16), request.targetMask.toString(16),
+    request.height, request.queue, request.rule, request.queueKnowledge,
+    request.holdEnabled, request.holdPiece
+  ].join(':');
   $: if (loadedSource && source !== loadedSource) reset();
   $: selectedCount = selected.size;
   $: pageCount = reader?.pageCount ?? 0;

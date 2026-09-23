@@ -589,6 +589,14 @@ export type ClearraProductResultPayload =
       };
     }
   | {
+      contract: 'pc.pinned-minimals';
+      result_kind: 'pc-pinned-minimum-cover.v1';
+      content: {
+        payload_kind: 'coverage-portfolio';
+        payload: ClearraCoveragePortfolioPagePayload;
+      };
+    }
+  | {
       contract: 'pc.score-minimals';
       result_kind: 'pc-score-portfolio.v2';
       content: {

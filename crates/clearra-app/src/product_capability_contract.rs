@@ -2,6 +2,7 @@
 
 use std::{fmt, sync::Arc};
 
+use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
 use clearra_host_contract::{AppCommandKind, QueryEnvelope};
 use clearra_pc_graph::request::{OpeningPcSearchQuery, PcScenarioQuery};
 
@@ -31,6 +32,7 @@ pub enum ProductCapabilityContract {
     PcSaves,
     PcBestSave,
     PcMinimals,
+    PcPinnedMinimals,
     PcPath,
     PcChance,
     PcFailedQueue,
@@ -51,6 +53,7 @@ impl ProductCapabilityContract {
             Self::PcSaves => "pc.saves",
             Self::PcBestSave => "pc.best-save",
             Self::PcMinimals => "pc.minimals",
+            Self::PcPinnedMinimals => "pc.pinned-minimals",
             Self::PcPath => "pc.path",
             Self::PcChance => "pc.chance",
             Self::PcFailedQueue => "pc.failed-queue",
@@ -102,6 +105,10 @@ impl ProductCapabilityContract {
                         query: command.query_arc(),
                         projection,
                         pinned_keys: Arc::from(command.pinned_minimum_keys()),
+                        pinned_drawings: Arc::from(command.pinned_minimum_drawings()),
+                        expected_source_set_hash: command
+                            .expected_source_set_hash()
+                            .map(str::to_owned),
                     }
                 } else if projection.projection().path_origin().is_some() {
                     ValidatedProductCapabilityPayload::PcPathOpening {
@@ -154,6 +161,10 @@ impl ProductCapabilityContract {
                         query: command.query_arc(),
                         projection,
                         pinned_keys: Arc::from(command.pinned_minimum_keys()),
+                        pinned_drawings: Arc::from(command.pinned_minimum_drawings()),
+                        expected_source_set_hash: command
+                            .expected_source_set_hash()
+                            .map(str::to_owned),
                     }
                 } else if projection.projection().path_origin().is_some() {
                     ValidatedProductCapabilityPayload::PcPathScenario {
@@ -212,6 +223,30 @@ impl ProductCapabilityContract {
                 actual: projection,
             });
         }
+        if matches!(self, Self::PcMinimals | Self::PcPinnedMinimals) {
+            let (_, _, keys, drawings, expected_hash) = payload.pc_minimum_cover_binding().ok_or(
+                ProductCapabilityContractError::RequestContractRejected(
+                    "pc.pinned-minimals requires a minimum-cover source",
+                ),
+            )?;
+            let invalid_selection = if self == Self::PcPinnedMinimals {
+                keys.is_empty() == drawings.is_empty()
+            } else {
+                !drawings.is_empty() || expected_hash.is_some()
+            };
+            if invalid_selection
+                || expected_hash.is_some() && drawings.is_empty()
+                || expected_hash.is_some_and(|hash| {
+                    !hash.strip_prefix("cts1:").is_some_and(|hex| {
+                        hex.len() == 16 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                })
+            {
+                return Err(ProductCapabilityContractError::RequestContractRejected(
+                    "pc.pinned-minimals requires exactly one nonempty selected-key or drawing input",
+                ));
+            }
+        }
 
         Ok(ValidatedProductCapabilityContract {
             contract: self,
@@ -239,7 +274,12 @@ impl ProductCapabilityContract {
             PcResultProjection::TilingFamilyV1(_) => Some(Self::PcTiling),
             PcResultProjection::SaveGroupsV2(_) => Some(Self::PcSaves),
             PcResultProjection::BestSaveV2(_) => Some(Self::PcBestSave),
-            PcResultProjection::MinimumCoverV2(_) => Some(Self::PcMinimals),
+            PcResultProjection::MinimumCoverV2(PcMinimalsIngressOrigin::CanonicalPcMinimals) => {
+                Some(Self::PcMinimals)
+            }
+            PcResultProjection::MinimumCoverV2(
+                PcMinimalsIngressOrigin::CanonicalPcPinnedMinimals,
+            ) => Some(Self::PcPinnedMinimals),
             PcResultProjection::PathFamilyV2(_) => Some(Self::PcPath),
             PcResultProjection::ChanceProbabilityV2(_) => Some(Self::PcChance),
             PcResultProjection::ScoreSummaryV2(origin) => Some(if origin.is_score_finder() {
@@ -268,7 +308,18 @@ impl ProductCapabilityContract {
             (Self::PcTiling, PcResultProjection::TilingFamilyV1(_))
                 | (Self::PcSaves, PcResultProjection::SaveGroupsV2(_))
                 | (Self::PcBestSave, PcResultProjection::BestSaveV2(_))
-                | (Self::PcMinimals, PcResultProjection::MinimumCoverV2(_))
+                | (
+                    Self::PcMinimals,
+                    PcResultProjection::MinimumCoverV2(
+                        PcMinimalsIngressOrigin::CanonicalPcMinimals
+                    )
+                )
+                | (
+                    Self::PcPinnedMinimals,
+                    PcResultProjection::MinimumCoverV2(
+                        PcMinimalsIngressOrigin::CanonicalPcPinnedMinimals
+                    )
+                )
                 | (Self::PcPath, PcResultProjection::PathFamilyV2(_))
                 | (Self::PcChance, PcResultProjection::ChanceProbabilityV2(_))
                 | (
@@ -398,11 +449,15 @@ enum ValidatedProductCapabilityPayload {
         query: Arc<OpeningPcSearchQuery>,
         projection: ValidatedPcResultProjection,
         pinned_keys: Arc<[String]>,
+        pinned_drawings: Arc<[StandardBoard64ColoredTilingIdentity]>,
+        expected_source_set_hash: Option<String>,
     },
     PcMinimalsScenario {
         query: Arc<PcScenarioQuery>,
         projection: ValidatedPcResultProjection,
         pinned_keys: Arc<[String]>,
+        pinned_drawings: Arc<[StandardBoard64ColoredTilingIdentity]>,
+        expected_source_set_hash: Option<String>,
     },
     PcPathOpening {
         query: Arc<OpeningPcSearchQuery>,
@@ -573,12 +628,16 @@ impl ValidatedProductCapabilityPayload {
         PcMinimumCoverQueryBinding<'_>,
         PcMinimalsIngressOrigin,
         &[String],
+        &[StandardBoard64ColoredTilingIdentity],
+        Option<&str>,
     )> {
         match self {
             Self::PcMinimalsOpening {
                 query,
                 projection,
                 pinned_keys,
+                pinned_drawings,
+                expected_source_set_hash,
             } => Some((
                 PcMinimumCoverQueryBinding::Opening(query),
                 projection
@@ -586,11 +645,15 @@ impl ValidatedProductCapabilityPayload {
                     .minimals_origin()
                     .expect("pc minimals opening payload carries minimum-cover projection"),
                 pinned_keys,
+                pinned_drawings,
+                expected_source_set_hash.as_deref(),
             )),
             Self::PcMinimalsScenario {
                 query,
                 projection,
                 pinned_keys,
+                pinned_drawings,
+                expected_source_set_hash,
             } => Some((
                 PcMinimumCoverQueryBinding::Scenario(query),
                 projection
@@ -598,6 +661,8 @@ impl ValidatedProductCapabilityPayload {
                     .minimals_origin()
                     .expect("pc minimals scenario payload carries minimum-cover projection"),
                 pinned_keys,
+                pinned_drawings,
+                expected_source_set_hash.as_deref(),
             )),
             _ => None,
         }
@@ -786,7 +851,10 @@ impl ValidatedProductCapabilityContract {
     /// Heap pointees retained by the closed pc.minimals proof. Other product
     /// payloads deliberately return None instead of silently omitting owners.
     pub(crate) fn checked_minimum_cover_retained_capacity_bytes(&self) -> Option<u128> {
-        if self.contract != ProductCapabilityContract::PcMinimals {
+        if !matches!(
+            self.contract,
+            ProductCapabilityContract::PcMinimals | ProductCapabilityContract::PcPinnedMinimals
+        ) {
             return None;
         }
         match &self.payload {
@@ -878,6 +946,8 @@ impl ValidatedProductCapabilityContract {
         PcMinimumCoverQueryBinding<'_>,
         PcMinimalsIngressOrigin,
         &[String],
+        &[StandardBoard64ColoredTilingIdentity],
+        Option<&str>,
     )> {
         self.payload.pc_minimum_cover_binding()
     }

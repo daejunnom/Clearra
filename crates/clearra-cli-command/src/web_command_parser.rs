@@ -253,6 +253,10 @@ impl WebCommandParser {
                 Some("minimals") => {
                     parse_pc_minimals_command(&tokens[cursor + 1..], worker_hardware_limit.max(1))
                 }
+                Some("pinned-minimals") => parse_pc_pinned_minimals_command(
+                    &tokens[cursor + 1..],
+                    worker_hardware_limit.max(1),
+                ),
                 Some("path") => {
                     parse_pc_path_command(&tokens[cursor + 1..], worker_hardware_limit.max(1))
                 }
@@ -600,6 +604,81 @@ fn parse_pc_minimals_command(
             .with_pc_minimals_product_capability(PcMinimalsIngressOrigin::CanonicalPcMinimals)
             .with_pc_minimum_pins(pinned_keys)
     })
+}
+
+fn parse_pc_pinned_minimals_command(
+    tokens: &[String],
+    worker_hardware_limit: usize,
+) -> Result<WebCommandRequest, WebCommandError> {
+    let mut forwarded = Vec::with_capacity(tokens.len());
+    let mut required_format = None;
+    let mut required_document = None;
+    let mut expected_source_set_hash = None;
+    let mut cursor = 0;
+    while cursor < tokens.len() {
+        let option = tokens[cursor].as_str();
+        match option {
+            "--required-format" => {
+                let value = next_value(tokens, &mut cursor, option)?;
+                let format = FieldDocumentFormat::parse(value).map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "pc.pinned-minimals requires ctk3 or fumen for --required-format",
+                    )
+                })?;
+                set_build_v2_option(&mut required_format, format, option)?;
+            }
+            "--required-document" => {
+                let value = next_value(tokens, &mut cursor, option)?.to_owned();
+                set_build_v2_option(&mut required_document, value, option)?;
+            }
+            "--expected-source-set-hash" => {
+                let value = next_value(tokens, &mut cursor, option)?.to_owned();
+                set_build_v2_option(&mut expected_source_set_hash, value, option)?;
+            }
+            "--pin-key" => {
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "pc.pinned-minimals selects drawings, not internal normalized keys",
+                ));
+            }
+            _ => {
+                forwarded.push(tokens[cursor].clone());
+                cursor += 1;
+            }
+        }
+    }
+    let format = required_format.ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            "pc.pinned-minimals requires --required-format",
+        )
+    })?;
+    let document: String = required_document.ok_or_else(|| {
+        WebCommandError::new(
+            WebCommandErrorCode::MissingValue,
+            "pc.pinned-minimals requires --required-document",
+        )
+    })?;
+    if document.len() > clearra_app::FIELD_DOCUMENT_MAX_INPUT_BYTES {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "pc.pinned-minimals selected document is too large",
+        ));
+    }
+    let decoded =
+        clearra_app::BuildColoredTargetDocument::decode(format, &document).map_err(|error| {
+            WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("invalid pc.pinned-minimals selected document: {error:?}"),
+            )
+        })?;
+    parse_pc_minimals_command(&forwarded, worker_hardware_limit)?
+        .with_pc_minimals_product_capability(PcMinimalsIngressOrigin::CanonicalPcPinnedMinimals)
+        .with_pc_pinned_drawings(
+            decoded.target().identities().to_vec(),
+            expected_source_set_hash,
+        )
 }
 
 fn parse_pc_path_command(
