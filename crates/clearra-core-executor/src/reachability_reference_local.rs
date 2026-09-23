@@ -7,7 +7,7 @@ use std::collections::{HashSet, VecDeque};
 
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
-use clearra_rules::kicks::{KickTableProfileId, KickTransition};
+use clearra_rules::kicks::{KickTableProfile, KickTableProfileId, KickTransition};
 
 use super::{
     placeable, reference_ceiling, reference_center, reference_profile, Pose,
@@ -19,6 +19,7 @@ use crate::conditioned_local_relation::ConditionedPoseWindow;
 pub struct ReferenceLocalRelation {
     pub grounded_lock_anchors: [u64; 4],
     pub exits: Vec<ReferenceReachabilityEntryPose>,
+    pub reached_source_dependency_mask: u64,
 }
 
 /// Exact window-internal locks and first exits under the complete board.
@@ -159,6 +160,12 @@ pub fn reference_local_relation(
             }
         }
     }
+    let reached_source_dependency_mask = visited.iter().fold(0_u64, |mask, &source| {
+        mask | source_collision_dependencies(
+            width, height, ceiling, piece, profile, &shapes, source,
+        )
+        .expect("a visited source is statically valid")
+    });
     let mut exits: Vec<_> = exits
         .into_iter()
         .map(|pose| ReferenceReachabilityEntryPose {
@@ -171,15 +178,16 @@ pub fn reference_local_relation(
     Some(ReferenceLocalRelation {
         grounded_lock_anchors: locks,
         exits,
+        reached_source_dependency_mask,
     })
 }
 
 /// Collision cells that can influence a traversal confined to `window`.
 /// This deliberately rebuilds the dependency closure from raw shape cells
 /// and the profile's ordered kick offsets, without reading compiled masks or
-/// transition arrays. Every statically valid source in the window is included,
-/// even if it is blocked or unreachable on `board`: changing obstacles can
-/// open an earlier kick or a new path to that source.
+/// transition arrays. This *static* upper bound includes every valid source
+/// in the window; the record audit instead checks the narrower closure of
+/// sources actually reached on the record's board.
 pub fn reference_local_dependency_mask(
     width: u8,
     height: u8,
@@ -213,49 +221,67 @@ pub fn reference_local_dependency_mask(
         for y in window.min_y..=window.max_y {
             for x in window.min_x..=window.max_x {
                 let source = Pose { rotation, x, y };
-                let Some(source_mask) =
-                    physical_collision_mask(width, height, ceiling, &shapes, source)
-                else {
-                    continue;
-                };
-                mask |= source_mask;
-                for candidate in [
-                    Pose { y: y - 1, ..source },
-                    Pose { x: x - 1, ..source },
-                    Pose { x: x + 1, ..source },
-                ] {
-                    mask |= physical_collision_mask(width, height, ceiling, &shapes, candidate)
-                        .unwrap_or(0);
-                }
-                for (slot, to) in [
-                    rotation.clockwise(),
-                    rotation.counter_clockwise(),
-                    rotation.rotated_180(),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    if slot == 2 && !profile.supports_180() {
-                        continue;
-                    }
-                    let Some(sequence) =
-                        profile.sequence_for(KickTransition::new(piece, rotation, to))
-                    else {
-                        continue;
-                    };
-                    let (from_x, from_y) = reference_center(piece, rotation);
-                    let (to_x, to_y) = reference_center(piece, to);
-                    for offset in sequence.offsets() {
-                        let candidate = Pose {
-                            rotation: to,
-                            x: x + offset.dx() + from_x - to_x,
-                            y: y + offset.dy() + from_y - to_y,
-                        };
-                        mask |= physical_collision_mask(width, height, ceiling, &shapes, candidate)
-                            .unwrap_or(0);
-                    }
+                if let Some(source_mask) = source_collision_dependencies(
+                    width, height, ceiling, piece, profile, &shapes, source,
+                ) {
+                    mask |= source_mask;
                 }
             }
+        }
+    }
+    Some(mask)
+}
+
+fn source_collision_dependencies(
+    width: u8,
+    height: u8,
+    ceiling: i8,
+    piece: PieceKind,
+    profile: &KickTableProfile,
+    shapes: &ShapeCells,
+    source: Pose,
+) -> Option<u64> {
+    let mut mask = physical_collision_mask(width, height, ceiling, shapes, source)?;
+    for candidate in [
+        Pose {
+            y: source.y - 1,
+            ..source
+        },
+        Pose {
+            x: source.x - 1,
+            ..source
+        },
+        Pose {
+            x: source.x + 1,
+            ..source
+        },
+    ] {
+        mask |= physical_collision_mask(width, height, ceiling, shapes, candidate).unwrap_or(0);
+    }
+    for (slot, to) in [
+        source.rotation.clockwise(),
+        source.rotation.counter_clockwise(),
+        source.rotation.rotated_180(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if slot == 2 && !profile.supports_180() {
+            continue;
+        }
+        let Some(sequence) = profile.sequence_for(KickTransition::new(piece, source.rotation, to))
+        else {
+            continue;
+        };
+        let (from_x, from_y) = reference_center(piece, source.rotation);
+        let (to_x, to_y) = reference_center(piece, to);
+        for offset in sequence.offsets() {
+            let candidate = Pose {
+                rotation: to,
+                x: source.x + offset.dx() + from_x - to_x,
+                y: source.y + offset.dy() + from_y - to_y,
+            };
+            mask |= physical_collision_mask(width, height, ceiling, shapes, candidate).unwrap_or(0);
         }
     }
     Some(mask)

@@ -33,7 +33,6 @@ pub(crate) fn exact_local_relation(
     {
         return None;
     }
-    let dependency_mask = local_dependency_mask(&template, window);
     let mut scratch = ReachabilityScratch::default();
     let generation = scratch.begin_search(template.state_masks.len());
     for &entry in entries {
@@ -61,10 +60,12 @@ pub(crate) fn exact_local_relation(
 
     let mut locks = [0_u64; 4];
     let mut exits = Vec::new();
+    let mut dependency_mask = 0_u64;
     let mut cursor = 0;
     while cursor < scratch.queue.len() {
         let source = usize::from(scratch.queue[cursor]);
         cursor += 1;
+        dependency_mask |= reached_source_dependency_mask(&template, source);
         let pose = state_from_index(width, template.ceiling, source);
         if pose.y < height as i8 && grounded_index(&template, board, source) {
             let anchor = pose.y as usize * width as usize + pose.x as usize;
@@ -116,30 +117,26 @@ pub(crate) fn exact_local_relation(
     })
 }
 
-/// Conservative closure of every collision read originating at a pose in
-/// this window: the source, translations (including grounding), and *all*
-/// ordered kick candidates. Including blocked and not-yet-reachable sources
-/// prevents an obstacle change from opening a new path under the same key.
-fn local_dependency_mask(template: &ReachabilityTemplate, window: ConditionedPoseWindow) -> u64 {
+/// Conservative collision closure for one *reached* source. A board change
+/// outside the union of these masks cannot change an edge out of any reached
+/// pose (including first-success kick order), so induction preserves the
+/// whole reachable set. Unreached poses cannot become reached without first
+/// changing an edge from that set. This can be much smaller than unioning all
+/// statically valid but currently unreachable poses in the window.
+fn reached_source_dependency_mask(template: &ReachabilityTemplate, source: usize) -> u64 {
     let mut mask = 0_u64;
-    for source in 0..template.state_masks.len() {
-        let pose = state_from_index(template.width, template.ceiling, source);
-        if !pose_inside_window(pose, window) || template.state_masks[source] == INVALID_STATE_MASK {
-            continue;
+    mask |= template.state_masks[source];
+    for &target in &template.translation_targets[source] {
+        if target != INVALID_STATE_INDEX {
+            mask |= template.state_masks[usize::from(target)];
         }
-        mask |= template.state_masks[source];
-        for &target in &template.translation_targets[source] {
-            if target != INVALID_STATE_INDEX {
-                mask |= template.state_masks[usize::from(target)];
-            }
-        }
-        for slot in 0..if template.allow_180 { 3 } else { 2 } {
-            let transition = source * 3 + slot;
-            let begin = template.rotation_target_offsets[transition] as usize;
-            let end = template.rotation_target_offsets[transition + 1] as usize;
-            for &target in &template.rotation_targets[begin..end] {
-                mask |= template.state_masks[usize::from(target)];
-            }
+    }
+    for slot in 0..if template.allow_180 { 3 } else { 2 } {
+        let transition = source * 3 + slot;
+        let begin = template.rotation_target_offsets[transition] as usize;
+        let end = template.rotation_target_offsets[transition + 1] as usize;
+        for &target in &template.rotation_targets[begin..end] {
+            mask |= template.state_masks[usize::from(target)];
         }
     }
     mask

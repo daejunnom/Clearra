@@ -1,7 +1,7 @@
 //! Independent audit of the *candidate* local-relation binary.
 //!
 //! This is compiled only for tests and qualification tools. A successful
-//! audit checks each stored source board and its conservative collision
+//! audit checks each stored source board and its reached-source collision
 //! dependency closure; it is not a completeness receipt for all boards,
 //! profiles, entry sets or the final product pack.
 
@@ -23,27 +23,16 @@ pub enum LocalRelationCandidateAuditError {
 }
 
 /// Check every stored record against the primitive BFS and independently
-/// reconstructed collision-read closure. Collision outcomes inside a fixed
-/// pose window depend only on this closure: it includes all statically valid
-/// sources, translation/grounding targets and *every* ordered kick candidate,
-/// including sources that are blocked or currently unreachable. This still
-/// leaves global entry reachability and exits/re-entry to the exact composer.
+/// reconstructed collision-read closure. From the fixed entries, the source
+/// board's reached poses are stable under any change outside their closure:
+/// every outgoing translation and every ordered kick candidate retains its
+/// collision result, so an unreached pose cannot become reached without a
+/// changed edge out of the reached set. This still leaves global entry
+/// reachability and exits/re-entry to the exact composer.
 pub fn audit_candidate_local_relation_pack(
     candidate: &LocalRelationCandidatePack,
 ) -> Result<usize, LocalRelationCandidateAuditError> {
     for (index, record) in candidate.records().iter().enumerate() {
-        let Some(mask) = reference_local_dependency_mask(
-            record.width,
-            record.height,
-            record.piece,
-            record.kick_profile,
-            record.window,
-        ) else {
-            return Err(LocalRelationCandidateAuditError::InvalidReferenceQuery { record: index });
-        };
-        if mask != record.dependency_mask || record.dependency_occupancy != record.board & mask {
-            return Err(LocalRelationCandidateAuditError::DependencyMaskMismatch { record: index });
-        }
         let entries: Vec<_> = record
             .entries
             .iter()
@@ -64,6 +53,10 @@ pub fn audit_candidate_local_relation_pack(
         ) else {
             return Err(LocalRelationCandidateAuditError::InvalidReferenceQuery { record: index });
         };
+        let mask = reference.reached_source_dependency_mask;
+        if mask != record.dependency_mask || record.dependency_occupancy != record.board & mask {
+            return Err(LocalRelationCandidateAuditError::DependencyMaskMismatch { record: index });
+        }
         let exits: Vec<_> = reference
             .exits
             .iter()
@@ -769,6 +762,105 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn reached_source_dependency_cube_preserves_every_one_row_board() {
+        let profile = KickTableProfileId::NoKick;
+        let piece = PieceKind::T;
+        let window = ConditionedPoseWindow {
+            min_x: 4,
+            max_x: 4,
+            min_y: 0,
+            max_y: 1,
+        };
+        let entries = [ConditionedReachabilityEntryPose {
+            rotation: RotationState::Zero,
+            x: 4,
+            y: 1,
+        }];
+        let static_mask = crate::reachability_reference::reference_local_dependency_mask(
+            10, 1, piece, profile, window,
+        )
+        .unwrap();
+        let record = (0..1_u64 << 10)
+            .filter_map(|board| {
+                derive_exact_conditioned_local_relation(
+                    10, 1, board, piece, profile, window, &entries,
+                )
+            })
+            .find(|record| record.dependency_mask() != static_mask)
+            .expect("a blocked source removes at least one static dependency");
+        assert_eq!(record.dependency_mask() & !static_mask, 0);
+        assert_eq!(
+            audit_candidate_local_relation_pack(&load(profile, record.clone())),
+            Ok(1)
+        );
+        let mut matched_boards = 0;
+        for board in 0..1_u64 << 10 {
+            if board & record.dependency_mask() != record.dependency_occupancy {
+                continue;
+            }
+            let matching = derive_exact_conditioned_local_relation(
+                10, 1, board, piece, profile, window, &entries,
+            )
+            .expect("matching dependency occupancy keeps the entry placeable");
+            assert_eq!(
+                (matching.grounded_lock_anchors, matching.exits),
+                (record.grounded_lock_anchors, record.exits.clone()),
+                "board={board:#x} source={:#x}",
+                record.board
+            );
+            matched_boards += 1;
+        }
+        assert!(matched_boards > 1);
+    }
+
+    #[test]
+    fn ordered_180_kicks_keep_the_reached_source_cube_exact() {
+        let profile = KickTableProfileId::SrsX;
+        let piece = PieceKind::J;
+        let window = ConditionedPoseWindow {
+            min_x: 4,
+            max_x: 4,
+            min_y: 0,
+            max_y: 1,
+        };
+        let entries = [ConditionedReachabilityEntryPose {
+            rotation: RotationState::Zero,
+            x: 4,
+            y: 1,
+        }];
+        let static_mask = crate::reachability_reference::reference_local_dependency_mask(
+            10, 1, piece, profile, window,
+        )
+        .unwrap();
+        let record = (0..1_u64 << 10)
+            .filter_map(|board| {
+                derive_exact_conditioned_local_relation(
+                    10, 1, board, piece, profile, window, &entries,
+                )
+            })
+            .find(|record| record.dependency_mask() != static_mask)
+            .expect("a blocked source removes a static SRS-X dependency");
+        assert_eq!(
+            audit_candidate_local_relation_pack(&load(profile, record.clone())),
+            Ok(1)
+        );
+        let mut matched_boards = 0;
+        for board in 0..1_u64 << 10 {
+            if board & record.dependency_mask() != record.dependency_occupancy {
+                continue;
+            }
+            let matching = derive_exact_conditioned_local_relation(
+                10, 1, board, piece, profile, window, &entries,
+            )
+            .expect("the entry remains placeable under the cube");
+            assert_eq!(matching.grounded_lock_anchors, record.grounded_lock_anchors);
+            assert_eq!(matching.exits, record.exits, "board={board:#x}");
+            matched_boards += 1;
+        }
+        assert!(matched_boards > 1);
     }
 
     #[test]

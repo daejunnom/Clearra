@@ -175,6 +175,7 @@ test('entry-to-first-exit candidate generation is bounded and cannot inherit spa
     'crates/clearra-accelerator-runtime/src/lib.rs',
     'scripts/tools/wsl-conditioned-local-relation-generate.sh',
     'tools/clearra-pc4-qualifier/src/bin/clearra-conditioned-local-relation.rs',
+    'tools/clearra-pc4-qualifier/src/conditioned_local_coverage_proof.rs',
     'tools/clearra-pc4-qualifier/src/conditioned_local_relation_generation.rs',
     'crates/clearra-core-executor/src/backend/wasm_cpu/reachability_local_relation.rs',
     'crates/clearra-core-executor/src/backend/wasm_cpu/reachability_reference_tests.rs',
