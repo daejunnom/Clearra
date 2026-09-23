@@ -66,6 +66,8 @@ jobs:
       - name: Build exact branch WASM without publication
         env:
           WASM_BINDGEN: ${{ github.workspace }}/build/tools/cargo/wasm-bindgen-cli/0.2.126/bin/wasm-bindgen
+          CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+          CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
         run: node scripts/tools/build-clearra-wasm.mjs --environment native
       - name: Check accelerator exports and source-bound manifest
         run: node --test scripts/tools/v081-wasm-accelerator-exports.test.mjs
