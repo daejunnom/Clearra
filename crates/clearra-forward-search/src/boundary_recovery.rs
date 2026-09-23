@@ -60,6 +60,10 @@ pub struct BoundaryRecoveryQuery {
     pub spin_profile: SpinProfileId,
     /// Each bag independently enables continuous B2B preservation.
     pub preserve_b2b_by_stage: [bool; 2],
+    /// One-based stage-local bag selections, represented as zero-based bits.
+    /// A partial bag at a stage boundary starts a new bag in the next stage.
+    /// This augments the legacy whole-stage switches without changing them.
+    pub preserve_b2b_bag_mask: u64,
     pub initial_b2b: bool,
     pub max_states: usize,
 }
@@ -74,6 +78,7 @@ pub enum BoundaryRecoveryError {
     InvalidEarlyPlacementLimit,
     QueueTooLong,
     InvalidStateLimit,
+    InvalidBagPolicy,
     UnsupportedRuleProfile,
     Cancelled,
 }
@@ -256,6 +261,40 @@ struct Pass<'a> {
 }
 
 impl BoundaryRecoveryQuery {
+    fn stage_one_bag_count(&self) -> usize {
+        self.stage_one_queue_len.div_ceil(7)
+    }
+
+    fn bag_count(&self) -> usize {
+        self.stage_one_bag_count()
+            + (self.required_placements - self.stage_one_queue_len).div_ceil(7)
+    }
+
+    fn bag_index(&self, source_index: usize) -> usize {
+        if source_index < self.stage_one_queue_len {
+            source_index / 7
+        } else {
+            self.stage_one_bag_count() + (source_index - self.stage_one_queue_len) / 7
+        }
+    }
+
+    fn bag_source_mask(&self, bag: usize) -> u64 {
+        let first = self.stage_one_bag_count();
+        let (start, end) = if bag < first {
+            let start = bag * 7;
+            (start, (start + 7).min(self.stage_one_queue_len))
+        } else {
+            let start = self.stage_one_queue_len + (bag - first) * 7;
+            (start, (start + 7).min(self.required_placements))
+        };
+        ((1_u64 << end) - 1) ^ ((1_u64 << start) - 1)
+    }
+
+    fn preserves_b2b_in_bag(&self, bag: usize) -> bool {
+        let stage = usize::from(bag >= self.stage_one_bag_count());
+        self.preserve_b2b_by_stage[stage] || self.preserve_b2b_bag_mask & (1_u64 << bag) != 0
+    }
+
     fn validate(&self) -> Result<(), BoundaryRecoveryError> {
         if self.height == 0 || self.height > 25 {
             return Err(BoundaryRecoveryError::InvalidHeight);
@@ -311,6 +350,9 @@ impl BoundaryRecoveryQuery {
         }
         if self.max_states == 0 || self.max_states > MAX_SEARCH_STATES {
             return Err(BoundaryRecoveryError::InvalidStateLimit);
+        }
+        if self.preserve_b2b_bag_mask >> self.bag_count() != 0 {
+            return Err(BoundaryRecoveryError::InvalidBagPolicy);
         }
         ReachabilityWorkspace::new(self.height, self.rule_profile)
             .map_err(|_| BoundaryRecoveryError::UnsupportedRuleProfile)?;
@@ -388,6 +430,31 @@ fn report(
 }
 
 impl<'a> Pass<'a> {
+    fn requires_b2b_for_lock(&self, state: State, source_index: usize) -> bool {
+        let selected_bag = self.query.bag_index(source_index);
+        if self.query.preserves_b2b_in_bag(selected_bag) {
+            return true;
+        }
+        // A borrowed next-bag token can lock while an earlier selected bag
+        // remains active. Conversely, after borrowing from a selected bag,
+        // an older held token can lock before that selected bag completes.
+        // Neither cross-boundary lock may silently break the live B2B chain.
+        let required_mask = (1_u64 << self.query.required_placements) - 1;
+        let pending = required_mask & !state.placed_mask;
+        if pending != 0
+            && self
+                .query
+                .preserves_b2b_in_bag(self.query.bag_index(pending.trailing_zeros() as usize))
+        {
+            return true;
+        }
+        (0..self.query.bag_count()).any(|bag| {
+            let mask = self.query.bag_source_mask(bag);
+            let placed = state.placed_mask & mask;
+            self.query.preserves_b2b_in_bag(bag) && placed != 0 && placed != mask
+        })
+    }
+
     fn new(
         query: &'a BoundaryRecoveryQuery,
         control: &'a ExecutionControl,
@@ -489,6 +556,7 @@ impl<'a> Pass<'a> {
             {
                 continue;
             }
+            let preserve_b2b = self.requires_b2b_for_lock(state, usize::from(choice.token.index));
             let locks = self
                 .reachability
                 .reachable_locks(state.board, choice.token.piece, true, true)
@@ -539,8 +607,7 @@ impl<'a> Pass<'a> {
                 } else {
                     cleared_lines == 4 || perfect_clear || recognized_spin
                 };
-                let selected_stage = usize::from(is_stage_two);
-                if self.query.preserve_b2b_by_stage[selected_stage]
+                if preserve_b2b
                     && (!state.b2b_active
                         || !b2b_active
                         || !BackToBackPreservationPolicy::new(spin_profile).allows(edge))
@@ -709,6 +776,7 @@ mod tests {
             rule_profile: RuleProfileId::SrsPlus,
             spin_profile: SpinProfileId::AllSpinPlus,
             preserve_b2b_by_stage: [false, false],
+            preserve_b2b_bag_mask: 0,
             initial_b2b: true,
             max_states: 10_000,
         }
@@ -834,6 +902,52 @@ mod tests {
         query.preserve_b2b_by_stage = [true, false];
         let report = query.search(&control()).unwrap();
         assert_eq!(report.status, BoundaryRecoveryStatus::NoPath);
+    }
+
+    #[test]
+    fn bag_policy_checks_the_locked_source_bag_independently() {
+        let mut query = two_stage_query();
+        query.initial_b2b = false;
+        query.preserve_b2b_bag_mask = 1;
+        assert_eq!(
+            query.search(&control()).unwrap().status,
+            BoundaryRecoveryStatus::NoPath
+        );
+        query.preserve_b2b_bag_mask = 2;
+        assert_eq!(
+            query.search(&control()).unwrap().status,
+            BoundaryRecoveryStatus::Normal
+        );
+        query.preserve_b2b_bag_mask = 4;
+        assert_eq!(
+            query.search(&control()),
+            Err(BoundaryRecoveryError::InvalidBagPolicy)
+        );
+    }
+
+    #[test]
+    fn borrowed_token_cannot_break_an_active_selected_bag() {
+        let mut query = two_stage_query();
+        query.queue.push(PieceKind::T);
+        query.hold_enabled = true;
+        query.initial_b2b = false;
+        let (unrestricted, _) = Pass::new(&query, &control(), 1).unwrap().run().unwrap();
+        assert!(matches!(unrestricted, PassResult::Found { .. }));
+        query.preserve_b2b_bag_mask = 1;
+        let (protected, _) = Pass::new(&query, &control(), 1).unwrap().run().unwrap();
+        assert!(matches!(protected, PassResult::NoPath));
+    }
+
+    #[test]
+    fn complete_and_partial_stages_keep_distinct_bag_indices() {
+        let mut query = two_stage_query();
+        query.stage_one_queue_len = 8;
+        query.required_placements = 15;
+        assert_eq!(query.bag_count(), 3);
+        assert_eq!(query.bag_index(0), 0);
+        assert_eq!(query.bag_index(7), 1);
+        assert_eq!(query.bag_index(8), 2);
+        assert_eq!(query.bag_index(14), 2);
     }
 
     #[test]

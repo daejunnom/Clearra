@@ -13,7 +13,7 @@
     wasmWorkerState, WasmTerminalWorkerController, type HostCapabilitySnapshot
   } from '../wasm';
   import {
-    boundaryRecoveryCommand, boundaryRecoveryDesktopRequest, boundaryRecoveryPayload,
+    boundaryRecoveryBagSlots, boundaryRecoveryCommand, boundaryRecoveryDesktopRequest, boundaryRecoveryPayload,
     createBoundaryRecoveryRequest, validateBoundaryRecoveryRequest
   } from './boundaryRecoveryModel';
   import { trimForwardBoardMask } from './forwardSearchModel';
@@ -45,6 +45,7 @@
   $: displayCheckpoint = payload?.population ? example?.stage_one_checkpoint_step : payload?.stage_one_checkpoint_step;
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: validation = validateBoundaryRecoveryRequest(request);
+  $: bagSlots = boundaryRecoveryBagSlots(request.stageOneCount, request.placements);
   $: label = (key: ComponentMessageKey) => componentMessage(language, key);
   $: standardLabel = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
 
@@ -109,6 +110,7 @@
     const placements = Math.max(2, Math.min(42, Math.trunc(value || 2)));
     request = {
       ...request, placements,
+      preserveB2BBags: placements === request.placements ? request.preserveB2BBags : [],
       placementRoleMasks: request.placementRoleMasks.length === 0 ? [] :
         Array.from({ length: placements }, (_, index) => request.placementRoleMasks[index] ?? 0n)
     };
@@ -120,6 +122,13 @@
       ...request,
       placementRoleMasks: enabled ? Array.from({ length: request.placements }, () => 0n) : []
     };
+  }
+
+  function setBagB2B(position: number, enabled: boolean) {
+    const bags = new Set(request.preserveB2BBags);
+    if (enabled) bags.add(position);
+    else bags.delete(position);
+    request = { ...request, preserveB2BBags: [...bags].sort((a, b) => a - b) };
   }
 
   function setRoleMask(position: number, mask: bigint) {
@@ -243,7 +252,7 @@
     </label>
     <label><span>{label('recoveryStageOneCount')}</span>
       <input type="number" min="1" max="41" value={request.stageOneCount}
-        on:input={(event) => request = { ...request, stageOneCount: Number((event.currentTarget as HTMLInputElement).value) }} />
+        on:input={(event) => request = { ...request, stageOneCount: Number((event.currentTarget as HTMLInputElement).value), preserveB2BBags: [] }} />
     </label>
     <label><span>{label('recoveryPlacements')}</span>
       <input type="number" min="2" max="42" value={request.placements}
@@ -270,8 +279,11 @@
     </label>
     <label class="check"><input type="checkbox" checked={request.holdEnabled} on:change={(event) => request = { ...request, holdEnabled: (event.currentTarget as HTMLInputElement).checked }} />{label('enableHold')}</label>
     <label class="check"><input type="checkbox" checked={request.initialB2B} on:change={(event) => request = { ...request, initialB2B: (event.currentTarget as HTMLInputElement).checked }} />{label('recoveryInitialB2b')}</label>
-    <label class="check"><input type="checkbox" checked={request.preserveB2BStageOne} on:change={(event) => request = { ...request, preserveB2BStageOne: (event.currentTarget as HTMLInputElement).checked }} />{label('recoveryPreserveStageOne')}</label>
-    <label class="check"><input type="checkbox" checked={request.preserveB2BStageTwo} on:change={(event) => request = { ...request, preserveB2BStageTwo: (event.currentTarget as HTMLInputElement).checked }} />{label('recoveryPreserveStageTwo')}</label>
+    {#each bagSlots as bag}
+      <label class="check"><input type="checkbox" checked={request.preserveB2BBags.includes(bag.position)}
+        on:change={(event) => setBagB2B(bag.position, (event.currentTarget as HTMLInputElement).checked)}
+      />{bag.stage === 1 ? label('recoveryPreserveStageOne') : label('recoveryPreserveStageTwo')} · {label('recoveryBagUnit')} {bag.stageBag}</label>
+    {/each}
     <label><span>{label('recoveryMaxStates')}</span>
       <input type="number" min="1" max="1000000" value={request.maxStates}
         on:input={(event) => request = { ...request, maxStates: Number((event.currentTarget as HTMLInputElement).value) }} />

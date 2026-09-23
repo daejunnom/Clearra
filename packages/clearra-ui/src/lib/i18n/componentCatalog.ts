@@ -67,6 +67,7 @@ export const COMPONENT_MESSAGES = {
   recoveryPlacements: { en: 'Required placements', ko: '목표까지의 배치 수', ja: '目標までの設置数' },
   recoveryPreserveStageOne: { en: 'Preserve B2B in stage one', ko: '1단계 B2B 보존', ja: '第1段階のB2B維持' },
   recoveryPreserveStageTwo: { en: 'Preserve B2B in stage two', ko: '2단계 B2B 보존', ja: '第2段階のB2B維持' },
+  recoveryBagUnit: { en: 'bag', ko: '가방', ja: 'バッグ' },
   recoveryInitialB2b: { en: 'B2B active at start', ko: '시작 시 B2B 활성', ja: '開始時のB2B有効' },
   recoveryMaxStates: { en: 'Maximum search states', ko: '최대 탐색 상태 수', ja: '最大探索状態数' },
   recoveryScope: { en: 'The fixed queue supports up to 42 pieces. Pattern probabilities require complete seven-piece bags and an exact four-cell role for every piece. All results assume full future queue knowledge; unresolved supply remains unknown.', ko: '확정 큐는 최대 42개 미노를 지원합니다. 패턴 확률은 완전한 7미노 가방과 모든 미노의 정확한 4칸 배치 역할이 필요합니다. 모든 결과는 미래 공급 전체를 알고 선택한 경로이며, 미탐색 공급은 미확정으로 남습니다.', ja: '確定順は最大42ミノです。パターン確率には完全な7ミノバッグと全ミノの正確な4マスの役割が必要です。結果は将来の全順序を知る場合のもので、未探索分は未確定です。' },

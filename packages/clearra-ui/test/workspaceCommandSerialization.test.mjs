@@ -21,6 +21,7 @@ import {
   createDefaultBuildProbabilityRequest
 } from '../src/lib/workspace/buildProbabilityModel.ts';
 import {
+  boundaryRecoveryBagSlots,
   boundaryRecoveryArguments,
   boundaryRecoveryCommand,
   boundaryRecoveryDesktopRequest,
@@ -47,16 +48,21 @@ test('boundary recovery keeps one fixed queue and independent bag B2B choices ac
     borrowSourcePosition: 2,
     borrowPlacementMask: 0x300c000n,
     holdEnabled: false,
-    preserveB2BStageOne: true,
-    preserveB2BStageTwo: false
+    preserveB2BBags: [1]
   };
   assert.deepEqual(validateBoundaryRecoveryRequest(request), []);
   const arguments_ = boundaryRecoveryArguments(request);
   assert.deepEqual(arguments_.slice(0, 3), ['clearra', 'recovery', 'boundary']);
   assert.deepEqual(arguments_.slice(arguments_.indexOf('--queue'), arguments_.indexOf('--queue') + 2), ['--queue', 'IO']);
   assert.deepEqual(arguments_.slice(arguments_.indexOf('--borrow-source-position'), arguments_.indexOf('--borrow-source-position') + 2), ['--borrow-source-position', '2']);
-  assert.equal(arguments_.includes('--preserve-b2b-stage-one'), true);
+  assert.equal(arguments_.includes('--preserve-b2b-stage-one'), false);
   assert.equal(arguments_.includes('--preserve-b2b-stage-two'), false);
+  assert.deepEqual(arguments_.slice(arguments_.indexOf('--preserve-b2b-bag'), arguments_.indexOf('--preserve-b2b-bag') + 2),
+    ['--preserve-b2b-bag', '1']);
+  assert.deepEqual(boundaryRecoveryBagSlots(1, 2), [
+    { position: 1, stage: 1, stageBag: 1 }, { position: 2, stage: 2, stageBag: 1 }
+  ]);
+  assert.deepEqual(validateBoundaryRecoveryRequest({ ...request, preserveB2BBags: [3] }), ['b2b-bags']);
   assert.deepEqual(boundaryRecoveryDesktopRequest(request, 'ko').arguments, arguments_);
   assert.deepEqual(tokenizeBrowserCommandForContract(boundaryRecoveryCommand(request)), arguments_);
 });

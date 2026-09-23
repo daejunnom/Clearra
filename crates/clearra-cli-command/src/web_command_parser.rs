@@ -2336,8 +2336,8 @@ fn parse_boundary_recovery_command(
     let mut queue_pattern = None;
     let mut max_pattern_evaluations = 100_usize;
     let mut max_total_states = 1_000_000_usize;
-    let mut stage_one_queue_len = None;
-    let mut required_placements = None;
+    let mut stage_one_queue_len: Option<usize> = None;
+    let mut required_placements: Option<usize> = None;
     let mut max_early_placements = 1_u8;
     let mut borrow_source_index = None;
     let mut borrow_placement_mask = None;
@@ -2346,6 +2346,7 @@ fn parse_boundary_recovery_command(
     let mut rule_profile = RuleProfileId::SrsPlus;
     let mut spin_profile = SpinProfileId::AllSpinPlus;
     let mut preserve_b2b_by_stage = [false; 2];
+    let mut preserve_b2b_bags = std::collections::BTreeSet::new();
     let mut initial_b2b = true;
     let mut max_states = 100_000;
     let mut cursor = 0;
@@ -2358,7 +2359,7 @@ fn parse_boundary_recovery_command(
                 format!("unexpected boundary recovery token '{option}'"),
             ));
         }
-        if option != "--role-mask" && !seen.insert(option) {
+        if option != "--role-mask" && option != "--preserve-b2b-bag" && !seen.insert(option) {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::InvalidValue,
                 format!("repeated boundary recovery option '{option}'"),
@@ -2488,6 +2489,15 @@ fn parse_boundary_recovery_command(
             }
             "--preserve-b2b-stage-one" => preserve_b2b_by_stage[0] = true,
             "--preserve-b2b-stage-two" => preserve_b2b_by_stage[1] = true,
+            "--preserve-b2b-bag" => {
+                let bag: usize = parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
+                if !preserve_b2b_bags.insert(bag) {
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "--preserve-b2b-bag repeats a bag position",
+                    ));
+                }
+            }
             "--initial-b2b" => {
                 let value = next_value(tokens, &mut cursor, option)?;
                 initial_b2b = match value {
@@ -2528,6 +2538,25 @@ fn parse_boundary_recovery_command(
         )
     };
     let required_placements = required_placements.ok_or_else(|| required("--placements"))?;
+    let stage_one_queue_len = stage_one_queue_len.ok_or_else(|| required("--stage-one-count"))?;
+    if stage_one_queue_len >= required_placements {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--stage-one-count must be smaller than --placements",
+        ));
+    }
+    let bag_count =
+        stage_one_queue_len.div_ceil(7) + (required_placements - stage_one_queue_len).div_ceil(7);
+    let mut preserve_b2b_bag_mask = 0_u64;
+    for bag in preserve_b2b_bags {
+        if bag > bag_count || bag > 64 {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "--preserve-b2b-bag must name a bag in the declared two-stage supply",
+            ));
+        }
+        preserve_b2b_bag_mask |= 1_u64 << (bag - 1);
+    }
     let placement_role_masks = if placement_roles.is_empty() {
         Vec::new()
     } else {
@@ -2561,7 +2590,7 @@ fn parse_boundary_recovery_command(
         final_board: final_board.ok_or_else(|| required("--target-board-mask"))?,
         height: height.ok_or_else(|| required("--height"))?,
         queue: queue.ok_or_else(|| required("--queue"))?,
-        stage_one_queue_len: stage_one_queue_len.ok_or_else(|| required("--stage-one-count"))?,
+        stage_one_queue_len,
         required_placements,
         placement_role_masks,
         max_early_placements,
@@ -2571,6 +2600,7 @@ fn parse_boundary_recovery_command(
         rule_profile,
         spin_profile,
         preserve_b2b_by_stage,
+        preserve_b2b_bag_mask,
         initial_b2b,
         max_states,
     };

@@ -95,6 +95,7 @@ mod tests {
             rule_profile: RuleProfileId::SrsPlus,
             spin_profile: SpinProfileId::AllSpinPlus,
             preserve_b2b_by_stage: [false; 2],
+            preserve_b2b_bag_mask: 0,
             initial_b2b: true,
             max_states: 1,
         };

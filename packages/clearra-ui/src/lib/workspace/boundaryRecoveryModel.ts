@@ -23,6 +23,8 @@ export type BoundaryRecoveryRequest = {
   spinProfile: SpinProfile;
   preserveB2BStageOne: boolean;
   preserveB2BStageTwo: boolean;
+  /** One-based bag positions; the stage boundary starts a new bag. */
+  preserveB2BBags: number[];
   initialB2B: boolean;
   maxStates: number;
   maxPatternEvaluations: number;
@@ -47,11 +49,25 @@ export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
     spinProfile: 'all-spin-plus',
     preserveB2BStageOne: false,
     preserveB2BStageTwo: false,
+    preserveB2BBags: [],
     initialB2B: true,
     maxStates: 100_000,
     maxPatternEvaluations: 100,
     maxTotalStates: 1_000_000
   };
+}
+
+export function boundaryRecoveryBagSlots(stageOneCount: number, placements: number):
+    Array<{ position: number; stage: 1 | 2; stageBag: number }> {
+  if (!Number.isInteger(stageOneCount) || !Number.isInteger(placements) ||
+      stageOneCount < 1 || placements <= stageOneCount || placements > 42) return [];
+  const first = Math.ceil(stageOneCount / 7);
+  const second = Math.ceil((placements - stageOneCount) / 7);
+  return Array.from({ length: first + second }, (_, index) => ({
+    position: index + 1,
+    stage: index < first ? 1 : 2,
+    stageBag: index < first ? index + 1 : index - first + 1
+  }));
 }
 
 export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest): string[] {
@@ -64,6 +80,11 @@ export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest
   if (request.maxEarlyPlacements !== 0 && request.maxEarlyPlacements !== 1) errors.push('max-early');
   if (request.maxEarlyPlacements === 1 && (!Number.isInteger(request.borrowSourcePosition) || request.borrowSourcePosition <= request.stageOneCount || request.borrowSourcePosition > request.placements)) errors.push('borrow-source');
   if (!Number.isInteger(request.maxStates) || request.maxStates < 1 || request.maxStates > 1_000_000) errors.push('max-states');
+  const bagCount = boundaryRecoveryBagSlots(request.stageOneCount, request.placements).length;
+  if (new Set(request.preserveB2BBags).size !== request.preserveB2BBags.length ||
+      request.preserveB2BBags.some((bag) => !Number.isInteger(bag) || bag < 1 || bag > bagCount)) {
+    errors.push('b2b-bags');
+  }
   if (request.queuePattern.trim()) {
     if (queue.length % 7 !== 0 || request.stageOneCount % 7 !== 0 || request.placements !== queue.length ||
         request.placementRoleMasks.length !== queue.length ||
@@ -114,6 +135,7 @@ export function boundaryRecoveryArguments(request: BoundaryRecoveryRequest): str
   }
   if (request.preserveB2BStageOne) args.push('--preserve-b2b-stage-one');
   if (request.preserveB2BStageTwo) args.push('--preserve-b2b-stage-two');
+  for (const bag of request.preserveB2BBags) args.push('--preserve-b2b-bag', String(bag));
   if (request.queuePattern.trim()) {
     args.push('--queue-pattern', request.queuePattern.trim());
     args.push('--max-pattern-evaluations', String(request.maxPatternEvaluations));

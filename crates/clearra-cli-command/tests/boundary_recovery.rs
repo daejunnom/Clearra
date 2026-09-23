@@ -41,6 +41,26 @@ fn boundary_recovery_rejects_ambiguous_or_missing_supply() {
 }
 
 #[test]
+fn bag_b2b_flags_bind_to_each_declared_stage_bag() {
+    let base = "clearra recovery boundary --initial-board-mask 0x0 --target-board-mask 0x0 --height 8 --queue IJLOSTZIJLOSTZIJLOSTZ --stage-one-count 14 --placements 21 --max-early-placements 0 --no-hold";
+    let command = format!("{base} --preserve-b2b-bag 2 --preserve-b2b-bag 3");
+    let request = CliCommandParser::parse(&command)
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let AppCommand::BoundaryRecovery(recovery) = request.command() else {
+        panic!("expected boundary recovery");
+    };
+    assert_eq!(recovery.query().preserve_b2b_bag_mask, 0b110);
+    assert_eq!(recovery.query().preserve_b2b_by_stage, [false, false]);
+    assert!(CliCommandParser::parse(&format!("{base} --preserve-b2b-bag 4")).is_err());
+    assert!(
+        CliCommandParser::parse(&format!("{base} --preserve-b2b-bag 2 --preserve-b2b-bag 2"))
+            .is_err()
+    );
+}
+
+#[test]
 fn zero_early_placements_does_not_require_a_borrow_role() {
     let parsed = CliCommandParser::parse(
         "clearra recovery boundary --initial-board-mask 0x3f0 --target-board-mask 0xc030 --height 4 --queue IO --stage-one-count 1 --placements 2 --max-early-placements 0 --no-hold",

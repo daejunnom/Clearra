@@ -83,7 +83,7 @@ Clearraのpath/setup/coverは従来のClearraでの意味を維持します。�
 pub(super) fn product_help_body(topic: ProductHelpTopic) -> &'static str {
     match topic {
         ProductHelpTopic::BoundaryRecovery => {
-            r#"使い方: clearra recovery boundary --initial-board-mask HEX --target-board-mask HEX --height 1..25 --queue REFERENCE --stage-one-count N --placements N [--role-mask POSITION:HEX ...] [--queue-pattern PATTERN --max-pattern-evaluations N --max-total-states N] [--max-early-placements 0|1] [--borrow-source-position N --borrow-placement-mask HEX] [--hold|--no-hold] [--rule RULE] [--spin-profile PROFILE] [--initial-b2b 0|1] [--preserve-b2b-stage-one] [--preserve-b2b-stage-two] [--max-states 1..1000000]
+            r#"使い方: clearra recovery boundary --initial-board-mask HEX --target-board-mask HEX --height 1..25 --queue REFERENCE --stage-one-count N --placements N [--role-mask POSITION:HEX ...] [--queue-pattern PATTERN --max-pattern-evaluations N --max-total-states N] [--max-early-placements 0|1] [--borrow-source-position N --borrow-placement-mask HEX] [--hold|--no-hold] [--rule RULE] [--spin-profile PROFILE] [--initial-b2b 0|1] [--preserve-b2b-bag N ...] [--preserve-b2b-stage-one] [--preserve-b2b-stage-two] [--max-states 1..1000000]
 連続した2～42ミノの供給順を扱います。--role-maskで必要な各供給位置のロック時4マスを指定できます。先行配置を許す場合は第2段階の供給位置を選びます。--queue-patternでは完全な7ミノバッグ、全配置役割、最大100000の供給パターンを対象に通常成功・追加リカバリー・未確定の重み付き確率を計算します。順序が変わっても役割と先行配置はバッグとミノ種に結び付けます。どちらのモードも将来の全供給を知る場合の解析であり、観測制限下の実戦可能性は証明しません。"#
         }
         ProductHelpTopic::PcTiling => {
