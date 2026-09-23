@@ -15,6 +15,27 @@ concurrency:
 # This branch-only source differential has no release, asset, or deployment
 # authority. Remove it before promoting the qualified source to main.
 jobs:
+  cli-candidate-and-tie-regressions:
+    if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Verify CLI and product formatting
+        run: cargo fmt -p clearra-app -p clearra-cli -p clearra-pc4-qualifier --check
+      - name: Verify explicit local relation candidates
+        run: |
+          cargo test --locked -p clearra-pc4-qualifier --lib candidate_queries_bind_profile_row_frame_and_independent_audit --no-default-features --features legal-board-assets
+          cargo test --locked -p clearra-cli --lib conditioned_reachability_assets --no-default-features
+      - name: Verify exact tie continuation and public CLI contracts
+        run: |
+          cargo test --locked -p clearra-cli --lib tie_snapshot::tests:: --no-default-features
+          cargo test --locked -p clearra-cli --lib cli_entry::sequence_dependencies_tests --no-default-features
+          cargo test --locked -p clearra-cli --lib commands::verify_command::tests --no-default-features
   exact-reverse-membership:
     if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923'
     runs-on: ubuntu-latest
