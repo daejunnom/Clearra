@@ -2,7 +2,9 @@
 //! never import the solver core: this crate alone translates signed product
 //! authority into parsed, profile-bound immutable solver data.
 
-use clearra_accelerator_product_host::{ProductCatalogKind, QualifiedCatalogAsset};
+use clearra_accelerator_product_host::{
+    ProductCatalogKind, QualifiedCatalogAsset, QualifiedProductMetadata,
+};
 use clearra_core_executor::{
     active_qualified_exact_legal_board_identity, active_qualified_local_relation_identity,
     built_in_legal_board_binding, built_in_local_relation_binding,
@@ -49,6 +51,13 @@ pub fn qualify_signed(
                 },
             )
             .map_err(|_| "accelerator: exact legal-board payload invalid")?;
+            if !matches!(asset.metadata(),
+                QualifiedProductMetadata::ExactLegalBoard {
+                    layer_counts, layer_payload_identities, ..
+                } if loaded.matches_layer_manifest(layer_counts, layer_payload_identities)
+            ) {
+                return Err("accelerator: exact legal-board layer manifest mismatch");
+            }
             let qualified = QualifiedExactLegalBoard::qualify(loaded, asset.authority())
                 .map_err(|_| "accelerator: exact legal-board qualification mismatch")?;
             if qualified.shared_bytes() as u64 > asset.metadata().active_session_shared_bytes() {

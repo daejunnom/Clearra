@@ -1089,6 +1089,20 @@ impl ExactLegalBoard {
         self.layers.get(layer).map(|value| value.directory.digest)
     }
 
+    /// Compare the signed catalog's layer directory with the parsed payload.
+    /// A complete-file digest alone does not catch a source catalog whose
+    /// per-layer evidence describes a different generation.
+    pub fn matches_layer_manifest(
+        &self,
+        counts: &[u64; LAYER_COUNT],
+        payload_digests: &[[u8; 32]; LAYER_COUNT],
+    ) -> bool {
+        self.layers.iter().enumerate().all(|(layer, entry)| {
+            entry.directory.count == counts[layer]
+                && entry.directory.digest == payload_digests[layer]
+        })
+    }
+
     fn scoped_storage_key(&self, query: LegalBoardQuery) -> Result<(usize, u64), ProviderStatus> {
         scoped_storage_key_for_binding(self.binding, query)
     }
@@ -2046,6 +2060,15 @@ mod tests {
         .unwrap();
         assert_eq!(loaded.layer_count(1), Some(2));
         assert!(loaded.sparse_index_bytes() < loaded.compressed_bytes());
+        let counts = std::array::from_fn(|layer| loaded.layer_count(layer).unwrap());
+        let digests = std::array::from_fn(|layer| loaded.layer_payload_digest(layer).unwrap());
+        assert!(loaded.matches_layer_manifest(&counts, &digests));
+        let mut wrong_counts = counts;
+        wrong_counts[1] += 1;
+        assert!(!loaded.matches_layer_manifest(&wrong_counts, &digests));
+        let mut wrong_digests = digests;
+        wrong_digests[1][0] ^= 1;
+        assert!(!loaded.matches_layer_manifest(&counts, &wrong_digests));
         assert_eq!(
             loaded.decide(LegalBoardQuery {
                 width: 10,

@@ -5,6 +5,7 @@
 use super::*;
 use clearra_accelerator_product_host::{
     embedded_catalog, CatalogProfileStatus, ProductCatalogKind, QualifiedCatalogAsset,
+    QualifiedProductMetadata,
 };
 use clearra_core_executor::{
     active_qualified_exact_legal_board_identity, built_in_legal_board_binding,
@@ -158,6 +159,13 @@ fn qualify(
                 },
             )
             .map_err(|_| "accelerator_legal_board_payload_invalid")?;
+            if !matches!(asset.metadata(),
+                QualifiedProductMetadata::ExactLegalBoard {
+                    layer_counts, layer_payload_identities, ..
+                } if board.matches_layer_manifest(layer_counts, layer_payload_identities)
+            ) {
+                return Err("accelerator_legal_board_layer_manifest_mismatch");
+            }
             let board = QualifiedExactLegalBoard::qualify(board, asset.authority())
                 .map_err(|_| "accelerator_legal_board_not_qualified")?;
             if board.shared_bytes() as u64 > asset.metadata().active_session_shared_bytes() {
