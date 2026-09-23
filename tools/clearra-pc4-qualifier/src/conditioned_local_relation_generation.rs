@@ -433,6 +433,13 @@ mod tests {
         let binding = built_in_local_relation_binding(profile).unwrap();
         let loaded = load_local_relation_candidate_pack(&first_pack, binding, None).unwrap();
         assert_eq!(audit_candidate_local_relation_pack(&loaded), Ok(1));
+        let bound = crate::validate_conditioned_local_candidate_catalog(
+            profile,
+            &first_pack,
+            &first_catalog,
+        )
+        .expect("published candidate pack and catalog bind exactly");
+        assert_eq!(bound.record_count, 1);
 
         generate_conditioned_local_relation(&options).expect("identical rerun is idempotent");
         assert_eq!(fs::read(&pack).unwrap(), first_pack);

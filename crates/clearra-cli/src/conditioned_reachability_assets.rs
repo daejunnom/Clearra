@@ -10,16 +10,17 @@ use clearra_accelerator_product_host::ProductCatalogKind;
 use clearra_i18n::LanguageId;
 use clearra_pc4_qualifier::{
     generate_conditioned_local_relation, generate_conditioned_reachability,
-    structurally_valid_conditioned_local_candidate, ConditionedLocalRelationGenerationOptions,
+    validate_conditioned_local_candidate_catalog, ConditionedLocalRelationGenerationOptions,
     ConditionedReachabilityGenerationOptions,
 };
 use clearra_rules::kicks::KickTableProfileId;
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf, sync::atomic::AtomicBool};
+use std::{fs, io::Read, path::PathBuf, sync::atomic::AtomicBool};
 
 const PRODUCT: ProductCatalogKind = ProductCatalogKind::BoardConditionedReachability;
 const PROFILES: [&str; 5] = ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"];
 const MAX_PRODUCT_PACK_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_CANDIDATE_CATALOG_BYTES: u64 = 512 * 1024;
 
 pub(crate) fn activate_for_request(request: &clearra_app::AppRequest) {
     if !request
@@ -214,8 +215,7 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
     {
         "oversized_unqualified_candidate"
     } else if candidate_bytes.is_some() {
-        let bytes = fs::read(&candidate)
-            .map_err(|_| "reachability-pack: candidate payload is unreadable")?;
+        let bytes = read_candidate_bounded(&candidate, MAX_PRODUCT_PACK_BYTES)?;
         if clearra_accelerator_runtime::structurally_valid_candidate(PRODUCT, profile, bytes.into())
         {
             "structurally_valid_unqualified"
@@ -226,23 +226,31 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
         "not_loaded"
     };
     let local_candidate = root.join(format!("conditioned-local-{profile}.cllr"));
+    let local_catalog = root.join(format!("conditioned-local-{profile}.catalog.json"));
     let local_candidate_bytes = candidate_size(&local_candidate)?;
-    let local_candidate_validation =
-        if local_candidate_bytes.is_some_and(|bytes| bytes > MAX_PRODUCT_PACK_BYTES) {
+    let local_catalog_bytes = candidate_size(&local_catalog)?;
+    let mut local_summary = None;
+    let local_candidate_validation = match (local_candidate_bytes, local_catalog_bytes) {
+        (None, None) => "not_loaded",
+        (Some(bytes), _) if bytes > MAX_PRODUCT_PACK_BYTES => "oversized_unqualified_candidate",
+        (_, Some(bytes)) if bytes > MAX_CANDIDATE_CATALOG_BYTES => {
             "oversized_unqualified_candidate"
-        } else if local_candidate_bytes.is_some() {
-            let bytes = fs::read(&local_candidate)
-                .map_err(|_| "reachability-pack: local candidate payload is unreadable")?;
+        }
+        (Some(_), Some(_)) => {
+            let bytes = read_candidate_bounded(&local_candidate, MAX_PRODUCT_PACK_BYTES)?;
+            let catalog = read_candidate_bounded(&local_catalog, MAX_CANDIDATE_CATALOG_BYTES)?;
             let kick = KickTableProfileId::parse(profile)
                 .ok_or("reachability-pack: profile is not connected to a kick table")?;
-            if structurally_valid_conditioned_local_candidate(kick, &bytes) {
+            local_summary =
+                validate_conditioned_local_candidate_catalog(kick, &bytes, &catalog).ok();
+            if local_summary.is_some() {
                 "structurally_valid_unqualified"
             } else {
                 "invalid_asset"
             }
-        } else {
-            "not_loaded"
-        };
+        }
+        _ => "incomplete_unqualified_candidate",
+    };
     Ok(json!({
         "action": "status",
         "profile": profile,
@@ -257,6 +265,9 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
         "candidate_validation": candidate_validation,
         "candidate_contract": "legacy_sparse_spawn_to_lock",
         "local_candidate_bundle_bytes": local_candidate_bytes,
+        "local_candidate_catalog_bytes": local_catalog_bytes,
+        "local_candidate_generation_identity": local_summary.as_ref().map(|summary| accelerator_asset_store::hex(summary.generation_identity)),
+        "local_candidate_record_count": local_summary.as_ref().map(|summary| summary.record_count),
         "local_candidate_validation": local_candidate_validation,
         "local_candidate_contract": "entry_to_first_exit",
         "candidate_only": true,
@@ -368,6 +379,24 @@ fn candidate_size(path: &std::path::Path) -> Result<Option<u64>, &'static str> {
     }
 }
 
+fn read_candidate_bounded(path: &std::path::Path, limit: u64) -> Result<Vec<u8>, &'static str> {
+    let file = fs::File::open(path).map_err(|_| "reachability-pack: candidate is unreadable")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "reachability-pack: candidate metadata is unreadable")?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err("reachability-pack: candidate is not a bounded regular file");
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "reachability-pack: candidate is unreadable")?;
+    if bytes.len() as u64 > limit {
+        return Err("reachability-pack: candidate grew beyond its bound");
+    }
+    Ok(bytes)
+}
+
 fn default_workers() -> usize {
     std::thread::available_parallelism().map_or(1, usize::from)
 }
@@ -376,7 +405,7 @@ fn render_text(value: &Value, language: LanguageId) -> String {
     let profile = value["profile"].as_str().unwrap_or("unknown");
     let qualified = value["qualified"].as_bool().unwrap_or(false);
     let installed = value["installed"].as_bool().unwrap_or(false);
-    match language {
+    let mut output = match language {
         LanguageId::Ko => format!(
             "조건부 도달성 프로필: {profile}\n자격 완료: {}\n설치됨: {}",
             if qualified { "예" } else { "아니요" },
@@ -392,7 +421,49 @@ fn render_text(value: &Value, language: LanguageId) -> String {
             if qualified { "yes" } else { "no" },
             if installed { "yes" } else { "no" }
         ),
+    };
+    if let Some(state) = value["local_candidate_validation"].as_str() {
+        let (label, description) = match (language, state) {
+            (LanguageId::Ko, "structurally_valid_unqualified") => {
+                ("국소 관계 후보", "형식 검증됨, 제품 자격 미완료")
+            }
+            (LanguageId::Ko, "incomplete_unqualified_candidate") => {
+                ("국소 관계 후보", "파일 일부만 존재함")
+            }
+            (LanguageId::Ko, "invalid_asset") => ("국소 관계 후보", "파일 검증 실패"),
+            (LanguageId::Ko, "oversized_unqualified_candidate") => {
+                ("국소 관계 후보", "허용 크기 초과")
+            }
+            (LanguageId::Ko, _) => ("국소 관계 후보", "없음"),
+            (LanguageId::Ja, "structurally_valid_unqualified") => {
+                ("局所関係候補", "形式検証済み、製品適格性は未確認")
+            }
+            (LanguageId::Ja, "incomplete_unqualified_candidate") => {
+                ("局所関係候補", "ファイルが不足")
+            }
+            (LanguageId::Ja, "invalid_asset") => ("局所関係候補", "ファイル検証失敗"),
+            (LanguageId::Ja, "oversized_unqualified_candidate") => {
+                ("局所関係候補", "サイズ上限超過")
+            }
+            (LanguageId::Ja, _) => ("局所関係候補", "なし"),
+            (LanguageId::En, "structurally_valid_unqualified") => (
+                "Local relation candidate",
+                "format verified, not qualified for product use",
+            ),
+            (LanguageId::En, "incomplete_unqualified_candidate") => {
+                ("Local relation candidate", "missing candidate file")
+            }
+            (LanguageId::En, "invalid_asset") => {
+                ("Local relation candidate", "candidate validation failed")
+            }
+            (LanguageId::En, "oversized_unqualified_candidate") => {
+                ("Local relation candidate", "size limit exceeded")
+            }
+            (LanguageId::En, _) => ("Local relation candidate", "none"),
+        };
+        output.push_str(&format!("\n{label}: {description}"));
     }
+    output
 }
 
 #[cfg(test)]
@@ -443,5 +514,30 @@ mod tests {
             candidate_size(&source_dir.join("absent-local-candidate.cllr")),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn local_candidate_status_requires_both_pack_and_catalog() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "clearra-local-relation-status-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("isolated candidate directory");
+        let catalog = root.join("conditioned-local-srs.catalog.json");
+        fs::write(&catalog, b"{}").expect("incomplete candidate fixture");
+        let result = status("srs", &root).expect("candidate status");
+        assert_eq!(
+            result["local_candidate_validation"],
+            "incomplete_unqualified_candidate"
+        );
+        assert_eq!(result["local_candidate_bundle_bytes"], Value::Null);
+        assert_eq!(result["local_candidate_catalog_bytes"], 2);
+        assert!(render_text(&result, LanguageId::Ko).contains("파일 일부만 존재함"));
+        fs::remove_file(catalog).expect("remove fixture file");
+        fs::remove_dir(root).expect("remove fixture directory");
     }
 }
