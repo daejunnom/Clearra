@@ -11,6 +11,8 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "crates/**"
+      - "apps/clearra-desktop/src-tauri/Cargo.lock"
+      - "apps/clearra-desktop/src-tauri/src/commands.rs"
       - "apps/clearra-web/**"
       - "apps/clearra-discord-bot/Dockerfile.accepted-job-service"
       - "apps/clearra-discord-bot/scripts/provision-v081-accelerators.mjs"
@@ -110,6 +112,11 @@ jobs:
           cargo test --locked -p clearra-accelerator-product-host --bin clearra-accelerator-release-gate
           cargo test --locked -p clearra-accelerator-runtime --lib catalog_scopes_match_the_exact_product_parsers
           cargo test --locked -p clearra-cli --lib local_relation_product_cannot_reuse_the_legacy_sparse_namespace_or_extension --no-default-features
+      - name: Preserve Desktop single-job asset activation boundary
+        run: |
+          cargo check --locked -p clearra-gui-host -p clearra-cli --no-default-features
+          cargo test --locked -p clearra-gui-host --lib case_desktop_job_queue_reports_progress_cancel_result --no-default-features
+          cargo test --locked -p clearra-cli --lib accelerator_gui_bridge --no-default-features
       - name: Verify exact tie continuation and public CLI contracts
         run: |
           cargo test --locked -p clearra-cli --lib tie_snapshot::tests:: --no-default-features

@@ -2,7 +2,8 @@
 //!
 //! Parsing proves structure, binding and integrity, not semantic qualification.
 //! This format is deliberately distinct from the older sparse spawn-to-lock
-//! cache. It has no product registry or signed-asset installation path yet.
+//! cache. The separate signed product wrapper checks authority before a
+//! parsed candidate can enter the process registry.
 
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_rules::kicks::KickTableProfileId;
