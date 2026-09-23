@@ -109,6 +109,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # The build-owner contract snapshots cargo/rustc versions. Without the
+      # pinned components, rustup can change that context during the test.
+      - name: Install the pinned Rust toolchain for stable build snapshots
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt --target wasm32-unknown-unknown
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
