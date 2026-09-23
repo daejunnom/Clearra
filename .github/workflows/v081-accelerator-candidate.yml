@@ -70,7 +70,7 @@ jobs:
           CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
         run: node scripts/tools/build-clearra-wasm.mjs --environment native
       - name: Check accelerator exports and source-bound manifest
-        run: node --test scripts/tools/v081-wasm-accelerator-exports.test.mjs
+        run: node --test scripts/tools/v081-wasm-accelerator-exports.test.mjs scripts/tools/v081-wasm-conditioned-admission.test.mjs
   cli-candidate-and-tie-regressions:
     if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923' && (github.event_name == 'push' || !inputs.wasm_smoke)
     runs-on: ubuntu-latest
