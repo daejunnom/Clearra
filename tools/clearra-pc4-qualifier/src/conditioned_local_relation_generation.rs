@@ -137,12 +137,12 @@ pub(crate) struct Query {
     pub(crate) entries: Vec<ConditionedReachabilityEntryPose>,
 }
 
-struct CoverDomain {
-    query: Query,
-    fixed_mask: u64,
-    fixed_occupancy: u64,
-    max_records: usize,
-    max_nodes: u32,
+pub(crate) struct CoverDomain {
+    pub(crate) query: Query,
+    pub(crate) fixed_mask: u64,
+    pub(crate) fixed_occupancy: u64,
+    pub(crate) max_records: usize,
+    pub(crate) max_nodes: u32,
 }
 
 pub fn generate_conditioned_local_relation(
@@ -325,7 +325,7 @@ fn parse_queries(raw: &[u8], profile: KickTableProfileId) -> Result<Vec<Query>, 
     Ok(unique.into_values().collect())
 }
 
-fn parse_cover_domains(
+pub(crate) fn parse_cover_domains(
     raw: &[u8],
     profile: KickTableProfileId,
 ) -> Result<Vec<CoverDomain>, String> {
@@ -394,7 +394,7 @@ fn cover_domain_key(domain: &CoverDomain) -> Vec<u8> {
     key
 }
 
-fn canonical_cover_identity(
+pub(crate) fn canonical_cover_identity(
     domains: &[CoverDomain],
     profile: KickTableProfileId,
 ) -> Result<[u8; 32], String> {
@@ -757,6 +757,16 @@ mod tests {
             &catalog_bytes,
         )
         .is_ok());
+        let source_bytes = fs::read(&queries).unwrap();
+        let verified = crate::verify_conditioned_local_cover_source(
+            KickTableProfileId::NoKick,
+            &pack_bytes,
+            &catalog_bytes,
+            &source_bytes,
+        )
+        .unwrap();
+        assert_eq!(verified.covered_domains, 1);
+        assert!(verified.visited_proof_nodes > 0);
         generate_conditioned_local_relation(&options).unwrap();
         assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
         assert_eq!(fs::read(&catalog).unwrap(), catalog_bytes);
@@ -764,6 +774,14 @@ mod tests {
         let mut limited = source;
         limited["domains"][0]["max_records"] = json!(1);
         fs::write(&queries, serde_json::to_vec(&limited).unwrap()).unwrap();
+        assert!(crate::verify_conditioned_local_cover_source(
+            KickTableProfileId::NoKick,
+            &pack_bytes,
+            &catalog_bytes,
+            &fs::read(&queries).unwrap(),
+        )
+        .unwrap_err()
+        .contains("source identity"));
         let rejected = ConditionedLocalRelationGenerationOptions {
             pack: root.join("rejected.cllr"),
             catalog: root.join("rejected.catalog.json"),

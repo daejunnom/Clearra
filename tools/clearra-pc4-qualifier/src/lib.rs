@@ -18,7 +18,8 @@ mod legal_board_candidate_validation;
 mod legal_board_generation;
 
 pub use conditioned_local_candidate_validation::{
-    validate_conditioned_local_candidate_catalog, ConditionedLocalCandidateSummary,
+    validate_conditioned_local_candidate_catalog, verify_conditioned_local_cover_source,
+    ConditionedLocalCandidateSummary, VerifiedBoundedLocalCover,
 };
 pub use conditioned_local_coverage_proof::{
     prove_conditioned_local_candidate_coverage, ConditionedLocalCoverageProofOptions,
