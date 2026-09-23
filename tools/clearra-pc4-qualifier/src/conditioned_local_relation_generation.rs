@@ -4,11 +4,7 @@
 //! selected query set and record-by-record primitive audit do not prove that a
 //! profile pack is complete, useful, signed, or releasable.
 
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_core_executor::{

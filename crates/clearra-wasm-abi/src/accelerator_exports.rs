@@ -222,11 +222,13 @@ pub(super) fn remove(kind: u32, profile: u32) -> i32 {
             return ABI_ERROR;
         };
         let removed = match kind {
-            ProductCatalogKind::ExactLegalBoard => {
-                remove_qualified_exact_legal_board(kick).map(|value| value.is_some())
-            }
+            ProductCatalogKind::ExactLegalBoard => remove_qualified_exact_legal_board(kick)
+                .map(|value| value.is_some())
+                .map_err(|_| ()),
             ProductCatalogKind::BoardConditionedReachability => {
-                remove_conditioned_reachability_pack(kick).map(|value| value.is_some())
+                remove_conditioned_reachability_pack(kick)
+                    .map(|value| value.is_some())
+                    .map_err(|_| ())
             }
         };
         match removed {
