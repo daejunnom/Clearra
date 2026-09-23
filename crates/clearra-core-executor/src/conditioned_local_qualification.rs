@@ -288,7 +288,9 @@ fn prove_cube_cover(
     }
     *visited_nodes += 1;
     let mut possible = Vec::new();
-    let mut frequency = [0_u16; 60];
+    // Candidate generation permits 65,536 records; u16 would wrap on a
+    // shared split bit precisely at that bound and invalidate the proof.
+    let mut frequency = [0_usize; 60];
     for &index in candidates {
         let cube = cubes[index];
         if (current.value ^ cube.value) & current.mask & cube.mask != 0 {
@@ -456,6 +458,23 @@ mod tests {
                 CoverageStep::Inconclusive => panic!("eight-bit proof exceeded its budget"),
             }
         }
+    }
+
+    #[test]
+    fn symbolic_cover_split_frequency_does_not_wrap_at_candidate_limit() {
+        let cubes = vec![OccupancyCube { mask: 1, value: 0 }; 65_536];
+        let candidates = (0..cubes.len()).collect::<Vec<_>>();
+        let mut visited = 0;
+        assert!(matches!(
+            prove_cube_cover(
+                &cubes,
+                &candidates,
+                OccupancyCube { mask: 0, value: 0 },
+                4,
+                &mut visited,
+            ),
+            CoverageStep::Uncovered(1)
+        ));
     }
 
     #[test]

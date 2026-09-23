@@ -278,7 +278,7 @@ fn parse_request(raw: &[u8], profile: &str) -> Result<Vec<RequestedDomain>, Stri
     Ok(domains)
 }
 
-fn parse_hex(value: &Value) -> Result<u64, String> {
+pub(crate) fn parse_hex(value: &Value) -> Result<u64, String> {
     let text = value
         .as_str()
         .ok_or("coverage mask must be lowercase hex")?;

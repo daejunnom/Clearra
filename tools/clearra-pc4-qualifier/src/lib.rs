@@ -25,7 +25,7 @@ pub use conditioned_local_coverage_proof::{
 };
 pub use conditioned_local_relation_generation::{
     generate_conditioned_local_relation, structurally_valid_conditioned_local_candidate,
-    ConditionedLocalRelationGenerationOptions,
+    synthesize_bounded_local_relation_cover, ConditionedLocalRelationGenerationOptions,
 };
 pub use conditioned_reachability_generation::{
     generate_conditioned_reachability, ConditionedReachabilityGenerationOptions,

@@ -47,13 +47,27 @@ pub fn validate_conditioned_local_candidate_catalog(
         .map_err(|_| "local relation candidate profile unsupported")?;
     let record_count = loaded.record_count();
     let stored_sha256: [u8; 32] = Sha256::digest(pack_bytes).into();
+    // A cover-set catalog reports its number of declared domains rather
+    // than its expanded record count. This structural check never replays
+    // the source request or upgrades the catalog to release authority.
+    let source_count = catalog["query_count"].as_u64();
+    let source_contract = match catalog["query_schema"].as_str() {
+        Some("clearra.conditioned-local-relation.query-set.v1") => {
+            source_count == Some(record_count as u64)
+                && catalog["evidence_scope"] == "stored-record-and-collision-dependency-only"
+        }
+        Some("clearra.conditioned-local-relation.cover-set.v1") => {
+            source_count.is_some_and(|count| count > 0 && count <= record_count as u64)
+                && catalog["evidence_scope"] == "audited-record-and-declared-domain-coverage"
+        }
+        _ => false,
+    };
     if catalog["schema"] != "clearra.conditioned-local-relation.candidate-catalog.v1"
         || catalog["status"] != "candidate_unqualified"
         || catalog["signed"] != false
         || catalog["release_authority"] != false
         || catalog["profile"] != profile_name
-        || catalog["query_schema"] != "clearra.conditioned-local-relation.query-set.v1"
-        || catalog["query_count"].as_u64() != Some(record_count as u64)
+        || !source_contract
         || catalog["record_count"].as_u64() != Some(record_count as u64)
         || catalog["independent_checked_records"].as_u64() != Some(record_count as u64)
         || catalog["encoded_bytes"].as_u64() != Some(pack_bytes.len() as u64)
@@ -62,7 +76,6 @@ pub fn validate_conditioned_local_candidate_catalog(
         || catalog["rule_identity"] != hex(binding.rule_identity)
         || !valid_hex_digest(&catalog["query_set_identity"])
         || !valid_hex_digest(&catalog["source_file_identity"])
-        || catalog["evidence_scope"] != "stored-record-and-collision-dependency-only"
         || catalog["global_entry_reachability"] != "not_proven"
         || catalog["profile_completeness"] != "not_proven"
     {
@@ -196,6 +209,14 @@ mod tests {
             KickTableProfileId::SrsPlus,
             &bytes,
             &serde_json::to_vec(&falsely_signed).unwrap(),
+        )
+        .is_err());
+        let mut false_cover = catalog.clone();
+        false_cover["query_schema"] = json!("clearra.conditioned-local-relation.cover-set.v1");
+        assert!(validate_conditioned_local_candidate_catalog(
+            KickTableProfileId::SrsPlus,
+            &bytes,
+            &serde_json::to_vec(&false_cover).unwrap(),
         )
         .is_err());
         let mut corrupted = bytes.clone();
