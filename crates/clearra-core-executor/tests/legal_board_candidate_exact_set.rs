@@ -6,7 +6,7 @@
 //! with and without the candidate filter. This is one KAT, not profile-wide
 //! asset qualification or a performance A/B.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use clearra_core_domain::{
     execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
@@ -39,7 +39,8 @@ fn generated_bundle_preserves_complete_p7p4_solution_identity_set() {
     );
     let previous = set_local_search_prune_policy(LocalSearchPrunePolicy::product_default());
     let baseline = execute_p7p4(profile);
-    assert_complete(&baseline, profile);
+    report_result("baseline", &baseline);
+    assert_complete_flags(&baseline);
 
     let bytes = std::fs::read(&bundle_path).expect("read local candidate bundle");
     let binding = built_in_legal_board_binding(profile).expect("legal-board profile binding");
@@ -56,7 +57,23 @@ fn generated_bundle_preserves_complete_p7p4_solution_identity_set() {
     let filtered = execute_p7p4(profile);
     set_local_search_prune_policy(previous);
 
-    assert_complete(&filtered, profile);
+    report_result("filtered", &filtered);
+    assert_complete_flags(&filtered);
+    if baseline.normalized_solution_identities() != filtered.normalized_solution_identities() {
+        let baseline_set: HashSet<_> = baseline
+            .normalized_solution_identities()
+            .iter()
+            .copied()
+            .collect();
+        let filtered_set: HashSet<_> = filtered
+            .normalized_solution_identities()
+            .iter()
+            .copied()
+            .collect();
+        let missing: Vec<_> = baseline_set.difference(&filtered_set).take(3).collect();
+        let extra: Vec<_> = filtered_set.difference(&baseline_set).take(3).collect();
+        eprintln!("candidate legal-board identity delta: missing={missing:?} extra={extra:?}");
+    }
     assert_eq!(
         filtered.usize_field("normalized_unique_solution_count"),
         baseline.usize_field("normalized_unique_solution_count")
@@ -73,6 +90,7 @@ fn generated_bundle_preserves_complete_p7p4_solution_identity_set() {
         filtered.normalized_solution_coverages() == baseline.normalized_solution_coverages(),
         "candidate legal-board changed complete solution coverage"
     );
+    assert_known_count(&baseline, profile);
 }
 
 fn execute_p7p4(profile: KickTableProfileId) -> CoreExecutionResult {
@@ -104,9 +122,20 @@ fn execute_p7p4(profile: KickTableProfileId) -> CoreExecutionResult {
     .expect("exact P7P4 CPU search")
 }
 
-fn assert_complete(result: &CoreExecutionResult, profile: KickTableProfileId) {
+fn report_result(stage: &str, result: &CoreExecutionResult) {
+    eprintln!(
+        "candidate legal-board {stage}: count={:?} hash={:?}",
+        result.usize_field("normalized_unique_solution_count"),
+        result.field("normalized_solution_set_hash")
+    );
+}
+
+fn assert_complete_flags(result: &CoreExecutionResult) {
     assert_eq!(result.bool_field("count_complete"), Some(true));
     assert_eq!(result.bool_field("probability_complete"), Some(true));
+}
+
+fn assert_known_count(result: &CoreExecutionResult, profile: KickTableProfileId) {
     let known_count = match profile {
         KickTableProfileId::SrsPlus => Some(456_923),
         KickTableProfileId::Jstris180 => Some(456_459),
