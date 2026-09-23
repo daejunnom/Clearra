@@ -12,6 +12,7 @@ mod conditioned_local_relation_generation;
 mod conditioned_reachability_generation;
 #[allow(dead_code)]
 mod domain;
+mod legal_board_candidate_validation;
 mod legal_board_generation;
 
 pub use conditioned_local_relation_generation::{
@@ -20,5 +21,8 @@ pub use conditioned_local_relation_generation::{
 };
 pub use conditioned_reachability_generation::{
     generate_conditioned_reachability, ConditionedReachabilityGenerationOptions,
+};
+pub use legal_board_candidate_validation::{
+    validate_legal_board_candidate_catalog, LegalBoardCandidateSummary,
 };
 pub use legal_board_generation::{generate_legal_board, LegalBoardGenerationOptions};

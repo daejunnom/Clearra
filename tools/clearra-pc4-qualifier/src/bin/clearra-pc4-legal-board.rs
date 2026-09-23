@@ -1,6 +1,11 @@
-use clearra_pc4_qualifier::{generate_legal_board, LegalBoardGenerationOptions};
+use clearra_pc4_qualifier::{
+    generate_legal_board, validate_legal_board_candidate_catalog, LegalBoardGenerationOptions,
+};
 use clearra_rules::kicks::KickTableProfileId;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, fs, io::Read, path::PathBuf, sync::Arc};
+
+const MAX_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CATALOG_BYTES: u64 = 512 * 1024;
 
 fn main() {
     if let Err(error) = run() {
@@ -10,9 +15,41 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let options = parse_options()?;
+    let (action, options) = parse_options()?;
     let profile = KickTableProfileId::parse(required(&options, "profile")?)
         .ok_or("legal-board profile is not a known kick-table profile")?;
+    if action == "legal-board-verify-candidate" {
+        if options.contains_key("layers")
+            || options.contains_key("workers")
+            || options.contains_key("max-new-steps")
+        {
+            return Err("candidate verification accepts only profile, bundle and catalog".into());
+        }
+        let bundle = absolute(&options, "bundle")?;
+        let catalog = absolute(&options, "catalog")?;
+        let bundle_name = bundle
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("candidate bundle filename must be UTF-8")?;
+        let bundle_bytes = read_regular_bounded(&bundle, MAX_BUNDLE_BYTES)?;
+        let catalog_bytes = read_regular_bounded(&catalog, MAX_CATALOG_BYTES)?;
+        let summary = validate_legal_board_candidate_catalog(
+            profile,
+            bundle_name,
+            Arc::from(bundle_bytes),
+            &catalog_bytes,
+        )
+        .map_err(str::to_owned)?;
+        println!(
+            "pc4_legal_board_candidate=structurally_valid_unqualified profile={} bundle_bytes={} sparse_index_bytes={} layer_counts={:?}",
+            clearra_core_executor::accelerator_profile_name(profile)
+                .map_err(|_| "legal-board profile is unsupported")?,
+            summary.bundle_bytes,
+            summary.sparse_index_bytes,
+            summary.layer_counts
+        );
+        return Ok(());
+    }
     let layers = absolute(&options, "layers")?;
     let profile_name = clearra_core_executor::accelerator_profile_name(profile)
         .map_err(|_| "legal-board profile is unsupported")?;
@@ -30,10 +67,14 @@ fn run() -> Result<(), String> {
     })
 }
 
-fn parse_options() -> Result<BTreeMap<String, String>, String> {
+fn parse_options() -> Result<(String, BTreeMap<String, String>), String> {
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() != Some("legal-board-run") {
-        return Err("expected legal-board-run".to_owned());
+    let action = args.next().ok_or("expected legal-board action")?;
+    if !matches!(
+        action.as_str(),
+        "legal-board-run" | "legal-board-verify-candidate"
+    ) {
+        return Err("expected legal-board-run or legal-board-verify-candidate".to_owned());
     }
     let mut options = BTreeMap::new();
     while let Some(flag) = args.next() {
@@ -53,7 +94,24 @@ fn parse_options() -> Result<BTreeMap<String, String>, String> {
             return Err(format!("duplicate legal-board option --{key}"));
         }
     }
-    Ok(options)
+    Ok((action, options))
+}
+
+fn read_regular_bounded(path: &PathBuf, limit: u64) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > limit {
+        return Err("candidate input must be a bounded regular file".to_owned());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    fs::File::open(path)
+        .map_err(|error| error.to_string())?
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err("candidate input grew beyond its bound".to_owned());
+    }
+    Ok(bytes)
 }
 
 fn required<'a>(options: &'a BTreeMap<String, String>, key: &str) -> Result<&'a str, String> {

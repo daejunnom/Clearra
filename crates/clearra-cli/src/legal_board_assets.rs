@@ -9,14 +9,17 @@ use crate::{
 };
 use clearra_accelerator_product_host::ProductCatalogKind;
 use clearra_i18n::LanguageId;
-use clearra_pc4_qualifier::{generate_legal_board, LegalBoardGenerationOptions};
+use clearra_pc4_qualifier::{
+    generate_legal_board, validate_legal_board_candidate_catalog, LegalBoardGenerationOptions,
+};
 use clearra_rules::kicks::KickTableProfileId;
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf, sync::atomic::AtomicBool};
+use std::{fs, io::Read, path::PathBuf, sync::atomic::AtomicBool, sync::Arc};
 
 const PROFILES: [&str; 5] = ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"];
 const PRODUCT: ProductCatalogKind = ProductCatalogKind::ExactLegalBoard;
 const MAX_PRODUCT_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CANDIDATE_CATALOG_BYTES: u64 = 512 * 1024;
 
 pub(crate) fn activate_for_request(request: &clearra_app::AppRequest) {
     if !request
@@ -211,21 +214,39 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
             legal_layers += u8::from(root.join(format!("legal-layer-{layer:02}.bin")).is_file());
         }
     }
-    let bundle = root.join(format!("legal-board-{profile}.cllb"));
-    let bundle_bytes = bundle.metadata().ok().map(|metadata| metadata.len());
-    let candidate_validation = if bundle_bytes.is_some_and(|bytes| bytes > MAX_PRODUCT_BUNDLE_BYTES)
-    {
-        "oversized_unqualified_candidate"
-    } else if bundle_bytes.is_some() {
-        let bytes = fs::read(&bundle).map_err(|_| "legal-board: candidate bundle is unreadable")?;
-        if clearra_accelerator_runtime::structurally_valid_candidate(PRODUCT, profile, bytes.into())
-        {
-            "structurally_valid_unqualified"
-        } else {
-            "invalid_asset"
+    let (bundle, catalog) = generated_candidate_paths(root, profile);
+    let bundle_bytes = candidate_size(&bundle)?;
+    let catalog_bytes = candidate_size(&catalog)?;
+    let legacy_candidate_bytes = candidate_size(&root.join(format!("legal-board-{profile}.cllb")))?;
+    let mut candidate_summary = None;
+    let candidate_validation = match (bundle_bytes, catalog_bytes) {
+        (None, None) => "not_loaded",
+        (Some(bytes), _) if bytes > MAX_PRODUCT_BUNDLE_BYTES => "oversized_unqualified_candidate",
+        (_, Some(bytes)) if bytes > MAX_CANDIDATE_CATALOG_BYTES => {
+            "oversized_unqualified_candidate"
         }
-    } else {
-        "not_loaded"
+        (Some(_), Some(_)) => {
+            let bytes = read_candidate_bounded(&bundle, MAX_PRODUCT_BUNDLE_BYTES)?;
+            let catalog_bytes = read_candidate_bounded(&catalog, MAX_CANDIDATE_CATALOG_BYTES)?;
+            let kick = KickTableProfileId::parse(profile)
+                .ok_or("legal-board: candidate profile unsupported")?;
+            candidate_summary = validate_legal_board_candidate_catalog(
+                kick,
+                bundle
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or("legal-board: candidate name invalid")?,
+                Arc::from(bytes),
+                &catalog_bytes,
+            )
+            .ok();
+            if candidate_summary.is_some() {
+                "structurally_valid_unqualified"
+            } else {
+                "invalid_asset"
+            }
+        }
+        _ => "incomplete_unqualified_candidate",
     };
     Ok(json!({
         "action": "status", "profile": profile, "installed": installed.installed,
@@ -237,7 +258,12 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
         "catalog_identity": accelerator_asset_store::hex(installed.catalog_identity),
         "forward_layer_count": forward_layers, "legal_layer_count": legal_layers,
         "candidate_bundle_bytes": bundle_bytes,
+        "candidate_catalog_bytes": catalog_bytes,
+        "candidate_generation_identity": candidate_summary.as_ref().map(|summary| accelerator_asset_store::hex(summary.generation_identity)),
+        "candidate_layer_counts": candidate_summary.as_ref().map(|summary| summary.layer_counts),
+        "candidate_shared_bytes": candidate_summary.as_ref().map(|summary| summary.bundle_bytes.saturating_add(summary.sparse_index_bytes)),
         "candidate_validation": candidate_validation,
+        "legacy_candidate_bundle_bytes": legacy_candidate_bytes,
         "candidate_only": true
     }))
 }
@@ -334,6 +360,35 @@ fn reject_link(path: &std::path::Path) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn candidate_size(path: &std::path::Path) -> Result<Option<u64>, &'static str> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err("legal-board: candidate path must be a regular file")
+        }
+        Ok(metadata) => Ok(Some(metadata.len())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("legal-board: candidate metadata is unreadable"),
+    }
+}
+
+fn read_candidate_bounded(path: &std::path::Path, limit: u64) -> Result<Vec<u8>, &'static str> {
+    let file = fs::File::open(path).map_err(|_| "legal-board: candidate is unreadable")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "legal-board: candidate metadata is unreadable")?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err("legal-board: candidate is not a bounded regular file");
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "legal-board: candidate is unreadable")?;
+    if bytes.len() as u64 > limit {
+        return Err("legal-board: candidate grew beyond its bound");
+    }
+    Ok(bytes)
+}
+
 fn default_workers() -> usize {
     std::thread::available_parallelism().map_or(1, usize::from)
 }
@@ -342,7 +397,7 @@ fn render_text(value: &Value, language: LanguageId) -> String {
     let profile = value["profile"].as_str().unwrap_or("unknown");
     let qualified = value["qualified"].as_bool().unwrap_or(false);
     let installed = value["installed"].as_bool().unwrap_or(false);
-    match language {
+    let mut output = match language {
         LanguageId::Ko => format!(
             "Legal-board 프로필: {profile}\n자격 완료: {}\n설치됨: {}",
             if qualified { "예" } else { "아니요" },
@@ -358,7 +413,37 @@ fn render_text(value: &Value, language: LanguageId) -> String {
             if qualified { "yes" } else { "no" },
             if installed { "yes" } else { "no" }
         ),
+    };
+    if let Some(candidate) = value["candidate_validation"].as_str() {
+        let state = match (language, candidate) {
+            (LanguageId::Ko, "structurally_valid_unqualified") => "형식 검증됨, 제품 자격 미완료",
+            (LanguageId::Ko, "incomplete_unqualified_candidate") => "파일 일부만 존재함",
+            (LanguageId::Ko, "oversized_unqualified_candidate") => "허용 크기 초과",
+            (LanguageId::Ko, "invalid_asset") => "파일 검증 실패",
+            (LanguageId::Ko, _) => "없음",
+            (LanguageId::Ja, "structurally_valid_unqualified") => {
+                "形式検証済み、製品適格性は未確認"
+            }
+            (LanguageId::Ja, "incomplete_unqualified_candidate") => "ファイルが不足",
+            (LanguageId::Ja, "oversized_unqualified_candidate") => "サイズ上限超過",
+            (LanguageId::Ja, "invalid_asset") => "ファイル検証失敗",
+            (LanguageId::Ja, _) => "なし",
+            (LanguageId::En, "structurally_valid_unqualified") => {
+                "format verified, not qualified for product use"
+            }
+            (LanguageId::En, "incomplete_unqualified_candidate") => "missing candidate file",
+            (LanguageId::En, "oversized_unqualified_candidate") => "size limit exceeded",
+            (LanguageId::En, "invalid_asset") => "candidate validation failed",
+            (LanguageId::En, _) => "none",
+        };
+        let label = match language {
+            LanguageId::Ko => "로컬 후보",
+            LanguageId::Ja => "ローカル候補",
+            LanguageId::En => "Local candidate",
+        };
+        output.push_str(&format!("\n{label}: {state}"));
     }
+    output
 }
 
 #[cfg(test)]
@@ -388,5 +473,30 @@ mod tests {
             );
             assert_ne!(bundle, root.join(format!("legal-board-{profile}.cllb")));
         }
+    }
+
+    #[test]
+    fn status_reports_an_incomplete_v2_candidate_instead_of_ignoring_it() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "clearra-legal-board-v2-status-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("isolated candidate directory");
+        let catalog = root.join("legal-board-srs-v2.catalog.json");
+        fs::write(&catalog, b"{}").expect("incomplete catalog fixture");
+        let result = status("srs", &root).expect("candidate status");
+        assert_eq!(
+            result["candidate_validation"],
+            "incomplete_unqualified_candidate"
+        );
+        assert_eq!(result["candidate_bundle_bytes"], Value::Null);
+        assert_eq!(result["candidate_catalog_bytes"], 2);
+        assert!(render_text(&result, LanguageId::Ko).contains("파일 일부만 존재함"));
+        fs::remove_file(catalog).expect("remove fixture file");
+        fs::remove_dir(root).expect("remove fixture directory");
     }
 }

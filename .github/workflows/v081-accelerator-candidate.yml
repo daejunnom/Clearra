@@ -31,6 +31,10 @@ jobs:
         run: |
           cargo test --locked -p clearra-pc4-qualifier --lib candidate_queries_bind_profile_row_frame_and_independent_audit --no-default-features --features legal-board-assets
           cargo test --locked -p clearra-cli --lib conditioned_reachability_assets --no-default-features
+      - name: Verify final legal-board candidate and CLI status boundaries
+        run: |
+          cargo test --locked -p clearra-pc4-qualifier --lib final_bundle_and_catalog_are_bound_without_granting_product_authority --no-default-features --features legal-board-assets
+          cargo test --locked -p clearra-cli --lib status_reports_an_incomplete_v2_candidate_instead_of_ignoring_it --no-default-features
       - name: Verify exact tie continuation and public CLI contracts
         run: |
           cargo test --locked -p clearra-cli --lib tie_snapshot::tests:: --no-default-features
