@@ -170,3 +170,4 @@ jobs:
           cargo test --locked -p clearra-pc4-qualifier --no-default-features --features legal-board-assets --lib domain::forward_bloom_tests
           cargo test --locked -p clearra-pc4-qualifier --no-default-features --features legal-board-assets --lib domain::tests::legal_backtrace_is_restricted_to_the_complete_forward_source
           cargo test --locked -p clearra-pc4-qualifier --no-default-features --features legal-board-assets --lib domain::tests::disk_prefilter_preserves_exact_predecessors_across_target_chunks
+          cargo check --locked -p clearra-core-executor --test legal_board_candidate_exact_set --features parallel,local-search-ab
