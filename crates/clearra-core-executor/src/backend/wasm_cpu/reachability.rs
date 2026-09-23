@@ -663,7 +663,11 @@ impl ReachabilityWorkspace {
                             return anchors_contain(anchors, catalog.width(), rotation, x, y);
                         }
                         LocalRelationProductLookup::PassThrough(status) => {
-                            if status == crate::legal_board::ProviderStatus::InvalidAsset {
+                            if matches!(
+                                status,
+                                crate::legal_board::ProviderStatus::InvalidAsset
+                                    | crate::legal_board::ProviderStatus::Unknown
+                            ) {
                                 break;
                             }
                             saw_miss |= status == crate::legal_board::ProviderStatus::Miss;

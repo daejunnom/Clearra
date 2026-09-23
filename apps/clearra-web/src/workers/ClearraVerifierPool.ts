@@ -2,6 +2,7 @@
 // workers and aggregating their bounded availability and exactness telemetry.
 import {
   ClearraWasmRuntimeError,
+  type AcceleratorWorkerPack,
   type AcceleratorWorkerSynopsis,
   type ClearraDistributedVerifierProgress,
   type ClearraWasmHostCapabilities
@@ -20,6 +21,7 @@ import { VerifierTransportProfile, type TransportOperation } from './VerifierTra
 
 type VerifierResponse =
   | { type: 'prewarmed' }
+  | { type: 'accelerator-pack-ready'; applied: boolean }
   | { type: 'accelerator-synopsis-ready'; applied: boolean }
   | { type: 'delegation-accepted'; acceptance: DelegationAcceptance }
   | {
@@ -190,7 +192,9 @@ class VerifierClient {
   private prewarmed: Promise<void> | null = null;
   private readyReject: ((error: Error) => void) | null = null;
   private prewarmReject: ((error: Error) => void) | null = null;
+  private packReject: ((error: Error) => void) | null = null;
   private synopsisReject: ((error: Error) => void) | null = null;
+  private installedConditionedProfile: number | null = null;
   private installedSynopsisProfile: number | null = null;
   private candidatesVerified = 0;
   private candidatesVerifiedAvailable = true;
@@ -305,7 +309,8 @@ class VerifierClient {
     lifecycleOwnerId = '',
     hostCapabilities?: ClearraWasmHostCapabilities,
     executionKind: ClearraWorkerExecutionKind = 'geometry-verifier',
-    legalBoardSynopsis?: AcceleratorWorkerSynopsis | null
+    legalBoardSynopsis?: AcceleratorWorkerSynopsis | null,
+    conditionedPack?: AcceleratorWorkerPack | null
   ): Promise<void> {
     this.initialized = false;
     this.exactCancellationRequested = false;
@@ -315,6 +320,7 @@ class VerifierClient {
     try {
       await this.transportProfile.measure(this.prewarmed ? 'prewarm_reuse' : 'prewarm_new', 'initialize',
         () => this.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities));
+      await this.installWorkerPack(executionKind === 'geometry-verifier' ? conditionedPack : null);
       await this.installWorkerSynopsis(executionKind === 'geometry-verifier' ? legalBoardSynopsis : null);
       this.worker ??= this.createWorker();
       const worker = this.worker;
@@ -389,6 +395,54 @@ class VerifierClient {
       this.busy = false;
       this.batchStartedAt = null;
     }
+  }
+
+  private async installWorkerPack(pack?: AcceleratorWorkerPack | null): Promise<void> {
+    if ((!pack || pack.bytes.byteLength === 0) && this.installedConditionedProfile === null) return;
+    const worker = this.worker;
+    if (!worker) throw new Error('distributed verifier worker disappeared before relation setup');
+    await new Promise<void>((resolve, reject) => {
+      const rejectAndCleanup = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      const cleanup = () => {
+        worker.removeEventListener('message', onMessage);
+        worker.removeEventListener('error', onError);
+        if (this.packReject === rejectAndCleanup) this.packReject = null;
+      };
+      const onMessage = (event: MessageEvent<VerifierResponse>) => {
+        if (event.data.type === 'accelerator-pack-ready') {
+          this.installedConditionedProfile = event.data.applied ? pack?.profile ?? null : null;
+          cleanup();
+          resolve();
+        } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
+          rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message));
+        }
+      };
+      const onError = (event: ErrorEvent) => {
+        rejectAndCleanup(new Error(event.message || 'distributed verifier relation setup failed'));
+      };
+      this.packReject = rejectAndCleanup;
+      worker.addEventListener('message', onMessage);
+      worker.addEventListener('error', onError);
+      try {
+        worker.postMessage({
+          type: 'accelerator-pack',
+          profile: pack?.profile ?? null,
+          bytes: pack?.bytes ?? null
+        }, pack?.bytes ? [pack.bytes] : []);
+      } catch (error) {
+        if (this.installedConditionedProfile === null) {
+          // A failed transfer to a worker with no prior negative authority
+          // leaves its exact verifier usable.
+          cleanup();
+          resolve();
+        } else {
+          rejectAndCleanup(asError(error));
+        }
+      }
+    });
   }
 
   private async installWorkerSynopsis(synopsis?: AcceleratorWorkerSynopsis | null): Promise<void> {
@@ -913,13 +967,17 @@ class VerifierClient {
       worker.terminate();
     }
     const prewarmReject = this.prewarmReject;
+    const packReject = this.packReject;
     const synopsisReject = this.synopsisReject;
     const readyReject = this.readyReject;
     this.prewarmReject = null;
+    this.packReject = null;
     this.synopsisReject = null;
+    this.installedConditionedProfile = null;
     this.installedSynopsisProfile = null;
     this.readyReject = null;
     prewarmReject?.(error);
+    packReject?.(error);
     synopsisReject?.(error);
     readyReject?.(error);
     if (this.initializationDelegation) {
@@ -1041,7 +1099,8 @@ export class ClearraVerifierPool {
     recoveryMode: ClearraVerifierRecoveryMode = 'atomic-task',
     hostCapabilities?: ClearraWasmHostCapabilities,
     executionKind: ClearraWorkerExecutionKind = 'geometry-verifier',
-    legalBoardSynopsis?: AcceleratorWorkerSynopsis | null
+    legalBoardSynopsis?: AcceleratorWorkerSynopsis | null,
+    conditionedPack?: AcceleratorWorkerPack | null
   ) {
     const generation = ++this.generation;
     this.readySubsetFinalization = null;
@@ -1060,7 +1119,7 @@ export class ClearraVerifierPool {
       while (this.clients.length < size) {
         this.clients.push(this.createClient());
       }
-      const initializations = this.clients.map(async (client) => {
+      const initializations = this.clients.map(async (client, index) => {
         const initializationTask = withTimeout(
           client.initialize(
             initialization,
@@ -1068,7 +1127,8 @@ export class ClearraVerifierPool {
             lifecycleOwnerId,
             hostCapabilities,
             executionKind,
-            legalBoardSynopsis
+            legalBoardSynopsis,
+            index === 0 ? conditionedPack : null
           ),
           this.initializationTimeoutMs,
           'distributed verifier initialization'

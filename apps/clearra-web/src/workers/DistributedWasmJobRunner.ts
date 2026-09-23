@@ -14,6 +14,7 @@ import {
   type ClearraVerifierRecoveryMode
 } from './ClearraVerifierPool';
 import type {
+  AcceleratorWorkerPack,
   AcceleratorWorkerSynopsis,
   ClearraDistributedCoreProgress,
   ClearraDistributedPlan,
@@ -133,7 +134,8 @@ export class DistributedWasmJobRunner {
     resourceAuthority?: SharedExecutionResourceAuthority,
     private readonly resourceWaitTimeoutMs = SHARED_RESOURCE_WAIT_TIMEOUT_MS,
     private readonly minimumManagerPolicy: MinimumManagerPolicy = 'auto',
-    private readonly legalBoardSynopsis?: AcceleratorWorkerSynopsis | null
+    private readonly legalBoardSynopsis?: AcceleratorWorkerSynopsis | null,
+    private readonly conditionedPack?: AcceleratorWorkerPack | null
   ) {
     this.pool = pool;
     this.resourceAuthority = resourceAuthority ?? authorityForVerifierPool(
@@ -439,7 +441,8 @@ export class DistributedWasmJobRunner {
           verifierRecoveryMode(plan),
           this.hostCapabilities,
           'geometry-verifier',
-          this.synopsisFor(verifierCount)
+          this.synopsisFor(verifierCount),
+          this.conditionedPack
         );
         void verifierInitialization.catch(() => undefined);
       }
@@ -489,7 +492,8 @@ export class DistributedWasmJobRunner {
             verifierRecoveryMode(plan),
             this.hostCapabilities,
             'geometry-verifier',
-            this.synopsisFor(effectiveVerifierCount)
+            this.synopsisFor(effectiveVerifierCount),
+            this.conditionedPack
           );
           void verifierInitialization.catch(() => undefined);
           await yieldToWorkerHost();

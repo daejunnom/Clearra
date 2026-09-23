@@ -49,6 +49,7 @@ pub const MAX_DISTRIBUTED_SYNOPSIS_BYTES: usize = 4 * 1024 * 1024;
 pub enum ProviderStatus {
     Ready,
     LoadedComplete,
+    Unknown,
     NotLoaded,
     OutOfScope,
     NotQualified,

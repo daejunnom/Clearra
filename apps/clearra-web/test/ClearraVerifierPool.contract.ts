@@ -33,6 +33,7 @@ type WorkerMessage = {
   type: string;
   profile?: number | null;
   wire?: ArrayBuffer | null;
+  bytes?: ArrayBuffer | null;
   requestId?: number;
   batch?: ArrayBuffer;
   offer?: {
@@ -89,6 +90,10 @@ class FakeVerifierWorker {
     }
     if (message.type === 'accelerator-synopsis') {
       this.emit({ type: 'accelerator-synopsis-ready', applied: Boolean(message.wire) });
+      return;
+    }
+    if (message.type === 'accelerator-pack') {
+      this.emit({ type: 'accelerator-pack-ready', applied: Boolean(message.bytes) });
       return;
     }
     if (message.type === 'delegation-run') {
@@ -208,6 +213,38 @@ await bounded('disabled summary clears peer state', synopsisPool.initialize(
 ));
 assert.ok(synopsisWorkers.every(worker => worker.controls.at(-1)?.profile === null));
 synopsisPool.cancel();
+
+class ConditionedVerifierWorker extends FakeVerifierWorker {
+  readonly controls: { profile: number | null; bytes: number }[] = [];
+  constructor() { super(false); }
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'accelerator-pack') {
+      this.controls.push({ profile: message.profile ?? null, bytes: message.bytes?.byteLength ?? 0 });
+    }
+    super.postMessage(message);
+  }
+}
+const conditionedWorkers: ConditionedVerifierWorker[] = [];
+const conditionedPool = new ClearraVerifierPool(() => {
+  const worker = new ConditionedVerifierWorker();
+  conditionedWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+await bounded('one designated relation owner', conditionedPool.initialize(
+  'clearra pc --lines 4', 2, undefined, 'conditioned-owner', 'atomic-task',
+  undefined, 'geometry-verifier', null,
+  { profile: 1, bytes: Uint8Array.of(7, 8, 9).buffer,
+    identity: 'qualified-generation', activeSessionSharedBytes: 1024 }
+));
+assert.deepEqual(conditionedWorkers.map(worker => worker.controls.length), [1, 0]);
+assert.deepEqual(conditionedWorkers[0].controls[0], { profile: 1, bytes: 3 });
+await bounded('conditioned job drain', conditionedPool.finish(() => undefined));
+await bounded('conditioned owner cleared before exact job', conditionedPool.initialize(
+  'clearra pc --lines 4', 2, undefined, 'conditioned-owner'
+));
+assert.deepEqual(conditionedWorkers[0].controls.at(-1), { profile: null, bytes: 0 });
+assert.equal(conditionedWorkers[1].controls.length, 0);
+conditionedPool.cancel();
 
 class StalledSynopsisWorker extends FakeVerifierWorker {
   constructor() { super(false); }

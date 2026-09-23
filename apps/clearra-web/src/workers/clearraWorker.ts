@@ -22,6 +22,7 @@ import {
   ClearraWasmRuntimeError,
   loadClearraWasmModule,
   type AcceleratorRequestPolicy,
+  type AcceleratorWorkerPack,
   type AcceleratorWorkerSynopsis,
   type ClearraWasmFailureDiagnostics,
   type ClearraWasmHostCapabilities,
@@ -258,10 +259,10 @@ async function runCommandText(
     wasm.configure_host(wasmHostCapabilities(hostCapabilitySnapshot));
     loadedWasm = wasm;
     releaseProductPages();
-    // The root retains the complete signed asset. Peers may receive only a
-    // bounded negative-only derivative; an unavailable derivative preserves
-    // their exact fallback without network work in the solver hot path.
-    const legalBoardSynopsis = await activateLocalAccelerators(
+    // The root retains the complete legal-board, and peers may receive only
+    // its bounded negative-only derivative. The signed relation is staged
+    // for one serial or distributed owner, never every verifier.
+    const accelerators = await activateLocalAccelerators(
       wasm, commandText, hostCapabilitySnapshot.wasmTransferByteCap,
       workerAuthority.workersEffective
     );
@@ -280,7 +281,9 @@ async function runCommandText(
       wasmHostCapabilities(hostCapabilitySnapshot),
       undefined,
       undefined,
-      legalBoardSynopsis
+      accelerators.legalBoardSynopsis,
+      accelerators.conditionedPack,
+      (profile, identity) => activeAcceleratorIdentities.set(`1:${profile}`, identity)
     );
     const modulePrepareMs = profileStarted === null ? 0 : performance.now() - profileStarted;
     const terminal = await job.runner.run(commandText, (event) => {
@@ -320,6 +323,10 @@ async function runCommandText(
 }
 
 const ACCELERATOR_PROFILES = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
+type ActivatedAccelerators = {
+  legalBoardSynopsis: AcceleratorWorkerSynopsis | null;
+  conditionedPack: AcceleratorWorkerPack | null;
+};
 let acceleratorOwner: ClearraWasmModule | null = null;
 const activeAcceleratorIdentities = new Map<string, string>();
 
@@ -328,9 +335,10 @@ async function activateLocalAccelerators(
   commandText: string,
   transferByteCap: number,
   workerCount: number
-): Promise<AcceleratorWorkerSynopsis | null> {
+): Promise<ActivatedAccelerators> {
+  const unavailable = (): ActivatedAccelerators => ({ legalBoardSynopsis: null, conditionedPack: null });
   if (!wasm.accelerator_catalog || !wasm.accelerator_request_policy ||
-      !wasm.accelerator_admit || !wasm.accelerator_remove) return null;
+      !wasm.accelerator_admit || !wasm.accelerator_remove) return unavailable();
   if (acceleratorOwner !== wasm) {
     acceleratorOwner = wasm;
     activeAcceleratorIdentities.clear();
@@ -362,7 +370,8 @@ async function activateLocalAccelerators(
       }
     }
   }
-  if (profile < 0) return null;
+  if (profile < 0) return unavailable();
+  let conditionedPack: AcceleratorWorkerPack | null = null;
   for (const kind of [0, 1]) {
     // A previously loaded generation must never survive a failed local read
     // or a new catalog. If an in-flight lease prevents removal, fail closed
@@ -387,7 +396,11 @@ async function activateLocalAccelerators(
         continue;
       }
       const identity = await currentQualifiedAcceleratorIdentity(plan);
-      if (activeAcceleratorIdentities.get(key) === identity) continue;
+      // The relation has exactly one WASM owner per search. For a serial job
+      // it is the root; for a distributed job only the first verifier owns
+      // the full pack. Do not keep an earlier serial root owner while staging
+      // a new peer handoff, even when the generation is unchanged.
+      if (kind === 0 && activeAcceleratorIdentities.get(key) === identity) continue;
       if (activeAcceleratorIdentities.has(key)) {
         wasm.accelerator_remove(kind, profile);
         activeAcceleratorIdentities.delete(key);
@@ -395,8 +408,18 @@ async function activateLocalAccelerators(
       if (!identity) continue;
       const bytes = await readQualifiedAccelerator(plan);
       if (bytes) {
-        wasm.accelerator_admit(kind, profile, bytes, true);
-        activeAcceleratorIdentities.set(key, identity);
+        if (kind === 1) {
+          if (!Number.isSafeInteger(plan.active_session_shared_bytes) ||
+              !plan.active_session_shared_bytes || plan.active_session_shared_bytes < 0) continue;
+          wasm.accelerator_admit(kind, profile, bytes, false);
+          conditionedPack = {
+            profile, bytes, identity,
+            activeSessionSharedBytes: plan.active_session_shared_bytes
+          };
+        } else {
+          wasm.accelerator_admit(kind, profile, bytes, true);
+          activeAcceleratorIdentities.set(key, identity);
+        }
       }
     } catch (error) {
       // Invalid/missing local assets are Unknown, not negative evidence.
@@ -409,8 +432,26 @@ async function activateLocalAccelerators(
       console.warn('Clearra local accelerator unavailable; using exact search', error);
     }
   }
+  if (conditionedPack) {
+    try {
+      const legalPlan = activeAcceleratorIdentities.has(`0:${profile}`)
+        ? wasm.accelerator_catalog(0, profile) : null;
+      const legalBytes = legalPlan?.active_session_shared_bytes ?? 0;
+      if (!Number.isSafeInteger(legalBytes) || legalBytes < 0 ||
+          legalBytes + conditionedPack.activeSessionSharedBytes +
+            conditionedPack.bytes.byteLength + 4 * 1024 * 1024 > 128 * 1024 * 1024) {
+        conditionedPack = null;
+      }
+    } catch {
+      // Account for the root bundle, the designated verifier owner, and the
+      // transient host transfer; unknown accounting preserves exact search.
+      conditionedPack = null;
+    }
+  }
   if (!activeAcceleratorIdentities.has(`0:${profile}`) ||
-      !wasm.accelerator_export_negative_synopsis || workerCount < 2) return null;
+      !wasm.accelerator_export_negative_synopsis || workerCount < 1) {
+    return { legalBoardSynopsis: null, conditionedPack };
+  }
   try {
     // The signed resident upper bounds include the complete root bundle and
     // relation pack. Reserve room for temporary admission buffers and keep
@@ -420,9 +461,12 @@ async function activateLocalAccelerators(
       if (!activeAcceleratorIdentities.has(`${kind}:${profile}`)) continue;
       const plan = wasm.accelerator_catalog(kind, profile);
       if (plan.state !== 'qualified' || !Number.isSafeInteger(plan.active_session_shared_bytes) ||
-          !plan.active_session_shared_bytes || plan.active_session_shared_bytes < 0) return null;
+          !plan.active_session_shared_bytes || plan.active_session_shared_bytes < 0) {
+        return { legalBoardSynopsis: null, conditionedPack };
+      }
       residentUpperBound += plan.active_session_shared_bytes;
     }
+    residentUpperBound += conditionedPack?.activeSessionSharedBytes ?? 0;
     const totalSynopsisBudget = Math.max(0, Math.min(
       16 * 1024 * 1024,
       128 * 1024 * 1024 - residentUpperBound - 4 * 1024 * 1024
@@ -433,11 +477,14 @@ async function activateLocalAccelerators(
       Math.floor(totalSynopsisBudget / Math.max(1, workerCount))
     );
     const wire = wasm.accelerator_export_negative_synopsis(profile, maximumBytes);
-    return wire.byteLength > 0 && wire.byteLength <= maximumBytes
-      ? { profile, wire, maximumPeers: workerCount } : null;
+    return {
+      legalBoardSynopsis: wire.byteLength > 0 && wire.byteLength <= maximumBytes
+        ? { profile, wire, maximumPeers: workerCount } : null,
+      conditionedPack
+    };
   } catch {
     // No negative proof leaves the existing exact verifier unchanged.
-    return null;
+    return { legalBoardSynopsis: null, conditionedPack };
   }
 }
 

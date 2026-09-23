@@ -171,9 +171,7 @@ impl QualifiedLocalRelationPack {
                 let mut anchors = record.grounded_lock_anchors();
                 if !record.exits().is_empty() {
                     let Some(continued) = continuation(record.exits()) else {
-                        return LocalRelationProductLookup::PassThrough(
-                            ProviderStatus::InvalidAsset,
-                        );
+                        return LocalRelationProductLookup::PassThrough(ProviderStatus::Unknown);
                     };
                     for (local, global) in anchors.iter_mut().zip(continued) {
                         *local |= global;
@@ -488,7 +486,7 @@ mod tests {
                 &[entry],
                 |_| None,
             ),
-            LocalRelationProductLookup::PassThrough(ProviderStatus::InvalidAsset)
+            LocalRelationProductLookup::PassThrough(ProviderStatus::Unknown)
         );
         assert_eq!(
             qualified.lookup_composed_for_proven_entries(

@@ -36,6 +36,12 @@ export type AcceleratorWorkerSynopsis = {
   wire: ArrayBuffer;
   maximumPeers: number;
 };
+export type AcceleratorWorkerPack = {
+  profile: number;
+  bytes: ArrayBuffer;
+  identity: string;
+  activeSessionSharedBytes: number;
+};
 export type ClearraWasmModule = {
   accelerator_catalog?: (kind: number, profile: number) => AcceleratorCatalogPlan;
   accelerator_request_policy?: (commandText: string) => AcceleratorRequestPolicy;
