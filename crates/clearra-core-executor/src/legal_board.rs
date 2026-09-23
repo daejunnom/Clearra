@@ -30,7 +30,11 @@ const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_ACTIVE_ACCELERATOR_BYTES: usize = 128 * 1024 * 1024;
 pub const EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE: &str =
     "empty-origin-10x4-four-lines-f-intersection-r";
-const CHECKPOINT_STRIDE: u64 = 256;
+// A hot BuildUp subset may probe the same 4L bundle hundreds of millions of
+// times. Keep the immutable payload compact, but cap the per-probe delta walk
+// at sixteen values; the additional shared index is checked by the 128 MiB
+// active-session admission contract.
+const CHECKPOINT_STRIDE: u64 = 16;
 const EXACT_INTERSECTION_KIND: u8 = 1;
 const PROFILE_SLOTS: usize = 5;
 
@@ -1197,6 +1201,24 @@ mod tests {
             }),
             LegalBoardDecision::CandidateAllowed
         );
+    }
+
+    #[test]
+    fn storage_key_matches_independent_four_row_bit_mapping() {
+        for row in 0..4 {
+            for pattern in 0_u64..1024 {
+                let board = pattern << (row * 10);
+                let expected = (0..10).fold(0_u64, |key, x| {
+                    if pattern & (1 << x) == 0 {
+                        key
+                    } else {
+                        key | (1 << (row * 10 + 9 - x))
+                    }
+                });
+                assert_eq!(bundle_key_from_clearra_board(board), expected);
+                assert_eq!(bundle_key_from_clearra_board(expected), board);
+            }
+        }
     }
 
     #[test]

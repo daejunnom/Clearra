@@ -81,6 +81,12 @@ fn generated_bundle_preserves_complete_p7p4_solution_identity_set() {
         },
     )
     .expect("generated exact-intersection bundle parses for its own profile");
+    eprintln!(
+        "candidate legal-board resident index: bundle_bytes={} sparse_index_bytes={}",
+        index.compressed_bytes(),
+        index.sparse_index_bytes(),
+    );
+    assert!(index.compressed_bytes() + index.sparse_index_bytes() <= 128 * 1024 * 1024);
     install_local_pc4_legal_board_index(index).expect("isolated test has one installed bundle");
     set_local_search_prune_policy(LocalSearchPrunePolicy::product_default().with_legal_board(true));
     let started = Instant::now();
