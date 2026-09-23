@@ -53,7 +53,15 @@ fn validate_options(options: &LegalBoardGenerationOptions) -> Result<(), String>
         return Err("legal-board max-new-steps outside 1..=21".to_owned());
     }
     validate_output_path(&options.bundle)?;
-    validate_output_path(&options.catalog)
+    validate_output_path(&options.catalog)?;
+    let layers = fs::canonicalize(&options.layers).map_err(|error| error.to_string())?;
+    for output in [&options.bundle, &options.catalog] {
+        let parent = output.parent().ok_or("legal-board output has no parent")?;
+        if fs::canonicalize(parent).map_err(|error| error.to_string())? != layers {
+            return Err("legal-board outputs must share the layers directory".to_owned());
+        }
+    }
+    Ok(())
 }
 
 fn run_exact_layers(
@@ -468,6 +476,40 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod immutable_output_tests {
     use super::*;
+
+    #[test]
+    fn candidate_outputs_must_share_the_verified_layer_directory() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "clearra-legal-board-output-scope-{}-{nonce}",
+            std::process::id()
+        ));
+        let layers = root.join("layers");
+        let other = root.join("other");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&layers).unwrap();
+        fs::create_dir(&other).unwrap();
+        let mut options = LegalBoardGenerationOptions {
+            profile: KickTableProfileId::SrsPlus,
+            layers: layers.clone(),
+            bundle: layers.join("candidate.cllb"),
+            catalog: layers.join("candidate.catalog.json"),
+            workers: 1,
+            max_new_steps: 1,
+        };
+        assert!(validate_options(&options).is_ok());
+        options.catalog = other.join("candidate.catalog.json");
+        assert_eq!(
+            validate_options(&options),
+            Err("legal-board outputs must share the layers directory".to_owned())
+        );
+        fs::remove_dir(&other).unwrap();
+        fs::remove_dir(&layers).unwrap();
+        fs::remove_dir(&root).unwrap();
+    }
 
     #[test]
     fn existing_output_is_idempotent_and_bounded_by_expected_length() {
