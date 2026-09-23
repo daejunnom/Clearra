@@ -19,6 +19,7 @@ const CATALOG_FIELDS: usize = 18;
 pub struct ConditionedLocalCandidateSummary {
     pub generation_identity: [u8; 32],
     pub pack_bytes: usize,
+    pub logical_resident_bytes: usize,
     pub record_count: usize,
 }
 
@@ -70,6 +71,7 @@ pub fn validate_conditioned_local_candidate_catalog(
     Ok(ConditionedLocalCandidateSummary {
         generation_identity: loaded.generation_identity(),
         pack_bytes: pack_bytes.len(),
+        logical_resident_bytes: loaded.logical_resident_bytes(),
         record_count,
     })
 }
@@ -156,6 +158,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(valid.pack_bytes, bytes.len());
+        assert!(valid.logical_resident_bytes >= core::mem::size_of_val(&valid));
         assert_eq!(valid.record_count, 1);
         assert!(validate_conditioned_local_candidate_catalog(
             KickTableProfileId::SrsX,

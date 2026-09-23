@@ -268,6 +268,7 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
         "local_candidate_catalog_bytes": local_catalog_bytes,
         "local_candidate_generation_identity": local_summary.as_ref().map(|summary| accelerator_asset_store::hex(summary.generation_identity)),
         "local_candidate_record_count": local_summary.as_ref().map(|summary| summary.record_count),
+        "local_candidate_logical_resident_bytes": local_summary.as_ref().map(|summary| summary.logical_resident_bytes),
         "local_candidate_validation": local_candidate_validation,
         "local_candidate_contract": "entry_to_first_exit",
         "candidate_only": true,

@@ -68,5 +68,6 @@ jobs:
         run: cargo test --locked -p clearra-core-executor --lib backend::wasm_cpu::reachability
       - name: Audit local relation reuse on the actual query board
         run: |
-          cargo test --locked -p clearra-core-executor --lib conditioned_local_pack_tests --features qualification-reference
+          cargo test --locked -p clearra-core-executor --lib conditioned_local_pack::tests --features qualification-reference
+          cargo test --locked -p clearra-core-executor --lib conditioned_local_index::tests --features qualification-reference
           cargo test --locked -p clearra-core-executor --lib conditioned_local_qualification --features qualification-reference

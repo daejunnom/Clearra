@@ -9,7 +9,7 @@ use clearra_rules::kicks::KickTableProfileId;
 use sha2::{Digest, Sha256};
 
 use crate::conditioned_local_index::{
-    context_key, piece_code, ContextKey, LocalRelationCandidateIndex, LocalRelationCandidateLookup,
+    compare_record_key, piece_code, LocalRelationCandidateIndex, LocalRelationCandidateLookup,
     LocalRelationIndexError,
 };
 use crate::conditioned_local_relation::{
@@ -89,6 +89,12 @@ impl LocalRelationCandidatePack {
         self.encoded_bytes
     }
 
+    /// Known Rust-owned storage after parsing. This excludes allocator and
+    /// process overhead, so the product's hard peak still needs measurement.
+    pub fn logical_resident_bytes(&self) -> usize {
+        core::mem::size_of::<Self>().saturating_add(self.index.retained_bytes())
+    }
+
     pub fn record_count(&self) -> usize {
         self.index.record_count()
     }
@@ -159,10 +165,10 @@ pub fn encode_local_relation_candidate_pack(
     records: &[ExactConditionedLocalRelation],
 ) -> Result<Vec<u8>, LocalRelationPackError> {
     let mut canonical = records.to_vec();
-    canonical.sort_unstable_by_key(record_key);
+    canonical.sort_unstable_by(compare_record_key);
     if canonical
         .windows(2)
-        .any(|pair| record_key(&pair[0]) == record_key(&pair[1]))
+        .any(|pair| compare_record_key(&pair[0], &pair[1]).is_eq())
     {
         return Err(LocalRelationPackError::NonCanonicalOrder);
     }
@@ -239,14 +245,14 @@ pub fn load_local_relation_candidate_pack(
     }
     let mut records = Vec::with_capacity(count);
     let mut cursor = HEADER_BYTES;
-    let mut prior = None;
     for _ in 0..count {
         let record = decode_record(bytes, &mut cursor, binding.kick_profile)?;
-        let key = record_key(&record);
-        if prior.is_some_and(|previous| previous >= key) {
+        if records
+            .last()
+            .is_some_and(|previous| !compare_record_key(previous, &record).is_lt())
+        {
             return Err(LocalRelationPackError::NonCanonicalOrder);
         }
-        prior = Some(key);
         records.push(record);
     }
     if cursor != bytes.len() {
@@ -261,14 +267,6 @@ pub fn load_local_relation_candidate_pack(
         encoded_bytes: bytes.len(),
         index,
     })
-}
-
-fn record_key(record: &ExactConditionedLocalRelation) -> (ContextKey, u64, u64) {
-    (
-        context_key(record),
-        record.dependency_mask,
-        record.dependency_occupancy,
-    )
 }
 
 fn generation_identity(
