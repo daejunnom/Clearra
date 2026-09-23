@@ -29,6 +29,10 @@ const VALIDATION_RUN_MAGIC: &[u8; 8] = b"LBVAL001";
 const VALIDATION_RUN_HEADER_BYTES: usize = 168;
 const FIELD_MASK: u64 = (1_u64 << 40) - 1;
 const MAX_WORKERS: usize = 64;
+// Generator-only semi-join filter. False positives are checked against the
+// complete sorted F_k file; false negatives are impossible for inserted keys.
+const FORWARD_BLOOM_MAX_BYTES: usize = 128 * 1024 * 1024;
+const FORWARD_BLOOM_HASHES: u64 = 4;
 const REVERSE_VALIDATION_BATCH_SIZE: usize = 131_072;
 #[cfg(not(test))]
 const PAIR_RUN_FAN_IN: usize = 32;
@@ -777,13 +781,15 @@ pub(crate) fn legal_predecessor_step(
     let workers = requested_workers
         .min(available)
         .min(target.fields.len().max(1));
+    let forward_bloom = ForwardBloom::from_verified_domain(forward_source_path, binding, &forward)?;
     // Enumerate geometric predecessors of the already-complete legal target,
     // merge their pair runs, intersect the sorted stream with complete F_k in
     // one verified file pass, then exact-ILC-check each surviving source.
-    // Unfiltered runs may use more spill space than in-memory prefiltering;
-    // their exact size remains a qualification measurement, not an estimate.
+    // A bounded no-false-negative Bloom semi-join removes most impossible
+    // sources before spill. The sorted F_k cursor remains the exact authority
+    // after merge; Bloom admission alone never certifies membership.
     let spill_identity: [u8; 32] = Sha256::new()
-        .chain_update(b"clearra.legal-predecessor.spill.v1\0")
+        .chain_update(b"clearra.legal-predecessor.spill.v2.bloom4\0")
         .chain_update(target.file_digest)
         .chain_update(forward.file_digest)
         .finalize()
@@ -808,6 +814,7 @@ pub(crate) fn legal_predecessor_step(
                 Some(ForwardMembership::SortedDomain {
                     path: forward_source_path,
                     summary: &forward,
+                    prefilter: &forward_bloom,
                 }),
                 emit,
             )?;
@@ -1529,12 +1536,105 @@ fn validate_reverse_sources(
     Ok(indexed.into_iter().map(|(_, field)| field).collect())
 }
 
+/// Probabilistic *admission* for the large disk-backed F_k semi-join. Exact
+/// membership is still proved by SortedDomainCursor before ILC validation.
+struct ForwardBloom {
+    words: Vec<u64>,
+    bit_mask: u64,
+}
+
+impl ForwardBloom {
+    fn new(expected_fields: usize) -> Result<Self, String> {
+        let maximum_bits = FORWARD_BLOOM_MAX_BYTES * 8;
+        let wanted_bits = expected_fields.saturating_mul(8).max(64);
+        let bit_count = wanted_bits
+            .checked_next_power_of_two()
+            .unwrap_or(maximum_bits)
+            .min(maximum_bits);
+        let word_count = bit_count / 64;
+        let mut words = Vec::new();
+        words
+            .try_reserve_exact(word_count)
+            .map_err(|_| "forward membership prefilter allocation failed".to_owned())?;
+        words.resize(word_count, 0);
+        Ok(Self {
+            words,
+            bit_mask: u64::try_from(bit_count - 1)
+                .map_err(|_| "forward membership prefilter width overflow".to_owned())?,
+        })
+    }
+
+    fn from_verified_domain(
+        path: &Path,
+        binding: DomainBinding,
+        summary: &DomainSummary,
+    ) -> Result<Self, String> {
+        let mut filter = Self::new(summary.field_count)?;
+        visit_verified_domain_fields(path, binding, summary, &mut |field| {
+            filter.insert(field);
+            Ok(())
+        })?;
+        eprintln!(
+            "legal_board_forward_prefilter=ready layer={} fields={} bytes={}",
+            summary.layer,
+            summary.field_count,
+            filter.words.len() * 8
+        );
+        Ok(filter)
+    }
+
+    fn insert(&mut self, field: u64) {
+        for bit in bloom_bit_positions(field, self.bit_mask) {
+            self.words[bit >> 6] |= 1_u64 << (bit & 63);
+        }
+    }
+
+    fn may_contain(&self, field: u64) -> bool {
+        bloom_bit_positions(field, self.bit_mask)
+            .all(|bit| self.words[bit >> 6] & (1_u64 << (bit & 63)) != 0)
+    }
+}
+
+fn bloom_bit_positions(field: u64, bit_mask: u64) -> impl Iterator<Item = usize> {
+    let first = bloom_mix(field ^ 0x243f_6a88_85a3_08d3);
+    let step = bloom_mix(field ^ 0x1319_8a2e_0370_7344) | 1;
+    (0..FORWARD_BLOOM_HASHES)
+        .map(move |index| ((first.wrapping_add(index.wrapping_mul(step))) & bit_mask) as usize)
+}
+
+fn bloom_mix(mut value: u64) -> u64 {
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+#[cfg(test)]
+mod forward_bloom_tests {
+    use super::ForwardBloom;
+
+    #[test]
+    fn semi_join_never_rejects_an_inserted_field_even_with_collisions() {
+        for count in [0, 1, 64, 10_000] {
+            let mut filter = ForwardBloom::new(count).unwrap();
+            for index in 0..count {
+                filter.insert((index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            }
+            for index in 0..count {
+                assert!(filter.may_contain((index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ForwardMembership<'a> {
     InMemory(&'a [u64]),
     SortedDomain {
         path: &'a Path,
         summary: &'a DomainSummary,
+        prefilter: &'a ForwardBloom,
     },
 }
 
@@ -1602,7 +1702,10 @@ fn visit_reverse_layer_spilled(
                                     clearra_board64_mask_to_hydra_field_hash_v1(source)
                                         .map_err(|error| error.reason().to_owned())?;
                                 let keep = match forward_filter {
-                                    None | Some(ForwardMembership::SortedDomain { .. }) => true,
+                                    None => true,
+                                    Some(ForwardMembership::SortedDomain { prefilter, .. }) => {
+                                        prefilter.may_contain(source_hash)
+                                    }
                                     Some(ForwardMembership::InMemory(allowed)) => {
                                         allowed.binary_search(&source_hash).is_ok()
                                     }
@@ -1665,7 +1768,7 @@ fn visit_reverse_layer_spilled(
         }
     }
     let mut disk_membership = match forward_filter {
-        Some(ForwardMembership::SortedDomain { path, summary }) => {
+        Some(ForwardMembership::SortedDomain { path, summary, .. }) => {
             Some(SortedDomainCursor::open(path, binding, summary)?)
         }
         _ => None,
