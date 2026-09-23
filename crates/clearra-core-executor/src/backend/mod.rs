@@ -109,13 +109,14 @@ pub use wasm_cpu::{
     any_pc4_ilc_target_field, canonical_wasm_candidate_packet_batch_sha256,
     encode_canonical_wasm_candidate_packet_batch, enumerate_pc4_ilc_geometric_predecessor_fields,
     enumerate_pc4_ilc_predecessor_fields, enumerate_pc4_ilc_target_fields,
-    materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
-    WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedResultMerger,
-    WasmBuildProbabilityDistributedVerifier, WasmCandidatePacket, WasmCandidateProducerAdvance,
-    WasmCpuCandidateProducer, WasmDistributedBackendExecution, WasmDistributedGeometrySummary,
-    WasmDistributedProgress, WasmDistributedResultMerger, WasmDistributedVerifier,
-    WasmPackedTilingIdentity, WasmPcRootProducer, WasmPcRootResultMerger, WasmTilingRootAdvance,
-    WasmTilingRootChunk, WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
+    materialize_pc4_ilc_transition, Pc4IlcForwardMembershipWorkspace, Pc4IlcMaterializationError,
+    Pc4IlcPlacement, WasmBuildProbabilityCandidateProducer,
+    WasmBuildProbabilityDistributedResultMerger, WasmBuildProbabilityDistributedVerifier,
+    WasmCandidatePacket, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
+    WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
+    WasmDistributedResultMerger, WasmDistributedVerifier, WasmPackedTilingIdentity,
+    WasmPcRootProducer, WasmPcRootResultMerger, WasmTilingRootAdvance, WasmTilingRootChunk,
+    WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
 pub(crate) use wasm_cpu::{DocumentLockReachability, DocumentReachabilityEngine};
 pub use wasm_cpu_search_backend::{

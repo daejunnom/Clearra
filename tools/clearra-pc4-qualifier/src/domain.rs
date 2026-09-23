@@ -2,8 +2,8 @@
 // profile-bound, resumable PC4 forward and reverse domain layers.
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_executor::{
-    any_pc4_ilc_target_field, enumerate_pc4_ilc_geometric_predecessor_fields,
-    enumerate_pc4_ilc_target_fields,
+    enumerate_pc4_ilc_geometric_predecessor_fields, enumerate_pc4_ilc_target_fields,
+    Pc4IlcForwardMembershipWorkspace,
 };
 use clearra_pc4_tablebase::{
     clearra_board64_mask_to_hydra_field_hash_v1, hydra_field_hash_v1_to_clearra_board64_mask,
@@ -1493,6 +1493,7 @@ fn validate_reverse_sources(
             let cursor = &cursor;
             handles.push(scope.spawn(move || {
                 let mut validated = Vec::new();
+                let mut workspace = Pc4IlcForwardMembershipWorkspace::default();
                 loop {
                     let begin = cursor.fetch_add(16, Ordering::Relaxed);
                     if begin >= candidates.len() {
@@ -1513,6 +1514,7 @@ fn validate_reverse_sources(
                                 continue;
                             }
                             reaches_domain = reaches_any_domain_target(
+                                &mut workspace,
                                 source,
                                 piece,
                                 binding.kick_profile,
@@ -1538,22 +1540,24 @@ fn validate_reverse_sources(
 }
 
 fn reaches_any_domain_target(
+    workspace: &mut Pc4IlcForwardMembershipWorkspace,
     source: u64,
     piece: PieceKind,
     kick_profile: KickTableProfileId,
     sorted_target_hashes: &[u64],
 ) -> Result<bool, String> {
     let mut invalid_target = None;
-    let found = any_pc4_ilc_target_field(source, piece, kick_profile, |target| {
-        match clearra_board64_mask_to_hydra_field_hash_v1(target) {
-            Ok(hash) => sorted_target_hashes.binary_search(&hash).is_ok(),
-            Err(error) => {
-                invalid_target = Some(error.reason());
-                true
+    let found = workspace
+        .any_target(source, piece, kick_profile, |target| {
+            match clearra_board64_mask_to_hydra_field_hash_v1(target) {
+                Ok(hash) => sorted_target_hashes.binary_search(&hash).is_ok(),
+                Err(error) => {
+                    invalid_target = Some(error.reason());
+                    true
+                }
             }
-        }
-    })
-    .map_err(|error| error.reason().to_owned())?;
+        })
+        .map_err(|error| error.reason().to_owned())?;
     if let Some(reason) = invalid_target {
         return Err(reason.to_owned());
     }
@@ -1997,6 +2001,7 @@ fn generate_reverse_layer_bounded(
                 let candidate_pairs = &candidate_pairs;
                 handles.push(scope.spawn(move || {
                     let mut validated = Vec::new();
+                    let mut workspace = Pc4IlcForwardMembershipWorkspace::default();
                     loop {
                         let begin = cursor.fetch_add(4, Ordering::Relaxed);
                         if begin >= candidate_pairs.len() {
@@ -2008,6 +2013,7 @@ fn generate_reverse_layer_bounded(
                             let source = hydra_field_hash_v1_to_clearra_board64_mask(source_hash)
                                 .map_err(|error| error.reason().to_owned())?;
                             let reaches_domain = reaches_any_domain_target(
+                                &mut workspace,
                                 source,
                                 piece,
                                 binding.kick_profile,
@@ -2598,6 +2604,7 @@ mod tests {
 
     #[test]
     fn reverse_domain_membership_matches_complete_forward_enumeration() {
+        let mut workspace = Pc4IlcForwardMembershipWorkspace::default();
         for profile in [
             KickTableProfileId::Srs90,
             KickTableProfileId::SrsPlus,
@@ -2605,18 +2612,34 @@ mod tests {
             KickTableProfileId::Jstris180,
             KickTableProfileId::NoKick,
         ] {
-            for piece in [PieceKind::J, PieceKind::L, PieceKind::T] {
-                let complete = enumerate_pc4_ilc_target_fields(0, piece, profile).unwrap();
-                let mut hashes = complete
-                    .into_iter()
-                    .map(clearra_board64_mask_to_hydra_field_hash_v1)
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap();
-                hashes.sort_unstable();
-                for selected in [hashes.first(), hashes.last()].into_iter().flatten() {
-                    assert!(reaches_any_domain_target(0, piece, profile, &[*selected]).unwrap());
+            for source in [0, (0b1111111110_u64) << 20] {
+                for piece in [PieceKind::J, PieceKind::L, PieceKind::T] {
+                    let complete = enumerate_pc4_ilc_target_fields(source, piece, profile).unwrap();
+                    let mut hashes = complete
+                        .into_iter()
+                        .map(clearra_board64_mask_to_hydra_field_hash_v1)
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    hashes.sort_unstable();
+                    for selected in [hashes.first(), hashes.last()].into_iter().flatten() {
+                        assert!(reaches_any_domain_target(
+                            &mut workspace,
+                            source,
+                            piece,
+                            profile,
+                            &[*selected],
+                        )
+                        .unwrap());
+                    }
+                    assert!(!reaches_any_domain_target(
+                        &mut workspace,
+                        source,
+                        piece,
+                        profile,
+                        &[u64::MAX],
+                    )
+                    .unwrap());
                 }
-                assert!(!reaches_any_domain_target(0, piece, profile, &[0]).unwrap());
             }
         }
     }

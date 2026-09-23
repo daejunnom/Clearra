@@ -71,7 +71,8 @@ pub use distributed::{
 pub use pc4_graph_materializer::{
     any_pc4_ilc_target_field, enumerate_pc4_ilc_geometric_predecessor_fields,
     enumerate_pc4_ilc_predecessor_fields, enumerate_pc4_ilc_target_fields,
-    materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
+    materialize_pc4_ilc_transition, Pc4IlcForwardMembershipWorkspace, Pc4IlcMaterializationError,
+    Pc4IlcPlacement,
 };
 pub(crate) use reachability::{
     exact_entry_lock_anchors, exact_local_relation, exact_spawn_lock_anchors,

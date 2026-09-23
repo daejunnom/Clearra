@@ -916,13 +916,43 @@ struct State {
     y: i8,
 }
 
+#[derive(Clone, Copy)]
+enum DesiredLocks {
+    All(ReachableLocks),
+    Any(ReachableLocks),
+}
+
 pub(super) fn search_reachable_locks(
     template: &ReachabilityTemplate,
     board: u64,
     scratch: &mut ReachabilityScratch,
     desired: Option<ReachableLocks>,
 ) -> ReachabilitySearchResult {
-    search_reachable_locks_from_seed_indices(template, board, scratch, desired, &template.sky_seeds)
+    search_reachable_locks_from_seed_indices(
+        template,
+        board,
+        scratch,
+        desired.map(DesiredLocks::All),
+        &template.sky_seeds,
+    )
+}
+
+/// Finds any one exact reachable lock from a geometrically prefiltered set.
+/// A non-exhaustive result is a positive witness; an exhaustive result is a
+/// complete negative for the requested lock set under the same ordered kicks.
+pub(super) fn search_reachable_any_desired_lock(
+    template: &ReachabilityTemplate,
+    board: u64,
+    scratch: &mut ReachabilityScratch,
+    desired: ReachableLocks,
+) -> ReachabilitySearchResult {
+    search_reachable_locks_from_seed_indices(
+        template,
+        board,
+        scratch,
+        Some(DesiredLocks::Any(desired)),
+        &template.sky_seeds,
+    )
 }
 
 /// Exact full-board traversal from the caller's actual entry poses. This is
@@ -964,7 +994,7 @@ fn search_reachable_locks_from_seed_indices(
     template: &ReachabilityTemplate,
     board: u64,
     scratch: &mut ReachabilityScratch,
-    desired: Option<ReachableLocks>,
+    desired: Option<DesiredLocks>,
     seeds: &[u16],
 ) -> ReachabilitySearchResult {
     let width = template.width;
@@ -994,7 +1024,14 @@ fn search_reachable_locks_from_seed_indices(
         if state.y < height as i8 && grounded_index(template, board, state_index) {
             let anchor = state.y as usize * width as usize + state.x as usize;
             locks.anchors[state.rotation.quarter_turns() as usize] |= 1_u64 << anchor;
-            if desired.is_some_and(|wanted| locks.contains_all(wanted)) {
+            let desired_reached = match desired {
+                Some(DesiredLocks::All(wanted)) => locks.contains_all(wanted),
+                Some(DesiredLocks::Any(wanted)) => {
+                    wanted.contains(width, state.rotation, state.x, state.y)
+                }
+                None => false,
+            };
+            if desired_reached {
                 return ReachabilitySearchResult {
                     locks,
                     visited_state_count: queue_cursor,
