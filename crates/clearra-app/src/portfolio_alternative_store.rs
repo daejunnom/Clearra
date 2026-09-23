@@ -1470,6 +1470,17 @@ impl CoveragePortfolioAlternativeStore {
         self.next_page_with_memory_guard(maximum_work_steps, &mut |_| true, cancelled)
     }
 
+    /// Advances an exclusively owned store without cloning its in-flight
+    /// search cursor. A caller that fails before publishing the returned page
+    /// must discard this store; public shared paging uses `next_page` instead.
+    pub fn next_page_owned(
+        &mut self,
+        maximum_work_steps: u64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PortfolioAlternativeAdvance, PortfolioAlternativeError> {
+        self.next_page_in_place_with_memory_guard(maximum_work_steps, &mut |_| true, cancelled)
+    }
+
     /// Advances the high-water enumerator while reporting its full retained
     /// owner plus every exact and App-page allocation that coexists with it.
     /// The caller adds any persistent owners outside this store. Returning

@@ -15,7 +15,7 @@ fn verify_command_runs_validation_before_native_execution() {
         assert_eq!(output.exit_code(), ExitCode::Unsupported);
         assert!(output
             .stderr()
-            .contains("native_geometry_exact_cover_not_connected"));
+            .contains(CliErrorCode::ProductRuntimeUnsupported.as_str()));
         return;
     }
 
@@ -40,7 +40,7 @@ fn verify_command_bounded_cover_reaches_native_execution_after_capability_valida
         assert_eq!(output.exit_code(), ExitCode::Unsupported);
         assert!(output
             .stderr()
-            .contains("native_geometry_exact_cover_not_connected"));
+            .contains(CliErrorCode::ProductRuntimeUnsupported.as_str()));
         return;
     }
 
@@ -82,13 +82,12 @@ fn verify_command_reports_builtin_kick_contracts() {
     assert!(output.stdout().contains("kind: verify-kicks"));
     assert!(output.stdout().contains("srs_jlstz_transitions: 8"));
     assert!(output.stdout().contains("srs_i_transitions: 8"));
-    assert!(output.stdout().contains("srs_profile_id: srs-90"));
-    assert!(output.stdout().contains("no_kick_profile_id: no-kick"));
-    assert!(output.stdout().contains("srs_plus_profile_id: srs-plus"));
     assert!(output
         .stdout()
         .contains("srs_plus_effective_kick_model: srs-plus-180"));
     assert!(output.stdout().contains("srs_plus_180_transitions: 24"));
+    assert!(output.stdout().contains("jstris_180_transitions: 24"));
+    assert!(output.stdout().contains("kick_profile_registry_count: 7"));
     assert!(output.stdout().contains("kick_verification_cases: 264"));
     assert!(output.stdout().contains("kick_verification_failures: 0"));
     assert!(!output.stdout().contains("srs_plus_extension_reason"));

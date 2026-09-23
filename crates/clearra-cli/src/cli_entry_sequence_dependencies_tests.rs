@@ -32,9 +32,8 @@ fn cli_sequence_dependencies_executes_the_exact_document_contract() {
         "900",
     ]);
     assert_eq!(output.exit_code(), ExitCode::Success, "{}", output.stderr());
-    assert!(output
-        .stdout()
-        .contains("contract_id: operation-dependency-report.v1"));
+    assert!(output.stdout().contains("kind: operation dependencies"));
+    assert!(output.stdout().contains("complete: true"));
     assert!(output.stdout().contains("exact_order_count: 1"));
 }
 
@@ -64,11 +63,36 @@ fn cli_sequence_losslessly_normalizes_and_replays_the_document_trace() {
         "900",
     ]);
     assert_eq!(output.exit_code(), ExitCode::Success, "{}", output.stderr());
-    assert!(output
-        .stdout()
-        .contains("contract_id: operation-sequence.v1"));
-    assert!(output.stdout().contains("normalized_trace: 0:O:0:0:0"));
+    assert!(output.stdout().contains("kind: operation sequence"));
+    assert!(output.stdout().contains("complete: true"));
     assert!(output.stdout().contains("operation_count: 1"));
+
+    let structured = run_with_args([
+        "clearra",
+        "--format",
+        "json",
+        "utility",
+        "sequence",
+        "--document",
+        document.as_str(),
+        "--rule-profile",
+        "srs-plus",
+        "--kick-profile",
+        "srs-plus",
+    ]);
+    assert_eq!(
+        structured.exit_code(),
+        ExitCode::Success,
+        "{}",
+        structured.stderr()
+    );
+    assert!(
+        structured
+            .stdout()
+            .contains("\"normalized_trace\":\"0:O:0:0:0\""),
+        "{}",
+        structured.stdout()
+    );
 
     let tie_output = run_with_args([
         "clearra",

@@ -8,8 +8,8 @@ use std::{
 
 use clearra_app::{
     AppResponse, CoveragePortfolioAlternativeSet, PortfolioAlternativeCheckpoint,
-    PortfolioAlternativePage, PortfolioAlternativeSetIdentity, ProductBuildIdentity,
-    ProductPageSourceOwner, PORTFOLIO_ALTERNATIVE_PAGE_CONTRACT,
+    PortfolioAlternativePage, PortfolioAlternativeSetIdentity, PortfolioEnumerationStop,
+    ProductBuildIdentity, ProductPageSourceOwner, PORTFOLIO_ALTERNATIVE_PAGE_CONTRACT,
     PORTFOLIO_ALTERNATIVE_SET_CONTRACT, PORTFOLIO_SNAPSHOT_CONTRACT,
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
@@ -418,15 +418,31 @@ pub(crate) fn continue_snapshot(
     if checkpoint.known_alternative_count_decimal != cursor.known_alternative_count_decimal {
         return Err(TieSnapshotError::StaleCursor);
     }
+    if checkpoint.enumeration_complete {
+        return Err(TieSnapshotError::StaleCursor);
+    }
 
     let set = set_from_header(header, first_page)?;
     let restart = checkpoint.to_checkpoint()?;
     let mut store = set
         .resume_store(&restart)
         .map_err(|_| TieSnapshotError::Enumeration)?;
-    let advance = store
-        .next_page(u64::MAX, &mut || false)
-        .map_err(|_| TieSnapshotError::Enumeration)?;
+    // A bounded exact-search slice can finish without a page even when the
+    // caller supplied the maximum work budget. Persist only a real page or a
+    // terminal checkpoint, never an intermediate page-less slice.
+    let advance = loop {
+        let advance = store
+            .next_page_owned(u64::MAX, &mut || false)
+            .map_err(|_| TieSnapshotError::Enumeration)?;
+        if advance.page().is_some() || advance.stop() == PortfolioEnumerationStop::Sealed {
+            break advance;
+        }
+        if advance.stop() != PortfolioEnumerationStop::WorkBudgetExhausted
+            || advance.work_steps() == 0
+        {
+            return Err(TieSnapshotError::Enumeration);
+        }
+    };
     let next_checkpoint = SnapshotCheckpoint::from_checkpoint(advance.checkpoint());
     if let Some(page) = advance.page() {
         append_signed_payload(
@@ -610,18 +626,38 @@ fn validated_snapshot_tail(
     let Some(SnapshotPayload::Checkpoint { value: checkpoint }) = records.last() else {
         return Err(TieSnapshotError::Format);
     };
+    let body = &records[1..];
+    let terminal_checkpoint_only = body.len() % 2 == 1 && checkpoint.enumeration_complete;
+    let paired_len = body.len() - usize::from(terminal_checkpoint_only);
     if records.len() < 3
-        || records[1..].iter().enumerate().any(|(index, payload)| {
-            if index % 2 == 0 {
-                !matches!(payload, SnapshotPayload::Page { .. })
-            } else {
-                !matches!(payload, SnapshotPayload::Checkpoint { .. })
-            }
-        })
+        || paired_len % 2 != 0
+        || body[..paired_len]
+            .iter()
+            .enumerate()
+            .any(|(index, payload)| {
+                if index % 2 == 0 {
+                    !matches!(payload, SnapshotPayload::Page { .. })
+                } else {
+                    !matches!(payload, SnapshotPayload::Checkpoint { .. })
+                }
+            })
         || header.set_identity_sha256 != checkpoint.set_identity_sha256
         || header.candidate_map_sha256 != checkpoint.candidate_map_sha256
     {
         return Err(TieSnapshotError::Format);
+    }
+    if terminal_checkpoint_only {
+        let Some(SnapshotPayload::Checkpoint { value: previous }) = body.get(paired_len - 1) else {
+            return Err(TieSnapshotError::Format);
+        };
+        if previous.enumeration_complete
+            || previous.known_alternative_count_decimal
+                != checkpoint.known_alternative_count_decimal
+            || previous.optimal_cardinality_decimal != checkpoint.optimal_cardinality_decimal
+            || checkpoint.next_combination_decimal.is_some()
+        {
+            return Err(TieSnapshotError::Format);
+        }
     }
     Ok((header, first_page, checkpoint))
 }
@@ -1188,6 +1224,30 @@ mod tests {
         .expect("single portfolio set")
     }
 
+    fn unique_portfolio_with_dead_row_test_set() -> CoveragePortfolioAlternativeSet {
+        let identity = PortfolioAlternativeSetIdentity::new(
+            "query-unique-frontier",
+            "source-unique-frontier",
+            "profile-unique-frontier",
+            "universe-unique-frontier",
+            product_build_identity_component(&ProductBuildIdentity::current()),
+        )
+        .expect("unique-frontier identity");
+        CoveragePortfolioAlternativeSet::new(
+            identity,
+            vec!["a".into(), "b".into(), "c".into(), "dead".into()],
+            PatternBitSet::all(3),
+            vec![
+                test_row(3, 0),
+                test_row(3, 1),
+                test_row(3, 2),
+                PatternBitSet::from_pattern_indices(3, Vec::new()).expect("empty row"),
+            ],
+            &["a".into(), "b".into(), "c".into()],
+        )
+        .expect("unique portfolio with an unfinished frontier")
+    }
+
     #[test]
     fn build_cover_public_page_owner_initializes_the_explicit_snapshot() {
         let _resource_guard =
@@ -1360,6 +1420,49 @@ mod tests {
             vec!["101", "205", "609"]
         );
 
+        remove_test_directory(&directory);
+    }
+
+    #[test]
+    fn terminal_search_without_another_page_appends_only_a_final_checkpoint() {
+        let directory = test_directory("terminal-without-page");
+        let path = directory.join("portfolios.jsonl");
+        let path_text = path.to_string_lossy();
+        let initial =
+            initialize_snapshot_from_set(&unique_portfolio_with_dead_row_test_set(), &path_text)
+                .expect("initialize unique unfinished snapshot");
+        assert!(!initial.enumeration_complete());
+        let cursor = initial.cursor().expect("continuation cursor").to_owned();
+
+        let terminal = continue_snapshot(&path_text, &cursor).expect("seal exhausted frontier");
+        assert_eq!(terminal.alternative_index_decimal(), None);
+        assert!(terminal.enumeration_complete());
+        assert_eq!(terminal.total_alternative_count_decimal(), Some("1"));
+        assert_eq!(terminal.cursor(), None);
+
+        let (secret, _) = parse_cursor(&cursor).expect("original cursor");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("open snapshot");
+        let records = read_and_authenticate_records(&mut file, &secret)
+            .expect("authenticated terminal checkpoint");
+        assert_eq!(records.len(), 4);
+        validated_snapshot_tail(&records).expect("terminal checkpoint-only tail");
+        let mut malformed = records.clone();
+        let Some(SnapshotPayload::Checkpoint { value }) = malformed.last_mut() else {
+            panic!("terminal record must be a checkpoint");
+        };
+        value.known_alternative_count_decimal = "2".into();
+        assert!(matches!(
+            validated_snapshot_tail(&malformed),
+            Err(TieSnapshotError::Format)
+        ));
+        assert_eq!(
+            continue_snapshot(&path_text, &cursor),
+            Err(TieSnapshotError::StaleCursor)
+        );
+        drop(file);
         remove_test_directory(&directory);
     }
 
