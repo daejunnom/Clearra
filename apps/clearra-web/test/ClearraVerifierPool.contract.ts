@@ -217,11 +217,13 @@ synopsisPool.cancel();
 class ConditionedVerifierWorker extends FakeVerifierWorker {
   readonly controls: { profile: number | null; bytes: number }[] = [];
   constructor() { super(false); }
-  override postMessage(message: WorkerMessage) {
-    if (message.type === 'accelerator-pack') {
-      this.controls.push({ profile: message.profile ?? null, bytes: message.bytes?.byteLength ?? 0 });
+  override postMessage(message: WorkerMessage, transfer?: Transferable[]) {
+    const delivered = transfer?.length
+      ? structuredClone(message, { transfer }) as WorkerMessage : message;
+    if (delivered.type === 'accelerator-pack') {
+      this.controls.push({ profile: delivered.profile ?? null, bytes: delivered.bytes?.byteLength ?? 0 });
     }
-    super.postMessage(message);
+    super.postMessage(delivered);
   }
 }
 const conditionedWorkers: ConditionedVerifierWorker[] = [];
@@ -230,12 +232,14 @@ const conditionedPool = new ClearraVerifierPool(() => {
   conditionedWorkers.push(worker);
   return worker as unknown as Worker;
 });
+const conditionedBytes = Uint8Array.of(7, 8, 9).buffer;
 await bounded('one designated relation owner', conditionedPool.initialize(
   'clearra pc --lines 4', 2, undefined, 'conditioned-owner', 'atomic-task',
   undefined, 'geometry-verifier', null,
-  { profile: 1, bytes: Uint8Array.of(7, 8, 9).buffer,
+  { profile: 1, bytes: conditionedBytes,
     identity: 'qualified-generation', activeSessionSharedBytes: 1024 }
 ));
+assert.equal(conditionedBytes.byteLength, 0, 'full pack ownership transfers to one verifier');
 assert.deepEqual(conditionedWorkers.map(worker => worker.controls.length), [1, 0]);
 assert.deepEqual(conditionedWorkers[0].controls[0], { profile: 1, bytes: 3 });
 await bounded('conditioned job drain', conditionedPool.finish(() => undefined));
