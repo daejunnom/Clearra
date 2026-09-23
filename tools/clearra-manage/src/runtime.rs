@@ -396,7 +396,7 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         command
             .arg("--expose-gc")
             .arg("--require")
-            .arg(repository.join("scripts/runtime/clearra-node-gc.cjs"));
+            .arg("./scripts/runtime/clearra-node-gc.cjs");
     }
     command
         .args(&options.command[1..])

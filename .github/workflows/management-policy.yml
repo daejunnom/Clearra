@@ -46,9 +46,12 @@ jobs:
           & $manager --root . runtime run --producer management-test --profile control --timeout 30 -- `
             pwsh -NoProfile -NonInteractive -Command "Write-Output 'job-object-ok'"
           if ($LASTEXITCODE -ne 0) { throw 'normal Job Object fixture failed' }
-          $nodeOutput = @(& $manager --root . runtime run --producer management-node-gc --profile control --timeout 30 -- `
-            node -e "setTimeout(() => {}, 3000)" 2>&1)
-          if ($LASTEXITCODE -ne 0) { throw 'managed Node fixture failed' }
+          $nodeOutput = & $manager --root . runtime run --producer management-node-gc --profile control --timeout 30 -- `
+            node -e "setTimeout(() => {}, 3000)" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $nodeOutput | ForEach-Object { Write-Host $_.ToString() }
+            throw 'managed Node fixture failed'
+          }
           $receiptLine = @($nodeOutput | ForEach-Object { $_.ToString() } | `
             Where-Object { $_.StartsWith('clearra_runtime_receipt=') })[-1]
           if (-not $receiptLine) { throw 'managed Node receipt is missing' }
