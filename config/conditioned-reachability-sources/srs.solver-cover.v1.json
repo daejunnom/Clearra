@@ -1,0 +1,566 @@
+{
+  "schema": "clearra.conditioned-local-relation.solver-cover-set.v1",
+  "profile": "srs",
+  "domains": [
+    {
+      "height": 1,
+      "piece": "I",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 1,
+      "piece": "O",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 1,
+      "piece": "T",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 1,
+      "piece": "S",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 1,
+      "piece": "Z",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 1,
+      "piece": "J",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 1,
+      "piece": "L",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "I",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "O",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "T",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "S",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "Z",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "J",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "L",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "I",
+      "deleted_original_rows": 1,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "O",
+      "deleted_original_rows": 1,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "T",
+      "deleted_original_rows": 1,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "S",
+      "deleted_original_rows": 1,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "Z",
+      "deleted_original_rows": 1,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "J",
+      "deleted_original_rows": 1,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "L",
+      "deleted_original_rows": 1,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "I",
+      "deleted_original_rows": 2,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "O",
+      "deleted_original_rows": 2,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "T",
+      "deleted_original_rows": 2,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "S",
+      "deleted_original_rows": 2,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "Z",
+      "deleted_original_rows": 2,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "J",
+      "deleted_original_rows": 2,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 2,
+      "piece": "L",
+      "deleted_original_rows": 2,
+      "window": "sky",
+      "fixed_mask": "0x300",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 3,
+      "piece": "I",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3fffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 3,
+      "piece": "O",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3fffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 3,
+      "piece": "T",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3fffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 3,
+      "piece": "S",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3fffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 3,
+      "piece": "Z",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3fffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 3,
+      "piece": "J",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3fffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 3,
+      "piece": "L",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3fffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 4,
+      "piece": "I",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 4,
+      "piece": "O",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 4,
+      "piece": "T",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 4,
+      "piece": "S",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 4,
+      "piece": "Z",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 4,
+      "piece": "J",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 4,
+      "piece": "L",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 5,
+      "piece": "I",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3ffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 5,
+      "piece": "O",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3ffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 5,
+      "piece": "T",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3ffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 5,
+      "piece": "S",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3ffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 5,
+      "piece": "Z",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3ffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 5,
+      "piece": "J",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3ffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 5,
+      "piece": "L",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0x3ffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 6,
+      "piece": "I",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfffffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 6,
+      "piece": "O",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfffffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 6,
+      "piece": "T",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfffffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 6,
+      "piece": "S",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfffffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 6,
+      "piece": "Z",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfffffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 6,
+      "piece": "J",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfffffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    },
+    {
+      "height": 6,
+      "piece": "L",
+      "deleted_original_rows": 0,
+      "window": "sky",
+      "fixed_mask": "0xfffffffffffff00",
+      "fixed_occupancy": "0x0",
+      "max_records": 1024,
+      "max_nodes": 1000000
+    }
+  ]
+}

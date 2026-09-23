@@ -10,6 +10,7 @@
 // compilation unit.
 mod conditioned_local_candidate_validation;
 mod conditioned_local_coverage_proof;
+mod conditioned_local_product_qualification;
 mod conditioned_local_relation_generation;
 mod conditioned_reachability_generation;
 #[allow(dead_code)]
@@ -23,6 +24,10 @@ pub use conditioned_local_candidate_validation::{
 };
 pub use conditioned_local_coverage_proof::{
     prove_conditioned_local_candidate_coverage, ConditionedLocalCoverageProofOptions,
+};
+pub use conditioned_local_product_qualification::{
+    validate_v081_conditioned_source, verify_v081_conditioned_product_candidate,
+    VerifiedV081ConditionedProductCandidate,
 };
 pub use conditioned_local_relation_generation::{
     generate_conditioned_local_relation, structurally_valid_conditioned_local_candidate,

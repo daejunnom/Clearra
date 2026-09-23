@@ -2004,6 +2004,69 @@ mod tests {
             .is_some());
     }
 
+    /// Local-only acceptance of the generated, source-bound product-sized
+    /// candidates. The assets are intentionally not checked into Git and a
+    /// test-only constructor never grants a release signature.
+    #[test]
+    #[ignore = "requires five generated packs in the local candidate directory"]
+    fn generated_five_profile_packs_reach_the_real_build_frame_lookup() {
+        let directory = std::env::var_os("CLEARRA_CONDITIONED_CANDIDATE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../_local/artifacts/conditioned-relation-product-candidates")
+            });
+        for (profile, name) in [
+            (KickTableProfileId::Srs90, "srs"),
+            (KickTableProfileId::SrsPlus, "srs-plus"),
+            (KickTableProfileId::SrsX, "srs-x"),
+            (KickTableProfileId::Jstris180, "jstris-180"),
+            (KickTableProfileId::NoKick, "no-kick"),
+        ] {
+            let bytes = std::fs::read(directory.join(format!("{name}.cllr")))
+                .expect("complete candidate pack is present");
+            let binding = built_in_local_relation_binding(profile).unwrap();
+            let pack = load_local_relation_candidate_pack(&bytes, binding, None).unwrap();
+            install_qualified_local_relation_pack(qualified_local_relation_for_solver_test(pack))
+                .expect("candidate fits the shared memory contract");
+            for (height, piece, deleted) in [
+                (1, PieceKind::I, 0),
+                (2, PieceKind::T, 1),
+                (4, PieceKind::J, 0),
+                (6, PieceKind::L, 0),
+            ] {
+                let catalog = super::GeometryCatalog::compile_for_required_cells_on_dimensions(
+                    10, height, 0, 0,
+                )
+                .expect("product dimensions");
+                let frame = LocalRelationRowFrame::new(height, deleted).unwrap();
+                let reference =
+                    super::exact_spawn_lock_anchors(10, height, 0, piece, profile).unwrap();
+                let mut workspace = ReachabilityWorkspace::default();
+                workspace.configure_kick_profile(profile, true);
+                workspace.prepare_template(&catalog, piece);
+                let got = workspace.lock_reachable_after_harddrop_miss_in_frame(
+                    &catalog,
+                    0,
+                    piece,
+                    RotationState::Zero,
+                    4,
+                    0,
+                    Some(frame),
+                );
+                assert_eq!(got, reference[0] & (1_u64 << 4) != 0, "{name} {height}L");
+                assert_eq!(
+                    workspace.metrics().conditioned_complete_hits,
+                    1,
+                    "{name} {height}L did not use its generated pack"
+                );
+            }
+            assert!(remove_qualified_local_relation_pack(profile)
+                .unwrap()
+                .is_some());
+        }
+    }
+
     #[test]
     fn full_height_relation_skips_exact_continuation_without_changing_locks() {
         let profile = KickTableProfileId::Jstris180;

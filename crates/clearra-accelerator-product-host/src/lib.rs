@@ -37,7 +37,7 @@ const LEGAL_BOARD_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const CONDITIONED_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const LEGAL_BOARD_SCOPE: &str = "empty-origin-10x4-four-lines-f-intersection-r";
 const CONDITIONED_SCOPE: &str =
-    "width-10-height-1-6-actual-entry-first-exit-boolean-closed-query-set";
+    "width10-height1to6-solver-sky-bottom8-56-contexts-entry-first-exit-boolean";
 
 /// The historical sparse spawn-to-lock cache remains an unqualified local
 /// fixture. The product parser and solver now use actual-entry/first-exit

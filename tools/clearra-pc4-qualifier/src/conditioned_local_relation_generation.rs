@@ -31,6 +31,10 @@ const CANDIDATE_SCHEMA: &str = "clearra.conditioned-local-relation.candidate-cat
 const MAX_QUERIES: usize = 65_536;
 const MAX_ENTRIES: usize = 640;
 const MAX_COVER_DOMAINS: usize = 64;
+// Each declared solver context has its own bounded proof. A complete
+// 1-6L, seven-piece source can contain up to 64 independent contexts; the
+// aggregate bound must not silently limit it to one context's budget.
+const MAX_AGGREGATE_PROOF_NODES: u64 = MAX_COVER_DOMAINS as u64 * 1_000_000;
 
 /// Build a candidate cover by repeatedly obtaining a concrete counterexample
 /// to the currently audited cubes and deriving the exact relation there.
@@ -429,7 +433,7 @@ pub(crate) fn parse_cover_domains(
             .ok_or("cover max_nodes outside its bound")?;
         total_records = total_records.saturating_add(max_records);
         total_nodes = total_nodes.saturating_add(u64::from(max_nodes));
-        if total_records > MAX_QUERIES || total_nodes > 1_000_000 {
+        if total_records > MAX_QUERIES || total_nodes > MAX_AGGREGATE_PROOF_NODES {
             return Err("cover aggregate record or proof budget exceeded".to_owned());
         }
         let domain = CoverDomain {

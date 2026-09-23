@@ -37,8 +37,14 @@ name = "clearra-conditioned-local-relation"
 path = "src/bin/clearra-conditioned-local-relation.rs"
 required-features = ["legal-board-assets"]
 
+[[bin]]
+name = "clearra-conditioned-catalog-sign"
+path = "src/bin/clearra-conditioned-catalog-sign.rs"
+required-features = ["legal-board-assets"]
+
 [dependencies]
 clearra-app = { path = "../../crates/clearra-app", features = ["online-pc4-tablebase", "parallel"], optional = true }
+clearra-accelerator-activation = { path = "../../crates/clearra-accelerator-activation" }
 clearra-core-domain = { path = "../../crates/clearra-core-domain" }
 clearra-core-executor = { path = "../../crates/clearra-core-executor", features = ["parallel", "qualification-reference"] }
 clearra-objectives = { path = "../../crates/clearra-objectives", optional = true }
@@ -47,6 +53,7 @@ clearra-pc-graph = { path = "../../crates/clearra-pc-graph", optional = true }
 clearra-piece-registry = { path = "../../crates/clearra-piece-registry", optional = true }
 clearra-problem = { path = "../../crates/clearra-problem", optional = true }
 clearra-rules = { path = "../../crates/clearra-rules" }
+ed25519-dalek.workspace = true
 serde_json = { workspace = true, optional = true }
 sha2 = "0.10.9"
 

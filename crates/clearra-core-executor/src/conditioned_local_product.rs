@@ -19,7 +19,7 @@ use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
 use crate::legal_board::{accelerator_profile_name, ProviderStatus};
 
 pub const LOCAL_RELATION_COMPLETENESS_SCOPE: &str =
-    "width-10-height-1-6-actual-entry-first-exit-boolean-closed-query-set";
+    "width10-height1to6-solver-sky-bottom8-56-contexts-entry-first-exit-boolean";
 const PROFILE_SLOTS: usize = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 pub const SIGNED_ASSET_ENVELOPE_SCHEMA: &str = "clearra.accelerator.signed-asset-envelope.v1";
 pub const ASSET_STATEMENT_SCHEMA: &str = "clearra.accelerator.asset-statement.v1";
 pub const SIGNATURE_ALGORITHM: &str = "ed25519";
-const SIGNATURE_DOMAIN: &[u8] = b"clearra.accelerator.asset-statement.v1\0";
+/// Domain separator shared by the verifier and the offline release signer.
+pub const SIGNATURE_DOMAIN: &[u8] = b"clearra.accelerator.asset-statement.v1\0";
 const MAX_ENVELOPE_BYTES: usize = 131_072;
 const MAX_STATEMENT_BYTES: usize = 65_536;
 const PROFILES: [&str; 5] = ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"];

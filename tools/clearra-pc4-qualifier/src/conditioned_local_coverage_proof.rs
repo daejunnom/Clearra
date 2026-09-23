@@ -24,7 +24,10 @@ const REPORT_SCHEMA: &str = "clearra.conditioned-local-relation.coverage-report.
 const MAX_PACK_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DOMAINS: usize = 1024;
-const MAX_TOTAL_PROOF_NODES: u64 = 1_000_000;
+// The proof is sequential and retains only one context's bounded search.
+// Its aggregate allowance must cover a complete declared profile source,
+// not accidentally stop after the first 1M-node context.
+const MAX_TOTAL_PROOF_NODES: u64 = 64 * 1_000_000;
 
 #[derive(Clone, Debug)]
 pub struct ConditionedLocalCoverageProofOptions {
