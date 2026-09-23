@@ -2022,6 +2022,7 @@ fn generate_reverse_layer_bounded(
             for _ in 0..validation_workers {
                 let cursor = &validation_cursor;
                 let candidate_pairs = &candidate_pairs;
+                let target_prefilter = &target_prefilter;
                 handles.push(scope.spawn(move || {
                     let mut validated = Vec::new();
                     let mut workspace = Pc4IlcForwardMembershipWorkspace::default();
@@ -2041,7 +2042,7 @@ fn generate_reverse_layer_bounded(
                                 piece,
                                 binding.kick_profile,
                                 input,
-                                &target_prefilter,
+                                target_prefilter,
                             )?;
                             if reaches_domain {
                                 validated.push(source_hash);
