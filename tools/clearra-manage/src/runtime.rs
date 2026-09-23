@@ -96,12 +96,15 @@ pub struct RunOutcome {
     pub output_bytes: u64,
     pub output_limit_bytes: u64,
     pub peak_memory_bytes: Option<u64>,
+    pub last_owned_memory_bytes: Option<u64>,
+    pub owned_memory_soft_limit_bytes: u64,
     pub descendant_processes_at_exit: Option<u32>,
     pub process_tree_stopped: bool,
     pub admission: Admission,
     pub memory_pressure_observed: bool,
     pub gc_request_written: bool,
     pub gc_acknowledged: bool,
+    pub cooperative_gc_available: bool,
     pub memory_pressure_events: u64,
     pub memory_pressure_recoveries: u64,
     pub cooperative_gc_requests: u64,
@@ -192,10 +195,10 @@ fn calculate_admission_for_profile(
 
     let minimum = profile.minimum_memory_mib * MIB;
     let maximum = profile.maximum_memory_mib.map(|value| value * MIB);
-    // A configured maximum is a stable process-tree bound. It is not a
-    // reservation from the start snapshot: external processes can change the
-    // available memory immediately after launch, so host pressure is handled
-    // continuously below instead.
+    // A configured maximum or total host capacity is an emergency containment
+    // ceiling, not a reservation against free memory at launch. On Windows,
+    // the commit limit includes the user's page file; physical and commit
+    // pressure are both checked live while the child runs.
     let hard_limit = maximum.unwrap_or_else(|| match model {
         HostMemoryModel::WindowsCommit => snapshot
             .commit_limit_bytes
@@ -300,7 +303,12 @@ fn write_gc_request(
     Ok(())
 }
 
-fn gc_acknowledged(acknowledgement: &Path, protocol: &str, request_id: &str) -> bool {
+fn gc_acknowledged(
+    acknowledgement: &Path,
+    protocol: &str,
+    request_id: &str,
+    child_pid: u32,
+) -> bool {
     let Ok(metadata) = fs::metadata(acknowledgement) else {
         return false;
     };
@@ -317,6 +325,29 @@ fn gc_acknowledged(acknowledgement: &Path, protocol: &str, request_id: &str) -> 
         && value.get("request_id").and_then(|value| value.as_str()) == Some(request_id)
         && value.get("action").and_then(|value| value.as_str()) == Some("full-gc")
         && value.get("status").and_then(|value| value.as_str()) == Some("completed")
+        && value.get("child_pid").and_then(|value| value.as_u64()) == Some(u64::from(child_pid))
+}
+
+fn is_node_executable(command: &OsString) -> bool {
+    Path::new(command)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            value.eq_ignore_ascii_case("node") || value.eq_ignore_ascii_case("node.exe")
+        })
+}
+
+fn owned_memory_soft_limit(hard_limit: u64) -> u64 {
+    let headroom = (hard_limit / 10).max(256 * MIB).min(hard_limit / 2);
+    hard_limit.saturating_sub(headroom)
+}
+
+fn pressure_requires_fail_close(
+    observation: MemoryPressureStatus,
+    owned_limit_near: bool,
+    recovery_due: bool,
+) -> bool {
+    recovery_due && (observation.critical || owned_limit_near)
 }
 
 pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<RunOutcome> {
@@ -359,7 +390,14 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
     let gc_request = gc_root.join(format!("{run_id}.request"));
     let gc_ack = gc_root.join(format!("{run_id}.ack"));
 
+    let cooperative_gc_available = is_node_executable(&options.command[0]);
     let mut command = Command::new(&options.command[0]);
+    if cooperative_gc_available {
+        command
+            .arg("--expose-gc")
+            .arg("--require")
+            .arg("./scripts/runtime/clearra-node-gc.cjs");
+    }
     command
         .args(&options.command[1..])
         .current_dir(repository)
@@ -474,6 +512,9 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
     let mut last_pressure_status = None;
     let mut active_gc_request: Option<String> = None;
     let mut active_gc_acknowledged = false;
+    let mut active_pressure_critical = false;
+    let mut last_owned_memory_bytes = None;
+    let owned_memory_soft_limit_bytes = owned_memory_soft_limit(admission.hard_limit_bytes);
     let mut recovery_deadline: Option<Instant> = None;
     let mut observed_peak = 0u64;
     let mut forced_reason: Option<(&'static str, &'static str)> = None;
@@ -507,7 +548,9 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         let pressure_due = recovery_deadline.is_some_and(|deadline| now >= deadline);
         if now >= next_sample || pressure_due {
             next_sample = now + sample_interval;
-            if let Some(current) = containment.current_memory_bytes() {
+            let owned_memory = containment.current_memory_bytes();
+            last_owned_memory_bytes = owned_memory;
+            if let Some(current) = owned_memory {
                 observed_peak = observed_peak.max(current);
                 if current > admission.hard_limit_bytes {
                     forced_reason = Some(("memory-limit", "E_CLEARRA_PROCESS_MEMORY_LIMIT"));
@@ -545,29 +588,42 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
             };
             let pressure = &policy.runtime_policy.memory_pressure;
             let observation = memory_pressure_status(pressure, current, host_memory_model());
+            let owned_limit_near =
+                owned_memory.is_some_and(|bytes| bytes >= owned_memory_soft_limit_bytes);
+            let critical = observation.critical || owned_limit_near;
+            let under_pressure = observation.under_pressure() || owned_limit_near;
             pressure_checks += 1;
             last_pressure_snapshot = Some(current);
             last_pressure_status = Some(observation);
 
             if let Some(request_id) = active_gc_request.as_deref() {
                 if !active_gc_acknowledged
-                    && gc_acknowledged(&gc_ack, &pressure.cooperative_gc_protocol, request_id)
+                    && gc_acknowledged(
+                        &gc_ack,
+                        &pressure.cooperative_gc_protocol,
+                        request_id,
+                        child.id(),
+                    )
                 {
                     active_gc_acknowledged = true;
                     gc_acknowledgements += 1;
                 }
             }
 
-            if !observation.under_pressure() {
+            if !under_pressure {
                 if active_gc_request.take().is_some() {
                     pressure_recoveries += 1;
                     active_gc_acknowledged = false;
+                    active_pressure_critical = false;
                     recovery_deadline = None;
                     reset_gc_channel(&gc_request, &gc_ack);
                 }
             } else {
                 pressure_seen = true;
-                if active_gc_request.is_none() {
+                // Escalation needs its own full-GC opportunity. A completed
+                // GC for an earlier warning cannot certify recovery after a
+                // different process consumes the remaining host reserve.
+                if active_gc_request.is_none() || (critical && !active_pressure_critical) {
                     pressure_events += 1;
                     let request_number = gc_requests + 1;
                     let request_id = format!("{run_id}-{request_number}");
@@ -593,17 +649,30 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
                     gc_requests = request_number;
                     active_gc_request = Some(request_id);
                     active_gc_acknowledged = false;
+                    active_pressure_critical = critical;
                     recovery_deadline = Some(
                         now + Duration::from_secs_f64(pressure.recovery_grace_seconds.max(0.0)),
                     );
-                } else if recovery_deadline.is_some_and(|deadline| now >= deadline) {
-                    forced_reason =
-                        Some(("memory-pressure", "E_CLEARRA_MEMORY_PRESSURE_FAIL_CLOSE"));
+                } else if pressure_requires_fail_close(
+                    observation,
+                    owned_limit_near,
+                    recovery_deadline.is_some_and(|deadline| now >= deadline),
+                ) {
+                    forced_reason = Some(if owned_limit_near && !observation.critical {
+                        ("memory-limit", "E_CLEARRA_PROCESS_MEMORY_LIMIT")
+                    } else {
+                        ("memory-pressure", "E_CLEARRA_MEMORY_PRESSURE_FAIL_CLOSE")
+                    });
                     terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
                     status = child
                         .wait()
                         .map_err(|error| Error::io("wait after memory pressure", error))?;
                     break;
+                } else if !critical && recovery_deadline.is_some_and(|deadline| now >= deadline) {
+                    // A warning may persist while the OS reclaims caches or
+                    // an unrelated process runs. Resume the low-frequency
+                    // cadence instead of sampling every 50 ms forever.
+                    recovery_deadline = None;
                 }
             }
         }
@@ -664,12 +733,15 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         output_bytes: total_output.load(Ordering::Relaxed),
         output_limit_bytes: profile.output_limit_bytes,
         peak_memory_bytes: peak,
+        last_owned_memory_bytes,
+        owned_memory_soft_limit_bytes,
         descendant_processes_at_exit: active,
         process_tree_stopped: tree_stopped,
         admission,
         memory_pressure_observed: pressure_seen,
         gc_request_written: gc_requests > 0,
         gc_acknowledged: gc_acknowledgements > 0,
+        cooperative_gc_available,
         memory_pressure_events: pressure_events,
         memory_pressure_recoveries: pressure_recoveries,
         cooperative_gc_requests: gc_requests,
@@ -998,6 +1070,7 @@ fn platform_prepare_command(_: &mut Command) {}
 #[cfg(windows)]
 struct Containment {
     job: windows_sys::Win32::Foundation::HANDLE,
+    maximum_processes: u32,
 }
 
 #[cfg(windows)]
@@ -1038,7 +1111,10 @@ impl Containment {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(job) };
             return Err(Error::runtime("AssignProcessToJobObject failed"));
         }
-        Ok(Self { job })
+        Ok(Self {
+            job,
+            maximum_processes,
+        })
     }
 
     fn request_termination(&self, child: &mut Child) {
@@ -1069,7 +1145,67 @@ impl Containment {
     }
 
     fn current_memory_bytes(&self) -> Option<u64> {
-        self.peak_memory_bytes()
+        use std::mem::{size_of, zeroed};
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectBasicProcessIdList, QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        };
+        use windows_sys::Win32::System::ProcessStatus::{
+            K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let slots = self.maximum_processes as usize + 16;
+        let byte_count = size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()
+            .checked_add(slots.checked_mul(size_of::<usize>())?)?;
+        let mut storage = vec![0usize; byte_count.div_ceil(size_of::<usize>())];
+        let list = storage
+            .as_mut_ptr()
+            .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+        let ok = unsafe {
+            QueryInformationJobObject(
+                self.job,
+                JobObjectBasicProcessIdList,
+                list.cast(),
+                (storage.len() * size_of::<usize>()) as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let count = unsafe { (*list).NumberOfProcessIdsInList as usize };
+        if count > slots {
+            return None;
+        }
+        let identifiers =
+            unsafe { std::slice::from_raw_parts((*list).ProcessIdList.as_ptr(), count) };
+        let mut total = 0u64;
+        for &identifier in identifiers {
+            let process =
+                unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, identifier as u32) };
+            if process.is_null() {
+                return None;
+            }
+            let mut counters: PROCESS_MEMORY_COUNTERS_EX = unsafe { zeroed() };
+            counters.cb = size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+            let ok = unsafe {
+                K32GetProcessMemoryInfo(
+                    process,
+                    (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX)
+                        .cast::<PROCESS_MEMORY_COUNTERS>(),
+                    size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+                )
+            };
+            unsafe { CloseHandle(process) };
+            if ok == 0 {
+                return None;
+            }
+            total = total.saturating_add(counters.PrivateUsage as u64);
+        }
+        Some(total)
     }
 
     fn active_processes(&self) -> Option<u32> {
@@ -1368,6 +1504,18 @@ mod tests {
         )
         .expect("Windows commit capacity is stable");
         assert_eq!(windows.hard_limit_bytes, 31 * 1024 * MIB);
+        let after_external_process_exit = calculate_admission_for_profile(
+            "benchmark-search",
+            &benchmark,
+            &pressure(),
+            snapshot(12_000, 20_000),
+            HostMemoryModel::WindowsCommit,
+        )
+        .expect("free memory does not set the safety cap");
+        assert_eq!(
+            windows.hard_limit_bytes,
+            after_external_process_exit.hard_limit_bytes
+        );
 
         let physical = calculate_admission_for_profile(
             "benchmark-search",
@@ -1395,6 +1543,38 @@ mod tests {
     }
 
     #[test]
+    fn sustained_warning_requests_gc_without_premature_fail_close() {
+        let warning = memory_pressure_status(
+            &pressure(),
+            snapshot(400, 2048),
+            HostMemoryModel::WindowsCommit,
+        );
+        assert!(warning.under_pressure());
+        assert!(!warning.critical);
+        assert!(!pressure_requires_fail_close(warning, false, true));
+        let critical = memory_pressure_status(
+            &pressure(),
+            snapshot(100, 2048),
+            HostMemoryModel::WindowsCommit,
+        );
+        assert!(pressure_requires_fail_close(critical, false, true));
+        assert!(pressure_requires_fail_close(warning, true, true));
+        assert!(!pressure_requires_fail_close(critical, true, false));
+    }
+
+    #[test]
+    fn soft_limit_leaves_gc_headroom_below_hard_containment() {
+        assert_eq!(
+            owned_memory_soft_limit(16 * 1024 * MIB),
+            16 * 1024 * MIB - (16 * 1024 * MIB) / 10,
+        );
+        assert_eq!(owned_memory_soft_limit(512 * MIB), 256 * MIB);
+        assert_eq!(owned_memory_soft_limit(256 * MIB), 128 * MIB);
+        assert!(is_node_executable(&OsString::from("node.exe")));
+        assert!(!is_node_executable(&OsString::from("pwsh.exe")));
+    }
+
+    #[test]
     fn full_gc_acknowledgement_must_match_the_request() {
         let root = state_root()
             .expect("resolve managed test state")
@@ -1413,23 +1593,31 @@ mod tests {
         .expect("write request");
         fs::write(
             &acknowledgement,
-            br#"{"schema_id":"clearra.memory-pressure.v1","request_id":"wrong","action":"full-gc","status":"completed"}"#,
+            br#"{"schema_id":"clearra.memory-pressure.v1","request_id":"wrong","action":"full-gc","status":"completed","child_pid":42}"#,
         )
         .expect("write wrong acknowledgement");
         assert!(!gc_acknowledged(
             &acknowledgement,
             "clearra.memory-pressure.v1",
-            "expected"
+            "expected",
+            42,
         ));
         fs::write(
             &acknowledgement,
-            br#"{"schema_id":"clearra.memory-pressure.v1","request_id":"expected","action":"full-gc","status":"completed"}"#,
+            br#"{"schema_id":"clearra.memory-pressure.v1","request_id":"expected","action":"full-gc","status":"completed","child_pid":42}"#,
         )
         .expect("write matching acknowledgement");
         assert!(gc_acknowledged(
             &acknowledgement,
             "clearra.memory-pressure.v1",
-            "expected"
+            "expected",
+            42,
+        ));
+        assert!(!gc_acknowledged(
+            &acknowledgement,
+            "clearra.memory-pressure.v1",
+            "expected",
+            43,
         ));
         write_gc_request(
             &request,
@@ -1442,7 +1630,8 @@ mod tests {
         assert!(!gc_acknowledged(
             &acknowledgement,
             "clearra.memory-pressure.v1",
-            "second"
+            "second",
+            42,
         ));
         reset_gc_channel(&request, &acknowledgement);
         let _ = fs::remove_dir(root);

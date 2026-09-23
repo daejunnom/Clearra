@@ -80,25 +80,32 @@ hard containment starts only when the manager inherits a cgroup v2 with finite
 supervisor checks host pressure at the low frequency declared in the manifest
 and never changes worker count or retries an OOM with different resources.
 
-At low host memory, the supervisor writes a uniquely identified cooperative
-full-GC request and waits for the configured grace period. It records GC only
-if the child acknowledges that exact request, action, protocol, and completion
-status. A recovered episode is cleared and rearmed, so a later pressure episode
-gets a new request rather than inheriting a stale acknowledgement. If the small
-physical or Windows commit reserve remains unavailable, it terminates only the
-Clearra-owned tree with a typed fail-close reason.
+At low host memory or when the owned tree approaches its emergency hard cap,
+the supervisor writes a uniquely identified cooperative full-GC request. A
+directly supervised Node root runs a small event-driven responder with exposed
+V8 GC. Its completion is accepted only when the request, protocol, action, and
+root PID match. A native process or a browser child with no responder does not
+receive a false GC completion claim. A recovered episode is cleared and
+rearmed. A sustained noncritical host warning does not end useful work; after
+critical escalation or an owned-tree soft-limit event remains unresolved for
+the recovery grace, only the Clearra-owned tree is terminated with a typed
+fail-close reason. The hard cap still protects against sudden allocation spikes.
 
 Start admission checks only the smaller critical physical reserve and, on
 Windows, the critical commit reserve. `minimum_memory_mib` describes the
 profile's intended working set; it is not reserved or compared with momentary
-free memory at launch. A configured maximum is a stable process-tree hard cap.
-Only profiles without a configured maximum derive that cap from total physical
-or Windows commit capacity, never from the start snapshot's available bytes.
+free memory at launch. Local profiles no longer have a fixed profile memory
+maximum. Their emergency hard cap derives from total physical capacity on
+Linux or total commit capacity on Windows, minus the configured reserve; it
+never uses the start snapshot's available bytes. The no-swap WSL guest cgroup
+is capped separately by host physical capacity. The Cloud Run job retains its
+fixed 16 GiB platform cap. The manager samples current owned-tree memory rather than the
+historical peak to decide whether a GC request actually recovered headroom.
 
 Runtime receipts are written to the Clearra-owned platform state root and
-include the sanitized command, profile, admission values, observed peak,
-pressure/GC state, exit reason, and tree-stop result. Secret values are
-redacted.
+include the sanitized command, profile, admission values, observed peak and
+current owned-tree usage, pressure/GC state, responder availability, exit
+reason, and tree-stop result. Secret values are redacted.
 
 ## WSL
 
@@ -114,6 +121,11 @@ executable. A lease owns only `Clearra-Build`, verifies its compatible
 toolchain marker, runs a fixed guest entrypoint, and terminates that distribution
 on every exit path. It never calls global `wsl --shutdown`, changes
 `.wslconfig`, or stops another distribution.
+
+WSL's `MemoryMax` follows the host's total-capacity emergency ceiling rather
+than free memory at session start. Native Cargo and C work has no managed heap
+to collect, so a GC request cannot be counted as completed for that guest;
+kernel reclaim and the cgroup hard boundary remain its safety mechanisms.
 
 Provisioning remains an explicit administrator/bootstrap operation rather than
 a recurring build command. The retained Python history is not a provisioning
