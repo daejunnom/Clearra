@@ -453,6 +453,7 @@ pub(super) struct ReachabilityWorkspace {
     cache: ReachabilityCache,
     scratch: ReachabilityScratch,
     templates: [Option<ReachabilityTemplate>; 7],
+    template_dimensions: Option<(u8, u8)>,
     kick_profile_id: KickTableProfileId,
     conditioned: Option<Arc<QualifiedLocalRelationPack>>,
     conditioned_profile: Option<KickTableProfileId>,
@@ -467,6 +468,7 @@ impl Default for ReachabilityWorkspace {
             cache: ReachabilityCache::default(),
             scratch: ReachabilityScratch::default(),
             templates: std::array::from_fn(|_| None),
+            template_dimensions: None,
             kick_profile_id: KickTableProfileId::SrsPlus,
             conditioned: None,
             conditioned_profile: None,
@@ -733,7 +735,8 @@ impl ReachabilityWorkspace {
         if self.kick_profile_id != profile_id {
             self.kick_profile_id = profile_id;
             self.templates = std::array::from_fn(|_| None);
-            self.cache = ReachabilityCache::default();
+            self.template_dimensions = None;
+            self.clear_cache_preserving_policy();
         }
         self.conditioned = (conditioned_enabled
             && crate::search_prune_policy::conditioned_reachability_enabled())
@@ -763,11 +766,26 @@ impl ReachabilityWorkspace {
     }
 
     fn template(&mut self, catalog: &GeometryCatalog, piece: PieceKind) -> &ReachabilityTemplate {
+        let dimensions = (catalog.width(), catalog.height());
+        if self.template_dimensions != Some(dimensions) {
+            // A query workspace may be reused for another 1-6L target. Both
+            // compiled poses and cached board/lock keys depend on dimensions.
+            self.templates = std::array::from_fn(|_| None);
+            self.clear_cache_preserving_policy();
+            self.template_dimensions = Some(dimensions);
+        }
         let index = piece_index(piece);
         let profile_id = self.kick_profile_id;
         self.templates[index].get_or_insert_with(|| {
             ReachabilityTemplate::compile(catalog.width(), catalog.height(), piece, profile_id)
         })
+    }
+
+    fn clear_cache_preserving_policy(&mut self) {
+        self.cache = ReachabilityCache {
+            exhaustive_observations: self.cache.exhaustive_observations,
+            ..ReachabilityCache::default()
+        };
     }
 }
 
@@ -1774,8 +1792,9 @@ fn normalized_rotation_center(piece: PieceKind, rotation: RotationState) -> (i8,
 mod tests {
     use super::{
         best_scoring_lock_evidence, builtin_kick_profile, normalized_kick_delta,
-        reverse_lock_reachable, state_from_index, state_index, ReachabilityScratch,
-        ReachabilityTemplate, ReachabilityWorkspace, State,
+        reverse_lock_reachable, state_from_index, state_index, ReachabilityCacheLookup,
+        ReachabilityScratch, ReachabilityTemplate, ReachabilityWorkspace, ReachableLocks, State,
+        LARGE_SEARCH_EXHAUSTIVE_OBSERVATIONS,
     };
     use crate::conditioned_local_pack::{
         built_in_local_relation_binding, encode_local_relation_candidate_pack,
@@ -1791,6 +1810,56 @@ mod tests {
     use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
     use clearra_rules::kicks::{KickTableProfileId, KickTransition};
+
+    #[test]
+    fn changing_target_height_invalidates_reachability_templates_and_cache() {
+        let short = super::GeometryCatalog::compile_for_required_cells_on_dimensions(10, 4, 0, 0)
+            .expect("four-row catalog");
+        let tall = super::GeometryCatalog::compile_for_required_cells_on_dimensions(10, 6, 0, 0)
+            .expect("six-row catalog");
+        let mut workspace = ReachabilityWorkspace::default();
+        workspace.configure(8);
+        workspace.configure_kick_profile(KickTableProfileId::SrsPlus, false);
+        workspace.prepare_template(&short, PieceKind::T);
+        assert_eq!(
+            workspace.templates[super::piece_index(PieceKind::T)]
+                .as_ref()
+                .unwrap()
+                .height,
+            4
+        );
+
+        let mut reachable = ReachableLocks::default();
+        reachable.insert(10, RotationState::Zero, 4, 0);
+        workspace.cache.insert(
+            0,
+            PieceKind::T,
+            reachable,
+            ReachableLocks::default(),
+            true,
+            true,
+        );
+        assert_eq!(
+            workspace
+                .cache
+                .query(0, PieceKind::T, 10, RotationState::Zero, 4, 0),
+            ReachabilityCacheLookup::Reachable,
+        );
+
+        workspace.prepare_template(&tall, PieceKind::T);
+        assert_eq!(
+            workspace.templates[super::piece_index(PieceKind::T)]
+                .as_ref()
+                .unwrap()
+                .height,
+            6
+        );
+        assert!(workspace.cache.keys.is_empty());
+        assert_eq!(
+            workspace.cache.exhaustive_observations,
+            LARGE_SEARCH_EXHAUSTIVE_OBSERVATIONS,
+        );
+    }
 
     #[test]
     fn build_frame_uses_pinned_local_relation_and_frame_miss_falls_back() {
