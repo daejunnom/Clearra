@@ -8,6 +8,7 @@ import { decoder as fumenDecoder } from "tetris-fumen";
 
 import { decodeViewerDocument } from "../viewer/document.mjs";
 import { DiscordInputError } from "./i18n.mjs";
+import { boundaryRecoveryArguments } from "./boundary-recovery-input.mjs";
 import {
   isStandardBagQueue,
   parseQueuePatternSource,
@@ -120,6 +121,8 @@ export function buildSlashCommandArguments(command, rawOptions = []) {
   const values = optionValues(rawOptions, allowedOptionNames(command));
 
   switch (command.input) {
+    case "boundary-recovery-v1":
+      return boundaryRecoveryArguments(command, requiredText(values, "scenario", FIELD_MAX_LENGTH));
     case "pc":
       return fieldAndNextArguments(command, values, [
         ...pcSettings(command, values),
@@ -2746,6 +2749,8 @@ function pieceInventory(value, name = "remaining") {
 function allowedOptionNames(command) {
   const input = command.input;
   switch (input) {
+    case "boundary-recovery-v1":
+      return new Set(["scenario"]);
     case "pc":
       return new Set(["field", "next", "lines", "options", "kicktable"]);
     case "pc-v2":

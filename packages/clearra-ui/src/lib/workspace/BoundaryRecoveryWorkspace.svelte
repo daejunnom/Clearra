@@ -171,6 +171,22 @@
     };
     return label(key[status] ?? 'recoveryIncomplete');
   }
+
+  function holdLabel(decision: string): string {
+    const key: Record<string, ComponentMessageKey> = {
+      none: 'recoveryHoldNone', swap: 'recoveryHoldSwap', store: 'recoveryHoldStore'
+    };
+    return key[decision] ? label(key[decision]) : decision;
+  }
+
+  function roleScopeLabel(scope: string): string {
+    const key: Record<string, ComponentMessageKey> = {
+      'occupancy-only': 'recoveryOccupancyScope',
+      'exact-lock-time': 'recoveryExactScope',
+      'bag-piece-exact-lock-time': 'recoveryBagPieceScope'
+    };
+    return key[scope] ? label(key[scope]) : scope;
+  }
 </script>
 
 <svelte:head>
@@ -258,10 +274,12 @@
       <input type="number" min="2" max="42" value={request.placements}
         on:input={(event) => setPlacements(Number((event.currentTarget as HTMLInputElement).value))} />
     </label>
-    <label><span>{label('recoveryBorrowPosition')}</span>
-      <input type="number" min={request.stageOneCount + 1} max={request.placements} value={request.borrowRolePosition}
-        on:input={(event) => request = { ...request, borrowRolePosition: Number((event.currentTarget as HTMLInputElement).value) }} />
-    </label>
+    {#if request.maxEarlyPlacements === 1}
+      <label><span>{label('recoveryBorrowPosition')}</span>
+        <input type="number" min={request.stageOneCount + 1} max={request.placements} value={request.borrowRolePosition}
+          on:input={(event) => request = { ...request, borrowRolePosition: Number((event.currentTarget as HTMLInputElement).value) }} />
+      </label>
+    {/if}
     <label><span>{label('recoveryMaxEarlyPlacements')}</span>
       <select value={request.maxEarlyPlacements} on:change={(event) => request = { ...request, maxEarlyPlacements: Number((event.currentTarget as HTMLSelectElement).value) as 0 | 1 }}>
         <option value="0">0</option><option value="1">1</option>
@@ -305,20 +323,20 @@
     {#if payload}
       <p class="outcome">{statusLabel(payload.status)}</p>
       {#if payload.population}
-        <p>{payload.population.evaluated_pattern_count} / {payload.population.total_possible_pattern_count} · {payload.population.state_count} states · full future queue knowledge</p>
+        <p>{label('recoveryEvaluatedPatterns')}: {payload.population.evaluated_pattern_count} / {payload.population.total_possible_pattern_count} · {label('recoverySearchStates')}: {payload.population.state_count} · {label('recoveryFullQueueKnowledge')}</p>
         <p>{label('recoveryNormalProbability')}: {(Number(payload.population.normal_probability) * 100).toFixed(2)}% · {label('recoveryAdditionalProbability')}: {(Number(payload.population.additional_recovery_probability) * 100).toFixed(2)}%</p>
         <p>{label('recoveryTotalResponseProbability')}: {(Number(payload.population.total_response_probability) * 100).toFixed(2)}% · {label('recoveryUnknownProbability')}: {(Number(payload.population.unknown_probability) * 100).toFixed(2)}%</p>
-        <p>PC-preserving recovery: {(Number(payload.population.pc_preserving_recovery_probability) * 100).toFixed(2)}% · non-PC recovery: {(Number(payload.population.non_pc_recovery_probability) * 100).toFixed(2)}% · no path: {(Number(payload.population.no_path_probability) * 100).toFixed(2)}%</p>
-        {#if example}<p>Example queue: <code>{example.queue}</code> · {statusLabel(example.status)}</p>{/if}
+        <p>{label('recoveryPcPreservingProbability')}: {(Number(payload.population.pc_preserving_recovery_probability) * 100).toFixed(2)}% · {label('recoveryNonPcProbability')}: {(Number(payload.population.non_pc_recovery_probability) * 100).toFixed(2)}% · {label('recoveryNoPathProbability')}: {(Number(payload.population.no_path_probability) * 100).toFixed(2)}%</p>
+        {#if example}<p>{label('recoveryExampleQueue')}: <code>{example.queue}</code> · {statusLabel(example.status)}</p>{/if}
       {:else}
-        <p>{label('recoveryBorrowed')}: {payload.borrowed_stage_two_count} · {label('recoveryCheckpoint')}: {payload.stage_one_checkpoint_step ?? '—'} · PC: {payload.checkpoint_is_pc === null ? '—' : payload.checkpoint_is_pc}</p>
-        <p>Full fixed queue · {payload.placement_role_scope} · {payload.normal_states} + {payload.recovery_states} states</p>
+        <p>{label('recoveryBorrowed')}: {payload.borrowed_stage_two_count} · {label('recoveryCheckpoint')}: {payload.stage_one_checkpoint_step ?? '—'} · {label('recoveryCheckpointPc')}: {payload.checkpoint_is_pc === null ? '—' : label(payload.checkpoint_is_pc ? 'recoveryYes' : 'recoveryNo')}</p>
+        <p>{label('recoveryFixedQueue')} · {roleScopeLabel(payload.placement_role_scope)} · {label('recoverySearchStates')}: {payload.normal_states} + {payload.recovery_states}</p>
       {/if}
       {#if displaySteps.length > 0}
         <h3>{label('recoveryTimeline')}</h3>
         <ol>
           {#each displaySteps as step, index}
-            <li><strong>{step.piece}</strong> · queue #{step.source_queue_index + 1} · role #{step.placement_role_index + 1} · {step.hold_decision} · ({step.x}, {step.y}) · {step.cleared_lines}L · B2B {step.b2b_active_after ? '✓' : '—'}{displayCheckpoint === index + 1 ? ' · checkpoint' : ''}<code>{step.board_after_mask}</code></li>
+            <li><strong>{step.piece}</strong> · {label('recoverySourceToken')} #{step.source_queue_index + 1} · {label('recoveryPlacementRole')} #{step.placement_role_index + 1} · {holdLabel(step.hold_decision)} · ({step.x}, {step.y}) · {label('recoveryClearedLines')}: {step.cleared_lines} · B2B {step.b2b_active_after ? '✓' : '—'}{displayCheckpoint === index + 1 ? ` · ${label('recoveryCheckpoint')}` : ''}<code>{step.board_after_mask}</code></li>
           {/each}
         </ol>
       {/if}

@@ -848,18 +848,23 @@ test("Discord capability IDs are exact members of the product authority", () => 
     new URL("../../../tests/fixtures/contracts/product_capability_registry.v1.json", import.meta.url),
     "utf8",
   ));
+  const candidate = JSON.parse(readFileSync(
+    new URL("../../../tests/fixtures/contracts/boundary_recovery_candidate.v1.json", import.meta.url),
+    "utf8",
+  ));
   assert.equal(authority.schema_id, "clearra.product-capability-registry.v1");
   const expectedRuntimeIds = authority.runtime_projection.current_capabilities
-    .map(({ id }) => id)
+    .map(({ id }) => id).concat(candidate.runtime_capability.id)
     .sort();
   const actualRuntimeIds = productCapabilityRegistry.map(({ id }) => id).sort();
-  assert.equal(expectedRuntimeIds.length, 47);
-  assert.equal(actualRuntimeIds.length, 47);
+  assert.equal(authority.runtime_projection.current_capabilities.length, 47);
+  assert.equal(actualRuntimeIds.length, 48);
   assert.deepEqual(actualRuntimeIds, expectedRuntimeIds);
-  const stableIds = new Set(authority.capabilities.map(({ id }) => id));
+  const stableIds = new Set([...authority.capabilities.map(({ id }) => id), candidate.product.id]);
   for (const capability of productCapabilityRegistry) {
     assert.equal(stableIds.has(capability.id), true, capability.id);
   }
+  assert.equal(candidate.target_release, "v0.9.0");
 
   assert.equal(findProductCapability("build.target-setup"), null);
   assert.equal(findProductCapability("build.evaluate-cover"), null);

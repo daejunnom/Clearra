@@ -1,0 +1,52 @@
+{
+  "schema_id": "clearra.boundary-recovery-candidate.v1",
+  "target_release": "v0.9.0",
+  "authority_scope": "candidate branch only; does not amend the frozen v0.8.0 release authority",
+  "product": {
+    "id": "recovery.boundary",
+    "kind": "search",
+    "command_path": ["recovery", "boundary"],
+    "problem_contract_id": "two-stage-boundary-recovery.v1",
+    "algorithm_family": "forward_state_expansion",
+    "timeout_class": "forward_long",
+    "input_schema_id": "boundary-recovery-scenario.v1",
+    "modal_schema_id": null,
+    "result_contract_id": "boundary-recovery.v1",
+    "surface_profile": "public_command"
+  },
+  "runtime_capability": {
+    "id": "recovery.boundary",
+    "kind": "search",
+    "status": "active",
+    "path": ["recovery", "boundary"],
+    "ingress": { "slash": true, "text": false },
+    "problem_contract_id": "two-stage-boundary-recovery.v1",
+    "input_schema_id": "boundary-recovery-scenario.v1",
+    "modal_schema_id": null,
+    "result_contract_id": "boundary-recovery.v1",
+    "algorithm_family": "forward_state_expansion",
+    "timeout_class": "forward_long",
+    "effect_classes": ["search_space", "supply_semantics", "reachability_semantics", "probability_semantics", "result_materialization"],
+    "help_policy": "public",
+    "i18n_policy": "en-ko-ja",
+    "result_allowlist": ["boundary-recovery"],
+    "telemetry_identity": "recovery.boundary",
+    "lowering_authority": "clearra.cli-command.v1",
+    "engine": {
+      "input": "boundary-recovery-v1",
+      "argvPrefix": ["recovery", "boundary"],
+      "fixedSemantics": {
+        "queueKnowledge": "full-oracle",
+        "inputCollection": "single-interaction",
+        "resultCompleteness": "explicit"
+      }
+    }
+  },
+  "implementation_evidence": [
+    "crates/clearra-forward-search/src/boundary_recovery.rs",
+    "crates/clearra-app/src/commands/boundary_recovery_app_command.rs",
+    "crates/clearra-cli-command/src/web_command_parser.rs",
+    "apps/clearra-discord-bot/src/discord/boundary-recovery-input.mjs",
+    "apps/clearra-discord-bot/src/discord/slash-command-catalog.mjs"
+  ]
+}

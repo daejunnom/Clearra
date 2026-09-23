@@ -1988,6 +1988,11 @@ function resultMessage(result, tilingOnly = false, options = {}) {
         : null;
       if (ctk3) return ctk3ResultMessage(structured, ctk3, tilingOnly, options);
       const empty = structuredCompleteness(structured.summary, structured.finesse_report);
+      if (structured.kind === "boundary-recovery" &&
+          structured.summary.status === "incomplete") {
+        empty.complete = false;
+        empty.warnings.push("incomplete");
+      }
       return textMessage(
         structuredResultSummary(
           structured,
@@ -2050,6 +2055,8 @@ function requestedStructuredResultKind(structured, fallback, allspinExpectation)
     publicKind === "score-minimals" &&
     !validDiscordPcScoreMinimalsResult(structured)
   ) return null;
+  if (publicKind === "boundary-recovery" &&
+      !validBoundaryRecoverySummary(structured)) return null;
   if (
     (publicKind === "saves" || publicKind === "best-save") &&
     !validDiscordPcSaveResult(structured, publicKind)
@@ -2071,6 +2078,45 @@ function requestedStructuredResultKind(structured, fallback, allspinExpectation)
 
 function validPcScoreSummary(structured) {
   return validDiscordTypedProductResult(structured);
+}
+
+function validBoundaryRecoverySummary(structured) {
+  const summary = structured?.summary;
+  if (structured?.kind !== "boundary-recovery" || !isPlainObject(summary) ||
+      summary.contract !== "boundary-recovery.v1") return false;
+  const fixed = summary.knowledge_basis === "full-fixed-queue";
+  const pattern = summary.knowledge_basis === "full-pattern-universe";
+  if (!fixed && !pattern) return false;
+  if (fixed) {
+    return ["normal", "pc-preserving-recovery", "non-pc-recovery",
+      "no-path-within-declared-scope", "incomplete"].includes(summary.status) &&
+      ["occupancy-only", "exact-lock-time"].includes(summary.placement_role_scope) &&
+      Number.isSafeInteger(summary.normal_states) && summary.normal_states >= 0 &&
+      Number.isSafeInteger(summary.recovery_states) && summary.recovery_states >= 0 &&
+      Number.isSafeInteger(summary.borrowed_stage_two_count) &&
+      summary.borrowed_stage_two_count >= 0 &&
+      (summary.stage_one_checkpoint_step === null ||
+        Number.isSafeInteger(summary.stage_one_checkpoint_step)) &&
+      (summary.checkpoint_is_pc === null ||
+        typeof summary.checkpoint_is_pc === "boolean") &&
+      Array.isArray(summary.steps) && summary.steps.length <= 42 &&
+      summary.steps.every((step) => isPlainObject(step) &&
+        Number.isSafeInteger(step.source_queue_index) && step.source_queue_index < 42 &&
+        step.source_queue_index >= 0 && Number.isSafeInteger(step.placement_role_index) &&
+        step.placement_role_index < 42 && step.placement_role_index >= 0);
+  }
+  return ["population-complete", "population-incomplete"].includes(summary.status) &&
+    summary.placement_role_scope === "bag-piece-exact-lock-time" &&
+    summary.complete === (summary.status === "population-complete") &&
+    Number.isSafeInteger(summary.evaluated_pattern_count) &&
+    summary.evaluated_pattern_count >= 0 &&
+    typeof summary.total_possible_pattern_count === "string" &&
+    /^\d+$/.test(summary.total_possible_pattern_count) &&
+    ["normal_probability", "pc_preserving_recovery_probability",
+      "non_pc_recovery_probability", "additional_recovery_probability",
+      "total_response_probability", "no_path_probability", "unknown_probability"]
+      .every((field) => typeof summary[field] === "string" &&
+        /^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(summary[field]));
 }
 
 function validAllspinSummary(summary, expectedContract, expectation) {
@@ -2379,12 +2425,15 @@ function structuredResultSummary(
       partial: complete ? "" : t(locale, "result.partial_suffix"),
     }),
   );
-  if (!["sequence", "sequence-dependencies", "score-minimals"].includes(structured.kind)) {
+  if (!["sequence", "sequence-dependencies", "score-minimals", "boundary-recovery"].includes(structured.kind)) {
     lines.push(t(locale, "result.ctk3_pages", { count: pageCount }));
   }
   const summary = structured.summary;
   if (structured.kind === "score-minimals") {
     lines.push(...(discordPcScoreMinimalsSummaryLines(structured, locale) ?? []));
+  }
+  if (structured.kind === "boundary-recovery") {
+    lines.push(...boundaryRecoverySummaryLines(structured.summary, locale));
   }
   if (
     structured.kind !== "score-minimals" &&
@@ -2480,6 +2529,40 @@ function summaryValue(key, value, locale) {
     return String(value);
   }
   return `${Number((probability * 100).toFixed(4))}%`;
+}
+
+function boundaryRecoverySummaryLines(summary, locale) {
+  const lines = [
+    `${t(locale, "recovery.result.status")}: ${t(locale, `recovery.result.status.${summary.status}`)}`,
+    t(locale, "recovery.result.full_queue_knowledge"),
+  ];
+  if (summary.knowledge_basis === "full-fixed-queue") {
+    lines.push(
+      `${t(locale, "recovery.result.states")}: ${summary.normal_states} + ${summary.recovery_states}`,
+      `${t(locale, "recovery.result.borrowed")}: ${summary.borrowed_stage_two_count ?? 0}`,
+    );
+    if (summary.stage_one_checkpoint_step !== null &&
+        summary.stage_one_checkpoint_step !== undefined) {
+      lines.push(`${t(locale, "recovery.result.checkpoint")}: ${summary.stage_one_checkpoint_step}`);
+    }
+    return lines;
+  }
+  lines.push(`${t(locale, "recovery.result.evaluated")}: ${summary.evaluated_pattern_count} / ${summary.total_possible_pattern_count}`);
+  for (const [field, key] of [
+    ["normal_probability", "normal_probability"],
+    ["pc_preserving_recovery_probability", "pc_recovery_probability"],
+    ["non_pc_recovery_probability", "non_pc_recovery_probability"],
+    ["additional_recovery_probability", "additional_probability"],
+    ["total_response_probability", "response_probability"],
+    ["no_path_probability", "no_path_probability"],
+    ["unknown_probability", "unknown_probability"],
+  ]) {
+    const value = Number(summary[field]);
+    if (Number.isFinite(value) && value >= 0 && value <= 1) {
+      lines.push(`${t(locale, `recovery.result.${key}`)}: ${Number((value * 100).toFixed(4))}%`);
+    }
+  }
+  return lines;
 }
 
 function safeResultKind(value) {

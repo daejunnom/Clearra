@@ -2463,7 +2463,7 @@ fn parse_boundary_recovery_command(
                 {
                     return Err(WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,
-                        "--role-mask repeats a source position",
+                        "--role-mask repeats a placement role position",
                     ));
                 }
             }

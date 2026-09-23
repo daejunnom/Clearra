@@ -631,6 +631,7 @@ function searchGroupDescription(root, compatibility) {
     build: "Search or evaluate target-build objectives",
     setup: "Rank setup candidates under explicit observation policies",
     forward: "Run ordered-queue forward state searches",
+    recovery: "Search two-stage boundary recovery",
     "spin-structure": "Search unordered no-hold structural spin objectives",
     utility: "Run bounded stateless field and document utilities",
   })[root] ?? `Run ${root} calculations`;
@@ -638,6 +639,10 @@ function searchGroupDescription(root, compatibility) {
 
 function registrationOptions(input, capabilityId = null) {
   switch (input) {
+    case "boundary-recovery-v1":
+      return Object.freeze([
+        stringOption("scenario", "One complete two-stage JSON scenario; see /help recovery boundary", true, FIELD_MAX_LENGTH),
+      ]);
     case "pc":
       return Object.freeze([
         nextOption(false),
@@ -1791,6 +1796,7 @@ function commandListHelp(locale) {
   const build = canonicalGroupHelpPath("build");
   const setup = canonicalGroupHelpPath("setup");
   const forward = canonicalGroupHelpPath("forward");
+  const recovery = canonicalGroupHelpPath("recovery");
   const spinStructure = canonicalGroupHelpPath("spin-structure");
   const utility = canonicalGroupHelpPath("utility");
   if (locale === "ko") {
@@ -1801,6 +1807,7 @@ function commandListHelp(locale) {
       `구축: \`${build}\``,
       `셋업 순위와 점수: \`${setup}\``,
       `정방향 탐색: \`${forward}\``,
+      `경계 리커버리: \`${recovery}\``,
       `구조 탐색: \`${spinStructure}\``,
       `문서 유틸리티: \`${utility}\``,
       "위의 그룹형 명령어 사용을 권장합니다. `/path` 같은 기존 개별 명령어와 `/finesse search|score`도 계속 사용할 수 있습니다.",
@@ -1816,6 +1823,7 @@ function commandListHelp(locale) {
     `Build: \`${build}\``,
     `Setup ranking and scoring: \`${setup}\``,
     `Forward search: \`${forward}\``,
+    `Boundary recovery: \`${recovery}\``,
     `Spin structures: \`${spinStructure}\``,
     `Document utilities: \`${utility}\``,
     "The grouped commands above are recommended. Existing names such as `/path` and `/finesse search|score` remain available.",
@@ -1838,6 +1846,8 @@ function syntax(entry, locale = "en") {
   const path = commandPath(entry);
   if (normalizeDiscordLocale(locale) === "ko") {
     switch (entry.input) {
+      case "boundary-recovery-v1":
+        return `/${path} scenario:<두 단계 필드·공급·역할·B2B 설정을 담은 JSON>`;
       case "render-file":
         return "/render-file [image:<같은 채널의 미리보기 메시지 링크|메시지 ID>]";
       case "pc":
@@ -1925,6 +1935,8 @@ function syntax(entry, locale = "en") {
     }
   }
   switch (entry.input) {
+    case "boundary-recovery-v1":
+      return `/${path} scenario:<one JSON object with both boards, supply, roles and B2B policy>`;
     case "render-file":
       return "/render-file [image:<same-channel preview message link|message ID>]";
     case "pc":
@@ -2017,6 +2029,13 @@ function inputHelp(entry, locale = "en") {
   const kickHelp = "`kicktable` is one of `srs-plus`, `srs`, `srs-x`, or `jstris-180`; Clearra defaults to `srs-plus`.";
   const nativeKickHelp = "`kicktable` is `srs-plus`, `srs`, `srs-x`, `jstris-180`, or `no-kick`; Clearra defaults to `srs-plus`.";
   switch (entry.input) {
+    case "boundary-recovery-v1":
+      return [
+        "Provide one JSON object with `initial_board_mask`, `target_board_mask`, `height`, `queue`, `stage_one_count`, and `placements`. Board masks are hexadecimal; the queue is 2–42 exact IOTSZJL pieces.",
+        "For one early placement, set `borrow_role_position` and either `borrow_placement_mask` or an exact `role_masks` array. A role is fixed geometry; supply pieces may fill matching roles in a different order. Set `max_early_placements` to 0 to search only the normal connection.",
+        "Optional `preserve_b2b_bags` is an array of one-based supply-bag positions; `preserve_b2b_stage_one` and `preserve_b2b_stage_two` toggle whole stages. `initial_b2b`, `hold`, `rule`, `spin_profile`, and `max_states` are optional.",
+        "Add `queue_pattern` with complete seven-piece reference bags and all exact roles for weighted exhaustive evaluation. Bound it with `max_pattern_evaluations` and `max_total_states`; incomplete supply is reported separately from a proven no-path result.",
+      ];
     case "render-file":
       return [
         "For the simplest exact selection, open a Clearra preview message's Apps menu and choose `Get original GIF`. No message ID is needed.",
@@ -2318,6 +2337,13 @@ function koreanInputHelp(entry) {
   const kickHelp = "`kicktable`은 `srs-plus`, `srs`, `srs-x`, `jstris-180` 중 하나이며 기본값은 `srs-plus`입니다.";
   const nativeKickHelp = "`kicktable`은 `srs-plus`, `srs`, `srs-x`, `jstris-180`, `no-kick` 중 하나이며 기본값은 `srs-plus`입니다.";
   switch (entry.input) {
+    case "boundary-recovery-v1":
+      return [
+        "한 JSON 객체에 `initial_board_mask`, `target_board_mask`, `height`, `queue`, `stage_one_count`, `placements`를 넣습니다. 보드 마스크는 16진수이고 큐는 정확한 IOTSZJL 미노 2~42개입니다.",
+        "선행 배치 하나를 허용할 때 `borrow_role_position`과 `borrow_placement_mask` 또는 모든 `role_masks`를 지정합니다. 역할의 도형은 고정되며 같은 미노의 공급 순서는 달라질 수 있습니다. 일반 연결만 탐색하려면 `max_early_placements`를 0으로 둡니다.",
+        "`preserve_b2b_bags`는 1부터 시작하는 공급 가방 위치 배열입니다. 두 단계 전체 토글과 `initial_b2b`, `hold`, `rule`, `spin_profile`, `max_states`도 선택할 수 있습니다.",
+        "완전한 7미노 기준 가방과 정확한 역할 전체가 있으면 `queue_pattern`으로 가중 전수 평가를 요청합니다. `max_pattern_evaluations`와 `max_total_states`로 범위를 제한하며 미완료 공급을 무경로 증명과 구분합니다.",
+      ];
     case "render-file":
       return [
         "가장 간단하게 정확히 지정하려면 Clearra 미리보기 메시지의 앱 메뉴에서 `원본 GIF 받기`를 선택합니다. 메시지 ID는 필요하지 않습니다.",
@@ -3254,6 +3280,9 @@ const KOREAN_COMMAND_NAMES = Object.freeze({
   "channel-settings": "채널-설정",
   "server-settings": "서버-설정",
   pc: "pc-탐색",
+  recovery: "리커버리",
+  boundary: "경계",
+  "boundary-recovery": "경계-리커버리",
   build: "빌드",
   forward: "정방향",
   utility: "유틸리티",
@@ -3298,6 +3327,8 @@ const KOREAN_COMMAND_NAMES = Object.freeze({
 
 const KOREAN_OPTION_NAMES = Object.freeze({
   arguments: "명령어",
+  boundary: "경계",
+  scenario: "시나리오",
   image: "이미지",
   next: "넥스트",
   field: "필드",
@@ -3438,6 +3469,8 @@ const KOREAN_OPTION_NAMES = Object.freeze({
 });
 
 const KOREAN_COMMAND_DESCRIPTIONS = Object.freeze({
+  recovery: "두 단계의 일반 연결과 경계 리커버리를 탐색합니다",
+  boundary: "두 단계의 일반 연결과 경계 리커버리를 탐색합니다",
   help: "Clearra 명령어의 정확한 문법과 제한을 표시합니다",
   "render-file": "최근 필드 미리보기의 원본 GIF 파일을 받습니다",
   "channel-settings": "현재 채널의 Clearra 설정을 관리합니다",
@@ -3489,6 +3522,7 @@ const KOREAN_COMMAND_DESCRIPTIONS = Object.freeze({
 });
 
 const KOREAN_COMMAND_NOTES = Object.freeze({
+  "recovery.boundary": "한 번의 명령으로 두 단계 시나리오 전체를 제출합니다. 패턴 탐색의 미확인 공급은 별도로 표시합니다.",
   "pc.path": "Discord는 canonical candidate ID가 가장 작은 첫 결과 하나만 결정적으로 게시하며 동률·대안 페이지·커서 제어를 노출하지 않습니다.",
   path: "Discord는 canonical candidate ID가 가장 작은 첫 결과 하나만 결정적으로 게시하며 동률·대안 페이지·커서 제어를 노출하지 않습니다.",
   "pc.allspin-sol": "기존 allspin_sol_finder와의 호환은 명령 의도만 보장하며 상위 도구의 판정을 그대로 재현한다는 뜻이 아닙니다. 슬래시 별칭은 v0.10에 제거되고 텍스트 별칭은 장기 유지됩니다.",
@@ -3514,6 +3548,8 @@ const KOREAN_COMMAND_NOTES = Object.freeze({
 });
 
 const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
+  "recovery.boundary": "두 단계의 일반 연결과 경계 리커버리를 탐색합니다",
+  scenario: "두 단계의 필드·공급·배치 역할·B2B 설정을 한 JSON 객체로 입력합니다",
   "pc.path": "표현되는 모든 퍼펙트 클리어 경로를 찾습니다",
   "pc.chance": "정확한 퍼펙트 클리어 성공 확률을 계산합니다",
   "pc.minimals": "최소 커버 퍼펙트 클리어 해법 집합을 찾습니다",
