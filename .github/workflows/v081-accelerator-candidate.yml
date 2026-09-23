@@ -24,6 +24,8 @@ on:
       - "scripts/tools/clearra-build-policy.test.mjs"
       - "scripts/tools/build-clearra-frontend.mjs"
       - "scripts/tools/build-clearra-frontend.test.mjs"
+      - "scripts/tools/v081-wasm-accelerator-exports.test.mjs"
+      - "scripts/tools/v081-wasm-conditioned-admission.test.mjs"
       - "scripts/tools/clearra-frontend-paths.mjs"
       - "scripts/release/accepted-pages-build.mjs"
       - "scripts/release/accepted-pages-build.test.mjs"
