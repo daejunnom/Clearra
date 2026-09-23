@@ -26,7 +26,7 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
       - name: Verify CLI and product formatting
-        run: cargo fmt -p clearra-app -p clearra-cli -p clearra-pc4-qualifier --check
+        run: cargo fmt -p clearra-app -p clearra-cli -p clearra-pc4-qualifier -p clearra-accelerator-product-host -p clearra-accelerator-runtime -p clearra-wasm-abi --check
       - name: Verify explicit local relation candidates
         run: |
           cargo test --locked -p clearra-pc4-qualifier --lib candidate_queries_bind_profile_row_frame_and_independent_audit --no-default-features --features legal-board-assets
@@ -37,6 +37,11 @@ jobs:
         run: |
           cargo test --locked -p clearra-pc4-qualifier --lib final_bundle_and_catalog_are_bound_without_granting_product_authority --no-default-features --features legal-board-assets
           cargo test --locked -p clearra-cli --lib status_reports_an_incomplete_v2_candidate_instead_of_ignoring_it --no-default-features
+      - name: Verify signed local-relation product and legacy isolation
+        run: |
+          cargo test --locked -p clearra-accelerator-product-host --bin clearra-accelerator-release-gate
+          cargo test --locked -p clearra-accelerator-runtime --lib catalog_scopes_match_the_exact_product_parsers
+          cargo test --locked -p clearra-cli --lib local_relation_product_cannot_reuse_the_legacy_sparse_namespace_or_extension --no-default-features
       - name: Verify exact tie continuation and public CLI contracts
         run: |
           cargo test --locked -p clearra-cli --lib tie_snapshot::tests:: --no-default-features
@@ -71,3 +76,6 @@ jobs:
           cargo test --locked -p clearra-core-executor --lib conditioned_local_pack::tests --features qualification-reference
           cargo test --locked -p clearra-core-executor --lib conditioned_local_index::tests --features qualification-reference
           cargo test --locked -p clearra-core-executor --lib conditioned_local_qualification --features qualification-reference
+          cargo test --locked -p clearra-core-executor --lib conditioned_local_product::tests --features qualification-reference
+          cargo test --locked -p clearra-core-executor --lib row_frame::tests --features qualification-reference
+          cargo test --locked -p clearra-core-executor --lib legal_board::tests --features qualification-reference
