@@ -3720,6 +3720,31 @@ mod tests {
     }
 
     #[test]
+    fn accelerator_admission_consumes_staged_transfer_without_a_false_worker_conflict() {
+        reset_abi_state_for_test();
+        assert_eq!(clearra_wasm_transfer_resize(1), ABI_OK);
+        assert_eq!(clearra_wasm_accelerator_admit(1, 4, 1), ABI_ERROR);
+        let error = ABI_STATE
+            .with(|state| String::from_utf8(state.borrow().output.clone()).expect("ASCII error"));
+        assert!(
+            error.starts_with("accelerator_payload_size_mismatch:"),
+            "{error}"
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+
+        assert_eq!(clearra_wasm_transfer_resize(1), ABI_OK);
+        assert_eq!(
+            clearra_wasm_accelerator_admit_negative_synopsis(4),
+            ABI_ERROR
+        );
+        let error = ABI_STATE
+            .with(|state| String::from_utf8(state.borrow().output.clone()).expect("ASCII error"));
+        assert!(!error.starts_with("accelerator_session_in_use:"), "{error}");
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        reset_abi_state_for_test();
+    }
+
+    #[test]
     fn product_retention_configuration_is_bounded_and_cannot_mutate_leased_output() {
         reset_abi_state_for_test();
         assert_eq!(clearra_wasm_configure_product_retention(0), ABI_ERROR);

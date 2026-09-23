@@ -207,7 +207,10 @@ pub(super) fn admit(kind: u32, profile: u32, activate: u32) -> i32 {
         if let Err(status) = state.require_mutation_admission() {
             return status;
         }
-        if state.has_worker_job_start_conflict() || activate > 1 {
+        // Admission consumes transfer_input. A staged transfer is not an
+        // executing worker; has_worker_job_start_conflict() intentionally
+        // counts it for job starts and must not guard this consumer.
+        if state.has_external_compute_owner() || activate > 1 {
             state.set_error(
                 "accelerator_session_in_use",
                 "asset mutation requires an idle owner",
@@ -385,7 +388,9 @@ pub(super) fn admit_negative_synopsis(profile: u32) -> i32 {
         if let Err(status) = state.require_mutation_admission() {
             return status;
         }
-        if state.has_worker_job_start_conflict() {
+        // The signed derivative arrives in transfer_input, so only an
+        // executing owner (not the staged bytes) conflicts with admission.
+        if state.has_external_compute_owner() {
             state.set_error(
                 "accelerator_session_in_use",
                 "synopsis installation requires an idle worker",

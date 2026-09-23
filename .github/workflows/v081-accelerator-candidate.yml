@@ -146,7 +146,9 @@ jobs:
           cargo test --locked -p clearra-core-executor --lib row_frame::tests --features qualification-reference
           cargo test --locked -p clearra-core-executor --lib legal_board::tests --features qualification-reference
       - name: Preserve typed Web accelerator request policy
-        run: cargo test --locked -p clearra-wasm-abi --lib accelerator_request_policy_uses_the_typed_default_and_opt_outs
+        run: |
+          cargo test --locked -p clearra-wasm-abi --lib accelerator_request_policy_uses_the_typed_default_and_opt_outs
+          cargo test --locked -p clearra-wasm-abi --lib accelerator_admission_consumes_staged_transfer_without_a_false_worker_conflict
   web-accelerator-worker-contract:
     if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923' && (github.event_name == 'push' || !inputs.wasm_smoke)
     runs-on: ubuntu-latest
