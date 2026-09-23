@@ -63,6 +63,10 @@ pub fn run_request(
 ) -> Result<String, String> {
     state.product_page_operation.cancel()?;
     let mut bridge = state.bridge.lock().map_err(|error| error.to_string())?;
+    let request = bridge
+        .parse_app_request(&request_json)
+        .map_err(|error| error.to_string())?;
+    clearra_cli::activate_native_accelerators_for_request(&request);
     bridge
         .run_request(&request_json)
         .map_err(|error| error.to_string())
@@ -86,6 +90,10 @@ pub fn start_job(
 ) -> Result<u64, String> {
     state.product_page_operation.cancel()?;
     let mut bridge = state.bridge.lock().map_err(|error| error.to_string())?;
+    let request = bridge
+        .parse_app_request(&request_json)
+        .map_err(|error| error.to_string())?;
+    clearra_cli::activate_native_accelerators_for_request(&request);
     bridge
         .start_job(&request_json)
         .map_err(|error| error.to_string())

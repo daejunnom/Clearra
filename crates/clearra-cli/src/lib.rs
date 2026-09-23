@@ -1,5 +1,6 @@
 mod accelerator_asset_store;
 mod accelerator_download_transport;
+mod accelerator_gui_bridge;
 pub mod args;
 pub mod assemble;
 mod cli_entry;
@@ -20,6 +21,9 @@ mod tablebase_download;
 mod tie_snapshot;
 mod typed_document_utility_cli;
 
+pub use accelerator_gui_bridge::{
+    activate_native_accelerators_for_request, run_native_accelerator_action,
+};
 pub use cli_entry::{run, run_with_args};
 
 #[cfg(all(test, feature = "native-c-core"))]

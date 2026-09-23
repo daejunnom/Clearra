@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { stat, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { frontendOptions, frontendPlan, executeFrontendPlan } from './build-clearra-frontend.mjs';
-import { frontendPaths } from './clearra-frontend-paths.mjs';
+import { frontendPaths, frontendUiSourceAliases } from './clearra-frontend-paths.mjs';
 import { validateManagedFrontendSource } from './validate-managed-frontend-source.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -85,6 +85,24 @@ test('the first audit page optimizes its linked-workspace runtime imports togeth
   assert.match(vite, /optimizeDeps: \{ include: \['@lucide\/svelte', 'tetris-fumen', '@tauri-apps\/api\/core'\] \}/u);
   assert.match(vite, /cacheDir: frontend\.viteCacheDir/u);
   assert.match(vite, /hmr: mode === 'local-recovery' \|\| mode === 'local-audit' \? false : undefined/u);
+});
+
+test('web and desktop bundle every declared UI export from original workspace source', async () => {
+  const package_ = JSON.parse(await readFile(resolve(root, 'packages/clearra-ui/package.json'), 'utf8'));
+  const aliases = frontendUiSourceAliases(root);
+  assert.equal(aliases.length, Object.keys(package_.exports).length);
+  for (const [subpath, target] of Object.entries(package_.exports)) {
+    const specifier = `@clearra/ui${subpath === '.' ? '' : subpath.slice(1)}`;
+    const alias = aliases.find(({ find }) => find.test(specifier));
+    assert.ok(alias, `missing original-source alias for ${specifier}`);
+    assert.equal(alias.replacement, resolve(root, 'packages/clearra-ui', target));
+    assert.equal((await stat(alias.replacement)).isFile(), true);
+    assert.equal(alias.find.test(`${specifier}/unexpected`), false);
+  }
+  for (const app of ['web', 'desktop']) {
+    const vite = await readFile(resolve(root, `apps/clearra-${app}/vite.config.ts`), 'utf8');
+    assert.match(vite, /resolve: \{ alias: frontendUiSourceAliases\(\) \}/u);
+  }
 });
 
 test('type forwarding follows successful sync and every failed payload stops later work', async () => {

@@ -5,9 +5,13 @@ use clearra_rules::kicks::{KickTableProfile, KickTableProfileId, KickTransition}
 use std::sync::Arc;
 
 use crate::conditioned_reachability::{
-    conditioned_reachability_snapshot, ConditionedReachabilityLookup,
-    QualifiedBoardConditionedReachability,
+    conditioned_reachability_snapshot, ConditionedReachabilityEntryPose,
+    ConditionedReachabilityLookup, QualifiedBoardConditionedReachability,
 };
+
+#[path = "reachability_local_relation.rs"]
+mod local_relation;
+pub(crate) use local_relation::exact_local_relation;
 
 use super::{
     catalog::{GeometryCatalog, InstantiatedRealization},
@@ -737,6 +741,28 @@ pub(crate) fn exact_spawn_lock_anchors(
     result.exhaustive.then_some(result.locks.anchors)
 }
 
+pub(crate) fn exact_entry_lock_anchors(
+    width: u8,
+    height: u8,
+    board: u64,
+    piece: PieceKind,
+    profile_id: KickTableProfileId,
+    entries: &[ConditionedReachabilityEntryPose],
+) -> Option<[u64; 4]> {
+    if width != 10
+        || !(1..=6).contains(&height)
+        || board >> (u32::from(width) * u32::from(height)) != 0
+        || entries.is_empty()
+        || builtin_kick_profile(profile_id).is_none()
+    {
+        return None;
+    }
+    let template = ReachabilityTemplate::compile(width, height, piece, profile_id);
+    let mut scratch = ReachabilityScratch::default();
+    let result = search_reachable_locks_from_entries(&template, board, &mut scratch, entries)?;
+    result.exhaustive.then_some(result.locks.anchors)
+}
+
 fn anchors_contain(anchors: [u64; 4], width: u8, rotation: RotationState, x: i8, y: i8) -> bool {
     if x < 0 || y < 0 || x >= width as i8 {
         return false;
@@ -896,6 +922,51 @@ pub(super) fn search_reachable_locks(
     scratch: &mut ReachabilityScratch,
     desired: Option<ReachableLocks>,
 ) -> ReachabilitySearchResult {
+    search_reachable_locks_from_seed_indices(template, board, scratch, desired, &template.sky_seeds)
+}
+
+/// Exact full-board traversal from the caller's actual entry poses. This is
+/// only a relation primitive: a cropped window must separately prove that
+/// its boundary is closed before using absence as a negative certificate.
+fn search_reachable_locks_from_entries(
+    template: &ReachabilityTemplate,
+    board: u64,
+    scratch: &mut ReachabilityScratch,
+    entries: &[ConditionedReachabilityEntryPose],
+) -> Option<ReachabilitySearchResult> {
+    if entries.len() > template.state_masks.len() {
+        return None;
+    }
+    let mut indices = Vec::with_capacity(entries.len());
+    for &entry in entries {
+        let index = state_index(
+            template.width,
+            template.ceiling,
+            State {
+                rotation: entry.rotation,
+                x: entry.x,
+                y: entry.y,
+            },
+        )?;
+        if template.state_masks[index] == INVALID_STATE_MASK
+            || board & template.state_masks[index] != 0
+        {
+            return None;
+        }
+        indices.push(u16::try_from(index).ok()?);
+    }
+    Some(search_reachable_locks_from_seed_indices(
+        template, board, scratch, None, &indices,
+    ))
+}
+
+fn search_reachable_locks_from_seed_indices(
+    template: &ReachabilityTemplate,
+    board: u64,
+    scratch: &mut ReachabilityScratch,
+    desired: Option<ReachableLocks>,
+    seeds: &[u16],
+) -> ReachabilitySearchResult {
     let width = template.width;
     let height = template.height;
     let allow_180 = template.allow_180;
@@ -903,7 +974,7 @@ pub(super) fn search_reachable_locks(
     let state_count = 4 * (ceiling as usize + 1) * width as usize;
     let generation = scratch.begin_search(state_count);
 
-    for &seed in &template.sky_seeds {
+    for &seed in seeds {
         push_index_if_placeable(
             template,
             board,
@@ -1744,4 +1815,8 @@ mod tests {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "reachability_reference_tests.rs"]
+mod reference_tests;
 // SRP rationale: this module has one behavior-level change reason: exhaustive SRS+ lock reachability over compact WASM boards.

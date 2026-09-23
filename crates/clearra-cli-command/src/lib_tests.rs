@@ -1093,6 +1093,40 @@ fn canonical_setup_score_accepts_the_two_independent_pattern_sources() {
 }
 
 #[test]
+fn setup_score_accepts_independent_exact_accelerator_switches() {
+    let document = setup_score_ctk3_document();
+    let base = format!(
+        "clearra setup score --document-format ctk3 --document {document} --setup-queue I --solution-queue OTSJ --clear 2"
+    );
+    for (suffix, expected) in [
+        ("", (true, true)),
+        ("--no-legal-board", (false, true)),
+        ("--no-conditioned-reachability", (true, false)),
+        (
+            "--no-legal-board --no-conditioned-reachability",
+            (false, false),
+        ),
+    ] {
+        let source = format!("{base} {suffix}");
+        let request = CliCommandParser::parse(&source)
+            .expect(&source)
+            .to_app_request()
+            .expect("typed Setup score request");
+        assert_eq!(request.command().exact_accelerator_policy(), Some(expected));
+    }
+    for suffix in [
+        "--legal-board --no-legal-board",
+        "--conditioned-reachability --no-conditioned-reachability",
+    ] {
+        let source = format!("{base} {suffix}");
+        assert_eq!(
+            CliCommandParser::parse(&source).expect_err(&source).code(),
+            CliCommandErrorCode::InvalidValue
+        );
+    }
+}
+
+#[test]
 fn canonical_setup_score_rejects_cross_family_and_ungoverned_options() {
     let document = setup_score_ctk3_document();
     let base = format!(

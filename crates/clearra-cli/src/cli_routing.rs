@@ -1,3 +1,5 @@
+// SRP rationale: this module has one change reason: routing a parsed CLI
+// invocation to its product handler while preserving the common output policy.
 use crate::error::CliErrorCode;
 use crate::{
     args::{ParsedCliCommand, ParsedCliInvocation},

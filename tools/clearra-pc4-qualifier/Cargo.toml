@@ -32,10 +32,15 @@ name = "clearra-conditioned-reachability"
 path = "src/bin/clearra-conditioned-reachability.rs"
 required-features = ["legal-board-assets"]
 
+[[bin]]
+name = "clearra-conditioned-local-relation"
+path = "src/bin/clearra-conditioned-local-relation.rs"
+required-features = ["legal-board-assets"]
+
 [dependencies]
 clearra-app = { path = "../../crates/clearra-app", features = ["online-pc4-tablebase", "parallel"], optional = true }
 clearra-core-domain = { path = "../../crates/clearra-core-domain" }
-clearra-core-executor = { path = "../../crates/clearra-core-executor", features = ["parallel"] }
+clearra-core-executor = { path = "../../crates/clearra-core-executor", features = ["parallel", "qualification-reference"] }
 clearra-objectives = { path = "../../crates/clearra-objectives", optional = true }
 clearra-pc4-tablebase = { path = "../../crates/clearra-pc4-tablebase" }
 clearra-pc-graph = { path = "../../crates/clearra-pc-graph", optional = true }

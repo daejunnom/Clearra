@@ -7,11 +7,15 @@
 // reusable legal-board library intentionally consumes only the forward/legal
 // derivations, so the binary-only validation helpers are dead in this crate
 // compilation unit.
+mod conditioned_local_relation_generation;
 mod conditioned_reachability_generation;
 #[allow(dead_code)]
 mod domain;
 mod legal_board_generation;
 
+pub use conditioned_local_relation_generation::{
+    generate_conditioned_local_relation, ConditionedLocalRelationGenerationOptions,
+};
 pub use conditioned_reachability_generation::{
     generate_conditioned_reachability, ConditionedReachabilityGenerationOptions,
 };

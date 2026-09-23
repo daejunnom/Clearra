@@ -487,7 +487,11 @@ function Invoke-AdversarialReleaseGateWiringValidation {
     foreach ($requiredSingleOwnerMarker in @(
         'Assert-AdversarialRustCasesInOutput',
         'adversarial_rust_tests=executed owner=RustExactTests',
-        'complete_required_keeps_candidate status=passed source=rust-test owner=RustExactTests'
+        'complete_required_keeps_candidate status=passed source=rust-test owner=RustExactTests',
+        "'--package', 'clearra-accelerator-product-host'",
+        "'--bin', 'clearra-accelerator-release-gate'",
+        "'--', '--require-all-v0.8.1'",
+        'v0.8.1 accelerator qualification gate failed'
     )) {
         if ($rustExact -notlike "*$requiredSingleOwnerMarker*") {
             Add-ArchitectureError "RustExactTests is missing delegated release evidence '$requiredSingleOwnerMarker'"
@@ -3841,8 +3845,8 @@ function Invoke-ReleaseIdentityGateValidation {
     }
     foreach ($required in @(
         'serializeClearraWasmManifest',
-        'CLEARRA_SOURCE_COMMIT=',
-        'CLEARRA_ENGINE_BUILD_ID='
+        'CLEARRA_SOURCE_COMMIT: wasmBuildContract.runtime_identity.source_commit',
+        'CLEARRA_ENGINE_BUILD_ID: wasmBuildContract.runtime_identity.engine_build_id'
     )) {
         if ($wasmBuild.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "WASM build is missing compile identity propagation '$required'"

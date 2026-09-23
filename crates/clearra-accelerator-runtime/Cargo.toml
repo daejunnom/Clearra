@@ -1,0 +1,14 @@
+[package]
+name = "clearra-accelerator-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
+clearra-core-executor = { path = "../clearra-core-executor" }
+clearra-rules = { path = "../clearra-rules" }

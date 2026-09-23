@@ -5,6 +5,9 @@
 //! generate movement domains, download assets, decide product qualification,
 //! or implement BuildUp reachability.
 
+// SRP rationale: this module has one change reason: the exact legal-board
+// bundle contract, from physical-row encoding through qualified lookup.
+
 use clearra_accelerator_activation::{AcceleratorProduct, VerifiedAcceleratorAuthority};
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
@@ -429,13 +432,15 @@ pub fn install_qualified_exact_legal_board(
         .lock()
         .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
     let slot = profile_slot(board.binding().kick_profile)?;
-    let combined = board.shared_bytes().saturating_add(
-        crate::conditioned_reachability::conditioned_reachability_snapshot(
-            board.binding().kick_profile,
-        )
-        .as_ref()
-        .map_or(0, |pack| pack.shared_bytes()),
-    );
+    // Count every resident profile, not just the selected profile. A host may
+    // retain a prior profile while the next request is being prepared.
+    let combined = board
+        .shared_bytes()
+        .saturating_add(installed_legal_board_bytes(Some(slot))?)
+        .saturating_add(
+            crate::conditioned_reachability::installed_conditioned_reachability_bytes(None)
+                .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?,
+        );
     if combined > MAX_ACTIVE_ACCELERATOR_BYTES {
         return Err(LegalBoardAssetError::ActiveSessionTooLarge);
     }
@@ -488,6 +493,26 @@ pub(crate) fn qualified_legal_board_snapshot(
         .ok()?
         .slots[slot]
         .clone()
+}
+
+pub(crate) fn installed_legal_board_bytes(
+    exclude_slot: Option<usize>,
+) -> Result<usize, LegalBoardAssetError> {
+    let Some(registry) = LEGAL_BOARD_REGISTRY.get() else {
+        return Ok(0);
+    };
+    let guard = registry
+        .read()
+        .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
+    Ok(guard
+        .slots
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != exclude_slot)
+        .filter_map(|(_, slot)| slot.as_ref())
+        .fold(0_usize, |total, board| {
+            total.saturating_add(board.shared_bytes())
+        }))
 }
 
 /// Host-side fast path for an already pinned immutable generation. This does
@@ -687,6 +712,99 @@ pub fn encode_exact_intersection(
         if output.len() > MAX_BUNDLE_BYTES {
             return Err(LegalBoardAssetError::TooLarge);
         }
+    }
+    let payload_digest: [u8; 32] = Sha256::digest(&output[PAYLOAD_OFFSET..]).into();
+    output[48..80].copy_from_slice(&payload_digest);
+    let output_length = output.len() as u64;
+    output[112..120].copy_from_slice(&output_length.to_le_bytes());
+    output[120..128].copy_from_slice(&(PAYLOAD_OFFSET as u64).to_le_bytes());
+    let generation = generation_identity_for(
+        binding,
+        payload_digest,
+        &output[HEADER_BYTES..PAYLOAD_OFFSET],
+    );
+    output[80..112].copy_from_slice(&generation);
+    Ok(output)
+}
+
+/// Encode the same immutable format one verified layer at a time. The source
+/// callback must visit every field in canonical order; its own I/O failure is
+/// kept distinct from a bundle-contract failure. The output remains bounded
+/// by the product's compressed 64 MiB limit, independent of raw layer sizes.
+#[derive(Debug)]
+pub enum LegalBoardStreamEncodeError<E> {
+    Asset(LegalBoardAssetError),
+    Source(E),
+}
+
+pub fn encode_exact_intersection_streaming<E, F>(
+    binding: LegalBoardBinding,
+    mut visit_layer: F,
+) -> Result<Vec<u8>, LegalBoardStreamEncodeError<E>>
+where
+    F: FnMut(usize, &mut dyn FnMut(u64) -> Result<(), LegalBoardAssetError>) -> Result<(), E>,
+{
+    let mut output = vec![0_u8; PAYLOAD_OFFSET];
+    output[..8].copy_from_slice(MAGIC);
+    output[8..12].copy_from_slice(&VERSION.to_le_bytes());
+    output[12] =
+        encode_profile(binding.kick_profile).map_err(LegalBoardStreamEncodeError::Asset)?;
+    output[13] = EXACT_INTERSECTION_KIND;
+    output[14] = LAYER_COUNT as u8;
+    output[16..48].copy_from_slice(&binding.rule_identity);
+
+    let mut cursor = PAYLOAD_OFFSET;
+    let mut has_empty_origin = false;
+    let mut has_full_terminal = false;
+    for layer in 0..LAYER_COUNT {
+        let begin = output.len();
+        let mut prior = None;
+        let mut count = 0_u64;
+        let mut emit = |field: u64| -> Result<(), LegalBoardAssetError> {
+            if field & !FIELD_MASK != 0 || field.count_ones() != (layer as u32) * 4 {
+                return Err(LegalBoardAssetError::LayerArea);
+            }
+            if prior.is_some_and(|value| value >= field) {
+                return Err(LegalBoardAssetError::NonCanonicalEncoding);
+            }
+            if layer == 0 && field == 0 {
+                has_empty_origin = true;
+            }
+            if layer == LAYER_COUNT - 1 && field == FIELD_MASK {
+                has_full_terminal = true;
+            }
+            let delta = prior.map_or(field, |value| field - value);
+            write_uleb128(delta, &mut output);
+            if output.len() > MAX_BUNDLE_BYTES {
+                return Err(LegalBoardAssetError::TooLarge);
+            }
+            prior = Some(field);
+            count = count
+                .checked_add(1)
+                .ok_or(LegalBoardAssetError::Directory)?;
+            Ok(())
+        };
+        visit_layer(layer, &mut emit).map_err(LegalBoardStreamEncodeError::Source)?;
+        drop(emit);
+        let length = output.len() - begin;
+        let digest: [u8; 32] = Sha256::digest(&output[begin..]).into();
+        write_directory(
+            &mut output[..PAYLOAD_OFFSET],
+            layer,
+            LayerDirectory {
+                count,
+                offset: cursor,
+                length,
+                digest,
+            },
+        )
+        .map_err(LegalBoardStreamEncodeError::Asset)?;
+        cursor = output.len();
+    }
+    if !has_empty_origin || !has_full_terminal {
+        return Err(LegalBoardStreamEncodeError::Asset(
+            LegalBoardAssetError::TerminalDomainIncomplete,
+        ));
     }
     let payload_digest: [u8; 32] = Sha256::digest(&output[PAYLOAD_OFFSET..]).into();
     output[48..80].copy_from_slice(&payload_digest);
@@ -1109,6 +1227,20 @@ mod tests {
             }),
             LegalBoardDecision::VerifiedAbsent
         );
+    }
+
+    #[test]
+    fn streamed_layer_encoder_matches_existing_bundle_bytes() {
+        let layers = layers();
+        let expected = encode_exact_intersection(binding(), &layers).unwrap();
+        let observed = encode_exact_intersection_streaming(binding(), |layer, emit| {
+            for &field in &layers[layer] {
+                emit(field).map_err(|error| error.code().to_owned())?;
+            }
+            Ok::<(), String>(())
+        })
+        .unwrap();
+        assert_eq!(observed, expected);
     }
 
     #[test]

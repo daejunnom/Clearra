@@ -38,6 +38,14 @@ pub(crate) fn parse_command(
         "percent" => parse_percent(command_args),
         "failed-queue" | "failed_queue" => parse_failed_queue(command_args),
         "setup"
+            if command_args.first().map(String::as_str) == Some("score")
+                && has_help(command_args) =>
+        {
+            Ok(ParsedCliCommand::Help(CliHelpTopic::Product(
+                super::ProductHelpTopic::SetupScore,
+            )))
+        }
+        "setup"
             if command_args.first().is_some_and(|value| {
                 matches!(value.as_str(), "joint" | "build" | "pc" | "score")
             }) && has_help(command_args) =>

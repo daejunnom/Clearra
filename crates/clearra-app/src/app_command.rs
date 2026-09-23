@@ -93,12 +93,17 @@ impl AppCommand {
                     });
             }
             Self::BuildProbability(command) => command.query().core_query().execution_policy(),
+            Self::BuildV2(command) => command
+                .request_profile_query()
+                .core_query()
+                .execution_policy(),
             Self::Setup(command) => {
                 return Some((
                     command.query().exact_legal_board_enabled(),
                     command.query().conditioned_reachability_enabled(),
                 ));
             }
+            Self::SetupScore(command) => return command.exact_accelerator_policy(),
             _ => return None,
         };
         Some((

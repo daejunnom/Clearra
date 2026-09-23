@@ -2,11 +2,13 @@ use crate::domain;
 use clearra_rules::kicks::KickTableProfileId;
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, OpenOptions},
-    io::Write,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+const MEET_LAYER: u8 = 6;
 
 #[derive(Clone, Debug)]
 pub struct LegalBoardGenerationOptions {
@@ -68,7 +70,7 @@ fn run_exact_layers(
     );
 
     let mut created = 0_usize;
-    for input_layer in 0_u8..10 {
+    for input_layer in 0_u8..MEET_LAYER {
         let output_layer = input_layer + 1;
         let report = domain::step(
             binding,
@@ -96,23 +98,79 @@ fn run_exact_layers(
         }
     }
 
-    let terminal = domain::legal_terminal_seed(
+    // Exact bidirectional meet: F_6 is complete from the empty board and R_7
+    // is complete to the full board. An F_6 state with an exact ILC edge into
+    // R_7 is precisely L_6. This avoids materialising unrestricted F_7..F_10.
+    let reverse = domain::DomainDirection::Reverse;
+    let terminal = domain::seed(
         binding,
-        &layers.join("forward-reachable-layer-10.bin"),
-        &layers.join("legal-layer-10.bin"),
+        reverse,
+        &layers.join("reverse-filter-layer-10.bin"),
     )?;
     println!(
-        "pc4_domain_seed={} direction=legal-backtrace layer={} fields={} identity={}",
+        "pc4_domain_seed={} direction=reverse-filter layer={} fields={} identity={}",
         terminal.disposition, terminal.layer, terminal.field_count, terminal.file_identity
     );
     if terminal.disposition == "created" {
         created += 1;
         if created == options.max_new_steps {
-            return incomplete("legal-terminal", created, options.max_new_steps);
+            return incomplete("reverse-filter", created, options.max_new_steps);
         }
     }
 
-    for source_layer in (0_u8..10).rev() {
+    for source_layer in (7_u8..10).rev() {
+        let input_layer = source_layer + 1;
+        let report = domain::step(
+            binding,
+            reverse,
+            &layers.join(format!("reverse-filter-layer-{input_layer:02}.bin")),
+            None,
+            &layers.join(format!("reverse-filter-layer-{source_layer:02}.bin")),
+            options.workers,
+        )?;
+        println!(
+            "pc4_domain_step={} direction=reverse-filter input_layer={} output_layer={} input_fields={} output_fields={} workers={} identity={}",
+            report.disposition,
+            report.input_layer,
+            report.output_layer,
+            report.input_field_count,
+            report.output_field_count,
+            report.workers,
+            report.file_identity
+        );
+        if report.disposition == "created" {
+            created += 1;
+            if created == options.max_new_steps {
+                return incomplete("reverse-filter", created, options.max_new_steps);
+            }
+        }
+    }
+
+    let report = domain::legal_predecessor_step(
+        binding,
+        &layers.join("forward-reachable-layer-06.bin"),
+        &layers.join("reverse-filter-layer-07.bin"),
+        &layers.join("legal-layer-06.bin"),
+        options.workers,
+    )?;
+    println!(
+        "pc4_domain_step={} direction=legal-meet input_layer={} output_layer={} input_fields={} output_fields={} workers={} identity={}",
+        report.disposition,
+        report.input_layer,
+        report.output_layer,
+        report.input_field_count,
+        report.output_field_count,
+        report.workers,
+        report.file_identity
+    );
+    if report.disposition == "created" {
+        created += 1;
+        if created == options.max_new_steps {
+            return incomplete("legal-meet", created, options.max_new_steps);
+        }
+    }
+
+    for source_layer in (0_u8..MEET_LAYER).rev() {
         let target_layer = source_layer + 1;
         let report = domain::legal_predecessor_step(
             binding,
@@ -133,8 +191,36 @@ fn run_exact_layers(
         );
         if report.disposition == "created" {
             created += 1;
-            if created == options.max_new_steps && source_layer != 0 {
+            if created == options.max_new_steps {
                 return incomplete("legal-backtrace", created, options.max_new_steps);
+            }
+        }
+    }
+
+    for output_layer in (MEET_LAYER + 1)..=10 {
+        let input_layer = output_layer - 1;
+        let report = domain::step(
+            binding,
+            forward,
+            &layers.join(format!("legal-layer-{input_layer:02}.bin")),
+            Some(&layers.join(format!("reverse-filter-layer-{output_layer:02}.bin"))),
+            &layers.join(format!("legal-layer-{output_layer:02}.bin")),
+            options.workers,
+        )?;
+        println!(
+            "pc4_domain_step={} direction=legal-forward input_layer={} output_layer={} input_fields={} output_fields={} workers={} identity={}",
+            report.disposition,
+            report.input_layer,
+            report.output_layer,
+            report.input_field_count,
+            report.output_field_count,
+            report.workers,
+            report.file_identity
+        );
+        if report.disposition == "created" {
+            created += 1;
+            if created == options.max_new_steps && output_layer != 10 {
+                return incomplete("legal-forward", created, options.max_new_steps);
             }
         }
     }
@@ -161,52 +247,107 @@ fn publish_exact_bundle(
     binding: domain::DomainBinding,
     options: &LegalBoardGenerationOptions,
 ) -> Result<(), String> {
-    let mut fields: [Vec<u64>; 11] = std::array::from_fn(|_| Vec::new());
+    let mut legal_summaries = Vec::with_capacity(11);
     let mut forward_identity = Vec::with_capacity(11);
+    let mut reverse_identity = Vec::with_capacity(11);
     let mut legal_identity = Vec::with_capacity(11);
+    let mut forward_digests = [None; 11];
+    let mut reverse_digests = [None; 11];
+    let mut legal_digests = [[0_u8; 32]; 11];
+    let mut legal_input_digests = [[0_u8; 32]; 11];
+    let mut legal_filter_digests = [[0_u8; 32]; 11];
     for layer in 0_u8..=10 {
-        let forward = domain::read(
-            &options
+        let legal_path = options.layers.join(format!("legal-layer-{layer:02}.bin"));
+        let expected_derivation = if layer <= MEET_LAYER {
+            domain::DomainDerivation::LegalPredecessorStep
+        } else {
+            domain::DomainDerivation::ForwardStep
+        };
+        let complete_path = if layer <= MEET_LAYER {
+            options
                 .layers
-                .join(format!("forward-reachable-layer-{layer:02}.bin")),
-            binding,
-            Some(layer),
-        )?;
-        let legal = domain::read(
-            &options.layers.join(format!("legal-layer-{layer:02}.bin")),
-            binding,
-            Some(layer),
-        )?;
-        if legal
-            .fields
-            .iter()
-            .any(|field| forward.fields.binary_search(field).is_err())
-        {
-            return Err("legal-board layer is not a subset of its forward domain".to_owned());
+                .join(format!("forward-reachable-layer-{layer:02}.bin"))
+        } else {
+            options
+                .layers
+                .join(format!("reverse-filter-layer-{layer:02}.bin"))
+        };
+        let (legal, complete) =
+            domain::verify_subset_files(&legal_path, &complete_path, binding, layer)?;
+        if legal.derivation != expected_derivation {
+            return Err("legal-board layer uses the wrong meet-side derivation".to_owned());
         }
-        fields[usize::from(layer)] = legal.fields;
-        forward_identity.push(forward.file_identity);
-        legal_identity.push(legal.file_identity);
+        if layer <= MEET_LAYER {
+            forward_digests[usize::from(layer)] = Some(complete.file_digest);
+            forward_identity.push(Some(complete.file_identity));
+            reverse_identity.push(None);
+        } else {
+            reverse_digests[usize::from(layer)] = Some(complete.file_digest);
+            forward_identity.push(None);
+            reverse_identity.push(Some(complete.file_identity));
+        }
+        legal_digests[usize::from(layer)] = legal.file_digest;
+        legal_input_digests[usize::from(layer)] = legal.input_digest;
+        legal_filter_digests[usize::from(layer)] = legal.filter_digest;
+        legal_identity.push(legal.file_identity.clone());
+        legal_summaries.push(legal);
     }
-    let encoded = clearra_core_executor::encode_exact_legal_board_intersection(
+    for layer in 0..=10_usize {
+        let expected_input = if layer <= usize::from(MEET_LAYER) {
+            forward_digests[layer].ok_or("legal-board forward proof is incomplete")?
+        } else {
+            legal_digests[layer - 1]
+        };
+        let expected_filter = if layer < usize::from(MEET_LAYER) {
+            legal_digests[layer + 1]
+        } else {
+            let reverse_layer = if layer == usize::from(MEET_LAYER) {
+                layer + 1
+            } else {
+                layer
+            };
+            reverse_digests[reverse_layer].ok_or("legal-board reverse proof is incomplete")?
+        };
+        if legal_input_digests[layer] != expected_input
+            || legal_filter_digests[layer] != expected_filter
+        {
+            return Err("legal-board layer proof chain is disconnected".to_owned());
+        }
+    }
+    if legal_summaries[10].field_count != 1 {
+        return Err("legal-board terminal is not the full four-line field".to_owned());
+    }
+    let encoded = clearra_core_executor::encode_exact_legal_board_intersection_streaming(
         binding.legal_board_binding(),
-        &fields,
+        |layer, emit| {
+            let path = options.layers.join(format!("legal-layer-{layer:02}.bin"));
+            domain::visit_verified_domain_fields(
+                &path,
+                binding,
+                &legal_summaries[layer],
+                &mut |field| emit(field).map_err(|error| error.code().to_owned()),
+            )
+        },
     )
-    .map_err(|error| error.code().to_owned())?;
+    .map_err(|error| match error {
+        clearra_core_executor::LegalBoardStreamEncodeError::Asset(asset) => asset.code().to_owned(),
+        clearra_core_executor::LegalBoardStreamEncodeError::Source(source) => source,
+    })?;
+    let encoded: Arc<[u8]> = Arc::from(encoded);
     let generation: [u8; 32] = encoded[80..112]
         .try_into()
         .map_err(|_| "legal-board generation identity width mismatch")?;
     let loaded = clearra_core_executor::ExactLegalBoard::load(
-        Arc::from(encoded.clone()),
+        Arc::clone(&encoded),
         clearra_core_executor::LegalBoardExpectation {
             binding: binding.legal_board_binding(),
             generation_identity: Some(generation),
         },
     )
     .map_err(|error| error.code().to_owned())?;
-    publish_immutable(&options.bundle, &encoded)?;
+    publish_immutable(&options.bundle, encoded.as_ref())?;
 
-    let bundle_digest: [u8; 32] = Sha256::digest(&encoded).into();
+    let bundle_digest: [u8; 32] = Sha256::digest(encoded.as_ref()).into();
     let layer_entries = (0..=10)
         .map(|layer| {
             serde_json::json!({
@@ -214,13 +355,16 @@ fn publish_exact_bundle(
                 "field_count": loaded.layer_count(layer).expect("all layers indexed"),
                 "payload_sha256": format!("sha256:{}", hex(&loaded.layer_payload_digest(layer).expect("all layers indexed"))),
                 "forward_domain_identity": forward_identity[layer],
-                "legal_backtrace_identity": legal_identity[layer],
+                "reverse_domain_identity": reverse_identity[layer],
+                "legal_layer_identity": legal_identity[layer],
             })
         })
         .collect::<Vec<_>>();
     let catalog = serde_json::to_vec_pretty(&serde_json::json!({
-        "schema": "clearra.legal-board.catalog.candidate.v1",
+        "schema": "clearra.legal-board.catalog.candidate.v2",
         "status": "candidate_unqualified",
+        "construction": "bidirectional_exact_intersection_v1",
+        "meet_layer": MEET_LAYER,
         "profile": clearra_core_executor::accelerator_profile_name(binding.legal_board_binding().kick_profile)
             .map_err(|_| "unsupported legal-board profile")?,
         "rule_identity": binding.identity_string(),
@@ -233,8 +377,9 @@ fn publish_exact_bundle(
         },
         "qualification": {
             "exact_intersection": true,
-            "forward_complete": true,
-            "backtrace_restricted_to_forward_domain": true,
+            "forward_prefix_complete": true,
+            "reverse_suffix_complete": true,
+            "inductive_legal_layers_complete": true,
             "signed": false,
             "release_authority": false,
         },
@@ -254,15 +399,29 @@ fn validate_output_path(path: &Path) -> Result<(), String> {
 }
 
 fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if path.exists() {
-        let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err("existing legal-board output is a symlink or non-file".to_owned());
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("existing legal-board output is a symlink or non-file".to_owned());
+            }
+            if metadata.len() != bytes.len() as u64 {
+                return Err(
+                    "refusing to replace a different immutable legal-board output".to_owned(),
+                );
+            }
+            let mut existing = Vec::with_capacity(bytes.len());
+            File::open(path)
+                .map_err(|error| error.to_string())?
+                .take((bytes.len() as u64).saturating_add(1))
+                .read_to_end(&mut existing)
+                .map_err(|error| error.to_string())?;
+            if existing == bytes {
+                return Ok(());
+            }
+            return Err("refusing to replace a different immutable legal-board output".to_owned());
         }
-        if fs::read(path).map_err(|error| error.to_string())? == bytes {
-            return Ok(());
-        }
-        return Err("refusing to replace a different immutable legal-board output".to_owned());
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
     }
     let parent = path.parent().ok_or("legal-board output has no parent")?;
     let name = path
@@ -279,7 +438,8 @@ fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<(), String> {
         file.write_all(bytes).map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())?;
         drop(file);
-        fs::rename(&pending, path).map_err(|error| error.to_string())?;
+        fs::hard_link(&pending, path).map_err(|error| error.to_string())?;
+        fs::remove_file(&pending).map_err(|error| error.to_string())?;
         Ok(())
     })();
     if result.is_err() {
@@ -296,4 +456,48 @@ fn hex(bytes: &[u8]) -> String {
         output.push(char::from(HEX[usize::from(byte & 15)]));
     }
     output
+}
+
+#[cfg(test)]
+mod immutable_output_tests {
+    use super::*;
+
+    #[test]
+    fn existing_output_is_idempotent_and_bounded_by_expected_length() {
+        let root = std::env::temp_dir().join(format!(
+            "clearra-legal-board-immutable-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let output = root.join("candidate.bin");
+        publish_immutable(&output, b"first").unwrap();
+        publish_immutable(&output, b"first").unwrap();
+        assert!(publish_immutable(&output, b"other").is_err());
+        OpenOptions::new()
+            .write(true)
+            .open(&output)
+            .unwrap()
+            .set_len(1024 * 1024)
+            .unwrap();
+        assert!(publish_immutable(&output, b"first").is_err());
+        fs::remove_file(output).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_link_is_never_treated_as_a_new_output() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "clearra-legal-board-dangling-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let output = root.join("candidate.bin");
+        symlink(root.join("absent.bin"), &output).unwrap();
+        assert!(publish_immutable(&output, b"new").is_err());
+        fs::remove_file(output).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
 }

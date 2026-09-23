@@ -339,7 +339,9 @@ mod tests {
     use clearra_host_contract::{
         BuildV2PayloadKind, ProductResultPayloadContent, HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES,
     };
-    use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_pc_graph::request::{
+        PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    };
     use clearra_problem::{
         BuildProbabilityField, BuildProbabilityQuery, BuildSolutionProbabilityPolicy,
     };
@@ -363,16 +365,35 @@ mod tests {
     };
 
     fn one_piece_query() -> BuildProbabilityQuery {
+        one_piece_query_with_policy(PcExecutionPolicy::mvp_default())
+    }
+
+    fn one_piece_query_with_policy(policy: PcExecutionPolicy) -> BuildProbabilityQuery {
         let core = PcScenarioQuery::new(
             PcScenarioBoard::standard_10(4, 0),
             PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
             PieceWindow::new(1),
         )
-        .with_exact_pieces(Some(1));
+        .with_exact_pieces(Some(1))
+        .with_execution_policy(policy);
         let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
             .expect("canonical target");
         BuildProbabilityQuery::new(core, field)
             .with_solution_probability_policy(BuildSolutionProbabilityPolicy::Include)
+    }
+
+    #[test]
+    fn build_v2_exposes_the_actual_request_accelerator_policy() {
+        let policy = PcExecutionPolicy::mvp_default()
+            .with_exact_legal_board_enabled(false)
+            .with_conditioned_reachability_enabled(true);
+        let request = BuildCoverV2Request::new(
+            one_piece_query_with_policy(policy),
+            BuildObjective::MinCover,
+        )
+        .expect("portfolio request");
+        let command = AppCommand::BuildV2(BuildV2AppCommand::build_cover(request));
+        assert_eq!(command.exact_accelerator_policy(), Some((false, true)));
     }
 
     fn colored_identity(piece_index: usize, cells: u64) -> StandardBoard64ColoredTilingIdentity {

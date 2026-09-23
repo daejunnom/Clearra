@@ -1,5 +1,5 @@
 use clearra_accelerator_product_host::{
-    embedded_catalog, CatalogProfileStatus, ProductCatalogKind,
+    embedded_catalog, CatalogProfileStatus, ConditionedRelationContract, ProductCatalogKind,
 };
 use std::process::ExitCode;
 
@@ -61,7 +61,35 @@ fn require_v081_qualification() -> Result<(), String> {
             return Err(format!("active_profile_limit_{}", profile.profile()));
         }
     }
+    require_local_entry_exit_contract()?;
     Ok(())
+}
+
+fn require_local_entry_exit_contract() -> Result<(), String> {
+    // The checked-in conditioned catalog currently authorizes only sparse
+    // spawn-to-lock records. Even five signed qualified profiles cannot
+    // satisfy the planned entry-to-first-exit BuildUp relation with that
+    // parser. Check this *after* catalog/profile/size diagnostics so the gate
+    // still reports those independently.
+    if ProductCatalogKind::BoardConditionedReachability.conditioned_relation_contract()
+        != Some(ConditionedRelationContract::ActualEntryToFirstExit)
+    {
+        return Err("conditioned_local_entry_exit_product_not_implemented".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_local_entry_exit_contract;
+
+    #[test]
+    fn sparse_spawn_to_lock_catalog_cannot_satisfy_local_relation_release_gate() {
+        assert_eq!(
+            require_local_entry_exit_contract(),
+            Err("conditioned_local_entry_exit_product_not_implemented".to_owned())
+        );
+    }
 }
 
 fn qualified_resident_bytes(

@@ -4,6 +4,11 @@ pub mod area;
 pub mod backend;
 pub mod board;
 pub mod buildup;
+mod conditioned_local_index;
+mod conditioned_local_pack;
+#[cfg(any(test, feature = "qualification-reference"))]
+mod conditioned_local_qualification;
+mod conditioned_local_relation;
 mod conditioned_reachability;
 pub mod core_execution_result;
 pub mod core_executor;
@@ -24,6 +29,8 @@ pub mod pc_chance_coverage_evidence;
 pub mod pc_failed_queue_evidence;
 pub mod performance;
 pub mod problem_lowering;
+#[cfg(any(test, feature = "qualification-reference"))]
+pub mod reachability_reference;
 pub mod resource;
 pub mod result_views;
 mod search_prune_policy;
@@ -62,15 +69,32 @@ pub use clearra_replay::{
     ScoringExecutionEdge, ScoringExecutionNode, ScoringLockEvidence, SpinCoverageExecutionBatch,
     SpinCoverageExecutionGraph,
 };
+pub use conditioned_local_index::{
+    LocalRelationCandidateIndex, LocalRelationCandidateLookup, LocalRelationIndexError,
+};
+pub use conditioned_local_pack::{
+    built_in_local_relation_binding, encode_local_relation_candidate_pack,
+    load_local_relation_candidate_pack, LocalRelationBinding, LocalRelationCandidatePack,
+    LocalRelationPackError,
+};
+#[cfg(any(test, feature = "qualification-reference"))]
+pub use conditioned_local_qualification::{
+    audit_candidate_local_relation_pack, LocalRelationCandidateAuditError,
+};
+pub use conditioned_local_relation::{
+    derive_exact_conditioned_local_relation, derive_exact_conditioned_local_relation_with_frame,
+    ConditionedPoseWindow, ExactConditionedLocalRelation, LocalRelationRowFrame,
+};
 pub use conditioned_reachability::{
     active_conditioned_reachability_identity, built_in_conditioned_reachability_binding,
-    derive_exact_conditioned_reachability_record, encode_conditioned_reachability,
-    install_conditioned_reachability_pack, remove_conditioned_reachability_pack,
-    BoardConditionedReachability, ConditionedEntryPoseSet, ConditionedEvidenceLevel,
-    ConditionedReachabilityAssetError, ConditionedReachabilityBinding,
-    ConditionedReachabilityExpectation, ConditionedReachabilityLookup,
-    ConditionedReachabilityQuery, ConditionedReachabilityRecord, ConditionedTargetScope,
-    QualifiedBoardConditionedReachability, CONDITIONED_REACHABILITY_COMPLETENESS_SCOPE,
+    derive_exact_conditioned_entry_lock_anchors, derive_exact_conditioned_reachability_record,
+    encode_conditioned_reachability, install_conditioned_reachability_pack,
+    remove_conditioned_reachability_pack, BoardConditionedReachability, ConditionedEntryPoseSet,
+    ConditionedEvidenceLevel, ConditionedReachabilityAssetError, ConditionedReachabilityBinding,
+    ConditionedReachabilityEntryPose, ConditionedReachabilityExpectation,
+    ConditionedReachabilityLookup, ConditionedReachabilityQuery, ConditionedReachabilityRecord,
+    ConditionedTargetScope, QualifiedBoardConditionedReachability,
+    CONDITIONED_REACHABILITY_COMPLETENESS_SCOPE,
 };
 pub use core_execution_result::{
     CoreExecutionResult, CorePathStep, PcScoreDistributedMergeEvidence,
@@ -89,10 +113,11 @@ pub use legal_board::{
     built_in_binding as built_in_legal_board_binding,
     built_in_rule_identity as built_in_legal_board_rule_identity,
     encode_exact_intersection as encode_exact_legal_board_intersection,
+    encode_exact_intersection_streaming as encode_exact_legal_board_intersection_streaming,
     install_qualified_exact_legal_board, remove_qualified_exact_legal_board, CompletionCapability,
     ExactLegalBoard, LegalBoardAssetError, LegalBoardBinding, LegalBoardDecision,
-    LegalBoardExpectation, LegalBoardQuery, OriginalRowFrame, ProviderStatus,
-    QualifiedExactLegalBoard, RowCodecError, UnsupportedLegalBoardProfile,
+    LegalBoardExpectation, LegalBoardQuery, LegalBoardStreamEncodeError, OriginalRowFrame,
+    ProviderStatus, QualifiedExactLegalBoard, RowCodecError, UnsupportedLegalBoardProfile,
     EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE,
 };
 pub use memory::ScopeGuard;

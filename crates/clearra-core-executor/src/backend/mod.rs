@@ -30,6 +30,8 @@ pub mod search_backend_executor;
 pub mod search_backend_warmup;
 pub mod wasm_build_probability_backend;
 mod wasm_cpu;
+pub(crate) use wasm_cpu::exact_entry_lock_anchors;
+pub(crate) use wasm_cpu::exact_local_relation;
 pub(crate) use wasm_cpu::exact_spawn_lock_anchors;
 pub mod wasm_cpu_search_backend;
 pub mod wasm_setup_parallel_backend;

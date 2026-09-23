@@ -12,6 +12,7 @@
   import QueueTextInput from '../components/QueueTextInput.svelte';
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
+  import AcceleratorDownloadControl from './AcceleratorDownloadControl.svelte';
   import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
   import type { WorkerAuthorityReport } from '../wasm';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
@@ -287,6 +288,7 @@
         <span>{label('conditionedReachability')}</span>
       </label>
       <small class="workspace-field-help">{label('exactAcceleratorsHelp')}</small>
+      <AcceleratorDownloadControl {language} />
     </div>
   </section>
 

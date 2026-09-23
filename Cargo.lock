@@ -162,6 +162,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clearra-accelerator-runtime"
+version = "0.8.1"
+dependencies = [
+ "clearra-accelerator-product-host",
+ "clearra-core-executor",
+ "clearra-rules",
+]
+
+[[package]]
 name = "clearra-app"
 version = "0.8.1"
 dependencies = [
@@ -209,11 +218,11 @@ name = "clearra-cli"
 version = "0.8.1"
 dependencies = [
  "clearra-accelerator-product-host",
+ "clearra-accelerator-runtime",
  "clearra-app",
  "clearra-build-coverage",
  "clearra-cli-command",
  "clearra-core-domain",
- "clearra-core-executor",
  "clearra-coverage",
  "clearra-fumen",
  "clearra-host-contract",
@@ -749,8 +758,11 @@ dependencies = [
 name = "clearra-wasm-abi"
 version = "0.8.1"
 dependencies = [
+ "clearra-accelerator-product-host",
+ "clearra-core-executor",
  "clearra-coverage",
  "clearra-pc-graph",
+ "clearra-rules",
  "clearra-wasm",
  "serde_json",
  "wasm-bindgen-futures",

@@ -9,7 +9,8 @@ function Get-SrpSourceRoots() {
 
 function Test-SrpExcludedPath([string]$FullName) {
     return $FullName -match '[\\/](node_modules|dist|dist-server|build|coverage|models|checkpoints|\.cache|target)[\\/]' -or
-        $FullName -match '[\\/]tools[\\/]vendor[\\/]'
+        $FullName -match '[\\/]tools[\\/]vendor[\\/]' -or
+        $FullName -match '[\\/]scripts[\\/]management[\\/]history[\\/]python-v1[\\/]'
 }
 
 function Assert-NoGeneratedFragmentDirectoryPattern() {

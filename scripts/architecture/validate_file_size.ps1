@@ -26,7 +26,8 @@ function Get-SrpGovernedFiles() {
                 [System.StringSplitOptions]::RemoveEmptyEntries
             )
             $excluded = @($pathSegments | Where-Object { $excludedSegments -contains $_ }).Count -gt 0
-            $extensionIncluded -and -not $excluded
+            $historicalMigration = $_.FullName -match '[\\/]scripts[\\/]management[\\/]history[\\/]python-v1[\\/]'
+            $extensionIncluded -and -not $excluded -and -not $historicalMigration
         } | ForEach-Object { $files.Add($_) }
     }
     $script:SrpGovernedFilesCache = @($files)

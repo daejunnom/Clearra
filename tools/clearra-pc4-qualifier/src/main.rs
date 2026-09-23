@@ -8,6 +8,9 @@
 //! targets outside the upstream field index still require an independent dead
 //! proof before an outgoing-edge completeness identity can be minted.
 
+// SRP rationale: this binary has one change reason: orchestrating local-only
+// PC4 qualification commands and their immutable evidence receipts.
+
 mod boundary;
 mod boundary_completion;
 mod boundary_dead;

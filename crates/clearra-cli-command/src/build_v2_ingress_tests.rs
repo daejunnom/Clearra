@@ -312,3 +312,34 @@ fn build_v2_accepts_only_cpu_even_when_the_redundant_backend_is_explicit() {
         .expect_err("programmatic GPU Build v2 request");
     assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
 }
+
+#[test]
+fn build_v2_accepts_independent_exact_accelerator_switches() {
+    let base = "clearra build cover --base-mask 0 --target-mask 15 --height 4 --queue I";
+    for (suffix, expected) in [
+        ("", (true, true)),
+        ("--no-legal-board", (false, true)),
+        ("--no-conditioned-reachability", (true, false)),
+        (
+            "--no-legal-board --no-conditioned-reachability",
+            (false, false),
+        ),
+    ] {
+        let source = format!("{base} {suffix}");
+        let request = CliCommandParser::parse(&source)
+            .expect(&source)
+            .to_app_request()
+            .expect("typed Build v2 request");
+        assert_eq!(request.command().exact_accelerator_policy(), Some(expected));
+    }
+    for suffix in [
+        "--legal-board --no-legal-board",
+        "--conditioned-reachability --no-conditioned-reachability",
+    ] {
+        let source = format!("{base} {suffix}");
+        assert_eq!(
+            CliCommandParser::parse(&source).expect_err(&source).code(),
+            CliCommandErrorCode::InvalidValue
+        );
+    }
+}

@@ -1,3 +1,5 @@
+// SRP rationale: this module has one change reason: proving outside-index PC4
+// boundary absence by an exact, resumable frontier traversal.
 use super::{
     boundary, clearra_board64_mask_to_hydra_field_hash_v1, domain, enumerate_pc4_ilc_target_fields,
     field_hash, hydra_field_hash_v1_to_clearra_board64_mask, lookup_field_id, read_json,

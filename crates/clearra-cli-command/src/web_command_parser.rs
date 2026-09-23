@@ -1613,6 +1613,10 @@ fn parse_setup_score_command(
     let mut use_all_seen = false;
     let mut backend_seen = false;
     let mut no_fallback_seen = false;
+    let mut exact_legal_board_enabled = true;
+    let mut exact_legal_board_seen = false;
+    let mut conditioned_reachability_enabled = true;
+    let mut conditioned_reachability_seen = false;
     let mut cursor = 0_usize;
     while cursor < tokens.len() {
         let option = tokens[cursor].as_str();
@@ -1780,6 +1784,26 @@ fn parse_setup_score_command(
                 no_fallback_seen = true;
                 cursor += 1;
             }
+            "--legal-board" | "--no-legal-board" => {
+                if exact_legal_board_seen {
+                    return Err(repeated_setup_score_option(
+                        "--legal-board/--no-legal-board",
+                    ));
+                }
+                exact_legal_board_enabled = option == "--legal-board";
+                exact_legal_board_seen = true;
+                cursor += 1;
+            }
+            "--conditioned-reachability" | "--no-conditioned-reachability" => {
+                if conditioned_reachability_seen {
+                    return Err(repeated_setup_score_option(
+                        "--conditioned-reachability/--no-conditioned-reachability",
+                    ));
+                }
+                conditioned_reachability_enabled = option == "--conditioned-reachability";
+                conditioned_reachability_seen = true;
+                cursor += 1;
+            }
             "--allow-backend-fallback" => {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::InvalidValue,
@@ -1883,7 +1907,9 @@ fn parse_setup_score_command(
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_runtime_webgpu_available(false)
         .with_hold_enabled(hold_enabled)
-        .with_use_all_logical_processors(use_all_logical_processors);
+        .with_use_all_logical_processors(use_all_logical_processors)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled);
     if let Some(limit) = max_patterns {
         request = request.with_max_patterns(limit);
     }
@@ -2674,6 +2700,10 @@ fn parse_build_v2_command(
     let mut cpu_warmup_seen = false;
     let mut backend_seen = false;
     let mut no_backend_fallback_seen = false;
+    let mut exact_legal_board_enabled = true;
+    let mut exact_legal_board_seen = false;
+    let mut conditioned_reachability_enabled = true;
+    let mut conditioned_reachability_seen = false;
     let mut cursor = 0usize;
 
     while cursor < options.len() {
@@ -2891,6 +2921,24 @@ fn parse_build_v2_command(
                 no_backend_fallback_seen = true;
                 cursor += 1;
             }
+            "--legal-board" | "--no-legal-board" => {
+                if exact_legal_board_seen {
+                    return Err(repeated_build_v2_option("--legal-board/--no-legal-board"));
+                }
+                exact_legal_board_enabled = option == "--legal-board";
+                exact_legal_board_seen = true;
+                cursor += 1;
+            }
+            "--conditioned-reachability" | "--no-conditioned-reachability" => {
+                if conditioned_reachability_seen {
+                    return Err(repeated_build_v2_option(
+                        "--conditioned-reachability/--no-conditioned-reachability",
+                    ));
+                }
+                conditioned_reachability_enabled = option == "--conditioned-reachability";
+                conditioned_reachability_seen = true;
+                cursor += 1;
+            }
             "--allow-backend-fallback" => {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::InvalidValue,
@@ -3050,7 +3098,9 @@ fn parse_build_v2_command(
         .with_runtime_webgpu_available(false)
         .with_hold_enabled(hold_enabled)
         .with_use_all_logical_processors(use_all_logical_processors)
-        .with_cpu_warmup(cpu_warmup);
+        .with_cpu_warmup(cpu_warmup)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled);
     if let Some(queue) = queue {
         request = request.with_queue(queue);
     }

@@ -4536,6 +4536,13 @@ mod validate_request {
     };
 
     impl DesktopTauriCommandBridge {
+        pub fn parse_app_request(
+            &self,
+            request_json: &str,
+        ) -> Result<AppRequest, DesktopTauriCommandError> {
+            desktop_request_builds_app_request(request_json)
+        }
+
         pub fn validate_request(
             &self,
             request_json: &str,

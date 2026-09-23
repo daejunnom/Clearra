@@ -1,5 +1,6 @@
 <script lang="ts">
   import Pc4DownloadControl from './Pc4DownloadControl.svelte';
+  import AcceleratorDownloadControl from './AcceleratorDownloadControl.svelte';
   import { Database, Layers3 } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
@@ -255,6 +256,7 @@
           <span>{label('conditionedReachability')}</span>
         </label>
         <small class="workspace-field-help">{label('exactAcceleratorsHelp')}</small>
+        <AcceleratorDownloadControl {language} />
       </div>
       <label class="workspace-field wide priority-field">
         <span>{label('setupCandidatePriority')}</span>

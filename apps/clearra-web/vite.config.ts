@@ -1,6 +1,6 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig, searchForWorkspaceRoot } from 'vite';
-import { frontendPaths } from '../../scripts/tools/clearra-frontend-paths.mjs';
+import { frontendPaths, frontendUiSourceAliases } from '../../scripts/tools/clearra-frontend-paths.mjs';
 
 import { wasmArtifactGuard } from './wasmArtifactGuard';
 
@@ -13,6 +13,7 @@ export default defineConfig(({ mode }) => {
     // Svelte runtime generations until a manual reload (blank first page).
     optimizeDeps: { include: ['@lucide/svelte', 'tetris-fumen', '@tauri-apps/api/core'] },
     plugins: [wasmArtifactGuard(), sveltekit()],
+    resolve: { alias: frontendUiSourceAliases() },
     ssr: { noExternal: true },
     server: {
       strictPort: false,

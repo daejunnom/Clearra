@@ -9,21 +9,17 @@ use clearra_accelerator_product_host::{
     embedded_catalog, CatalogProfileStatus, ProductCatalogKind, QualifiedCatalogAsset,
     VerifiedProductCatalog,
 };
-use clearra_core_executor::{
-    active_conditioned_reachability_identity, active_qualified_exact_legal_board_identity,
-    built_in_conditioned_reachability_binding, built_in_legal_board_binding,
-    install_conditioned_reachability_pack, install_qualified_exact_legal_board,
-    BoardConditionedReachability, ConditionedReachabilityExpectation, ExactLegalBoard,
-    LegalBoardExpectation, QualifiedBoardConditionedReachability, QualifiedExactLegalBoard,
+use clearra_accelerator_runtime::{
+    active_identity, install, qualify_signed as qualify, remove as remove_active,
+    QualifiedAccelerator,
 };
-use clearra_rules::kicks::KickTableProfileId;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use crate::accelerator_download_transport::stream_release_asset;
@@ -154,6 +150,17 @@ pub(crate) fn download(
     profile: &str,
     profile_root: &Path,
 ) -> Result<LocalAssetReport, &'static str> {
+    let cancelled = AtomicBool::new(false);
+    download_observed(kind, profile, profile_root, &cancelled, &mut |_, _| {})
+}
+
+pub(crate) fn download_observed(
+    kind: ProductCatalogKind,
+    profile: &str,
+    profile_root: &Path,
+    cancelled: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<LocalAssetReport, &'static str> {
     validate_profile(profile)?;
     let catalog = verified_catalog(kind)?;
     let catalog_identity = catalog.catalog_identity();
@@ -167,6 +174,9 @@ pub(crate) fn download(
     let lock = open_lock(profile_root)?;
     lock.try_lock()
         .map_err(|_| "accelerator: profile store is in use")?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("accelerator: download cancelled");
+    }
 
     let authority = asset.authority();
     let generation_name = generation_name(authority.generation_identity());
@@ -186,14 +196,18 @@ pub(crate) fn download(
             .open(&temporary)
             .map_err(|_| "accelerator: could not create bounded download staging")?;
         let mut digest = Sha256::new();
+        let mut transferred = 0_u64;
         let transfer = stream_release_asset(
             authority.asset_url(),
             authority.payload_bytes(),
+            cancelled,
             &mut |chunk| {
                 output
                     .write_all(chunk)
                     .map_err(|_| "accelerator: could not write download staging")?;
                 digest.update(chunk);
+                transferred += chunk.len() as u64;
+                progress(transferred, authority.payload_bytes());
                 Ok(())
             },
         );
@@ -219,6 +233,10 @@ pub(crate) fn download(
             let _ = fs::remove_file(&temporary);
             return Err(error);
         }
+        if cancelled.load(Ordering::Acquire) {
+            let _ = fs::remove_file(&temporary);
+            return Err("accelerator: download cancelled");
+        }
         if fs::create_dir(&generation_root).is_err() {
             let _ = fs::remove_file(&temporary);
             return Err("accelerator: could not publish immutable generation directory");
@@ -228,6 +246,14 @@ pub(crate) fn download(
             let _ = fs::remove_dir(&generation_root);
             return Err("accelerator: could not publish immutable payload");
         }
+        if cancelled.load(Ordering::Acquire) {
+            let _ = fs::remove_file(&payload_path);
+            let _ = fs::remove_dir(&generation_root);
+            return Err("accelerator: download cancelled");
+        }
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return Err("accelerator: download cancelled");
     }
     append_activation(
         profile_root,
@@ -255,21 +281,11 @@ pub(crate) fn activate_installed(
     let CatalogProfileStatus::Qualified(asset) = status else {
         return LocalAssetState::NotQualified;
     };
-    let Some(kick_profile) = KickTableProfileId::parse(profile) else {
-        return LocalAssetState::InvalidAsset;
-    };
     let expected = (
         asset.authority().generation_identity(),
         asset.authority().statement_identity(),
     );
-    let active = match kind {
-        ProductCatalogKind::ExactLegalBoard => {
-            active_qualified_exact_legal_board_identity(kick_profile)
-        }
-        ProductCatalogKind::BoardConditionedReachability => {
-            active_conditioned_reachability_identity(kick_profile)
-        }
-    };
+    let active = active_identity(kind, profile);
     if active == Some(expected) {
         return LocalAssetState::Ready;
     }
@@ -280,15 +296,8 @@ pub(crate) fn activate_installed(
         catalog.catalog_identity(),
         asset,
     ) {
-        Ok(Some(LoadedAsset::Exact(board))) => {
-            if install_qualified_exact_legal_board(board).is_ok() {
-                LocalAssetState::Ready
-            } else {
-                LocalAssetState::InvalidAsset
-            }
-        }
-        Ok(Some(LoadedAsset::Conditioned(pack))) => {
-            if install_conditioned_reachability_pack(pack).is_ok() {
+        Ok(Some(asset)) => {
+            if install(asset).is_ok() {
                 LocalAssetState::Ready
             } else {
                 LocalAssetState::InvalidAsset
@@ -309,20 +318,17 @@ pub(crate) fn remove(
 ) -> Result<bool, &'static str> {
     validate_profile(profile)?;
     if !profile_root.exists() {
+        remove_active(kind, profile)?;
         return Ok(false);
     }
     reject_link(profile_root, true)?;
     let lock = open_lock(profile_root)?;
     lock.try_lock()
         .map_err(|_| "accelerator: profile store is in use")?;
+    remove_active(kind, profile)?;
     remove_file_if_present(&profile_root.join(JOURNAL))?;
     cleanup_inactive_generations(profile_root, kind, "")?;
     Ok(true)
-}
-
-enum LoadedAsset {
-    Exact(QualifiedExactLegalBoard),
-    Conditioned(QualifiedBoardConditionedReachability),
 }
 
 fn load_active(
@@ -331,7 +337,7 @@ fn load_active(
     profile_root: &Path,
     catalog_identity: [u8; 32],
     asset: &QualifiedCatalogAsset,
-) -> Result<Option<LoadedAsset>, &'static str> {
+) -> Result<Option<QualifiedAccelerator>, &'static str> {
     if !profile_root.exists() {
         return Ok(None);
     }
@@ -352,55 +358,6 @@ fn load_active(
     reject_link(&payload, false)?;
     let bytes = read_bounded(&payload, asset.authority().payload_bytes())?;
     qualify(kind, profile, bytes.into(), asset).map(Some)
-}
-
-fn qualify(
-    kind: ProductCatalogKind,
-    profile: &str,
-    bytes: Arc<[u8]>,
-    asset: &QualifiedCatalogAsset,
-) -> Result<LoadedAsset, &'static str> {
-    let kick_profile = KickTableProfileId::parse(profile)
-        .ok_or("accelerator: profile is not connected to a kick table")?;
-    match kind {
-        ProductCatalogKind::ExactLegalBoard => {
-            let binding = built_in_legal_board_binding(kick_profile)
-                .map_err(|_| "accelerator: legal-board binding unavailable")?;
-            let loaded = ExactLegalBoard::load(
-                bytes,
-                LegalBoardExpectation {
-                    binding,
-                    generation_identity: Some(asset.authority().generation_identity()),
-                },
-            )
-            .map_err(|_| "accelerator: exact legal-board payload invalid")?;
-            let qualified = QualifiedExactLegalBoard::qualify(loaded, asset.authority())
-                .map_err(|_| "accelerator: exact legal-board qualification mismatch")?;
-            if qualified.shared_bytes() as u64 > asset.metadata().active_session_shared_bytes() {
-                return Err("accelerator: exact legal-board exceeds resident-size proof");
-            }
-            Ok(LoadedAsset::Exact(qualified))
-        }
-        ProductCatalogKind::BoardConditionedReachability => {
-            let binding = built_in_conditioned_reachability_binding(kick_profile)
-                .map_err(|_| "accelerator: conditioned-reachability binding unavailable")?;
-            let loaded = BoardConditionedReachability::load(
-                bytes,
-                ConditionedReachabilityExpectation {
-                    binding,
-                    generation_identity: Some(asset.authority().generation_identity()),
-                },
-            )
-            .map_err(|_| "accelerator: conditioned-reachability payload invalid")?;
-            let qualified =
-                QualifiedBoardConditionedReachability::qualify(loaded, asset.authority())
-                    .map_err(|_| "accelerator: conditioned-reachability qualification mismatch")?;
-            if qualified.shared_bytes() as u64 > asset.metadata().active_session_shared_bytes() {
-                return Err("accelerator: conditioned-reachability exceeds resident-size proof");
-            }
-            Ok(LoadedAsset::Conditioned(qualified))
-        }
-    }
 }
 
 fn append_activation(

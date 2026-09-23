@@ -81,7 +81,10 @@ Reviewers should ask:
 
 The gate covers source, tests, and scripts under `crates`, `core-c`, `scripts`,
 `tools`, `apps`, `packages`, and `gui`. Generated and dependency directories are
-excluded. Very large files produce a review warning, not an automatic failure.
+excluded. The frozen `scripts/management/history/python-v1/` migration archive
+is also excluded because it is not an executable production owner; its contents
+remain tracked historical evidence. Very large files produce a review warning,
+not an automatic failure.
 
 The structural gate rejects known over-fragmentation forms while allowing
 public domain modules and real dependency boundaries to remain separate.

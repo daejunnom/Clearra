@@ -12,6 +12,7 @@
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
   import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
   import Pc4DownloadControl from './Pc4DownloadControl.svelte';
+  import AcceleratorDownloadControl from './AcceleratorDownloadControl.svelte';
   import type { WorkerAuthorityReport } from '../wasm';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
@@ -318,6 +319,7 @@
         <span>{label('conditionedReachability')}</span>
       </label>
       <small class="workspace-field-help">{label('exactAcceleratorsHelp')}</small>
+      <AcceleratorDownloadControl {language} />
     </div>
   </section>
 

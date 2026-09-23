@@ -10,6 +10,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(scriptDirectory, '..');
 const svelteSources = [
   'apps/clearra-desktop/src/routes/+page.svelte',
+  'apps/clearra-desktop/src/lib/AcceleratorAssetPanel.svelte',
   'packages/clearra-ui/src/lib/components/DesktopHostShell.svelte',
   'packages/clearra-ui/src/lib/render/RenderStatusPanel.svelte',
   'packages/clearra-ui/src/lib/wasm/WasmTerminalShell.svelte',
@@ -106,10 +107,26 @@ for (const requiredMarker of [
   '<BuildProbabilityWorkspace runtime="desktop"',
   '<ForwardSearchWorkspace tool={selectedTool} runtime="desktop"',
   '<CtkDrawerWorkspace',
-  '<PlayerWorkspace'
+  '<PlayerWorkspace',
+  "setContext('clearra.accelerator-download-control.v1', AcceleratorAssetPanel)"
 ]) {
   if (!desktopEntrySource.includes(requiredMarker)) {
     throw new Error(`desktop tool route is missing ${requiredMarker}`);
+  }
+}
+
+const desktopMainSource = await readFile(
+  path.join(root, 'apps/clearra-desktop/src-tauri/src/main.rs'),
+  'utf8'
+);
+for (const command of [
+  'accelerator_asset_action',
+  'accelerator_asset_start_download',
+  'accelerator_asset_progress',
+  'accelerator_asset_cancel'
+]) {
+  if (!desktopMainSource.includes(command)) {
+    throw new Error(`desktop accelerator command is not registered: ${command}`);
   }
 }
 

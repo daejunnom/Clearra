@@ -12,7 +12,7 @@ use clearra_i18n::LanguageId;
 use clearra_pc4_qualifier::{generate_legal_board, LegalBoardGenerationOptions};
 use clearra_rules::kicks::KickTableProfileId;
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{fs, path::PathBuf, sync::atomic::AtomicBool};
 
 const PROFILES: [&str; 5] = ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"];
 const PRODUCT: ProductCatalogKind = ProductCatalogKind::ExactLegalBoard;
@@ -152,6 +152,19 @@ fn execute(args: &[String]) -> Result<Value, &'static str> {
     }
 }
 
+pub(crate) fn download_observed(
+    profile: &str,
+    cancelled: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<Value, &'static str> {
+    let root = checked_profile_root(&default_directory()?, profile)?;
+    report_value(
+        "download",
+        profile,
+        accelerator_asset_store::download_observed(PRODUCT, profile, &root, cancelled, progress)?,
+    )
+}
+
 fn default_directory() -> Result<PathBuf, &'static str> {
     if let Some(path) = std::env::var_os("CLEARRA_LEGAL_BOARD_DIRECTORY") {
         return Ok(PathBuf::from(path));
@@ -205,19 +218,11 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
         "oversized_unqualified_candidate"
     } else if bundle_bytes.is_some() {
         let bytes = fs::read(&bundle).map_err(|_| "legal-board: candidate bundle is unreadable")?;
-        let kick_profile = KickTableProfileId::parse(profile)
-            .ok_or("legal-board: profile is not connected to a kick table")?;
-        let binding = clearra_core_executor::built_in_legal_board_binding(kick_profile)
-            .map_err(|_| "legal-board: profile binding is unavailable")?;
-        match clearra_core_executor::ExactLegalBoard::load(
-            Arc::from(bytes),
-            clearra_core_executor::LegalBoardExpectation {
-                binding,
-                generation_identity: None,
-            },
-        ) {
-            Ok(_) => "structurally_valid_unqualified",
-            Err(_) => "invalid_asset",
+        if clearra_accelerator_runtime::structurally_valid_candidate(PRODUCT, profile, bytes.into())
+        {
+            "structurally_valid_unqualified"
+        } else {
+            "invalid_asset"
         }
     } else {
         "not_loaded"
@@ -238,9 +243,11 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
 }
 
 fn remove(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> {
+    // Revoke the process-local authority even if the user (or a cleaner)
+    // already removed the on-disk directory.
+    accelerator_asset_store::remove(PRODUCT, profile, root)?;
     if root.exists() {
         reject_link(root)?;
-        accelerator_asset_store::remove(PRODUCT, profile, root)?;
         for layer in 0_u8..=10 {
             remove_file_if_present(&root.join(format!("forward-reachable-layer-{layer:02}.bin")))?;
             remove_file_if_present(&root.join(format!("legal-layer-{layer:02}.bin")))?;

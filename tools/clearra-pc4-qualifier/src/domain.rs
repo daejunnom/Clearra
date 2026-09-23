@@ -1,3 +1,5 @@
+// SRP rationale: this module has one change reason: producing and validating
+// profile-bound, resumable PC4 forward and reverse domain layers.
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_executor::{
     enumerate_pc4_ilc_geometric_predecessor_fields, enumerate_pc4_ilc_target_fields,
@@ -11,7 +13,7 @@ use std::{
     cmp::Reverse,
     collections::{BTreeSet, BinaryHeap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
     thread,
@@ -36,6 +38,10 @@ const PAIR_RUN_FAN_IN: usize = 2;
 const REVERSE_TARGET_CHUNK_SIZE: usize = 512;
 #[cfg(test)]
 const REVERSE_TARGET_CHUNK_SIZE: usize = 2;
+#[cfg(not(test))]
+const FORWARD_SOURCE_CHUNK_SIZE: usize = 1024;
+#[cfg(test)]
+const FORWARD_SOURCE_CHUNK_SIZE: usize = 2;
 
 #[derive(Clone, Copy)]
 pub(crate) struct DomainBinding {
@@ -105,6 +111,16 @@ impl DomainDirection {
 pub(crate) struct DomainFile {
     pub(crate) layer: u8,
     pub(crate) fields: Vec<u64>,
+    pub(crate) file_identity: String,
+    pub(crate) file_digest: [u8; 32],
+    pub(crate) derivation: DomainDerivation,
+    pub(crate) input_digest: [u8; 32],
+    pub(crate) filter_digest: [u8; 32],
+}
+
+pub(crate) struct DomainSummary {
+    pub(crate) layer: u8,
+    pub(crate) field_count: usize,
     pub(crate) file_identity: String,
     pub(crate) file_digest: [u8; 32],
     pub(crate) derivation: DomainDerivation,
@@ -218,6 +234,9 @@ pub(crate) fn step(
     if requested_workers == 0 || requested_workers > MAX_WORKERS {
         return Err("domain worker count outside 1..=64".to_owned());
     }
+    if direction == DomainDirection::Forward && filter_path.is_none() {
+        return step_unfiltered_forward(binding, input_path, output_path, requested_workers);
+    }
     let input = read(input_path, binding, None)?;
     let output_layer = match direction {
         DomainDirection::Reverse => input
@@ -258,6 +277,8 @@ pub(crate) fn step(
         }
         if direction == DomainDirection::Reverse {
             cleanup_reverse_spill(output_path)?;
+        } else {
+            cleanup_forward_spill(output_path)?;
         }
         return Ok(StepReport {
             disposition: "already-complete",
@@ -275,55 +296,343 @@ pub(crate) fn step(
     let workers = requested_workers
         .min(available)
         .min(input.fields.len().max(1));
-    let (fields, candidate_pair_count) = match direction {
-        DomainDirection::Reverse => generate_reverse_layer(
+    if direction == DomainDirection::Forward {
+        let filter_digest = filter.as_ref().map_or([0; 32], |value| value.file_digest);
+        let derivation = if filter.is_some() {
+            DomainDerivation::ForwardStep
+        } else {
+            DomainDerivation::ForwardReachableStep
+        };
+        let (identity, output_field_count) = write_streamed_domain(
+            output_path,
             binding,
             output_layer,
-            &input.fields,
+            derivation,
             input.file_digest,
-            output_path,
+            filter_digest,
+            |emit| {
+                visit_forward_layer_spilled(
+                    binding,
+                    output_layer,
+                    ForwardSource::Fields(&input.fields),
+                    input.file_digest,
+                    filter.as_ref().map(|value| value.fields.as_slice()),
+                    filter_digest,
+                    output_path,
+                    workers,
+                    emit,
+                )
+            },
+        )?;
+        cleanup_forward_spill(output_path)?;
+        return Ok(StepReport {
+            disposition: "created",
+            input_layer: input.layer,
+            output_layer,
+            input_field_count: input.fields.len(),
+            output_field_count,
+            candidate_pair_count: 0,
             workers,
-        )?,
-        DomainDirection::Forward => (
-            generate_forward_layer(
-                binding,
-                output_layer,
-                &input.fields,
-                filter.as_ref().map(|value| value.fields.as_slice()),
-                workers,
-            )?,
-            0,
-        ),
-    };
-    validate_fields(output_layer, &fields)?;
-    let derivation = match direction {
-        DomainDirection::Reverse => DomainDerivation::ReverseStep,
-        DomainDirection::Forward if filter.is_some() => DomainDerivation::ForwardStep,
-        DomainDirection::Forward => DomainDerivation::ForwardReachableStep,
-    };
-    let filter_digest = filter.as_ref().map_or([0; 32], |value| value.file_digest);
-    let identity = write(
+            file_identity: identity,
+        });
+    }
+    let mut candidate_pair_count = 0_usize;
+    let (identity, output_field_count) = write_streamed_domain(
         output_path,
         binding,
         output_layer,
-        &fields,
-        derivation,
+        DomainDerivation::ReverseStep,
         input.file_digest,
-        filter_digest,
+        [0; 32],
+        |emit| {
+            let (count, pairs) = visit_reverse_layer_spilled(
+                binding,
+                output_layer,
+                &input.fields,
+                input.file_digest,
+                output_path,
+                workers,
+                REVERSE_TARGET_CHUNK_SIZE,
+                None,
+                emit,
+            )?;
+            candidate_pair_count = pairs;
+            Ok(count)
+        },
     )?;
-    if direction == DomainDirection::Reverse {
-        cleanup_reverse_spill(output_path)?;
-    }
+    cleanup_reverse_spill(output_path)?;
     Ok(StepReport {
         disposition: "created",
         input_layer: input.layer,
         output_layer,
         input_field_count: input.fields.len(),
-        output_field_count: fields.len(),
+        output_field_count,
         candidate_pair_count,
         workers,
         file_identity: identity,
     })
+}
+
+/// The product F_k path validates the input without materialising it, then
+/// rechecks the same immutable digest while feeding bounded source chunks into
+/// pair runs. Historical filtered steps retain their in-memory input path.
+fn step_unfiltered_forward(
+    binding: DomainBinding,
+    input_path: &Path,
+    output_path: &Path,
+    requested_workers: usize,
+) -> Result<StepReport, String> {
+    let input = inspect_domain_file(input_path, binding, None)?;
+    let output_layer = input
+        .layer
+        .checked_add(1)
+        .filter(|layer| *layer <= 10)
+        .ok_or("forward domain is already at layer ten")?;
+    if output_path.exists() {
+        let existing = inspect_domain_file(output_path, binding, Some(output_layer))?;
+        if existing.derivation != DomainDerivation::ForwardReachableStep
+            || existing.input_digest != input.file_digest
+            || existing.filter_digest != [0; 32]
+        {
+            return Err("existing domain step is not bound to its current inputs".to_owned());
+        }
+        cleanup_forward_spill(output_path)?;
+        return Ok(StepReport {
+            disposition: "already-complete",
+            input_layer: input.layer,
+            output_layer,
+            input_field_count: input.field_count,
+            output_field_count: existing.field_count,
+            candidate_pair_count: 0,
+            workers: 0,
+            file_identity: existing.file_identity,
+        });
+    }
+    let available = thread::available_parallelism().map_or(1, usize::from);
+    let workers = requested_workers
+        .min(available)
+        .min(input.field_count.max(1));
+    let (identity, output_field_count) = write_streamed_domain(
+        output_path,
+        binding,
+        output_layer,
+        DomainDerivation::ForwardReachableStep,
+        input.file_digest,
+        [0; 32],
+        |emit| {
+            visit_forward_layer_spilled(
+                binding,
+                output_layer,
+                ForwardSource::VerifiedFile {
+                    path: input_path,
+                    summary: &input,
+                },
+                input.file_digest,
+                None,
+                [0; 32],
+                output_path,
+                workers,
+                emit,
+            )
+        },
+    )?;
+    cleanup_forward_spill(output_path)?;
+    Ok(StepReport {
+        disposition: "created",
+        input_layer: input.layer,
+        output_layer,
+        input_field_count: input.field_count,
+        output_field_count,
+        candidate_pair_count: 0,
+        workers,
+        file_identity: identity,
+    })
+}
+
+/// The production forward path emits its final sorted union directly into a
+/// domain writer. Tests retain a collecting adapter to compare the spill merge
+/// with the independent in-memory implementation on bounded fixtures.
+#[cfg(test)]
+fn generate_forward_layer_spilled(
+    binding: DomainBinding,
+    output_layer: u8,
+    input: &[u64],
+    input_digest: [u8; 32],
+    filter: Option<&[u64]>,
+    filter_digest: [u8; 32],
+    output_path: &Path,
+    workers: usize,
+) -> Result<Vec<u64>, String> {
+    let mut fields = Vec::new();
+    visit_forward_layer_spilled(
+        binding,
+        output_layer,
+        ForwardSource::Fields(input),
+        input_digest,
+        filter,
+        filter_digest,
+        output_path,
+        workers,
+        &mut |field| {
+            fields.push(field);
+            Ok(())
+        },
+    )?;
+    Ok(fields)
+}
+
+enum ForwardSource<'a> {
+    Fields(&'a [u64]),
+    VerifiedFile {
+        path: &'a Path,
+        summary: &'a DomainSummary,
+    },
+}
+
+fn visit_forward_layer_spilled(
+    binding: DomainBinding,
+    output_layer: u8,
+    source: ForwardSource<'_>,
+    input_digest: [u8; 32],
+    filter: Option<&[u64]>,
+    filter_digest: [u8; 32],
+    output_path: &Path,
+    workers: usize,
+    emit: &mut dyn FnMut(u64) -> Result<(), String>,
+) -> Result<usize, String> {
+    let spill_root = prepare_forward_spill(output_path)?;
+    let spill_identity: [u8; 32] = Sha256::new()
+        .chain_update(b"clearra.legal-forward.spill.v1\0")
+        .chain_update(input_digest)
+        .chain_update(filter_digest)
+        .finalize()
+        .into();
+    let mut run_paths = Vec::new();
+    let mut created_runs = 0_usize;
+    let mut reused_runs = 0_usize;
+    let source_len = match &source {
+        ForwardSource::Fields(fields) => fields.len(),
+        ForwardSource::VerifiedFile { summary, .. } => summary.field_count,
+    };
+    let mut write_chunk = |chunk_index: usize, input_chunk: &[u64]| -> Result<(), String> {
+        let start = chunk_index
+            .checked_mul(FORWARD_SOURCE_CHUNK_SIZE)
+            .ok_or("forward run start overflow")?;
+        let end = start
+            .checked_add(input_chunk.len())
+            .ok_or("forward run end overflow")?;
+        let path = pair_run_path(&spill_root, start, end);
+        if path.exists() {
+            PairRunReader::open(&path, binding, spill_identity, output_layer, start, end)?;
+            reused_runs += 1;
+        } else {
+            let fields = generate_forward_layer(
+                binding,
+                output_layer,
+                input_chunk,
+                filter,
+                workers.min(input_chunk.len().max(1)),
+            )?;
+            let marked_fields = fields
+                .into_iter()
+                .map(|field| (field, PieceKind::I))
+                .collect::<Vec<_>>();
+            write_pair_run(
+                &path,
+                binding,
+                spill_identity,
+                output_layer,
+                start,
+                end,
+                &marked_fields,
+            )?;
+            created_runs += 1;
+        }
+        if (created_runs + reused_runs) % 128 == 0 || end == source_len {
+            eprintln!(
+                "legal_board_forward_run=progress layer={} created={} reused={} end={}",
+                output_layer, created_runs, reused_runs, end
+            );
+        }
+        run_paths.push((path, start, end));
+        Ok(())
+    };
+    match source {
+        ForwardSource::Fields(input) => {
+            for (chunk_index, input_chunk) in input.chunks(FORWARD_SOURCE_CHUNK_SIZE).enumerate() {
+                write_chunk(chunk_index, input_chunk)?;
+            }
+        }
+        ForwardSource::VerifiedFile { path, summary } => {
+            let mut chunk = Vec::with_capacity(FORWARD_SOURCE_CHUNK_SIZE);
+            let mut chunk_index = 0_usize;
+            let mut visit = |field| -> Result<(), String> {
+                chunk.push(field);
+                if chunk.len() == FORWARD_SOURCE_CHUNK_SIZE {
+                    write_chunk(chunk_index, &chunk)?;
+                    chunk.clear();
+                    chunk_index = chunk_index
+                        .checked_add(1)
+                        .ok_or("forward run index overflow")?;
+                }
+                Ok(())
+            };
+            let (observed, _) =
+                scan_domain_file(path, binding, Some(summary.layer), Some(&mut visit))?;
+            drop(visit);
+            if !chunk.is_empty() {
+                write_chunk(chunk_index, &chunk)?;
+            }
+            if observed.file_digest != summary.file_digest
+                || observed.field_count != summary.field_count
+                || observed.derivation != summary.derivation
+                || observed.input_digest != summary.input_digest
+                || observed.filter_digest != summary.filter_digest
+            {
+                return Err("forward source changed during its verified scan".to_owned());
+            }
+        }
+    }
+    drop(write_chunk);
+    let run_paths = reduce_pair_runs(
+        &spill_root,
+        run_paths,
+        binding,
+        spill_identity,
+        output_layer,
+    )?;
+    let mut readers = run_paths
+        .iter()
+        .map(|(path, start, end)| {
+            PairRunReader::open(path, binding, spill_identity, output_layer, *start, *end)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let marker = PieceKind::STANDARD_TETROMINOES
+        .iter()
+        .position(|piece| *piece == PieceKind::I)
+        .ok_or("forward run marker is not standard")? as u8;
+    let mut heap = BinaryHeap::new();
+    for (run_index, reader) in readers.iter_mut().enumerate() {
+        if let Some(pair) = reader.next_pair()? {
+            heap.push(Reverse((pair, run_index)));
+        }
+    }
+    let mut count = 0_usize;
+    let mut previous = None;
+    while let Some(Reverse((pair, run_index))) = heap.pop() {
+        if pair.1 != marker {
+            return Err("forward run contains a non-marker piece".to_owned());
+        }
+        if previous != Some(pair.0) {
+            emit(pair.0)?;
+            previous = Some(pair.0);
+            count = count.checked_add(1).ok_or("forward field count overflow")?;
+        }
+        if let Some(next) = readers[run_index].next_pair()? {
+            heap.push(Reverse((next, run_index)));
+        }
+    }
+    Ok(count)
 }
 
 fn generate_forward_layer(
@@ -436,14 +745,14 @@ pub(crate) fn legal_predecessor_step(
     if requested_workers == 0 || requested_workers > MAX_WORKERS {
         return Err("domain worker count outside 1..=64".to_owned());
     }
-    let forward = read(forward_source_path, binding, None)?;
+    let forward = inspect_domain_file(forward_source_path, binding, None)?;
     if forward.layer >= 10 {
         return Err("legal predecessor source must be below layer ten".to_owned());
     }
     let target_layer = forward.layer + 1;
     let target = read(legal_target_path, binding, Some(target_layer))?;
     if output_path.exists() {
-        let existing = read(output_path, binding, Some(forward.layer))?;
+        let existing = inspect_domain_file(output_path, binding, Some(forward.layer))?;
         if existing.derivation != DomainDerivation::LegalPredecessorStep
             || existing.input_digest != forward.file_digest
             || existing.filter_digest != target.file_digest
@@ -452,12 +761,13 @@ pub(crate) fn legal_predecessor_step(
                 "existing legal predecessor layer is not bound to its current inputs".to_owned(),
             );
         }
+        cleanup_reverse_spill(output_path)?;
         return Ok(StepReport {
             disposition: "already-complete",
             input_layer: target_layer,
             output_layer: forward.layer,
             input_field_count: target.fields.len(),
-            output_field_count: existing.fields.len(),
+            output_field_count: existing.field_count,
             candidate_pair_count: 0,
             workers: 0,
             file_identity: existing.file_identity,
@@ -466,89 +776,56 @@ pub(crate) fn legal_predecessor_step(
     let available = thread::available_parallelism().map_or(1, usize::from);
     let workers = requested_workers
         .min(available)
-        .min(forward.fields.len().max(1));
-    let cursor = AtomicUsize::new(0);
-    let partials = thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for _ in 0..workers {
-            let cursor = &cursor;
-            let sources = &forward.fields;
-            let targets = &target.fields;
-            handles.push(scope.spawn(move || {
-                let mut admitted = Vec::new();
-                loop {
-                    let begin = cursor.fetch_add(8, Ordering::Relaxed);
-                    if begin >= sources.len() {
-                        break;
-                    }
-                    for &field_hash in &sources[begin..sources.len().min(begin + 8)] {
-                        let cells = hydra_field_hash_v1_to_clearra_board64_mask(field_hash)
-                            .map_err(|error| error.reason().to_owned())?;
-                        let mut reaches_legal_target = false;
-                        'pieces: for piece in PieceKind::STANDARD_TETROMINOES {
-                            for candidate in
-                                enumerate_pc4_ilc_target_fields(cells, piece, binding.kick_profile)
-                                    .map_err(|error| error.reason().to_owned())?
-                            {
-                                let candidate_hash =
-                                    clearra_board64_mask_to_hydra_field_hash_v1(candidate)
-                                        .map_err(|error| error.reason().to_owned())?;
-                                if targets.binary_search(&candidate_hash).is_ok() {
-                                    reaches_legal_target = true;
-                                    break 'pieces;
-                                }
-                            }
-                        }
-                        if reaches_legal_target {
-                            admitted.push(field_hash);
-                        }
-                    }
-                }
-                Ok(admitted)
-            }));
-        }
-        join_workers(handles)
-    })?;
-    let fields = merge_sorted(partials);
-    validate_fields(forward.layer, &fields)?;
-    let identity = write(
+        .min(target.fields.len().max(1));
+    // Enumerate geometric predecessors of the already-complete legal target,
+    // merge their pair runs, intersect the sorted stream with complete F_k in
+    // one verified file pass, then exact-ILC-check each surviving source.
+    // Unfiltered runs may use more spill space than in-memory prefiltering;
+    // their exact size remains a qualification measurement, not an estimate.
+    let spill_identity: [u8; 32] = Sha256::new()
+        .chain_update(b"clearra.legal-predecessor.spill.v1\0")
+        .chain_update(target.file_digest)
+        .chain_update(forward.file_digest)
+        .finalize()
+        .into();
+    let mut candidate_pair_count = 0_usize;
+    let (identity, output_field_count) = write_streamed_domain(
         output_path,
         binding,
         forward.layer,
-        &fields,
         DomainDerivation::LegalPredecessorStep,
         forward.file_digest,
         target.file_digest,
+        |emit| {
+            let (count, pairs) = visit_reverse_layer_spilled(
+                binding,
+                forward.layer,
+                &target.fields,
+                spill_identity,
+                output_path,
+                workers,
+                REVERSE_TARGET_CHUNK_SIZE,
+                Some(ForwardMembership::SortedDomain {
+                    path: forward_source_path,
+                    summary: &forward,
+                }),
+                emit,
+            )?;
+            candidate_pair_count = pairs;
+            Ok(count)
+        },
     )?;
+    cleanup_reverse_spill(output_path)?;
     Ok(StepReport {
         disposition: "created",
         input_layer: target_layer,
         output_layer: forward.layer,
         input_field_count: target.fields.len(),
-        output_field_count: fields.len(),
-        candidate_pair_count: forward.fields.len(),
+        output_field_count,
+        candidate_pair_count,
         workers,
         file_identity: identity,
     })
-}
-
-fn generate_reverse_layer(
-    binding: DomainBinding,
-    output_layer: u8,
-    input: &[u64],
-    input_digest: [u8; 32],
-    output_path: &Path,
-    workers: usize,
-) -> Result<(Vec<u64>, usize), String> {
-    generate_reverse_layer_spilled(
-        binding,
-        output_layer,
-        input,
-        input_digest,
-        output_path,
-        workers,
-        REVERSE_TARGET_CHUNK_SIZE,
-    )
 }
 
 struct PairRunReader {
@@ -664,6 +941,7 @@ fn prepare_reverse_spill(output_path: &Path) -> Result<PathBuf, String> {
     } else {
         fs::create_dir(&root).map_err(io_error)?;
     }
+    validate_spill_root_parent(&root, output_path)?;
     Ok(root)
 }
 
@@ -676,6 +954,59 @@ fn cleanup_reverse_spill(output_path: &Path) -> Result<(), String> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("legal-board spill cleanup rejected non-directory".to_owned());
     }
+    validate_spill_root_parent(&root, output_path)?;
+    fs::remove_dir_all(root).map_err(io_error)
+}
+
+fn validate_spill_root_parent(root: &Path, output_path: &Path) -> Result<(), String> {
+    let expected_parent = fs::canonicalize(
+        output_path
+            .parent()
+            .ok_or("legal-board spill output has no parent")?,
+    )
+    .map_err(io_error)?;
+    let resolved_root = fs::canonicalize(root).map_err(io_error)?;
+    if resolved_root.parent() != Some(expected_parent.as_path()) {
+        return Err("legal-board spill root escapes its output parent".to_owned());
+    }
+    Ok(())
+}
+
+fn forward_spill_root(output_path: &Path) -> Result<PathBuf, String> {
+    let parent = output_path
+        .parent()
+        .ok_or("legal-board forward output has no parent")?;
+    let output_name = output_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("legal-board forward output name must be UTF-8")?;
+    Ok(parent.join(format!(".{output_name}.legal-board-forward-spill-v1")))
+}
+
+fn prepare_forward_spill(output_path: &Path) -> Result<PathBuf, String> {
+    let root = forward_spill_root(output_path)?;
+    if root.exists() {
+        let metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("legal-board forward spill root must be a real directory".to_owned());
+        }
+    } else {
+        fs::create_dir(&root).map_err(io_error)?;
+    }
+    validate_spill_root_parent(&root, output_path)?;
+    Ok(root)
+}
+
+fn cleanup_forward_spill(output_path: &Path) -> Result<(), String> {
+    let root = forward_spill_root(output_path)?;
+    if !root.exists() {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("legal-board forward spill cleanup rejected non-directory".to_owned());
+    }
+    validate_spill_root_parent(&root, output_path)?;
     fs::remove_dir_all(root).map_err(io_error)
 }
 
@@ -762,7 +1093,11 @@ fn write_pair_run(
         return Err(error);
     }
     drop(writer);
-    fs::rename(&pending, path).map_err(io_error)
+    if let Err(error) = fs::hard_link(&pending, path) {
+        let _ = fs::remove_file(&pending);
+        return Err(io_error(error));
+    }
+    fs::remove_file(&pending).map_err(io_error)
 }
 
 fn piece_from_index(index: u8) -> Result<PieceKind, String> {
@@ -772,37 +1107,117 @@ fn piece_from_index(index: u8) -> Result<PieceKind, String> {
         .ok_or("legal-board pair run piece index invalid".to_owned())
 }
 
-fn merge_pair_run_group(
+/// Merge one bounded fan-in directly into an immutable run. A merged layer may
+/// contain millions of pairs; retaining the entire result before writing it
+/// defeats the source-chunk spill boundary.
+fn write_merged_pair_run_group(
+    output: &Path,
     runs: &[(PathBuf, usize, usize)],
     binding: DomainBinding,
     input_digest: [u8; 32],
     output_layer: u8,
-) -> Result<Vec<(u64, PieceKind)>, String> {
-    let mut readers = runs
-        .iter()
-        .map(|(path, start, end)| {
-            PairRunReader::open(path, binding, input_digest, output_layer, *start, *end)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut heap = BinaryHeap::new();
-    for (run_index, reader) in readers.iter_mut().enumerate() {
-        if let Some(pair) = reader.next_pair()? {
-            heap.push(Reverse((pair, run_index)));
-        }
+) -> Result<usize, String> {
+    if output.exists() {
+        return Err("refusing to overwrite a legal-board merged run".to_owned());
     }
-    let mut merged = Vec::new();
-    let mut last_pair = None;
-    while let Some(Reverse((pair, run_index))) = heap.pop() {
-        if let Some(next) = readers[run_index].next_pair()? {
-            heap.push(Reverse((next, run_index)));
+    let (start, end) = match (runs.first(), runs.last()) {
+        (Some((_, start, _)), Some((_, _, end))) => (*start, *end),
+        _ => return Err("legal-board merge group empty".to_owned()),
+    };
+    let name = output
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("legal-board merged run name must be UTF-8")?;
+    let pending = output.with_file_name(format!(".{name}.pending-{}", std::process::id()));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pending)
+        .map_err(io_error)?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+    let result = (|| {
+        writer
+            .write_all(&[0_u8; PAIR_RUN_HEADER_BYTES])
+            .map_err(io_error)?;
+        let mut readers = runs
+            .iter()
+            .map(|(path, run_start, run_end)| {
+                PairRunReader::open(
+                    path,
+                    binding,
+                    input_digest,
+                    output_layer,
+                    *run_start,
+                    *run_end,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut heap = BinaryHeap::new();
+        for (run_index, reader) in readers.iter_mut().enumerate() {
+            if let Some(pair) = reader.next_pair()? {
+                heap.push(Reverse((pair, run_index)));
+            }
         }
-        if last_pair == Some(pair) {
-            continue;
+        let mut count = 0_usize;
+        let mut payload_digest = Sha256::new();
+        let mut last_pair = None;
+        while let Some(Reverse((pair, run_index))) = heap.pop() {
+            if let Some(next) = readers[run_index].next_pair()? {
+                heap.push(Reverse((next, run_index)));
+            }
+            if last_pair == Some(pair) {
+                continue;
+            }
+            last_pair = Some(pair);
+            let mut encoded = [0_u8; PAIR_RUN_RECORD_BYTES];
+            encoded[..8].copy_from_slice(&pair.0.to_le_bytes());
+            encoded[8] = piece_from_index(pair.1)?.as_ascii() as u8;
+            writer.write_all(&encoded).map_err(io_error)?;
+            payload_digest.update(&encoded);
+            count = count.checked_add(1).ok_or("pair run count overflow")?;
         }
-        last_pair = Some(pair);
-        merged.push((pair.0, piece_from_index(pair.1)?));
+        let mut header = [0_u8; PAIR_RUN_HEADER_BYTES];
+        header[..8].copy_from_slice(PAIR_RUN_MAGIC);
+        header[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        header[12..16].copy_from_slice(&u32::from(output_layer).to_le_bytes());
+        header[16..24].copy_from_slice(
+            &u64::try_from(start)
+                .map_err(|_| "pair run start overflow")?
+                .to_le_bytes(),
+        );
+        header[24..32].copy_from_slice(
+            &u64::try_from(end)
+                .map_err(|_| "pair run end overflow")?
+                .to_le_bytes(),
+        );
+        header[32..40].copy_from_slice(
+            &u64::try_from(count)
+                .map_err(|_| "pair run count overflow")?
+                .to_le_bytes(),
+        );
+        header[40..72].copy_from_slice(&binding.identity);
+        header[72..104].copy_from_slice(&input_digest);
+        header[104..136].copy_from_slice(&payload_digest.finalize());
+        writer.seek(SeekFrom::Start(0)).map_err(io_error)?;
+        writer.write_all(&header).map_err(io_error)?;
+        writer.flush().map_err(io_error)?;
+        writer.get_ref().sync_all().map_err(io_error)?;
+        Ok::<usize, String>(count)
+    })();
+    drop(writer);
+    let count = match result {
+        Ok(count) => count,
+        Err(error) => {
+            let _ = fs::remove_file(&pending);
+            return Err(error);
+        }
+    };
+    if let Err(error) = fs::hard_link(&pending, output) {
+        let _ = fs::remove_file(&pending);
+        return Err(io_error(error));
     }
-    Ok(merged)
+    fs::remove_file(&pending).map_err(io_error)?;
+    Ok(count)
 }
 
 fn reduce_pair_runs(
@@ -832,23 +1247,11 @@ fn reduce_pair_runs(
                     output_layer, pass, start, end
                 );
             } else {
-                let merged = merge_pair_run_group(group, binding, input_digest, output_layer)?;
-                write_pair_run(
-                    &path,
-                    binding,
-                    input_digest,
-                    output_layer,
-                    start,
-                    end,
-                    &merged,
-                )?;
+                let count =
+                    write_merged_pair_run_group(&path, group, binding, input_digest, output_layer)?;
                 eprintln!(
                     "legal_board_pair_merge=created layer={} pass={} start={} end={} pairs={}",
-                    output_layer,
-                    pass,
-                    start,
-                    end,
-                    merged.len()
+                    output_layer, pass, start, end, count
                 );
             }
             reduced.push((path, start, end));
@@ -1126,7 +1529,16 @@ fn validate_reverse_sources(
     Ok(indexed.into_iter().map(|(_, field)| field).collect())
 }
 
-fn generate_reverse_layer_spilled(
+#[derive(Clone, Copy)]
+enum ForwardMembership<'a> {
+    InMemory(&'a [u64]),
+    SortedDomain {
+        path: &'a Path,
+        summary: &'a DomainSummary,
+    },
+}
+
+fn visit_reverse_layer_spilled(
     binding: DomainBinding,
     output_layer: u8,
     input: &[u64],
@@ -1134,7 +1546,9 @@ fn generate_reverse_layer_spilled(
     output_path: &Path,
     workers: usize,
     target_chunk_size: usize,
-) -> Result<(Vec<u64>, usize), String> {
+    forward_filter: Option<ForwardMembership<'_>>,
+    emit: &mut dyn FnMut(u64) -> Result<(), String>,
+) -> Result<(usize, usize), String> {
     if target_chunk_size == 0 {
         return Err("reverse target chunk size must be positive".to_owned());
     }
@@ -1187,7 +1601,15 @@ fn generate_reverse_layer_spilled(
                                 let source_hash =
                                     clearra_board64_mask_to_hydra_field_hash_v1(source)
                                         .map_err(|error| error.reason().to_owned())?;
-                                candidates.push((source_hash, piece));
+                                let keep = match forward_filter {
+                                    None | Some(ForwardMembership::SortedDomain { .. }) => true,
+                                    Some(ForwardMembership::InMemory(allowed)) => {
+                                        allowed.binary_search(&source_hash).is_ok()
+                                    }
+                                };
+                                if keep {
+                                    candidates.push((source_hash, piece));
+                                }
                             }
                         }
                     }
@@ -1242,7 +1664,13 @@ fn generate_reverse_layer_spilled(
             heap.push(Reverse((pair, run_index)));
         }
     }
-    let mut fields = Vec::new();
+    let mut disk_membership = match forward_filter {
+        Some(ForwardMembership::SortedDomain { path, summary }) => {
+            Some(SortedDomainCursor::open(path, binding, summary)?)
+        }
+        _ => None,
+    };
+    let mut field_count = 0_usize;
     let mut batch = Vec::with_capacity(REVERSE_VALIDATION_BATCH_SIZE);
     let mut current_source = None;
     let mut current_piece_bits = 0_u8;
@@ -1257,6 +1685,11 @@ fn generate_reverse_layer_spilled(
             continue;
         }
         last_pair = Some(pair);
+        if let Some(cursor) = disk_membership.as_mut() {
+            if !cursor.contains(pair.0)? {
+                continue;
+            }
+        }
         candidate_pair_count = candidate_pair_count
             .checked_add(1)
             .ok_or("candidate pair count overflow")?;
@@ -1265,7 +1698,7 @@ fn generate_reverse_layer_spilled(
             source_count += 1;
             if batch.len() == REVERSE_VALIDATION_BATCH_SIZE {
                 let start = source_count - batch.len();
-                fields.extend(validate_reverse_checkpoint(
+                for field in validate_reverse_checkpoint(
                     &spill_root,
                     binding,
                     input,
@@ -1275,13 +1708,16 @@ fn generate_reverse_layer_spilled(
                     workers,
                     start,
                     source_count,
-                )?);
+                )? {
+                    emit(field)?;
+                    field_count = field_count
+                        .checked_add(1)
+                        .ok_or("reverse field count overflow")?;
+                }
                 batch.clear();
                 eprintln!(
                     "legal_board_validation=progress layer={} sources={} fields={}",
-                    output_layer,
-                    source_count,
-                    fields.len()
+                    output_layer, source_count, field_count
                 );
             }
             current_piece_bits = 0;
@@ -1295,7 +1731,7 @@ fn generate_reverse_layer_spilled(
     }
     if !batch.is_empty() {
         let start = source_count - batch.len();
-        fields.extend(validate_reverse_checkpoint(
+        for field in validate_reverse_checkpoint(
             &spill_root,
             binding,
             input,
@@ -1305,16 +1741,53 @@ fn generate_reverse_layer_spilled(
             workers,
             start,
             source_count,
-        )?);
+        )? {
+            emit(field)?;
+            field_count = field_count
+                .checked_add(1)
+                .ok_or("reverse field count overflow")?;
+        }
+    }
+    if let Some(cursor) = disk_membership {
+        cursor.finish()?;
     }
     eprintln!(
         "legal_board_validation=complete layer={} pairs={} sources={} fields={}",
-        output_layer,
-        candidate_pair_count,
-        source_count,
-        fields.len()
+        output_layer, candidate_pair_count, source_count, field_count
     );
-    Ok((fields, candidate_pair_count))
+    Ok((field_count, candidate_pair_count))
+}
+
+#[cfg(test)]
+fn generate_reverse_layer_spilled(
+    binding: DomainBinding,
+    output_layer: u8,
+    input: &[u64],
+    input_digest: [u8; 32],
+    output_path: &Path,
+    workers: usize,
+    target_chunk_size: usize,
+    forward_filter: Option<&[u64]>,
+) -> Result<(Vec<u64>, usize), String> {
+    let mut fields = Vec::new();
+    let (count, pairs) = visit_reverse_layer_spilled(
+        binding,
+        output_layer,
+        input,
+        input_digest,
+        output_path,
+        workers,
+        target_chunk_size,
+        forward_filter.map(ForwardMembership::InMemory),
+        &mut |field| {
+            fields.push(field);
+            Ok(())
+        },
+    )?;
+    if count != fields.len() {
+        return Err("reverse validation reported the wrong field count".to_owned());
+    }
+    Ok((fields, pairs))
 }
 
 fn generate_reverse_layer_bounded(
@@ -1481,57 +1954,419 @@ pub(crate) fn read(
     binding: DomainBinding,
     expected_layer: Option<u8>,
 ) -> Result<DomainFile, String> {
+    let (summary, fields) = scan_domain_file(path, binding, expected_layer, None)?;
+    Ok(DomainFile {
+        layer: summary.layer,
+        fields,
+        file_identity: summary.file_identity,
+        file_digest: summary.file_digest,
+        derivation: summary.derivation,
+        input_digest: summary.input_digest,
+        filter_digest: summary.filter_digest,
+    })
+}
+
+pub(crate) fn inspect_domain_file(
+    path: &Path,
+    binding: DomainBinding,
+    expected_layer: Option<u8>,
+) -> Result<DomainSummary, String> {
+    let mut ignore = |_field| Ok(());
+    let (summary, _) = scan_domain_file(path, binding, expected_layer, Some(&mut ignore))?;
+    Ok(summary)
+}
+
+pub(crate) fn visit_verified_domain_fields(
+    path: &Path,
+    binding: DomainBinding,
+    expected: &DomainSummary,
+    visitor: &mut dyn FnMut(u64) -> Result<(), String>,
+) -> Result<(), String> {
+    let (observed, _) = scan_domain_file(path, binding, Some(expected.layer), Some(visitor))?;
+    if observed.file_digest != expected.file_digest
+        || observed.field_count != expected.field_count
+        || observed.derivation != expected.derivation
+        || observed.input_digest != expected.input_digest
+        || observed.filter_digest != expected.filter_digest
+    {
+        return Err("domain layer changed during verified visitation".to_owned());
+    }
+    Ok(())
+}
+
+/// Verify the whole immutable layer while optionally visiting fields instead
+/// of allocating a second full domain vector. The streaming caller compares
+/// the observed digest again before publishing any derived output.
+fn scan_domain_file(
+    path: &Path,
+    binding: DomainBinding,
+    expected_layer: Option<u8>,
+    mut visitor: Option<&mut dyn FnMut(u64) -> Result<(), String>>,
+) -> Result<(DomainSummary, Vec<u64>), String> {
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err("domain file symlink or non-file rejected".to_owned());
     }
-    let bytes = fs::read(path).map_err(io_error)?;
-    if bytes.len() < HEADER_BYTES || bytes.get(..8) != Some(MAGIC.as_slice()) {
+    if metadata.len() < HEADER_BYTES as u64 {
         return Err("domain file header invalid".to_owned());
     }
-    if read_u32(&bytes[8..12])? != VERSION {
+    let mut reader = BufReader::with_capacity(64 * 1024, File::open(path).map_err(io_error)?);
+    let mut header = [0_u8; HEADER_BYTES];
+    reader.read_exact(&mut header).map_err(io_error)?;
+    if header.get(..8) != Some(MAGIC.as_slice()) {
+        return Err("domain file header invalid".to_owned());
+    }
+    if read_u32(&header[8..12])? != VERSION {
         return Err("domain file version invalid".to_owned());
     }
-    let layer_u32 = read_u32(&bytes[12..16])?;
+    let layer_u32 = read_u32(&header[12..16])?;
     let layer = u8::try_from(layer_u32).map_err(|_| "domain layer overflow")?;
     if layer > 10 || expected_layer.is_some_and(|expected| expected != layer) {
         return Err("domain file layer mismatch".to_owned());
     }
     let count =
-        usize::try_from(read_u64(&bytes[16..24])?).map_err(|_| "domain field count overflow")?;
-    if bytes.get(24..56) != Some(binding.identity.as_slice())
-        || bytes.len() != HEADER_BYTES.saturating_add(count.saturating_mul(8))
+        usize::try_from(read_u64(&header[16..24])?).map_err(|_| "domain field count overflow")?;
+    let expected_len = HEADER_BYTES
+        .checked_add(count.checked_mul(8).ok_or("domain file length overflow")?)
+        .ok_or("domain file length overflow")?;
+    if header.get(24..56) != Some(binding.identity.as_slice())
+        || metadata.len()
+            != u64::try_from(expected_len).map_err(|_| "domain file length overflow")?
     {
         return Err("domain file binding or length mismatch".to_owned());
     }
-    let derivation = DomainDerivation::parse(bytes[56])?;
-    if bytes[57..64].iter().any(|byte| *byte != 0) {
+    let derivation = DomainDerivation::parse(header[56])?;
+    if header[57..64].iter().any(|byte| *byte != 0) {
         return Err("domain file reserved header bytes are nonzero".to_owned());
     }
-    let input_digest: [u8; 32] = bytes[64..96]
+    let input_digest: [u8; 32] = header[64..96]
         .try_into()
         .map_err(|_| "domain input digest width mismatch")?;
-    let filter_digest: [u8; 32] = bytes[96..128]
+    let filter_digest: [u8; 32] = header[96..128]
         .try_into()
         .map_err(|_| "domain filter digest width mismatch")?;
+    let mut digest = Sha256::new();
+    digest.update(header);
     let mut fields = Vec::new();
-    fields
-        .try_reserve_exact(count)
-        .map_err(|_| "domain file allocation failed")?;
-    for encoded in bytes[HEADER_BYTES..].chunks_exact(8) {
-        fields.push(read_u64(encoded)?);
+    if visitor.is_none() {
+        fields
+            .try_reserve_exact(count)
+            .map_err(|_| "domain file allocation failed")?;
     }
-    validate_fields(layer, &fields)?;
-    let file_digest: [u8; 32] = Sha256::digest(&bytes).into();
-    Ok(DomainFile {
-        layer,
+    let expected_cells = u32::from(layer) * 4;
+    let mut prior = None;
+    let mut batch = vec![0_u8; 1024 * 1024];
+    let mut remaining = count;
+    while remaining > 0 {
+        let batch_fields = remaining.min(batch.len() / 8);
+        let batch_bytes = batch_fields * 8;
+        reader
+            .read_exact(&mut batch[..batch_bytes])
+            .map_err(io_error)?;
+        digest.update(&batch[..batch_bytes]);
+        for encoded in batch[..batch_bytes].chunks_exact(8) {
+            let field = read_u64(encoded)?;
+            if field & !FIELD_MASK != 0 || field.count_ones() != expected_cells {
+                return Err("domain field outside its exact area layer".to_owned());
+            }
+            if prior.is_some_and(|value| value >= field) {
+                return Err("domain fields must be strictly sorted and unique".to_owned());
+            }
+            if let Some(visit) = visitor.as_mut() {
+                visit(field)?;
+            } else {
+                fields.push(field);
+            }
+            prior = Some(field);
+        }
+        remaining -= batch_fields;
+    }
+    let mut trailing = [0_u8; 1];
+    if reader.read(&mut trailing).map_err(io_error)? != 0 {
+        return Err("domain file length changed while reading".to_owned());
+    }
+    let file_digest: [u8; 32] = digest.finalize().into();
+    Ok((
+        DomainSummary {
+            layer,
+            field_count: count,
+            file_identity: format!("sha256:{}", hex(&file_digest)),
+            file_digest,
+            derivation,
+            input_digest,
+            filter_digest,
+        },
         fields,
-        file_identity: format!("sha256:{}", hex(&file_digest)),
-        file_digest,
-        derivation,
-        input_digest,
-        filter_digest,
-    })
+    ))
+}
+
+/// Exact, monotonically queried membership for a validated sorted domain.
+/// Geometric predecessor pairs are globally merged before querying this
+/// cursor, so one sequential pass over F_k replaces the whole F_k vector.
+struct SortedDomainCursor {
+    reader: BufReader<File>,
+    digest: Sha256,
+    expected_digest: [u8; 32],
+    remaining: usize,
+    layer: u8,
+    prior_field: Option<u64>,
+    current: Option<u64>,
+    prior_query: Option<u64>,
+}
+
+impl SortedDomainCursor {
+    fn open(path: &Path, binding: DomainBinding, summary: &DomainSummary) -> Result<Self, String> {
+        let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("domain membership source must be a real file".to_owned());
+        }
+        let expected_len = HEADER_BYTES
+            .checked_add(
+                summary
+                    .field_count
+                    .checked_mul(8)
+                    .ok_or("domain membership length overflow")?,
+            )
+            .ok_or("domain membership length overflow")?;
+        if metadata.len()
+            != u64::try_from(expected_len).map_err(|_| "domain membership length overflow")?
+        {
+            return Err("domain membership length mismatch".to_owned());
+        }
+        let mut reader = BufReader::with_capacity(64 * 1024, File::open(path).map_err(io_error)?);
+        let mut header = [0_u8; HEADER_BYTES];
+        reader.read_exact(&mut header).map_err(io_error)?;
+        if header[..8] != *MAGIC
+            || read_u32(&header[8..12])? != VERSION
+            || read_u32(&header[12..16])? != u32::from(summary.layer)
+            || read_u64(&header[16..24])?
+                != u64::try_from(summary.field_count)
+                    .map_err(|_| "domain membership count overflow")?
+            || header[24..56] != binding.identity
+            || header[56] != summary.derivation as u8
+            || header[57..64].iter().any(|byte| *byte != 0)
+            || header[64..96] != summary.input_digest
+            || header[96..128] != summary.filter_digest
+        {
+            return Err("domain membership header changed".to_owned());
+        }
+        let mut digest = Sha256::new();
+        digest.update(header);
+        Ok(Self {
+            reader,
+            digest,
+            expected_digest: summary.file_digest,
+            remaining: summary.field_count,
+            layer: summary.layer,
+            prior_field: None,
+            current: None,
+            prior_query: None,
+        })
+    }
+
+    fn next_field(&mut self) -> Result<Option<u64>, String> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        let mut encoded = [0_u8; 8];
+        self.reader.read_exact(&mut encoded).map_err(io_error)?;
+        self.digest.update(encoded);
+        let field = u64::from_le_bytes(encoded);
+        if field & !FIELD_MASK != 0 || field.count_ones() != u32::from(self.layer) * 4 {
+            return Err("domain membership field outside its area layer".to_owned());
+        }
+        if self.prior_field.is_some_and(|prior| prior >= field) {
+            return Err("domain membership fields are not strictly sorted".to_owned());
+        }
+        self.prior_field = Some(field);
+        self.remaining -= 1;
+        Ok(Some(field))
+    }
+
+    fn contains(&mut self, wanted: u64) -> Result<bool, String> {
+        if self.prior_query.is_some_and(|prior| prior > wanted) {
+            return Err("domain membership queries must be sorted".to_owned());
+        }
+        self.prior_query = Some(wanted);
+        while self.current.is_none_or(|field| field < wanted) {
+            self.current = self.next_field()?;
+            if self.current.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(self.current == Some(wanted))
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        while self.next_field()?.is_some() {}
+        let mut trailing = [0_u8; 1];
+        if self.reader.read(&mut trailing).map_err(io_error)? != 0 {
+            return Err("domain membership length changed during lookup".to_owned());
+        }
+        let observed: [u8; 32] = self.digest.finalize().into();
+        if observed != self.expected_digest {
+            return Err("domain membership digest changed during lookup".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// Validate a completed legal layer against one full sorted domain without
+/// retaining that full domain beside the legal layer being encoded.
+#[cfg(test)]
+pub(crate) fn verify_subset_of_file(
+    legal_fields: &[u64],
+    complete_path: &Path,
+    binding: DomainBinding,
+    layer: u8,
+) -> Result<(String, [u8; 32]), String> {
+    validate_fields(layer, legal_fields)?;
+    let complete = inspect_domain_file(complete_path, binding, Some(layer))?;
+    let mut cursor = SortedDomainCursor::open(complete_path, binding, &complete)?;
+    for &field in legal_fields {
+        if !cursor.contains(field)? {
+            return Err("legal-board layer is not a subset of its complete domain".to_owned());
+        }
+    }
+    cursor.finish()?;
+    Ok((complete.file_identity, complete.file_digest))
+}
+
+pub(crate) fn verify_subset_files(
+    legal_path: &Path,
+    complete_path: &Path,
+    binding: DomainBinding,
+    layer: u8,
+) -> Result<(DomainSummary, DomainSummary), String> {
+    let complete = inspect_domain_file(complete_path, binding, Some(layer))?;
+    let mut cursor = SortedDomainCursor::open(complete_path, binding, &complete)?;
+    let mut check = |field| -> Result<(), String> {
+        if cursor.contains(field)? {
+            Ok(())
+        } else {
+            Err("legal-board layer is not a subset of its complete domain".to_owned())
+        }
+    };
+    let (legal, _) = scan_domain_file(legal_path, binding, Some(layer), Some(&mut check))?;
+    drop(check);
+    cursor.finish()?;
+    Ok((legal, complete))
+}
+
+/// Publish a final domain union without collecting it in RAM. The count is
+/// only known after the merge, so fill its header in the pending file, then
+/// hash the exact on-disk bytes before immutable publication.
+fn write_streamed_domain<F>(
+    path: &Path,
+    binding: DomainBinding,
+    layer: u8,
+    derivation: DomainDerivation,
+    input_digest: [u8; 32],
+    filter_digest: [u8; 32],
+    mut visit: F,
+) -> Result<(String, usize), String>
+where
+    F: FnMut(&mut dyn FnMut(u64) -> Result<(), String>) -> Result<usize, String>,
+{
+    if path.exists() {
+        return Err("refusing to overwrite an existing domain file".to_owned());
+    }
+    let parent = path.parent().ok_or("domain output has no parent")?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(io_error)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err("domain output parent must be a real directory".to_owned());
+    }
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("domain output name must be UTF-8")?;
+    let pending = parent.join(format!(".{name}.pending-{}", std::process::id()));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pending)
+        .map_err(io_error)?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+    let result = (|| {
+        writer.write_all(&[0_u8; HEADER_BYTES]).map_err(io_error)?;
+        let mut count = 0_usize;
+        let mut prior = None;
+        let produced = {
+            let mut emit = |field: u64| -> Result<(), String> {
+                if field & !FIELD_MASK != 0 || field.count_ones() != u32::from(layer) * 4 {
+                    return Err("domain field outside its exact area layer".to_owned());
+                }
+                if prior.is_some_and(|value| value >= field) {
+                    return Err("domain fields must be strictly sorted and unique".to_owned());
+                }
+                writer.write_all(&field.to_le_bytes()).map_err(io_error)?;
+                prior = Some(field);
+                count = count.checked_add(1).ok_or("domain field count overflow")?;
+                Ok(())
+            };
+            visit(&mut emit)?
+        };
+        if produced != count {
+            return Err("streamed domain merge reported the wrong field count".to_owned());
+        }
+        let mut header = Vec::with_capacity(HEADER_BYTES);
+        header.extend_from_slice(MAGIC);
+        header.extend_from_slice(&VERSION.to_le_bytes());
+        header.extend_from_slice(&u32::from(layer).to_le_bytes());
+        header.extend_from_slice(
+            &u64::try_from(count)
+                .map_err(|_| "domain field count overflow")?
+                .to_le_bytes(),
+        );
+        header.extend_from_slice(&binding.identity);
+        header.push(derivation as u8);
+        header.extend_from_slice(&[0; 7]);
+        header.extend_from_slice(&input_digest);
+        header.extend_from_slice(&filter_digest);
+        if header.len() != HEADER_BYTES {
+            return Err("domain header width mismatch".to_owned());
+        }
+        writer.seek(SeekFrom::Start(0)).map_err(io_error)?;
+        writer.write_all(&header).map_err(io_error)?;
+        writer.flush().map_err(io_error)?;
+        writer.get_ref().sync_all().map_err(io_error)?;
+        Ok::<usize, String>(count)
+    })();
+    drop(writer);
+    let count = match result {
+        Ok(count) => count,
+        Err(error) => {
+            let _ = fs::remove_file(&pending);
+            return Err(error);
+        }
+    };
+    let result = (|| {
+        let mut file = File::open(&pending).map_err(io_error)?;
+        let expected_len = HEADER_BYTES
+            .checked_add(count.checked_mul(8).ok_or("domain file length overflow")?)
+            .ok_or("domain file length overflow")?;
+        if file.metadata().map_err(io_error)?.len()
+            != u64::try_from(expected_len).map_err(|_| "domain file length overflow")?
+        {
+            return Err("domain file length changed before publication".to_owned());
+        }
+        let mut digest = Sha256::new();
+        let mut batch = [0_u8; 64 * 1024];
+        loop {
+            let bytes = file.read(&mut batch).map_err(io_error)?;
+            if bytes == 0 {
+                break;
+            }
+            digest.update(&batch[..bytes]);
+        }
+        drop(file);
+        fs::hard_link(&pending, path).map_err(io_error)?;
+        Ok::<String, String>(format!("sha256:{}", hex(&digest.finalize())))
+    })();
+    let cleanup = fs::remove_file(&pending).map_err(io_error);
+    let identity = result?;
+    cleanup?;
+    Ok((identity, count))
 }
 
 fn write(
@@ -1585,7 +2420,8 @@ fn write(
         writer.flush().map_err(io_error)?;
         writer.get_ref().sync_all().map_err(io_error)?;
         drop(writer);
-        fs::rename(&pending, path).map_err(io_error)?;
+        fs::hard_link(&pending, path).map_err(io_error)?;
+        fs::remove_file(&pending).map_err(io_error)?;
         Ok(format!("sha256:{}", hex(digest.finalize().as_slice())))
     })();
     if result.is_err() {
@@ -1675,7 +2511,12 @@ mod tests {
         )
         .unwrap();
         let observed = read(&path, binding(), Some(1)).unwrap();
+        let summary = inspect_domain_file(&path, binding(), Some(1)).unwrap();
+        assert_eq!(summary.field_count, fields.len());
+        assert_eq!(summary.file_digest, observed.file_digest);
         assert_eq!(observed.fields, fields);
+        let expected_digest: [u8; 32] = Sha256::digest(fs::read(&path).unwrap()).into();
+        assert_eq!(observed.file_digest, expected_digest);
         assert_eq!(observed.derivation, DomainDerivation::ReverseStep);
         assert_eq!(observed.input_digest, [1; 32]);
         assert_eq!(observed.filter_digest, [0; 32]);
@@ -1686,6 +2527,113 @@ mod tests {
         )
         .is_err());
         assert!(read(&path, binding(), Some(2)).is_err());
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[0])
+            .unwrap();
+        assert!(read(&path, binding(), Some(1)).is_err());
+        assert!(inspect_domain_file(&path, binding(), Some(1)).is_err());
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn sorted_domain_cursor_is_exact_and_rejects_a_changed_file() {
+        let root = test_root("sorted-domain-cursor");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("forward.bin");
+        write(
+            &path,
+            binding(),
+            1,
+            &[0b1111, 0b1111_0000, 0b1111_0000_0000],
+            DomainDerivation::ForwardReachableStep,
+            [1; 32],
+            [0; 32],
+        )
+        .unwrap();
+        let summary = inspect_domain_file(&path, binding(), Some(1)).unwrap();
+        let mut cursor = SortedDomainCursor::open(&path, binding(), &summary).unwrap();
+        for (field, expected) in [
+            (0, false),
+            (0b1111, true),
+            (0b1_0000, false),
+            (0b1111_0000, true),
+            (0b1_0000_0000, false),
+            (0b1111_0000_0000, true),
+        ] {
+            assert_eq!(cursor.contains(field).unwrap(), expected);
+        }
+        cursor.finish().unwrap();
+        let mut cursor = SortedDomainCursor::open(&path, binding(), &summary).unwrap();
+        assert!(cursor.contains(0b1111_0000).unwrap());
+        assert!(cursor.contains(0b1111).is_err());
+        drop(cursor);
+        fs::remove_file(&path).unwrap();
+        write(
+            &path,
+            binding(),
+            1,
+            &[0b1111, 0b1111_0000, 0b1111_0000_0000_0000],
+            DomainDerivation::ForwardReachableStep,
+            [1; 32],
+            [0; 32],
+        )
+        .unwrap();
+        let cursor = SortedDomainCursor::open(&path, binding(), &summary).unwrap();
+        assert!(cursor.finish().is_err());
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn complete_domain_subset_check_streams_and_rejects_missing_fields() {
+        let root = test_root("complete-domain-subset");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("complete.bin");
+        let legal_path = root.join("legal.bin");
+        write(
+            &path,
+            binding(),
+            1,
+            &[0b1111, 0b1111_0000, 0b1111_0000_0000],
+            DomainDerivation::ForwardReachableStep,
+            [1; 32],
+            [0; 32],
+        )
+        .unwrap();
+        let (identity, digest) =
+            verify_subset_of_file(&[0b1111, 0b1111_0000_0000], &path, binding(), 1).unwrap();
+        assert_eq!(identity, format!("sha256:{}", hex(&digest)));
+        assert!(verify_subset_of_file(&[0b1111_0000_0000_0000], &path, binding(), 1).is_err());
+        write(
+            &legal_path,
+            binding(),
+            1,
+            &[0b1111, 0b1111_0000_0000],
+            DomainDerivation::LegalPredecessorStep,
+            [2; 32],
+            [3; 32],
+        )
+        .unwrap();
+        let (legal, complete) = verify_subset_files(&legal_path, &path, binding(), 1).unwrap();
+        assert_eq!(legal.field_count, 2);
+        assert_eq!(complete.file_digest, digest);
+        fs::remove_file(&legal_path).unwrap();
+        write(
+            &legal_path,
+            binding(),
+            1,
+            &[0b1111_0000_0000_0000],
+            DomainDerivation::LegalPredecessorStep,
+            [2; 32],
+            [3; 32],
+        )
+        .unwrap();
+        assert!(verify_subset_files(&legal_path, &path, binding(), 1).is_err());
+        fs::remove_file(legal_path).unwrap();
         fs::remove_file(path).unwrap();
         fs::remove_dir(root).unwrap();
     }
@@ -1719,6 +2667,7 @@ mod tests {
         let legal_ten = root.join("legal-10.bin");
         let forward_nine = root.join("forward-09.bin");
         let legal_nine = root.join("legal-09.bin");
+        let expected_nine = root.join("expected-09.bin");
 
         write(
             &forward_ten,
@@ -1762,7 +2711,66 @@ mod tests {
             read(&legal_ten, binding, Some(10)).unwrap().file_digest
         );
 
-        for path in [forward_ten, legal_ten, forward_nine, legal_nine] {
+        write(
+            &expected_nine,
+            binding,
+            9,
+            &selected,
+            DomainDerivation::LegalPredecessorStep,
+            observed.input_digest,
+            observed.filter_digest,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&legal_nine).unwrap(),
+            fs::read(&expected_nine).unwrap()
+        );
+
+        for path in [
+            forward_ten,
+            legal_ten,
+            forward_nine,
+            legal_nine,
+            expected_nine,
+        ] {
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn streamed_reverse_step_matches_direct_domain_bytes() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::SrsPlus).unwrap();
+        let root = test_root("streamed-reverse-domain");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.bin");
+        let expected = root.join("expected.bin");
+        let observed = root.join("observed.bin");
+        seed(binding, DomainDirection::Reverse, &source).unwrap();
+        let source_digest = read(&source, binding, Some(10)).unwrap().file_digest;
+        let (fields, _) = generate_reverse_layer_bounded(binding, 9, &[FIELD_MASK], 2, 1).unwrap();
+        write(
+            &expected,
+            binding,
+            9,
+            &fields,
+            DomainDerivation::ReverseStep,
+            source_digest,
+            [0; 32],
+        )
+        .unwrap();
+        let report = step(
+            binding,
+            DomainDirection::Reverse,
+            &source,
+            None,
+            &observed,
+            2,
+        )
+        .unwrap();
+        assert_eq!(report.output_field_count, fields.len());
+        assert_eq!(fs::read(&observed).unwrap(), fs::read(&expected).unwrap());
+        for path in [source, expected, observed] {
             fs::remove_file(path).unwrap();
         }
         fs::remove_dir(root).unwrap();
@@ -1779,6 +2787,372 @@ mod tests {
             ]),
             vec![1, 2, 3, 4, 8, 9]
         );
+    }
+
+    #[test]
+    fn streamed_pair_merge_preserves_sorted_unique_records_and_digest() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::SrsPlus).unwrap();
+        let root = test_root("streamed-pair-merge");
+        fs::create_dir(&root).unwrap();
+        let first = pair_run_path(&root, 0, 2);
+        let second = pair_run_path(&root, 2, 4);
+        let output = root.join("merged-00-0000000000-0000000004.bin");
+        let digest = [9; 32];
+        write_pair_run(
+            &first,
+            binding,
+            digest,
+            2,
+            0,
+            2,
+            &[(1, PieceKind::I), (2, PieceKind::T), (4, PieceKind::O)],
+        )
+        .unwrap();
+        write_pair_run(
+            &second,
+            binding,
+            digest,
+            2,
+            2,
+            4,
+            &[(2, PieceKind::T), (3, PieceKind::O), (4, PieceKind::O)],
+        )
+        .unwrap();
+        let count = write_merged_pair_run_group(
+            &output,
+            &[(first.clone(), 0, 2), (second.clone(), 2, 4)],
+            binding,
+            digest,
+            2,
+        )
+        .unwrap();
+        assert_eq!(count, 4);
+        let mut reader = PairRunReader::open(&output, binding, digest, 2, 0, 4).unwrap();
+        let mut observed = Vec::new();
+        while let Some(pair) = reader.next_pair().unwrap() {
+            observed.push(pair);
+        }
+        assert_eq!(observed, vec![(1, 0), (2, 2), (3, 1), (4, 1)]);
+        assert!(write_merged_pair_run_group(
+            &output,
+            &[(first.clone(), 0, 2), (second.clone(), 2, 4)],
+            binding,
+            digest,
+            2,
+        )
+        .is_err());
+        for path in [first, second, output] {
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn spill_cleanup_requires_the_exact_output_parent() {
+        let root = test_root("spill-parent");
+        let nested = root.join("nested");
+        let child = nested.join("child");
+        fs::create_dir_all(&child).unwrap();
+        assert!(validate_spill_root_parent(&nested, &root.join("layer.bin")).is_ok());
+        assert!(validate_spill_root_parent(&child, &root.join("layer.bin")).is_err());
+        fs::remove_dir(&child).unwrap();
+        fs::remove_dir(&nested).unwrap();
+        fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn spilled_forward_domain_matches_direct_and_filtered_layers() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::Jstris180).unwrap();
+        let first_layer = generate_forward_layer(binding, 1, &[0], None, 1).unwrap();
+        let sources = &first_layer[..first_layer.len().min(6)];
+        assert!(sources.len() > FORWARD_SOURCE_CHUNK_SIZE);
+        let expected = generate_forward_layer(binding, 2, sources, None, 2).unwrap();
+        let root = test_root("spilled-forward");
+        fs::create_dir(&root).unwrap();
+        let output = root.join("forward2.bin");
+        let observed =
+            generate_forward_layer_spilled(binding, 2, sources, [3; 32], None, [0; 32], &output, 2)
+                .unwrap();
+        let resumed =
+            generate_forward_layer_spilled(binding, 2, sources, [3; 32], None, [0; 32], &output, 2)
+                .unwrap();
+        assert_eq!(observed, expected);
+        assert_eq!(resumed, expected);
+        cleanup_forward_spill(&output).unwrap();
+
+        let filter = expected.iter().step_by(4).copied().collect::<Vec<_>>();
+        let filtered_output = root.join("filtered2.bin");
+        let filtered = generate_forward_layer_spilled(
+            binding,
+            2,
+            sources,
+            [3; 32],
+            Some(&filter),
+            [4; 32],
+            &filtered_output,
+            2,
+        )
+        .unwrap();
+        assert_eq!(filtered, filter);
+        cleanup_forward_spill(&filtered_output).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn streamed_forward_step_matches_direct_domain_bytes_and_resumes() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::Jstris180).unwrap();
+        let root = test_root("streamed-forward-domain");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.bin");
+        let expected = root.join("expected.bin");
+        let observed = root.join("observed.bin");
+        write(
+            &source,
+            binding,
+            0,
+            &[0],
+            DomainDerivation::ForwardSeed,
+            [0; 32],
+            [0; 32],
+        )
+        .unwrap();
+        let source_digest = read(&source, binding, Some(0)).unwrap().file_digest;
+        let fields = generate_forward_layer(binding, 1, &[0], None, 1).unwrap();
+        write(
+            &expected,
+            binding,
+            1,
+            &fields,
+            DomainDerivation::ForwardReachableStep,
+            source_digest,
+            [0; 32],
+        )
+        .unwrap();
+        let report = step(
+            binding,
+            DomainDirection::Forward,
+            &source,
+            None,
+            &observed,
+            2,
+        )
+        .unwrap();
+        assert_eq!(report.output_field_count, fields.len());
+        assert_eq!(fs::read(&observed).unwrap(), fs::read(&expected).unwrap());
+        let resumed = step(
+            binding,
+            DomainDirection::Forward,
+            &source,
+            None,
+            &observed,
+            2,
+        )
+        .unwrap();
+        assert_eq!(resumed.disposition, "already-complete");
+        assert_eq!(resumed.file_identity, report.file_identity);
+        for path in [source, expected, observed] {
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn streamed_forward_writer_does_not_publish_invalid_order() {
+        let root = test_root("streamed-forward-invalid-order");
+        fs::create_dir(&root).unwrap();
+        let output = root.join("forward.bin");
+        let result = write_streamed_domain(
+            &output,
+            binding(),
+            1,
+            DomainDerivation::ForwardReachableStep,
+            [1; 32],
+            [0; 32],
+            |emit| {
+                emit(0b1111_0000)?;
+                emit(0b1111)?;
+                Ok(2)
+            },
+        );
+        assert!(result.is_err());
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn streamed_filtered_forward_step_matches_direct_domain_bytes() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::Jstris180).unwrap();
+        let root = test_root("streamed-forward-filtered");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.bin");
+        let filter = root.join("filter.bin");
+        let expected = root.join("expected.bin");
+        let observed = root.join("observed.bin");
+        let first_layer = generate_forward_layer(binding, 1, &[0], None, 1).unwrap();
+        let sources = &first_layer[..first_layer.len().min(2)];
+        let second_layer = generate_forward_layer(binding, 2, sources, None, 2).unwrap();
+        let selected = second_layer.iter().step_by(3).copied().collect::<Vec<_>>();
+        write(
+            &source,
+            binding,
+            1,
+            sources,
+            DomainDerivation::ForwardReachableStep,
+            [1; 32],
+            [0; 32],
+        )
+        .unwrap();
+        write(
+            &filter,
+            binding,
+            2,
+            &selected,
+            DomainDerivation::ReverseStep,
+            [2; 32],
+            [0; 32],
+        )
+        .unwrap();
+        let source_digest = read(&source, binding, Some(1)).unwrap().file_digest;
+        let filter_digest = read(&filter, binding, Some(2)).unwrap().file_digest;
+        write(
+            &expected,
+            binding,
+            2,
+            &selected,
+            DomainDerivation::ForwardStep,
+            source_digest,
+            filter_digest,
+        )
+        .unwrap();
+        let report = step(
+            binding,
+            DomainDirection::Forward,
+            &source,
+            Some(&filter),
+            &observed,
+            2,
+        )
+        .unwrap();
+        assert_eq!(report.output_field_count, selected.len());
+        assert_eq!(fs::read(&observed).unwrap(), fs::read(&expected).unwrap());
+        for path in [source, filter, expected, observed] {
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn streamed_forward_step_reads_multiple_verified_source_chunks() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::Jstris180).unwrap();
+        let root = test_root("streamed-forward-source-chunks");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.bin");
+        let expected = root.join("expected.bin");
+        let observed = root.join("observed.bin");
+        let first_layer = generate_forward_layer(binding, 1, &[0], None, 1).unwrap();
+        let sources = &first_layer[..first_layer.len().min(6)];
+        assert!(sources.len() > FORWARD_SOURCE_CHUNK_SIZE);
+        write(
+            &source,
+            binding,
+            1,
+            sources,
+            DomainDerivation::ForwardReachableStep,
+            [1; 32],
+            [0; 32],
+        )
+        .unwrap();
+        let source_digest = inspect_domain_file(&source, binding, Some(1))
+            .unwrap()
+            .file_digest;
+        let fields = generate_forward_layer(binding, 2, sources, None, 2).unwrap();
+        write(
+            &expected,
+            binding,
+            2,
+            &fields,
+            DomainDerivation::ForwardReachableStep,
+            source_digest,
+            [0; 32],
+        )
+        .unwrap();
+        let report = step(
+            binding,
+            DomainDirection::Forward,
+            &source,
+            None,
+            &observed,
+            2,
+        )
+        .unwrap();
+        assert_eq!(report.input_field_count, sources.len());
+        assert_eq!(report.output_field_count, fields.len());
+        assert_eq!(fs::read(&observed).unwrap(), fs::read(&expected).unwrap());
+        for path in [source, expected, observed] {
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn streamed_forward_step_rejects_a_changed_source_before_publication() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::Jstris180).unwrap();
+        let root = test_root("streamed-forward-changed-source");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.bin");
+        let output = root.join("output.bin");
+        write(
+            &source,
+            binding,
+            1,
+            &[0b1111],
+            DomainDerivation::ForwardReachableStep,
+            [1; 32],
+            [0; 32],
+        )
+        .unwrap();
+        let original = inspect_domain_file(&source, binding, Some(1)).unwrap();
+        fs::remove_file(&source).unwrap();
+        write(
+            &source,
+            binding,
+            1,
+            &[0b1111_0000],
+            DomainDerivation::ForwardReachableStep,
+            [1; 32],
+            [0; 32],
+        )
+        .unwrap();
+        let result = write_streamed_domain(
+            &output,
+            binding,
+            2,
+            DomainDerivation::ForwardReachableStep,
+            original.file_digest,
+            [0; 32],
+            |emit| {
+                visit_forward_layer_spilled(
+                    binding,
+                    2,
+                    ForwardSource::VerifiedFile {
+                        path: &source,
+                        summary: &original,
+                    },
+                    original.file_digest,
+                    None,
+                    [0; 32],
+                    &output,
+                    1,
+                    emit,
+                )
+            },
+        );
+        assert!(result.is_err());
+        assert!(!output.exists());
+        cleanup_forward_spill(&output).unwrap();
+        fs::remove_file(source).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 
     #[test]
@@ -1809,12 +3183,68 @@ mod tests {
         let (expected, _) =
             generate_reverse_layer_bounded(binding, 8, input, 3, input.len()).unwrap();
         let (observed, _) =
-            generate_reverse_layer_spilled(binding, 8, input, [9; 32], &output, 3, 1).unwrap();
+            generate_reverse_layer_spilled(binding, 8, input, [9; 32], &output, 3, 1, None)
+                .unwrap();
         let (resumed, _) =
-            generate_reverse_layer_spilled(binding, 8, input, [9; 32], &output, 3, 1).unwrap();
+            generate_reverse_layer_spilled(binding, 8, input, [9; 32], &output, 3, 1, None)
+                .unwrap();
 
         assert_eq!(observed, expected);
         assert_eq!(resumed, expected);
+        cleanup_reverse_spill(&output).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn filtered_spilled_predecessors_match_exact_intersection_across_chunk_boundaries() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::SrsPlus).unwrap();
+        let (layer_nine, _) =
+            generate_reverse_layer_bounded(binding, 9, &[FIELD_MASK], 2, 1).unwrap();
+        let targets = &layer_nine[..5];
+        let (all_predecessors, _) =
+            generate_reverse_layer_bounded(binding, 8, targets, 2, 2).unwrap();
+        let forward = all_predecessors
+            .iter()
+            .step_by(3)
+            .copied()
+            .collect::<Vec<_>>();
+        let root = test_root("filtered-spill");
+        fs::create_dir(&root).unwrap();
+        let output = root.join("legal8.bin");
+
+        let (observed, _) = generate_reverse_layer_spilled(
+            binding,
+            8,
+            targets,
+            [7; 32],
+            &output,
+            3,
+            1,
+            Some(&forward),
+        )
+        .unwrap();
+        let expected = forward
+            .iter()
+            .copied()
+            .filter(|&source_hash| {
+                let source = hydra_field_hash_v1_to_clearra_board64_mask(source_hash).unwrap();
+                PieceKind::STANDARD_TETROMINOES
+                    .iter()
+                    .copied()
+                    .any(|piece| {
+                        enumerate_pc4_ilc_target_fields(source, piece, binding.kick_profile)
+                            .unwrap()
+                            .into_iter()
+                            .any(|target| {
+                                let hash =
+                                    clearra_board64_mask_to_hydra_field_hash_v1(target).unwrap();
+                                targets.binary_search(&hash).is_ok()
+                            })
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected);
+
         cleanup_reverse_spill(&output).unwrap();
         fs::remove_dir(root).unwrap();
     }

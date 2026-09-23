@@ -20,6 +20,9 @@ experimental-native-gpu = ["clearra-core-ffi/experimental-native-gpu"]
 # Local-only same-binary A/B controls. Product and release builds never enable
 # this feature, so hot-path policy remains compile-time constant there.
 local-search-ab = []
+# Primitive oracle is linked only by local-only asset generation/qualification.
+# It is not consulted by product search.
+qualification-reference = []
 
 [dependencies]
 clearra-accelerator-activation = { path = "../clearra-accelerator-activation" }

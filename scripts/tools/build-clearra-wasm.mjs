@@ -150,19 +150,24 @@ async function buildWithWsl() {
 async function buildNative() {
   const targetRoot = buildOwner.cargoTarget;
   await mkdir(targetRoot, { recursive: true });
+  const compileEnvironment = {
+    CARGO_TARGET_DIR: targetRoot,
+    CLEARRA_SOURCE_COMMIT: wasmBuildContract.runtime_identity.source_commit,
+    CLEARRA_ENGINE_BUILD_ID: wasmBuildContract.runtime_identity.engine_build_id,
+  };
   if (options.verify) {
     await run('cargo', [
       'check', '--locked', '--manifest-path', resolve(root, 'Cargo.toml'),
       '--package', 'clearra-cli-command', '--lib', '--tests'
-    ], { CARGO_TARGET_DIR: targetRoot });
+    ], compileEnvironment);
     await run('cargo', [
       'check', '--locked', '--manifest-path', resolve(root, 'Cargo.toml'),
       '--package', 'clearra-wasm', '--lib', '--tests'
-    ], { CARGO_TARGET_DIR: targetRoot });
+    ], compileEnvironment);
     await run('cargo', [
       'test', '--locked', '--manifest-path', resolve(root, 'Cargo.toml'),
       '--package', 'clearra-wasm', '--test', 'wasm_host_contract'
-    ], { CARGO_TARGET_DIR: targetRoot });
+    ], compileEnvironment);
   }
   const cargoArgs = [
     'build', '--locked',
@@ -175,7 +180,7 @@ async function buildNative() {
     'clearra-wasm-abi'
   ];
   if (options.stageProfiling) cargoArgs.push('--features', 'stage-profiling');
-  await run('cargo', cargoArgs, { CARGO_TARGET_DIR: targetRoot });
+  await run('cargo', cargoArgs, compileEnvironment);
   await run(process.env.WASM_BINDGEN || 'wasm-bindgen', [
     resolve(targetRoot, 'wasm32-unknown-unknown', 'release', 'clearra_wasm.wasm'),
     '--target',

@@ -74,7 +74,8 @@ pub use pc4_graph_materializer::{
     Pc4IlcPlacement,
 };
 pub(crate) use reachability::{
-    exact_spawn_lock_anchors, DocumentLockReachability, DocumentReachabilityEngine,
+    exact_entry_lock_anchors, exact_local_relation, exact_spawn_lock_anchors,
+    DocumentLockReachability, DocumentReachabilityEngine,
 };
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
 pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};

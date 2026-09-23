@@ -5,6 +5,10 @@
 use std::{
     io::Read,
     process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
+    sync::mpsc::{sync_channel, RecvTimeoutError},
+    thread,
+    time::Duration,
 };
 
 const RELEASE_PREFIX: &str = "https://github.com/daejunnom/Clearra/releases/download/";
@@ -12,10 +16,14 @@ const RELEASE_PREFIX: &str = "https://github.com/daejunnom/Clearra/releases/down
 pub(crate) fn stream_release_asset(
     url: &str,
     exact_bytes: u64,
+    cancelled: &AtomicBool,
     sink: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
     if !url.starts_with(RELEASE_PREFIX) || exact_bytes == 0 || exact_bytes > 64 * 1024 * 1024 {
         return Err("accelerator: release transport authority rejected");
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return Err("accelerator: download cancelled");
     }
     let mut command = Command::new("curl");
     command
@@ -55,38 +63,85 @@ pub(crate) fn stream_release_asset(
     let mut child = command
         .spawn()
         .map_err(|_| "accelerator: curl is required for explicit downloads")?;
-    let result = (|| {
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or("accelerator: download stream unavailable")?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("accelerator: download stream unavailable");
+    };
+    let result = thread::scope(|scope| {
+        enum ReadChunk {
+            Data(Vec<u8>),
+            End,
+            Error,
+        }
+        // Bounded buffering lets the caller observe cancellation even while
+        // curl is blocked on a slow response. Killing this exact child closes
+        // the reader pipe; no other process or download is affected.
+        let (sender, receiver) = sync_channel::<ReadChunk>(4);
+        let reader = scope.spawn(move || {
+            let mut stdout = stdout;
+            let mut buffer = [0_u8; 65_536];
+            loop {
+                let message = match stdout.read(&mut buffer) {
+                    Ok(0) => ReadChunk::End,
+                    Ok(count) => ReadChunk::Data(buffer[..count].to_vec()),
+                    Err(_) => ReadChunk::Error,
+                };
+                let terminal = !matches!(&message, ReadChunk::Data(_));
+                if sender.send(message).is_err() || terminal {
+                    break;
+                }
+            }
+        });
         let mut total = 0_u64;
-        let mut buffer = [0_u8; 65_536];
-        loop {
-            let count = stdout
-                .read(&mut buffer)
-                .map_err(|_| "accelerator: download interrupted")?;
-            if count == 0 {
-                break;
+        let result = loop {
+            if cancelled.load(Ordering::Acquire) {
+                break Err("accelerator: download cancelled");
             }
-            total = total
-                .checked_add(count as u64)
-                .ok_or("accelerator: response size overflow")?;
-            if total > exact_bytes {
-                return Err("accelerator: response exceeds signed byte length");
+            match receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(ReadChunk::Data(bytes)) => {
+                    let Some(next_total) = total.checked_add(bytes.len() as u64) else {
+                        break Err("accelerator: response size overflow");
+                    };
+                    if next_total > exact_bytes {
+                        break Err("accelerator: response exceeds signed byte length");
+                    }
+                    if let Err(error) = sink(&bytes) {
+                        break Err(error);
+                    }
+                    total = next_total;
+                }
+                Ok(ReadChunk::End) => {
+                    break if total == exact_bytes {
+                        Ok(())
+                    } else {
+                        Err("accelerator: response is shorter than signed byte length")
+                    };
+                }
+                Ok(ReadChunk::Error) => break Err("accelerator: download interrupted"),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    break Err("accelerator: download interrupted");
+                }
             }
-            sink(&buffer[..count])?;
+        };
+        if result.is_err() {
+            let _ = child.kill();
         }
-        if total != exact_bytes {
-            return Err("accelerator: response is shorter than signed byte length");
+        drop(receiver);
+        if reader.join().is_err() {
+            return Err("accelerator: download reader failed");
         }
-        Ok(())
-    })();
+        result
+    });
     if result.is_err() {
         let _ = child.kill();
     }
     let successful = child.wait().map(|status| status.success()).unwrap_or(false);
     result?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("accelerator: download cancelled");
+    }
     if !successful {
         return Err("accelerator: release download failed");
     }
@@ -100,7 +155,15 @@ mod tests {
     #[test]
     fn transport_rejects_non_release_origins_before_process_start() {
         let mut sink = |_bytes: &[u8]| Ok(());
-        assert!(stream_release_asset("https://example.com/asset", 1, &mut sink).is_err());
-        assert!(stream_release_asset(RELEASE_PREFIX, 0, &mut sink).is_err());
+        let cancelled = AtomicBool::new(false);
+        assert!(
+            stream_release_asset("https://example.com/asset", 1, &cancelled, &mut sink).is_err()
+        );
+        assert!(stream_release_asset(RELEASE_PREFIX, 0, &cancelled, &mut sink).is_err());
+        cancelled.store(true, Ordering::Release);
+        assert_eq!(
+            stream_release_asset(RELEASE_PREFIX, 1, &cancelled, &mut sink),
+            Err("accelerator: download cancelled")
+        );
     }
 }

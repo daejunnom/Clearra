@@ -87,7 +87,121 @@ test('legal-board generation uses one managed Linux build owner and only the val
   assert.match(source, /bash "\$AUTHORITY_ROOT\/scripts\/tools\/wsl-native-cargo\.sh"/u);
   assert.match(source, /BINARY="\$MANAGED_CARGO_TARGET\/release\/clearra-pc4-legal-board"/u);
   assert.match(source, /exec "\$BINARY" legal-board-run/u);
-  assert.doesNotMatch(source, /\bwsl(?:\.exe)?\b|--force-unmanaged-output|XDG_CACHE_HOME/u);
+  assert.doesNotMatch(source, /^\s*(?:exec\s+|command\s+)?wsl(?:\.exe)?\s|--force-unmanaged-output|XDG_CACHE_HOME/mu);
+});
+
+test('legal-board generation is a bounded managed WSL entrypoint', async () => {
+  const policy = JSON.parse(await readFile(new URL('../../config/clearra-management.v1.json', import.meta.url), 'utf8'));
+  const entry = policy.runtime_policy.wsl.entrypoints['legal-board-generate'];
+  assert.equal(entry.profile, 'benchmark-search');
+  assert.equal(entry.requires_source, true);
+  assert.deepEqual(entry.local_source_files, [
+    'crates/clearra-accelerator-runtime/Cargo.toml',
+    'crates/clearra-accelerator-runtime/src/lib.rs',
+    'crates/clearra-core-executor/src/backend/wasm_cpu/reachability_local_relation.rs',
+    'crates/clearra-core-executor/src/backend/wasm_cpu/reachability_reference_tests.rs',
+    'crates/clearra-core-executor/src/conditioned_local_index.rs',
+    'crates/clearra-core-executor/src/conditioned_local_pack.rs',
+    'crates/clearra-core-executor/src/conditioned_local_pack_tests.rs',
+    'crates/clearra-core-executor/src/conditioned_local_qualification.rs',
+    'crates/clearra-core-executor/src/conditioned_local_relation.rs',
+    'crates/clearra-core-executor/src/reachability_reference.rs',
+    'crates/clearra-core-executor/src/reachability_reference_local.rs'
+  ]);
+  for (const relative of entry.local_source_files) {
+    assert.ok((await readFile(new URL(`../../${relative}`, import.meta.url))).byteLength > 0);
+  }
+  assert.equal(entry.timeout_seconds, 7200);
+  assert.deepEqual(entry.output_path_options, ['--layers']);
+  const guest = await readFile(new URL('../runtime/clearra-wsl-guest.sh', import.meta.url), 'utf8');
+  assert.match(guest, /legal-board-generate\)[\s\S]*?exec bash "\$SOURCE_ROOT\/scripts\/tools\/wsl-legal-board-generate\.sh"/u);
+});
+
+test('conditioned-reachability generation has a separate bounded producer and host paths', async () => {
+  const policy = JSON.parse(await readFile(new URL('../../config/clearra-management.v1.json', import.meta.url), 'utf8'));
+  const entry = policy.runtime_policy.wsl.entrypoints['conditioned-reachability-generate'];
+  assert.equal(entry.profile, 'benchmark-search');
+  assert.equal(entry.requires_source, true);
+  assert.deepEqual(entry.local_source_files, [
+    'crates/clearra-accelerator-runtime/Cargo.toml',
+    'crates/clearra-accelerator-runtime/src/lib.rs',
+    'scripts/tools/wsl-conditioned-reachability-generate.sh',
+    'crates/clearra-core-executor/src/backend/wasm_cpu/reachability_local_relation.rs',
+    'crates/clearra-core-executor/src/backend/wasm_cpu/reachability_reference_tests.rs',
+    'crates/clearra-core-executor/src/conditioned_local_index.rs',
+    'crates/clearra-core-executor/src/conditioned_local_pack.rs',
+    'crates/clearra-core-executor/src/conditioned_local_pack_tests.rs',
+    'crates/clearra-core-executor/src/conditioned_local_qualification.rs',
+    'crates/clearra-core-executor/src/conditioned_local_relation.rs',
+    'crates/clearra-core-executor/src/reachability_reference.rs',
+    'crates/clearra-core-executor/src/reachability_reference_local.rs'
+  ]);
+  for (const relative of entry.local_source_files) {
+    assert.ok((await readFile(new URL(`../../${relative}`, import.meta.url))).byteLength > 0);
+  }
+  assert.equal(entry.timeout_seconds, 7200);
+  assert.deepEqual(entry.input_path_options, ['--queries']);
+  assert.deepEqual(entry.output_path_options, ['--pack', '--catalog']);
+  const manager = await readFile(new URL('../../tools/clearra-manage/src/wsl.rs', import.meta.url), 'utf8');
+  assert.match(manager, /fs::canonicalize\(&path\)[\s\S]*?storage::is_secret_path\(policy, &canonical\)/u);
+  assert.match(manager, /contract\.local_source_files[\s\S]*?Component::Normal[\s\S]*?symlink_metadata[\s\S]*?canonical\.starts_with\(&repository\)/u);
+  const authority = await readFile(new URL('../../tools/clearra-manage/src/policy.rs', import.meta.url), 'utf8');
+  assert.match(authority, /local_source_files\.is_empty\(\)[\s\S]*?entry\.profile != "benchmark-search"[\s\S]*?"conditioned-reachability-generate"/u);
+  assert.match(authority, /let allowed = match name\.as_str\(\)[\s\S]*?"legal-board-generate"[\s\S]*?"conditioned-reachability-generate"[\s\S]*?local_source_files\.len\(\) != allowed\.len\(\)/u);
+  assert.match(authority, /local_source_files\s*\.iter\(\)\s*\.any\(\|path\| !allowed\.contains\(&path\.as_str\(\)\)\)/u);
+  const guest = await readFile(new URL('../runtime/clearra-wsl-guest.sh', import.meta.url), 'utf8');
+  assert.match(guest, /conditioned-reachability-generate\)[\s\S]*?exec bash "\$SOURCE_ROOT\/scripts\/tools\/wsl-conditioned-reachability-generate\.sh"/u);
+  const source = await readFile(new URL('./wsl-conditioned-reachability-generate.sh', import.meta.url), 'utf8');
+  assert.match(source, /9p \| v9fs \| drvfs \| fuseblk/u);
+  assert.match(source, /\[\[ "\$QUERIES" == \/mnt\/\?\/\*/u);
+  assert.match(source, /\[\[ "\$output" == \/mnt\/\?\/\*/u);
+  assert.match(source, /--source-root "\$ROOT" --purpose/u);
+  assert.match(source, /-- bash "\$AUTHORITY_ROOT\/scripts\/tools\/wsl-conditioned-reachability-generate\.sh"/u);
+  assert.match(source, /--bin clearra-conditioned-reachability/u);
+  assert.match(source, /exec "\$BINARY" --profile "\$PROFILE" --queries "\$QUERIES"/u);
+  assert.doesNotMatch(source, /^\s*(?:exec\s+|command\s+)?wsl(?:\.exe)?\s|--force-unmanaged-output|XDG_CACHE_HOME/mu);
+});
+
+test('entry-to-first-exit candidate generation is bounded and cannot inherit sparse-pack authority', async () => {
+  const policy = JSON.parse(await readFile(new URL('../../config/clearra-management.v1.json', import.meta.url), 'utf8'));
+  const entry = policy.runtime_policy.wsl.entrypoints['conditioned-local-relation-generate'];
+  assert.equal(entry.profile, 'benchmark-search');
+  assert.equal(entry.requires_source, true);
+  assert.equal(entry.timeout_seconds, 7200);
+  assert.deepEqual(entry.input_path_options, ['--queries']);
+  assert.deepEqual(entry.output_path_options, ['--pack', '--catalog']);
+  assert.deepEqual(entry.local_source_files, [
+    'crates/clearra-accelerator-runtime/Cargo.toml',
+    'crates/clearra-accelerator-runtime/src/lib.rs',
+    'scripts/tools/wsl-conditioned-local-relation-generate.sh',
+    'tools/clearra-pc4-qualifier/src/bin/clearra-conditioned-local-relation.rs',
+    'tools/clearra-pc4-qualifier/src/conditioned_local_relation_generation.rs',
+    'crates/clearra-core-executor/src/backend/wasm_cpu/reachability_local_relation.rs',
+    'crates/clearra-core-executor/src/backend/wasm_cpu/reachability_reference_tests.rs',
+    'crates/clearra-core-executor/src/conditioned_local_index.rs',
+    'crates/clearra-core-executor/src/conditioned_local_pack.rs',
+    'crates/clearra-core-executor/src/conditioned_local_pack_tests.rs',
+    'crates/clearra-core-executor/src/conditioned_local_qualification.rs',
+    'crates/clearra-core-executor/src/conditioned_local_relation.rs',
+    'crates/clearra-core-executor/src/reachability_reference.rs',
+    'crates/clearra-core-executor/src/reachability_reference_local.rs'
+  ]);
+  for (const relative of entry.local_source_files) {
+    assert.ok((await readFile(new URL(`../../${relative}`, import.meta.url))).byteLength > 0);
+  }
+  const authority = await readFile(new URL('../../tools/clearra-manage/src/policy.rs', import.meta.url), 'utf8');
+  assert.match(authority, /"conditioned-local-relation-generate"\s*=>\s*&\[/u);
+  const guest = await readFile(new URL('../runtime/clearra-wsl-guest.sh', import.meta.url), 'utf8');
+  assert.match(guest, /conditioned-local-relation-generate\)[\s\S]*?exec bash "\$SOURCE_ROOT\/scripts\/tools\/wsl-conditioned-local-relation-generate\.sh"/u);
+  const source = await readFile(new URL('./wsl-conditioned-local-relation-generate.sh', import.meta.url), 'utf8');
+  assert.match(source, /9p \| v9fs \| drvfs \| fuseblk/u);
+  assert.match(source, /\[\[ "\$QUERIES" == \/mnt\/\?\/\*/u);
+  assert.match(source, /--source-root "\$ROOT" --purpose/u);
+  assert.match(source, /--bin clearra-conditioned-local-relation/u);
+  assert.doesNotMatch(source, /--workers|^\s*(?:exec\s+|command\s+)?wsl(?:\.exe)?\s|--force-unmanaged-output|XDG_CACHE_HOME/mu);
+  const generator = await readFile(new URL('../../tools/clearra-pc4-qualifier/src/conditioned_local_relation_generation.rs', import.meta.url), 'utf8');
+  assert.match(generator, /"status": "candidate_unqualified"[\s\S]*?"release_authority": false/u);
+  assert.match(generator, /audit_candidate_local_relation_pack\(&loaded\)/u);
 });
 
 test('standalone NoPrepare batch refuses before artifact execution or report mutation', async () => {

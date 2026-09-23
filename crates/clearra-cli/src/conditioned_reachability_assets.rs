@@ -13,7 +13,7 @@ use clearra_pc4_qualifier::{
 };
 use clearra_rules::kicks::KickTableProfileId;
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{fs, path::PathBuf, sync::atomic::AtomicBool};
 
 const PRODUCT: ProductCatalogKind = ProductCatalogKind::BoardConditionedReachability;
 const PROFILES: [&str; 5] = ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"];
@@ -148,6 +148,22 @@ fn execute(args: &[String]) -> Result<Value, &'static str> {
     }
 }
 
+pub(crate) fn download_observed(
+    profile: &str,
+    cancelled: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<Value, &'static str> {
+    let base = default_directory()?;
+    checked_base(&base)?;
+    let root = accelerator_asset_store::profile_root(&base, PRODUCT, profile);
+    accelerator_asset_store::validate_real_directory_if_present(&root)?;
+    report_value(
+        "download",
+        profile,
+        accelerator_asset_store::download_observed(PRODUCT, profile, &root, cancelled, progress)?,
+    )
+}
+
 fn default_directory() -> Result<PathBuf, &'static str> {
     if let Some(path) = std::env::var_os("CLEARRA_CONDITIONED_REACHABILITY_DIRECTORY") {
         return Ok(PathBuf::from(path));
@@ -178,30 +194,22 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
     let installed = accelerator_asset_store::status(PRODUCT, profile, root)?;
     let candidate = root.join(format!("conditioned-reachability-{profile}.clbr"));
     let candidate_bytes = candidate.metadata().ok().map(|metadata| metadata.len());
-    let candidate_validation =
-        if candidate_bytes.is_some_and(|bytes| bytes > MAX_PRODUCT_PACK_BYTES) {
-            "oversized_unqualified_candidate"
-        } else if candidate_bytes.is_some() {
-            let bytes = fs::read(&candidate)
-                .map_err(|_| "reachability-pack: candidate payload is unreadable")?;
-            let kick_profile = KickTableProfileId::parse(profile)
-                .ok_or("reachability-pack: profile is not connected to a kick table")?;
-            let binding =
-                clearra_core_executor::built_in_conditioned_reachability_binding(kick_profile)
-                    .map_err(|_| "reachability-pack: profile binding is unavailable")?;
-            match clearra_core_executor::BoardConditionedReachability::load(
-                Arc::from(bytes),
-                clearra_core_executor::ConditionedReachabilityExpectation {
-                    binding,
-                    generation_identity: None,
-                },
-            ) {
-                Ok(_) => "structurally_valid_unqualified",
-                Err(_) => "invalid_asset",
-            }
+    let candidate_validation = if candidate_bytes
+        .is_some_and(|bytes| bytes > MAX_PRODUCT_PACK_BYTES)
+    {
+        "oversized_unqualified_candidate"
+    } else if candidate_bytes.is_some() {
+        let bytes = fs::read(&candidate)
+            .map_err(|_| "reachability-pack: candidate payload is unreadable")?;
+        if clearra_accelerator_runtime::structurally_valid_candidate(PRODUCT, profile, bytes.into())
+        {
+            "structurally_valid_unqualified"
         } else {
-            "not_loaded"
-        };
+            "invalid_asset"
+        }
+    } else {
+        "not_loaded"
+    };
     Ok(json!({
         "action": "status",
         "profile": profile,
@@ -219,8 +227,10 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
 }
 
 fn remove(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> {
+    // An absent store must not leave a once-loaded generation active in this
+    // process. The shared store boundary handles both cases.
+    accelerator_asset_store::remove(PRODUCT, profile, root)?;
     if root.exists() {
-        accelerator_asset_store::remove(PRODUCT, profile, root)?;
         remove_file_if_present(&root.join(format!("conditioned-reachability-{profile}.clbr")))?;
         remove_file_if_present(
             &root.join(format!("conditioned-reachability-{profile}.catalog.json")),

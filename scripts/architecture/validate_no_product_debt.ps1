@@ -1,6 +1,6 @@
 # Release-blocking checks for product-code debt. Tests, fixture support, and
 # historical documents are excluded explicitly; product source is not.
-. (Join-Path $PSScriptRoot '../lib/clearra-local-diagnostics-policy.ps1')
+. (Join-Path $PSScriptRoot '../lib/clearra-path-helpers.ps1')
 
 function Test-NoProductDebtAllowlistedPath([string]$RelativePath) {
     $path = $RelativePath.Replace('\', '/')
@@ -59,12 +59,17 @@ function Add-NoProductDebtPatternErrors {
 }
 
 function Invoke-NoProductDebtStaticValidation {
-    foreach ($forbiddenRoot in @('target', 'build')) {
+    # `build/` is the manifest-declared publication/staging root. Reject an
+    # unmanaged/reparse/tracked build root through the repository artifact
+    # policy below; only the legacy Cargo `target/` root is unconditional debt.
+    foreach ($forbiddenRoot in @('target')) {
         $forbiddenPath = Join-Path $Root $forbiddenRoot
         if (Test-Path -LiteralPath $forbiddenPath) {
             Add-ArchitectureError "NoProductDebt repository-local artifact directory exists: $forbiddenRoot"
         }
     }
+    try { Assert-ClearraRepositoryArtifactPolicy $Root.Path }
+    catch { Add-ArchitectureError "NoProductDebt $($_.Exception.Message)" }
     try { Assert-ClearraLocalToolDirectoryPolicy $Root.Path }
     catch { Add-ArchitectureError "NoProductDebt $($_.Exception.Message)" }
     if ((Read-PhysicalText '.dockerignore') -notmatch '(?m)^/?_local/?\s*$') {

@@ -43,6 +43,7 @@ required-features = ["wasm-cpu-runtime"]
 
 [dependencies]
 clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
+clearra-accelerator-runtime = { path = "../clearra-accelerator-runtime" }
 clearra-app = { path = "../clearra-app" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
@@ -61,7 +62,6 @@ clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
 clearra-supply = { path = "../clearra-supply" }
 clearra-validation = { path = "../clearra-validation" }
 clearra-cli-command = { path = "../clearra-cli-command" }
-clearra-core-executor = { path = "../clearra-core-executor" }
 clearra-pc4-qualifier = { path = "../../tools/clearra-pc4-qualifier", default-features = false, features = ["legal-board-assets"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true

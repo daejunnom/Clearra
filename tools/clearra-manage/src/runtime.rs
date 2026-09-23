@@ -1,3 +1,5 @@
+// SRP rationale: this module has one change reason: supervised process-tree
+// execution with admission, bounded resources and verifiable receipts.
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;

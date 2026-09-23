@@ -38,10 +38,8 @@ pub fn run_entry(
     let mut guest_arguments =
         normalize_entry_arguments(repository, policy, &contract, entry_name, arguments)?;
     if contract.requires_source {
-        let (archive, digest) = source_archive(repository, policy, &run_tag)?;
-        temporary_archive = archive
-            .parent()
-            .map(|path| OwnedTemporaryDirectory(path.to_path_buf()));
+        let (archive, digest, owner) = source_archive(repository, policy, &run_tag, &contract)?;
+        temporary_archive = Some(owner);
         let mounted_archive = windows_to_wsl(&archive)?;
         guest_arguments.splice(
             0..0,
@@ -164,6 +162,11 @@ fn normalize_entry_arguments(
         }
         let canonical =
             fs::canonicalize(&path).map_err(|error| Error::io("canonicalize WSL input", error))?;
+        if storage::is_secret_path(policy, &canonical) {
+            return Err(Error::storage(
+                "prohibited credential path blocked; contents were not inspected",
+            ));
+        }
         values[index] = OsString::from(windows_to_wsl(&canonical)?);
     }
     if entry == "oracle-local-layers-v080" {
@@ -212,9 +215,13 @@ fn unique_option_value(arguments: &[OsString], option: &str) -> Result<usize> {
     Ok(indexes[0])
 }
 
-fn source_archive(repository: &Path, policy: &Policy, run_tag: &str) -> Result<(PathBuf, String)> {
+fn source_archive(
+    repository: &Path,
+    policy: &Policy,
+    run_tag: &str,
+    contract: &WslEntry,
+) -> Result<(PathBuf, String, OwnedTemporaryDirectory)> {
     let root = temporary_root()?.join("wsl-source").join(run_tag);
-    fs::create_dir_all(&root).map_err(|error| Error::io("create WSL source staging", error))?;
     let listing = Command::new("git")
         .args(["-C", &repository.to_string_lossy(), "ls-files", "-z"])
         .output()
@@ -236,8 +243,48 @@ fn source_archive(repository: &Path, policy: &Policy, run_tag: &str) -> Result<(
             ));
         }
     }
-    let list = root.join("tracked-files.zlist");
-    fs::write(&list, &listing.stdout).map_err(|error| Error::io("write WSL source list", error))?;
+    let mut source_list = listing.stdout;
+    let repository = fs::canonicalize(repository)
+        .map_err(|error| Error::io("canonicalize WSL source root", error))?;
+    for relative in &contract.local_source_files {
+        let path = Path::new(relative);
+        if path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            || path.as_os_str().is_empty()
+            || relative.chars().any(char::is_control)
+            || relative.contains('\\')
+            || relative.contains(':')
+            || storage::is_secret_path(policy, path)
+        {
+            return Err(Error::storage("invalid local WSL source path"));
+        }
+        let absolute = repository.join(path);
+        let metadata = fs::symlink_metadata(&absolute)
+            .map_err(|error| Error::io("inspect local WSL source", error))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(Error::storage("local WSL source must be a regular file"));
+        }
+        let canonical = fs::canonicalize(&absolute)
+            .map_err(|error| Error::io("canonicalize local WSL source", error))?;
+        if !canonical.starts_with(&repository) || storage::is_secret_path(policy, &canonical) {
+            return Err(Error::storage(
+                "prohibited local WSL source path blocked; contents were not inspected",
+            ));
+        }
+        let raw = relative.as_bytes();
+        if !source_list
+            .split(|byte| *byte == 0)
+            .any(|candidate| candidate == raw)
+        {
+            source_list.extend_from_slice(raw);
+            source_list.push(0);
+        }
+    }
+    fs::create_dir_all(&root).map_err(|error| Error::io("create WSL source staging", error))?;
+    let owner = OwnedTemporaryDirectory(root.clone());
+    let list = root.join("source-files.zlist");
+    fs::write(&list, &source_list).map_err(|error| Error::io("write WSL source list", error))?;
     let archive = root.join("source.tar.gz");
     let status = Command::new("tar")
         .current_dir(repository)
@@ -252,7 +299,7 @@ fn source_archive(repository: &Path, policy: &Policy, run_tag: &str) -> Result<(
         return Err(Error::runtime("tar failed while preparing WSL source"));
     }
     let digest = sha256_file(&archive)?;
-    Ok((archive, digest))
+    Ok((archive, digest, owner))
 }
 
 fn marker_digest(policy: &Policy) -> Result<String> {

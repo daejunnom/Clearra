@@ -7,6 +7,7 @@
 
 use clearra_accelerator_activation::{AcceleratorProduct, VerifiedAcceleratorAuthority};
 use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::piece::rotation::RotationState;
 use clearra_rules::kicks::KickTableProfileId;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -34,13 +35,24 @@ pub enum ConditionedEvidenceLevel {
     CountAll,
 }
 
-/// Entry poses are the exact collision-free sky seeds compiled by the same
-/// profile-bound reachability template as the fallback search. This is not an
-/// arbitrary local window and may not be substituted for another entry set.
+/// The installed sparse pack supports only the exact collision-free sky seeds
+/// compiled by the profile-bound fallback template. `Explicit` is a typed
+/// out-of-scope request here: it has no pose payload in this pack schema and
+/// must never be answered using the sky-seed record. Use the separate exact
+/// full-board entry primitive when actual caller-proven poses are available.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConditionedEntryPoseSet {
     ProfileSkySeeds,
     Explicit,
+}
+
+/// One entry pose already proven reachable by the caller on the *complete*
+/// physical board. A cropped window cannot substitute a guessed entry pose.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ConditionedReachabilityEntryPose {
+    pub rotation: RotationState,
+    pub x: i8,
+    pub y: i8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -412,6 +424,24 @@ pub fn derive_exact_conditioned_reachability_record(
     })
 }
 
+/// Exact full-board relation from actual entry poses to grounded locks.
+///
+/// This deliberately does not consult the sparse spawn-to-lock pack. It is a
+/// primitive for qualifying a future local relation: absence on a cropped
+/// window is not a negative proof until the window's boundary is closed.
+/// Invalid, empty, or out-of-domain entry sets return `None`, never an empty
+/// lock set that could be mistaken for a complete negative result.
+pub fn derive_exact_conditioned_entry_lock_anchors(
+    width: u8,
+    height: u8,
+    board: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+    entries: &[ConditionedReachabilityEntryPose],
+) -> Option<[u64; 4]> {
+    crate::backend::exact_entry_lock_anchors(width, height, board, piece, kick_profile, entries)
+}
+
 pub fn encode_conditioned_reachability(
     binding: ConditionedReachabilityBinding,
     records: &[ConditionedReachabilityRecord],
@@ -473,11 +503,13 @@ pub fn install_conditioned_reachability_pack(
         .lock()
         .map_err(|_| ConditionedReachabilityAssetError::RegistryUnavailable)?;
     let slot = profile_slot(pack.binding().kick_profile)?;
-    let combined = pack.shared_bytes().saturating_add(
-        crate::legal_board::qualified_legal_board_snapshot(pack.binding().kick_profile)
-            .as_ref()
-            .map_or(0, |board| board.shared_bytes()),
-    );
+    let combined = pack
+        .shared_bytes()
+        .saturating_add(installed_conditioned_reachability_bytes(Some(slot))?)
+        .saturating_add(
+            crate::legal_board::installed_legal_board_bytes(None)
+                .map_err(|_| ConditionedReachabilityAssetError::RegistryUnavailable)?,
+        );
     if combined > crate::legal_board::MAX_ACTIVE_ACCELERATOR_BYTES {
         return Err(ConditionedReachabilityAssetError::ActiveSessionTooLarge);
     }
@@ -530,6 +562,26 @@ pub(crate) fn conditioned_reachability_snapshot(
         .ok()?
         .slots[slot]
         .clone()
+}
+
+pub(crate) fn installed_conditioned_reachability_bytes(
+    exclude_slot: Option<usize>,
+) -> Result<usize, ConditionedReachabilityAssetError> {
+    let Some(registry) = REGISTRY.get() else {
+        return Ok(0);
+    };
+    let guard = registry
+        .read()
+        .map_err(|_| ConditionedReachabilityAssetError::RegistryUnavailable)?;
+    Ok(guard
+        .slots
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != exclude_slot)
+        .filter_map(|(_, slot)| slot.as_ref())
+        .fold(0_usize, |total, pack| {
+            total.saturating_add(pack.shared_bytes())
+        }))
 }
 
 /// Host-side fast path for an already pinned immutable generation. Workers

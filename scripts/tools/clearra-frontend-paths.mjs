@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { copyFile, mkdir, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -6,6 +7,26 @@ import { assertBuildPathWithin, assertManagedBuildTransaction, assertNoBuildLink
   buildSourceId, canonicalBuildRoot } from './clearra-build-policy.mjs';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+/** Resolve the UI package's declared exports to its source tree for Vite.
+ * pnpm injects workspace packages into a virtual store for applications. A
+ * source-relative import from that copy cannot reach the sibling ctk3 package.
+ * Keep the package's public export map authoritative while bundling the
+ * original source, so both applications see the same CTK3 implementation.
+ */
+export function frontendUiSourceAliases(sourceRoot = repositoryRoot) {
+  const packageRoot = resolve(sourceRoot, 'packages', 'clearra-ui');
+  const manifest = JSON.parse(readFileSync(resolve(packageRoot, 'package.json'), 'utf8'));
+  return Object.entries(manifest.exports).map(([subpath, target]) => {
+    if (typeof target !== 'string' || !target.startsWith('./src/lib/') ||
+        !/^\.(?:\/[a-z-]+)?$/u.test(subpath)) {
+      throw new Error(`Invalid @clearra/ui source export: ${subpath}`);
+    }
+    const specifier = `@clearra/ui${subpath === '.' ? '' : subpath.slice(1)}`;
+    const escaped = specifier.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    return { find: new RegExp(`^${escaped}$`, 'u'), replacement: resolve(packageRoot, target) };
+  });
+}
 
 /** Select paths without creating a transaction or writing compiler output. */
 export function frontendPaths(app, { sourceRoot = repositoryRoot, environment = process.env,

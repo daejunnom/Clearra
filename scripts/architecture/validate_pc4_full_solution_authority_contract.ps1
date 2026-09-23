@@ -166,6 +166,17 @@ function Assert-Pc4ProductDecisionSourceAbsence() {
             'muse918/tetris-4lpc-mdp-vstar-policy',
             'muse918/pc4-qualified-graph-dataset'
         )
+        # This one exact negative-validation regex rejects non-graph artifact
+        # roles before a generation is compiled. Its own vocabulary is not a
+        # candidate source. Strip only the audited guard statement; any other
+        # occurrence in this file, including a weakened or copied guard, must
+        # still fail the decision-source scan.
+        $relative = Get-Pc4ProductAuthorityRelativePath $file
+        $artifactRoleGuard = 'const FORBIDDEN_ARTIFACT_ROLE = /(?:^|[._/-])(?:vstar|v-star|value|policy|krylov)(?:[._/-]|$)/iu;'
+        if ($relative -ceq 'scripts/release/pc4/compile-production-host-generation.mjs' -and
+            $decisionSourceContents.Contains($artifactRoleGuard)) {
+            $decisionSourceContents = $decisionSourceContents.Replace($artifactRoleGuard, '')
+        }
         $patterns = @($globallyForbiddenPatterns)
         if (Test-Pc4DecisionAuthorityContext -File $file -Contents $decisionSourceContents) {
             $patterns += $pc4DecisionPatterns

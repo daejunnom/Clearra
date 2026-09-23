@@ -8,6 +8,7 @@ use std::{
 };
 
 use clearra_pc_graph::request::GpuDeviceSelection;
+mod accelerator_exports;
 mod online_pc4_exports;
 #[cfg(target_arch = "wasm32")]
 use clearra_wasm::prewarm_gpu_search_async;
@@ -820,6 +821,21 @@ fn clear_panic_diagnostics() {
 #[no_mangle]
 pub extern "C" fn clearra_wasm_abi_version() -> u32 {
     ABI_VERSION
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_catalog(kind: u32, profile: u32) -> i32 {
+    accelerator_exports::catalog(kind, profile)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_admit(kind: u32, profile: u32, activate: u32) -> i32 {
+    accelerator_exports::admit(kind, profile, activate)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_remove(kind: u32, profile: u32) -> i32 {
+    accelerator_exports::remove(kind, profile)
 }
 
 #[no_mangle]

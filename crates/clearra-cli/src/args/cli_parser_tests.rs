@@ -55,6 +55,7 @@ fn ordinary_help_never_exposes_versioned_contracts_or_internal_identity_terms() 
         CliHelpTopic::Product(ProductHelpTopic::PcAllSpinSolution),
         CliHelpTopic::Product(ProductHelpTopic::PcAllSpinPreservationChance),
         CliHelpTopic::Product(ProductHelpTopic::BuildV2),
+        CliHelpTopic::Product(ProductHelpTopic::SetupScore),
         CliHelpTopic::Product(ProductHelpTopic::BuildProbability),
         CliHelpTopic::Product(ProductHelpTopic::Finesse),
         CliHelpTopic::Product(ProductHelpTopic::Damage),
@@ -163,7 +164,28 @@ fn build_v2_routes_to_the_product_boundary_and_owns_closed_help() {
         "--solution-format ctk3|fumen",
         "--objective all|unique|min-cover|max-probability-minimum|max-score-cover",
         "--score-profile tetrio|guideline|jstris-ultra",
+        "--legal-board|--no-legal-board",
+        "--conditioned-reachability|--no-conditioned-reachability",
         "rejects --max-memory-mib",
+    ] {
+        assert!(help.stdout().contains(marker), "missing marker: {marker}");
+    }
+}
+
+#[test]
+fn setup_score_help_describes_its_exact_accelerator_switches() {
+    assert_eq!(
+        CliParser::parse(["clearra", "setup", "score", "--help"])
+            .expect("Setup score help")
+            .into_command(),
+        ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::SetupScore))
+    );
+    let help = CliHelpTopic::Product(ProductHelpTopic::SetupScore).into_output(LanguageId::En);
+    for marker in [
+        "--setup-queue",
+        "--solution-queue",
+        "--legal-board|--no-legal-board",
+        "--conditioned-reachability|--no-conditioned-reachability",
     ] {
         assert!(help.stdout().contains(marker), "missing marker: {marker}");
     }

@@ -15,7 +15,20 @@ export type Pc4PendingRange = Pc4RangeRequest & {
   batch?: Pc4RangeRequest[];
   can_advance?: boolean;
 };
+export type AcceleratorCatalogPlan = {
+  product: 'exact-legal-board' | 'board-conditioned-reachability';
+  profile: string;
+  state: 'qualified' | 'not_qualified';
+  payload_bytes: number | null;
+  generation: string | null;
+  payload_identity: string | null;
+  url: string | null;
+  catalog_identity: string;
+};
 export type ClearraWasmModule = {
+  accelerator_catalog?: (kind: number, profile: number) => AcceleratorCatalogPlan;
+  accelerator_admit?: (kind: number, profile: number, bytes: ArrayBuffer, activate: boolean) => void;
+  accelerator_remove?: (kind: number, profile: number) => void;
   configure_online_pc4?: (generation: unknown) => void;
   online_pc4_pending?: (jobId: number) => Pc4PendingRange | null;
   online_pc4_admit?: (jobId: number, response: unknown) => void;
@@ -180,6 +193,9 @@ const ARTIFACT_MODULE_TIMEOUT_MS = 60_000;
 const ABI_OUTPUT_NOT_RELEASED = -2;
 
 type ClearraRawWasmExports = {
+  clearra_wasm_accelerator_catalog?: (kind: number, profile: number) => number;
+  clearra_wasm_accelerator_admit?: (kind: number, profile: number, activate: number) => number;
+  clearra_wasm_accelerator_remove?: (kind: number, profile: number) => number;
   clearra_wasm_online_pc4_configure?: () => number;
   clearra_wasm_online_pc4_pending?: (jobId: number) => number;
   clearra_wasm_online_pc4_admit?: (jobId: number) => number;
@@ -989,6 +1005,21 @@ function wrapRawModule(
   let gpuWarmupGeneration = 0;
 
   const module: ClearraWasmModule = {
+    ...(raw.clearra_wasm_accelerator_catalog && raw.clearra_wasm_accelerator_admit && raw.clearra_wasm_accelerator_remove ? {
+      accelerator_catalog(kind: number, profile: number): AcceleratorCatalogPlan {
+        requireOk(raw.clearra_wasm_accelerator_catalog!(kind, profile));
+        return JSON.parse(outputText()) as AcceleratorCatalogPlan;
+      },
+      accelerator_admit(kind: number, profile: number, bytes: ArrayBuffer, activate: boolean) {
+        setTransfer(bytes);
+        requireOk(raw.clearra_wasm_accelerator_admit!(kind, profile, activate ? 1 : 0));
+        outputText();
+      },
+      accelerator_remove(kind: number, profile: number) {
+        requireOk(raw.clearra_wasm_accelerator_remove!(kind, profile));
+        outputText();
+      }
+    } : {}),
     ...(raw.clearra_wasm_online_pc4_configure && raw.clearra_wasm_online_pc4_pending && raw.clearra_wasm_online_pc4_admit ? {
       configure_online_pc4(generation: unknown) {
         setCommand(JSON.stringify(generation));

@@ -125,6 +125,10 @@ pub struct WslEntry {
     pub profile: String,
     #[serde(default)]
     pub requires_source: bool,
+    /// Explicit, repository-local working-copy files required by a local-only
+    /// generator before they are tracked. They never grant release authority.
+    #[serde(default)]
+    pub local_source_files: Vec<String>,
     pub timeout_seconds: Option<u64>,
     #[serde(default)]
     pub output_path_options: Vec<String>,
@@ -314,6 +318,91 @@ impl Policy {
         if wsl.source_distribution == wsl.distribution || wsl.marker != "/etc/clearra/runtime.json"
         {
             return Err(Error::policy("WSL source/marker contract is invalid"));
+        }
+        for (name, entry) in &wsl.entrypoints {
+            if !entry.requires_source && !entry.local_source_files.is_empty() {
+                return Err(Error::policy(format!(
+                    "WSL entry {name} declares local files without a source archive"
+                )));
+            }
+            if !entry.local_source_files.is_empty()
+                && (entry.profile != "benchmark-search"
+                    || !matches!(
+                        name.as_str(),
+                        "legal-board-generate"
+                            | "conditioned-reachability-generate"
+                            | "conditioned-local-relation-generate"
+                    ))
+            {
+                return Err(Error::policy(format!(
+                    "WSL entry {name} cannot include working-copy-only source"
+                )));
+            }
+            let allowed = match name.as_str() {
+                "legal-board-generate" => &[
+                    "crates/clearra-accelerator-runtime/Cargo.toml",
+                    "crates/clearra-accelerator-runtime/src/lib.rs",
+                    "crates/clearra-core-executor/src/backend/wasm_cpu/reachability_local_relation.rs",
+                    "crates/clearra-core-executor/src/backend/wasm_cpu/reachability_reference_tests.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_index.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_pack.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_pack_tests.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_qualification.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_relation.rs",
+                    "crates/clearra-core-executor/src/reachability_reference.rs",
+                    "crates/clearra-core-executor/src/reachability_reference_local.rs",
+                ][..],
+                "conditioned-reachability-generate" => &[
+                    "crates/clearra-accelerator-runtime/Cargo.toml",
+                    "crates/clearra-accelerator-runtime/src/lib.rs",
+                    "scripts/tools/wsl-conditioned-reachability-generate.sh",
+                    "crates/clearra-core-executor/src/backend/wasm_cpu/reachability_local_relation.rs",
+                    "crates/clearra-core-executor/src/backend/wasm_cpu/reachability_reference_tests.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_index.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_pack.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_pack_tests.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_qualification.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_relation.rs",
+                    "crates/clearra-core-executor/src/reachability_reference.rs",
+                    "crates/clearra-core-executor/src/reachability_reference_local.rs",
+                ][..],
+                "conditioned-local-relation-generate" => &[
+                    "crates/clearra-accelerator-runtime/Cargo.toml",
+                    "crates/clearra-accelerator-runtime/src/lib.rs",
+                    "scripts/tools/wsl-conditioned-local-relation-generate.sh",
+                    "tools/clearra-pc4-qualifier/src/bin/clearra-conditioned-local-relation.rs",
+                    "tools/clearra-pc4-qualifier/src/conditioned_local_relation_generation.rs",
+                    "crates/clearra-core-executor/src/backend/wasm_cpu/reachability_local_relation.rs",
+                    "crates/clearra-core-executor/src/backend/wasm_cpu/reachability_reference_tests.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_index.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_pack.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_pack_tests.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_qualification.rs",
+                    "crates/clearra-core-executor/src/conditioned_local_relation.rs",
+                    "crates/clearra-core-executor/src/reachability_reference.rs",
+                    "crates/clearra-core-executor/src/reachability_reference_local.rs",
+                ][..],
+                _ => &[][..],
+            };
+            if entry.local_source_files.len() != allowed.len() {
+                return Err(Error::policy(format!(
+                    "WSL entry {name} has an incomplete working-copy source allowlist"
+                )));
+            }
+            if entry
+                .local_source_files
+                .iter()
+                .any(|path| !allowed.contains(&path.as_str()))
+                || entry
+                    .local_source_files
+                    .iter()
+                    .enumerate()
+                    .any(|(index, path)| entry.local_source_files[..index].contains(path))
+            {
+                return Err(Error::policy(format!(
+                    "WSL entry {name} has an unapproved working-copy source"
+                )));
+            }
         }
         Ok(())
     }

@@ -246,6 +246,18 @@ PY
         export CLEARRA_WSL_WORKSPACE="$SOURCE_ROOT"
         exec bash "$SOURCE_ROOT/scripts/tools/wsl-legal-board-generate.sh" "${SOURCE_ARGS[@]}"
         ;;
+    conditioned-reachability-generate)
+        parse_source "$@"
+        [[ "${#SOURCE_ARGS[@]}" -eq 10 ]] || exit 2
+        export CLEARRA_WSL_WORKSPACE="$SOURCE_ROOT"
+        exec bash "$SOURCE_ROOT/scripts/tools/wsl-conditioned-reachability-generate.sh" "${SOURCE_ARGS[@]}"
+        ;;
+    conditioned-local-relation-generate)
+        parse_source "$@"
+        [[ "${#SOURCE_ARGS[@]}" -eq 8 ]] || exit 2
+        export CLEARRA_WSL_WORKSPACE="$SOURCE_ROOT"
+        exec bash "$SOURCE_ROOT/scripts/tools/wsl-conditioned-local-relation-generate.sh" "${SOURCE_ARGS[@]}"
+        ;;
     pc-runtime-build-batch)
         parse_source "$@"
         set -- "${SOURCE_ARGS[@]}"
