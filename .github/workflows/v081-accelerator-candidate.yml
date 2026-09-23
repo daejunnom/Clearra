@@ -3,6 +3,18 @@ name: v0.8.1 Accelerator Candidate (Non-publishing)
 on:
   push:
     branches: ["codex/converge-v081-v090-release-20260923"]
+    # Keep source regressions on accelerator changes; management-only and
+    # documentation commits do not re-run the already receipted profile work.
+    paths:
+      - ".github/workflows/v081-accelerator-candidate.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "tools/clearra-pc4-qualifier/**"
+      - "scripts/tools/wsl-conditioned-*-generate.sh"
+      - "scripts/tools/wsl-legal-board-generate.sh"
+      - "config/clearra-management.v1.json"
   workflow_dispatch:
 
 permissions:
