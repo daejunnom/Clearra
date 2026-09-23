@@ -264,7 +264,10 @@ pub(crate) fn local_pc4_legal_board_allows(
 mod tests {
     use std::sync::Arc;
 
-    use crate::legal_board::{built_in_binding, encode_exact_intersection, LegalBoardExpectation};
+    use crate::legal_board::{
+        built_in_binding, bundle_key_from_clearra_board, encode_exact_intersection,
+        LegalBoardExpectation,
+    };
     use clearra_rules::kicks::KickTableProfileId;
 
     use super::{
@@ -276,9 +279,9 @@ mod tests {
     fn local_legal_board_filter_is_strictly_scoped_to_matching_empty_four_rows() {
         let mut layers: [Vec<u64>; 11] = std::array::from_fn(|_| Vec::new());
         layers[0].push(0);
-        layers[1].push(0b1111);
+        layers[1].push(bundle_key_from_clearra_board(0b1111));
         let bottom_prefix_target = ((1_u64 << 10) - 1) | (0b11 << 30);
-        layers[3].push(bottom_prefix_target);
+        layers[3].push(bundle_key_from_clearra_board(bottom_prefix_target));
         layers[10].push((1_u64 << 40) - 1);
         let binding = built_in_binding(KickTableProfileId::SrsPlus).unwrap();
         let bytes = encode_exact_intersection(binding, &layers).unwrap();

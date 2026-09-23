@@ -620,7 +620,7 @@ pub(crate) fn hex(identity: [u8; 32]) -> String {
 
 pub(crate) fn profile_root(base: &Path, kind: ProductCatalogKind, profile: &str) -> PathBuf {
     let namespace = match kind {
-        ProductCatalogKind::ExactLegalBoard => "legal-board-v1",
+        ProductCatalogKind::ExactLegalBoard => "legal-board-v2",
         ProductCatalogKind::BoardConditionedReachability => "conditioned-reachability-v1",
     };
     base.join(namespace).join(profile)

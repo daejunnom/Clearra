@@ -17,8 +17,8 @@ use clearra_rules::kicks::{
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-const MAGIC: &[u8; 8] = b"CLLB0001";
-const VERSION: u32 = 1;
+const MAGIC: &[u8; 8] = b"CLLB0002";
+const VERSION: u32 = 2;
 const HEADER_BYTES: usize = 160;
 const DIRECTORY_ENTRY_BYTES: usize = 64;
 const LAYER_COUNT: usize = 11;
@@ -652,10 +652,15 @@ impl ExactLegalBoard {
         if normalized.count_ones() != (query.placed_piece_count as u32) * 4 {
             return LegalBoardDecision::PassThrough(ProviderStatus::OutOfScope);
         }
+        // The immutable domain layers and bundle encode each 10-bit row in
+        // right-to-left storage order. BuildUp owns a left-to-right Board64
+        // mask. A row mirror is not generally a legal-board symmetry under
+        // ordered kicks, so membership must use the bundle's exact key.
+        let storage_key = bundle_key_from_clearra_board(normalized);
         match layer_contains(
             &self.bytes,
             &self.layers[query.placed_piece_count],
-            normalized,
+            storage_key,
         ) {
             Ok(true) => LegalBoardDecision::CandidateAllowed,
             Ok(false) => LegalBoardDecision::VerifiedAbsent,
@@ -664,7 +669,10 @@ impl ExactLegalBoard {
     }
 }
 
-/// Encode strictly sorted `L_k = F_k ∩ R_k` layers. Qualification and
+/// Encode strictly sorted `L_k = F_k ∩ R_k` storage-key layers. Each row's
+/// bit order is right-to-left, as in the independently generated domain files;
+/// callers must not pass Clearra's left-to-right Board64 masks directly.
+/// Qualification and
 /// publication remain external; this routine only creates the immutable
 /// representation and its self-authenticating generation identity.
 pub fn encode_exact_intersection(
@@ -931,6 +939,18 @@ fn index_layer(
     })
 }
 
+/// Involutive conversion between Clearra's `y * 10 + x` Board64 layout and
+/// the immutable legal-board storage key. It is deliberately owned here, not
+/// by the separate PC4 Tablebase product.
+pub(crate) fn bundle_key_from_clearra_board(board: u64) -> u64 {
+    let mut key = 0_u64;
+    for row in 0..4 {
+        let cells = ((board >> (row * 10)) & 1023) as u16;
+        key |= u64::from(cells.reverse_bits() >> 6) << (row * 10);
+    }
+    key
+}
+
 fn layer_contains(
     bytes: &[u8],
     layer: &LayerIndex,
@@ -992,7 +1012,7 @@ fn generation_identity_for(
     directory: &[u8],
 ) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"clearra.legal-board.exact-intersection.generation.v1\0");
+    digest.update(b"clearra.legal-board.exact-intersection.generation.v2\0");
     digest.update([encode_profile(binding.kick_profile).unwrap_or(u8::MAX)]);
     digest.update(binding.rule_identity);
     digest.update(payload_digest);
@@ -1130,10 +1150,53 @@ mod tests {
     fn layers() -> [Vec<u64>; LAYER_COUNT] {
         let mut layers: [Vec<u64>; LAYER_COUNT] = std::array::from_fn(|_| Vec::new());
         layers[0].push(0);
-        layers[1].extend([0b1111, 0b1111_0000]);
-        layers[3].push(ROW_MASK | (0b11 << 30));
+        layers[1].extend([
+            bundle_key_from_clearra_board(0b1111),
+            bundle_key_from_clearra_board(0b1111_0000),
+        ]);
+        layers[1].sort_unstable();
+        layers[3].push(bundle_key_from_clearra_board(ROW_MASK | (0b11 << 30)));
         layers[10].push(FIELD_MASK);
         layers
+    }
+
+    #[test]
+    fn asymmetric_row_storage_key_preserves_exact_membership() {
+        // One known SRS+ P7P4 solution was falsely rejected at layer six
+        // because the bundle stored row-reversed keys but lookup used Board64.
+        let board = 0xf830_3d1bff_u64;
+        let key = bundle_key_from_clearra_board(board);
+        assert_eq!(key, 0x07f0_362fff);
+        assert_eq!(bundle_key_from_clearra_board(key), board);
+        assert_ne!(key, board);
+
+        let mut layers: [Vec<u64>; LAYER_COUNT] = std::array::from_fn(|_| Vec::new());
+        layers[0].push(0);
+        layers[6].push(key);
+        layers[10].push(FIELD_MASK);
+        let encoded = encode_exact_intersection(binding(), &layers).unwrap();
+        let loaded = ExactLegalBoard::load(
+            Arc::from(encoded),
+            LegalBoardExpectation {
+                binding: binding(),
+                generation_identity: None,
+            },
+        )
+        .unwrap();
+        let frame = OriginalRowFrame::from_deleted_rows(1 << 1).unwrap();
+        assert_eq!(
+            loaded.decide(LegalBoardQuery {
+                width: 10,
+                height: 4,
+                initial_board: 0,
+                kick_profile: KickTableProfileId::Jstris180,
+                physical_board: frame.compact_physical_board(board).unwrap(),
+                deleted_original_rows: 1 << 1,
+                placed_piece_count: 6,
+                completion: CompletionCapability::ClearToEmpty,
+            }),
+            LegalBoardDecision::CandidateAllowed
+        );
     }
 
     #[test]
