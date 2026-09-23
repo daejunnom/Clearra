@@ -66,7 +66,8 @@ pub fn run_request(
     let request = bridge
         .parse_app_request(&request_json)
         .map_err(|error| error.to_string())?;
-    clearra_cli::activate_native_accelerators_for_request(&request);
+    bridge.ensure_no_running_job().map_err(|error| error.to_string())?;
+    clearra_cli::activate_native_accelerators_for_request(&request).map_err(str::to_owned)?;
     bridge
         .run_request(&request_json)
         .map_err(|error| error.to_string())
@@ -93,7 +94,8 @@ pub fn start_job(
     let request = bridge
         .parse_app_request(&request_json)
         .map_err(|error| error.to_string())?;
-    clearra_cli::activate_native_accelerators_for_request(&request);
+    bridge.ensure_no_running_job().map_err(|error| error.to_string())?;
+    clearra_cli::activate_native_accelerators_for_request(&request).map_err(str::to_owned)?;
     bridge
         .start_job(&request_json)
         .map_err(|error| error.to_string())

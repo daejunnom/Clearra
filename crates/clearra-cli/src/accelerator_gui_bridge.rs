@@ -6,15 +6,40 @@
 use std::sync::atomic::AtomicBool;
 
 use crate::{exit::ExitCode, run_with_args};
+use clearra_accelerator_product_host::ProductCatalogKind;
 
 const PROFILES: [&str; 5] = ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"];
+const PRODUCTS: [ProductCatalogKind; 2] = [
+    ProductCatalogKind::ExactLegalBoard,
+    ProductCatalogKind::BoardConditionedReachability,
+];
 
 /// Desktop executes the same exact AppRequest but does not pass through the
 /// CLI router. Activate only its selected profile before the GUI job starts;
 /// any unavailable or invalid asset remains an exact-search cache miss.
-pub fn activate_native_accelerators_for_request(request: &clearra_app::AppRequest) {
+pub fn activate_native_accelerators_for_request(
+    request: &clearra_app::AppRequest,
+) -> Result<(), &'static str> {
+    let selected = request.request_profiles().rule().as_str();
+    let (legal_enabled, relation_enabled) = request
+        .command()
+        .exact_accelerator_policy()
+        .unwrap_or((false, false));
+    // Desktop lives across jobs, unlike the one-shot CLI. Evict prior
+    // profiles before selecting the next immutable asset generation. A live
+    // session lease rejects eviction; never begin another job with a stale
+    // resident profile or an unaccounted second asset.
+    for (kind, enabled) in PRODUCTS.into_iter().zip([legal_enabled, relation_enabled]) {
+        for profile in PROFILES {
+            if enabled && profile == selected {
+                continue;
+            }
+            clearra_accelerator_runtime::remove(kind, profile)?;
+        }
+    }
     crate::legal_board_assets::activate_for_request(request);
     crate::conditioned_reachability_assets::activate_for_request(request);
+    Ok(())
 }
 
 pub fn run_native_accelerator_action(

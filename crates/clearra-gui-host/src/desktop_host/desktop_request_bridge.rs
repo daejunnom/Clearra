@@ -4444,6 +4444,7 @@ mod run_request {
             &mut self,
             request_json: &str,
         ) -> Result<String, DesktopTauriCommandError> {
+            self.ensure_no_running_job()?;
             self.product_page_store = None;
             let request = desktop_request_builds_app_request(request_json)?;
             let response = self.app_context.run(request);
@@ -4476,7 +4477,22 @@ mod start_job {
     };
 
     impl DesktopTauriCommandBridge {
+        /// Native asset activation mutates the process-wide registry. A
+        /// request may prepare a different profile only after the previous
+        /// worker has stopped using its immutable session lease.
+        pub fn ensure_no_running_job(&self) -> Result<(), DesktopTauriCommandError> {
+            if self
+                .active_job
+                .as_ref()
+                .is_some_and(|job| !job.is_finished())
+            {
+                return Err(DesktopTauriCommandError::job("desktop job already active"));
+            }
+            Ok(())
+        }
+
         pub fn start_job(&mut self, request_json: &str) -> Result<u64, DesktopTauriCommandError> {
+            self.ensure_no_running_job()?;
             self.reap_finished_job_before_start()?;
             self.product_page_store = None;
             let request = desktop_request_builds_app_request(request_json)?;
