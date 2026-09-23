@@ -250,10 +250,14 @@ fn remove(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
         reject_link(root)?;
         for layer in 0_u8..=10 {
             remove_file_if_present(&root.join(format!("forward-reachable-layer-{layer:02}.bin")))?;
+            remove_file_if_present(&root.join(format!("reverse-filter-layer-{layer:02}.bin")))?;
             remove_file_if_present(&root.join(format!("legal-layer-{layer:02}.bin")))?;
         }
         remove_file_if_present(&root.join(format!("legal-board-{profile}.cllb")))?;
         remove_file_if_present(&root.join(format!("legal-board-{profile}.catalog.json")))?;
+        let (bundle, catalog) = generated_candidate_paths(root, profile);
+        remove_file_if_present(&bundle)?;
+        remove_file_if_present(&catalog)?;
         remove_file_if_present(&root.join("store.lock"))?;
         match fs::remove_dir(root) {
             Ok(()) => {}
@@ -276,8 +280,7 @@ fn generate(
     accelerator_asset_store::ensure_real_directory(root)?;
     let kick_profile = KickTableProfileId::parse(profile)
         .ok_or("legal-board: profile is not connected to a kick table")?;
-    let bundle = root.join(format!("legal-board-{profile}.cllb"));
-    let catalog = root.join(format!("legal-board-{profile}.catalog.json"));
+    let (bundle, catalog) = generated_candidate_paths(root, profile);
     generate_legal_board(&LegalBoardGenerationOptions {
         profile: kick_profile,
         layers: root.to_path_buf(),
@@ -288,6 +291,13 @@ fn generate(
     })
     .map_err(|_| "legal-board: local candidate generation failed")?;
     status(profile, root)
+}
+
+fn generated_candidate_paths(root: &std::path::Path, profile: &str) -> (PathBuf, PathBuf) {
+    (
+        root.join(format!("legal-board-{profile}-v2.cllb")),
+        root.join(format!("legal-board-{profile}-v2.catalog.json")),
+    )
 }
 
 fn report_value(
@@ -363,6 +373,20 @@ mod tests {
             assert_eq!(value["catalog_status"], "not_qualified");
             assert_eq!(value["network_used"], false);
             assert!(execute(&["download".into(), "--profile".into(), profile.into()]).is_err());
+        }
+    }
+
+    #[test]
+    fn local_generation_uses_versioned_paths_without_replacing_v1_candidates() {
+        let root = std::path::Path::new("candidate-root");
+        for profile in PROFILES {
+            let (bundle, catalog) = generated_candidate_paths(root, profile);
+            assert_eq!(bundle, root.join(format!("legal-board-{profile}-v2.cllb")));
+            assert_eq!(
+                catalog,
+                root.join(format!("legal-board-{profile}-v2.catalog.json"))
+            );
+            assert_ne!(bundle, root.join(format!("legal-board-{profile}.cllb")));
         }
     }
 }

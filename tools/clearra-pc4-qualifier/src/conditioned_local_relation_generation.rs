@@ -373,6 +373,69 @@ mod tests {
     }
 
     #[test]
+    fn candidate_producer_publishes_only_audited_immutable_files() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "clearra-conditioned-local-producer-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create this test's isolated output directory");
+        let queries = root.join("queries.json");
+        let pack = root.join("candidate.cllr");
+        let catalog = root.join("candidate.catalog.json");
+        let profile = KickTableProfileId::SrsPlus;
+        let source = json!({
+            "schema": QUERY_SCHEMA,
+            "profile": "srs-plus",
+            "queries": [fixture_query()],
+        });
+        fs::write(&queries, serde_json::to_vec(&source).unwrap()).unwrap();
+        let options = ConditionedLocalRelationGenerationOptions {
+            profile,
+            queries: queries.clone(),
+            pack: pack.clone(),
+            catalog: catalog.clone(),
+        };
+        generate_conditioned_local_relation(&options).expect("audited candidate generation");
+        let first_pack = fs::read(&pack).unwrap();
+        let first_catalog = fs::read(&catalog).unwrap();
+        let report: Value = serde_json::from_slice(&first_catalog).unwrap();
+        assert_eq!(report["status"], "candidate_unqualified");
+        assert_eq!(report["signed"], false);
+        assert_eq!(report["independent_checked_records"], 1);
+        assert_eq!(report["encoded_bytes"], first_pack.len());
+        let binding = built_in_local_relation_binding(profile).unwrap();
+        let loaded = load_local_relation_candidate_pack(&first_pack, binding, None).unwrap();
+        assert_eq!(audit_candidate_local_relation_pack(&loaded), Ok(1));
+
+        generate_conditioned_local_relation(&options).expect("identical rerun is idempotent");
+        assert_eq!(fs::read(&pack).unwrap(), first_pack);
+        assert_eq!(fs::read(&catalog).unwrap(), first_catalog);
+
+        let mut changed = fixture_query();
+        changed["piece"] = json!("L");
+        fs::write(
+            &queries,
+            serde_json::to_vec(&json!({
+                "schema": QUERY_SCHEMA,
+                "profile": "srs-plus",
+                "queries": [changed],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = generate_conditioned_local_relation(&options)
+            .expect_err("different candidate cannot replace an immutable pack");
+        assert!(error.contains("immutable output already exists"));
+        assert_eq!(fs::read(&pack).unwrap(), first_pack);
+        assert_eq!(fs::read(&catalog).unwrap(), first_catalog);
+        fs::remove_dir_all(&root).expect("remove only this test's isolated outputs");
+    }
+
+    #[test]
     fn query_set_rejects_noncanonical_board_frame_and_semantic_duplicates() {
         let profile = KickTableProfileId::Srs90;
         let name = accelerator_profile_name(profile).unwrap();
