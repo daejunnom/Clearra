@@ -6,7 +6,9 @@
 //! profiles, entry sets or the final product pack.
 
 use crate::conditioned_local_pack::LocalRelationCandidatePack;
-use crate::conditioned_local_relation::{ConditionedPoseWindow, LocalRelationRowFrame};
+use crate::conditioned_local_relation::{
+    ConditionedPoseWindow, ExactConditionedLocalRelation, LocalRelationRowFrame,
+};
 use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
 use crate::reachability_reference::{
     reference_local_dependency_mask, reference_local_relation, ReferenceReachabilityEntryPose,
@@ -33,45 +35,103 @@ pub fn audit_candidate_local_relation_pack(
     candidate: &LocalRelationCandidatePack,
 ) -> Result<usize, LocalRelationCandidateAuditError> {
     for (index, record) in candidate.records().iter().enumerate() {
-        let entries: Vec<_> = record
-            .entries
-            .iter()
-            .map(|pose| ReferenceReachabilityEntryPose {
-                rotation: pose.rotation,
-                x: pose.x,
-                y: pose.y,
-            })
-            .collect();
-        let Some(reference) = reference_local_relation(
-            record.width,
-            record.height,
-            record.board,
-            record.piece,
-            record.kick_profile,
-            record.window,
-            &entries,
-        ) else {
-            return Err(LocalRelationCandidateAuditError::InvalidReferenceQuery { record: index });
-        };
-        let mask = reference.reached_source_dependency_mask;
-        if mask != record.dependency_mask || record.dependency_occupancy != record.board & mask {
-            return Err(LocalRelationCandidateAuditError::DependencyMaskMismatch { record: index });
-        }
-        let exits: Vec<_> = reference
-            .exits
-            .iter()
-            .map(|pose| ConditionedReachabilityEntryPose {
-                rotation: pose.rotation,
-                x: pose.x,
-                y: pose.y,
-            })
-            .collect();
-        if reference.grounded_lock_anchors != record.grounded_lock_anchors || exits != record.exits
-        {
-            return Err(LocalRelationCandidateAuditError::RelationMismatch { record: index });
-        }
+        audit_local_relation_record(record, index)?;
     }
     Ok(candidate.record_count())
+}
+
+fn audit_local_relation_record(
+    record: &ExactConditionedLocalRelation,
+    index: usize,
+) -> Result<(), LocalRelationCandidateAuditError> {
+    let entries: Vec<_> = record
+        .entries
+        .iter()
+        .map(|pose| ReferenceReachabilityEntryPose {
+            rotation: pose.rotation,
+            x: pose.x,
+            y: pose.y,
+        })
+        .collect();
+    let Some(reference) = reference_local_relation(
+        record.width,
+        record.height,
+        record.board,
+        record.piece,
+        record.kick_profile,
+        record.window,
+        &entries,
+    ) else {
+        return Err(LocalRelationCandidateAuditError::InvalidReferenceQuery { record: index });
+    };
+    let mask = reference.reached_source_dependency_mask;
+    if mask != record.dependency_mask || record.dependency_occupancy != record.board & mask {
+        return Err(LocalRelationCandidateAuditError::DependencyMaskMismatch { record: index });
+    }
+    let exits: Vec<_> = reference
+        .exits
+        .iter()
+        .map(|pose| ConditionedReachabilityEntryPose {
+            rotation: pose.rotation,
+            x: pose.x,
+            y: pose.y,
+        })
+        .collect();
+    if reference.grounded_lock_anchors != record.grounded_lock_anchors || exits != record.exits {
+        return Err(LocalRelationCandidateAuditError::RelationMismatch { record: index });
+    }
+    Ok(())
+}
+
+/// Qualification-only accumulator. Each new exact record is independently
+/// audited once before it can contribute a coverage cube. The final encoded
+/// pack must still be reloaded and audited as a whole; this saves repeated
+/// serialization/audit work during counterexample-guided generation only.
+pub struct AuditedLocalRelationRecordSet {
+    profile: KickTableProfileId,
+    records: Vec<ExactConditionedLocalRelation>,
+}
+
+impl AuditedLocalRelationRecordSet {
+    pub fn new(profile: KickTableProfileId) -> Self {
+        Self {
+            profile,
+            records: Vec::new(),
+        }
+    }
+
+    pub fn push(
+        &mut self,
+        record: ExactConditionedLocalRelation,
+    ) -> Result<(), LocalRelationCandidateAuditError> {
+        let index = self.records.len();
+        if record.kick_profile != self.profile {
+            return Err(LocalRelationCandidateAuditError::InvalidReferenceQuery { record: index });
+        }
+        audit_local_relation_record(&record, index)?;
+        self.records.push(record);
+        Ok(())
+    }
+
+    pub fn prove_context_coverage(
+        &self,
+        domain: LocalRelationCoverageDomain<'_>,
+        max_nodes: u32,
+    ) -> Result<LocalRelationCoverageResult, LocalRelationCoverageError> {
+        prove_context_coverage_after_audit(&self.records, self.profile, domain, max_nodes)
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn into_records(self) -> Vec<ExactConditionedLocalRelation> {
+        self.records
+    }
 }
 
 /// A process-local proof token. Only the independent primitive audit can
@@ -93,7 +153,12 @@ impl AuditedLocalRelationCandidatePack<'_> {
         domain: LocalRelationCoverageDomain<'_>,
         max_nodes: u32,
     ) -> Result<LocalRelationCoverageResult, LocalRelationCoverageError> {
-        prove_context_coverage_after_audit(self.candidate, domain, max_nodes)
+        prove_context_coverage_after_audit(
+            self.candidate.records(),
+            self.candidate.binding().kick_profile,
+            domain,
+            max_nodes,
+        )
     }
 }
 
@@ -164,7 +229,8 @@ pub fn prove_candidate_local_relation_context_coverage(
 }
 
 fn prove_context_coverage_after_audit(
-    candidate: &LocalRelationCandidatePack,
+    records: &[ExactConditionedLocalRelation],
+    profile: KickTableProfileId,
     domain: LocalRelationCoverageDomain<'_>,
     max_nodes: u32,
 ) -> Result<LocalRelationCoverageResult, LocalRelationCoverageError> {
@@ -172,7 +238,7 @@ fn prove_context_coverage_after_audit(
         || domain.width != 10
         || !(1..=6).contains(&domain.height)
         || domain.frame.target_height() != domain.height
-        || candidate.binding().kick_profile != domain.profile
+        || profile != domain.profile
         || domain.entries.is_empty()
         || domain.entries.len() > 640
         || domain
@@ -202,8 +268,7 @@ fn prove_context_coverage_after_audit(
     if domain.fixed_occupancy & entry_empty_mask != 0 {
         return Err(LocalRelationCoverageError::InvalidDomain);
     }
-    let cubes = candidate
-        .records()
+    let cubes = records
         .iter()
         .filter(|record| {
             record.width == domain.width
@@ -344,10 +409,11 @@ mod tests {
     use clearra_rules::kicks::KickTableProfileId;
 
     use super::{
-        audit_candidate_local_relation_pack, entry_footprint_mask,
-        prove_candidate_local_relation_context_coverage, prove_cube_cover, CoverageStep,
-        LocalRelationCandidateAuditError, LocalRelationCoverageDomain, LocalRelationCoverageError,
-        LocalRelationCoverageResult, OccupancyCube,
+        audit_candidate_local_relation_pack, audited_local_relation_candidate_pack,
+        entry_footprint_mask, prove_candidate_local_relation_context_coverage, prove_cube_cover,
+        AuditedLocalRelationRecordSet, CoverageStep, LocalRelationCandidateAuditError,
+        LocalRelationCoverageDomain, LocalRelationCoverageError, LocalRelationCoverageResult,
+        OccupancyCube,
     };
     use crate::conditioned_local_pack::{
         built_in_local_relation_binding, encode_local_relation_candidate_pack,
@@ -389,6 +455,46 @@ mod tests {
         let binding = built_in_local_relation_binding(profile).unwrap();
         let bytes = encode_local_relation_candidate_pack(binding, &[record]).unwrap();
         load_local_relation_candidate_pack(&bytes, binding, None).unwrap()
+    }
+
+    #[test]
+    fn incremental_audit_has_the_same_coverage_as_final_pack_audit() {
+        let profile = KickTableProfileId::NoKick;
+        let record = fixture(profile);
+        let pack = load(profile, record.clone());
+        let domain = || LocalRelationCoverageDomain {
+            width: record.width,
+            height: record.height,
+            frame: record.row_frame,
+            piece: record.piece,
+            profile,
+            window: record.window,
+            entries: &record.entries,
+            fixed_mask: (1_u64 << 40) - 1,
+            fixed_occupancy: 0,
+        };
+        let mut incremental = AuditedLocalRelationRecordSet::new(profile);
+        assert!(incremental.is_empty());
+        incremental.push(record.clone()).unwrap();
+        assert_eq!(incremental.len(), 1);
+        assert_eq!(
+            incremental.prove_context_coverage(domain(), 100),
+            audited_local_relation_candidate_pack(&pack)
+                .unwrap()
+                .prove_context_coverage(domain(), 100),
+        );
+        let mut false_dependency = record.clone();
+        false_dependency.dependency_mask ^= 1;
+        assert!(matches!(
+            incremental.push(false_dependency),
+            Err(LocalRelationCandidateAuditError::DependencyMaskMismatch { .. })
+        ));
+        assert_eq!(incremental.len(), 1);
+        assert!(matches!(
+            incremental.push(fixture(KickTableProfileId::SrsPlus)),
+            Err(LocalRelationCandidateAuditError::InvalidReferenceQuery { .. })
+        ));
+        assert_eq!(incremental.into_records(), vec![record]);
     }
 
     #[test]

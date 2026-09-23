@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::conditioned_local_product::{
     qualified_local_relation_snapshot, LocalRelationProductLookup, QualifiedLocalRelationPack,
 };
-use crate::conditioned_local_relation::{ConditionedPoseWindow, LocalRelationRowFrame};
+use crate::conditioned_local_relation::{solver_local_relation_windows, LocalRelationRowFrame};
 use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
 
 #[path = "reachability_local_relation.rs"]
@@ -610,40 +610,22 @@ impl ReachabilityWorkspace {
             self.templates[piece_index(piece)].as_mut(),
         ) {
             template.sky_entry_poses.get_or_insert_with(|| {
-                let mut poses = template
-                    .sky_seeds
-                    .iter()
-                    .map(|&index| {
-                        let pose =
-                            state_from_index(template.width, template.ceiling, usize::from(index));
-                        ConditionedReachabilityEntryPose {
-                            rotation: pose.rotation,
-                            x: pose.x,
-                            y: pose.y,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                poses.sort_unstable_by_key(|pose| (pose.rotation.quarter_turns(), pose.x, pose.y));
-                poses
+                canonical_sky_entry_poses(template.width, template.ceiling, &template.sky_seeds)
             });
             let entries = template.sky_entry_poses.as_deref().unwrap_or(&[]);
             if !entries.is_empty() {
-                let mut prior_min_y = None;
                 let mut saw_miss = false;
                 // Prefer a closed full-height relation (no continuation),
                 // then a top-half relation, then the original sky window.
                 // Each miss is only an asset miss, never a negative result.
-                for min_y in [0, catalog.height() as i8 / 2, catalog.height() as i8] {
-                    if prior_min_y == Some(min_y) {
-                        continue;
-                    }
-                    prior_min_y = Some(min_y);
-                    let window = ConditionedPoseWindow {
-                        min_x: 0,
-                        max_x: catalog.width() as i8 - 1,
-                        min_y,
-                        max_y: template.ceiling,
-                    };
+                for window in solver_local_relation_windows(
+                    catalog.width(),
+                    catalog.height(),
+                    template.ceiling,
+                )
+                .into_iter()
+                .flat_map(|(windows, count)| windows.into_iter().take(count))
+                {
                     let scratch = &mut self.scratch;
                     let generated_states = &mut self.generated_states;
                     match conditioned.lookup_composed_for_proven_entries_with(
@@ -863,6 +845,42 @@ pub(crate) fn exact_entry_lock_anchors(
     let mut scratch = ReachabilityScratch::default();
     let result = search_reachable_locks_from_entries(&template, board, &mut scratch, entries)?;
     result.exhaustive.then_some(result.locks.anchors)
+}
+
+fn canonical_sky_entry_poses(
+    width: u8,
+    ceiling: i8,
+    sky_seeds: &[u16],
+) -> Vec<ConditionedReachabilityEntryPose> {
+    let mut poses = sky_seeds
+        .iter()
+        .map(|&index| {
+            let pose = state_from_index(width, ceiling, usize::from(index));
+            ConditionedReachabilityEntryPose {
+                rotation: pose.rotation,
+                x: pose.x,
+                y: pose.y,
+            }
+        })
+        .collect::<Vec<_>>();
+    poses.sort_unstable_by_key(|pose| (pose.rotation.quarter_turns(), pose.x, pose.y));
+    poses
+}
+
+#[cfg(any(test, feature = "qualification-reference"))]
+pub(crate) fn exact_solver_local_relation_spawn_entries(
+    height: u8,
+    piece: PieceKind,
+    profile_id: KickTableProfileId,
+) -> Option<(i8, Vec<ConditionedReachabilityEntryPose>)> {
+    if !(1..=6).contains(&height) || builtin_kick_profile(profile_id).is_none() {
+        return None;
+    }
+    let template = ReachabilityTemplate::compile(10, height, piece, profile_id);
+    Some((
+        template.ceiling,
+        canonical_sky_entry_poses(template.width, template.ceiling, &template.sky_seeds),
+    ))
 }
 
 fn anchors_contain(anchors: [u64; 4], width: u8, rotation: RotationState, x: i8, y: i8) -> bool {

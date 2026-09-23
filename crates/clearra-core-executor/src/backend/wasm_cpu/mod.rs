@@ -74,6 +74,8 @@ pub use pc4_graph_materializer::{
     materialize_pc4_ilc_transition, Pc4IlcForwardMembershipWorkspace, Pc4IlcMaterializationError,
     Pc4IlcPlacement,
 };
+#[cfg(any(test, feature = "qualification-reference"))]
+pub(crate) use reachability::exact_solver_local_relation_spawn_entries;
 pub(crate) use reachability::{
     exact_entry_lock_anchors, exact_local_relation, exact_spawn_lock_anchors,
     DocumentLockReachability, DocumentReachabilityEngine,

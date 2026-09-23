@@ -68,7 +68,7 @@ fn run_proof(args: &[String]) -> Result<(), String> {
 
 fn usage() -> String {
     format!(
-        "usage: clearra-conditioned-local-relation --profile PROFILE --queries ABSOLUTE_JSON --pack ABSOLUTE_CLLR --catalog ABSOLUTE_JSON\nqueries accepts an explicit query-set.v1 or bounded cover-set.v1 source; both remain unqualified candidates\n{}",
+        "usage: clearra-conditioned-local-relation --profile PROFILE --queries ABSOLUTE_JSON --pack ABSOLUTE_CLLR --catalog ABSOLUTE_JSON\nqueries accepts query-set.v1, bounded cover-set.v1, or solver-cover-set.v1; all remain unqualified candidates\n{}",
         proof_usage()
     )
 }

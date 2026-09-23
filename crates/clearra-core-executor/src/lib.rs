@@ -89,12 +89,15 @@ pub use conditioned_local_product::{
 pub use conditioned_local_qualification::{
     audit_candidate_local_relation_pack, audited_local_relation_candidate_pack,
     prove_candidate_local_relation_context_coverage, AuditedLocalRelationCandidatePack,
-    LocalRelationCandidateAuditError, LocalRelationCoverageDomain, LocalRelationCoverageError,
-    LocalRelationCoverageResult,
+    AuditedLocalRelationRecordSet, LocalRelationCandidateAuditError, LocalRelationCoverageDomain,
+    LocalRelationCoverageError, LocalRelationCoverageResult,
 };
+#[cfg(any(test, feature = "qualification-reference"))]
+pub use conditioned_local_relation::solver_local_relation_spawn_entries;
 pub use conditioned_local_relation::{
     derive_exact_conditioned_local_relation, derive_exact_conditioned_local_relation_with_frame,
-    ConditionedPoseWindow, ExactConditionedLocalRelation, LocalRelationRowFrame,
+    solver_local_relation_windows, ConditionedPoseWindow, ExactConditionedLocalRelation,
+    LocalRelationRowFrame,
 };
 pub use conditioned_reachability::{
     active_conditioned_reachability_identity, built_in_conditioned_reachability_binding,

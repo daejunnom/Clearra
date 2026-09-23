@@ -15,7 +15,10 @@ use clearra_rules::kicks::KickTableProfileId;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::conditioned_local_relation_generation::{canonical_cover_identity, parse_cover_domains};
+use crate::conditioned_local_relation_generation::{
+    canonical_cover_identity, parse_cover_domains, parse_solver_cover_domains, COVER_SCHEMA,
+    SOLVER_COVER_SCHEMA,
+};
 
 const MAX_CATALOG_BYTES: usize = 512 * 1024;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
@@ -56,13 +59,20 @@ pub fn verify_conditioned_local_cover_source(
             .map_err(str::to_owned)?;
     let catalog: Value = serde_json::from_slice(catalog_bytes)
         .map_err(|_| "local relation cover catalog invalid".to_owned())?;
-    if catalog["query_schema"] != "clearra.conditioned-local-relation.cover-set.v1"
+    let query_schema = catalog["query_schema"]
+        .as_str()
+        .ok_or("local relation cover source schema invalid")?;
+    if (query_schema != COVER_SCHEMA && query_schema != SOLVER_COVER_SCHEMA)
         || catalog["source_file_identity"] != hex(Sha256::digest(source_bytes).into())
     {
         return Err("local relation cover source identity mismatch".to_owned());
     }
-    let domains = parse_cover_domains(source_bytes, profile)?;
-    let identity = canonical_cover_identity(&domains, profile)?;
+    let domains = if query_schema == SOLVER_COVER_SCHEMA {
+        parse_solver_cover_domains(source_bytes, profile)?
+    } else {
+        parse_cover_domains(source_bytes, profile)?
+    };
+    let identity = canonical_cover_identity(&domains, profile, query_schema)?;
     if catalog["query_set_identity"] != hex(identity)
         || catalog["query_count"].as_u64() != Some(domains.len() as u64)
     {
@@ -150,7 +160,7 @@ pub fn validate_conditioned_local_candidate_catalog(
             source_count == Some(record_count as u64)
                 && catalog["evidence_scope"] == "stored-record-and-collision-dependency-only"
         }
-        Some("clearra.conditioned-local-relation.cover-set.v1") => {
+        Some(schema) if schema == COVER_SCHEMA || schema == SOLVER_COVER_SCHEMA => {
             source_count.is_some_and(|count| count > 0 && count <= record_count as u64)
                 && catalog["evidence_scope"] == "audited-record-and-declared-domain-coverage"
         }
@@ -376,7 +386,7 @@ mod tests {
             "profile": "no-kick",
             "query_schema": "clearra.conditioned-local-relation.cover-set.v1",
             "query_count": 1,
-            "query_set_identity": hex(canonical_cover_identity(&domains, profile).unwrap()),
+            "query_set_identity": hex(canonical_cover_identity(&domains, profile, COVER_SCHEMA).unwrap()),
             "source_file_identity": hex(Sha256::digest(&source_bytes).into()),
             "record_count": 1,
             "independent_checked_records": 1,

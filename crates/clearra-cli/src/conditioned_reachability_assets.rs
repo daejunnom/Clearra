@@ -65,9 +65,9 @@ pub(crate) fn run(args: &[String], language: LanguageId, json_output: bool) -> C
 
 fn help(language: LanguageId) -> String {
     let body = match language {
-        LanguageId::Ko => "profile별 조건부 도달성 pack을 확인·다운로드·생성·삭제합니다. check는 네트워크를 사용하지 않습니다. generate는 구형 sparse 후보, generate-local-candidate는 명시한 entry/exit query set의 새 미자격 후보를 만들며 어느 쪽도 제품에 설치하지 않습니다.",
-        LanguageId::Ja => "プロファイル別の条件付き到達性packを確認・ダウンロード・生成・削除します。checkはネットワークを使用しません。generateは旧sparse候補、generate-local-candidateは指定したentry/exit query setの新しい未適格候補を作成し、どちらも製品にインストールしません。",
-        LanguageId::En => "Inspect, download, generate, or remove one profile's conditioned-reachability pack. check uses no network. generate makes a legacy sparse candidate; generate-local-candidate makes a new unqualified entry/exit candidate from an explicit query set. Neither installs a product asset.",
+        LanguageId::Ko => "profile별 조건부 도달성 pack을 확인·다운로드·생성·삭제합니다. check는 네트워크를 사용하지 않습니다. generate는 구형 sparse 후보를 만듭니다. generate-local-candidate는 명시 query, 조건부 cover 또는 solver 문맥 cover에서 미자격 entry/exit 후보를 만들며 제품에 설치하지 않습니다.",
+        LanguageId::Ja => "プロファイル別の条件付き到達性packを確認・ダウンロード・生成・削除します。checkはネットワークを使用しません。generateは旧sparse候補を作成します。generate-local-candidateは明示query、条件付きcover、またはsolver文脈coverから未適格のentry/exit候補を作成し、製品にはインストールしません。",
+        LanguageId::En => "Inspect, download, generate, or remove one profile's conditioned-reachability pack. check uses no network. generate makes a legacy sparse candidate. generate-local-candidate makes an unqualified entry/exit candidate from explicit queries, bounded covers, or solver-context covers; it does not install a product asset.",
     };
     format!(
         "clearra reachability-pack <check|download|status|remove|generate|generate-local-candidate> --profile srs|srs-plus|srs-x|jstris-180|no-kick [--directory DIRECTORY] [--queries FILE] [--workers N for legacy generate]\n{body}"

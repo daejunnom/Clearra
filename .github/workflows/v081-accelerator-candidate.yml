@@ -90,5 +90,6 @@ jobs:
           cargo test --locked -p clearra-core-executor --lib conditioned_local_index::tests --features qualification-reference
           cargo test --locked -p clearra-core-executor --lib conditioned_local_qualification --features qualification-reference
           cargo test --locked -p clearra-core-executor --lib conditioned_local_product::tests --features qualification-reference
+          cargo test --locked -p clearra-core-executor --lib solver_context_tests --features qualification-reference
           cargo test --locked -p clearra-core-executor --lib row_frame::tests --features qualification-reference
           cargo test --locked -p clearra-core-executor --lib legal_board::tests --features qualification-reference
