@@ -473,12 +473,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn five_profiles_are_explicit_and_unqualified_downloads_never_start() {
+    fn five_signed_profiles_are_explicit_and_check_never_starts_a_download() {
         for profile in PROFILES {
             let checked = execute(&["check".into(), "--profile".into(), profile.into()]).unwrap();
-            assert_eq!(checked["catalog_status"], "not_qualified");
+            assert_eq!(checked["catalog_status"], "ready");
+            assert_eq!(checked["qualified"], true);
+            assert!(checked["compressed_bytes"]
+                .as_u64()
+                .is_some_and(|size| size > 0));
             assert_eq!(checked["network_used"], false);
-            assert!(execute(&["download".into(), "--profile".into(), profile.into()]).is_err());
+        }
+    }
+
+    /// Runs only after a person explicitly downloaded the immutable assets
+    /// into the declared local smoke store. This exercises the next-process
+    /// activation path, not merely the download-time payload validator.
+    #[test]
+    #[ignore = "requires five downloaded signed packs in the local smoke store"]
+    fn downloaded_five_profile_packs_activate_from_the_signed_catalog() {
+        let directory = std::env::var_os("CLEARRA_CONDITIONED_SMOKE_DIRECTORY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../_local/artifacts/conditioned-relation-download-smoke")
+            });
+        for profile in PROFILES {
+            let root = accelerator_asset_store::profile_root(&directory, PRODUCT, profile);
+            assert_eq!(
+                accelerator_asset_store::activate_installed(PRODUCT, profile, &root),
+                LocalAssetState::Ready,
+                "signed pack did not activate for {profile}"
+            );
+            assert!(clearra_accelerator_runtime::active_identity(PRODUCT, profile).is_some());
+            clearra_accelerator_runtime::remove(PRODUCT, profile).unwrap();
         }
     }
 

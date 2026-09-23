@@ -25,10 +25,22 @@ const PUBLIC_KEY: [u8; 32] = [
     0xa6, 0xca, 0x31, 0xd0, 0xfb, 0xfa, 0xc1, 0x25, 0xd5, 0x4f, 0x7b, 0x15, 0xbe, 0x5c, 0x37, 0xe2,
     0xb5, 0x43, 0x60, 0x88, 0x9c, 0xf4, 0x16, 0x2f, 0xaf, 0xe3, 0xd5, 0x36, 0xce, 0x27, 0x93, 0xfa,
 ];
-const PRODUCTION_KEYS: [PinnedPublicKey; 1] = [PinnedPublicKey {
-    key_id: KEY_ID,
-    public_key: PUBLIC_KEY,
-}];
+const CONDITIONED_KEY_ID: &str =
+    "ed25519-raw-sha256:764ecfc06e730760c3d6704c71dea629cc6895ba3e202d40ce9e6ad96ef49328";
+const CONDITIONED_PUBLIC_KEY: [u8; 32] = [
+    0x18, 0x70, 0xcd, 0xc0, 0x5d, 0x9d, 0xa3, 0x04, 0x1a, 0xe2, 0xe0, 0x76, 0xa8, 0x76, 0xd3, 0x28,
+    0x85, 0x5a, 0xbd, 0x7f, 0x06, 0x85, 0x68, 0x23, 0xa3, 0x92, 0x56, 0xe4, 0x67, 0xd9, 0x5a, 0x8e,
+];
+const PRODUCTION_KEYS: [PinnedPublicKey; 2] = [
+    PinnedPublicKey {
+        key_id: KEY_ID,
+        public_key: PUBLIC_KEY,
+    },
+    PinnedPublicKey {
+        key_id: CONDITIONED_KEY_ID,
+        public_key: CONDITIONED_PUBLIC_KEY,
+    },
+];
 const PROFILES: [&str; 5] = ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"];
 const REPOSITORY: &str = "daejunnom/Clearra";
 const RELEASE_URL_PREFIX: &str = "https://github.com/daejunnom/Clearra/releases/download/";
@@ -463,20 +475,21 @@ fn validate_keyring_document(text: &str) -> Result<(), ProductCatalogError> {
     }
     let entries = value["keys"]
         .as_array()
-        .filter(|entries| entries.len() == 1)
+        .filter(|entries| entries.len() == PRODUCTION_KEYS.len())
         .ok_or(ProductCatalogError::new("accelerator_keyring_keys"))?;
-    let entry = &entries[0];
-    exact_keys(
-        object(entry, "accelerator_keyring_key_shape")?,
-        &["algorithm", "key_id", "public_key_hex", "status"],
-        "accelerator_keyring_key_shape",
-    )?;
-    if string(entry, "algorithm")? != "ed25519"
-        || string(entry, "key_id")? != KEY_ID
-        || decode_hex::<32>(string(entry, "public_key_hex")?)? != PUBLIC_KEY
-        || string(entry, "status")? != "active"
-    {
-        return Err(ProductCatalogError::new("accelerator_keyring_contract"));
+    for (entry, pinned) in entries.iter().zip(PRODUCTION_KEYS) {
+        exact_keys(
+            object(entry, "accelerator_keyring_key_shape")?,
+            &["algorithm", "key_id", "public_key_hex", "status"],
+            "accelerator_keyring_key_shape",
+        )?;
+        if string(entry, "algorithm")? != "ed25519"
+            || string(entry, "key_id")? != pinned.key_id
+            || decode_hex::<32>(string(entry, "public_key_hex")?)? != pinned.public_key
+            || string(entry, "status")? != "active"
+        {
+            return Err(ProductCatalogError::new("accelerator_keyring_contract"));
+        }
     }
     Ok(())
 }
@@ -598,7 +611,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn embedded_catalogs_have_five_explicit_unqualified_slots() {
+    fn embedded_catalogs_preserve_independent_profile_authority() {
         production_keyring().expect("checked-in public keyring");
         for kind in [
             ProductCatalogKind::ExactLegalBoard,
@@ -606,7 +619,10 @@ mod tests {
         ] {
             let catalog = embedded_catalog(kind).expect("checked-in catalog");
             assert_eq!(catalog.kind(), kind);
-            assert!(!catalog.all_profiles_qualified());
+            assert_eq!(
+                catalog.all_profiles_qualified(),
+                kind == ProductCatalogKind::BoardConditionedReachability
+            );
             assert_eq!(
                 catalog
                     .profiles()
@@ -615,10 +631,19 @@ mod tests {
                     .collect::<Vec<_>>(),
                 PROFILES
             );
-            assert!(catalog
-                .profiles()
-                .iter()
-                .all(|profile| matches!(profile.status(), CatalogProfileStatus::NotQualified)));
+            for profile in catalog.profiles() {
+                match (kind, profile.status()) {
+                    (ProductCatalogKind::ExactLegalBoard, CatalogProfileStatus::NotQualified) => {}
+                    (
+                        ProductCatalogKind::BoardConditionedReachability,
+                        CatalogProfileStatus::Qualified(asset),
+                    ) => {
+                        assert_eq!(asset.authority().profile(), profile.profile());
+                        assert_eq!(asset.authority().completeness_scope(), CONDITIONED_SCOPE);
+                    }
+                    _ => panic!("product authority changed without qualification"),
+                }
+            }
         }
     }
 

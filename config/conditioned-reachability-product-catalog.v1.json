@@ -1,11 +1,86 @@
 {
   "product": "board-conditioned-reachability",
   "profiles": [
-    { "activation_envelope_json": null, "metadata": null, "profile": "srs", "status": "not_qualified" },
-    { "activation_envelope_json": null, "metadata": null, "profile": "srs-plus", "status": "not_qualified" },
-    { "activation_envelope_json": null, "metadata": null, "profile": "srs-x", "status": "not_qualified" },
-    { "activation_envelope_json": null, "metadata": null, "profile": "jstris-180", "status": "not_qualified" },
-    { "activation_envelope_json": null, "metadata": null, "profile": "no-kick", "status": "not_qualified" }
+    {
+      "activation_envelope_json": "{\"schema\":\"clearra.accelerator.signed-asset-envelope.v1\",\"signature_hex\":\"5d2eb44f9f2b514dc8f30fb8b97eefe850582c4db40d12eb5643214f990b5e9db9b93abed5b5e2e8fb7173c4fd7ce3817c2571aa6723eb9a3f0818bb39fd2605\",\"statement_json\":\"{\\\"algorithm\\\":\\\"ed25519\\\",\\\"asset_url\\\":\\\"https://github.com/daejunnom/Clearra/releases/download/conditioned-data-v081-20260924-rc1/conditioned-srs.cllr\\\",\\\"completeness_scope\\\":\\\"width10-height1to6-solver-sky-bottom8-56-contexts-entry-first-exit-boolean\\\",\\\"generation_identity\\\":\\\"7c7e8289c8f5f48a1e7832ddb4898fff14be8533773f3364f7a3a83813ca0843\\\",\\\"key_id\\\":\\\"ed25519-raw-sha256:764ecfc06e730760c3d6704c71dea629cc6895ba3e202d40ce9e6ad96ef49328\\\",\\\"payload_bytes\\\":\\\"4184234\\\",\\\"payload_identity\\\":\\\"5b715d40564c585b05ff0954c213f92c80fd6eb27ee8b8ae8d6bbfbcdff0011d\\\",\\\"product\\\":\\\"board-conditioned-reachability\\\",\\\"profile\\\":\\\"srs\\\",\\\"qualification_identity\\\":\\\"9c4869bfb7308cbbdea39233e59df39d259b8bdef2fdab369357e00706bb4732\\\",\\\"repository\\\":\\\"daejunnom/Clearra\\\",\\\"revision\\\":\\\"63deb2d0984059506b64e3c40a12f3b7bb34aa4d\\\",\\\"rule_identity\\\":\\\"f0f75792daabfbf30e8ebff712b9d47988c9a3546f70ba4c36800f2c5c9e3b49\\\",\\\"schema\\\":\\\"clearra.accelerator.asset-statement.v1\\\"}\"}",
+      "metadata": {
+        "active_session_shared_bytes": "9413554",
+        "generation_identity": "7c7e8289c8f5f48a1e7832ddb4898fff14be8533773f3364f7a3a83813ca0843",
+        "payload_bytes": "4184234",
+        "payload_identity": "5b715d40564c585b05ff0954c213f92c80fd6eb27ee8b8ae8d6bbfbcdff0011d",
+        "qualification_identity": "9c4869bfb7308cbbdea39233e59df39d259b8bdef2fdab369357e00706bb4732",
+        "query_set_identity": "1596aa9cb9dee8055f0abf7450e350aba5e2f5f6559cb40f067c7af8aa026d14",
+        "record_count": "7449",
+        "rule_identity": "f0f75792daabfbf30e8ebff712b9d47988c9a3546f70ba4c36800f2c5c9e3b49",
+        "url": "https://github.com/daejunnom/Clearra/releases/download/conditioned-data-v081-20260924-rc1/conditioned-srs.cllr"
+      },
+      "profile": "srs",
+      "status": "qualified"
+    },
+    {
+      "activation_envelope_json": "{\"schema\":\"clearra.accelerator.signed-asset-envelope.v1\",\"signature_hex\":\"2f101280b2284e24d09196f4c1d876632557fb968b74e31b5e9566e2136d65e7c32193aac151dbb28c7ed313be10b5f28e3bf210136f7750aea46cae3d17e60a\",\"statement_json\":\"{\\\"algorithm\\\":\\\"ed25519\\\",\\\"asset_url\\\":\\\"https://github.com/daejunnom/Clearra/releases/download/conditioned-data-v081-20260924-rc1/conditioned-srs-plus.cllr\\\",\\\"completeness_scope\\\":\\\"width10-height1to6-solver-sky-bottom8-56-contexts-entry-first-exit-boolean\\\",\\\"generation_identity\\\":\\\"05a2e87c655c7358de12b63f14e303b31467a26ef46758dd58a73866a8acac42\\\",\\\"key_id\\\":\\\"ed25519-raw-sha256:764ecfc06e730760c3d6704c71dea629cc6895ba3e202d40ce9e6ad96ef49328\\\",\\\"payload_bytes\\\":\\\"4183658\\\",\\\"payload_identity\\\":\\\"2b76ff102fd158d7fa1fcd8789b99e04f302c0e8fdf4de2808052484ca6755a1\\\",\\\"product\\\":\\\"board-conditioned-reachability\\\",\\\"profile\\\":\\\"srs-plus\\\",\\\"qualification_identity\\\":\\\"57d35264fbc4b316719875800375a8e039916e9f3e52c3b4bf8ef2fa4a9bca96\\\",\\\"repository\\\":\\\"daejunnom/Clearra\\\",\\\"revision\\\":\\\"63deb2d0984059506b64e3c40a12f3b7bb34aa4d\\\",\\\"rule_identity\\\":\\\"97dd721c8003c0ed75f91bf0c089096920dac531e575f310c6b2299832437dd6\\\",\\\"schema\\\":\\\"clearra.accelerator.asset-statement.v1\\\"}\"}",
+      "metadata": {
+        "active_session_shared_bytes": "9411826",
+        "generation_identity": "05a2e87c655c7358de12b63f14e303b31467a26ef46758dd58a73866a8acac42",
+        "payload_bytes": "4183658",
+        "payload_identity": "2b76ff102fd158d7fa1fcd8789b99e04f302c0e8fdf4de2808052484ca6755a1",
+        "qualification_identity": "57d35264fbc4b316719875800375a8e039916e9f3e52c3b4bf8ef2fa4a9bca96",
+        "query_set_identity": "4aa6385cf7aaa6b908bc89e29e3369cb86f6bb947c91122a7b11be50e01fc0f5",
+        "record_count": "7449",
+        "rule_identity": "97dd721c8003c0ed75f91bf0c089096920dac531e575f310c6b2299832437dd6",
+        "url": "https://github.com/daejunnom/Clearra/releases/download/conditioned-data-v081-20260924-rc1/conditioned-srs-plus.cllr"
+      },
+      "profile": "srs-plus",
+      "status": "qualified"
+    },
+    {
+      "activation_envelope_json": "{\"schema\":\"clearra.accelerator.signed-asset-envelope.v1\",\"signature_hex\":\"9817af9537088a14d71d90aef03fea447f1382f67fd8a57b7ba28716240a3cf200a5d7195c95009a63265aa475c7bfebf9f999e1d6b85d4aee2062629231540a\",\"statement_json\":\"{\\\"algorithm\\\":\\\"ed25519\\\",\\\"asset_url\\\":\\\"https://github.com/daejunnom/Clearra/releases/download/conditioned-data-v081-20260924-rc1/conditioned-srs-x.cllr\\\",\\\"completeness_scope\\\":\\\"width10-height1to6-solver-sky-bottom8-56-contexts-entry-first-exit-boolean\\\",\\\"generation_identity\\\":\\\"cf78d334ad821f05ec2ae13554fbede22e8be3c5cd613fbe0373630b1834bd79\\\",\\\"key_id\\\":\\\"ed25519-raw-sha256:764ecfc06e730760c3d6704c71dea629cc6895ba3e202d40ce9e6ad96ef49328\\\",\\\"payload_bytes\\\":\\\"4407722\\\",\\\"payload_identity\\\":\\\"2846b82033438f5a77def79f558c5b29f5766114110de024aa2d2dadc58eeb51\\\",\\\"product\\\":\\\"board-conditioned-reachability\\\",\\\"profile\\\":\\\"srs-x\\\",\\\"qualification_identity\\\":\\\"e7ae9a863517753aeed3e802d14a70f4b0ac30f8ab8755573155e38c528e3f5c\\\",\\\"repository\\\":\\\"daejunnom/Clearra\\\",\\\"revision\\\":\\\"63deb2d0984059506b64e3c40a12f3b7bb34aa4d\\\",\\\"rule_identity\\\":\\\"4841bd366fc338ba4254d055745eebb47ddca6fdc4a74ca05dc6b5d3bdb48af4\\\",\\\"schema\\\":\\\"clearra.accelerator.asset-statement.v1\\\"}\"}",
+      "metadata": {
+        "active_session_shared_bytes": "9918130",
+        "generation_identity": "cf78d334ad821f05ec2ae13554fbede22e8be3c5cd613fbe0373630b1834bd79",
+        "payload_bytes": "4407722",
+        "payload_identity": "2846b82033438f5a77def79f558c5b29f5766114110de024aa2d2dadc58eeb51",
+        "qualification_identity": "e7ae9a863517753aeed3e802d14a70f4b0ac30f8ab8755573155e38c528e3f5c",
+        "query_set_identity": "da120f421435b6e761c591a1614aa95f38121cee68a68366e7ee62a8defa1ab4",
+        "record_count": "7833",
+        "rule_identity": "4841bd366fc338ba4254d055745eebb47ddca6fdc4a74ca05dc6b5d3bdb48af4",
+        "url": "https://github.com/daejunnom/Clearra/releases/download/conditioned-data-v081-20260924-rc1/conditioned-srs-x.cllr"
+      },
+      "profile": "srs-x",
+      "status": "qualified"
+    },
+    {
+      "activation_envelope_json": "{\"schema\":\"clearra.accelerator.signed-asset-envelope.v1\",\"signature_hex\":\"44d7f66bf575b24af95b7939f8e2774396e8c891ee9e969bc03b738b6c63ecea126b1fd7f804fa956cb121425a3bd94e171bcb24bfa61572c620c1f49916420c\",\"statement_json\":\"{\\\"algorithm\\\":\\\"ed25519\\\",\\\"asset_url\\\":\\\"https://github.com/daejunnom/Clearra/releases/download/conditioned-data-v081-20260924-rc1/conditioned-jstris-180.cllr\\\",\\\"completeness_scope\\\":\\\"width10-height1to6-solver-sky-bottom8-56-contexts-entry-first-exit-boolean\\\",\\\"generation_identity\\\":\\\"bb81560460568a7a8573a07350f6b0ec824823de4918baf542a3098b4f345b33\\\",\\\"key_id\\\":\\\"ed25519-raw-sha256:764ecfc06e730760c3d6704c71dea629cc6895ba3e202d40ce9e6ad96ef49328\\\",\\\"payload_bytes\\\":\\\"4184234\\\",\\\"payload_identity\\\":\\\"fa38fd66b1686b51db438bd04f47a82da71fd199a71b36dd48a047e7395ded39\\\",\\\"product\\\":\\\"board-conditioned-reachability\\\",\\\"profile\\\":\\\"jstris-180\\\",\\\"qualification_identity\\\":\\\"db4e9234ad276c60d712010e6a00fccffd9a7b5401cedb959e91105679ec95ad\\\",\\\"repository\\\":\\\"daejunnom/Clearra\\\",\\\"revision\\\":\\\"63deb2d0984059506b64e3c40a12f3b7bb34aa4d\\\",\\\"rule_identity\\\":\\\"09ef65217722215942d16fb6fe0d5323ae6fdd5b31128367c6db0d97aacfe69c\\\",\\\"schema\\\":\\\"clearra.accelerator.asset-statement.v1\\\"}\"}",
+      "metadata": {
+        "active_session_shared_bytes": "9413554",
+        "generation_identity": "bb81560460568a7a8573a07350f6b0ec824823de4918baf542a3098b4f345b33",
+        "payload_bytes": "4184234",
+        "payload_identity": "fa38fd66b1686b51db438bd04f47a82da71fd199a71b36dd48a047e7395ded39",
+        "qualification_identity": "db4e9234ad276c60d712010e6a00fccffd9a7b5401cedb959e91105679ec95ad",
+        "query_set_identity": "b83755736822e078f25a56ca2607c4ceaecc4389cff7e4ccdccd110dafe72c71",
+        "record_count": "7449",
+        "rule_identity": "09ef65217722215942d16fb6fe0d5323ae6fdd5b31128367c6db0d97aacfe69c",
+        "url": "https://github.com/daejunnom/Clearra/releases/download/conditioned-data-v081-20260924-rc1/conditioned-jstris-180.cllr"
+      },
+      "profile": "jstris-180",
+      "status": "qualified"
+    },
+    {
+      "activation_envelope_json": "{\"schema\":\"clearra.accelerator.signed-asset-envelope.v1\",\"signature_hex\":\"c3447fd57862f70a2c9779f438f2a36110a86e0ed98841b4f14ff262d535caff1c623e725161a46f144526dd5017c3a5517314842a75d45f80cbe4c9c7522803\",\"statement_json\":\"{\\\"algorithm\\\":\\\"ed25519\\\",\\\"asset_url\\\":\\\"https://github.com/daejunnom/Clearra/releases/download/conditioned-data-v081-20260924-rc1/conditioned-no-kick.cllr\\\",\\\"completeness_scope\\\":\\\"width10-height1to6-solver-sky-bottom8-56-contexts-entry-first-exit-boolean\\\",\\\"generation_identity\\\":\\\"a3dcb3c2c4f00065c210221ea86b481f4e3845f5cb4a83b856cc152fac3c6132\\\",\\\"key_id\\\":\\\"ed25519-raw-sha256:764ecfc06e730760c3d6704c71dea629cc6895ba3e202d40ce9e6ad96ef49328\\\",\\\"payload_bytes\\\":\\\"785942\\\",\\\"payload_identity\\\":\\\"f4412939c3d7b34ad4fc88e62a135b8e5f2da2ce31af02d1bad17eeeca153342\\\",\\\"product\\\":\\\"board-conditioned-reachability\\\",\\\"profile\\\":\\\"no-kick\\\",\\\"qualification_identity\\\":\\\"b28cde9933232b25d211b894b006fb01e471615c2ce12c204acc26b177a9eca4\\\",\\\"repository\\\":\\\"daejunnom/Clearra\\\",\\\"revision\\\":\\\"63deb2d0984059506b64e3c40a12f3b7bb34aa4d\\\",\\\"rule_identity\\\":\\\"414afa8392f8df14c64cd66f6779e003d3ba4b5475d0155c419e46c8bc72c2a1\\\",\\\"schema\\\":\\\"clearra.accelerator.asset-statement.v1\\\"}\"}",
+      "metadata": {
+        "active_session_shared_bytes": "1810690",
+        "generation_identity": "a3dcb3c2c4f00065c210221ea86b481f4e3845f5cb4a83b856cc152fac3c6132",
+        "payload_bytes": "785942",
+        "payload_identity": "f4412939c3d7b34ad4fc88e62a135b8e5f2da2ce31af02d1bad17eeeca153342",
+        "qualification_identity": "b28cde9933232b25d211b894b006fb01e471615c2ce12c204acc26b177a9eca4",
+        "query_set_identity": "627fd73106f6b437d3d6a2eb14ec13f660cc7f0072e5786caef9a8e628203520",
+        "record_count": "2222",
+        "rule_identity": "414afa8392f8df14c64cd66f6779e003d3ba4b5475d0155c419e46c8bc72c2a1",
+        "url": "https://github.com/daejunnom/Clearra/releases/download/conditioned-data-v081-20260924-rc1/conditioned-no-kick.cllr"
+      },
+      "profile": "no-kick",
+      "status": "qualified"
+    }
   ],
   "schema": "clearra.conditioned-reachability.product-catalog.v1"
 }
