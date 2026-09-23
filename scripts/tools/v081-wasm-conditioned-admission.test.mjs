@@ -15,7 +15,7 @@ test('exact WASM validates and installs a real qualified conditioned pack', asyn
   ));
   const wasm = await readFile(resolve(artifactRoot, manifest.wasm.path));
   const bindings = await import(pathToFileURL(resolve(artifactRoot, manifest.bindings.path)).href);
-  const raw = await bindings.default(wasm);
+  const raw = await bindings.default({ module_or_path: wasm });
   const output = () => {
     const pointer = raw.clearra_wasm_output_ptr() >>> 0;
     const length = raw.clearra_wasm_output_len() >>> 0;
@@ -44,7 +44,10 @@ test('exact WASM validates and installs a real qualified conditioned pack', asyn
   assert.equal(raw.clearra_wasm_transfer_resize(bytes.byteLength), 0);
   const pointer = raw.clearra_wasm_transfer_ptr() >>> 0;
   new Uint8Array(raw.memory.buffer, pointer, bytes.byteLength).set(bytes);
-  assert.equal(raw.clearra_wasm_accelerator_admit(1, 4, 1), 0);
+  const admission = raw.clearra_wasm_accelerator_admit(1, 4, 1);
+  if (admission !== 0) {
+    assert.fail(`qualified WASM admission failed: ${JSON.stringify(output())}`);
+  }
   assert.deepEqual(output(), {
     state: 'ready',
     product: 'board-conditioned-reachability',
