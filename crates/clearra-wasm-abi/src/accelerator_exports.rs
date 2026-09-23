@@ -7,11 +7,11 @@ use clearra_accelerator_product_host::{
     embedded_catalog, CatalogProfileStatus, ProductCatalogKind, QualifiedCatalogAsset,
 };
 use clearra_core_executor::{
-    built_in_conditioned_reachability_binding, built_in_legal_board_binding,
-    install_conditioned_reachability_pack, install_qualified_exact_legal_board,
-    remove_conditioned_reachability_pack, remove_qualified_exact_legal_board,
-    BoardConditionedReachability, ConditionedReachabilityExpectation, ExactLegalBoard,
-    LegalBoardExpectation, QualifiedBoardConditionedReachability, QualifiedExactLegalBoard,
+    built_in_legal_board_binding, built_in_local_relation_binding,
+    install_qualified_exact_legal_board, install_qualified_local_relation_pack,
+    load_local_relation_candidate_pack, remove_qualified_exact_legal_board,
+    remove_qualified_local_relation_pack, ExactLegalBoard, LegalBoardExpectation,
+    QualifiedExactLegalBoard, QualifiedLocalRelationPack,
 };
 use clearra_rules::kicks::KickTableProfileId;
 use serde_json::json;
@@ -120,23 +120,27 @@ fn qualify(
             }
         }
         ProductCatalogKind::BoardConditionedReachability => {
-            let binding = built_in_conditioned_reachability_binding(kick)
+            let binding = built_in_local_relation_binding(kick)
                 .map_err(|_| "accelerator_rule_binding_unavailable")?;
-            let pack = BoardConditionedReachability::load(
-                bytes,
-                ConditionedReachabilityExpectation {
-                    binding,
-                    generation_identity: Some(asset.authority().generation_identity()),
-                },
+            let pack = load_local_relation_candidate_pack(
+                &bytes,
+                binding,
+                Some(asset.authority().generation_identity()),
             )
             .map_err(|_| "accelerator_reachability_payload_invalid")?;
-            let pack = QualifiedBoardConditionedReachability::qualify(pack, asset.authority())
+            let pack = QualifiedLocalRelationPack::qualify(pack, asset.authority())
                 .map_err(|_| "accelerator_reachability_not_qualified")?;
-            if pack.shared_bytes() as u64 > asset.metadata().active_session_shared_bytes() {
+            if pack.accounted_bytes() as u64 > asset.metadata().active_session_shared_bytes() {
                 return Err("accelerator_resident_size_exceeded");
             }
+            if !matches!(asset.metadata(),
+                clearra_accelerator_product_host::QualifiedProductMetadata::BoardConditionedReachability { record_count, .. }
+                    if *record_count == pack.record_count() as u64
+            ) {
+                return Err("accelerator_record_count_mismatch");
+            }
             if install {
-                install_conditioned_reachability_pack(pack)
+                install_qualified_local_relation_pack(pack)
                     .map_err(|_| "accelerator_reachability_install_rejected")?;
             }
         }
@@ -226,7 +230,7 @@ pub(super) fn remove(kind: u32, profile: u32) -> i32 {
                 .map(|value| value.is_some())
                 .map_err(|_| ()),
             ProductCatalogKind::BoardConditionedReachability => {
-                remove_conditioned_reachability_pack(kick)
+                remove_qualified_local_relation_pack(kick)
                     .map(|value| value.is_some())
                     .map_err(|_| ())
             }

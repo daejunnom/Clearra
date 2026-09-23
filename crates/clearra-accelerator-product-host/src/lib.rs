@@ -36,11 +36,12 @@ const MAX_CATALOG_BYTES: usize = 512 * 1024;
 const LEGAL_BOARD_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const CONDITIONED_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const LEGAL_BOARD_SCOPE: &str = "empty-origin-10x4-four-lines-f-intersection-r";
-const CONDITIONED_SCOPE: &str = "width-10-height-1-6-spawn-to-lock-boolean-complete-records";
+const CONDITIONED_SCOPE: &str =
+    "width-10-height-1-6-actual-entry-first-exit-boolean-closed-query-set";
 
-/// The old sparse spawn-to-lock cache is not the v0.8.1 local entry/exit
-/// product. A catalog signature proves the declared product, not a stronger
-/// algorithmic meaning that the parser and runtime do not implement.
+/// The historical sparse spawn-to-lock cache remains an unqualified local
+/// fixture. The product parser and solver now use actual-entry/first-exit
+/// relations; this enum keeps the release gate honest about that boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConditionedRelationContract {
     SparseSpawnToLock,
@@ -69,7 +70,7 @@ impl ProductCatalogKind {
         match self {
             Self::ExactLegalBoard => None,
             Self::BoardConditionedReachability => {
-                Some(ConditionedRelationContract::SparseSpawnToLock)
+                Some(ConditionedRelationContract::ActualEntryToFirstExit)
             }
         }
     }
@@ -83,7 +84,7 @@ impl ProductCatalogKind {
         }
     }
 
-    const fn completeness_scope(self) -> &'static str {
+    pub const fn completeness_scope(self) -> &'static str {
         match self {
             Self::ExactLegalBoard => LEGAL_BOARD_SCOPE,
             Self::BoardConditionedReachability => CONDITIONED_SCOPE,

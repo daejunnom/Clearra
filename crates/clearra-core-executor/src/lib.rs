@@ -6,6 +6,7 @@ pub mod board;
 pub mod buildup;
 mod conditioned_local_index;
 mod conditioned_local_pack;
+mod conditioned_local_product;
 #[cfg(any(test, feature = "qualification-reference"))]
 mod conditioned_local_qualification;
 mod conditioned_local_relation;
@@ -78,6 +79,11 @@ pub use conditioned_local_pack::{
     built_in_local_relation_binding, encode_local_relation_candidate_pack,
     load_local_relation_candidate_pack, LocalRelationBinding, LocalRelationCandidatePack,
     LocalRelationPackError,
+};
+pub use conditioned_local_product::{
+    active_qualified_local_relation_identity, install_qualified_local_relation_pack,
+    remove_qualified_local_relation_pack, LocalRelationProductError, LocalRelationProductLookup,
+    QualifiedLocalRelationPack, LOCAL_RELATION_COMPLETENESS_SCOPE,
 };
 #[cfg(any(test, feature = "qualification-reference"))]
 pub use conditioned_local_qualification::{

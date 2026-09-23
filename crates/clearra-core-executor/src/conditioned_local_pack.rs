@@ -68,6 +68,7 @@ pub struct LocalRelationCandidatePack {
     binding: LocalRelationBinding,
     generation_identity: [u8; 32],
     payload_identity: [u8; 32],
+    encoded_identity: [u8; 32],
     encoded_bytes: usize,
     index: LocalRelationCandidateIndex,
 }
@@ -83,6 +84,13 @@ impl LocalRelationCandidatePack {
 
     pub const fn payload_identity(&self) -> [u8; 32] {
         self.payload_identity
+    }
+
+    /// Digest of the complete serialized bundle, including its header. The
+    /// payload digest above covers only records and must not be substituted
+    /// for the signed asset's complete-file identity.
+    pub const fn encoded_identity(&self) -> [u8; 32] {
+        self.encoded_identity
     }
 
     pub const fn encoded_bytes(&self) -> usize {
@@ -264,6 +272,7 @@ pub fn load_local_relation_candidate_pack(
         binding,
         generation_identity: generation,
         payload_identity,
+        encoded_identity: Sha256::digest(bytes).into(),
         encoded_bytes: bytes.len(),
         index,
     })

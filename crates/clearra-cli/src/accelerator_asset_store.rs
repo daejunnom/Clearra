@@ -589,7 +589,7 @@ fn reject_link(path: &Path, require_directory: bool) -> Result<(), &'static str>
 fn payload_name(kind: ProductCatalogKind) -> &'static str {
     match kind {
         ProductCatalogKind::ExactLegalBoard => "asset.cllb",
-        ProductCatalogKind::BoardConditionedReachability => "asset.clbr",
+        ProductCatalogKind::BoardConditionedReachability => "asset.cllr",
     }
 }
 
@@ -621,7 +621,7 @@ pub(crate) fn hex(identity: [u8; 32]) -> String {
 pub(crate) fn profile_root(base: &Path, kind: ProductCatalogKind, profile: &str) -> PathBuf {
     let namespace = match kind {
         ProductCatalogKind::ExactLegalBoard => "legal-board-v2",
-        ProductCatalogKind::BoardConditionedReachability => "conditioned-reachability-v1",
+        ProductCatalogKind::BoardConditionedReachability => "conditioned-local-v2",
     };
     base.join(namespace).join(profile)
 }
@@ -658,5 +658,17 @@ mod tests {
         ] {
             assert!(!generation_directory_name(value));
         }
+    }
+
+    #[test]
+    fn local_relation_product_cannot_reuse_the_legacy_sparse_namespace_or_extension() {
+        let base = Path::new("accelerators");
+        let kind = ProductCatalogKind::BoardConditionedReachability;
+        assert_eq!(
+            profile_root(base, kind, "srs-plus"),
+            base.join("conditioned-local-v2").join("srs-plus")
+        );
+        assert_eq!(payload_name(kind), "asset.cllr");
+        assert_ne!(payload_name(kind), "asset.clbr");
     }
 }

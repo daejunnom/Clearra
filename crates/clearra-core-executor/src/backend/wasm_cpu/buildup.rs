@@ -31,6 +31,7 @@ use clearra_supply::{
 };
 
 use crate::{
+    conditioned_local_relation::LocalRelationRowFrame,
     legal_board::{qualified_legal_board_snapshot, QualifiedExactLegalBoard},
     performance::{ExecutorSearchStage, SearchStageSpan},
     CorePathStep,
@@ -2538,11 +2539,12 @@ fn witness_transition(
         if board & lock_mask != 0 {
             continue;
         }
-        if !workspace.reachability.lock_reachable_instantiated(
+        if !workspace.reachability.lock_reachable_instantiated_in_frame(
             catalog,
             board,
             row.piece,
             realization,
+            LocalRelationRowFrame::new(catalog.height(), deleted_rows),
         ) {
             continue;
         }
@@ -2901,14 +2903,18 @@ impl BuildOrderGraph {
                         workspace.reachability.prepare_template(catalog, row.piece);
                         let mut reachable = None;
                         for edge in edge_scratch[scratch_start..].iter().copied() {
-                            if workspace.reachability.lock_reachable_after_harddrop_miss(
-                                catalog,
-                                board,
-                                row.piece,
-                                edge.rotation,
-                                edge.x,
-                                edge.y,
-                            ) {
+                            if workspace
+                                .reachability
+                                .lock_reachable_after_harddrop_miss_in_frame(
+                                    catalog,
+                                    board,
+                                    row.piece,
+                                    edge.rotation,
+                                    edge.x,
+                                    edge.y,
+                                    LocalRelationRowFrame::new(catalog.height(), deleted_rows),
+                                )
+                            {
                                 reachable = Some(edge);
                                 break;
                             }
@@ -2933,11 +2939,12 @@ impl BuildOrderGraph {
                         ) else {
                             continue;
                         };
-                        if workspace.reachability.lock_reachable_instantiated(
+                        if workspace.reachability.lock_reachable_instantiated_in_frame(
                             catalog,
                             board,
                             row.piece,
                             realization,
+                            LocalRelationRowFrame::new(catalog.height(), deleted_rows),
                         ) {
                             try_push_build_edge(&mut edge_scratch, edge)?;
                         }

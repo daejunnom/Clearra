@@ -4,10 +4,11 @@ use clearra_replay::{RotationRequest, ScoringLockEvidence};
 use clearra_rules::kicks::{KickTableProfile, KickTableProfileId, KickTransition};
 use std::sync::Arc;
 
-use crate::conditioned_reachability::{
-    conditioned_reachability_snapshot, ConditionedReachabilityEntryPose,
-    ConditionedReachabilityLookup, QualifiedBoardConditionedReachability,
+use crate::conditioned_local_product::{
+    qualified_local_relation_snapshot, LocalRelationProductLookup, QualifiedLocalRelationPack,
 };
+use crate::conditioned_local_relation::{ConditionedPoseWindow, LocalRelationRowFrame};
+use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
 
 #[path = "reachability_local_relation.rs"]
 mod local_relation;
@@ -453,7 +454,7 @@ pub(super) struct ReachabilityWorkspace {
     scratch: ReachabilityScratch,
     templates: [Option<ReachabilityTemplate>; 7],
     kick_profile_id: KickTableProfileId,
-    conditioned: Option<Arc<QualifiedBoardConditionedReachability>>,
+    conditioned: Option<Arc<QualifiedLocalRelationPack>>,
     conditioned_profile: Option<KickTableProfileId>,
     conditioned_enabled: Option<bool>,
     generated_states: usize,
@@ -502,6 +503,19 @@ impl ReachabilityWorkspace {
         piece: PieceKind,
         realization: InstantiatedRealization,
     ) -> bool {
+        self.lock_reachable_instantiated_in_frame(catalog, board, piece, realization, None)
+    }
+
+    /// Only a caller that owns BuildUp's original-row correspondence may
+    /// supply a local relation frame. Other callers retain the exact path.
+    pub fn lock_reachable_instantiated_in_frame(
+        &mut self,
+        catalog: &GeometryCatalog,
+        board: u64,
+        piece: PieceKind,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> bool {
         self.metrics.lock_queries = self.metrics.lock_queries.saturating_add(1);
         if self.lock_harddrop_reachable_instantiated(catalog.width(), board, realization) {
             return true;
@@ -514,6 +528,7 @@ impl ReachabilityWorkspace {
             realization.rotation,
             realization.x,
             realization.lock_y,
+            frame,
         )
     }
 
@@ -541,7 +556,8 @@ impl ReachabilityWorkspace {
             .with_immobile_before_clear(immobile)
     }
 
-    pub fn lock_reachable_after_harddrop_miss(
+    #[allow(clippy::too_many_arguments)]
+    pub fn lock_reachable_after_harddrop_miss_in_frame(
         &mut self,
         catalog: &GeometryCatalog,
         board: u64,
@@ -549,9 +565,10 @@ impl ReachabilityWorkspace {
         rotation: RotationState,
         x: i8,
         y: i8,
+        frame: Option<LocalRelationRowFrame>,
     ) -> bool {
         self.metrics.lock_queries = self.metrics.lock_queries.saturating_add(1);
-        self.lock_reachable_cached(catalog, board, piece, rotation, x, y)
+        self.lock_reachable_cached(catalog, board, piece, rotation, x, y, frame)
     }
 
     fn lock_reachable_cached(
@@ -562,28 +579,61 @@ impl ReachabilityWorkspace {
         rotation: RotationState,
         x: i8,
         y: i8,
+        frame: Option<LocalRelationRowFrame>,
     ) -> bool {
-        if let Some(conditioned) = self.conditioned.as_ref() {
-            match conditioned.lookup(
-                catalog.width(),
-                catalog.height(),
-                board,
-                piece,
-                self.kick_profile_id,
-            ) {
-                ConditionedReachabilityLookup::Complete(anchors) => {
-                    self.metrics.conditioned_complete_hits =
-                        self.metrics.conditioned_complete_hits.saturating_add(1);
-                    return anchors_contain(anchors, catalog.width(), rotation, x, y);
-                }
-                ConditionedReachabilityLookup::PassThrough(status) => {
-                    self.metrics.conditioned_misses = self
-                        .metrics
-                        .conditioned_misses
-                        .saturating_add(usize::from(matches!(
-                            status,
-                            crate::legal_board::ProviderStatus::Miss
-                        )));
+        if let (Some(conditioned), Some(frame), Some(template)) = (
+            self.conditioned.as_ref(),
+            frame,
+            self.templates[piece_index(piece)].as_mut(),
+        ) {
+            let entries = template.sky_entry_poses.get_or_insert_with(|| {
+                let mut poses = template
+                    .sky_seeds
+                    .iter()
+                    .map(|&index| {
+                        let pose =
+                            state_from_index(template.width, template.ceiling, usize::from(index));
+                        ConditionedReachabilityEntryPose {
+                            rotation: pose.rotation,
+                            x: pose.x,
+                            y: pose.y,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                poses.sort_unstable_by_key(|pose| (pose.rotation.quarter_turns(), pose.x, pose.y));
+                poses
+            });
+            if !entries.is_empty() {
+                let window = ConditionedPoseWindow {
+                    min_x: 0,
+                    max_x: catalog.width() as i8 - 1,
+                    min_y: catalog.height() as i8,
+                    max_y: template.ceiling,
+                };
+                match conditioned.lookup_composed_for_proven_entries(
+                    catalog.width(),
+                    catalog.height(),
+                    board,
+                    frame,
+                    piece,
+                    self.kick_profile_id,
+                    window,
+                    entries,
+                ) {
+                    LocalRelationProductLookup::ComposedForProvenEntries(anchors) => {
+                        self.metrics.conditioned_complete_hits =
+                            self.metrics.conditioned_complete_hits.saturating_add(1);
+                        return anchors_contain(anchors, catalog.width(), rotation, x, y);
+                    }
+                    LocalRelationProductLookup::PassThrough(status) => {
+                        self.metrics.conditioned_misses = self
+                            .metrics
+                            .conditioned_misses
+                            .saturating_add(usize::from(matches!(
+                                status,
+                                crate::legal_board::ProviderStatus::Miss
+                            )));
+                    }
                 }
             }
         }
@@ -687,7 +737,7 @@ impl ReachabilityWorkspace {
         }
         self.conditioned = (conditioned_enabled
             && crate::search_prune_policy::conditioned_reachability_enabled())
-        .then(|| conditioned_reachability_snapshot(profile_id))
+        .then(|| qualified_local_relation_snapshot(profile_id))
         .flatten();
         self.conditioned_profile = Some(profile_id);
         self.conditioned_enabled = Some(conditioned_enabled);
@@ -782,6 +832,7 @@ pub(super) struct ReachabilityTemplate {
     translation_targets: Vec<[u16; 3]>,
     reverse_translation_sources: Vec<[u16; 3]>,
     sky_seeds: Vec<u16>,
+    sky_entry_poses: Option<Vec<ConditionedReachabilityEntryPose>>,
     sky_seed_words: Vec<u64>,
     rotation_target_offsets: Vec<u32>,
     rotation_targets: Vec<u16>,
@@ -881,6 +932,7 @@ impl ReachabilityTemplate {
             translation_targets,
             reverse_translation_sources,
             sky_seeds,
+            sky_entry_poses: None,
             sky_seed_words,
             rotation_target_offsets,
             rotation_targets,
@@ -895,6 +947,9 @@ impl ReachabilityTemplate {
             + self.translation_targets.capacity() * core::mem::size_of::<[u16; 3]>()
             + self.reverse_translation_sources.capacity() * core::mem::size_of::<[u16; 3]>()
             + self.sky_seeds.capacity() * core::mem::size_of::<u16>()
+            + self.sky_entry_poses.as_ref().map_or(0, |entries| {
+                entries.capacity() * core::mem::size_of::<ConditionedReachabilityEntryPose>()
+            })
             + self.sky_seed_words.capacity() * core::mem::size_of::<u64>()
             + self.rotation_target_offsets.capacity() * core::mem::size_of::<u32>()
             + self.rotation_targets.capacity() * core::mem::size_of::<u16>()
@@ -1720,10 +1775,93 @@ mod tests {
     use super::{
         best_scoring_lock_evidence, builtin_kick_profile, normalized_kick_delta,
         reverse_lock_reachable, state_from_index, state_index, ReachabilityScratch,
-        ReachabilityTemplate, State,
+        ReachabilityTemplate, ReachabilityWorkspace, State,
     };
+    use crate::conditioned_local_pack::{
+        built_in_local_relation_binding, encode_local_relation_candidate_pack,
+        load_local_relation_candidate_pack,
+    };
+    use crate::conditioned_local_product::{
+        install_qualified_local_relation_pack, qualified_local_relation_for_solver_test,
+        remove_qualified_local_relation_pack,
+    };
+    use crate::conditioned_local_relation::{
+        derive_exact_conditioned_local_relation, ConditionedPoseWindow, LocalRelationRowFrame,
+    };
+    use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
     use clearra_rules::kicks::{KickTableProfileId, KickTransition};
+
+    #[test]
+    fn build_frame_uses_pinned_local_relation_and_frame_miss_falls_back() {
+        let profile = KickTableProfileId::NoKick;
+        let piece = PieceKind::T;
+        let template = ReachabilityTemplate::compile(10, 4, piece, profile);
+        let window = ConditionedPoseWindow {
+            min_x: 0,
+            max_x: 9,
+            min_y: 4,
+            max_y: template.ceiling,
+        };
+        let mut entries = template
+            .sky_seeds
+            .iter()
+            .map(|&index| {
+                let state = state_from_index(10, template.ceiling, usize::from(index));
+                ConditionedReachabilityEntryPose {
+                    rotation: state.rotation,
+                    x: state.x,
+                    y: state.y,
+                }
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|pose| (pose.rotation.quarter_turns(), pose.x, pose.y));
+        let record =
+            derive_exact_conditioned_local_relation(10, 4, 0, piece, profile, window, &entries)
+                .expect("full sky-seed window is a valid local relation");
+        let binding = built_in_local_relation_binding(profile).unwrap();
+        let bytes = encode_local_relation_candidate_pack(binding, &[record]).unwrap();
+        let loaded = load_local_relation_candidate_pack(&bytes, binding, None).unwrap();
+        install_qualified_local_relation_pack(qualified_local_relation_for_solver_test(loaded))
+            .expect("test-only qualified relation fits shared cap");
+
+        let catalog = super::GeometryCatalog::compile_for_required_cells_on_dimensions(10, 4, 0, 0)
+            .expect("four-row geometry dimensions");
+        let frame = LocalRelationRowFrame::new(4, 0).unwrap();
+        let reference = super::exact_spawn_lock_anchors(10, 4, 0, piece, profile).unwrap();
+        let mut workspace = ReachabilityWorkspace::default();
+        workspace.configure_kick_profile(profile, true);
+        workspace.prepare_template(&catalog, piece);
+        let got = workspace.lock_reachable_after_harddrop_miss_in_frame(
+            &catalog,
+            0,
+            piece,
+            RotationState::Zero,
+            4,
+            0,
+            Some(frame),
+        );
+        let bit = 1_u64 << 4;
+        assert_eq!(got, reference[0] & bit != 0);
+        assert_eq!(workspace.metrics().conditioned_complete_hits, 1);
+
+        let other_frame = LocalRelationRowFrame::new(4, 1).unwrap();
+        let fallback = workspace.lock_reachable_after_harddrop_miss_in_frame(
+            &catalog,
+            0,
+            piece,
+            RotationState::Zero,
+            4,
+            0,
+            Some(other_frame),
+        );
+        assert_eq!(fallback, got);
+        assert_eq!(workspace.metrics().conditioned_misses, 1);
+        drop(workspace);
+        assert!(remove_qualified_local_relation_pack(profile)
+            .expect("test snapshot released")
+            .is_some());
+    }
 
     #[test]
     fn srs_x_reachability_compiles_every_canonical_kick_in_order() {

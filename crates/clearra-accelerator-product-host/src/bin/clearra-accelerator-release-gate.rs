@@ -66,11 +66,9 @@ fn require_v081_qualification() -> Result<(), String> {
 }
 
 fn require_local_entry_exit_contract() -> Result<(), String> {
-    // The checked-in conditioned catalog currently authorizes only sparse
-    // spawn-to-lock records. Even five signed qualified profiles cannot
-    // satisfy the planned entry-to-first-exit BuildUp relation with that
-    // parser. Check this *after* catalog/profile/size diagnostics so the gate
-    // still reports those independently.
+    // The product parser/solver contract must stay on entry-to-first-exit.
+    // This check does not replace the independent five-profile qualification,
+    // bounded-memory proof, or full acceptance enforced above and by CI.
     if ProductCatalogKind::BoardConditionedReachability.conditioned_relation_contract()
         != Some(ConditionedRelationContract::ActualEntryToFirstExit)
     {
@@ -81,13 +79,18 @@ fn require_local_entry_exit_contract() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::require_local_entry_exit_contract;
+    use super::{require_local_entry_exit_contract, require_v081_qualification};
 
     #[test]
-    fn sparse_spawn_to_lock_catalog_cannot_satisfy_local_relation_release_gate() {
+    fn product_contract_is_actual_entry_to_first_exit() {
+        assert_eq!(require_local_entry_exit_contract(), Ok(()));
+    }
+
+    #[test]
+    fn implementation_does_not_promote_unqualified_profiles() {
         assert_eq!(
-            require_local_entry_exit_contract(),
-            Err("conditioned_local_entry_exit_product_not_implemented".to_owned())
+            require_v081_qualification(),
+            Err("legal_board_profile_not_qualified_srs".to_owned())
         );
     }
 }

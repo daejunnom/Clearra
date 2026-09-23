@@ -481,6 +481,10 @@ pub fn install_qualified_exact_legal_board(
         .saturating_add(
             crate::conditioned_reachability::installed_conditioned_reachability_bytes(None)
                 .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?,
+        )
+        .saturating_add(
+            crate::conditioned_local_product::installed_local_relation_bytes(None)
+                .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?,
         );
     if combined > MAX_ACTIVE_ACCELERATOR_BYTES {
         return Err(LegalBoardAssetError::ActiveSessionTooLarge);

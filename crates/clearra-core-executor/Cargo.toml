@@ -52,6 +52,7 @@ wasm-bindgen = { version = "0.2.126" }
 clearra-core-ffi = { path = "../clearra-core-ffi", features = ["test-support"] }
 clearra-fumen = { path = "../clearra-fumen" }
 clearra-scoring = { path = "../clearra-scoring" }
+ed25519-dalek.workspace = true
 
 [lints]
 workspace = true

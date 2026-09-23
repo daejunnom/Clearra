@@ -210,21 +210,22 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
     let installed = accelerator_asset_store::status(PRODUCT, profile, root)?;
     let candidate = root.join(format!("conditioned-reachability-{profile}.clbr"));
     let candidate_bytes = candidate_size(&candidate)?;
-    let candidate_validation = if candidate_bytes
-        .is_some_and(|bytes| bytes > MAX_PRODUCT_PACK_BYTES)
-    {
-        "oversized_unqualified_candidate"
-    } else if candidate_bytes.is_some() {
-        let bytes = read_candidate_bounded(&candidate, MAX_PRODUCT_PACK_BYTES)?;
-        if clearra_accelerator_runtime::structurally_valid_candidate(PRODUCT, profile, bytes.into())
-        {
-            "structurally_valid_unqualified"
+    let candidate_validation =
+        if candidate_bytes.is_some_and(|bytes| bytes > MAX_PRODUCT_PACK_BYTES) {
+            "oversized_unqualified_candidate"
+        } else if candidate_bytes.is_some() {
+            let bytes = read_candidate_bounded(&candidate, MAX_PRODUCT_PACK_BYTES)?;
+            if clearra_accelerator_runtime::structurally_valid_legacy_sparse_candidate(
+                profile,
+                bytes.into(),
+            ) {
+                "structurally_valid_unqualified"
+            } else {
+                "invalid_asset"
+            }
         } else {
-            "invalid_asset"
-        }
-    } else {
-        "not_loaded"
-    };
+            "not_loaded"
+        };
     let local_candidate = root.join(format!("conditioned-local-{profile}.cllr"));
     let local_catalog = root.join(format!("conditioned-local-{profile}.catalog.json"));
     let local_candidate_bytes = candidate_size(&local_candidate)?;

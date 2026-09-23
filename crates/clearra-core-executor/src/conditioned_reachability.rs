@@ -509,6 +509,10 @@ pub fn install_conditioned_reachability_pack(
         .saturating_add(
             crate::legal_board::installed_legal_board_bytes(None)
                 .map_err(|_| ConditionedReachabilityAssetError::RegistryUnavailable)?,
+        )
+        .saturating_add(
+            crate::conditioned_local_product::installed_local_relation_bytes(None)
+                .map_err(|_| ConditionedReachabilityAssetError::RegistryUnavailable)?,
         );
     if combined > crate::legal_board::MAX_ACTIVE_ACCELERATOR_BYTES {
         return Err(ConditionedReachabilityAssetError::ActiveSessionTooLarge);
