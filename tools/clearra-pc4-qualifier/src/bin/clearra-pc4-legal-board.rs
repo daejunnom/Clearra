@@ -3,7 +3,14 @@ use clearra_pc4_qualifier::{
     verify_legal_board_candidate_source_chain, LegalBoardGenerationOptions,
 };
 use clearra_rules::kicks::KickTableProfileId;
-use std::{collections::BTreeMap, fs, io::Read, path::PathBuf, sync::Arc};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 const MAX_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CATALOG_BYTES: u64 = 512 * 1024;
@@ -60,12 +67,31 @@ fn run() -> Result<(), String> {
         let catalog = absolute(&options, "catalog")?;
         verify_legal_board_candidate_source_chain(&LegalBoardGenerationOptions {
             profile,
-            layers,
-            bundle,
-            catalog,
+            layers: layers.clone(),
+            bundle: bundle.clone(),
+            catalog: catalog.clone(),
             workers: 1,
             max_new_steps: 1,
         })?;
+        let receipt = options.get("receipt");
+        if let Some(receipt) = receipt {
+            let generation_revision = required(&options, "generation-revision")?;
+            let verifier_revision = required(&options, "verifier-revision")?;
+            let receipt = PathBuf::from(receipt);
+            write_source_chain_receipt(
+                profile,
+                &layers,
+                &bundle,
+                &catalog,
+                &receipt,
+                generation_revision,
+                verifier_revision,
+            )?;
+        } else if options.contains_key("generation-revision")
+            || options.contains_key("verifier-revision")
+        {
+            return Err("proof revisions require --receipt".into());
+        }
         println!(
             "pc4_legal_board_source_chain=consistent_unqualified profile={}",
             clearra_core_executor::accelerator_profile_name(profile)
@@ -109,7 +135,15 @@ fn parse_options() -> Result<(String, BTreeMap<String, String>), String> {
             .ok_or("legal-board option must start with --")?;
         if !matches!(
             key,
-            "profile" | "layers" | "workers" | "max-new-steps" | "bundle" | "catalog"
+            "profile"
+                | "layers"
+                | "workers"
+                | "max-new-steps"
+                | "bundle"
+                | "catalog"
+                | "receipt"
+                | "generation-revision"
+                | "verifier-revision"
         ) {
             return Err(format!("unknown legal-board option --{key}"));
         }
@@ -120,7 +154,131 @@ fn parse_options() -> Result<(String, BTreeMap<String, String>), String> {
             return Err(format!("duplicate legal-board option --{key}"));
         }
     }
+    if action != "legal-board-verify-source-chain"
+        && ["receipt", "generation-revision", "verifier-revision"]
+            .iter()
+            .any(|key| options.contains_key(*key))
+    {
+        return Err("source-chain receipt options require proof verification".into());
+    }
     Ok((action, options))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_source_chain_receipt(
+    profile: KickTableProfileId,
+    layers: &Path,
+    bundle: &Path,
+    catalog: &Path,
+    receipt: &Path,
+    generation_revision: &str,
+    verifier_revision: &str,
+) -> Result<(), String> {
+    for revision in [generation_revision, verifier_revision] {
+        if revision.len() != 40
+            || !revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("source-chain revision must be a lowercase 40-digit SHA".into());
+        }
+    }
+    if !receipt.is_absolute()
+        || receipt
+            .parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            != fs::canonicalize(layers).ok()
+    {
+        return Err("source-chain receipt must be inside its verified layers directory".into());
+    }
+    let bundle_name = bundle
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("candidate bundle filename must be UTF-8")?;
+    let bundle_bytes = read_regular_bounded(&bundle.to_path_buf(), MAX_BUNDLE_BYTES)?;
+    let catalog_bytes = read_regular_bounded(&catalog.to_path_buf(), MAX_CATALOG_BYTES)?;
+    let summary = validate_legal_board_candidate_catalog(
+        profile,
+        bundle_name,
+        Arc::from(bundle_bytes.as_slice()),
+        &catalog_bytes,
+    )
+    .map_err(str::to_owned)?;
+    let candidate_catalog: serde_json::Value = serde_json::from_slice(&catalog_bytes)
+        .map_err(|_| "verified candidate catalog changed before receipt")?;
+    let bundle_identity: [u8; 32] = Sha256::digest(&bundle_bytes).into();
+    let catalog_identity: [u8; 32] = Sha256::digest(&catalog_bytes).into();
+    let profile_name = clearra_core_executor::accelerator_profile_name(profile)
+        .map_err(|_| "legal-board profile is unsupported")?;
+    let mut chain = Sha256::new();
+    chain.update(b"clearra.v081.legal-board.source-chain-receipt.v1\0");
+    chain.update(profile_name.as_bytes());
+    chain.update(catalog_identity);
+    chain.update(bundle_identity);
+    let chain_identity: [u8; 32] = chain.finalize().into();
+    let serialized = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": "clearra.legal-board.source-chain-receipt.v1",
+        "status": "source_chain_verified_unqualified",
+        "profile": profile_name,
+        "generation_revision": generation_revision,
+        "verifier_revision": verifier_revision,
+        "generation_identity": hex(&summary.generation_identity),
+        "bundle_bytes": summary.bundle_bytes,
+        "bundle_sha256": hex(&bundle_identity),
+        "catalog_sha256": hex(&catalog_identity),
+        "chain_identity": hex(&chain_identity),
+        "layer_counts": summary.layer_counts.map(|count| count.to_string()),
+        "layers": candidate_catalog["layers"],
+    }))
+    .map_err(|error| error.to_string())?;
+    publish_immutable_receipt(receipt, &serialized)
+}
+
+fn publish_immutable_receipt(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() != bytes.len() as u64
+            || fs::read(path).map_err(|error| error.to_string())? != bytes
+        {
+            return Err("refusing to replace a different source-chain receipt".into());
+        }
+        return Ok(());
+    }
+    let parent = path.parent().ok_or("source-chain receipt has no parent")?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("source-chain receipt filename must be UTF-8")?;
+    let pending = parent.join(format!(".{name}.pending-{}", std::process::id()));
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pending)
+        .map_err(|error| error.to_string())?;
+    let result = (|| {
+        output
+            .write_all(bytes)
+            .and_then(|_| output.sync_all())
+            .map_err(|error| error.to_string())?;
+        drop(output);
+        fs::hard_link(&pending, path).map_err(|error| error.to_string())?;
+        fs::remove_file(&pending).map_err(|error| error.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&pending);
+    }
+    result
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    output
 }
 
 fn read_regular_bounded(path: &PathBuf, limit: u64) -> Result<Vec<u8>, String> {
