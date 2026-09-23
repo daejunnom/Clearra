@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { acquireBuildOwner, buildCompilerSnapshot } from './clearra-build-owner.mjs';
+import { acquireBuildOwner, buildCompilerSnapshot, commandVersion } from './clearra-build-owner.mjs';
 import { assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, canonicalBuildRoot, nativeBuildPath } from './clearra-build-policy.mjs';
 
 function cleanBuildEnvironment() {
@@ -17,6 +17,12 @@ function cleanBuildEnvironment() {
   }
   return environment;
 }
+
+test('successful compiler identity ignores transient launcher stderr', () => {
+  const version = commandVersion(process.execPath, ['-e',
+    'process.stdout.write("compiler 1.2.3\\n"); process.stderr.write("transient sync notice\\n")'], {});
+  assert.equal(version, `${process.execPath}=compiler 1.2.3`);
+});
 
 async function fixture(t) {
   const temporary = await mkdtemp(join(tmpdir(), 'clearra-build-policy-test-'));

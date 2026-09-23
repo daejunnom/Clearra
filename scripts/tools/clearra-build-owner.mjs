@@ -61,12 +61,16 @@ async function collectBuildInputFiles(sourceRoot) {
   }
   return [...new Set(inputs)].sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'case' }));
 }
-function commandVersion(command, arguments_, environment) {
+export function commandVersion(command, arguments_, environment) {
   const result = spawnSync(command, arguments_, {
     encoding: 'utf8', env: { ...process.env, ...environment }, windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024,
   });
   if (result.error || result.signal || result.status !== 0) return `${command}=unavailable`;
-  return `${command}=${`${result.stdout ?? ''}${result.stderr ?? ''}`.trim().replace(/\r?\n/gu, '|')}`;
+  // Successful version probes report their identity on stdout. rustup and
+  // other launchers may emit transient sync/progress notices on stderr; those
+  // notices are not compiler identity and must not invalidate a build lease.
+  const version = `${result.stdout ?? ''}`.trim();
+  return version ? `${command}=${version.replace(/\r?\n/gu, '|')}` : `${command}=unavailable`;
 }
 export async function buildCompilerSnapshot(sourceRoot, environment = process.env) {
   const files = await collectBuildInputFiles(sourceRoot);
