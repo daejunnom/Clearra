@@ -135,6 +135,48 @@ fn srs_plus_profile_preserves_symmetric_i_and_transition_specific_180_kicks() {
 }
 
 #[test]
+fn srs_plus_j_and_l_preserve_tetrio_ordered_180_candidates() {
+    use RotationState::{Left, Right, Two, Zero};
+
+    let profile = SrsKicks::srs_plus_profile();
+    // TETR.IO uses one JLSTZ table. The first successful candidate wins, so
+    // changing this order can make a mirrored J/L placement reach a new field.
+    for piece in [PieceKind::J, PieceKind::L] {
+        for (from, to, expected) in [
+            (
+                Zero,
+                Two,
+                offsets([(0, 0), (0, 1), (1, 1), (-1, 1), (1, 0), (-1, 0)]),
+            ),
+            (
+                Two,
+                Zero,
+                offsets([(0, 0), (0, -1), (-1, -1), (1, -1), (-1, 0), (1, 0)]),
+            ),
+            (
+                Right,
+                Left,
+                offsets([(0, 0), (1, 0), (1, 2), (1, 1), (0, 2), (0, 1)]),
+            ),
+            (
+                Left,
+                Right,
+                offsets([(0, 0), (-1, 0), (-1, 2), (-1, 1), (0, 2), (0, 1)]),
+            ),
+        ] {
+            assert_eq!(
+                profile
+                    .sequence_for(KickTransition::new(piece, from, to))
+                    .expect("J/L SRS+ 180 transition")
+                    .offsets(),
+                expected.as_slice(),
+                "{piece:?} {from:?}->{to:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn srs_x_matches_the_tetrio_standard_tetromino_fixture_for_all_84_transitions() {
     let profile = SrsKicks::srs_x_profile();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
