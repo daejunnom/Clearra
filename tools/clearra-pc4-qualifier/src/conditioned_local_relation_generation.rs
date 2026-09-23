@@ -8,13 +8,13 @@ use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_core_executor::{
-    accelerator_profile_name, audit_candidate_local_relation_pack,
-    audited_local_relation_candidate_pack, built_in_local_relation_binding,
-    derive_exact_conditioned_local_relation_with_frame, encode_local_relation_candidate_pack,
-    load_local_relation_candidate_pack, solver_local_relation_spawn_entries,
-    solver_local_relation_windows, AuditedLocalRelationRecordSet, ConditionedPoseWindow,
-    ConditionedReachabilityEntryPose, ExactConditionedLocalRelation, LocalRelationCoverageDomain,
-    LocalRelationCoverageResult, LocalRelationRowFrame,
+    accelerator_profile_name, audited_local_relation_candidate_pack,
+    built_in_local_relation_binding, derive_exact_conditioned_local_relation_with_frame,
+    encode_local_relation_candidate_pack, load_local_relation_candidate_pack,
+    solver_local_relation_spawn_entries, solver_local_relation_windows,
+    AuditedLocalRelationRecordSet, ConditionedPoseWindow, ConditionedReachabilityEntryPose,
+    ExactConditionedLocalRelation, LocalRelationCoverageDomain, LocalRelationCoverageResult,
+    LocalRelationRowFrame,
 };
 use clearra_rules::kicks::KickTableProfileId;
 use serde_json::{json, Value};
@@ -175,83 +175,112 @@ pub fn generate_conditioned_local_relation(
         .map_err(|error| error.code().to_owned())?;
     let source: Value =
         serde_json::from_slice(&raw).map_err(|error| format!("query JSON invalid: {error}"))?;
-    let (records, source_count, query_identity, query_schema, evidence_scope) = if source["schema"]
-        == COVER_SCHEMA
-        || source["schema"] == SOLVER_COVER_SCHEMA
-    {
-        let query_schema = source["schema"]
-            .as_str()
-            .ok_or("cover source schema must be a string")?;
-        let domains = if query_schema == SOLVER_COVER_SCHEMA {
-            parse_solver_cover_domains(&raw, options.profile)?
-        } else {
-            parse_cover_domains(&raw, options.profile)?
-        };
-        let identity = canonical_cover_identity(&domains, options.profile, query_schema)?;
-        let mut records = Vec::new();
-        for (index, domain) in domains.iter().enumerate() {
-            let query = &domain.query;
-            let generated = synthesize_bounded_local_relation_records(
-                &LocalRelationCoverageDomain {
-                    width: query.width,
-                    height: query.height,
-                    frame: query.frame,
-                    piece: query.piece,
-                    profile: options.profile,
-                    window: query.window,
-                    entries: &query.entries,
-                    fixed_mask: domain.fixed_mask,
-                    fixed_occupancy: domain.fixed_occupancy,
-                },
-                domain.max_records,
-                domain.max_nodes,
-            )
-            .map_err(|error| format!("cover domain {index}: {error}"))?;
-            records.extend(generated);
-        }
-        (
-            records,
-            domains.len(),
-            identity,
-            query_schema,
-            "audited-record-and-declared-domain-coverage",
-        )
-    } else {
-        let queries = parse_queries(&raw, options.profile)?;
-        let identity = canonical_query_identity(&queries, options.profile)?;
-        let records = queries
-            .iter()
-            .enumerate()
-            .map(|(index, query)| {
-                derive_exact_conditioned_local_relation_with_frame(
-                    query.width,
-                    query.height,
-                    query.board,
-                    query.frame,
-                    query.piece,
-                    options.profile,
-                    query.window,
-                    &query.entries,
+    let (records, source_count, query_identity, query_schema, evidence_scope, cover_domains) =
+        if source["schema"] == COVER_SCHEMA || source["schema"] == SOLVER_COVER_SCHEMA {
+            let query_schema = source["schema"]
+                .as_str()
+                .ok_or("cover source schema must be a string")?;
+            let domains = if query_schema == SOLVER_COVER_SCHEMA {
+                parse_solver_cover_domains(&raw, options.profile)?
+            } else {
+                parse_cover_domains(&raw, options.profile)?
+            };
+            let identity = canonical_cover_identity(&domains, options.profile, query_schema)?;
+            let mut records = Vec::new();
+            for (index, domain) in domains.iter().enumerate() {
+                let query = &domain.query;
+                let generated = synthesize_bounded_local_relation_records(
+                    &LocalRelationCoverageDomain {
+                        width: query.width,
+                        height: query.height,
+                        frame: query.frame,
+                        piece: query.piece,
+                        profile: options.profile,
+                        window: query.window,
+                        entries: &query.entries,
+                        fixed_mask: domain.fixed_mask,
+                        fixed_occupancy: domain.fixed_occupancy,
+                    },
+                    domain.max_records,
+                    domain.max_nodes,
                 )
-                .ok_or_else(|| format!("local relation query {index} is not placeable or in scope"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        (
-            records,
-            queries.len(),
-            identity,
-            QUERY_SCHEMA,
-            "stored-record-and-collision-dependency-only",
-        )
-    };
+                .map_err(|error| format!("cover domain {index}: {error}"))?;
+                records.extend(generated);
+            }
+            (
+                records,
+                domains.len(),
+                identity,
+                query_schema,
+                "audited-record-and-declared-domain-coverage",
+                Some(domains),
+            )
+        } else {
+            let queries = parse_queries(&raw, options.profile)?;
+            let identity = canonical_query_identity(&queries, options.profile)?;
+            let records = queries
+                .iter()
+                .enumerate()
+                .map(|(index, query)| {
+                    derive_exact_conditioned_local_relation_with_frame(
+                        query.width,
+                        query.height,
+                        query.board,
+                        query.frame,
+                        query.piece,
+                        options.profile,
+                        query.window,
+                        &query.entries,
+                    )
+                    .ok_or_else(|| {
+                        format!("local relation query {index} is not placeable or in scope")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (
+                records,
+                queries.len(),
+                identity,
+                QUERY_SCHEMA,
+                "stored-record-and-collision-dependency-only",
+                None,
+            )
+        };
     let bytes = encode_local_relation_candidate_pack(binding, &records)
         .map_err(|error| error.code().to_owned())?;
     let loaded = load_local_relation_candidate_pack(&bytes, binding, None)
         .map_err(|error| error.code().to_owned())?;
-    let checked = audit_candidate_local_relation_pack(&loaded)
+    let audited = audited_local_relation_candidate_pack(&loaded)
         .map_err(|error| format!("independent local relation audit failed: {error:?}"))?;
+    let checked = loaded.record_count();
     if checked != records.len() {
         return Err("independent audit did not cover every source record".to_owned());
+    }
+    if let Some(domains) = cover_domains {
+        for (index, domain) in domains.iter().enumerate() {
+            let query = &domain.query;
+            if !matches!(
+                audited.prove_context_coverage(
+                    LocalRelationCoverageDomain {
+                        width: query.width,
+                        height: query.height,
+                        frame: query.frame,
+                        piece: query.piece,
+                        profile: options.profile,
+                        window: query.window,
+                        entries: &query.entries,
+                        fixed_mask: domain.fixed_mask,
+                        fixed_occupancy: domain.fixed_occupancy,
+                    },
+                    domain.max_nodes,
+                ),
+                Ok(LocalRelationCoverageResult::Complete { .. })
+            ) {
+                return Err(format!(
+                    "merged local relation candidate did not preserve cover domain {index}"
+                ));
+            }
+        }
     }
 
     // Immutable candidate output is useful local evidence, not a signed
@@ -692,6 +721,7 @@ fn parse_i8(value: &Value, name: &str) -> Result<i8, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clearra_core_executor::audit_candidate_local_relation_pack;
 
     fn fixture_query() -> Value {
         json!({
@@ -852,16 +882,28 @@ mod tests {
         let source = json!({
             "schema": COVER_SCHEMA,
             "profile": "no-kick",
-            "domains": [{
-                "query": {
-                    "width": 10, "height": 1, "board": "0x0",
-                    "deleted_original_rows": 0, "piece": "T",
-                    "window": { "min_x": 4, "max_x": 4, "min_y": 0, "max_y": 1 },
-                    "entries": [{ "rotation": 0, "x": 4, "y": 1 }]
+            "domains": [
+                {
+                    "query": {
+                        "width": 10, "height": 1, "board": "0x0",
+                        "deleted_original_rows": 0, "piece": "T",
+                        "window": { "min_x": 4, "max_x": 4, "min_y": 0, "max_y": 1 },
+                        "entries": [{ "rotation": 0, "x": 4, "y": 1 }]
+                    },
+                    "fixed_mask": "0x0", "fixed_occupancy": "0x0",
+                    "max_records": 1024, "max_nodes": 100000
                 },
-                "fixed_mask": "0x0", "fixed_occupancy": "0x0",
-                "max_records": 1024, "max_nodes": 100000
-            }]
+                {
+                    "query": {
+                        "width": 10, "height": 1, "board": "0x0",
+                        "deleted_original_rows": 0, "piece": "T",
+                        "window": { "min_x": 5, "max_x": 5, "min_y": 0, "max_y": 1 },
+                        "entries": [{ "rotation": 0, "x": 5, "y": 1 }]
+                    },
+                    "fixed_mask": "0x3ff", "fixed_occupancy": "0x0",
+                    "max_records": 1, "max_nodes": 100
+                }
+            ]
         });
         fs::write(&queries, serde_json::to_vec(&source).unwrap()).unwrap();
         let options = ConditionedLocalRelationGenerationOptions {
@@ -877,7 +919,7 @@ mod tests {
         assert_eq!(report["status"], "candidate_unqualified");
         assert_eq!(report["signed"], false);
         assert_eq!(report["query_schema"], COVER_SCHEMA);
-        assert_eq!(report["query_count"], 1);
+        assert_eq!(report["query_count"], 2);
         assert!(report["record_count"].as_u64().unwrap() > 1);
         assert!(crate::validate_conditioned_local_candidate_catalog(
             KickTableProfileId::NoKick,
@@ -893,7 +935,7 @@ mod tests {
             &source_bytes,
         )
         .unwrap();
-        assert_eq!(verified.covered_domains, 1);
+        assert_eq!(verified.covered_domains, 2);
         assert!(verified.visited_proof_nodes > 0);
         generate_conditioned_local_relation(&options).unwrap();
         assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
