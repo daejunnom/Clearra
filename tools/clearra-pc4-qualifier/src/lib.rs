@@ -39,4 +39,6 @@ pub use conditioned_reachability_generation::{
 pub use legal_board_candidate_validation::{
     validate_legal_board_candidate_catalog, LegalBoardCandidateSummary,
 };
-pub use legal_board_generation::{generate_legal_board, LegalBoardGenerationOptions};
+pub use legal_board_generation::{
+    generate_legal_board, verify_legal_board_candidate_source_chain, LegalBoardGenerationOptions,
+};

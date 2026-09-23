@@ -43,6 +43,20 @@ pub fn generate_legal_board(options: &LegalBoardGenerationOptions) -> Result<(),
     run_exact_layers(binding, options)
 }
 
+/// Recheck an already materialized F/R/L proof chain against its immutable
+/// final bundle and catalog. Missing layers or outputs are errors: this path
+/// must never resume generation, publish a candidate, or grant signed product
+/// authority by trusting the candidate catalog's own completeness flags.
+pub fn verify_legal_board_candidate_source_chain(
+    options: &LegalBoardGenerationOptions,
+) -> Result<(), String> {
+    validate_options(options)?;
+    let binding = domain::DomainBinding::legal_board(options.profile)?;
+    verify_existing_immutable(&options.bundle, None)?;
+    verify_existing_immutable(&options.catalog, None)?;
+    finish_exact_bundle(binding, options, true)
+}
+
 fn validate_options(options: &LegalBoardGenerationOptions) -> Result<(), String> {
     if !options.layers.is_absolute()
         || !options.bundle.is_absolute()
@@ -245,7 +259,7 @@ fn run_exact_layers(
         }
     }
 
-    publish_exact_bundle(binding, options)?;
+    finish_exact_bundle(binding, options, false)?;
     println!(
         "pc4_legal_board_generation=complete new_steps={} max_new_steps={} bundle={} catalog={}",
         created,
@@ -263,9 +277,10 @@ fn incomplete(phase: &str, created: usize, limit: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn publish_exact_bundle(
+fn finish_exact_bundle(
     binding: domain::DomainBinding,
     options: &LegalBoardGenerationOptions,
+    verify_only: bool,
 ) -> Result<(), String> {
     let mut legal_summaries = Vec::with_capacity(11);
     let mut forward_identity = Vec::with_capacity(11);
@@ -388,7 +403,11 @@ fn publish_exact_bundle(
         },
     )
     .map_err(|error| error.code().to_owned())?;
-    publish_immutable(&options.bundle, encoded.as_ref())?;
+    if verify_only {
+        verify_existing_immutable(&options.bundle, Some(encoded.as_ref()))?;
+    } else {
+        publish_immutable(&options.bundle, encoded.as_ref())?;
+    }
     let bundle_digest: [u8; 32] = Sha256::digest(encoded.as_ref()).into();
     let layer_entries = (0..=10)
         .map(|layer| {
@@ -428,7 +447,11 @@ fn publish_exact_bundle(
         "layers": layer_entries,
     }))
     .map_err(|error| error.to_string())?;
-    publish_immutable(&options.catalog, &catalog)
+    if verify_only {
+        verify_existing_immutable(&options.catalog, Some(&catalog))
+    } else {
+        publish_immutable(&options.catalog, &catalog)
+    }
 }
 
 fn verify_source_domain_chains(
@@ -489,26 +512,7 @@ fn validate_output_path(path: &Path) -> Result<(), String> {
 
 fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<(), String> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err("existing legal-board output is a symlink or non-file".to_owned());
-            }
-            if metadata.len() != bytes.len() as u64 {
-                return Err(
-                    "refusing to replace a different immutable legal-board output".to_owned(),
-                );
-            }
-            let mut existing = Vec::with_capacity(bytes.len());
-            File::open(path)
-                .map_err(|error| error.to_string())?
-                .take((bytes.len() as u64).saturating_add(1))
-                .read_to_end(&mut existing)
-                .map_err(|error| error.to_string())?;
-            if existing == bytes {
-                return Ok(());
-            }
-            return Err("refusing to replace a different immutable legal-board output".to_owned());
-        }
+        Ok(_) => return verify_existing_immutable(path, Some(bytes)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
     }
@@ -535,6 +539,29 @@ fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = fs::remove_file(&pending);
     }
     result
+}
+
+fn verify_existing_immutable(path: &Path, bytes: Option<&[u8]>) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        "complete legal-board proof requires an existing immutable output".to_owned()
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("existing legal-board output is a symlink or non-file".to_owned());
+    }
+    let Some(bytes) = bytes else { return Ok(()) };
+    if metadata.len() != bytes.len() as u64 {
+        return Err("refusing to replace a different immutable legal-board output".to_owned());
+    }
+    let mut existing = Vec::with_capacity(bytes.len());
+    File::open(path)
+        .map_err(|error| error.to_string())?
+        .take((bytes.len() as u64).saturating_add(1))
+        .read_to_end(&mut existing)
+        .map_err(|error| error.to_string())?;
+    if existing != bytes {
+        return Err("refusing to replace a different immutable legal-board output".to_owned());
+    }
+    Ok(())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -670,6 +697,28 @@ mod immutable_output_tests {
             .set_len(1024 * 1024)
             .unwrap();
         assert!(publish_immutable(&output, b"first").is_err());
+        fs::remove_file(output).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn proof_verification_never_creates_or_replaces_an_output() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "clearra-legal-board-proof-readonly-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let output = root.join("candidate.bin");
+        assert!(verify_existing_immutable(&output, None).is_err());
+        assert!(!output.exists());
+        publish_immutable(&output, b"candidate").unwrap();
+        assert!(verify_existing_immutable(&output, Some(b"candidate")).is_ok());
+        assert!(verify_existing_immutable(&output, Some(b"different")).is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"candidate");
         fs::remove_file(output).unwrap();
         fs::remove_dir(root).unwrap();
     }

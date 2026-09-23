@@ -1,5 +1,6 @@
 use clearra_pc4_qualifier::{
-    generate_legal_board, validate_legal_board_candidate_catalog, LegalBoardGenerationOptions,
+    generate_legal_board, validate_legal_board_candidate_catalog,
+    verify_legal_board_candidate_source_chain, LegalBoardGenerationOptions,
 };
 use clearra_rules::kicks::KickTableProfileId;
 use std::{collections::BTreeMap, fs, io::Read, path::PathBuf, sync::Arc};
@@ -50,6 +51,28 @@ fn run() -> Result<(), String> {
         );
         return Ok(());
     }
+    if action == "legal-board-verify-source-chain" {
+        if options.contains_key("workers") || options.contains_key("max-new-steps") {
+            return Err("proof verification cannot create new generation steps".into());
+        }
+        let layers = absolute(&options, "layers")?;
+        let bundle = absolute(&options, "bundle")?;
+        let catalog = absolute(&options, "catalog")?;
+        verify_legal_board_candidate_source_chain(&LegalBoardGenerationOptions {
+            profile,
+            layers,
+            bundle,
+            catalog,
+            workers: 1,
+            max_new_steps: 1,
+        })?;
+        println!(
+            "pc4_legal_board_source_chain=consistent_unqualified profile={}",
+            clearra_core_executor::accelerator_profile_name(profile)
+                .map_err(|_| "legal-board profile is unsupported")?
+        );
+        return Ok(());
+    }
     let layers = absolute(&options, "layers")?;
     let profile_name = clearra_core_executor::accelerator_profile_name(profile)
         .map_err(|_| "legal-board profile is unsupported")?;
@@ -72,9 +95,12 @@ fn parse_options() -> Result<(String, BTreeMap<String, String>), String> {
     let action = args.next().ok_or("expected legal-board action")?;
     if !matches!(
         action.as_str(),
-        "legal-board-run" | "legal-board-verify-candidate"
+        "legal-board-run" | "legal-board-verify-candidate" | "legal-board-verify-source-chain"
     ) {
-        return Err("expected legal-board-run or legal-board-verify-candidate".to_owned());
+        return Err(
+            "expected legal-board-run, legal-board-verify-candidate or legal-board-verify-source-chain"
+                .to_owned(),
+        );
     }
     let mut options = BTreeMap::new();
     while let Some(flag) = args.next() {
