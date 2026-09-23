@@ -31,6 +31,8 @@ async function bounded<T>(label: string, operation: Promise<T>): Promise<T> {
 
 type WorkerMessage = {
   type: string;
+  profile?: number | null;
+  wire?: ArrayBuffer | null;
   requestId?: number;
   batch?: ArrayBuffer;
   offer?: {
@@ -83,6 +85,10 @@ class FakeVerifierWorker {
     }
     if (message.type === 'prewarm') {
       this.emit({ type: 'prewarmed' });
+      return;
+    }
+    if (message.type === 'accelerator-synopsis') {
+      this.emit({ type: 'accelerator-synopsis-ready', applied: Boolean(message.wire) });
       return;
     }
     if (message.type === 'delegation-run') {
@@ -172,6 +178,56 @@ await assert.rejects(
 assert.equal(workers.length, 1);
 assert.equal(workers[0].terminated, true);
 
+class SynopsisVerifierWorker extends FakeVerifierWorker {
+  readonly controls: { profile: number | null; bytes: number }[] = [];
+  constructor() { super(false); }
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'accelerator-synopsis') {
+      this.controls.push({ profile: message.profile ?? null, bytes: message.wire?.byteLength ?? 0 });
+    }
+    super.postMessage(message);
+  }
+}
+const synopsisWorkers: SynopsisVerifierWorker[] = [];
+const synopsisPool = new ClearraVerifierPool(() => {
+  const worker = new SynopsisVerifierWorker();
+  synopsisWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+const synopsisWire = Uint8Array.of(1, 2, 3).buffer;
+await bounded('summary before job', synopsisPool.initialize(
+  'clearra pc --lines 4', 2, undefined, 'synopsis-owner', 'atomic-task',
+  undefined, 'geometry-verifier', { profile: 3, wire: synopsisWire, maximumPeers: 2 }
+));
+assert.deepEqual(synopsisWorkers.map(worker => worker.controls[0]), [
+  { profile: 3, bytes: 3 }, { profile: 3, bytes: 3 }
+]);
+await bounded('summary job drain', synopsisPool.finish(() => undefined));
+await bounded('disabled summary clears peer state', synopsisPool.initialize(
+  'clearra pc --lines 4', 2, undefined, 'synopsis-owner'
+));
+assert.ok(synopsisWorkers.every(worker => worker.controls.at(-1)?.profile === null));
+synopsisPool.cancel();
+
+class StalledSynopsisWorker extends FakeVerifierWorker {
+  constructor() { super(false); }
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'accelerator-synopsis') return;
+    super.postMessage(message);
+  }
+}
+const stalledSynopsisPool = new ClearraVerifierPool(
+  () => new StalledSynopsisWorker() as unknown as Worker
+);
+const stalledSetup = stalledSynopsisPool.initialize(
+  'clearra pc --lines 4', 1, undefined, '', 'atomic-task', undefined,
+  'geometry-verifier', { profile: 3, wire: synopsisWire, maximumPeers: 1 }
+);
+await new Promise(resolve => setTimeout(resolve, 0));
+stalledSynopsisPool.cancel();
+await bounded('cancelled synopsis setup settles', stalledSetup);
+assert.equal(stalledSynopsisPool.progressSnapshot().workerCount, 0);
+
 class StreamingVerifierWorker {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
@@ -208,6 +264,10 @@ class StreamingVerifierWorker {
     }
     if (message.type === 'prewarm') {
       this.emit({ type: 'prewarmed' });
+      return;
+    }
+    if (message.type === 'accelerator-synopsis') {
+      this.emit({ type: 'accelerator-synopsis-ready', applied: false });
       return;
     }
     if (message.type === 'delegation-run') {

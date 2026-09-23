@@ -844,6 +844,19 @@ pub extern "C" fn clearra_wasm_accelerator_remove(kind: u32, profile: u32) -> i3
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_export_negative_synopsis(
+    profile: u32,
+    maximum_bytes: u32,
+) -> i32 {
+    accelerator_exports::export_negative_synopsis(profile, maximum_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_admit_negative_synopsis(profile: u32) -> i32 {
+    accelerator_exports::admit_negative_synopsis(profile)
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_configure_host(
     logical_processor_count: u32,
     capability_flags: u32,

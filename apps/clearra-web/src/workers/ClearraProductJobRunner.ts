@@ -10,6 +10,7 @@ import type { SharedExecutionResourceAuthority } from './SharedExecutionResource
 import { WasmJobRunner } from './WasmJobRunner';
 import type { Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 import type {
+  AcceleratorWorkerSynopsis,
   ClearraWasmHostCapabilities,
   ClearraWasmModule
 } from './clearraWasmRuntime';
@@ -23,7 +24,8 @@ export class ClearraProductJobRunner {
     private readonly lifecycleOwnerId: string,
     private readonly hostCapabilities: ClearraWasmHostCapabilities,
     private readonly resourceAuthority?: SharedExecutionResourceAuthority,
-    private readonly resourceWaitTimeoutMs?: number
+    private readonly resourceWaitTimeoutMs?: number,
+    private readonly legalBoardSynopsis?: AcceleratorWorkerSynopsis | null
   ) {}
 
   async run(
@@ -42,7 +44,9 @@ export class ClearraProductJobRunner {
       this.hostCapabilities,
       undefined,
       this.resourceAuthority,
-      this.resourceWaitTimeoutMs
+      this.resourceWaitTimeoutMs,
+      'auto',
+      this.legalBoardSynopsis
     );
     this.activeRunner = distributed;
     try {

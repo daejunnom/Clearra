@@ -7,10 +7,12 @@ use clearra_accelerator_product_host::{
     embedded_catalog, CatalogProfileStatus, ProductCatalogKind, QualifiedCatalogAsset,
 };
 use clearra_core_executor::{
-    built_in_legal_board_binding, built_in_local_relation_binding,
+    active_qualified_exact_legal_board_identity, built_in_legal_board_binding,
+    built_in_local_relation_binding, export_qualified_legal_board_synopsis,
     install_qualified_exact_legal_board, install_qualified_local_relation_pack,
-    load_local_relation_candidate_pack, remove_qualified_exact_legal_board,
-    remove_qualified_local_relation_pack, ExactLegalBoard, LegalBoardExpectation,
+    install_trusted_legal_board_synopsis, load_local_relation_candidate_pack,
+    remove_qualified_exact_legal_board, remove_qualified_local_relation_pack,
+    remove_trusted_legal_board_synopsis, ExactLegalBoard, LegalBoardExpectation,
     QualifiedExactLegalBoard, QualifiedLocalRelationPack,
 };
 use clearra_rules::kicks::KickTableProfileId;
@@ -112,7 +114,8 @@ pub(super) fn catalog(kind: u32, profile: u32) -> i32 {
             Some(CatalogProfileStatus::NotQualified) => json!({
                 "product": kind.as_str(), "profile": name, "state": "not_qualified",
                 "payload_bytes": null, "generation": null, "payload_identity": null,
-                "url": null, "catalog_identity": hex(catalog.catalog_identity())
+                "url": null, "catalog_identity": hex(catalog.catalog_identity()),
+                "active_session_shared_bytes": null
             }),
             Some(CatalogProfileStatus::Qualified(asset)) => json!({
                 "product": kind.as_str(), "profile": name, "state": "qualified",
@@ -120,6 +123,7 @@ pub(super) fn catalog(kind: u32, profile: u32) -> i32 {
                 "generation": hex(asset.authority().generation_identity()),
                 "payload_identity": hex(asset.authority().payload_identity()),
                 "url": asset.authority().asset_url(),
+                "active_session_shared_bytes": asset.metadata().active_session_shared_bytes(),
                 "catalog_identity": hex(catalog.catalog_identity())
             }),
             None => {
@@ -272,7 +276,10 @@ pub(super) fn remove(kind: u32, profile: u32) -> i32 {
         };
         let removed = match kind {
             ProductCatalogKind::ExactLegalBoard => remove_qualified_exact_legal_board(kick)
-                .map(|value| value.is_some())
+                .and_then(|full| {
+                    remove_trusted_legal_board_synopsis(kick)
+                        .map(|summary| full.is_some() || summary)
+                })
                 .map_err(|_| ()),
             ProductCatalogKind::BoardConditionedReachability => {
                 remove_qualified_local_relation_pack(kick)
@@ -294,6 +301,130 @@ pub(super) fn remove(kind: u32, profile: u32) -> i32 {
                     "accelerator_session_in_use",
                     "active search retains this generation",
                 );
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+/// Only a WASM owner with the complete signed bundle can derive this small
+/// negative-only worker transport. A null result means no qualified source;
+/// peers then keep the ordinary exact verifier.
+pub(super) fn export_negative_synopsis(profile: u32, maximum_bytes: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        if state.has_worker_job_start_conflict() {
+            state.set_error(
+                "accelerator_session_in_use",
+                "synopsis export requires an idle owner",
+            );
+            return ABI_ERROR;
+        }
+        let Some((ProductCatalogKind::ExactLegalBoard, name, kick)) = selection(0, profile) else {
+            state.set_error(
+                "accelerator_selection_invalid",
+                "unknown legal-board profile",
+            );
+            return ABI_ERROR;
+        };
+        let catalog = match embedded_catalog(ProductCatalogKind::ExactLegalBoard) {
+            Ok(value) => value,
+            Err(error) => {
+                state.set_error(error.code(), "embedded signed catalog is invalid");
+                return ABI_ERROR;
+            }
+        };
+        let Some(CatalogProfileStatus::Qualified(asset)) = catalog.profile(name) else {
+            state.set_error(
+                "accelerator_not_qualified",
+                "profile has no qualified signed asset",
+            );
+            return ABI_ERROR;
+        };
+        if active_qualified_exact_legal_board_identity(kick)
+            != Some((
+                asset.authority().generation_identity(),
+                asset.authority().statement_identity(),
+            ))
+        {
+            state.set_error(
+                "accelerator_snapshot_mismatch",
+                "complete owner is not installed",
+            );
+            return ABI_ERROR;
+        }
+        match export_qualified_legal_board_synopsis(kick, maximum_bytes as usize) {
+            Ok(Some(wire)) => {
+                state.set_output_bytes(wire);
+                ABI_OK
+            }
+            Ok(None) => {
+                state.set_error("accelerator_not_loaded", "complete owner is not installed");
+                ABI_ERROR
+            }
+            Err(_) => {
+                state.set_error(
+                    "accelerator_synopsis_budget",
+                    "bounded derivative unavailable",
+                );
+                ABI_ERROR
+            }
+        }
+    })
+}
+
+/// Accept a derivative only from the trusted in-app worker transport. Its
+/// generation, rule and complete-domain statement must match the embedded
+/// signed catalog; no network response may call this export directly.
+pub(super) fn admit_negative_synopsis(profile: u32) -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        if state.has_worker_job_start_conflict() {
+            state.set_error(
+                "accelerator_session_in_use",
+                "synopsis installation requires an idle worker",
+            );
+            return ABI_ERROR;
+        }
+        let Some((ProductCatalogKind::ExactLegalBoard, name, _)) = selection(0, profile) else {
+            state.set_error(
+                "accelerator_selection_invalid",
+                "unknown legal-board profile",
+            );
+            return ABI_ERROR;
+        };
+        let catalog = match embedded_catalog(ProductCatalogKind::ExactLegalBoard) {
+            Ok(value) => value,
+            Err(error) => {
+                state.set_error(error.code(), "embedded signed catalog is invalid");
+                return ABI_ERROR;
+            }
+        };
+        let Some(CatalogProfileStatus::Qualified(asset)) = catalog.profile(name) else {
+            state.set_error(
+                "accelerator_not_qualified",
+                "profile has no qualified signed asset",
+            );
+            return ABI_ERROR;
+        };
+        let wire = std::mem::take(&mut state.transfer_input);
+        match install_trusted_legal_board_synopsis(&wire, asset.authority()) {
+            Ok(()) => {
+                state.set_output(
+                    json!({"state": "ready", "profile": name,
+                    "generation": hex(asset.authority().generation_identity())})
+                    .to_string(),
+                );
+                ABI_OK
+            }
+            Err(error) => {
+                state.set_error(error.code(), "trusted synopsis admission failed");
                 ABI_ERROR
             }
         }

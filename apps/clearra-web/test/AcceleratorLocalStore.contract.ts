@@ -73,7 +73,8 @@ const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
 const plan: AcceleratorCatalogPlan = {
   product: 'exact-legal-board', profile: 'srs', state: 'qualified',
   payload_bytes: bytes.byteLength, payload_identity: digest,
-  generation: 'a'.repeat(64), catalog_identity: 'b'.repeat(64), url: 'https://example.invalid/asset'
+  generation: 'a'.repeat(64), catalog_identity: 'b'.repeat(64), url: 'https://example.invalid/asset',
+  active_session_shared_bytes: 1024
 };
 const profile = async () => (await (await origin.getDirectoryHandle('clearra-exact-accelerators-v1'))
   .getDirectoryHandle('exact-legal-board')).getDirectoryHandle('srs');

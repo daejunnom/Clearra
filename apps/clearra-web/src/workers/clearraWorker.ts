@@ -22,6 +22,7 @@ import {
   ClearraWasmRuntimeError,
   loadClearraWasmModule,
   type AcceleratorRequestPolicy,
+  type AcceleratorWorkerSynopsis,
   type ClearraWasmFailureDiagnostics,
   type ClearraWasmHostCapabilities,
   type ClearraWasmModule
@@ -257,10 +258,13 @@ async function runCommandText(
     wasm.configure_host(wasmHostCapabilities(hostCapabilitySnapshot));
     loadedWasm = wasm;
     releaseProductPages();
-    // The root WASM owner installs at most one immutable profile generation
-    // per product. Distributed peers receive no asset copy and retain their
-    // exact fallback; no network request is made on the solver hot path.
-    await activateLocalAccelerators(wasm, commandText, hostCapabilitySnapshot.wasmTransferByteCap);
+    // The root retains the complete signed asset. Peers may receive only a
+    // bounded negative-only derivative; an unavailable derivative preserves
+    // their exact fallback without network work in the solver hot path.
+    const legalBoardSynopsis = await activateLocalAccelerators(
+      wasm, commandText, hostCapabilitySnapshot.wasmTransferByteCap,
+      workerAuthority.workersEffective
+    );
     await startTablebaseWarmupAfterWasm(wasm);
     if (job.cancelled) {
       releaseJobResources(job);
@@ -273,7 +277,10 @@ async function runCommandText(
       wasm,
       jobId,
       lifecycleOwnerId,
-      wasmHostCapabilities(hostCapabilitySnapshot)
+      wasmHostCapabilities(hostCapabilitySnapshot),
+      undefined,
+      undefined,
+      legalBoardSynopsis
     );
     const modulePrepareMs = profileStarted === null ? 0 : performance.now() - profileStarted;
     const terminal = await job.runner.run(commandText, (event) => {
@@ -319,10 +326,11 @@ const activeAcceleratorIdentities = new Map<string, string>();
 async function activateLocalAccelerators(
   wasm: ClearraWasmModule,
   commandText: string,
-  transferByteCap: number
-) {
+  transferByteCap: number,
+  workerCount: number
+): Promise<AcceleratorWorkerSynopsis | null> {
   if (!wasm.accelerator_catalog || !wasm.accelerator_request_policy ||
-      !wasm.accelerator_admit || !wasm.accelerator_remove) return;
+      !wasm.accelerator_admit || !wasm.accelerator_remove) return null;
   if (acceleratorOwner !== wasm) {
     acceleratorOwner = wasm;
     activeAcceleratorIdentities.clear();
@@ -354,7 +362,7 @@ async function activateLocalAccelerators(
       }
     }
   }
-  if (profile < 0) return;
+  if (profile < 0) return null;
   for (const kind of [0, 1]) {
     // A previously loaded generation must never survive a failed local read
     // or a new catalog. If an in-flight lease prevents removal, fail closed
@@ -400,6 +408,36 @@ async function activateLocalAccelerators(
       }
       console.warn('Clearra local accelerator unavailable; using exact search', error);
     }
+  }
+  if (!activeAcceleratorIdentities.has(`0:${profile}`) ||
+      !wasm.accelerator_export_negative_synopsis || workerCount < 2) return null;
+  try {
+    // The signed resident upper bounds include the complete root bundle and
+    // relation pack. Reserve room for temporary admission buffers and keep
+    // all peer summaries below 16 MiB in aggregate.
+    let residentUpperBound = 0;
+    for (const kind of [0, 1]) {
+      if (!activeAcceleratorIdentities.has(`${kind}:${profile}`)) continue;
+      const plan = wasm.accelerator_catalog(kind, profile);
+      if (plan.state !== 'qualified' || !Number.isSafeInteger(plan.active_session_shared_bytes) ||
+          !plan.active_session_shared_bytes || plan.active_session_shared_bytes < 0) return null;
+      residentUpperBound += plan.active_session_shared_bytes;
+    }
+    const totalSynopsisBudget = Math.max(0, Math.min(
+      16 * 1024 * 1024,
+      128 * 1024 * 1024 - residentUpperBound - 4 * 1024 * 1024
+    ));
+    const maximumBytes = Math.min(
+      transferByteCap,
+      2 * 1024 * 1024,
+      Math.floor(totalSynopsisBudget / Math.max(1, workerCount))
+    );
+    const wire = wasm.accelerator_export_negative_synopsis(profile, maximumBytes);
+    return wire.byteLength > 0 && wire.byteLength <= maximumBytes
+      ? { profile, wire, maximumPeers: workerCount } : null;
+  } catch {
+    // No negative proof leaves the existing exact verifier unchanged.
+    return null;
   }
 }
 

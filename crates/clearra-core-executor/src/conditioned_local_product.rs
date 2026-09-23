@@ -213,6 +213,10 @@ pub fn install_qualified_local_relation_pack(
                 .map_err(|_| LocalRelationProductError::RegistryUnavailable)?,
         )
         .saturating_add(
+            crate::legal_board::installed_legal_board_synopsis_bytes(None)
+                .map_err(|_| LocalRelationProductError::RegistryUnavailable)?,
+        )
+        .saturating_add(
             crate::conditioned_reachability::installed_conditioned_reachability_bytes(None)
                 .map_err(|_| LocalRelationProductError::RegistryUnavailable)?,
         );

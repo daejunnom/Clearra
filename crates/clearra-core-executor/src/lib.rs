@@ -128,12 +128,14 @@ pub use legal_board::{
     built_in_rule_identity as built_in_legal_board_rule_identity,
     encode_exact_intersection as encode_exact_legal_board_intersection,
     encode_exact_intersection_streaming as encode_exact_legal_board_intersection_streaming,
-    install_qualified_exact_legal_board, remove_qualified_exact_legal_board, CompletionCapability,
-    ExactLegalBoard, LegalBoardAssetError, LegalBoardBinding, LegalBoardDecision,
-    LegalBoardExpectation, LegalBoardNegativeSynopsis, LegalBoardQuery,
-    LegalBoardStreamEncodeError, LegalBoardSynopsisError, OriginalRowFrame, ProviderStatus,
-    QualifiedExactLegalBoard, RowCodecError, UnsupportedLegalBoardProfile,
-    EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE,
+    export_qualified_legal_board_synopsis, install_qualified_exact_legal_board,
+    install_trusted_legal_board_synopsis, remove_qualified_exact_legal_board,
+    remove_trusted_legal_board_synopsis, CompletionCapability, ExactLegalBoard,
+    LegalBoardAssetError, LegalBoardBinding, LegalBoardDecision, LegalBoardExpectation,
+    LegalBoardNegativeSynopsis, LegalBoardQuery, LegalBoardStreamEncodeError,
+    LegalBoardSynopsisError, OriginalRowFrame, ProviderStatus, QualifiedExactLegalBoard,
+    RowCodecError, UnsupportedLegalBoardProfile, EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE,
+    MAX_DISTRIBUTED_SYNOPSIS_BYTES,
 };
 pub use memory::ScopeGuard;
 pub use packing::{PackingExecutionPlan, PackingRunResult, PackingRunner, PackingState};

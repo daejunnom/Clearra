@@ -24,17 +24,25 @@ export type AcceleratorCatalogPlan = {
   payload_identity: string | null;
   url: string | null;
   catalog_identity: string;
+  active_session_shared_bytes: number | null;
 };
 export type AcceleratorRequestPolicy = {
   profile: number | null;
   legal_board: boolean;
   conditioned_reachability: boolean;
 };
+export type AcceleratorWorkerSynopsis = {
+  profile: number;
+  wire: ArrayBuffer;
+  maximumPeers: number;
+};
 export type ClearraWasmModule = {
   accelerator_catalog?: (kind: number, profile: number) => AcceleratorCatalogPlan;
   accelerator_request_policy?: (commandText: string) => AcceleratorRequestPolicy;
   accelerator_admit?: (kind: number, profile: number, bytes: ArrayBuffer, activate: boolean) => void;
   accelerator_remove?: (kind: number, profile: number) => void;
+  accelerator_export_negative_synopsis?: (profile: number, maximumBytes: number) => ArrayBuffer;
+  accelerator_admit_negative_synopsis?: (profile: number, wire: ArrayBuffer) => void;
   configure_online_pc4?: (generation: unknown) => void;
   online_pc4_pending?: (jobId: number) => Pc4PendingRange | null;
   online_pc4_admit?: (jobId: number, response: unknown) => void;
@@ -203,6 +211,8 @@ type ClearraRawWasmExports = {
   clearra_wasm_accelerator_request_policy?: () => number;
   clearra_wasm_accelerator_admit?: (kind: number, profile: number, activate: number) => number;
   clearra_wasm_accelerator_remove?: (kind: number, profile: number) => number;
+  clearra_wasm_accelerator_export_negative_synopsis?: (profile: number, maximumBytes: number) => number;
+  clearra_wasm_accelerator_admit_negative_synopsis?: (profile: number) => number;
   clearra_wasm_online_pc4_configure?: () => number;
   clearra_wasm_online_pc4_pending?: (jobId: number) => number;
   clearra_wasm_online_pc4_admit?: (jobId: number) => number;
@@ -1030,6 +1040,18 @@ function wrapRawModule(
       },
       accelerator_remove(kind: number, profile: number) {
         requireOk(raw.clearra_wasm_accelerator_remove!(kind, profile));
+        outputText();
+      }
+    } : {}),
+    ...(raw.clearra_wasm_accelerator_export_negative_synopsis &&
+      raw.clearra_wasm_accelerator_admit_negative_synopsis ? {
+      accelerator_export_negative_synopsis(profile: number, maximumBytes: number) {
+        requireOk(raw.clearra_wasm_accelerator_export_negative_synopsis!(profile, maximumBytes));
+        return outputBytes();
+      },
+      accelerator_admit_negative_synopsis(profile: number, wire: ArrayBuffer) {
+        setTransfer(wire);
+        requireOk(raw.clearra_wasm_accelerator_admit_negative_synopsis!(profile));
         outputText();
       }
     } : {}),

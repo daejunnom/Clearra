@@ -2,6 +2,7 @@
 // workers and aggregating their bounded availability and exactness telemetry.
 import {
   ClearraWasmRuntimeError,
+  type AcceleratorWorkerSynopsis,
   type ClearraDistributedVerifierProgress,
   type ClearraWasmHostCapabilities
 } from './clearraWasmRuntime';
@@ -19,6 +20,7 @@ import { VerifierTransportProfile, type TransportOperation } from './VerifierTra
 
 type VerifierResponse =
   | { type: 'prewarmed' }
+  | { type: 'accelerator-synopsis-ready'; applied: boolean }
   | { type: 'delegation-accepted'; acceptance: DelegationAcceptance }
   | {
       type: 'delegation-started';
@@ -188,6 +190,8 @@ class VerifierClient {
   private prewarmed: Promise<void> | null = null;
   private readyReject: ((error: Error) => void) | null = null;
   private prewarmReject: ((error: Error) => void) | null = null;
+  private synopsisReject: ((error: Error) => void) | null = null;
+  private installedSynopsisProfile: number | null = null;
   private candidatesVerified = 0;
   private candidatesVerifiedAvailable = true;
   private candidatesVerifiedExact = true;
@@ -300,7 +304,8 @@ class VerifierClient {
     compiledModule?: WebAssembly.Module,
     lifecycleOwnerId = '',
     hostCapabilities?: ClearraWasmHostCapabilities,
-    executionKind: ClearraWorkerExecutionKind = 'geometry-verifier'
+    executionKind: ClearraWorkerExecutionKind = 'geometry-verifier',
+    legalBoardSynopsis?: AcceleratorWorkerSynopsis | null
   ): Promise<void> {
     this.initialized = false;
     this.exactCancellationRequested = false;
@@ -310,6 +315,7 @@ class VerifierClient {
     try {
       await this.transportProfile.measure(this.prewarmed ? 'prewarm_reuse' : 'prewarm_new', 'initialize',
         () => this.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities));
+      await this.installWorkerSynopsis(executionKind === 'geometry-verifier' ? legalBoardSynopsis : null);
       this.worker ??= this.createWorker();
       const worker = this.worker;
       this.candidatesVerified = 0;
@@ -383,6 +389,47 @@ class VerifierClient {
       this.busy = false;
       this.batchStartedAt = null;
     }
+  }
+
+  private async installWorkerSynopsis(synopsis?: AcceleratorWorkerSynopsis | null): Promise<void> {
+    if (!synopsis && this.installedSynopsisProfile === null) return;
+    const worker = this.worker;
+    if (!worker) throw new Error('distributed verifier worker disappeared before asset setup');
+    await new Promise<void>((resolve, reject) => {
+      const rejectAndCleanup = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      const cleanup = () => {
+        worker.removeEventListener('message', onMessage);
+        worker.removeEventListener('error', onError);
+        if (this.synopsisReject === rejectAndCleanup) this.synopsisReject = null;
+      };
+      const onMessage = (event: MessageEvent<VerifierResponse>) => {
+        if (event.data.type === 'accelerator-synopsis-ready') {
+          this.installedSynopsisProfile = event.data.applied ? synopsis?.profile ?? null : null;
+          cleanup();
+          resolve();
+        } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
+          rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message));
+        }
+      };
+      const onError = (event: ErrorEvent) => {
+        rejectAndCleanup(new Error(event.message || 'distributed verifier asset setup failed'));
+      };
+      this.synopsisReject = rejectAndCleanup;
+      worker.addEventListener('message', onMessage);
+      worker.addEventListener('error', onError);
+      try {
+        worker.postMessage({
+          type: 'accelerator-synopsis',
+          profile: synopsis?.profile ?? null,
+          wire: synopsis?.wire ?? null
+        });
+      } catch (error) {
+        rejectAndCleanup(asError(error));
+      }
+    });
   }
 
   async consume(
@@ -866,10 +913,14 @@ class VerifierClient {
       worker.terminate();
     }
     const prewarmReject = this.prewarmReject;
+    const synopsisReject = this.synopsisReject;
     const readyReject = this.readyReject;
     this.prewarmReject = null;
+    this.synopsisReject = null;
+    this.installedSynopsisProfile = null;
     this.readyReject = null;
     prewarmReject?.(error);
+    synopsisReject?.(error);
     readyReject?.(error);
     if (this.initializationDelegation) {
       void this.failDelegation(this.initializationDelegation, error.message);
@@ -989,7 +1040,8 @@ export class ClearraVerifierPool {
     lifecycleOwnerId = '',
     recoveryMode: ClearraVerifierRecoveryMode = 'atomic-task',
     hostCapabilities?: ClearraWasmHostCapabilities,
-    executionKind: ClearraWorkerExecutionKind = 'geometry-verifier'
+    executionKind: ClearraWorkerExecutionKind = 'geometry-verifier',
+    legalBoardSynopsis?: AcceleratorWorkerSynopsis | null
   ) {
     const generation = ++this.generation;
     this.readySubsetFinalization = null;
@@ -1015,7 +1067,8 @@ export class ClearraVerifierPool {
             compiledModule,
             lifecycleOwnerId,
             hostCapabilities,
-            executionKind
+            executionKind,
+            legalBoardSynopsis
           ),
           this.initializationTimeoutMs,
           'distributed verifier initialization'

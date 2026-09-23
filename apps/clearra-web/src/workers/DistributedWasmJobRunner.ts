@@ -14,6 +14,7 @@ import {
   type ClearraVerifierRecoveryMode
 } from './ClearraVerifierPool';
 import type {
+  AcceleratorWorkerSynopsis,
   ClearraDistributedCoreProgress,
   ClearraDistributedPlan,
   ClearraWasmHostCapabilities,
@@ -131,7 +132,8 @@ export class DistributedWasmJobRunner {
     pool: ClearraVerifierPool = sharedVerifierPool,
     resourceAuthority?: SharedExecutionResourceAuthority,
     private readonly resourceWaitTimeoutMs = SHARED_RESOURCE_WAIT_TIMEOUT_MS,
-    private readonly minimumManagerPolicy: MinimumManagerPolicy = 'auto'
+    private readonly minimumManagerPolicy: MinimumManagerPolicy = 'auto',
+    private readonly legalBoardSynopsis?: AcceleratorWorkerSynopsis | null
   ) {
     this.pool = pool;
     this.resourceAuthority = resourceAuthority ?? authorityForVerifierPool(
@@ -141,6 +143,13 @@ export class DistributedWasmJobRunner {
         hostCapabilities.transferByteCap
       )
     );
+  }
+
+  private synopsisFor(verifierCount: number): AcceleratorWorkerSynopsis | null {
+    const synopsis = this.legalBoardSynopsis;
+    if (!synopsis || verifierCount > synopsis.maximumPeers || verifierCount < 1 ||
+        verifierCount * synopsis.wire.byteLength > 16 * 1024 * 1024) return null;
+    return synopsis;
   }
 
   async acquire(): Promise<void> {
@@ -428,7 +437,9 @@ export class DistributedWasmJobRunner {
           this.wasm.compiled_module(),
           this.lifecycleOwnerId,
           verifierRecoveryMode(plan),
-          this.hostCapabilities
+          this.hostCapabilities,
+          'geometry-verifier',
+          this.synopsisFor(verifierCount)
         );
         void verifierInitialization.catch(() => undefined);
       }
@@ -476,7 +487,9 @@ export class DistributedWasmJobRunner {
             this.wasm.compiled_module(),
             this.lifecycleOwnerId,
             verifierRecoveryMode(plan),
-            this.hostCapabilities
+            this.hostCapabilities,
+            'geometry-verifier',
+            this.synopsisFor(effectiveVerifierCount)
           );
           void verifierInitialization.catch(() => undefined);
           await yieldToWorkerHost();

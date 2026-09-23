@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 
 use clearra_core_domain::{
     board::board_size::BoardSize,
@@ -32,7 +32,7 @@ use clearra_supply::{
 
 use crate::{
     conditioned_local_relation::LocalRelationRowFrame,
-    legal_board::{qualified_legal_board_snapshot, QualifiedExactLegalBoard},
+    legal_board::{legal_board_negative_snapshot, LegalBoardNegativeOwner},
     performance::{ExecutorSearchStage, SearchStageSpan},
     CorePathStep,
 };
@@ -513,7 +513,7 @@ pub(super) struct BuildUpWorkspace {
     projection_physical_boards: Vec<u64>,
     projection_state_generations: Vec<u32>,
     projection_generation: u32,
-    legal_board: Option<Arc<QualifiedExactLegalBoard>>,
+    legal_board: Option<LegalBoardNegativeOwner>,
     legal_board_profile: Option<clearra_rules::kicks::KickTableProfileId>,
     legal_board_enabled: Option<bool>,
 }
@@ -531,7 +531,7 @@ impl BuildUpWorkspace {
             return;
         }
         self.legal_board = enabled
-            .then(|| qualified_legal_board_snapshot(profile))
+            .then(|| legal_board_negative_snapshot(profile))
             .flatten();
         self.legal_board_profile = Some(profile);
         self.legal_board_enabled = Some(enabled);
@@ -2822,7 +2822,7 @@ impl BuildOrderGraph {
             edge_scratch.clear();
             let (board, deleted_rows) = projection.state(subset);
             if !crate::search_prune_policy::local_pc4_legal_board_allows(
-                workspace.legal_board.as_deref(),
+                workspace.legal_board.as_ref(),
                 catalog.width(),
                 catalog.height(),
                 catalog.initial_board(),

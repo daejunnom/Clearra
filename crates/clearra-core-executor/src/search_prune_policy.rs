@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::legal_board::{
-    CompletionCapability, LegalBoardDecision, LegalBoardQuery, QualifiedExactLegalBoard,
+    CompletionCapability, LegalBoardDecision, LegalBoardNegativeOwner, LegalBoardQuery,
 };
 #[cfg(feature = "local-search-ab")]
 use crate::legal_board::{ExactLegalBoard, LegalBoardExpectation};
@@ -200,7 +200,7 @@ pub(crate) fn conditioned_reachability_enabled() -> bool {
 /// no-false-negative filter: positive collisions only lose a prune opportunity.
 #[inline(always)]
 pub(crate) fn local_pc4_legal_board_allows(
-    qualified: Option<&QualifiedExactLegalBoard>,
+    qualified: Option<&LegalBoardNegativeOwner>,
     width: u8,
     height: u8,
     initial_board: u64,

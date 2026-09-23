@@ -40,6 +40,10 @@ const NEGATIVE_FILTER_KEYS_PER_WORD: u64 = 8;
 const NEGATIVE_FILTER_MAX_WORDS: usize = 1 << 20;
 const EXACT_INTERSECTION_KIND: u8 = 1;
 const PROFILE_SLOTS: usize = 5;
+const SYNOPSIS_MAGIC: &[u8; 8] = b"CLLS0001";
+const SYNOPSIS_HEADER_BYTES: usize = 8 + 1 + 32 * 3 + LAYER_COUNT * 4;
+const SYNOPSIS_DIGEST_BYTES: usize = 32;
+pub const MAX_DISTRIBUTED_SYNOPSIS_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProviderStatus {
@@ -405,6 +409,8 @@ pub struct ExactLegalBoard {
 pub enum LegalBoardSynopsisError {
     BudgetTooSmall,
     AllocationUnavailable,
+    InvalidWire,
+    AuthorityMismatch,
 }
 
 /// A bounded, negative-only derivative of one signed complete legal-board.
@@ -447,6 +453,149 @@ impl LegalBoardNegativeSynopsis {
             LegalBoardDecision::CandidateAllowed
         } else {
             LegalBoardDecision::VerifiedAbsent
+        }
+    }
+
+    /// Transport a bounded derivative between trusted workers of the same
+    /// application job. The signed complete bundle remains with the owner.
+    /// The wire digest detects accidental corruption; it does not turn an
+    /// arbitrary sender into a source of negative-proof authority.
+    pub fn to_trusted_worker_wire(&self) -> Result<Vec<u8>, LegalBoardSynopsisError> {
+        let word_bytes = self
+            .filters
+            .iter()
+            .try_fold(0_usize, |sum, filter| {
+                sum.checked_add(filter.words.len().checked_mul(8)?)
+            })
+            .ok_or(LegalBoardSynopsisError::InvalidWire)?;
+        let total = SYNOPSIS_HEADER_BYTES
+            .checked_add(word_bytes)
+            .and_then(|bytes| bytes.checked_add(SYNOPSIS_DIGEST_BYTES))
+            .ok_or(LegalBoardSynopsisError::InvalidWire)?;
+        if total > MAX_DISTRIBUTED_SYNOPSIS_BYTES {
+            return Err(LegalBoardSynopsisError::BudgetTooSmall);
+        }
+        let mut wire = Vec::new();
+        wire.try_reserve_exact(total)
+            .map_err(|_| LegalBoardSynopsisError::AllocationUnavailable)?;
+        wire.extend_from_slice(SYNOPSIS_MAGIC);
+        wire.push(
+            profile_slot(self.binding.kick_profile)
+                .map_err(|_| LegalBoardSynopsisError::InvalidWire)? as u8,
+        );
+        wire.extend_from_slice(&self.binding.rule_identity);
+        wire.extend_from_slice(&self.generation_identity);
+        wire.extend_from_slice(&self.signed_catalog_identity);
+        for filter in &self.filters {
+            wire.extend_from_slice(&(filter.words.len() as u32).to_le_bytes());
+        }
+        for filter in &self.filters {
+            for word in &filter.words {
+                wire.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        let digest: [u8; 32] = Sha256::digest(&wire).into();
+        wire.extend_from_slice(&digest);
+        Ok(wire)
+    }
+
+    /// Only the signed-bundle owner may supply this derivative. The receiver
+    /// separately authenticates the embedded catalog statement and compares
+    /// all three identities before it installs the bounded summary.
+    pub fn from_trusted_worker_wire(
+        wire: &[u8],
+        authority: &VerifiedAcceleratorAuthority,
+    ) -> Result<Self, LegalBoardSynopsisError> {
+        if wire.len() < SYNOPSIS_HEADER_BYTES + SYNOPSIS_DIGEST_BYTES
+            || wire.len() > MAX_DISTRIBUTED_SYNOPSIS_BYTES
+            || wire.get(..8) != Some(SYNOPSIS_MAGIC.as_slice())
+        {
+            return Err(LegalBoardSynopsisError::InvalidWire);
+        }
+        let digest_start = wire.len() - SYNOPSIS_DIGEST_BYTES;
+        let digest: [u8; 32] = Sha256::digest(&wire[..digest_start]).into();
+        if wire[digest_start..] != digest {
+            return Err(LegalBoardSynopsisError::InvalidWire);
+        }
+        let profile = decode_profile(wire[8]).map_err(|_| LegalBoardSynopsisError::InvalidWire)?;
+        let binding =
+            built_in_binding(profile).map_err(|_| LegalBoardSynopsisError::AuthorityMismatch)?;
+        if authority.product() != AcceleratorProduct::ExactLegalBoard
+            || authority.profile()
+                != accelerator_profile_name(profile)
+                    .map_err(|_| LegalBoardSynopsisError::AuthorityMismatch)?
+            || authority.rule_identity() != binding.rule_identity
+            || authority.completeness_scope() != EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE
+            || wire[9..41] != binding.rule_identity
+            || wire[41..73] != authority.generation_identity()
+            || wire[73..105] != authority.statement_identity()
+        {
+            return Err(LegalBoardSynopsisError::AuthorityMismatch);
+        }
+        let mut counts = [0_usize; LAYER_COUNT];
+        let mut expected_end = SYNOPSIS_HEADER_BYTES;
+        for (layer, count) in counts.iter_mut().enumerate() {
+            let offset = 105 + layer * 4;
+            *count = u32::from_le_bytes(
+                wire[offset..offset + 4]
+                    .try_into()
+                    .map_err(|_| LegalBoardSynopsisError::InvalidWire)?,
+            ) as usize;
+            if *count == 0 || !count.is_power_of_two() || *count > NEGATIVE_FILTER_MAX_WORDS {
+                return Err(LegalBoardSynopsisError::InvalidWire);
+            }
+            expected_end = expected_end
+                .checked_add(
+                    count
+                        .checked_mul(8)
+                        .ok_or(LegalBoardSynopsisError::InvalidWire)?,
+                )
+                .ok_or(LegalBoardSynopsisError::InvalidWire)?;
+        }
+        if expected_end != digest_start {
+            return Err(LegalBoardSynopsisError::InvalidWire);
+        }
+        let mut cursor = SYNOPSIS_HEADER_BYTES;
+        let mut filters = Vec::new();
+        filters
+            .try_reserve_exact(LAYER_COUNT)
+            .map_err(|_| LegalBoardSynopsisError::AllocationUnavailable)?;
+        for count in counts {
+            let mut words = Vec::new();
+            words
+                .try_reserve_exact(count)
+                .map_err(|_| LegalBoardSynopsisError::AllocationUnavailable)?;
+            for _ in 0..count {
+                words.push(u64::from_le_bytes(
+                    wire[cursor..cursor + 8]
+                        .try_into()
+                        .map_err(|_| LegalBoardSynopsisError::InvalidWire)?,
+                ));
+                cursor += 8;
+            }
+            filters.push(NegativeFilter { words });
+        }
+        Ok(Self {
+            binding,
+            generation_identity: authority.generation_identity(),
+            signed_catalog_identity: authority.statement_identity(),
+            filters,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum LegalBoardNegativeOwner {
+    Complete(Arc<QualifiedExactLegalBoard>),
+    TrustedSynopsis(Arc<LegalBoardNegativeSynopsis>),
+}
+
+impl LegalBoardNegativeOwner {
+    #[inline]
+    pub(crate) fn decide_negative_only(&self, query: LegalBoardQuery) -> LegalBoardDecision {
+        match self {
+            Self::Complete(board) => board.decide_negative_only(query),
+            Self::TrustedSynopsis(synopsis) => synopsis.decide_negative_only(query),
         }
     }
 }
@@ -533,6 +682,9 @@ struct LegalBoardRegistry {
 }
 
 static LEGAL_BOARD_REGISTRY: OnceLock<RwLock<LegalBoardRegistry>> = OnceLock::new();
+static LEGAL_BOARD_SYNOPSIS_REGISTRY: OnceLock<
+    RwLock<[Option<Arc<LegalBoardNegativeSynopsis>>; PROFILE_SLOTS]>,
+> = OnceLock::new();
 static ACCELERATOR_REGISTRY_MUTATION: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(crate) fn accelerator_registry_mutation_lock() -> &'static Mutex<()> {
@@ -555,6 +707,7 @@ pub fn install_qualified_exact_legal_board(
     let combined = board
         .shared_bytes()
         .saturating_add(installed_legal_board_bytes(Some(slot))?)
+        .saturating_add(installed_legal_board_synopsis_bytes(None)?)
         .saturating_add(
             crate::conditioned_reachability::installed_conditioned_reachability_bytes(None)
                 .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?,
@@ -570,6 +723,9 @@ pub fn install_qualified_exact_legal_board(
     let mut guard = registry
         .write()
         .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
+    if trusted_legal_board_synopsis_snapshot(board.binding().kick_profile).is_some() {
+        return Err(LegalBoardAssetError::ActiveSessionInUse);
+    }
     if let Some(active) = guard.slots[slot].as_ref() {
         if active.generation_identity() == board.generation_identity()
             && active.signed_catalog_identity() == board.signed_catalog_identity()
@@ -617,6 +773,116 @@ pub(crate) fn qualified_legal_board_snapshot(
         .clone()
 }
 
+pub(crate) fn legal_board_negative_snapshot(
+    profile: KickTableProfileId,
+) -> Option<LegalBoardNegativeOwner> {
+    qualified_legal_board_snapshot(profile)
+        .map(LegalBoardNegativeOwner::Complete)
+        .or_else(|| {
+            trusted_legal_board_synopsis_snapshot(profile)
+                .map(LegalBoardNegativeOwner::TrustedSynopsis)
+        })
+}
+
+fn trusted_legal_board_synopsis_snapshot(
+    profile: KickTableProfileId,
+) -> Option<Arc<LegalBoardNegativeSynopsis>> {
+    let slot = profile_slot(profile).ok()?;
+    LEGAL_BOARD_SYNOPSIS_REGISTRY
+        .get()?
+        .read()
+        .ok()?
+        .get(slot)?
+        .clone()
+}
+
+/// Install a small negative-only derivative delivered by the trusted browser
+/// owner. The caller must have authenticated the embedded catalog and must
+/// not accept this wire from an external client or network endpoint.
+pub fn install_trusted_legal_board_synopsis(
+    wire: &[u8],
+    authority: &VerifiedAcceleratorAuthority,
+) -> Result<(), LegalBoardAssetError> {
+    let synopsis = LegalBoardNegativeSynopsis::from_trusted_worker_wire(wire, authority)
+        .map_err(|_| LegalBoardAssetError::NotQualified)?;
+    let _mutation = accelerator_registry_mutation_lock()
+        .lock()
+        .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
+    let slot = profile_slot(synopsis.binding.kick_profile)?;
+    if qualified_legal_board_snapshot(synopsis.binding.kick_profile).is_some() {
+        return Err(LegalBoardAssetError::ActiveSessionInUse);
+    }
+    let combined = synopsis
+        .retained_bytes()
+        .saturating_add(installed_legal_board_bytes(None)?)
+        .saturating_add(installed_legal_board_synopsis_bytes(Some(slot))?)
+        .saturating_add(
+            crate::conditioned_reachability::installed_conditioned_reachability_bytes(None)
+                .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?,
+        )
+        .saturating_add(
+            crate::conditioned_local_product::installed_local_relation_bytes(None)
+                .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?,
+        );
+    if combined > MAX_ACTIVE_ACCELERATOR_BYTES {
+        return Err(LegalBoardAssetError::ActiveSessionTooLarge);
+    }
+    let registry =
+        LEGAL_BOARD_SYNOPSIS_REGISTRY.get_or_init(|| RwLock::new(std::array::from_fn(|_| None)));
+    let mut guard = registry
+        .write()
+        .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
+    if guard[slot]
+        .as_ref()
+        .is_some_and(|active| Arc::strong_count(active) > 1)
+    {
+        return Err(LegalBoardAssetError::ActiveSessionInUse);
+    }
+    guard[slot] = Some(Arc::new(synopsis));
+    Ok(())
+}
+
+pub fn remove_trusted_legal_board_synopsis(
+    profile: KickTableProfileId,
+) -> Result<bool, LegalBoardAssetError> {
+    let _mutation = accelerator_registry_mutation_lock()
+        .lock()
+        .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
+    let slot = profile_slot(profile)?;
+    let Some(registry) = LEGAL_BOARD_SYNOPSIS_REGISTRY.get() else {
+        return Ok(false);
+    };
+    let mut guard = registry
+        .write()
+        .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
+    if guard[slot]
+        .as_ref()
+        .is_some_and(|active| Arc::strong_count(active) > 1)
+    {
+        return Err(LegalBoardAssetError::ActiveSessionInUse);
+    }
+    Ok(guard[slot].take().is_some())
+}
+
+pub(crate) fn installed_legal_board_synopsis_bytes(
+    exclude_slot: Option<usize>,
+) -> Result<usize, LegalBoardAssetError> {
+    let Some(registry) = LEGAL_BOARD_SYNOPSIS_REGISTRY.get() else {
+        return Ok(0);
+    };
+    let guard = registry
+        .read()
+        .map_err(|_| LegalBoardAssetError::RegistryUnavailable)?;
+    Ok(guard
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != exclude_slot)
+        .filter_map(|(_, synopsis)| synopsis.as_ref())
+        .fold(0_usize, |sum, synopsis| {
+            sum.saturating_add(synopsis.retained_bytes())
+        }))
+}
+
 pub(crate) fn installed_legal_board_bytes(
     exclude_slot: Option<usize>,
 ) -> Result<usize, LegalBoardAssetError> {
@@ -645,6 +911,27 @@ pub fn active_qualified_exact_legal_board_identity(
 ) -> Option<([u8; 32], [u8; 32])> {
     let board = qualified_legal_board_snapshot(profile)?;
     Some((board.generation_identity(), board.signed_catalog_identity()))
+}
+
+/// The complete signed bundle remains installed only in this owner. A peer
+/// receives no source payload or sparse index, only a bounded negative-only
+/// derivative whose positive results still enter the exact solver.
+pub fn export_qualified_legal_board_synopsis(
+    profile: KickTableProfileId,
+    maximum_wire_bytes: usize,
+) -> Result<Option<Vec<u8>>, LegalBoardSynopsisError> {
+    let Some(board) = qualified_legal_board_snapshot(profile) else {
+        return Ok(None);
+    };
+    if maximum_wire_bytes > MAX_DISTRIBUTED_SYNOPSIS_BYTES {
+        return Err(LegalBoardSynopsisError::BudgetTooSmall);
+    }
+    let synopsis = board.negative_synopsis(maximum_wire_bytes.saturating_sub(256))?;
+    let wire = synopsis.to_trusted_worker_wire()?;
+    if wire.len() > maximum_wire_bytes {
+        return Err(LegalBoardSynopsisError::BudgetTooSmall);
+    }
+    Ok(Some(wire))
 }
 
 impl ExactLegalBoard {
@@ -1315,6 +1602,56 @@ fn array32(bytes: &[u8]) -> Result<[u8; 32], LegalBoardAssetError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clearra_accelerator_activation::{
+        verify_accelerator_envelope, PinnedPublicKey, StaticPublicKeyring, ASSET_STATEMENT_SCHEMA,
+        SIGNATURE_ALGORITHM, SIGNATURE_DOMAIN, SIGNED_ASSET_ENVELOPE_SCHEMA,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
+    use serde_json::json;
+
+    fn signed_test_authority(
+        binding: LegalBoardBinding,
+        generation: [u8; 32],
+        payload: &[u8],
+    ) -> VerifiedAcceleratorAuthority {
+        let signing = SigningKey::from_bytes(&[43_u8; 32]);
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let statement = serde_json::to_string(&json!({
+            "algorithm": SIGNATURE_ALGORITHM,
+            "asset_url": "https://github.com/daejunnom/Clearra/releases/download/test/legal.cllb",
+            "completeness_scope": EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE,
+            "generation_identity": hex(&generation),
+            "key_id": "test-only-legal-synopsis",
+            "payload_bytes": payload.len().to_string(),
+            "payload_identity": hex(&Sha256::digest(payload)),
+            "product": AcceleratorProduct::ExactLegalBoard.as_str(),
+            "profile": accelerator_profile_name(binding.kick_profile).unwrap(),
+            "qualification_identity": "aa".repeat(32),
+            "repository": "daejunnom/Clearra",
+            "revision": "bb".repeat(20),
+            "rule_identity": hex(&binding.rule_identity),
+            "schema": ASSET_STATEMENT_SCHEMA
+        }))
+        .unwrap();
+        let mut signed = SIGNATURE_DOMAIN.to_vec();
+        signed.extend_from_slice(statement.as_bytes());
+        let envelope = serde_json::to_string(&json!({
+            "schema": SIGNED_ASSET_ENVELOPE_SCHEMA,
+            "signature_hex": hex(&signing.sign(&signed).to_bytes()),
+            "statement_json": statement
+        }))
+        .unwrap();
+        let keys = [PinnedPublicKey {
+            key_id: "test-only-legal-synopsis",
+            public_key: signing.verifying_key().to_bytes(),
+        }];
+        verify_accelerator_envelope(&envelope, StaticPublicKeyring::new(&keys)).unwrap()
+    }
 
     fn binding() -> LegalBoardBinding {
         LegalBoardBinding {
@@ -1511,6 +1848,107 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn trusted_worker_synopsis_roundtrip_preserves_negative_scope_and_rejects_corruption() {
+        let binding = built_in_binding(KickTableProfileId::Jstris180).unwrap();
+        let input_layers = layers();
+        let encoded = encode_exact_intersection(binding, &input_layers).unwrap();
+        let complete = ExactLegalBoard::load(
+            Arc::from(encoded.clone()),
+            LegalBoardExpectation {
+                binding,
+                generation_identity: None,
+            },
+        )
+        .unwrap();
+        let authority = signed_test_authority(binding, complete.generation_identity(), &encoded);
+        let qualified = QualifiedExactLegalBoard::qualify(complete, &authority).unwrap();
+        let synopsis = qualified.negative_synopsis(64 * 1024).unwrap();
+        let wire = synopsis.to_trusted_worker_wire().unwrap();
+        let restored =
+            LegalBoardNegativeSynopsis::from_trusted_worker_wire(&wire, &authority).unwrap();
+        assert!(wire.len() <= 64 * 1024);
+        let other_generation = signed_test_authority(binding, [17; 32], &encoded);
+        assert_eq!(
+            LegalBoardNegativeSynopsis::from_trusted_worker_wire(&wire, &other_generation)
+                .unwrap_err(),
+            LegalBoardSynopsisError::AuthorityMismatch
+        );
+        let other_profile = signed_test_authority(
+            built_in_binding(KickTableProfileId::Srs90).unwrap(),
+            authority.generation_identity(),
+            &encoded,
+        );
+        assert_eq!(
+            LegalBoardNegativeSynopsis::from_trusted_worker_wire(&wire, &other_profile)
+                .unwrap_err(),
+            LegalBoardSynopsisError::AuthorityMismatch
+        );
+        for (layer, keys) in input_layers.iter().enumerate() {
+            for &key in keys {
+                let query = LegalBoardQuery {
+                    width: 10,
+                    height: 4,
+                    initial_board: 0,
+                    kick_profile: KickTableProfileId::Jstris180,
+                    physical_board: bundle_key_from_clearra_board(key),
+                    deleted_original_rows: 0,
+                    placed_piece_count: layer,
+                    completion: CompletionCapability::ClearToEmpty,
+                };
+                assert_eq!(
+                    restored.decide_negative_only(query),
+                    LegalBoardDecision::CandidateAllowed
+                );
+                assert_eq!(
+                    restored.decide_negative_only(LegalBoardQuery { height: 5, ..query }),
+                    LegalBoardDecision::PassThrough(ProviderStatus::OutOfScope)
+                );
+            }
+        }
+        let mut corrupted = wire.clone();
+        *corrupted.last_mut().unwrap() ^= 1;
+        assert_eq!(
+            LegalBoardNegativeSynopsis::from_trusted_worker_wire(&corrupted, &authority)
+                .unwrap_err(),
+            LegalBoardSynopsisError::InvalidWire
+        );
+        let mut tampered_words = wire.clone();
+        tampered_words[SYNOPSIS_HEADER_BYTES] ^= 1;
+        let digest: [u8; 32] = Sha256::digest(&tampered_words[..wire.len() - 32]).into();
+        tampered_words[wire.len() - 32..].copy_from_slice(&digest);
+        // Same-origin transport is the trust boundary: a recomputed checksum
+        // is not a proof that the derivative came from the signed bundle.
+        assert!(
+            LegalBoardNegativeSynopsis::from_trusted_worker_wire(&tampered_words, &authority)
+                .is_ok()
+        );
+
+        install_trusted_legal_board_synopsis(&wire, &authority).unwrap();
+        let snapshot = legal_board_negative_snapshot(KickTableProfileId::Jstris180).unwrap();
+        let known = LegalBoardQuery {
+            width: 10,
+            height: 4,
+            initial_board: 0,
+            kick_profile: KickTableProfileId::Jstris180,
+            physical_board: 0b1111,
+            deleted_original_rows: 0,
+            placed_piece_count: 1,
+            completion: CompletionCapability::ClearToEmpty,
+        };
+        assert_eq!(
+            snapshot.decide_negative_only(known),
+            LegalBoardDecision::CandidateAllowed
+        );
+        assert_eq!(
+            remove_trusted_legal_board_synopsis(KickTableProfileId::Jstris180),
+            Err(LegalBoardAssetError::ActiveSessionInUse)
+        );
+        drop(snapshot);
+        assert!(remove_trusted_legal_board_synopsis(KickTableProfileId::Jstris180).unwrap());
+        assert!(legal_board_negative_snapshot(KickTableProfileId::Jstris180).is_none());
     }
 
     #[test]
