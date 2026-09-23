@@ -117,6 +117,18 @@ pub fn generate_conditioned_local_relation(
     Ok(())
 }
 
+/// A local status check may parse a candidate without granting it product
+/// authority. The independent record audit runs during generation; parsing a
+/// file later proves only its structure, profile binding and payload digest.
+pub fn structurally_valid_conditioned_local_candidate(
+    profile: KickTableProfileId,
+    bytes: &[u8],
+) -> bool {
+    built_in_local_relation_binding(profile)
+        .ok()
+        .is_some_and(|binding| load_local_relation_candidate_pack(bytes, binding, None).is_ok())
+}
+
 fn validate_paths(options: &ConditionedLocalRelationGenerationOptions) -> Result<(), String> {
     if !options.queries.is_absolute()
         || !options.pack.is_absolute()
@@ -363,11 +375,22 @@ mod tests {
             let bytes = encode_local_relation_candidate_pack(binding, &records).unwrap();
             let loaded = load_local_relation_candidate_pack(&bytes, binding, None).unwrap();
             assert_eq!(audit_candidate_local_relation_pack(&loaded), Ok(1));
+            assert!(structurally_valid_conditioned_local_candidate(
+                profile, &bytes
+            ));
             let wrong = if profile == KickTableProfileId::Srs90 {
                 KickTableProfileId::SrsX
             } else {
                 KickTableProfileId::Srs90
             };
+            assert!(!structurally_valid_conditioned_local_candidate(
+                wrong, &bytes
+            ));
+            let mut corrupted = bytes.clone();
+            *corrupted.last_mut().unwrap() ^= 1;
+            assert!(!structurally_valid_conditioned_local_candidate(
+                profile, &corrupted
+            ));
             assert!(parse_queries(&raw, wrong).is_err());
         }
     }

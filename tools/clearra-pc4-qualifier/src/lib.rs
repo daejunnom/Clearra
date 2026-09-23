@@ -1,7 +1,8 @@
 //! Reusable, local-only data-product generation boundaries.
 //!
 //! Product search never links these routines into a hot path. The native CLI
-//! may expose them only through an explicit `legal-board generate` request.
+//! exposes them only through explicit legal-board or reachability-pack
+//! candidate-generation requests.
 
 // `domain.rs` is also compiled by the full qualification binary.  The small
 // reusable legal-board library intentionally consumes only the forward/legal
@@ -14,7 +15,8 @@ mod domain;
 mod legal_board_generation;
 
 pub use conditioned_local_relation_generation::{
-    generate_conditioned_local_relation, ConditionedLocalRelationGenerationOptions,
+    generate_conditioned_local_relation, structurally_valid_conditioned_local_candidate,
+    ConditionedLocalRelationGenerationOptions,
 };
 pub use conditioned_reachability_generation::{
     generate_conditioned_reachability, ConditionedReachabilityGenerationOptions,

@@ -9,7 +9,9 @@ use crate::{
 use clearra_accelerator_product_host::ProductCatalogKind;
 use clearra_i18n::LanguageId;
 use clearra_pc4_qualifier::{
-    generate_conditioned_reachability, ConditionedReachabilityGenerationOptions,
+    generate_conditioned_local_relation, generate_conditioned_reachability,
+    structurally_valid_conditioned_local_candidate, ConditionedLocalRelationGenerationOptions,
+    ConditionedReachabilityGenerationOptions,
 };
 use clearra_rules::kicks::KickTableProfileId;
 use serde_json::{json, Value};
@@ -62,12 +64,12 @@ pub(crate) fn run(args: &[String], language: LanguageId, json_output: bool) -> C
 
 fn help(language: LanguageId) -> String {
     let body = match language {
-        LanguageId::Ko => "profile별 조건부 도달성 pack을 독립적으로 확인·다운로드·생성·삭제합니다. check는 네트워크를 사용하지 않으며, generate는 명시한 canonical query set으로 미자격 후보만 만듭니다.",
-        LanguageId::Ja => "プロファイル別の条件付き到達性packを独立して確認・ダウンロード・生成・削除します。checkはネットワークを使用せず、generateは明示したcanonical query setから未適格候補だけを作成します。",
-        LanguageId::En => "Inspect, download, generate, or remove one profile's conditioned-reachability pack independently. check uses no network; generate produces only an unqualified candidate from an explicit canonical query set.",
+        LanguageId::Ko => "profile별 조건부 도달성 pack을 확인·다운로드·생성·삭제합니다. check는 네트워크를 사용하지 않습니다. generate는 구형 sparse 후보, generate-local-candidate는 명시한 entry/exit query set의 새 미자격 후보를 만들며 어느 쪽도 제품에 설치하지 않습니다.",
+        LanguageId::Ja => "プロファイル別の条件付き到達性packを確認・ダウンロード・生成・削除します。checkはネットワークを使用しません。generateは旧sparse候補、generate-local-candidateは指定したentry/exit query setの新しい未適格候補を作成し、どちらも製品にインストールしません。",
+        LanguageId::En => "Inspect, download, generate, or remove one profile's conditioned-reachability pack. check uses no network. generate makes a legacy sparse candidate; generate-local-candidate makes a new unqualified entry/exit candidate from an explicit query set. Neither installs a product asset.",
     };
     format!(
-        "clearra reachability-pack <check|download|status|remove|generate> --profile srs|srs-plus|srs-x|jstris-180|no-kick [--directory DIRECTORY] [--queries FILE --workers N]\n{body}"
+        "clearra reachability-pack <check|download|status|remove|generate|generate-local-candidate> --profile srs|srs-plus|srs-x|jstris-180|no-kick [--directory DIRECTORY] [--queries FILE] [--workers N for legacy generate]\n{body}"
     )
 }
 
@@ -78,9 +80,9 @@ fn execute(args: &[String]) -> Result<Value, &'static str> {
         .ok_or("reachability-pack: an action is required")?;
     if !matches!(
         action,
-        "check" | "download" | "status" | "remove" | "generate"
+        "check" | "download" | "status" | "remove" | "generate" | "generate-local-candidate"
     ) {
-        return Err("reachability-pack: use check, download, status, remove or generate");
+        return Err("reachability-pack: use check, download, status, remove, generate or generate-local-candidate");
     }
     let mut profile = None;
     let mut directory = None;
@@ -110,8 +112,15 @@ fn execute(args: &[String]) -> Result<Value, &'static str> {
     if !PROFILES.contains(&profile) {
         return Err("reachability-pack: unknown profile");
     }
-    if action != "generate" && (queries.is_some() || workers.is_some()) {
-        return Err("reachability-pack: query and worker options belong only to generate");
+    if !matches!(action, "generate" | "generate-local-candidate")
+        && (queries.is_some() || workers.is_some())
+    {
+        return Err(
+            "reachability-pack: query and worker options belong only to candidate generation",
+        );
+    }
+    if action == "generate-local-candidate" && workers.is_some() {
+        return Err("reachability-pack: --workers belongs only to legacy generate");
     }
     if action == "check" {
         let catalog = accelerator_asset_store::catalog_summary(PRODUCT, profile)?;
@@ -143,6 +152,12 @@ fn execute(args: &[String]) -> Result<Value, &'static str> {
             &root,
             queries.ok_or("reachability-pack: --queries is required for generate")?,
             workers.unwrap_or_else(default_workers),
+        ),
+        "generate-local-candidate" => generate_local_candidate(
+            profile,
+            &root,
+            queries
+                .ok_or("reachability-pack: --queries is required for generate-local-candidate")?,
         ),
         _ => unreachable!(),
     }
@@ -193,7 +208,7 @@ fn checked_base(base: &std::path::Path) -> Result<(), &'static str> {
 fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> {
     let installed = accelerator_asset_store::status(PRODUCT, profile, root)?;
     let candidate = root.join(format!("conditioned-reachability-{profile}.clbr"));
-    let candidate_bytes = candidate.metadata().ok().map(|metadata| metadata.len());
+    let candidate_bytes = candidate_size(&candidate)?;
     let candidate_validation = if candidate_bytes
         .is_some_and(|bytes| bytes > MAX_PRODUCT_PACK_BYTES)
     {
@@ -210,6 +225,24 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
     } else {
         "not_loaded"
     };
+    let local_candidate = root.join(format!("conditioned-local-{profile}.cllr"));
+    let local_candidate_bytes = candidate_size(&local_candidate)?;
+    let local_candidate_validation =
+        if local_candidate_bytes.is_some_and(|bytes| bytes > MAX_PRODUCT_PACK_BYTES) {
+            "oversized_unqualified_candidate"
+        } else if local_candidate_bytes.is_some() {
+            let bytes = fs::read(&local_candidate)
+                .map_err(|_| "reachability-pack: local candidate payload is unreadable")?;
+            let kick = KickTableProfileId::parse(profile)
+                .ok_or("reachability-pack: profile is not connected to a kick table")?;
+            if structurally_valid_conditioned_local_candidate(kick, &bytes) {
+                "structurally_valid_unqualified"
+            } else {
+                "invalid_asset"
+            }
+        } else {
+            "not_loaded"
+        };
     Ok(json!({
         "action": "status",
         "profile": profile,
@@ -222,6 +255,10 @@ fn status(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
         "catalog_identity": accelerator_asset_store::hex(installed.catalog_identity),
         "candidate_bundle_bytes": candidate_bytes,
         "candidate_validation": candidate_validation,
+        "candidate_contract": "legacy_sparse_spawn_to_lock",
+        "local_candidate_bundle_bytes": local_candidate_bytes,
+        "local_candidate_validation": local_candidate_validation,
+        "local_candidate_contract": "entry_to_first_exit",
         "candidate_only": true,
     }))
 }
@@ -235,6 +272,8 @@ fn remove(profile: &str, root: &std::path::Path) -> Result<Value, &'static str> 
         remove_file_if_present(
             &root.join(format!("conditioned-reachability-{profile}.catalog.json")),
         )?;
+        remove_file_if_present(&root.join(format!("conditioned-local-{profile}.cllr")))?;
+        remove_file_if_present(&root.join(format!("conditioned-local-{profile}.catalog.json")))?;
         remove_file_if_present(&root.join("store.lock"))?;
         match fs::remove_dir(root) {
             Ok(()) => {}
@@ -272,6 +311,27 @@ fn generate(
     status(profile, root)
 }
 
+fn generate_local_candidate(
+    profile: &str,
+    root: &std::path::Path,
+    queries: PathBuf,
+) -> Result<Value, &'static str> {
+    if !queries.is_absolute() {
+        return Err("reachability-pack: generate-local-candidate requires an absolute query path");
+    }
+    accelerator_asset_store::ensure_real_directory(root)?;
+    let kick_profile = KickTableProfileId::parse(profile)
+        .ok_or("reachability-pack: profile is not connected to a kick table")?;
+    generate_conditioned_local_relation(&ConditionedLocalRelationGenerationOptions {
+        profile: kick_profile,
+        queries,
+        pack: root.join(format!("conditioned-local-{profile}.cllr")),
+        catalog: root.join(format!("conditioned-local-{profile}.catalog.json")),
+    })
+    .map_err(|_| "reachability-pack: local entry/exit candidate generation failed")?;
+    status(profile, root)
+}
+
 fn report_value(
     action: &str,
     profile: &str,
@@ -294,6 +354,17 @@ fn remove_file_if_present(path: &std::path::Path) -> Result<(), &'static str> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err("reachability-pack: could not remove managed candidate file"),
+    }
+}
+
+fn candidate_size(path: &std::path::Path) -> Result<Option<u64>, &'static str> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err("reachability-pack: candidate path must be a regular file")
+        }
+        Ok(metadata) => Ok(Some(metadata.len())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("reachability-pack: candidate metadata is unreadable"),
     }
 }
 
@@ -336,5 +407,41 @@ mod tests {
             assert_eq!(checked["network_used"], false);
             assert!(execute(&["download".into(), "--profile".into(), profile.into()]).is_err());
         }
+    }
+
+    #[test]
+    fn local_entry_exit_candidate_is_explicit_and_never_accepts_legacy_workers() {
+        assert!(help(LanguageId::En).contains("generate-local-candidate"));
+        assert!(execute(&[
+            "generate-local-candidate".into(),
+            "--profile".into(),
+            "srs".into(),
+        ])
+        .is_err());
+        assert_eq!(
+            execute(&[
+                "generate-local-candidate".into(),
+                "--profile".into(),
+                "srs".into(),
+                "--queries".into(),
+                "queries.json".into(),
+                "--workers".into(),
+                "4".into(),
+            ]),
+            Err("reachability-pack: --workers belongs only to legacy generate")
+        );
+    }
+
+    #[test]
+    fn candidate_status_never_reads_a_directory_as_a_payload() {
+        let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            candidate_size(source_dir),
+            Err("reachability-pack: candidate path must be a regular file")
+        );
+        assert_eq!(
+            candidate_size(&source_dir.join("absent-local-candidate.cllr")),
+            Ok(None)
+        );
     }
 }

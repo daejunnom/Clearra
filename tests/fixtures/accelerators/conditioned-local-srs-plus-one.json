@@ -1,0 +1,15 @@
+{
+  "schema": "clearra.conditioned-local-relation.query-set.v1",
+  "profile": "srs-plus",
+  "queries": [
+    {
+      "width": 10,
+      "height": 4,
+      "board": "0x0",
+      "deleted_original_rows": 4,
+      "piece": "T",
+      "window": { "min_x": 4, "max_x": 4, "min_y": 4, "max_y": 4 },
+      "entries": [{ "rotation": 0, "x": 4, "y": 4 }]
+    }
+  ]
+}
