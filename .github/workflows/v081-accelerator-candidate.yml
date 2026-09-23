@@ -29,6 +29,12 @@ on:
       - "scripts/release/accepted-pages-build.test.mjs"
       - "config/clearra-management.v1.json"
   workflow_dispatch:
+    inputs:
+      wasm_smoke:
+        description: Build exact branch WASM and inspect accelerator ABI without publishing
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -42,6 +48,27 @@ concurrency:
 # This branch-only source differential has no release, asset, or deployment
 # authority. Remove it before promoting the qualified source to main.
 jobs:
+  wasm-accelerator-smoke:
+    if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923' && github.event_name == 'workflow_dispatch' && inputs.wasm_smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Install pinned Rust and WASM target
+        run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
+      - name: Install pinned bindgen under the managed build root
+        run: cargo install --locked --version 0.2.126 --root build/tools/cargo/wasm-bindgen-cli/0.2.126 wasm-bindgen-cli
+      - name: Build exact branch WASM without publication
+        env:
+          WASM_BINDGEN: ${{ github.workspace }}/build/tools/cargo/wasm-bindgen-cli/0.2.126/bin/wasm-bindgen
+        run: node scripts/tools/build-clearra-wasm.mjs --environment native
+      - name: Check accelerator exports and source-bound manifest
+        run: node --test scripts/tools/v081-wasm-accelerator-exports.test.mjs
   cli-candidate-and-tie-regressions:
     if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923'
     runs-on: ubuntu-latest
