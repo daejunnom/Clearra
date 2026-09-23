@@ -6,16 +6,23 @@
 //! with and without the candidate filter. This is one KAT, not profile-wide
 //! asset qualification or a performance A/B.
 
-use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Instant,
+};
 
 use clearra_core_domain::{
     execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     pc::pc_target::PcTarget,
+    piece::piece_kind::PieceKind,
 };
 use clearra_core_executor::{
-    built_in_legal_board_binding, install_local_pc4_legal_board_index,
-    set_local_search_prune_policy, CoreExecutionResult, LegalBoardExpectation,
-    LocalPc4LegalBoardIndex, LocalSearchPrunePolicy, WasmCpuSearchBackend,
+    built_in_legal_board_binding, enumerate_pc4_ilc_target_fields,
+    install_local_pc4_legal_board_index, set_local_search_prune_policy, CompletionCapability,
+    CoreExecutionResult, ExactLegalBoard, LegalBoardDecision, LegalBoardExpectation,
+    LegalBoardQuery, LocalPc4LegalBoardIndex, LocalSearchPrunePolicy, WasmCpuSearchBackend,
 };
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
@@ -188,4 +195,153 @@ fn assert_known_count(result: &CoreExecutionResult, profile: KickTableProfileId)
             Some(known_count)
         );
     }
+}
+
+/// Bounded local diagnosis of the one SRS+ identity lost by the first generated
+/// F∩R bundle. This is not an asset qualification test or a product fixture.
+#[test]
+#[ignore = "requires the local SRS+ candidate bundle; inspects one missing identity only"]
+fn diagnose_one_missing_solution_projection_against_generated_graph() {
+    const MASKS: [u64; 10] = [
+        515_396_075_520,
+        3_148_800,
+        29_360_136,
+        550_561_644_544,
+        12_294,
+        393_984,
+        25_769_803_824,
+        114_752,
+        234_881_152,
+        7_516_192_769,
+    ];
+    const PIECES: [PieceKind; 10] = [
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::T,
+        PieceKind::T,
+        PieceKind::S,
+        PieceKind::Z,
+        PieceKind::Z,
+        PieceKind::J,
+        PieceKind::J,
+        PieceKind::L,
+    ];
+    let bundle_path = PathBuf::from(
+        std::env::var_os("CLEARRA_LOCAL_PC4_LEGAL_BOARD_BUNDLE")
+            .expect("set CLEARRA_LOCAL_PC4_LEGAL_BOARD_BUNDLE to the SRS+ candidate"),
+    );
+    let binding = built_in_legal_board_binding(KickTableProfileId::SrsPlus).unwrap();
+    let board = ExactLegalBoard::load(
+        Arc::from(std::fs::read(bundle_path).unwrap()),
+        LegalBoardExpectation {
+            binding,
+            generation_identity: None,
+        },
+    )
+    .unwrap();
+    let states: Vec<_> = (0..1_usize << 10)
+        .map(|subset| projected_missing_solution_state(subset, &MASKS))
+        .collect();
+    let mut reached = [false; 1 << 10];
+    let mut parent = [None; 1 << 10];
+    let mut targets_cache: HashMap<(u64, PieceKind), Vec<u64>> = HashMap::new();
+    reached[0] = true;
+    for subset in 0..(1 << 10) {
+        if !reached[subset] {
+            continue;
+        }
+        let (source, deleted_rows) = states[subset];
+        for operation in 0..10 {
+            let bit = 1 << operation;
+            if subset & bit != 0 {
+                continue;
+            }
+            let deleted_mask = (0..4)
+                .filter(|row| deleted_rows & (1 << row) != 0)
+                .fold(0_u64, |mask, row| mask | (1023_u64 << (row * 10)));
+            if MASKS[operation] & deleted_mask != 0 {
+                continue;
+            }
+            let child = subset | bit;
+            let target = states[child].0;
+            let targets = targets_cache
+                .entry((source, PIECES[operation]))
+                .or_insert_with(|| {
+                    enumerate_pc4_ilc_target_fields(
+                        source,
+                        PIECES[operation],
+                        KickTableProfileId::SrsPlus,
+                    )
+                    .expect("exact local graph transition")
+                });
+            if targets.binary_search(&target).is_ok() && !reached[child] {
+                reached[child] = true;
+                parent[child] = Some((subset, operation));
+            }
+        }
+    }
+    let reached_count = reached.iter().filter(|value| **value).count();
+    eprintln!(
+        "missing identity graph diagnosis: reached_subsets={reached_count} edge_queries={} complete={}",
+        targets_cache.len(),
+        reached[(1 << 10) - 1],
+    );
+    assert!(
+        reached[(1 << 10) - 1],
+        "generator graph cannot reconstruct the solver's one missing identity"
+    );
+    let mut path = vec![(1 << 10) - 1];
+    while let Some((source, _operation)) = parent[*path.last().unwrap()] {
+        path.push(source);
+    }
+    path.reverse();
+    for subset in path {
+        let (physical_product_board, deleted_rows) = states[subset];
+        let decision = board.decide(LegalBoardQuery {
+            width: 10,
+            height: 4,
+            initial_board: 0,
+            kick_profile: KickTableProfileId::SrsPlus,
+            physical_board: physical_from_product(physical_product_board, deleted_rows),
+            deleted_original_rows: deleted_rows,
+            placed_piece_count: subset.count_ones() as usize,
+            completion: CompletionCapability::ClearToEmpty,
+        });
+        eprintln!(
+            "missing identity path: depth={} subset={subset:010b} product={physical_product_board:010x} deleted={deleted_rows:04b} decision={decision:?}",
+            subset.count_ones(),
+        );
+        assert_ne!(decision, LegalBoardDecision::VerifiedAbsent);
+    }
+}
+
+fn projected_missing_solution_state(subset: usize, masks: &[u64; 10]) -> (u64, u16) {
+    let occupied = masks
+        .iter()
+        .enumerate()
+        .filter(|(operation, _)| subset & (1 << operation) != 0)
+        .fold(0_u64, |board, (_, mask)| board | mask);
+    let mut deleted_rows = 0_u16;
+    let mut physical = 0_u64;
+    let mut physical_row = 0_u32;
+    for original_row in 0..4_u32 {
+        let row = (occupied >> (original_row * 10)) & 1023;
+        if row == 1023 {
+            deleted_rows |= 1 << original_row;
+        } else {
+            physical |= row << (physical_row * 10);
+            physical_row += 1;
+        }
+    }
+    let prefix_bits = deleted_rows.count_ones() * 10;
+    let prefix = if prefix_bits == 0 {
+        0
+    } else {
+        (1_u64 << prefix_bits) - 1
+    };
+    ((physical << prefix_bits) | prefix, deleted_rows)
+}
+
+fn physical_from_product(product: u64, deleted_rows: u16) -> u64 {
+    product >> (deleted_rows.count_ones() * 10)
 }
