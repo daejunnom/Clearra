@@ -106,6 +106,52 @@ fn original_row_correspondence_is_a_distinct_lookup_and_binary_identity() {
 }
 
 #[test]
+fn reused_local_relation_continues_on_the_query_board_not_the_source_board() {
+    let profile = KickTableProfileId::SrsPlus;
+    let (record, window, entry) = record(profile);
+    let reference_source =
+        crate::backend::exact_entry_lock_anchors(10, 4, 0, PieceKind::T, profile, &[entry])
+            .unwrap();
+    assert_eq!(
+        record.compose_exact_global_lock_anchors_for_board(0),
+        Some(reference_source)
+    );
+    let binding = built_in_local_relation_binding(profile).unwrap();
+    let bytes = encode_local_relation_candidate_pack(binding, &[record.clone()]).unwrap();
+    let loaded = load_local_relation_candidate_pack(&bytes, binding, None).unwrap();
+    let (query_board, expected) = (0..40_u32)
+        .filter(|bit| record.dependency_mask() & (1_u64 << bit) == 0)
+        .find_map(|bit| {
+            let board = 1_u64 << bit;
+            let locks = crate::backend::exact_entry_lock_anchors(
+                10,
+                4,
+                board,
+                PieceKind::T,
+                profile,
+                &[entry],
+            )?;
+            (locks != reference_source).then_some((board, locks))
+        })
+        .expect("an outside-dependency obstacle changes a global continuation");
+    let LocalRelationCandidateLookup::Hit(found) =
+        loaded.lookup(10, 4, query_board, PieceKind::T, profile, window, &[entry])
+    else {
+        panic!("unchanged local dependency cells must reuse the relation");
+    };
+    assert_ne!(expected, reference_source);
+    assert_eq!(
+        found.compose_exact_global_lock_anchors_for_board(query_board),
+        Some(expected)
+    );
+    assert_eq!(
+        found.compose_exact_global_lock_anchors_for_board(1_u64 << 60),
+        None,
+        "an out-of-domain board must never be composed"
+    );
+}
+
+#[test]
 fn truncation_tampering_snapshot_and_duplicate_signature_are_rejected() {
     let profile = KickTableProfileId::SrsPlus;
     let binding = built_in_local_relation_binding(profile).unwrap();

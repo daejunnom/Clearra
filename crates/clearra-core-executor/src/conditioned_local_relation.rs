@@ -201,22 +201,37 @@ impl ExactConditionedLocalRelation {
         &self.exits
     }
 
-    /// Compose this exact local relation with the complete-board search from
-    /// every first exit. Any path that leaves the window must cross one of
-    /// those exits first; the continuation is allowed to re-enter the window.
+    /// Compose a matching query board with the complete-board search from
+    /// every first exit. A stored relation can match boards other than its
+    /// source board when their dependency cells agree. The continuation must
+    /// therefore search the *query* board: cells outside the local dependency
+    /// mask can change global paths after an exit. Any path that leaves the
+    /// window must cross one of those exits first and may later re-enter it.
     /// This proves locks reachable from the recorded entry poses, not from
     /// spawn or from entry poses that the caller has not globally reached.
     ///
     /// A qualified product may replace the continuation with a shared exact
     /// macro/cache, but must preserve this result. This reference composition
     /// is not installed in the solver hot path.
-    pub fn compose_exact_global_lock_anchors(&self) -> Option<[u64; 4]> {
+    pub fn compose_exact_global_lock_anchors_for_board(&self, board: u64) -> Option<[u64; 4]> {
+        if !self.matches_query_with_frame(
+            self.width,
+            self.height,
+            board,
+            self.row_frame,
+            self.piece,
+            self.kick_profile,
+            self.window,
+            &self.entries,
+        ) {
+            return None;
+        }
         let mut anchors = self.grounded_lock_anchors;
         if !self.exits.is_empty() {
             let continuation = crate::backend::exact_entry_lock_anchors(
                 self.width,
                 self.height,
-                self.board,
+                board,
                 self.piece,
                 self.kick_profile,
                 &self.exits,

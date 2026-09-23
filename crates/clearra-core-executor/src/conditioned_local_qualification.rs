@@ -224,7 +224,7 @@ mod tests {
                             &[entry],
                         );
                         assert_eq!(
-                            relation.compose_exact_global_lock_anchors(),
+                            relation.compose_exact_global_lock_anchors_for_board(board),
                             expected,
                             "{profile:?} {height}L {piece:?} board={board:#x}"
                         );
