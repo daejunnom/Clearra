@@ -42,6 +42,12 @@ const PAIR_RUN_FAN_IN: usize = 2;
 const REVERSE_TARGET_CHUNK_SIZE: usize = 512;
 #[cfg(test)]
 const REVERSE_TARGET_CHUNK_SIZE: usize = 2;
+// L_m uses a verified Bloom semi-join, so larger target chunks avoid tens of
+// thousands of tiny checkpoint files without retaining a whole reverse layer.
+#[cfg(not(test))]
+const LEGAL_PREDECESSOR_TARGET_CHUNK_SIZE: usize = 4096;
+#[cfg(test)]
+const LEGAL_PREDECESSOR_TARGET_CHUNK_SIZE: usize = 2;
 #[cfg(not(test))]
 const FORWARD_SOURCE_CHUNK_SIZE: usize = 1024;
 #[cfg(test)]
@@ -810,7 +816,7 @@ pub(crate) fn legal_predecessor_step(
                 spill_identity,
                 output_path,
                 workers,
-                REVERSE_TARGET_CHUNK_SIZE,
+                LEGAL_PREDECESSOR_TARGET_CHUNK_SIZE,
                 Some(ForwardMembership::SortedDomain {
                     path: forward_source_path,
                     summary: &forward,
@@ -2838,6 +2844,50 @@ mod tests {
         ] {
             fs::remove_file(path).unwrap();
         }
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn disk_prefilter_preserves_exact_predecessors_across_target_chunks() {
+        let binding = DomainBinding::legal_board(KickTableProfileId::SrsPlus).unwrap();
+        let root = test_root("disk-prefilter-chunks");
+        fs::create_dir(&root).unwrap();
+        let (reverse_nine, _) =
+            generate_reverse_layer_bounded(binding, 9, &[FIELD_MASK], 2, 1).unwrap();
+        let targets = &reverse_nine[..5];
+        let (reverse_eight, _) = generate_reverse_layer_bounded(binding, 8, targets, 2, 2).unwrap();
+        let selected = reverse_eight.iter().step_by(3).copied().collect::<Vec<_>>();
+        let forward_path = root.join("forward-08.bin");
+        let target_path = root.join("legal-09.bin");
+        let output_path = root.join("legal-08.bin");
+        write(
+            &forward_path,
+            binding,
+            8,
+            &selected,
+            DomainDerivation::ForwardReachableStep,
+            [1; 32],
+            [0; 32],
+        )
+        .unwrap();
+        write(
+            &target_path,
+            binding,
+            9,
+            targets,
+            DomainDerivation::LegalPredecessorStep,
+            [2; 32],
+            [3; 32],
+        )
+        .unwrap();
+        legal_predecessor_step(binding, &forward_path, &target_path, &output_path, 2).unwrap();
+        assert_eq!(
+            read(&output_path, binding, Some(8)).unwrap().fields,
+            selected
+        );
+        fs::remove_file(output_path).unwrap();
+        fs::remove_file(target_path).unwrap();
+        fs::remove_file(forward_path).unwrap();
         fs::remove_dir(root).unwrap();
     }
 
