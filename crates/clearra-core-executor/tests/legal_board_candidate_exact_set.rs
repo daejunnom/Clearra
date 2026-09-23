@@ -19,10 +19,12 @@ use clearra_core_domain::{
     piece::piece_kind::PieceKind,
 };
 use clearra_core_executor::{
-    built_in_legal_board_binding, enumerate_pc4_ilc_target_fields,
-    install_local_pc4_legal_board_index, set_local_search_prune_policy, CompletionCapability,
-    CoreExecutionResult, ExactLegalBoard, LegalBoardDecision, LegalBoardExpectation,
-    LegalBoardQuery, LocalPc4LegalBoardIndex, LocalSearchPrunePolicy, WasmCpuSearchBackend,
+    built_in_legal_board_binding, enumerate_pc4_ilc_geometric_predecessor_fields,
+    enumerate_pc4_ilc_predecessor_fields, enumerate_pc4_ilc_target_fields,
+    install_local_pc4_legal_board_index, materialize_pc4_ilc_transition,
+    set_local_search_prune_policy, CompletionCapability, CoreExecutionResult, ExactLegalBoard,
+    LegalBoardDecision, LegalBoardExpectation, LegalBoardQuery, LocalPc4LegalBoardIndex,
+    LocalSearchPrunePolicy, WasmCpuSearchBackend,
 };
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
@@ -242,6 +244,48 @@ fn diagnose_one_missing_solution_projection_against_generated_graph() {
     let states: Vec<_> = (0..1_usize << 10)
         .map(|subset| projected_missing_solution_state(subset, &MASKS))
         .collect();
+    // The user's concrete sequence places the second J after I. Report this
+    // path separately from the graph-reconstructed path; one canonical
+    // placement family can have more than one exact BuildUp ordering.
+    const REPORTED_ORDER: [usize; 10] = [4, 7, 5, 1, 3, 0, 8, 9, 2, 6];
+    let mut reported_subset = 0_usize;
+    for (depth, operation) in REPORTED_ORDER.into_iter().enumerate() {
+        let source = states[reported_subset].0;
+        reported_subset |= 1 << operation;
+        let target = states[reported_subset].0;
+        let outgoing =
+            enumerate_pc4_ilc_target_fields(source, PIECES[operation], KickTableProfileId::SrsPlus)
+                .expect("exact reported-order edge");
+        let decision = board.decide(LegalBoardQuery {
+            width: 10,
+            height: 4,
+            initial_board: 0,
+            kick_profile: KickTableProfileId::SrsPlus,
+            physical_board: physical_from_product(target, states[reported_subset].1),
+            deleted_original_rows: states[reported_subset].1,
+            placed_piece_count: depth + 1,
+            completion: CompletionCapability::ClearToEmpty,
+        });
+        let placements = if operation == 8 {
+            Some(
+                materialize_pc4_ilc_transition(
+                    source,
+                    target,
+                    PieceKind::J,
+                    KickTableProfileId::SrsPlus,
+                )
+                .expect("reported J2 materialization"),
+            )
+        } else {
+            None
+        };
+        eprintln!(
+            "missing identity reported order: depth={} operation={operation} edge={} product={target:010x} deleted={:04b} decision={decision:?} J2_placements={placements:?}",
+            depth + 1,
+            outgoing.binary_search(&target).is_ok(),
+            states[reported_subset].1,
+        );
+    }
     let mut reached = [false; 1 << 10];
     let mut parent = [None; 1 << 10];
     let mut targets_cache: HashMap<(u64, PieceKind), Vec<u64>> = HashMap::new();
@@ -295,7 +339,8 @@ fn diagnose_one_missing_solution_projection_against_generated_graph() {
         path.push(source);
     }
     path.reverse();
-    for subset in path {
+    let mut verified_absent = Vec::new();
+    for (depth, &subset) in path.iter().enumerate() {
         let (physical_product_board, deleted_rows) = states[subset];
         let decision = board.decide(LegalBoardQuery {
             width: 10,
@@ -307,12 +352,38 @@ fn diagnose_one_missing_solution_projection_against_generated_graph() {
             placed_piece_count: subset.count_ones() as usize,
             completion: CompletionCapability::ClearToEmpty,
         });
+        let next = path.get(depth + 1).map(|&child| {
+            let operation = parent[child].expect("reachable child has a parent").1;
+            let target = states[child].0;
+            let geometric = enumerate_pc4_ilc_geometric_predecessor_fields(
+                target,
+                PIECES[operation],
+                KickTableProfileId::SrsPlus,
+            )
+            .expect("geometric predecessor enumeration")
+            .binary_search(&physical_product_board)
+            .is_ok();
+            let exact = enumerate_pc4_ilc_predecessor_fields(
+                target,
+                PIECES[operation],
+                KickTableProfileId::SrsPlus,
+            )
+            .expect("exact predecessor enumeration")
+            .binary_search(&physical_product_board)
+            .is_ok();
+            (operation, target, geometric, exact)
+        });
         eprintln!(
-            "missing identity path: depth={} subset={subset:010b} product={physical_product_board:010x} deleted={deleted_rows:04b} decision={decision:?}",
-            subset.count_ones(),
+            "missing identity path: depth={depth} subset={subset:010b} product={physical_product_board:010x} deleted={deleted_rows:04b} decision={decision:?} next={next:?}",
         );
-        assert_ne!(decision, LegalBoardDecision::VerifiedAbsent);
+        if decision == LegalBoardDecision::VerifiedAbsent {
+            verified_absent.push((depth, subset));
+        }
     }
+    assert!(
+        verified_absent.is_empty(),
+        "generated legal-board falsely rejects a concrete graph path: {verified_absent:?}"
+    );
 }
 
 fn projected_missing_solution_state(subset: usize, masks: &[u64; 10]) -> (u64, u16) {
