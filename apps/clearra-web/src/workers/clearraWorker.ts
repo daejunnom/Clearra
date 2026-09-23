@@ -21,6 +21,7 @@ import { SharedExecutionAvailabilityError } from './SharedExecutionResourceAutho
 import {
   ClearraWasmRuntimeError,
   loadClearraWasmModule,
+  type AcceleratorRequestPolicy,
   type ClearraWasmFailureDiagnostics,
   type ClearraWasmHostCapabilities,
   type ClearraWasmModule
@@ -320,14 +321,24 @@ async function activateLocalAccelerators(
   commandText: string,
   transferByteCap: number
 ) {
-  if (!wasm.accelerator_catalog || !wasm.accelerator_admit || !wasm.accelerator_remove) return;
+  if (!wasm.accelerator_catalog || !wasm.accelerator_request_policy ||
+      !wasm.accelerator_admit || !wasm.accelerator_remove) return;
   if (acceleratorOwner !== wasm) {
     acceleratorOwner = wasm;
     activeAcceleratorIdentities.clear();
   }
-  const matches = [...commandText.matchAll(/(?:^|\s)--rule\s+(srs-plus|srs-x|jstris-180|no-kick|srs)(?=\s|$)/gu)];
-  const profile = matches.length === 1 && !/(?:^|\s)--kick-profile-json(?:\s|=)/u.test(commandText)
-    ? ACCELERATOR_PROFILES.indexOf(matches[0][1]) : -1;
+  let requestPolicy: AcceleratorRequestPolicy | null = null;
+  try {
+    requestPolicy = wasm.accelerator_request_policy(commandText);
+  } catch {
+    // The command runner owns the canonical parser error. Clear any prior
+    // asset before it handles this request; a parse failure is never a reason
+    // to retain a previous negative-proof snapshot.
+  }
+  const profile = requestPolicy && requestPolicy.profile !== null &&
+    Number.isInteger(requestPolicy.profile) && requestPolicy.profile >= 0 &&
+    requestPolicy.profile < ACCELERATOR_PROFILES.length
+      ? requestPolicy.profile : -1;
   // A custom/unknown rule cannot inherit the previous request's accelerator.
   // Clear its owner slots before the exact path begins.
   // The product holds at most one profile per accelerator in this WASM
@@ -348,8 +359,8 @@ async function activateLocalAccelerators(
     // A previously loaded generation must never survive a failed local read
     // or a new catalog. If an in-flight lease prevents removal, fail closed
     // instead of allowing a stale negative proof into this request.
-    const disabled = kind === 0 ? /(?:^|\s)--no-legal-board(?:\s|$)/u.test(commandText)
-      : /(?:^|\s)--no-conditioned-reachability(?:\s|$)/u.test(commandText);
+    const disabled = kind === 0 ? !requestPolicy?.legal_board
+      : !requestPolicy?.conditioned_reachability;
     const key = `${kind}:${profile}`;
     if (disabled) {
       if (activeAcceleratorIdentities.has(key)) {

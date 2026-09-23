@@ -25,8 +25,14 @@ export type AcceleratorCatalogPlan = {
   url: string | null;
   catalog_identity: string;
 };
+export type AcceleratorRequestPolicy = {
+  profile: number | null;
+  legal_board: boolean;
+  conditioned_reachability: boolean;
+};
 export type ClearraWasmModule = {
   accelerator_catalog?: (kind: number, profile: number) => AcceleratorCatalogPlan;
+  accelerator_request_policy?: (commandText: string) => AcceleratorRequestPolicy;
   accelerator_admit?: (kind: number, profile: number, bytes: ArrayBuffer, activate: boolean) => void;
   accelerator_remove?: (kind: number, profile: number) => void;
   configure_online_pc4?: (generation: unknown) => void;
@@ -194,6 +200,7 @@ const ABI_OUTPUT_NOT_RELEASED = -2;
 
 type ClearraRawWasmExports = {
   clearra_wasm_accelerator_catalog?: (kind: number, profile: number) => number;
+  clearra_wasm_accelerator_request_policy?: () => number;
   clearra_wasm_accelerator_admit?: (kind: number, profile: number, activate: number) => number;
   clearra_wasm_accelerator_remove?: (kind: number, profile: number) => number;
   clearra_wasm_online_pc4_configure?: () => number;
@@ -1005,10 +1012,16 @@ function wrapRawModule(
   let gpuWarmupGeneration = 0;
 
   const module: ClearraWasmModule = {
-    ...(raw.clearra_wasm_accelerator_catalog && raw.clearra_wasm_accelerator_admit && raw.clearra_wasm_accelerator_remove ? {
+    ...(raw.clearra_wasm_accelerator_catalog && raw.clearra_wasm_accelerator_request_policy &&
+      raw.clearra_wasm_accelerator_admit && raw.clearra_wasm_accelerator_remove ? {
       accelerator_catalog(kind: number, profile: number): AcceleratorCatalogPlan {
         requireOk(raw.clearra_wasm_accelerator_catalog!(kind, profile));
         return JSON.parse(outputText()) as AcceleratorCatalogPlan;
+      },
+      accelerator_request_policy(commandText: string): AcceleratorRequestPolicy {
+        setCommand(commandText);
+        requireOk(raw.clearra_wasm_accelerator_request_policy!());
+        return JSON.parse(outputText()) as AcceleratorRequestPolicy;
       },
       accelerator_admit(kind: number, profile: number, bytes: ArrayBuffer, activate: boolean) {
         setTransfer(bytes);

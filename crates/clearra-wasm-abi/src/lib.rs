@@ -829,6 +829,11 @@ pub extern "C" fn clearra_wasm_accelerator_catalog(kind: u32, profile: u32) -> i
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_request_policy() -> i32 {
+    accelerator_exports::request_policy()
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_accelerator_admit(kind: u32, profile: u32, activate: u32) -> i32 {
     accelerator_exports::admit(kind, profile, activate)
 }
@@ -3669,6 +3674,36 @@ mod tests {
 
     fn reset_abi_state_for_test() {
         ABI_STATE.with(|state| *state.borrow_mut() = WasmAbiState::default());
+    }
+
+    #[test]
+    fn accelerator_request_policy_uses_the_typed_default_and_opt_outs() {
+        reset_abi_state_for_test();
+        let policy = |command: &str| {
+            ABI_STATE.with(|state| state.borrow_mut().input = command.as_bytes().to_vec());
+            assert_eq!(clearra_wasm_accelerator_request_policy(), ABI_OK);
+            let value = ABI_STATE.with(|state| {
+                serde_json::from_slice::<serde_json::Value>(&state.borrow().output).unwrap()
+            });
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+            value
+        };
+        let default = policy(MULTI_ALTERNATIVE_PC_MINIMALS_COMMAND);
+        assert_eq!(default["profile"], 1);
+        assert_eq!(default["legal_board"], true);
+        assert_eq!(default["conditioned_reachability"], true);
+
+        let disabled = policy(&format!(
+            "{TYPED_PC_MINIMALS_COMMAND} --no-legal-board --no-conditioned-reachability"
+        ));
+        assert_eq!(disabled["profile"], 1);
+        assert_eq!(disabled["legal_board"], false);
+        assert_eq!(disabled["conditioned_reachability"], false);
+
+        let utility = policy(TYPED_PARITY_COMMAND);
+        assert_eq!(utility["legal_board"], false);
+        assert_eq!(utility["conditioned_reachability"], false);
+        reset_abi_state_for_test();
     }
 
     #[test]

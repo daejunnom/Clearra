@@ -41,6 +41,51 @@ fn hex(value: [u8; 32]) -> String {
     value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Parse the same typed request that the executor will run. The browser host
+/// must not infer a profile or an opt-out from command-text regular expressions:
+/// defaults and command-family policies belong to the shared Rust parser.
+pub(super) fn request_policy() -> i32 {
+    ABI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Err(status) = state.require_mutation_admission() {
+            return status;
+        }
+        let command_text = match String::from_utf8(std::mem::take(&mut state.input)) {
+            Ok(command_text) => command_text,
+            Err(error) => {
+                state.set_error("E_WASM_COMMAND_UTF8", error.utf8_error());
+                return ABI_ERROR;
+            }
+        };
+        let request = match state
+            .runtime
+            .command_runtime()
+            .compile_command_text(&command_text)
+        {
+            Ok(request) => request,
+            Err(error) => {
+                state.set_runtime_error(&error);
+                return ABI_ERROR;
+            }
+        };
+        let (legal_board, conditioned_reachability) = request
+            .command()
+            .exact_accelerator_policy()
+            .unwrap_or((false, false));
+        let rule = request.request_profiles().rule();
+        let profile = PROFILES.iter().position(|(name, _)| *name == rule.as_str());
+        state.set_output(
+            json!({
+                "profile": profile,
+                "legal_board": legal_board,
+                "conditioned_reachability": conditioned_reachability,
+            })
+            .to_string(),
+        );
+        ABI_OK
+    })
+}
+
 /// Returns a UI/download plan. This reads only the source-embedded catalog;
 /// it never follows a mutable ref or opens the network.
 pub(super) fn catalog(kind: u32, profile: u32) -> i32 {

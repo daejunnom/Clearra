@@ -11,6 +11,8 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "crates/**"
+      - "apps/clearra-web/**"
+      - "packages/clearra-ui/**"
       - "tools/clearra-pc4-qualifier/**"
       - "scripts/tools/wsl-conditioned-*-generate.sh"
       - "scripts/tools/wsl-legal-board-generate.sh"
@@ -95,3 +97,25 @@ jobs:
           cargo test --locked -p clearra-core-executor --lib solver_context_tests --features qualification-reference
           cargo test --locked -p clearra-core-executor --lib row_frame::tests --features qualification-reference
           cargo test --locked -p clearra-core-executor --lib legal_board::tests --features qualification-reference
+      - name: Preserve typed Web accelerator request policy
+        run: cargo test --locked -p clearra-wasm-abi --lib accelerator_request_policy_uses_the_typed_default_and_opt_outs
+  web-accelerator-worker-contract:
+    if: github.ref == 'refs/heads/codex/converge-v081-v090-release-20260923'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Bind exact Corepack pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          test "$(pnpm --version)" = "11.5.0"
+      - name: Install locked frontend dependencies without scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify Web worker types and contracts without building WASM
+        run: node scripts/tools/build-clearra-frontend.mjs --app web --task test
