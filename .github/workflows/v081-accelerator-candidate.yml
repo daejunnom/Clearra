@@ -16,6 +16,8 @@ on:
       - "tools/clearra-pc4-qualifier/**"
       - "scripts/tools/wsl-conditioned-*-generate.sh"
       - "scripts/tools/wsl-legal-board-generate.sh"
+      - "scripts/tools/clearra-build-owner.mjs"
+      - "scripts/tools/clearra-build-policy.test.mjs"
       - "config/clearra-management.v1.json"
   workflow_dispatch:
 
@@ -117,5 +119,7 @@ jobs:
           test "$(pnpm --version)" = "11.5.0"
       - name: Install locked frontend dependencies without scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify build snapshot and generated-input exclusion
+        run: node --test scripts/tools/clearra-build-policy.test.mjs
       - name: Verify Web worker types and contracts without building WASM
         run: node scripts/tools/build-clearra-frontend.mjs --app web --task test

@@ -100,7 +100,7 @@ test('a moving compiler input cannot seal a reusable experiment snapshot', async
   const options = await fixture(t);
   const owner = await acquireBuildOwner(options);
   await writeFile(join(options.sourceRoot, 'Cargo.toml'), '[workspace]\n# changed during build\n');
-  await assert.rejects(owner.finish(true), /inputs changed/iu);
+  await assert.rejects(owner.finish(true), /inputs changed.*changed_inputs=1 \[Cargo\.toml\]; context_changed=false/iu);
   const marker = JSON.parse(await readFile(join(owner.transaction.transaction_root, '.clearra-build-transaction.json'), 'utf8'));
   assert.equal(marker.status, 'failed');
   const next = await acquireBuildOwner(options);

@@ -71,11 +71,13 @@ function commandVersion(command, arguments_, environment) {
 export async function buildCompilerSnapshot(sourceRoot, environment = process.env) {
   const files = await collectBuildInputFiles(sourceRoot);
   const sourceHash = createHash('sha256');
+  const inputIdentities = [];
   sourceHash.update('clearra.compiler-input-snapshot.v1\n');
   for (const path of files) {
     const bytes = await readFile(path);
     const relativePath = relative(sourceRoot, path).replaceAll('\\', '/');
     const digest = createHash('sha256').update(bytes).digest('hex');
+    inputIdentities.push([relativePath, digest]);
     sourceHash.update(`${relativePath}\0${bytes.byteLength}\0${digest}\n`);
   }
   const context = [
@@ -95,7 +97,18 @@ export async function buildCompilerSnapshot(sourceRoot, environment = process.en
     sourceSha256: sourceHash.digest('hex'),
     inputFileCount: files.length,
     contextSha256: createHash('sha256').update(context.join('\n')).digest('hex'),
+    inputIdentities,
   };
+}
+
+function compilerSnapshotDrift(before, after) {
+  const initial = new Map(before.inputIdentities);
+  const final = new Map(after.inputIdentities);
+  const changed = [...new Set([...initial.keys(), ...final.keys()])]
+    .filter(path => initial.get(path) !== final.get(path))
+    .sort((left, right) => left.localeCompare(right, 'en'));
+  const shown = changed.slice(0, 8).join(', ') || 'none';
+  return `changed_inputs=${changed.length} [${shown}${changed.length > 8 ? ', ...' : ''}]; context_changed=${before.contextSha256 !== after.contextSha256}`;
 }
 function leaseIdentity(marker, ownerPid = marker.owner_pid) {
   return { schema_version: 1, purpose: marker.purpose, source_id: marker.source_id, session_id: marker.session_id, owner_pid: ownerPid };
@@ -292,7 +305,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
         if (finalSnapshot.sourceSha256 !== marker.compiler_snapshot_sha256 ||
             finalSnapshot.inputFileCount !== marker.compiler_input_file_count ||
             finalSnapshot.contextSha256 !== marker.incremental_context_sha256) {
-          snapshotError = new Error('Clearra build inputs changed while the transaction was active; the incremental seed was not sealed');
+          snapshotError = new Error(`Clearra build inputs changed while the transaction was active; the incremental seed was not sealed (${compilerSnapshotDrift(compilerSnapshot, finalSnapshot)})`);
           success = false;
         }
       } catch (error) { snapshotError = error; success = false; }
