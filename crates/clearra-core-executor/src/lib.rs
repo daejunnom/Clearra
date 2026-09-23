@@ -76,9 +76,9 @@ pub use conditioned_local_index::{
     LocalRelationCandidateIndex, LocalRelationCandidateLookup, LocalRelationIndexError,
 };
 pub use conditioned_local_pack::{
-    built_in_local_relation_binding, encode_local_relation_candidate_pack,
-    load_local_relation_candidate_pack, LocalRelationBinding, LocalRelationCandidatePack,
-    LocalRelationPackError,
+    built_in_local_relation_binding, coalesce_identical_local_relation_records,
+    encode_local_relation_candidate_pack, load_local_relation_candidate_pack, LocalRelationBinding,
+    LocalRelationCandidatePack, LocalRelationPackError,
 };
 pub use conditioned_local_product::{
     active_qualified_local_relation_identity, install_qualified_local_relation_pack,

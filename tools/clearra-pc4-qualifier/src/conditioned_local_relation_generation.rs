@@ -9,12 +9,12 @@ use std::{collections::BTreeMap, fs, path::PathBuf};
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_core_executor::{
     accelerator_profile_name, audited_local_relation_candidate_pack,
-    built_in_local_relation_binding, derive_exact_conditioned_local_relation_with_frame,
-    encode_local_relation_candidate_pack, load_local_relation_candidate_pack,
-    solver_local_relation_spawn_entries, solver_local_relation_windows,
-    AuditedLocalRelationRecordSet, ConditionedPoseWindow, ConditionedReachabilityEntryPose,
-    ExactConditionedLocalRelation, LocalRelationCoverageDomain, LocalRelationCoverageResult,
-    LocalRelationRowFrame,
+    built_in_local_relation_binding, coalesce_identical_local_relation_records,
+    derive_exact_conditioned_local_relation_with_frame, encode_local_relation_candidate_pack,
+    load_local_relation_candidate_pack, solver_local_relation_spawn_entries,
+    solver_local_relation_windows, AuditedLocalRelationRecordSet, ConditionedPoseWindow,
+    ConditionedReachabilityEntryPose, ExactConditionedLocalRelation, LocalRelationCoverageDomain,
+    LocalRelationCoverageResult, LocalRelationRowFrame,
 };
 use clearra_rules::kicks::KickTableProfileId;
 use serde_json::{json, Value};
@@ -175,7 +175,7 @@ pub fn generate_conditioned_local_relation(
         .map_err(|error| error.code().to_owned())?;
     let source: Value =
         serde_json::from_slice(&raw).map_err(|error| format!("query JSON invalid: {error}"))?;
-    let (records, source_count, query_identity, query_schema, evidence_scope, cover_domains) =
+    let (mut records, source_count, query_identity, query_schema, evidence_scope, cover_domains) =
         if source["schema"] == COVER_SCHEMA || source["schema"] == SOLVER_COVER_SCHEMA {
             let query_schema = source["schema"]
                 .as_str()
@@ -246,6 +246,10 @@ pub fn generate_conditioned_local_relation(
                 None,
             )
         };
+    if cover_domains.is_some() {
+        coalesce_identical_local_relation_records(&mut records)
+            .map_err(|error| format!("overlapping cover records conflict: {}", error.code()))?;
+    }
     let bytes = encode_local_relation_candidate_pack(binding, &records)
         .map_err(|error| error.code().to_owned())?;
     let loaded = load_local_relation_candidate_pack(&bytes, binding, None)
@@ -965,6 +969,65 @@ mod tests {
         let canonical_root = fs::canonicalize(&root).unwrap();
         let canonical_temp = fs::canonicalize(std::env::temp_dir()).unwrap();
         assert_eq!(canonical_root.parent(), Some(canonical_temp.as_path()));
+        fs::remove_dir_all(&canonical_root).unwrap();
+    }
+
+    #[test]
+    fn overlapping_cover_domains_share_one_identical_record_without_losing_either_proof() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "clearra-overlapping-cover-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let queries = root.join("cover.json");
+        let pack = root.join("candidate.cllr");
+        let catalog = root.join("candidate.catalog.json");
+        let query = json!({
+            "width": 10, "height": 1, "board": "0x0",
+            "deleted_original_rows": 0, "piece": "T",
+            "window": { "min_x": 4, "max_x": 4, "min_y": 0, "max_y": 1 },
+            "entries": [{ "rotation": 0, "x": 4, "y": 1 }]
+        });
+        let source = json!({
+            "schema": COVER_SCHEMA, "profile": "no-kick",
+            "domains": [
+                { "query": query, "fixed_mask": "0x3ff", "fixed_occupancy": "0x0",
+                  "max_records": 1, "max_nodes": 100 },
+                { "query": query, "fixed_mask": "0x3fe", "fixed_occupancy": "0x0",
+                  "max_records": 1, "max_nodes": 100 }
+            ]
+        });
+        fs::write(&queries, serde_json::to_vec(&source).unwrap()).unwrap();
+        generate_conditioned_local_relation(&ConditionedLocalRelationGenerationOptions {
+            profile: KickTableProfileId::NoKick,
+            queries: queries.clone(),
+            pack: pack.clone(),
+            catalog: catalog.clone(),
+        })
+        .unwrap();
+        let pack_bytes = fs::read(&pack).unwrap();
+        let catalog_bytes = fs::read(&catalog).unwrap();
+        let report: Value = serde_json::from_slice(&catalog_bytes).unwrap();
+        assert_eq!(report["query_count"], 2);
+        assert_eq!(report["record_count"], 1);
+        assert_eq!(report["status"], "candidate_unqualified");
+        let proof = crate::verify_conditioned_local_cover_source(
+            KickTableProfileId::NoKick,
+            &pack_bytes,
+            &catalog_bytes,
+            &fs::read(&queries).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(proof.covered_domains, 2);
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            canonical_root.parent(),
+            Some(fs::canonicalize(std::env::temp_dir()).unwrap().as_path())
+        );
         fs::remove_dir_all(&canonical_root).unwrap();
     }
 

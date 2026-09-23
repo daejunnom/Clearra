@@ -204,6 +204,24 @@ pub fn encode_local_relation_candidate_pack(
     Ok(output)
 }
 
+/// Coalesce only byte-equivalent logical relations produced by overlapping
+/// cover domains. The pack encoder itself remains strict: callers importing
+/// an already-canonical record set must not silently lose duplicate keys.
+/// A shared key with different evidence is an error, never a tie-break.
+pub fn coalesce_identical_local_relation_records(
+    records: &mut Vec<ExactConditionedLocalRelation>,
+) -> Result<(), LocalRelationPackError> {
+    records.sort_unstable_by(compare_record_key);
+    if records
+        .windows(2)
+        .any(|pair| compare_record_key(&pair[0], &pair[1]).is_eq() && pair[0] != pair[1])
+    {
+        return Err(LocalRelationPackError::NonCanonicalOrder);
+    }
+    records.dedup_by(|left, right| compare_record_key(left, right).is_eq());
+    Ok(())
+}
+
 pub fn load_local_relation_candidate_pack(
     bytes: &[u8],
     expected_binding: LocalRelationBinding,

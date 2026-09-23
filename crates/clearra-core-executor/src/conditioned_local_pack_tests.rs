@@ -3,8 +3,9 @@ use clearra_rules::kicks::KickTableProfileId;
 use sha2::{Digest, Sha256};
 
 use super::{
-    built_in_local_relation_binding, encode_local_relation_candidate_pack, generation_identity,
-    load_local_relation_candidate_pack, LocalRelationBinding, LocalRelationPackError, HEADER_BYTES,
+    built_in_local_relation_binding, coalesce_identical_local_relation_records,
+    encode_local_relation_candidate_pack, generation_identity, load_local_relation_candidate_pack,
+    LocalRelationBinding, LocalRelationPackError, HEADER_BYTES,
 };
 use crate::conditioned_local_index::LocalRelationCandidateLookup;
 use crate::conditioned_local_relation::{
@@ -213,6 +214,26 @@ fn truncation_tampering_snapshot_and_duplicate_signature_are_rejected() {
         load_local_relation_candidate_pack(&malformed, binding, None),
         Err(LocalRelationPackError::Record)
     ));
+}
+
+#[test]
+fn overlapping_cover_records_coalesce_only_when_their_full_evidence_matches() {
+    let profile = KickTableProfileId::NoKick;
+    let binding = built_in_local_relation_binding(profile).unwrap();
+    let (record, _, _) = record(profile);
+    let mut identical = vec![record.clone(), record.clone()];
+    coalesce_identical_local_relation_records(&mut identical).unwrap();
+    assert_eq!(identical, vec![record.clone()]);
+    assert!(encode_local_relation_candidate_pack(binding, &identical).is_ok());
+
+    let mut conflicting = record.clone();
+    conflicting.grounded_lock_anchors[0] ^= 1;
+    let mut records = vec![record, conflicting];
+    assert_eq!(
+        coalesce_identical_local_relation_records(&mut records),
+        Err(LocalRelationPackError::NonCanonicalOrder),
+        "a shared key with divergent locks must never choose an arbitrary record"
+    );
 }
 
 fn reseal_candidate(bytes: &mut [u8], binding: LocalRelationBinding) {

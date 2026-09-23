@@ -24,6 +24,7 @@ const MAX_CATALOG_BYTES: usize = 512 * 1024;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PACK_BYTES: usize = 16 * 1024 * 1024;
 const CATALOG_FIELDS: usize = 18;
+const MAX_COVER_DOMAINS: u64 = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConditionedLocalCandidateSummary {
@@ -161,7 +162,10 @@ pub fn validate_conditioned_local_candidate_catalog(
                 && catalog["evidence_scope"] == "stored-record-and-collision-dependency-only"
         }
         Some(schema) if schema == COVER_SCHEMA || schema == SOLVER_COVER_SCHEMA => {
-            source_count.is_some_and(|count| count > 0 && count <= record_count as u64)
+            // One independently audited relation may cover several declared
+            // domains. The source-bound verifier below replays *every* domain;
+            // record count is not an upper bound on declaration count.
+            source_count.is_some_and(|count| (1..=MAX_COVER_DOMAINS).contains(&count))
                 && catalog["evidence_scope"] == "audited-record-and-declared-domain-coverage"
         }
         _ => false,
@@ -403,6 +407,14 @@ mod tests {
             validate_conditioned_local_candidate_catalog(profile, &pack_bytes, &catalog_bytes,)
                 .is_ok()
         );
+        let mut forged_count = catalog.clone();
+        forged_count["query_count"] = json!(MAX_COVER_DOMAINS + 1);
+        assert!(validate_conditioned_local_candidate_catalog(
+            profile,
+            &pack_bytes,
+            &serde_json::to_vec(&forged_count).unwrap(),
+        )
+        .is_err());
         assert!(verify_conditioned_local_cover_source(
             profile,
             &pack_bytes,
