@@ -23,6 +23,14 @@ pub struct LegalBoardGenerationOptions {
     pub max_new_steps: usize,
 }
 
+#[derive(Clone, Copy)]
+struct DomainProofLink {
+    derivation: domain::DomainDerivation,
+    input_digest: [u8; 32],
+    filter_digest: [u8; 32],
+    field_count: usize,
+}
+
 pub fn generate_legal_board(options: &LegalBoardGenerationOptions) -> Result<(), String> {
     validate_options(options)?;
     let binding = domain::DomainBinding::legal_board(options.profile)?;
@@ -265,6 +273,8 @@ fn publish_exact_bundle(
     let mut legal_identity = Vec::with_capacity(11);
     let mut forward_digests = [None; 11];
     let mut reverse_digests = [None; 11];
+    let mut forward_links = [None; 11];
+    let mut reverse_links = [None; 11];
     let mut legal_digests = [[0_u8; 32]; 11];
     let mut legal_input_digests = [[0_u8; 32]; 11];
     let mut legal_filter_digests = [[0_u8; 32]; 11];
@@ -291,10 +301,22 @@ fn publish_exact_bundle(
         }
         if layer <= MEET_LAYER {
             forward_digests[usize::from(layer)] = Some(complete.file_digest);
+            forward_links[usize::from(layer)] = Some(DomainProofLink {
+                derivation: complete.derivation,
+                input_digest: complete.input_digest,
+                filter_digest: complete.filter_digest,
+                field_count: complete.field_count,
+            });
             forward_identity.push(Some(complete.file_identity));
             reverse_identity.push(None);
         } else {
             reverse_digests[usize::from(layer)] = Some(complete.file_digest);
+            reverse_links[usize::from(layer)] = Some(DomainProofLink {
+                derivation: complete.derivation,
+                input_digest: complete.input_digest,
+                filter_digest: complete.filter_digest,
+                field_count: complete.field_count,
+            });
             forward_identity.push(None);
             reverse_identity.push(Some(complete.file_identity));
         }
@@ -304,6 +326,12 @@ fn publish_exact_bundle(
         legal_identity.push(legal.file_identity.clone());
         legal_summaries.push(legal);
     }
+    verify_source_domain_chains(
+        &forward_digests,
+        &reverse_digests,
+        &forward_links,
+        &reverse_links,
+    )?;
     for layer in 0..=10_usize {
         let expected_input = if layer <= usize::from(MEET_LAYER) {
             forward_digests[layer].ok_or("legal-board forward proof is incomplete")?
@@ -361,7 +389,6 @@ fn publish_exact_bundle(
     )
     .map_err(|error| error.code().to_owned())?;
     publish_immutable(&options.bundle, encoded.as_ref())?;
-
     let bundle_digest: [u8; 32] = Sha256::digest(encoded.as_ref()).into();
     let layer_entries = (0..=10)
         .map(|layer| {
@@ -402,6 +429,53 @@ fn publish_exact_bundle(
     }))
     .map_err(|error| error.to_string())?;
     publish_immutable(&options.catalog, &catalog)
+}
+
+fn verify_source_domain_chains(
+    forward_digests: &[Option<[u8; 32]>; 11],
+    reverse_digests: &[Option<[u8; 32]>; 11],
+    forward_links: &[Option<DomainProofLink>; 11],
+    reverse_links: &[Option<DomainProofLink>; 11],
+) -> Result<(), String> {
+    for layer in 0..=usize::from(MEET_LAYER) {
+        let link = forward_links[layer].ok_or("legal-board forward domain proof is incomplete")?;
+        let (derivation, input) = if layer == 0 {
+            (domain::DomainDerivation::ForwardSeed, [0; 32])
+        } else {
+            (
+                domain::DomainDerivation::ForwardReachableStep,
+                forward_digests[layer - 1]
+                    .ok_or("legal-board forward domain proof is incomplete")?,
+            )
+        };
+        if link.derivation != derivation
+            || link.input_digest != input
+            || link.filter_digest != [0; 32]
+            || (layer == 0 && link.field_count != 1)
+        {
+            return Err("legal-board forward domain proof chain is disconnected".to_owned());
+        }
+    }
+    for layer in usize::from(MEET_LAYER + 1)..=10 {
+        let link = reverse_links[layer].ok_or("legal-board reverse domain proof is incomplete")?;
+        let (derivation, input) = if layer == 10 {
+            (domain::DomainDerivation::ReverseSeed, [0; 32])
+        } else {
+            (
+                domain::DomainDerivation::ReverseStep,
+                reverse_digests[layer + 1]
+                    .ok_or("legal-board reverse domain proof is incomplete")?,
+            )
+        };
+        if link.derivation != derivation
+            || link.input_digest != input
+            || link.filter_digest != [0; 32]
+            || (layer == 10 && link.field_count != 1)
+        {
+            return Err("legal-board reverse domain proof chain is disconnected".to_owned());
+        }
+    }
+    Ok(())
 }
 
 fn validate_output_path(path: &Path) -> Result<(), String> {
@@ -476,6 +550,73 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod immutable_output_tests {
     use super::*;
+
+    #[test]
+    fn source_domains_require_seed_to_meet_and_terminal_to_meet_digest_chains() {
+        let mut forward_digests = [None; 11];
+        let mut reverse_digests = [None; 11];
+        let mut forward_links = [None; 11];
+        let mut reverse_links = [None; 11];
+        for layer in 0..=usize::from(MEET_LAYER) {
+            forward_digests[layer] = Some([layer as u8 + 1; 32]);
+            forward_links[layer] = Some(DomainProofLink {
+                derivation: if layer == 0 {
+                    domain::DomainDerivation::ForwardSeed
+                } else {
+                    domain::DomainDerivation::ForwardReachableStep
+                },
+                input_digest: if layer == 0 {
+                    [0; 32]
+                } else {
+                    forward_digests[layer - 1].unwrap()
+                },
+                filter_digest: [0; 32],
+                field_count: 1,
+            });
+        }
+        for layer in (usize::from(MEET_LAYER) + 1..=10).rev() {
+            reverse_digests[layer] = Some([layer as u8 + 1; 32]);
+            reverse_links[layer] = Some(DomainProofLink {
+                derivation: if layer == 10 {
+                    domain::DomainDerivation::ReverseSeed
+                } else {
+                    domain::DomainDerivation::ReverseStep
+                },
+                input_digest: if layer == 10 {
+                    [0; 32]
+                } else {
+                    reverse_digests[layer + 1].unwrap()
+                },
+                filter_digest: [0; 32],
+                field_count: 1,
+            });
+        }
+        assert!(verify_source_domain_chains(
+            &forward_digests,
+            &reverse_digests,
+            &forward_links,
+            &reverse_links,
+        )
+        .is_ok());
+
+        forward_links[3].as_mut().unwrap().input_digest = [99; 32];
+        assert!(verify_source_domain_chains(
+            &forward_digests,
+            &reverse_digests,
+            &forward_links,
+            &reverse_links,
+        )
+        .is_err());
+        forward_links[3].as_mut().unwrap().input_digest = forward_digests[2].unwrap();
+        reverse_links[8].as_mut().unwrap().filter_digest = [77; 32];
+        assert!(verify_source_domain_chains(
+            &forward_digests,
+            &reverse_digests,
+            &forward_links,
+            &reverse_links,
+        )
+        .is_err());
+    }
 
     #[test]
     fn candidate_outputs_must_share_the_verified_layer_directory() {

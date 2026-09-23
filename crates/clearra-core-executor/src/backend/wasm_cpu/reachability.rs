@@ -583,6 +583,27 @@ impl ReachabilityWorkspace {
         y: i8,
         frame: Option<LocalRelationRowFrame>,
     ) -> bool {
+        let (exhaustive, admit, key_present) =
+            match self
+                .cache
+                .query(board, piece, catalog.width(), rotation, x, y)
+            {
+                ReachabilityCacheLookup::Reachable => {
+                    self.metrics.cache_reachable_hits =
+                        self.metrics.cache_reachable_hits.saturating_add(1);
+                    return true;
+                }
+                ReachabilityCacheLookup::ExhaustivelyUnreachable => {
+                    self.metrics.cache_unreachable_hits =
+                        self.metrics.cache_unreachable_hits.saturating_add(1);
+                    return false;
+                }
+                ReachabilityCacheLookup::Search {
+                    exhaustive,
+                    admit,
+                    key_present,
+                } => (exhaustive, admit, key_present),
+            };
         if let (Some(conditioned), Some(frame), Some(template)) = (
             self.conditioned.as_ref(),
             frame,
@@ -625,6 +646,18 @@ impl ReachabilityWorkspace {
                     LocalRelationProductLookup::ComposedForProvenEntries(anchors) => {
                         self.metrics.conditioned_complete_hits =
                             self.metrics.conditioned_complete_hits.saturating_add(1);
+                        // The composed relation covers every lock reachable
+                        // from the proven sky entries, including all exits.
+                        // Reuse that complete result for later lock queries
+                        // on this physical board and piece.
+                        self.cache.insert(
+                            board,
+                            piece,
+                            ReachableLocks { anchors },
+                            ReachableLocks::default(),
+                            true,
+                            true,
+                        );
                         return anchors_contain(anchors, catalog.width(), rotation, x, y);
                     }
                     LocalRelationProductLookup::PassThrough(status) => {
@@ -639,27 +672,6 @@ impl ReachabilityWorkspace {
                 }
             }
         }
-        let (exhaustive, admit, key_present) =
-            match self
-                .cache
-                .query(board, piece, catalog.width(), rotation, x, y)
-            {
-                ReachabilityCacheLookup::Reachable => {
-                    self.metrics.cache_reachable_hits =
-                        self.metrics.cache_reachable_hits.saturating_add(1);
-                    return true;
-                }
-                ReachabilityCacheLookup::ExhaustivelyUnreachable => {
-                    self.metrics.cache_unreachable_hits =
-                        self.metrics.cache_unreachable_hits.saturating_add(1);
-                    return false;
-                }
-                ReachabilityCacheLookup::Search {
-                    exhaustive,
-                    admit,
-                    key_present,
-                } => (exhaustive, admit, key_present),
-            };
         self.metrics.cache_key_misses = self
             .metrics
             .cache_key_misses
@@ -1913,9 +1925,27 @@ mod tests {
         let bit = 1_u64 << 4;
         assert_eq!(got, reference[0] & bit != 0);
         assert_eq!(workspace.metrics().conditioned_complete_hits, 1);
+        let repeated = workspace.lock_reachable_after_harddrop_miss_in_frame(
+            &catalog,
+            0,
+            piece,
+            RotationState::Zero,
+            4,
+            0,
+            Some(frame),
+        );
+        assert_eq!(repeated, got);
+        assert_eq!(workspace.metrics().conditioned_complete_hits, 1);
+        assert_eq!(
+            workspace.metrics().cache_reachable_hits + workspace.metrics().cache_unreachable_hits,
+            1,
+        );
 
         let other_frame = LocalRelationRowFrame::new(4, 1).unwrap();
-        let fallback = workspace.lock_reachable_after_harddrop_miss_in_frame(
+        let mut frame_miss_workspace = ReachabilityWorkspace::default();
+        frame_miss_workspace.configure_kick_profile(profile, true);
+        frame_miss_workspace.prepare_template(&catalog, piece);
+        let fallback = frame_miss_workspace.lock_reachable_after_harddrop_miss_in_frame(
             &catalog,
             0,
             piece,
@@ -1925,8 +1955,9 @@ mod tests {
             Some(other_frame),
         );
         assert_eq!(fallback, got);
-        assert_eq!(workspace.metrics().conditioned_misses, 1);
+        assert_eq!(frame_miss_workspace.metrics().conditioned_misses, 1);
         drop(workspace);
+        drop(frame_miss_workspace);
         assert!(remove_qualified_local_relation_pack(profile)
             .expect("test snapshot released")
             .is_some());
