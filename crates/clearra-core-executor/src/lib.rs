@@ -46,10 +46,11 @@ pub mod tiling_solution_store;
 #[cfg(feature = "webgpu-search")]
 pub use backend::WasmWebGpuCandidateProducer;
 pub use backend::{
-    canonical_wasm_candidate_packet_batch_sha256, encode_canonical_wasm_candidate_packet_batch,
-    enumerate_pc4_ilc_geometric_predecessor_fields, enumerate_pc4_ilc_predecessor_fields,
-    enumerate_pc4_ilc_target_fields, materialize_pc4_ilc_transition, Pc4IlcMaterializationError,
-    Pc4IlcPlacement, WasmBuildProbabilityAdvance, WasmBuildProbabilityBackend,
+    any_pc4_ilc_target_field, canonical_wasm_candidate_packet_batch_sha256,
+    encode_canonical_wasm_candidate_packet_batch, enumerate_pc4_ilc_geometric_predecessor_fields,
+    enumerate_pc4_ilc_predecessor_fields, enumerate_pc4_ilc_target_fields,
+    materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
+    WasmBuildProbabilityAdvance, WasmBuildProbabilityBackend,
     WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedResultMerger,
     WasmBuildProbabilityDistributedVerifier, WasmBuildProbabilitySession, WasmCandidatePacket,
     WasmCandidateProducerAdvance, WasmCpuCandidateProducer, WasmCpuSearchAdvance,

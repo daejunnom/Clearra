@@ -241,6 +241,33 @@ pub fn enumerate_pc4_ilc_target_fields(
     piece: PieceKind,
     kick_profile: KickTableProfileId,
 ) -> Result<Vec<u64>, Pc4IlcMaterializationError> {
+    let mut targets = BTreeSet::new();
+    visit_pc4_ilc_target_fields(source_cells, piece, kick_profile, |target| {
+        targets.insert(target);
+        false
+    })?;
+    Ok(targets.into_iter().collect())
+}
+
+/// Tests exact forward membership without allocating and sorting every target.
+/// The predicate receives normalized four-row Board64 masks. A true result
+/// means that at least one reachable lock produces a matching target; this
+/// neither qualifies a graph nor changes the ordered-kick reachability rule.
+pub fn any_pc4_ilc_target_field(
+    source_cells: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+    matches: impl FnMut(u64) -> bool,
+) -> Result<bool, Pc4IlcMaterializationError> {
+    visit_pc4_ilc_target_fields(source_cells, piece, kick_profile, matches)
+}
+
+fn visit_pc4_ilc_target_fields(
+    source_cells: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+    mut visit: impl FnMut(u64) -> bool,
+) -> Result<bool, Pc4IlcMaterializationError> {
     if source_cells & !FIELD_MASK != 0 {
         return Err(Pc4IlcMaterializationError::SourceOutsideFourRows);
     }
@@ -253,7 +280,7 @@ pub fn enumerate_pc4_ilc_target_fields(
     let source_prefix = source_deleted.count_ones() as u8;
     let physical_height = HEIGHT - source_prefix;
     if physical_height == 0 {
-        return Ok(Vec::new());
+        return Ok(false);
     }
     let current_board = compact_target_board(WIDTH, HEIGHT, source_cells, source_deleted);
     let template = ReachabilityTemplate::compile(WIDTH, physical_height, piece, kick_profile);
@@ -275,7 +302,6 @@ pub fn enumerate_pc4_ilc_target_fields(
             .ok_or(Pc4IlcMaterializationError::Geometry(
                 "pc4_forward_piece_definition_missing",
             ))?;
-    let mut targets = BTreeSet::new();
     for rotation in RotationState::ALL {
         let shape = definition.shape(rotation);
         if shape.height() > physical_height {
@@ -314,11 +340,13 @@ pub fn enumerate_pc4_ilc_target_fields(
                         "pc4_forward_target_outside_four_rows",
                     ));
                 }
-                targets.insert(normalized);
+                if visit(normalized) {
+                    return Ok(true);
+                }
             }
         }
     }
-    Ok(targets.into_iter().collect())
+    Ok(false)
 }
 
 /// Enumerates every geometric predecessor candidate that could produce
@@ -570,6 +598,60 @@ mod completion_proof_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_forward_membership_matches_complete_targets_across_profiles() {
+        let post_clear_source = 0b11000000 | (0b111111 << 10);
+        for profile in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
+            KickTableProfileId::Jstris180,
+            KickTableProfileId::NoKick,
+        ] {
+            for source in [0, post_clear_source, FIELD_MASK] {
+                for piece in [PieceKind::I, PieceKind::J, PieceKind::L, PieceKind::T] {
+                    let targets = enumerate_pc4_ilc_target_fields(source, piece, profile).unwrap();
+                    for selected in [targets.first(), targets.last()].into_iter().flatten() {
+                        assert!(
+                            any_pc4_ilc_target_field(source, piece, profile, |target| {
+                                target == *selected
+                            })
+                            .unwrap(),
+                            "profile={profile:?} source={source} piece={piece:?} target={selected}"
+                        );
+                    }
+                    assert!(!any_pc4_ilc_target_field(source, piece, profile, |target| {
+                        target == u64::MAX
+                    })
+                    .unwrap());
+                    let mut visits = 0;
+                    let matched = any_pc4_ilc_target_field(source, piece, profile, |_| {
+                        visits += 1;
+                        true
+                    })
+                    .unwrap();
+                    assert_eq!(matched, !targets.is_empty());
+                    assert_eq!(visits, usize::from(!targets.is_empty()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_forward_membership_rejects_the_same_invalid_source_contract() {
+        for (source, profile) in [
+            (1_u64 << 40, KickTableProfileId::Srs90),
+            (ROW_MASK << WIDTH, KickTableProfileId::Srs90),
+            (0, KickTableProfileId::Custom),
+        ] {
+            assert_eq!(
+                any_pc4_ilc_target_field(source, PieceKind::J, profile, |_| true),
+                enumerate_pc4_ilc_target_fields(source, PieceKind::J, profile)
+                    .map(|targets| !targets.is_empty())
+            );
+        }
+    }
 
     #[test]
     fn observed_hf_root_edges_equal_independent_empty_board_placements() {

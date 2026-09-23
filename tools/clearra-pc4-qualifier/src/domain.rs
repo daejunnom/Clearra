@@ -2,7 +2,8 @@
 // profile-bound, resumable PC4 forward and reverse domain layers.
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_executor::{
-    enumerate_pc4_ilc_geometric_predecessor_fields, enumerate_pc4_ilc_target_fields,
+    any_pc4_ilc_target_field, enumerate_pc4_ilc_geometric_predecessor_fields,
+    enumerate_pc4_ilc_target_fields,
 };
 use clearra_pc4_tablebase::{
     clearra_board64_mask_to_hydra_field_hash_v1, hydra_field_hash_v1_to_clearra_board64_mask,
@@ -1511,18 +1512,12 @@ fn validate_reverse_sources(
                             if piece_bits & (1_u8 << piece_index) == 0 {
                                 continue;
                             }
-                            reaches_domain = enumerate_pc4_ilc_target_fields(
+                            reaches_domain = reaches_any_domain_target(
                                 source,
                                 piece,
                                 binding.kick_profile,
-                            )
-                            .map_err(|error| error.reason().to_owned())?
-                            .into_iter()
-                            .map(clearra_board64_mask_to_hydra_field_hash_v1)
-                            .collect::<Result<Vec<_>, _>>()
-                            .map_err(|error| error.reason().to_owned())?
-                            .into_iter()
-                            .any(|target_hash| input.binary_search(&target_hash).is_ok());
+                                input,
+                            )?;
                             if reaches_domain {
                                 break;
                             }
@@ -1540,6 +1535,29 @@ fn validate_reverse_sources(
     let mut indexed = partials.into_iter().flatten().collect::<Vec<_>>();
     indexed.sort_unstable_by_key(|(index, _)| *index);
     Ok(indexed.into_iter().map(|(_, field)| field).collect())
+}
+
+fn reaches_any_domain_target(
+    source: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+    sorted_target_hashes: &[u64],
+) -> Result<bool, String> {
+    let mut invalid_target = None;
+    let found = any_pc4_ilc_target_field(source, piece, kick_profile, |target| {
+        match clearra_board64_mask_to_hydra_field_hash_v1(target) {
+            Ok(hash) => sorted_target_hashes.binary_search(&hash).is_ok(),
+            Err(error) => {
+                invalid_target = Some(error.reason());
+                true
+            }
+        }
+    })
+    .map_err(|error| error.reason().to_owned())?;
+    if let Some(reason) = invalid_target {
+        return Err(reason.to_owned());
+    }
+    Ok(found)
 }
 
 /// Probabilistic *admission* for the large disk-backed F_k semi-join. Exact
@@ -1989,18 +2007,12 @@ fn generate_reverse_layer_bounded(
                         {
                             let source = hydra_field_hash_v1_to_clearra_board64_mask(source_hash)
                                 .map_err(|error| error.reason().to_owned())?;
-                            let reaches_domain = enumerate_pc4_ilc_target_fields(
+                            let reaches_domain = reaches_any_domain_target(
                                 source,
                                 piece,
                                 binding.kick_profile,
-                            )
-                            .map_err(|error| error.reason().to_owned())?
-                            .into_iter()
-                            .map(clearra_board64_mask_to_hydra_field_hash_v1)
-                            .collect::<Result<Vec<_>, _>>()
-                            .map_err(|error| error.reason().to_owned())?
-                            .into_iter()
-                            .any(|target_hash| input.binary_search(&target_hash).is_ok());
+                                input,
+                            )?;
                             if reaches_domain {
                                 validated.push(source_hash);
                             }
@@ -2583,6 +2595,31 @@ fn io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reverse_domain_membership_matches_complete_forward_enumeration() {
+        for profile in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
+            KickTableProfileId::Jstris180,
+            KickTableProfileId::NoKick,
+        ] {
+            for piece in [PieceKind::J, PieceKind::L, PieceKind::T] {
+                let complete = enumerate_pc4_ilc_target_fields(0, piece, profile).unwrap();
+                let mut hashes = complete
+                    .into_iter()
+                    .map(clearra_board64_mask_to_hydra_field_hash_v1)
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                hashes.sort_unstable();
+                for selected in [hashes.first(), hashes.last()].into_iter().flatten() {
+                    assert!(reaches_any_domain_target(0, piece, profile, &[*selected]).unwrap());
+                }
+                assert!(!reaches_any_domain_target(0, piece, profile, &[0]).unwrap());
+            }
+        }
+    }
 
     fn binding() -> DomainBinding {
         DomainBinding::new([7; 32], KickTableProfileId::Jstris180)

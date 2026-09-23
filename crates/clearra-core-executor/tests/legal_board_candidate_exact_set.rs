@@ -193,6 +193,7 @@ fn assert_complete_flags(result: &CoreExecutionResult) {
 
 fn assert_known_count(result: &CoreExecutionResult, profile: KickTableProfileId) {
     let known_count = match profile {
+        KickTableProfileId::Srs90 => Some(438_791),
         KickTableProfileId::SrsPlus => Some(456_923),
         KickTableProfileId::Jstris180 => Some(456_459),
         _ => None,
