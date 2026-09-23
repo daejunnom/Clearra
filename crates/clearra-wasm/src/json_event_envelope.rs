@@ -1104,7 +1104,7 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                 result.string("placement_role_scope", &report.placement_role_scope);
                 result.number("normal_states", report.normal_states);
                 result.number("max_early_placements", report.max_early_placements);
-                result.number("borrow_source_index", report.borrow_source_index);
+                result.number("borrow_role_index", report.borrow_role_index);
                 result.string("borrow_placement_mask", &report.borrow_placement_mask);
                 result.number("recovery_states", report.recovery_states);
                 result.optional_number(
@@ -1116,6 +1116,7 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                 result.array("steps", |output| {
                     write_object_array(output, &report.steps, |object, step| {
                         object.number("source_queue_index", step.source_queue_index);
+                        object.number("placement_role_index", step.placement_role_index);
                         object.string("piece", &step.piece);
                         object.number("rotation", step.rotation);
                         object.number("x", step.x);
@@ -1206,6 +1207,10 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                                                 object.number(
                                                     "source_queue_index",
                                                     step.source_queue_index,
+                                                );
+                                                object.number(
+                                                    "placement_role_index",
+                                                    step.placement_role_index,
                                                 );
                                                 object.string("piece", &step.piece);
                                                 object.number("rotation", step.rotation);
@@ -3159,6 +3164,7 @@ mod exact_json_tests {
 
         let step = BoundaryRecoveryStepPayload {
             source_queue_index: 7,
+            placement_role_index: 10,
             piece: "O".to_owned(),
             rotation: 0,
             x: 2,
@@ -3177,7 +3183,7 @@ mod exact_json_tests {
             knowledge_basis: "full-pattern-universe".to_owned(),
             placement_role_scope: "bag-piece-exact-lock-time".to_owned(),
             max_early_placements: 1,
-            borrow_source_index: 7,
+            borrow_role_index: 7,
             borrow_placement_mask: "0xf".to_owned(),
             normal_states: 0,
             recovery_states: 0,

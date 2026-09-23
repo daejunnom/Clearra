@@ -299,7 +299,7 @@ mod tests {
                     Board256Mask::from_words([0x300c000, 0, 0, 0]),
                 ];
                 query.max_early_placements = 1;
-                query.borrow_source_index = 1;
+                query.borrow_role_index = 1;
                 query.borrow_placement_mask = query.placement_role_masks[1];
                 query.hold_enabled = true;
                 Ok(Some(query))
@@ -326,8 +326,9 @@ mod tests {
             stage_one_queue_len: 1,
             required_placements: 2,
             placement_role_masks: Vec::new(),
+            placement_role_pieces: Vec::new(),
             max_early_placements: 0,
-            borrow_source_index: 0,
+            borrow_role_index: 0,
             borrow_placement_mask: Board256Mask::EMPTY,
             hold_enabled: false,
             rule_profile: RuleProfileId::SrsPlus,

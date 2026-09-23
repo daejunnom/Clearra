@@ -45,7 +45,7 @@ test('boundary recovery keeps one fixed queue and independent bag B2B choices ac
     stageOneCount: 1,
     placements: 2,
     maxEarlyPlacements: 1,
-    borrowSourcePosition: 2,
+    borrowRolePosition: 2,
     borrowPlacementMask: 0x300c000n,
     holdEnabled: false,
     preserveB2BBags: [1]
@@ -54,7 +54,7 @@ test('boundary recovery keeps one fixed queue and independent bag B2B choices ac
   const arguments_ = boundaryRecoveryArguments(request);
   assert.deepEqual(arguments_.slice(0, 3), ['clearra', 'recovery', 'boundary']);
   assert.deepEqual(arguments_.slice(arguments_.indexOf('--queue'), arguments_.indexOf('--queue') + 2), ['--queue', 'IO']);
-  assert.deepEqual(arguments_.slice(arguments_.indexOf('--borrow-source-position'), arguments_.indexOf('--borrow-source-position') + 2), ['--borrow-source-position', '2']);
+  assert.deepEqual(arguments_.slice(arguments_.indexOf('--borrow-role-position'), arguments_.indexOf('--borrow-role-position') + 2), ['--borrow-role-position', '2']);
   assert.equal(arguments_.includes('--preserve-b2b-stage-one'), false);
   assert.equal(arguments_.includes('--preserve-b2b-stage-two'), false);
   assert.deepEqual(arguments_.slice(arguments_.indexOf('--preserve-b2b-bag'), arguments_.indexOf('--preserve-b2b-bag') + 2),
@@ -66,11 +66,11 @@ test('boundary recovery keeps one fixed queue and independent bag B2B choices ac
   assert.deepEqual(boundaryRecoveryDesktopRequest(request, 'ko').arguments, arguments_);
   assert.deepEqual(tokenizeBrowserCommandForContract(boundaryRecoveryCommand(request)), arguments_);
 });
-test('boundary recovery exact roles serialize every source mask without a duplicate borrow mask', () => {
+test('boundary recovery exact roles serialize every placement mask without a duplicate borrow mask', () => {
   const request = {
     ...createBoundaryRecoveryRequest(),
     queue: 'IO', height: 4, placements: 2, stageOneCount: 1,
-    borrowSourcePosition: 2, placementRoleMasks: [0xfn, 0x300c000n]
+    borrowRolePosition: 2, placementRoleMasks: [0xfn, 0x300c000n]
   };
   assert.deepEqual(validateBoundaryRecoveryRequest(request), []);
   const args = boundaryRecoveryArguments(request);
@@ -87,7 +87,7 @@ test('boundary recovery pattern mode preserves full-bag roles and finite budgets
     ...createBoundaryRecoveryRequest(),
     queue: 'IJLOSTZIJLOSTZ', queuePattern: 'IJLOSTZP7',
     height: 8, stageOneCount: 7, placements: 14,
-    borrowSourcePosition: 8, maxEarlyPlacements: 0,
+    borrowRolePosition: 8, maxEarlyPlacements: 0,
     placementRoleMasks: Array.from({ length: 14 }, () => 0xfn),
     maxPatternEvaluations: 2, maxTotalStates: 1000
   };
@@ -112,7 +112,7 @@ test('weighted recovery payload keeps unresolved supply distinct from proven no-
     content: { payload_kind: 'boundary-recovery', payload: {
       status: 'population-incomplete', knowledge_basis: 'full-pattern-universe',
       placement_role_scope: 'bag-piece-exact-lock-time', max_early_placements: 0,
-      borrow_source_index: 0, borrow_placement_mask: '0x0',
+      borrow_role_index: 0, borrow_placement_mask: '0x0',
       normal_states: 0, recovery_states: 0, stage_one_checkpoint_step: null,
       checkpoint_is_pc: null, borrowed_stage_two_count: 0, steps: [],
       population: {
@@ -135,6 +135,28 @@ test('weighted recovery payload keeps unresolved supply distinct from proven no-
     ...payload, content: { ...payload.content, payload: {
       ...payload.content.payload,
       population: { ...payload.content.payload.population, no_path_count: 0 }
+    } }
+  }), 'invalid boundary recovery payload');
+});
+
+test('recovery payload preserves distinct supply and placement-role identities', () => {
+  const step = {
+    source_queue_index: 0, placement_role_index: 1, piece: 'O',
+    placement_mask: '0xc03000000', board_after_mask: '0xc03000000'
+  };
+  const payload = {
+    contract: 'boundary-recovery.v1', result_kind: 'boundary-recovery',
+    content: { payload_kind: 'boundary-recovery', payload: {
+      status: 'non-pc-recovery', knowledge_basis: 'full-fixed-queue',
+      placement_role_scope: 'exact-lock-time', max_early_placements: 1,
+      borrow_role_index: 1, borrow_placement_mask: step.placement_mask,
+      normal_states: 1, recovery_states: 1, steps: [step]
+    } }
+  };
+  assert.equal(validateBoundaryRecoveryPayload(payload), null);
+  assert.equal(validateBoundaryRecoveryPayload({
+    ...payload, content: { ...payload.content, payload: {
+      ...payload.content.payload, steps: [{ ...step, placement_role_index: undefined }]
     } }
   }), 'invalid boundary recovery payload');
 });

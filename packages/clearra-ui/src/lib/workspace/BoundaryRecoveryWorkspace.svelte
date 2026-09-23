@@ -259,8 +259,8 @@
         on:input={(event) => setPlacements(Number((event.currentTarget as HTMLInputElement).value))} />
     </label>
     <label><span>{label('recoveryBorrowPosition')}</span>
-      <input type="number" min={request.stageOneCount + 1} max={request.placements} value={request.borrowSourcePosition}
-        on:input={(event) => request = { ...request, borrowSourcePosition: Number((event.currentTarget as HTMLInputElement).value) }} />
+      <input type="number" min={request.stageOneCount + 1} max={request.placements} value={request.borrowRolePosition}
+        on:input={(event) => request = { ...request, borrowRolePosition: Number((event.currentTarget as HTMLInputElement).value) }} />
     </label>
     <label><span>{label('recoveryMaxEarlyPlacements')}</span>
       <select value={request.maxEarlyPlacements} on:change={(event) => request = { ...request, maxEarlyPlacements: Number((event.currentTarget as HTMLSelectElement).value) as 0 | 1 }}>
@@ -318,7 +318,7 @@
         <h3>{label('recoveryTimeline')}</h3>
         <ol>
           {#each displaySteps as step, index}
-            <li><strong>{step.piece}</strong> · queue #{step.source_queue_index + 1} · {step.hold_decision} · ({step.x}, {step.y}) · {step.cleared_lines}L · B2B {step.b2b_active_after ? '✓' : '—'}{displayCheckpoint === index + 1 ? ' · checkpoint' : ''}<code>{step.board_after_mask}</code></li>
+            <li><strong>{step.piece}</strong> · queue #{step.source_queue_index + 1} · role #{step.placement_role_index + 1} · {step.hold_decision} · ({step.x}, {step.y}) · {step.cleared_lines}L · B2B {step.b2b_active_after ? '✓' : '—'}{displayCheckpoint === index + 1 ? ' · checkpoint' : ''}<code>{step.board_after_mask}</code></li>
           {/each}
         </ol>
       {/if}

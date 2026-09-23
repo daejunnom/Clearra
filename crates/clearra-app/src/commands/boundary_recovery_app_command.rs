@@ -101,7 +101,7 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
             }
             .to_owned(),
             max_early_placements: self.query.max_early_placements,
-            borrow_source_index: self.query.borrow_source_index as u8,
+            borrow_role_index: self.query.borrow_role_index as u8,
             borrow_placement_mask: mask_hex(self.query.borrow_placement_mask.words()),
             normal_states: report.normal_states,
             recovery_states: report.recovery_states,
@@ -116,6 +116,10 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
                 (
                     "source_queue_index",
                     RenderFieldValue::from(step.source_queue_index),
+                ),
+                (
+                    "placement_role_index",
+                    RenderFieldValue::from(step.placement_role_index),
                 ),
                 (
                     "piece",
@@ -171,7 +175,7 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
                 },
             ),
             RenderField::new("max_early_placements", self.query.max_early_placements),
-            RenderField::new("borrow_source_index", self.query.borrow_source_index),
+            RenderField::new("borrow_role_index", self.query.borrow_role_index),
             RenderField::new(
                 "borrow_placement_mask",
                 mask_hex(self.query.borrow_placement_mask.words()),
@@ -276,7 +280,7 @@ impl BoundaryRecoveryAppCommand {
             knowledge_basis: "full-pattern-universe".to_owned(),
             placement_role_scope: "bag-piece-exact-lock-time".to_owned(),
             max_early_placements: self.query.max_early_placements,
-            borrow_source_index: self.query.borrow_source_index as u8,
+            borrow_role_index: self.query.borrow_role_index as u8,
             borrow_placement_mask: mask_hex(self.query.borrow_placement_mask.words()),
             normal_states: 0,
             recovery_states: 0,
@@ -344,6 +348,7 @@ impl BoundaryRecoveryAppCommand {
 fn public_step(step: &BoundaryRecoveryStep) -> BoundaryRecoveryStepPayload {
     BoundaryRecoveryStepPayload {
         source_queue_index: step.source_queue_index as u8,
+        placement_role_index: step.placement_role_index as u8,
         piece: step.piece.as_ascii().to_string(),
         rotation: step.rotation.quarter_turns(),
         x: step.x,

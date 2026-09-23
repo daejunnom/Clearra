@@ -2339,7 +2339,7 @@ fn parse_boundary_recovery_command(
     let mut stage_one_queue_len: Option<usize> = None;
     let mut required_placements: Option<usize> = None;
     let mut max_early_placements = 1_u8;
-    let mut borrow_source_index = None;
+    let mut borrow_role_index = None;
     let mut borrow_placement_mask = None;
     let mut placement_roles = std::collections::BTreeMap::new();
     let mut hold_enabled = true;
@@ -2434,10 +2434,10 @@ fn parse_boundary_recovery_command(
                     }
                 };
             }
-            "--borrow-source-position" => {
+            "--borrow-role-position" => {
                 let position: usize =
                     parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
-                borrow_source_index = Some(position - 1);
+                borrow_role_index = Some(position - 1);
             }
             "--borrow-placement-mask" => {
                 borrow_placement_mask = Some(Board256Mask::from_words(parse_board_words(
@@ -2565,15 +2565,15 @@ fn parse_boundary_recovery_command(
         {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::InvalidValue,
-                "--role-mask must specify every required source position exactly once",
+                "--role-mask must specify every required placement role exactly once",
             ));
         }
         placement_roles.into_values().collect()
     };
-    let borrow_source_index = if max_early_placements == 0 {
-        borrow_source_index.unwrap_or(0)
+    let borrow_role_index = if max_early_placements == 0 {
+        borrow_role_index.unwrap_or(0)
     } else {
-        borrow_source_index.ok_or_else(|| required("--borrow-source-position"))?
+        borrow_role_index.ok_or_else(|| required("--borrow-role-position"))?
     };
     let borrow_placement_mask = if max_early_placements == 0 {
         borrow_placement_mask.unwrap_or(Board256Mask::EMPTY)
@@ -2581,7 +2581,7 @@ fn parse_boundary_recovery_command(
         mask
     } else {
         placement_role_masks
-            .get(borrow_source_index)
+            .get(borrow_role_index)
             .copied()
             .ok_or_else(|| required("--borrow-placement-mask or complete --role-mask set"))?
     };
@@ -2593,8 +2593,9 @@ fn parse_boundary_recovery_command(
         stage_one_queue_len,
         required_placements,
         placement_role_masks,
+        placement_role_pieces: Vec::new(),
         max_early_placements,
-        borrow_source_index,
+        borrow_role_index,
         borrow_placement_mask,
         hold_enabled,
         rule_profile,

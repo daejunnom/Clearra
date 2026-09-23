@@ -4,7 +4,7 @@ use clearra_cli_command::CliCommandParser;
 #[test]
 fn fixed_queue_boundary_recovery_uses_one_continuous_app_request() {
     let parsed = CliCommandParser::parse(
-        "clearra recovery boundary --initial-board-mask 0x3f0 --target-board-mask 0xc030 --height 4 --queue IO --stage-one-count 1 --placements 2 --borrow-source-position 2 --borrow-placement-mask 0x300c000 --no-hold --preserve-b2b-stage-one --spin-profile all-spin-plus",
+        "clearra recovery boundary --initial-board-mask 0x3f0 --target-board-mask 0xc030 --height 4 --queue IO --stage-one-count 1 --placements 2 --borrow-role-position 2 --borrow-placement-mask 0x300c000 --no-hold --preserve-b2b-stage-one --spin-profile all-spin-plus",
     )
     .unwrap();
     let request = parsed.to_app_request().unwrap();
@@ -13,7 +13,7 @@ fn fixed_queue_boundary_recovery_uses_one_continuous_app_request() {
     };
     assert_eq!(command.query().queue.len(), 2);
     assert_eq!(command.query().stage_one_queue_len, 1);
-    assert_eq!(command.query().borrow_source_index, 1);
+    assert_eq!(command.query().borrow_role_index, 1);
     assert_eq!(
         command.query().borrow_placement_mask.words(),
         [0x300c000, 0, 0, 0]
@@ -31,7 +31,7 @@ fn fixed_queue_boundary_recovery_uses_one_continuous_app_request() {
 #[test]
 fn boundary_recovery_rejects_ambiguous_or_missing_supply() {
     assert!(CliCommandParser::parse(
-        "clearra recovery boundary --initial-board-mask 0x3f0 --target-board-mask 0xc030 --height 4 --queue IO --stage-one-count 1 --placements 2 --borrow-source-position 2 --borrow-placement-mask 0x300c000 --hold --no-hold"
+        "clearra recovery boundary --initial-board-mask 0x3f0 --target-board-mask 0xc030 --height 4 --queue IO --stage-one-count 1 --placements 2 --borrow-role-position 2 --borrow-placement-mask 0x300c000 --hold --no-hold"
     )
     .is_err());
     assert!(CliCommandParser::parse(
@@ -94,7 +94,7 @@ fn complete_diagram_roles_bind_each_source_token_to_its_lock_mask() {
     let borrowed = command
         .replace(
             "--max-early-placements 0",
-            "--max-early-placements 1 --borrow-source-position 2",
+            "--max-early-placements 1 --borrow-role-position 2",
         )
         .replace("--role-mask 2:0xc030", "--role-mask 2:0x300c000");
     let borrowed = CliCommandParser::parse(&borrowed)

@@ -441,6 +441,7 @@ export type ClearraRenderArtifactPayload = {
 
 export type ClearraBoundaryRecoveryStepPayload = {
   source_queue_index: number;
+  placement_role_index: number;
   piece: string;
   rotation: number;
   x: number;
@@ -460,7 +461,7 @@ export type ClearraBoundaryRecoveryPayload = {
   knowledge_basis: 'full-fixed-queue' | 'full-pattern-universe';
   placement_role_scope: 'occupancy-only' | 'exact-lock-time' | 'bag-piece-exact-lock-time';
   max_early_placements: 0 | 1;
-  borrow_source_index: number;
+  borrow_role_index: number;
   borrow_placement_mask: string;
   normal_states: number;
   recovery_states: number;

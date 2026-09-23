@@ -42,16 +42,17 @@ pub struct BoundaryRecoveryQuery {
     /// Number of locks needed to reach the declared second-stage target.
     /// Remaining queue tokens are lookahead, not silently consumed.
     pub required_placements: usize,
-    /// Empty means unconstrained geometry. Otherwise exactly one four-cell
-    /// lock-time role belongs to each required source token, in source order.
-    /// Roles are distinct from the supply token and remain bound through hold.
+    /// Empty means unconstrained geometry. Otherwise each entry is one
+    /// four-cell lock-time role independent of the source token that fills it.
     pub placement_role_masks: Vec<Board256Mask>,
+    /// Empty uses the fixed reference queue as the role-piece catalog. Pattern
+    /// adapters retain reference roles while permuting supply tokens.
+    pub placement_role_pieces: Vec<PieceKind>,
     /// Zero runs only the normal connection proof; one permits the selected
     /// stage-two placement to be locked before stage-one cleanup.
     pub max_early_placements: u8,
-    /// The user-selected source token allowed to fill one early stage-two
-    /// placement. This is a supply identity, not a piece-kind alias.
-    pub borrow_source_index: usize,
+    /// The selected stage-two role allowed before stage-one cleanup.
+    pub borrow_role_index: usize,
     /// Exact lock-time geometry of that selected early placement. It may
     /// compact to different cells after the stage-one line clear.
     pub borrow_placement_mask: Board256Mask,
@@ -134,28 +135,19 @@ impl BoundaryRecoveryBagRolePlan {
         }
         let mut query = self.reference.clone();
         query.queue = queue.to_vec();
-        let mut roles = vec![Board256Mask::EMPTY; queue.len()];
-        let mut mapped_borrow = None;
+        query.placement_role_pieces = self.reference.queue.clone();
         for (bag_index, bag) in queue.chunks_exact(7).enumerate() {
             let reference = &self.reference.queue[bag_index * 7..][..7];
             let mut seen = 0_u8;
-            for (target_offset, piece) in bag.iter().enumerate() {
+            for piece in bag {
                 let bit = 1_u8 << piece_index(*piece);
                 if seen & bit != 0 {
                     return None;
                 }
                 seen |= bit;
-                let source_offset = reference.iter().position(|source| source == piece)?;
-                let source_index = bag_index * 7 + source_offset;
-                let target_index = bag_index * 7 + target_offset;
-                roles[target_index] = self.reference.placement_role_masks[source_index];
-                if source_index == self.reference.borrow_source_index {
-                    mapped_borrow = Some(target_index);
-                }
+                reference.iter().position(|source| source == piece)?;
             }
         }
-        query.placement_role_masks = roles;
-        query.borrow_source_index = mapped_borrow?;
         Some(query)
     }
 }
@@ -185,6 +177,8 @@ pub enum BoundaryRecoveryStatus {
 pub struct BoundaryRecoveryStep {
     /// Zero-based index in the actual source queue, not a piece-kind alias.
     pub source_queue_index: usize,
+    /// Zero-based required placement role filled by this source token.
+    pub placement_role_index: usize,
     pub piece: PieceKind,
     pub rotation: RotationState,
     pub x: i8,
@@ -225,6 +219,7 @@ struct State {
     hold: Option<Token>,
     next_queue_index: u8,
     placed_mask: u64,
+    fulfilled_role_mask: u64,
     checkpoint_step: Option<u8>,
     checkpoint_is_pc: bool,
     borrowed_count: u8,
@@ -261,6 +256,13 @@ struct Pass<'a> {
 }
 
 impl BoundaryRecoveryQuery {
+    fn role_piece(&self, role_index: usize) -> PieceKind {
+        self.placement_role_pieces
+            .get(role_index)
+            .copied()
+            .unwrap_or(self.queue[role_index])
+    }
+
     fn stage_one_bag_count(&self) -> usize {
         self.stage_one_queue_len.div_ceil(7)
     }
@@ -331,9 +333,26 @@ impl BoundaryRecoveryQuery {
         {
             return Err(BoundaryRecoveryError::InvalidPlacementRoles);
         }
+        if !self.placement_role_pieces.is_empty() {
+            if self.placement_role_masks.is_empty()
+                || self.placement_role_pieces.len() != self.required_placements
+            {
+                return Err(BoundaryRecoveryError::InvalidPlacementRoles);
+            }
+            let mut counts = [0_i8; 7];
+            for piece in self.queue.iter().take(self.required_placements) {
+                counts[piece_index(*piece) as usize] += 1;
+            }
+            for piece in &self.placement_role_pieces {
+                counts[piece_index(*piece) as usize] -= 1;
+            }
+            if counts.iter().any(|count| *count != 0) {
+                return Err(BoundaryRecoveryError::InvalidPlacementRoles);
+            }
+        }
         if self.max_early_placements == 1
-            && (self.borrow_source_index < self.stage_one_queue_len
-                || self.borrow_source_index >= self.required_placements
+            && (self.borrow_role_index < self.stage_one_queue_len
+                || self.borrow_role_index >= self.required_placements
                 || self.borrow_placement_mask.fits_cell_count(cells) != Ok(true)
                 || self
                     .borrow_placement_mask
@@ -343,7 +362,7 @@ impl BoundaryRecoveryQuery {
                     .sum::<u32>()
                     != 4
                 || (!self.placement_role_masks.is_empty()
-                    && self.placement_role_masks[self.borrow_source_index].words()
+                    && self.placement_role_masks[self.borrow_role_index].words()
                         != self.borrow_placement_mask.words()))
         {
             return Err(BoundaryRecoveryError::InvalidBorrowRole);
@@ -488,6 +507,7 @@ impl<'a> Pass<'a> {
             hold: None,
             next_queue_index: 1,
             placed_mask: 0,
+            fulfilled_role_mask: 0,
             checkpoint_step: None,
             checkpoint_is_pc: false,
             borrowed_count: 0,
@@ -525,6 +545,7 @@ impl<'a> Pass<'a> {
             let required_mask = (1_u64 << self.query.required_placements) - 1;
             if state.checkpoint_step.is_some()
                 && state.placed_mask == required_mask
+                && state.fulfilled_role_mask == required_mask
                 && state.board.words() == self.query.final_board.words()
                 && (self.max_borrowed == 0 || state.borrowed_count > 0)
             {
@@ -548,32 +569,22 @@ impl<'a> Pass<'a> {
             if usize::from(choice.token.index) >= self.query.required_placements {
                 continue;
             }
-            let is_stage_two = usize::from(choice.token.index) >= self.query.stage_one_queue_len;
-            if is_stage_two
-                && state.checkpoint_step.is_none()
-                && (state.borrowed_count >= self.max_borrowed
-                    || usize::from(choice.token.index) != self.query.borrow_source_index)
-            {
-                continue;
-            }
             let preserve_b2b = self.requires_b2b_for_lock(state, usize::from(choice.token.index));
+            let role_candidates: Vec<usize> = if self.query.placement_role_masks.is_empty() {
+                vec![usize::from(choice.token.index)]
+            } else {
+                (0..self.query.required_placements)
+                    .filter(|role| {
+                        state.fulfilled_role_mask & (1_u64 << role) == 0
+                            && self.query.role_piece(*role) == choice.token.piece
+                    })
+                    .collect()
+            };
             let locks = self
                 .reachability
                 .reachable_locks(state.board, choice.token.piece, true, true)
                 .to_vec();
             for lock in locks {
-                if !self.query.placement_role_masks.is_empty()
-                    && lock.mask.words()
-                        != self.query.placement_role_masks[usize::from(choice.token.index)].words()
-                {
-                    continue;
-                }
-                if is_stage_two
-                    && state.checkpoint_step.is_none()
-                    && lock.mask.words() != self.query.borrow_placement_mask.words()
-                {
-                    continue;
-                }
                 let placed = state.board.union_for_height(lock.mask, self.query.height);
                 let (board_after, cleared_rows, cleared_lines) =
                     place_and_clear(10, self.query.height, placed);
@@ -614,83 +625,107 @@ impl<'a> Pass<'a> {
                 {
                     continue;
                 }
-                let stage_one_placed = if is_stage_two {
-                    state.stage_one_board
-                } else {
-                    state
-                        .stage_one_board
-                        .union_for_height(lock.mask, self.query.height)
-                };
-                let stage_two_placed = if is_stage_two {
-                    state
-                        .stage_two_board
-                        .union_for_height(lock.mask, self.query.height)
-                } else {
-                    state.stage_two_board
-                };
-                let stage_one_board =
-                    compact_tag(stage_one_placed, cleared_rows, self.query.height);
-                let stage_two_board =
-                    compact_tag(stage_two_placed, cleared_rows, self.query.height);
-                let placed_mask = state.placed_mask | (1_u64 << choice.token.index);
-                let stage_one_mask = (1_u64 << self.query.stage_one_queue_len) - 1;
-                let checkpoint_reached = state.checkpoint_step.is_none()
-                    && placed_mask & stage_one_mask == stage_one_mask
-                    && stage_one_board.is_empty();
-                let next_queue_index = choice.next_queue_index;
-                let active = if usize::from(next_queue_index) < self.query.queue.len() {
-                    Some(Token {
-                        index: next_queue_index,
-                        piece: self.query.queue[usize::from(next_queue_index)],
-                    })
-                } else {
-                    None
-                };
-                let next = State {
-                    board: board_after,
-                    stage_one_board,
-                    stage_two_board,
-                    active,
-                    hold: choice.hold_after,
-                    next_queue_index: next_queue_index.saturating_add(u8::from(active.is_some())),
-                    placed_mask,
-                    checkpoint_step: if checkpoint_reached {
-                        Some((path.len() + 1) as u8)
+                for role_index in &role_candidates {
+                    let role_index = *role_index;
+                    if state.fulfilled_role_mask & (1_u64 << role_index) != 0 {
+                        continue;
+                    }
+                    if !self.query.placement_role_masks.is_empty()
+                        && lock.mask.words() != self.query.placement_role_masks[role_index].words()
+                    {
+                        continue;
+                    }
+                    let is_stage_two = role_index >= self.query.stage_one_queue_len;
+                    if is_stage_two
+                        && state.checkpoint_step.is_none()
+                        && (state.borrowed_count >= self.max_borrowed
+                            || role_index != self.query.borrow_role_index
+                            || lock.mask.words() != self.query.borrow_placement_mask.words())
+                    {
+                        continue;
+                    }
+                    let stage_one_placed = if is_stage_two {
+                        state.stage_one_board
                     } else {
-                        state.checkpoint_step
-                    },
-                    checkpoint_is_pc: if checkpoint_reached {
-                        board_after.is_empty()
+                        state
+                            .stage_one_board
+                            .union_for_height(lock.mask, self.query.height)
+                    };
+                    let stage_two_placed = if is_stage_two {
+                        state
+                            .stage_two_board
+                            .union_for_height(lock.mask, self.query.height)
                     } else {
-                        state.checkpoint_is_pc
-                    },
-                    borrowed_count: state.borrowed_count
-                        + u8::from(is_stage_two && state.checkpoint_step.is_none()),
-                    b2b_active,
-                };
-                debug_assert_eq!(
-                    next.board.words(),
-                    next.stage_one_board.union(next.stage_two_board).words()
-                );
-                path.push(BoundaryRecoveryStep {
-                    source_queue_index: usize::from(choice.token.index),
-                    piece: choice.token.piece,
-                    rotation: lock.rotation,
-                    x: lock.x,
-                    y: lock.y,
-                    hold_decision: choice.decision,
-                    placement_mask: lock.mask.words(),
-                    cleared_row_mask: cleared_rows,
-                    board_after: board_after.words(),
-                    cleared_lines,
-                    recognized_spin,
-                    b2b_active_after: b2b_active,
-                    stage_one_complete_after: next.checkpoint_step.is_some(),
-                });
-                if let Some(found) = self.visit(next, path)? {
-                    return Ok(Some(found));
+                        state.stage_two_board
+                    };
+                    let stage_one_board =
+                        compact_tag(stage_one_placed, cleared_rows, self.query.height);
+                    let stage_two_board =
+                        compact_tag(stage_two_placed, cleared_rows, self.query.height);
+                    let placed_mask = state.placed_mask | (1_u64 << choice.token.index);
+                    let fulfilled_role_mask = state.fulfilled_role_mask | (1_u64 << role_index);
+                    let stage_one_mask = (1_u64 << self.query.stage_one_queue_len) - 1;
+                    let checkpoint_reached = state.checkpoint_step.is_none()
+                        && fulfilled_role_mask & stage_one_mask == stage_one_mask
+                        && stage_one_board.is_empty();
+                    let next_queue_index = choice.next_queue_index;
+                    let active = if usize::from(next_queue_index) < self.query.queue.len() {
+                        Some(Token {
+                            index: next_queue_index,
+                            piece: self.query.queue[usize::from(next_queue_index)],
+                        })
+                    } else {
+                        None
+                    };
+                    let next = State {
+                        board: board_after,
+                        stage_one_board,
+                        stage_two_board,
+                        active,
+                        hold: choice.hold_after,
+                        next_queue_index: next_queue_index
+                            .saturating_add(u8::from(active.is_some())),
+                        placed_mask,
+                        fulfilled_role_mask,
+                        checkpoint_step: if checkpoint_reached {
+                            Some((path.len() + 1) as u8)
+                        } else {
+                            state.checkpoint_step
+                        },
+                        checkpoint_is_pc: if checkpoint_reached {
+                            board_after.is_empty()
+                        } else {
+                            state.checkpoint_is_pc
+                        },
+                        borrowed_count: state.borrowed_count
+                            + u8::from(is_stage_two && state.checkpoint_step.is_none()),
+                        b2b_active,
+                    };
+                    debug_assert_eq!(
+                        next.board.words(),
+                        next.stage_one_board.union(next.stage_two_board).words()
+                    );
+                    path.push(BoundaryRecoveryStep {
+                        source_queue_index: usize::from(choice.token.index),
+                        placement_role_index: role_index,
+                        piece: choice.token.piece,
+                        rotation: lock.rotation,
+                        x: lock.x,
+                        y: lock.y,
+                        hold_decision: choice.decision,
+                        placement_mask: lock.mask.words(),
+                        cleared_row_mask: cleared_rows,
+                        board_after: board_after.words(),
+                        cleared_lines,
+                        recognized_spin,
+                        b2b_active_after: b2b_active,
+                        stage_one_complete_after: next.checkpoint_step.is_some(),
+                    });
+                    if let Some(found) = self.visit(next, path)? {
+                        return Ok(Some(found));
+                    }
+                    path.pop();
                 }
-                path.pop();
             }
         }
         Ok(None)
@@ -769,8 +804,9 @@ mod tests {
             stage_one_queue_len: 1,
             required_placements: 2,
             placement_role_masks: Vec::new(),
+            placement_role_pieces: Vec::new(),
             max_early_placements: 1,
-            borrow_source_index: 1,
+            borrow_role_index: 1,
             borrow_placement_mask: Board256Mask::from_words([0x300c000, 0, 0, 0]),
             hold_enabled: false,
             rule_profile: RuleProfileId::SrsPlus,
@@ -861,7 +897,7 @@ mod tests {
         assert_eq!(report.status, BoundaryRecoveryStatus::NoPath);
 
         query.max_early_placements = 1;
-        query.borrow_source_index = 2;
+        query.borrow_role_index = 2;
         assert_eq!(
             query.search(&control()),
             Err(BoundaryRecoveryError::InvalidBorrowRole)
@@ -983,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn bag_roles_follow_piece_identity_and_selected_borrow_across_permutations() {
+    fn bag_roles_remain_fixed_while_supply_tokens_permute() {
         let mut reference = two_stage_query();
         reference.height = 8;
         reference.initial_board = Board256Mask::EMPTY;
@@ -1006,7 +1042,7 @@ mod tests {
         ];
         reference.stage_one_queue_len = 7;
         reference.required_placements = 14;
-        reference.borrow_source_index = 10;
+        reference.borrow_role_index = 10;
         reference.placement_role_masks = (0..14)
             .map(|index| Board256Mask::from_words([0xf_u64 << (index * 4), 0, 0, 0]))
             .collect();
@@ -1017,15 +1053,12 @@ mod tests {
         sequence[7..].rotate_left(3);
         let projected = plan.query_for_sequence(&sequence).unwrap();
         assert_eq!(projected.queue, sequence);
+        assert_eq!(projected.placement_role_pieces, reference.queue);
         assert_eq!(
-            projected.placement_role_masks[0],
-            reference.placement_role_masks[6]
+            projected.placement_role_masks,
+            reference.placement_role_masks
         );
-        assert_eq!(projected.borrow_source_index, 7);
-        assert_eq!(
-            projected.placement_role_masks[7],
-            reference.borrow_placement_mask
-        );
+        assert_eq!(projected.borrow_role_index, reference.borrow_role_index);
         assert_eq!(
             projected.borrow_placement_mask,
             reference.borrow_placement_mask
@@ -1033,6 +1066,38 @@ mod tests {
 
         sequence[7] = PieceKind::I;
         assert!(plan.query_for_sequence(&sequence).is_none());
+    }
+
+    #[test]
+    fn identical_supply_pieces_can_fill_roles_across_the_stage_boundary() {
+        let mut query = two_stage_query();
+        query.initial_board = Board256Mask::from_words([0xff3fc, 0, 0, 0]);
+        query.queue = vec![PieceKind::O, PieceKind::O];
+        query.placement_role_masks = vec![
+            Board256Mask::from_words([0xc03, 0, 0, 0]),
+            Board256Mask::from_words([0xc03000000, 0, 0, 0]),
+        ];
+        query.placement_role_pieces = query.queue.clone();
+        query.borrow_placement_mask = query.placement_role_masks[1];
+
+        let (result, states) = Pass::new(&query, &control(), 1).unwrap().run().unwrap();
+        let PassResult::Found {
+            steps,
+            checkpoint_is_pc,
+            borrowed_count,
+            ..
+        } = result
+        else {
+            panic!("same-piece roles should cross the boundary: {result:?}, states={states}");
+        };
+        assert_eq!(steps.len(), 2);
+        assert_eq!(borrowed_count, 1);
+        assert!(!checkpoint_is_pc);
+        assert_eq!(steps[0].source_queue_index, 0);
+        assert_eq!(steps[0].placement_role_index, 1);
+        assert_eq!(steps[1].source_queue_index, 1);
+        assert_eq!(steps[1].placement_role_index, 0);
+        assert_eq!(steps[1].board_after, query.final_board.words());
     }
 
     #[test]
@@ -1050,7 +1115,7 @@ mod tests {
             query.placement_role_masks[step.source_queue_index] =
                 Board256Mask::from_words(step.placement_mask);
         }
-        query.borrow_placement_mask = query.placement_role_masks[query.borrow_source_index];
+        query.borrow_placement_mask = query.placement_role_masks[query.borrow_role_index];
         let report = query.search(&control()).unwrap();
         assert_eq!(report.status, BoundaryRecoveryStatus::NonPcRecovery);
         assert!(report.normal_states > 0);

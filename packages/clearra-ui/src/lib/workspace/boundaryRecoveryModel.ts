@@ -13,10 +13,10 @@ export type BoundaryRecoveryRequest = {
   queuePattern: string;
   stageOneCount: number;
   placements: number;
-  /** Empty keeps occupancy-only search; otherwise one exact lock-time mask per source token. */
+  /** Empty keeps occupancy-only search; otherwise one exact lock-time mask per placement role. */
   placementRoleMasks: bigint[];
   maxEarlyPlacements: 0 | 1;
-  borrowSourcePosition: number;
+  borrowRolePosition: number;
   borrowPlacementMask: bigint;
   holdEnabled: boolean;
   rule: RuleProfile;
@@ -42,7 +42,7 @@ export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
     placements: 2,
     placementRoleMasks: [],
     maxEarlyPlacements: 1,
-    borrowSourcePosition: 2,
+    borrowRolePosition: 2,
     borrowPlacementMask: 0n,
     holdEnabled: true,
     rule: 'srs-plus',
@@ -78,7 +78,7 @@ export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest
   if (!Number.isInteger(request.stageOneCount) || request.stageOneCount < 1 || request.stageOneCount >= request.placements) errors.push('stage-one');
   if (!Number.isInteger(request.placements) || request.placements > queue.length) errors.push('placements');
   if (request.maxEarlyPlacements !== 0 && request.maxEarlyPlacements !== 1) errors.push('max-early');
-  if (request.maxEarlyPlacements === 1 && (!Number.isInteger(request.borrowSourcePosition) || request.borrowSourcePosition <= request.stageOneCount || request.borrowSourcePosition > request.placements)) errors.push('borrow-source');
+  if (request.maxEarlyPlacements === 1 && (!Number.isInteger(request.borrowRolePosition) || request.borrowRolePosition <= request.stageOneCount || request.borrowRolePosition > request.placements)) errors.push('borrow-role');
   if (!Number.isInteger(request.maxStates) || request.maxStates < 1 || request.maxStates > 1_000_000) errors.push('max-states');
   const bagCount = boundaryRecoveryBagSlots(request.stageOneCount, request.placements).length;
   if (new Set(request.preserveB2BBags).size !== request.preserveB2BBags.length ||
@@ -121,7 +121,7 @@ export function boundaryRecoveryArguments(request: BoundaryRecoveryRequest): str
     '--stage-one-count', String(request.stageOneCount),
     '--placements', String(request.placements),
     '--max-early-placements', String(request.maxEarlyPlacements),
-    '--borrow-source-position', String(request.borrowSourcePosition),
+    '--borrow-role-position', String(request.borrowRolePosition),
     request.holdEnabled ? '--hold' : '--no-hold',
     '--rule', request.rule,
     '--spin-profile', request.spinProfile,

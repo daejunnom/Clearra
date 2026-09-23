@@ -19,7 +19,7 @@ export function validateBoundaryRecoveryPayload(product: ClearraProductResultPay
         population === undefined &&
         ['normal', 'pc-preserving-recovery', 'non-pc-recovery', 'no-path-within-declared-scope', 'incomplete'].includes(report.status)) &&
     (report.max_early_placements === 0 || report.max_early_placements === 1) &&
-    Number.isInteger(report.borrow_source_index) && report.borrow_source_index >= 0 && report.borrow_source_index < 42 &&
+    Number.isInteger(report.borrow_role_index) && report.borrow_role_index >= 0 && report.borrow_role_index < 42 &&
     /^0x[0-9a-f]{1,64}$/u.test(report.borrow_placement_mask) &&
     Number.isSafeInteger(report.normal_states) && report.normal_states >= 0 &&
     Number.isSafeInteger(report.recovery_states) && report.recovery_states >= 0 &&
@@ -28,8 +28,11 @@ export function validateBoundaryRecoveryPayload(product: ClearraProductResultPay
 
 function validSteps(steps: ClearraBoundaryRecoveryStepPayload[]): boolean {
   return Array.isArray(steps) && steps.length <= 42 &&
+    new Set(steps.map((step) => step.source_queue_index)).size === steps.length &&
+    new Set(steps.map((step) => step.placement_role_index)).size === steps.length &&
     steps.every((step) =>
       Number.isInteger(step.source_queue_index) && step.source_queue_index >= 0 && step.source_queue_index < 42 &&
+      Number.isInteger(step.placement_role_index) && step.placement_role_index >= 0 && step.placement_role_index < 42 &&
       /^[IJLOSTZ]$/u.test(step.piece) &&
       /^0x[0-9a-f]{1,64}$/u.test(step.placement_mask) &&
       /^0x[0-9a-f]{1,64}$/u.test(step.board_after_mask)

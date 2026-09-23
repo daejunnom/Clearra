@@ -821,8 +821,8 @@ export function productResultIdentity(payload: ClearraProductResultPayload | nul
         population.unknown_probability, population.normal_example?.queue ?? '',
         population.recovery_example?.queue ?? ''].join(':');
     }
-    return [payload.contract, payload.result_kind, report.status, report.knowledge_basis, report.placement_role_scope, report.max_early_placements, report.borrow_source_index, report.borrow_placement_mask, report.normal_states, report.recovery_states,
-      ...report.steps.map((step) => `${step.source_queue_index}:${step.piece}:${step.placement_mask}:${step.board_after_mask}`)].join(':');
+    return [payload.contract, payload.result_kind, report.status, report.knowledge_basis, report.placement_role_scope, report.max_early_placements, report.borrow_role_index, report.borrow_placement_mask, report.normal_states, report.recovery_states,
+      ...report.steps.map((step) => `${step.source_queue_index}:${step.placement_role_index}:${step.piece}:${step.placement_mask}:${step.board_after_mask}`)].join(':');
   }
   return [payload.contract, payload.result_kind, payload.content.payload.sha256].join(':');
 }
