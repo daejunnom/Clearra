@@ -1,6 +1,7 @@
 use clearra_pc4_qualifier::{
-    generate_legal_board, validate_legal_board_candidate_catalog,
-    verify_legal_board_candidate_source_chain, LegalBoardGenerationOptions,
+    generate_legal_board, legal_board_source_chain_identity,
+    validate_legal_board_candidate_catalog, verify_legal_board_candidate_source_chain,
+    LegalBoardGenerationOptions,
 };
 use clearra_rules::kicks::KickTableProfileId;
 use sha2::{Digest, Sha256};
@@ -210,12 +211,8 @@ fn write_source_chain_receipt(
     let catalog_identity: [u8; 32] = Sha256::digest(&catalog_bytes).into();
     let profile_name = clearra_core_executor::accelerator_profile_name(profile)
         .map_err(|_| "legal-board profile is unsupported")?;
-    let mut chain = Sha256::new();
-    chain.update(b"clearra.v081.legal-board.source-chain-receipt.v1\0");
-    chain.update(profile_name.as_bytes());
-    chain.update(catalog_identity);
-    chain.update(bundle_identity);
-    let chain_identity: [u8; 32] = chain.finalize().into();
+    let chain_identity =
+        legal_board_source_chain_identity(profile, catalog_identity, bundle_identity)?;
     let serialized = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": "clearra.legal-board.source-chain-receipt.v1",
         "status": "source_chain_verified_unqualified",

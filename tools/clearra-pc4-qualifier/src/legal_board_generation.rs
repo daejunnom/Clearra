@@ -57,6 +57,23 @@ pub fn verify_legal_board_candidate_source_chain(
     finish_exact_bundle(binding, options, true)
 }
 
+/// Identity of a successfully replayed F/R/L chain and its byte-identical
+/// candidate outputs. This is evidence metadata, never activation authority.
+pub fn legal_board_source_chain_identity(
+    profile: KickTableProfileId,
+    catalog_identity: [u8; 32],
+    bundle_identity: [u8; 32],
+) -> Result<[u8; 32], String> {
+    let name = clearra_core_executor::accelerator_profile_name(profile)
+        .map_err(|_| "legal-board source-chain profile is unsupported")?;
+    let mut chain = Sha256::new();
+    chain.update(b"clearra.v081.legal-board.source-chain-receipt.v1\0");
+    chain.update(name.as_bytes());
+    chain.update(catalog_identity);
+    chain.update(bundle_identity);
+    Ok(chain.finalize().into())
+}
+
 fn validate_options(options: &LegalBoardGenerationOptions) -> Result<(), String> {
     if !options.layers.is_absolute()
         || !options.bundle.is_absolute()

@@ -21,8 +21,8 @@ use clearra_core_executor::{
     EXACT_LEGAL_BOARD_COMPLETENESS_SCOPE,
 };
 use clearra_pc4_qualifier::{
-    validate_legal_board_candidate_catalog, verify_legal_board_candidate_source_chain,
-    LegalBoardGenerationOptions,
+    legal_board_source_chain_identity, validate_legal_board_candidate_catalog,
+    verify_legal_board_candidate_source_chain, LegalBoardGenerationOptions,
 };
 use clearra_rules::kicks::KickTableProfileId;
 use ed25519_dalek::{Signer, SigningKey};
@@ -69,6 +69,7 @@ struct VerifiedInput {
     shared_bytes: usize,
     bundle_identity: [u8; 32],
     catalog_identity: [u8; 32],
+    chain_identity: [u8; 32],
     generation_identity: [u8; 32],
     rule_identity: [u8; 32],
     layer_counts: [u64; 11],
@@ -183,6 +184,8 @@ fn run() -> Result<(), String> {
                 .ok_or("legal-board layer directory incomplete")?;
         }
         let catalog_identity: [u8; 32] = Sha256::digest(&catalog_bytes).into();
+        let chain_identity =
+            legal_board_source_chain_identity(profile, catalog_identity, actual_hash)?;
         verified.push(VerifiedInput {
             profile,
             name,
@@ -190,6 +193,7 @@ fn run() -> Result<(), String> {
             shared_bytes,
             bundle_identity: actual_hash,
             catalog_identity,
+            chain_identity,
             generation_identity: summary.generation_identity,
             rule_identity: binding.rule_identity,
             layer_counts: summary.layer_counts,
@@ -269,7 +273,7 @@ fn run() -> Result<(), String> {
             "activation_envelope_json": envelope,
             "metadata": {
                 "active_session_shared_bytes": input.shared_bytes.to_string(),
-                "chain_identity": hex(input.catalog_identity),
+                "chain_identity": hex(input.chain_identity),
                 "generation_identity": hex(input.generation_identity),
                 "layer_counts": input.layer_counts.map(|count| count.to_string()),
                 "layer_payload_identities": input.layer_payload_identities.map(hex),

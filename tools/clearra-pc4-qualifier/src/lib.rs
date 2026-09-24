@@ -40,5 +40,6 @@ pub use legal_board_candidate_validation::{
     validate_legal_board_candidate_catalog, LegalBoardCandidateSummary,
 };
 pub use legal_board_generation::{
-    generate_legal_board, verify_legal_board_candidate_source_chain, LegalBoardGenerationOptions,
+    generate_legal_board, legal_board_source_chain_identity,
+    verify_legal_board_candidate_source_chain, LegalBoardGenerationOptions,
 };
