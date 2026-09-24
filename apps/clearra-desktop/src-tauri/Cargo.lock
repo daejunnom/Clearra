@@ -393,6 +393,7 @@ dependencies = [
  "clearra-objectives",
  "clearra-output",
  "clearra-pc-graph",
+ "clearra-pc4-tablebase",
  "clearra-postprocess",
  "clearra-problem",
  "clearra-profiles",
@@ -403,6 +404,7 @@ dependencies = [
  "clearra-supply",
  "clearra-validation",
  "getrandom 0.4.3",
+ "serde_json",
  "sha2",
 ]
 
@@ -614,6 +616,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "clearra-pc4-tablebase"
+version = "0.8.1"
+
+[[package]]
 name = "clearra-piece-registry"
 version = "0.8.1"
 dependencies = [
@@ -805,8 +811,11 @@ dependencies = [
  "clearra-forward-search",
  "clearra-host-contract",
  "clearra-pc-graph",
+ "clearra-pc4-tablebase",
  "clearra-problem",
  "clearra-spin-structure-search",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
