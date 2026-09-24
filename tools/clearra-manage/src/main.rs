@@ -6,6 +6,7 @@ mod wsl;
 use serde_json::json;
 use std::ffi::OsString;
 use std::fmt;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -184,7 +185,40 @@ fn run_command(
                 .map_err(|_| Error::usage("--timeout must be an integer"))
         })
         .transpose()?;
+    let stdin_max_bytes = take_option(&mut arguments, "--stdin-max-bytes")
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .parse::<usize>()
+                .map_err(|_| Error::usage("--stdin-max-bytes must be an integer"))
+        })
+        .transpose()?;
+    if stdin_max_bytes.is_some_and(|maximum| !(1..=4096).contains(&maximum)) {
+        return Err(Error::usage("--stdin-max-bytes must be between 1 and 4096"));
+    }
     require_empty(&arguments)?;
+    let stdin_payload = if let Some(maximum) = stdin_max_bytes {
+        if std::io::stdin().is_terminal() {
+            return Err(Error::usage(
+                "bounded stdin requires a non-interactive pipe",
+            ));
+        }
+        let mut bytes = Vec::new();
+        let read = std::io::stdin()
+            .take(maximum as u64 + 1)
+            .read_to_end(&mut bytes);
+        if read.is_err() {
+            bytes.fill(0);
+            return Err(Error::usage("bounded stdin could not be read"));
+        }
+        if bytes.is_empty() || bytes.len() > maximum {
+            bytes.fill(0);
+            return Err(Error::usage("bounded stdin is empty or exceeds its limit"));
+        }
+        Some(runtime::BoundedStdin::new(bytes))
+    } else {
+        None
+    };
     let outcome = runtime::run(
         repository,
         policy,
@@ -194,6 +228,7 @@ fn run_command(
             timeout_seconds,
             command,
             keep_stdin_open: false,
+            stdin_payload,
             extra_env: Default::default(),
             echo: true,
         },
@@ -295,7 +330,7 @@ fn print_help() {
          clearra-manage [--root PATH] storage audit\n\
          clearra-manage [--root PATH] storage verify --path PATH [--force-unmanaged-output --force-reason REASON]\n\
          clearra-manage [--root PATH] runtime audit\n\
-         clearra-manage [--root PATH] runtime run --producer ID --profile ID [--timeout SECONDS] -- COMMAND...\n\
+         clearra-manage [--root PATH] runtime run --producer ID --profile ID [--timeout SECONDS] [--stdin-max-bytes N] -- COMMAND...\n\
          clearra-manage [--root PATH] runtime wsl verify\n\
          clearra-manage [--root PATH] runtime wsl run --entry ID -- ARGUMENTS..."
     );

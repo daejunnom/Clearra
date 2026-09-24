@@ -73,13 +73,35 @@ fn host_memory_model() -> HostMemoryModel {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Small one-shot stdin payload. Debug output must never reveal its bytes.
+pub struct BoundedStdin(Vec<u8>);
+
+impl BoundedStdin {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl std::fmt::Debug for BoundedStdin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BoundedStdin([redacted])")
+    }
+}
+
+impl Drop for BoundedStdin {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+#[derive(Debug)]
 pub struct RunOptions {
     pub producer: String,
     pub profile: String,
     pub timeout_seconds: Option<u64>,
     pub command: Vec<OsString>,
     pub keep_stdin_open: bool,
+    pub stdin_payload: Option<BoundedStdin>,
     pub extra_env: BTreeMap<OsString, OsString>,
     pub echo: bool,
 }
@@ -321,9 +343,14 @@ fn gc_acknowledged(acknowledgement: &Path, protocol: &str, request_id: &str) -> 
         && value.get("status").and_then(|value| value.as_str()) == Some("completed")
 }
 
-pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<RunOutcome> {
+pub fn run(repository: &Path, policy: &Policy, mut options: RunOptions) -> Result<RunOutcome> {
     if options.command.is_empty() {
         return Err(Error::usage("runtime run requires a command after --"));
+    }
+    if options.stdin_payload.as_ref().is_some_and(|payload| {
+        payload.0.is_empty() || payload.0.len() > 4096 || options.keep_stdin_open
+    }) {
+        return Err(Error::usage("bounded stdin has invalid size or lifetime"));
     }
     let profile = policy.profile(&options.profile)?.clone();
     let timeout = options.timeout_seconds.unwrap_or(profile.timeout_seconds);
@@ -365,11 +392,13 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
     command
         .args(&options.command[1..])
         .current_dir(repository)
-        .stdin(if options.keep_stdin_open {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(
+            if options.keep_stdin_open || options.stdin_payload.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            },
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("CLEARRA_RUNTIME_SUPERVISED", "1")
@@ -409,11 +438,7 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
     let mut child = command
         .spawn()
         .map_err(|error| Error::io("start supervised command", error))?;
-    let mut stdin_lease = if options.keep_stdin_open {
-        child.stdin.take()
-    } else {
-        None
-    };
+    let mut stdin_lease = child.stdin.take();
     let containment = match Containment::attach(
         &child,
         admission.hard_limit_bytes,
@@ -426,6 +451,18 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
             return Err(error);
         }
     };
+
+    if let Some(payload) = options.stdin_payload.take() {
+        let delivery = stdin_lease.as_mut().map(|sink| sink.write_all(&payload.0));
+        drop(stdin_lease.take());
+        if !matches!(delivery, Some(Ok(()))) {
+            terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+            let _ = child.wait();
+            return Err(Error::runtime("bounded stdin delivery failed"));
+        }
+    } else if !options.keep_stdin_open {
+        drop(stdin_lease.take());
+    }
 
     let total_output = Arc::new(AtomicU64::new(0));
     let output_exceeded = Arc::new(AtomicBool::new(false));
@@ -1240,6 +1277,14 @@ pub(crate) fn pid_alive(_: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_stdin_debug_never_displays_payload() {
+        let payload = BoundedStdin::new(b"test-only-marker".to_vec());
+        let debug = format!("{payload:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("test-only-marker"));
+    }
 
     fn profile() -> ResourceProfile {
         ResourceProfile {

@@ -129,6 +129,7 @@ pub fn run_entry(
             timeout_seconds: Some(requested_timeout),
             command,
             keep_stdin_open: true,
+            stdin_payload: None,
             extra_env: BTreeMap::new(),
             echo: true,
         },
