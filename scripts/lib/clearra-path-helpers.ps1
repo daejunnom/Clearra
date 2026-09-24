@@ -129,10 +129,9 @@ function Assert-ClearraRepositoryArtifactPolicy(
             throw "Repository-local build policy cannot be parsed: $policyPath"
         }
         $repositoryRoots = $policy.PSObject.Properties['repository_roots']
-        $buildDeclarations = if ($null -eq $repositoryRoots) {
-            @()
-        } else {
-            @($repositoryRoots.Value | Where-Object {
+        $buildDeclarations = @()
+        if ($null -ne $repositoryRoots) {
+            $buildDeclarations = @($repositoryRoots.Value | Where-Object {
                 $_.id -ceq 'build-publication' -and $_.path -ceq 'build'
             })
         }

@@ -1,3 +1,6 @@
+// SRP rationale: the single change reason for this module is the owned-process
+// runtime supervision contract; admission, pressure handling, termination,
+// and the receipt must describe the same lease and outcome.
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;

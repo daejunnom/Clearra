@@ -95,14 +95,21 @@ function Get-ClearraCommandVersionMetadata([string]$Name, [string[]]$Arguments) 
     if ($null -eq $command -or [string]::IsNullOrWhiteSpace($command.Source)) {
         return "$Name-version=unavailable"
     }
+    $previousErrorActionPreference = $ErrorActionPreference
     try {
-        $output = @(& $command.Source @Arguments 2>&1)
-        if ($LASTEXITCODE -ne 0) {
-            return "$Name-version=error-$LASTEXITCODE"
+        # Windows PowerShell can promote redirected native stderr to an error
+        # under Stop. rustup's first-use diagnostics are not compiler identity.
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $command.Source @Arguments 2>$null)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            return "$Name-version=error-$exitCode"
         }
         return "$Name-version=$(($output -join '|').Trim())"
     } catch {
         return "$Name-version=error"
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
 }
 

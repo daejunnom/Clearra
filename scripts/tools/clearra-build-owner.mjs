@@ -63,7 +63,9 @@ function commandVersion(command, arguments_, environment) {
     encoding: 'utf8', env: { ...process.env, ...environment }, windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024,
   });
   if (result.error || result.signal || result.status !== 0) return `${command}=unavailable`;
-  return `${command}=${`${result.stdout ?? ''}${result.stderr ?? ''}`.trim().replace(/\r?\n/gu, '|')}`;
+  // rustup's first-use installation writes transient diagnostics to stderr.
+  // Successful stdout is the stable compiler identity for the build snapshot.
+  return `${command}=${`${result.stdout ?? ''}`.trim().replace(/\r?\n/gu, '|')}`;
 }
 export async function buildCompilerSnapshot(sourceRoot, environment = process.env) {
   const files = await collectBuildInputFiles(sourceRoot);

@@ -12,7 +12,7 @@ function Get-SrpGovernedFiles() {
     )
     $excludedSegments = @(
         'node_modules', 'dist', 'dist-server', 'build', 'coverage',
-        'models', 'checkpoints', '.cache', '.svelte-kit', 'target', 'vendor'
+        'models', 'checkpoints', '.cache', '.svelte-kit', 'target', 'vendor', 'history'
     )
     $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     foreach ($relativeRoot in @('crates', 'core-c', 'scripts', 'tools', 'apps', 'packages', 'gui')) {

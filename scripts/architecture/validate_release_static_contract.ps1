@@ -3841,8 +3841,10 @@ function Invoke-ReleaseIdentityGateValidation {
     }
     foreach ($required in @(
         'serializeClearraWasmManifest',
-        'CLEARRA_SOURCE_COMMIT=',
-        'CLEARRA_ENGINE_BUILD_ID='
+        'createClearraWasmBuildContract(root)',
+        "'--source-commit'",
+        "'--engine-build-id'",
+        'env: { ...process.env, ...extraEnvironment }'
     )) {
         if ($wasmBuild.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "WASM build is missing compile identity propagation '$required'"
