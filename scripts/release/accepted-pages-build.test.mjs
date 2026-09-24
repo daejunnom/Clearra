@@ -58,7 +58,7 @@ test("stamps and verifies a closed accepted Pages build", async () => {
 test("v0.8.1 cannot accept a Pages build that omits qualified accelerator bytes", async () => {
   await withFixture(async (build) => {
     await assert.rejects(stampAcceptedPagesBuild(build, { ...AUTHORITY, version: "0.8.1" }),
-      /Pages board-conditioned-reachability\/srs/u);
+      /Pages exact-legal-board\/srs/u);
   });
 });
 

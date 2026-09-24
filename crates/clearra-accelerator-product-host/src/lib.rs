@@ -31,7 +31,13 @@ const CONDITIONED_PUBLIC_KEY: [u8; 32] = [
     0x18, 0x70, 0xcd, 0xc0, 0x5d, 0x9d, 0xa3, 0x04, 0x1a, 0xe2, 0xe0, 0x76, 0xa8, 0x76, 0xd3, 0x28,
     0x85, 0x5a, 0xbd, 0x7f, 0x06, 0x85, 0x68, 0x23, 0xa3, 0x92, 0x56, 0xe4, 0x67, 0xd9, 0x5a, 0x8e,
 ];
-const PRODUCTION_KEYS: [PinnedPublicKey; 2] = [
+const LEGAL_BOARD_KEY_ID: &str =
+    "ed25519-raw-sha256:fd9537495c1168cfa8106ec1e3401f35f762aa76ce383ab8a17cf5a4faba9dbe";
+const LEGAL_BOARD_PUBLIC_KEY: [u8; 32] = [
+    0x9f, 0x46, 0x59, 0x4a, 0xc9, 0x96, 0xd1, 0x11, 0xcb, 0xc0, 0xfd, 0xe1, 0x8a, 0x20, 0xde, 0x4b,
+    0x58, 0x91, 0xcd, 0x70, 0xfd, 0xda, 0x22, 0xdb, 0xd9, 0x93, 0x54, 0x26, 0xdd, 0x59, 0x12, 0x96,
+];
+const PRODUCTION_KEYS: [PinnedPublicKey; 3] = [
     PinnedPublicKey {
         key_id: KEY_ID,
         public_key: PUBLIC_KEY,
@@ -39,6 +45,10 @@ const PRODUCTION_KEYS: [PinnedPublicKey; 2] = [
     PinnedPublicKey {
         key_id: CONDITIONED_KEY_ID,
         public_key: CONDITIONED_PUBLIC_KEY,
+    },
+    PinnedPublicKey {
+        key_id: LEGAL_BOARD_KEY_ID,
+        public_key: LEGAL_BOARD_PUBLIC_KEY,
     },
 ];
 const PROFILES: [&str; 5] = ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"];
@@ -619,10 +629,7 @@ mod tests {
         ] {
             let catalog = embedded_catalog(kind).expect("checked-in catalog");
             assert_eq!(catalog.kind(), kind);
-            assert_eq!(
-                catalog.all_profiles_qualified(),
-                kind == ProductCatalogKind::BoardConditionedReachability
-            );
+            assert!(catalog.all_profiles_qualified());
             assert_eq!(
                 catalog
                     .profiles()
@@ -632,17 +639,14 @@ mod tests {
                 PROFILES
             );
             for profile in catalog.profiles() {
-                match (kind, profile.status()) {
-                    (ProductCatalogKind::ExactLegalBoard, CatalogProfileStatus::NotQualified) => {}
-                    (
-                        ProductCatalogKind::BoardConditionedReachability,
-                        CatalogProfileStatus::Qualified(asset),
-                    ) => {
-                        assert_eq!(asset.authority().profile(), profile.profile());
-                        assert_eq!(asset.authority().completeness_scope(), CONDITIONED_SCOPE);
-                    }
-                    _ => panic!("product authority changed without qualification"),
-                }
+                let CatalogProfileStatus::Qualified(asset) = profile.status() else {
+                    panic!("a required profile lost qualification");
+                };
+                assert_eq!(asset.authority().profile(), profile.profile());
+                assert_eq!(
+                    asset.authority().completeness_scope(),
+                    kind.completeness_scope()
+                );
             }
         }
     }

@@ -1,11 +1,211 @@
 {
   "product": "exact-legal-board",
   "profiles": [
-    { "activation_envelope_json": null, "metadata": null, "profile": "srs", "status": "not_qualified" },
-    { "activation_envelope_json": null, "metadata": null, "profile": "srs-plus", "status": "not_qualified" },
-    { "activation_envelope_json": null, "metadata": null, "profile": "srs-x", "status": "not_qualified" },
-    { "activation_envelope_json": null, "metadata": null, "profile": "jstris-180", "status": "not_qualified" },
-    { "activation_envelope_json": null, "metadata": null, "profile": "no-kick", "status": "not_qualified" }
+    {
+      "activation_envelope_json": "{\"schema\":\"clearra.accelerator.signed-asset-envelope.v1\",\"signature_hex\":\"bde502a286a1e1f996322685ec7c75895baf82d0932781d70aad1ebc550b2ffc4cae7ba670758ecf61fc55c29325cdd6d7487e0b524defa67c95841fdb43fa05\",\"statement_json\":\"{\\\"algorithm\\\":\\\"ed25519\\\",\\\"asset_url\\\":\\\"https://github.com/daejunnom/Clearra/releases/download/legal-board-data-v081-20260924-rc1/legal-board-srs-v2.cllb\\\",\\\"completeness_scope\\\":\\\"empty-origin-10x4-four-lines-f-intersection-r\\\",\\\"generation_identity\\\":\\\"d1ebd4f848dba7344a59379bfb698a1438dc756aac26f94517f437b1d6ae7f55\\\",\\\"key_id\\\":\\\"ed25519-raw-sha256:fd9537495c1168cfa8106ec1e3401f35f762aa76ce383ab8a17cf5a4faba9dbe\\\",\\\"payload_bytes\\\":\\\"23749029\\\",\\\"payload_identity\\\":\\\"0dee2f88b01c8f44df8c2e5f3d5b7f6b76feb772b4e2fb7b7daab4165b155160\\\",\\\"product\\\":\\\"exact-legal-board\\\",\\\"profile\\\":\\\"srs\\\",\\\"qualification_identity\\\":\\\"6051f8c23553abb159bee4dbed816b46ba525cd5bcdc2b245b09d75a26fba92d\\\",\\\"repository\\\":\\\"daejunnom/Clearra\\\",\\\"revision\\\":\\\"fb956214f0163524deb9228a5c580c3523e85abe\\\",\\\"rule_identity\\\":\\\"e12ea69b112558767e681bbe48ef9cc6f292dd84e5b19d3b3457bce6ebe7d266\\\",\\\"schema\\\":\\\"clearra.accelerator.asset-statement.v1\\\"}\"}",
+      "metadata": {
+        "active_session_shared_bytes": "49167669",
+        "chain_identity": "50ca306efca26e2e00752445e74a3e3d51a7859e09b61ea89b450ee1c016cb88",
+        "generation_identity": "d1ebd4f848dba7344a59379bfb698a1438dc756aac26f94517f437b1d6ae7f55",
+        "layer_counts": [
+          "1",
+          "162",
+          "10181",
+          "269260",
+          "2438591",
+          "6333803",
+          "4423633",
+          "718155",
+          "19129",
+          "100",
+          "1"
+        ],
+        "layer_payload_identities": [
+          "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "0b62af0bc1dfb83489243932637eaaacb787fabbc036aceedf5d3fbc17c0989d",
+          "2b557d2048e6b9dfdf78a2829457bd9d97f587c1252cf9ec56248c9b3e013b8d",
+          "d4614f738e257f52fa8e0405c2959535bc3fd95b69681c696f44688c8feceb8e",
+          "7b6049192e0b4bfb039571ed1ef232438e46609b5e09b3246e3df32fccca63bf",
+          "68a07f219f97f0463b569c8f3d4bec10fdc02bd37a4846ca213dc696b3a0c824",
+          "af42152404e113961f7f28d1b5720b43163b32372579f0b612e693f6aba6d778",
+          "8784b5bb82cd9fb4f9b79d88d059324839fdac3d01b2f5c3cafc56108e731c02",
+          "5fad581c7355d39c96703f8555c958463123fa3544cf30b4092df722e1a3ebc3",
+          "60d3cd45fd68b10f2253aa61e2b9fcf2c3d69139e2d38d14aff7424535746ed9",
+          "7252cc31e752bf59d56683b5c22d281f6c568d5c204d6694cf9a69531351caba"
+        ],
+        "payload_bytes": "23749029",
+        "payload_identity": "0dee2f88b01c8f44df8c2e5f3d5b7f6b76feb772b4e2fb7b7daab4165b155160",
+        "qualification_identity": "6051f8c23553abb159bee4dbed816b46ba525cd5bcdc2b245b09d75a26fba92d",
+        "rule_identity": "e12ea69b112558767e681bbe48ef9cc6f292dd84e5b19d3b3457bce6ebe7d266",
+        "url": "https://github.com/daejunnom/Clearra/releases/download/legal-board-data-v081-20260924-rc1/legal-board-srs-v2.cllb"
+      },
+      "profile": "srs",
+      "status": "qualified"
+    },
+    {
+      "activation_envelope_json": "{\"schema\":\"clearra.accelerator.signed-asset-envelope.v1\",\"signature_hex\":\"b3d1f6d155a614ae4735f9ae87599dc2c66d361547194d8caebef6f55a7b2ca00194bcfc6760b8c480a5590ac6020eafb63aa1972b5157e434f4d12da2e4db04\",\"statement_json\":\"{\\\"algorithm\\\":\\\"ed25519\\\",\\\"asset_url\\\":\\\"https://github.com/daejunnom/Clearra/releases/download/legal-board-data-v081-20260924-rc1/legal-board-srs-plus-v2.cllb\\\",\\\"completeness_scope\\\":\\\"empty-origin-10x4-four-lines-f-intersection-r\\\",\\\"generation_identity\\\":\\\"f03d3857c23a79bc41e9eac21d40effc399b03d8032084cef4a98410bdffeb8c\\\",\\\"key_id\\\":\\\"ed25519-raw-sha256:fd9537495c1168cfa8106ec1e3401f35f762aa76ce383ab8a17cf5a4faba9dbe\\\",\\\"payload_bytes\\\":\\\"25367054\\\",\\\"payload_identity\\\":\\\"e830202b61034a3dcdf7c0e03cb3b94a5bbd06a6e0b651776a5a14d6b6a6e7d2\\\",\\\"product\\\":\\\"exact-legal-board\\\",\\\"profile\\\":\\\"srs-plus\\\",\\\"qualification_identity\\\":\\\"1f7ca7fa0014879cf579cbf42cc90d7711c1f9838360865b13ab739aa004d040\\\",\\\"repository\\\":\\\"daejunnom/Clearra\\\",\\\"revision\\\":\\\"fb956214f0163524deb9228a5c580c3523e85abe\\\",\\\"rule_identity\\\":\\\"84b8cf5b9285df395ba602ecd894d351abecb632da2898d77618f9945d6198c9\\\",\\\"schema\\\":\\\"clearra.accelerator.asset-statement.v1\\\"}\"}",
+      "metadata": {
+        "active_session_shared_bytes": "50785694",
+        "chain_identity": "c91490c5aec7f2a98f6c64b33369bf1162fcbb29a9ce5404a6f8a88fd5aef544",
+        "generation_identity": "f03d3857c23a79bc41e9eac21d40effc399b03d8032084cef4a98410bdffeb8c",
+        "layer_counts": [
+          "1",
+          "162",
+          "10191",
+          "273489",
+          "2557506",
+          "6830860",
+          "4796285",
+          "754994",
+          "19412",
+          "100",
+          "1"
+        ],
+        "layer_payload_identities": [
+          "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "0b62af0bc1dfb83489243932637eaaacb787fabbc036aceedf5d3fbc17c0989d",
+          "5c2eb2d43aa7e7b9258e090b69a4b07a34191899e09601d9e5851fb5593b047b",
+          "6fce72c75a7f5886a8056fe4562842e53bdf024cc3500cfa629a43aab646485b",
+          "307037c41c69115ff90f3099e96278644eea03704b58be044a68e2db2676e669",
+          "66bc12f92155bcd636a2fee6ff4d0da83c41baf7d706be14197d4e8b73d0164d",
+          "20b5a8b2bb57171d331e88ebf2f3f910aa4fcebe353da327bfc7ee36aede6fb0",
+          "9b2b09f801f5bfc56fe1ffd96c0f7c2ebe2c52ea0a2716a70c327d5b12f23d4c",
+          "fd38f3ee385720bfcf40faa8702591fd9781bd60fcde421f3d45d6af802809ae",
+          "60d3cd45fd68b10f2253aa61e2b9fcf2c3d69139e2d38d14aff7424535746ed9",
+          "7252cc31e752bf59d56683b5c22d281f6c568d5c204d6694cf9a69531351caba"
+        ],
+        "payload_bytes": "25367054",
+        "payload_identity": "e830202b61034a3dcdf7c0e03cb3b94a5bbd06a6e0b651776a5a14d6b6a6e7d2",
+        "qualification_identity": "1f7ca7fa0014879cf579cbf42cc90d7711c1f9838360865b13ab739aa004d040",
+        "rule_identity": "84b8cf5b9285df395ba602ecd894d351abecb632da2898d77618f9945d6198c9",
+        "url": "https://github.com/daejunnom/Clearra/releases/download/legal-board-data-v081-20260924-rc1/legal-board-srs-plus-v2.cllb"
+      },
+      "profile": "srs-plus",
+      "status": "qualified"
+    },
+    {
+      "activation_envelope_json": "{\"schema\":\"clearra.accelerator.signed-asset-envelope.v1\",\"signature_hex\":\"03f4a927c82e64f266caf41a88f54e0a133edf0290ac737fa8aced30baf27e49428fe7d6d53201a0c68b89ac2844f10362fe8087572675f74f78526ff4a12c00\",\"statement_json\":\"{\\\"algorithm\\\":\\\"ed25519\\\",\\\"asset_url\\\":\\\"https://github.com/daejunnom/Clearra/releases/download/legal-board-data-v081-20260924-rc1/legal-board-srs-x-v2.cllb\\\",\\\"completeness_scope\\\":\\\"empty-origin-10x4-four-lines-f-intersection-r\\\",\\\"generation_identity\\\":\\\"1f2af08af4e3994b9517b5edfe647d820ef070f117742015496bfed27c3a6e80\\\",\\\"key_id\\\":\\\"ed25519-raw-sha256:fd9537495c1168cfa8106ec1e3401f35f762aa76ce383ab8a17cf5a4faba9dbe\\\",\\\"payload_bytes\\\":\\\"33428297\\\",\\\"payload_identity\\\":\\\"d6ed2ef22dfe60cf98708360e98743c003aaff53f4c559b8bbfbb44ff0b371e6\\\",\\\"product\\\":\\\"exact-legal-board\\\",\\\"profile\\\":\\\"srs-x\\\",\\\"qualification_identity\\\":\\\"c57f11ce7951a19fcc175b15edac873d44774d2af18050e8ce02a2a71d77e21e\\\",\\\"repository\\\":\\\"daejunnom/Clearra\\\",\\\"revision\\\":\\\"fb956214f0163524deb9228a5c580c3523e85abe\\\",\\\"rule_identity\\\":\\\"d25cf11c377d6f116de8d2031b82e44564da7d25a86c99136fccfe03e50502a5\\\",\\\"schema\\\":\\\"clearra.accelerator.asset-statement.v1\\\"}\"}",
+      "metadata": {
+        "active_session_shared_bytes": "61075289",
+        "chain_identity": "3e51105943b291630514d7e75380a90446a63dacaa9c8f4d635f1ec0e5126a1f",
+        "generation_identity": "1f2af08af4e3994b9517b5edfe647d820ef070f117742015496bfed27c3a6e80",
+        "layer_counts": [
+          "1",
+          "162",
+          "10275",
+          "285744",
+          "2908019",
+          "8717699",
+          "6953235",
+          "1207970",
+          "31309",
+          "130",
+          "1"
+        ],
+        "layer_payload_identities": [
+          "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "0b62af0bc1dfb83489243932637eaaacb787fabbc036aceedf5d3fbc17c0989d",
+          "45daec98a5897e0a094e36ca41424ae45e23015dd74ccb219bf2aa3aae3887f3",
+          "92d43d5bae3abfdbab041096f33f1f7da6c88f0f3ca47497602b11990443240c",
+          "1b20841dd64d474bcef769f3ca34ec510a51a09d684686882796fbecba794bf6",
+          "fbe835013e234029e240fa36aa2e6d7710bdd1e2249afdb7e7c6132c5f88d93b",
+          "b8445ba26681eeeb69de0d54f79459354a7321a2a698aab358fba133c061f6ec",
+          "34bc2bbea444e9d79d006274dce9b667f724f94889bad3b7f68072c14efb5862",
+          "1a0def11fbf0888c2915bcbbf80807134004892ef1026db21fdee2e48a83bd29",
+          "dbb9bacb8bf62e297de78061c10d235964b2903b4cf3808bfb5e44ec40566598",
+          "7252cc31e752bf59d56683b5c22d281f6c568d5c204d6694cf9a69531351caba"
+        ],
+        "payload_bytes": "33428297",
+        "payload_identity": "d6ed2ef22dfe60cf98708360e98743c003aaff53f4c559b8bbfbb44ff0b371e6",
+        "qualification_identity": "c57f11ce7951a19fcc175b15edac873d44774d2af18050e8ce02a2a71d77e21e",
+        "rule_identity": "d25cf11c377d6f116de8d2031b82e44564da7d25a86c99136fccfe03e50502a5",
+        "url": "https://github.com/daejunnom/Clearra/releases/download/legal-board-data-v081-20260924-rc1/legal-board-srs-x-v2.cllb"
+      },
+      "profile": "srs-x",
+      "status": "qualified"
+    },
+    {
+      "activation_envelope_json": "{\"schema\":\"clearra.accelerator.signed-asset-envelope.v1\",\"signature_hex\":\"c94aeb8096663b7dd2766e53b6902a0d2a998c9bac45b24a50af2ad5b5782662697d0d2e01560190a2de8926a92816b1e60506a1205ff6d00f2b50d8c3576309\",\"statement_json\":\"{\\\"algorithm\\\":\\\"ed25519\\\",\\\"asset_url\\\":\\\"https://github.com/daejunnom/Clearra/releases/download/legal-board-data-v081-20260924-rc1/legal-board-jstris-180-v2.cllb\\\",\\\"completeness_scope\\\":\\\"empty-origin-10x4-four-lines-f-intersection-r\\\",\\\"generation_identity\\\":\\\"d595fa1c68f6e679d7a3f306cab89a0a8dbe30bc5c055f7b74fbb887113eea32\\\",\\\"key_id\\\":\\\"ed25519-raw-sha256:fd9537495c1168cfa8106ec1e3401f35f762aa76ce383ab8a17cf5a4faba9dbe\\\",\\\"payload_bytes\\\":\\\"25276473\\\",\\\"payload_identity\\\":\\\"7d20636d3f6e26415dcac7afda161f34916848e1cbc165ca030030eda087d30a\\\",\\\"product\\\":\\\"exact-legal-board\\\",\\\"profile\\\":\\\"jstris-180\\\",\\\"qualification_identity\\\":\\\"8afe9e847d15a42e10a9784587745d6ff038f541679c1ac35df942acc64da6d0\\\",\\\"repository\\\":\\\"daejunnom/Clearra\\\",\\\"revision\\\":\\\"fb956214f0163524deb9228a5c580c3523e85abe\\\",\\\"rule_identity\\\":\\\"67433f2cd15bb654971595ce189e68c8940bd3687481e93eed4f73fe1b786483\\\",\\\"schema\\\":\\\"clearra.accelerator.asset-statement.v1\\\"}\"}",
+      "metadata": {
+        "active_session_shared_bytes": "50695113",
+        "chain_identity": "0170b31d1527264ba056ca540386a9b13ccb68dadccc666f6653ed38f6ef4579",
+        "generation_identity": "d595fa1c68f6e679d7a3f306cab89a0a8dbe30bc5c055f7b74fbb887113eea32",
+        "layer_counts": [
+          "1",
+          "162",
+          "10191",
+          "273459",
+          "2554536",
+          "6805146",
+          "4769952",
+          "752753",
+          "19405",
+          "100",
+          "1"
+        ],
+        "layer_payload_identities": [
+          "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "0b62af0bc1dfb83489243932637eaaacb787fabbc036aceedf5d3fbc17c0989d",
+          "5c2eb2d43aa7e7b9258e090b69a4b07a34191899e09601d9e5851fb5593b047b",
+          "f10b0424452c7c6f71bec1a784e968b0c6e143cc91fff59204c1b65162910388",
+          "c39f166fcbda00b7447ceaeca96287a50c922542f8faeb0a6f75c5587c8a1f63",
+          "8b9a1a7431eec2bbe9cf1b0c87f94ce6820fb6c4258dc7ae5b77e4d9959f87f4",
+          "6d5d25f9d7fac8b3f66e99abdbd7f34cb62151907268720957ef9e95d7240898",
+          "2b1a7c0cae46a70419fad0e3ad7a80434c5c8721ea124b05a08d04556b317e94",
+          "2e8952b73538f07ddd0798a7e0343a3979299ecc679d435ee070e92d55137cd7",
+          "60d3cd45fd68b10f2253aa61e2b9fcf2c3d69139e2d38d14aff7424535746ed9",
+          "7252cc31e752bf59d56683b5c22d281f6c568d5c204d6694cf9a69531351caba"
+        ],
+        "payload_bytes": "25276473",
+        "payload_identity": "7d20636d3f6e26415dcac7afda161f34916848e1cbc165ca030030eda087d30a",
+        "qualification_identity": "8afe9e847d15a42e10a9784587745d6ff038f541679c1ac35df942acc64da6d0",
+        "rule_identity": "67433f2cd15bb654971595ce189e68c8940bd3687481e93eed4f73fe1b786483",
+        "url": "https://github.com/daejunnom/Clearra/releases/download/legal-board-data-v081-20260924-rc1/legal-board-jstris-180-v2.cllb"
+      },
+      "profile": "jstris-180",
+      "status": "qualified"
+    },
+    {
+      "activation_envelope_json": "{\"schema\":\"clearra.accelerator.signed-asset-envelope.v1\",\"signature_hex\":\"142da604a714ada6c35c6f88b6efb10237949a58ef89dd4f3950741f7cab2b9bf1a85cc18b8a33c94e3b746a0b0040ef483380e99a70f88fc50562af606a6f08\",\"statement_json\":\"{\\\"algorithm\\\":\\\"ed25519\\\",\\\"asset_url\\\":\\\"https://github.com/daejunnom/Clearra/releases/download/legal-board-data-v081-20260924-rc1/legal-board-no-kick-v2.cllb\\\",\\\"completeness_scope\\\":\\\"empty-origin-10x4-four-lines-f-intersection-r\\\",\\\"generation_identity\\\":\\\"b5c2b5ac1e2b8db6d7c2e2ca689db1b942cbcf2d04bba8df04aa6317af69553c\\\",\\\"key_id\\\":\\\"ed25519-raw-sha256:fd9537495c1168cfa8106ec1e3401f35f762aa76ce383ab8a17cf5a4faba9dbe\\\",\\\"payload_bytes\\\":\\\"12669421\\\",\\\"payload_identity\\\":\\\"956b55b8797b37fe3470ee17a497e664b7151f559c8db280ed510e179b85b669\\\",\\\"product\\\":\\\"exact-legal-board\\\",\\\"profile\\\":\\\"no-kick\\\",\\\"qualification_identity\\\":\\\"d42108bc92711ce8cec9b38eca2631a23a4aae146b64cee48e76d3d1180232c1\\\",\\\"repository\\\":\\\"daejunnom/Clearra\\\",\\\"revision\\\":\\\"fb956214f0163524deb9228a5c580c3523e85abe\\\",\\\"rule_identity\\\":\\\"4fe17bd81e1e5eac9f9ef1f08761ca562ed90912075f025bf23bd90ed7ab22df\\\",\\\"schema\\\":\\\"clearra.accelerator.asset-statement.v1\\\"}\"}",
+      "metadata": {
+        "active_session_shared_bytes": "23029117",
+        "chain_identity": "9b774c3651e9f7e2f801db84fe46b3e554f5bb445d3e3811b53e16b5f7da065d",
+        "generation_identity": "b5c2b5ac1e2b8db6d7c2e2ca689db1b942cbcf2d04bba8df04aa6317af69553c",
+        "layer_counts": [
+          "1",
+          "162",
+          "9809",
+          "234126",
+          "1727838",
+          "3455750",
+          "1895936",
+          "279403",
+          "9115",
+          "68",
+          "1"
+        ],
+        "layer_payload_identities": [
+          "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "0b62af0bc1dfb83489243932637eaaacb787fabbc036aceedf5d3fbc17c0989d",
+          "36a3d2108f9e8a71e822519d9fe807f9871440f3db2c24fa4128cbb312a70b0a",
+          "8a5279d3d58dcde6857c2943407399b285a6fac3d3ff11d5c144a421c5adf001",
+          "68e6c13ec948ed5f4bbe99481858fa1f59394aee6179ba22d451ed182d59a18c",
+          "ad50ed99f6a01d123fb4620decb5ad6dda8f94f0ee721f84ec86be90a8a33c80",
+          "0b072709e7e854ee55d26dfba4b00d2fa01baede9bebdf2d337723a62ccaa1a8",
+          "d9b37c6d157de7bb6a9089f50be6196f20ed8867dfa2f2d5ad05f7c6ae7b1772",
+          "cc3d3ac2b62f9ac511402ac73ed767dc7af12cf5be2b7199414a7e07cb1ce6f5",
+          "6217d589914c5b21ca59296d4eed6be36789069a0c4626c88fae4f44a1e75b54",
+          "7252cc31e752bf59d56683b5c22d281f6c568d5c204d6694cf9a69531351caba"
+        ],
+        "payload_bytes": "12669421",
+        "payload_identity": "956b55b8797b37fe3470ee17a497e664b7151f559c8db280ed510e179b85b669",
+        "qualification_identity": "d42108bc92711ce8cec9b38eca2631a23a4aae146b64cee48e76d3d1180232c1",
+        "rule_identity": "4fe17bd81e1e5eac9f9ef1f08761ca562ed90912075f025bf23bd90ed7ab22df",
+        "url": "https://github.com/daejunnom/Clearra/releases/download/legal-board-data-v081-20260924-rc1/legal-board-no-kick-v2.cllb"
+      },
+      "profile": "no-kick",
+      "status": "qualified"
+    }
   ],
   "schema": "clearra.legal-board.product-catalog.v1"
 }

@@ -87,11 +87,8 @@ mod tests {
     }
 
     #[test]
-    fn implementation_does_not_promote_unqualified_profiles() {
-        assert_eq!(
-            require_v081_qualification(),
-            Err("legal_board_profile_not_qualified_srs".to_owned())
-        );
+    fn five_profile_catalogs_satisfy_the_data_qualification_gate() {
+        assert_eq!(require_v081_qualification(), Ok(()));
     }
 }
 

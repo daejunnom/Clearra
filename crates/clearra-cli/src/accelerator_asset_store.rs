@@ -631,15 +631,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_unqualified_catalog_never_opens_network_or_store() {
+    fn embedded_catalog_summary_reports_authority_without_opening_network_or_store() {
         for kind in [
             ProductCatalogKind::ExactLegalBoard,
             ProductCatalogKind::BoardConditionedReachability,
         ] {
             for profile in PROFILE_NAMES {
                 let summary = catalog_summary(kind, profile).unwrap();
-                assert_eq!(summary.state, LocalAssetState::NotQualified);
-                assert_eq!(summary.payload_bytes, None);
+                let catalog = embedded_catalog(kind).unwrap();
+                match catalog.profile(profile).unwrap() {
+                    CatalogProfileStatus::NotQualified => {
+                        assert_eq!(summary.state, LocalAssetState::NotQualified);
+                        assert_eq!(summary.payload_bytes, None);
+                    }
+                    CatalogProfileStatus::Qualified(asset) => {
+                        assert_eq!(summary.state, LocalAssetState::Ready);
+                        assert_eq!(
+                            summary.payload_bytes,
+                            Some(asset.authority().payload_bytes())
+                        );
+                    }
+                }
             }
         }
     }

@@ -92,12 +92,18 @@ test('the first audit page optimizes its linked-workspace runtime imports togeth
 
 test('Pages mirrors only qualified profile assets and rejects changed Release bytes', async () => {
   const assets = await frontendAcceleratorAssets(root);
-  assert.equal(assets.length, 5);
-  assert.deepEqual(new Set(assets.map(asset => asset.profile)),
-    new Set(['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']));
-  assert.ok(assets.every(asset => asset.product === 'board-conditioned-reachability' &&
-    asset.pathname === `/accel/cr/${asset.profile}/${asset.digest}.bin` &&
-    asset.pathname.length < 98));
+  assert.equal(assets.length, 10);
+  for (const [product, pathnameProduct] of [
+    ['exact-legal-board', 'lb'],
+    ['board-conditioned-reachability', 'cr'],
+  ]) {
+    const selected = assets.filter(asset => asset.product === product);
+    assert.deepEqual(new Set(selected.map(asset => asset.profile)),
+      new Set(['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']));
+    assert.ok(selected.every(asset =>
+      asset.pathname === `/accel/${pathnameProduct}/${asset.profile}/${asset.digest}.bin` &&
+      asset.pathname.length < 98));
+  }
   const bytes = new TextEncoder().encode('exact-release-bytes');
   const asset = { url: 'https://github.com/daejunnom/Clearra/releases/download/tag/asset.cllr',
     bytes: bytes.length, digest: createHash('sha256').update(bytes).digest('hex') };

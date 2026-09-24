@@ -451,13 +451,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_profiles_are_explicit_and_unqualified_catalog_never_downloads() {
+    fn all_profiles_are_explicit_and_catalog_check_never_downloads() {
         for profile in PROFILES {
             let value = execute(&["check".into(), "--profile".into(), profile.into()]).unwrap();
             assert_eq!(value["profile"], profile);
-            assert_eq!(value["catalog_status"], "not_qualified");
+            let summary = accelerator_asset_store::catalog_summary(PRODUCT, profile).unwrap();
+            assert_eq!(value["catalog_status"], summary.state.as_str());
             assert_eq!(value["network_used"], false);
-            assert!(execute(&["download".into(), "--profile".into(), profile.into()]).is_err());
+            if summary.state == LocalAssetState::NotQualified {
+                assert!(execute(&["download".into(), "--profile".into(), profile.into()]).is_err());
+            }
         }
     }
 
