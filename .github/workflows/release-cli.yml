@@ -477,32 +477,30 @@ jobs:
             $env:CLEARRA_NATIVE_LIBRARY_DIR = $nativeIdentity.runtime_paths.native_library_directory
             if ([string]::IsNullOrWhiteSpace($env:CLEARRA_NATIVE_LIBRARY_DIR)) { throw 'Native identity has no library directory' }
             $nativeLink = "-L native=$env:CLEARRA_NATIVE_LIBRARY_DIR"
-            $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($existing)) { $nativeLink } else { "$existing $nativeLink" }
-            cargo build --locked -p clearra-cli --features native-c-core,webgpu-search --bin clearra
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $binary = Join-Path $env:CARGO_TARGET_DIR 'debug/clearra.exe'
-            if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "ProductE2E CLI was not built: $binary" }
-            node scripts/release/product-e2e-cli-artifact.mjs seal `
-              --binary $binary `
-              --native-identity $identity `
-              --source-commit $env:GITHUB_SHA `
-              --run-id $env:GITHUB_RUN_ID `
-              --run-attempt $env:GITHUB_RUN_ATTEMPT `
-              --output (Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-cli-input')
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            "artifact_path=$(Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-cli-input')" >> $env:GITHUB_OUTPUT
-            if ([string]::IsNullOrWhiteSpace($existing)) {
-              Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
-            } else {
-              $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $existing
+            try {
+              $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($existing)) { $nativeLink } else { "$existing $nativeLink" }
+              cargo build --locked -p clearra-cli --features native-c-core,webgpu-search --bin clearra
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              $binary = Join-Path $env:CARGO_TARGET_DIR 'debug/clearra.exe'
+              if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "ProductE2E CLI was not built: $binary" }
+              node scripts/release/product-e2e-cli-artifact.mjs seal `
+                --binary $binary `
+                --native-identity $identity `
+                --source-commit $env:GITHUB_SHA `
+                --run-id $env:GITHUB_RUN_ID `
+                --run-attempt $env:GITHUB_RUN_ATTEMPT `
+                --output (Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-cli-input')
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              "artifact_path=$(Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-cli-input')" >> $env:GITHUB_OUTPUT
+            } finally {
+              if ([string]::IsNullOrWhiteSpace($existing)) {
+                Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
+              } else {
+                $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $existing
+              }
             }
             Complete-ClearraBuildTransaction
           } finally {
-            if ([string]::IsNullOrWhiteSpace($existing)) {
-              Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
-            } else {
-              $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $existing
-            }
             Exit-ClearraBuildArtifactCacheUsage
           }
       - name: Upload exact ProductE2E CLI input
