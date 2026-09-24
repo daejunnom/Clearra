@@ -185,11 +185,11 @@ jobs:
         with:
           node-version: 22.23.2
       - name: Bind exact Corepack pnpm
-        shell: pwsh
+        shell: bash
         run: |
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
-          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+          test "$(pnpm --version)" = '11.5.0'
       - name: Download accepted CTK3 distribution
         uses: actions/download-artifact@v4
         with:
@@ -459,6 +459,7 @@ jobs:
         shell: pwsh
         run: |
           . ./scripts/lib/clearra-path-helpers.ps1
+          $existing = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
           Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose product
           try {
             $cargoJobs = [Math]::Max(1, [Environment]::ProcessorCount)
@@ -476,7 +477,6 @@ jobs:
             $env:CLEARRA_NATIVE_LIBRARY_DIR = $nativeIdentity.runtime_paths.native_library_directory
             if ([string]::IsNullOrWhiteSpace($env:CLEARRA_NATIVE_LIBRARY_DIR)) { throw 'Native identity has no library directory' }
             $nativeLink = "-L native=$env:CLEARRA_NATIVE_LIBRARY_DIR"
-            $existing = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
             $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($existing)) { $nativeLink } else { "$existing $nativeLink" }
             cargo build --locked -p clearra-cli --features native-c-core,webgpu-search --bin clearra
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -491,8 +491,18 @@ jobs:
               --output (Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-cli-input')
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             "artifact_path=$(Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'product-e2e-cli-input')" >> $env:GITHUB_OUTPUT
+            if ([string]::IsNullOrWhiteSpace($existing)) {
+              Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
+            } else {
+              $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $existing
+            }
             Complete-ClearraBuildTransaction
           } finally {
+            if ([string]::IsNullOrWhiteSpace($existing)) {
+              Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
+            } else {
+              $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $existing
+            }
             Exit-ClearraBuildArtifactCacheUsage
           }
       - name: Upload exact ProductE2E CLI input

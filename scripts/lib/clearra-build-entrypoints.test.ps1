@@ -20,7 +20,10 @@ function Invoke-ClearraEntryFailureProbe([string[]]$Arguments) {
         'core-c/src/coverage/fixture.c',
         'crates/fixture/src/target/mod.rs',
         'apps/fixture/build/generated.js',
-        'crates/fixture/target/generated.bin'
+        'crates/fixture/target/generated.bin',
+        'apps/clearra-desktop/src-tauri/gen/schemas/generated.json',
+        'apps/clearra-web/static/wasm/generated.wasm',
+        'apps/clearra-web/static/source.js'
     )) {
         $fixturePath = Join-Path $entrySource $relative
         [void][IO.Directory]::CreateDirectory((Split-Path -Parent $fixturePath))
@@ -95,7 +98,10 @@ try {
         'source_coverage_and_target_modules_are_build_inputs'
     Assert-ArtifactPathCondition `
         ($enumeratedBuildInputs -notcontains 'apps/fixture/build/generated.js' -and
-         $enumeratedBuildInputs -notcontains 'crates/fixture/target/generated.bin') `
+         $enumeratedBuildInputs -notcontains 'crates/fixture/target/generated.bin' -and
+         $enumeratedBuildInputs -notcontains 'apps/clearra-desktop/src-tauri/gen/schemas/generated.json' -and
+         $enumeratedBuildInputs -notcontains 'apps/clearra-web/static/wasm/generated.wasm' -and
+         $enumeratedBuildInputs -contains 'apps/clearra-web/static/source.js') `
         'generated_build_and_target_directories_are_excluded'
     Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Resolve-CoreCBuildDir 'unowned-core' }) 'core_library_cannot_create_without_owner'
     Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath (Join-Path $entryCacheHome 'Clearra'))) 'unowned_core_library_created_no_cache'

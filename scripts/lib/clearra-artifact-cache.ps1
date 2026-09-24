@@ -236,10 +236,13 @@ function Complete-ClearraBuildTransaction {
     if ($finalSnapshot.source_snapshot_sha256 -ne $record.compiler_snapshot_sha256 -or
         $finalSnapshot.input_file_count -ne $record.compiler_input_file_count -or
         $finalSnapshot.incremental_context_sha256 -ne $record.incremental_context_sha256) {
+        $sourceChanged = $finalSnapshot.source_snapshot_sha256 -ne $record.compiler_snapshot_sha256
+        $countChanged = $finalSnapshot.input_file_count -ne $record.compiler_input_file_count
+        $contextChanged = $finalSnapshot.incremental_context_sha256 -ne $record.incremental_context_sha256
         $record.status = 'failed'
         Write-ClearraBuildTransactionRecord $record
         $script:ClearraBuildTransaction = $record
-        throw 'Clearra build inputs changed while the transaction was active; the incremental seed was not sealed.'
+        throw "Clearra build inputs changed while the transaction was active; the incremental seed was not sealed. source_changed=$sourceChanged input_count_changed=$countChanged context_changed=$contextChanged"
     }
     $record.status = 'complete'
     $record.completed_utc = [DateTime]::UtcNow.ToString('o')

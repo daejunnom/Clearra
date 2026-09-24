@@ -24,6 +24,8 @@ function secretOrGeneratedInput(path) {
 function generatedInputDirectory(path) {
   const name = basename(path);
   if (generatedDirectories.has(name)) return true;
+  if (name === 'schemas' && basename(dirname(path)) === 'gen' && basename(dirname(dirname(path))) === 'src-tauri') return true;
+  if (name === 'wasm' && basename(dirname(path)) === 'static' && basename(dirname(dirname(path))) === 'clearra-web' && basename(dirname(dirname(dirname(path)))) === 'apps') return true;
   return ['target', 'coverage'].includes(name) && !['src', 'fixtures', 'golden'].includes(basename(dirname(path)));
 }
 async function collectBuildInputFiles(sourceRoot) {

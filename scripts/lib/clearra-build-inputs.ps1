@@ -16,6 +16,19 @@ function Test-ClearraSecretOrGeneratedInput([System.IO.FileInfo]$File) {
 }
 
 function Test-ClearraGeneratedInputDirectory([System.IO.DirectoryInfo]$Directory) {
+    if ($Directory.Name -eq 'schemas' -and
+        $Directory.Parent.Name -eq 'gen' -and
+        $Directory.Parent.Parent.Name -eq 'src-tauri') {
+        # Tauri generates and rewrites these ignored schemas during a GUI build.
+        return $true
+    }
+    if ($Directory.Name -eq 'wasm' -and
+        $Directory.Parent.Name -eq 'static' -and
+        $Directory.Parent.Parent.Name -eq 'clearra-web' -and
+        $Directory.Parent.Parent.Parent.Name -eq 'apps') {
+        # The Pages build stages accepted WASM into this ignored web output.
+        return $true
+    }
     if ($Directory.Name -in @(
             '.git', '.cache', '.svelte-kit', '.vite-temp', '_local', 'dist', 'dist-server',
             'node_modules', 'build', 'models', 'checkpoints'
