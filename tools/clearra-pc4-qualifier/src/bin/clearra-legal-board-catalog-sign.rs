@@ -130,7 +130,7 @@ fn run() -> Result<(), String> {
     let mut total_bytes = 0_usize;
     for (profile, name, expected_hash) in PROFILES {
         let layers = candidate_root.join(name);
-        let bundle = layers.join(format!("legal-board-{name}-v2.cllb"));
+        let bundle = layers.join(bundle_filename(name));
         let catalog = layers.join(format!("legal-board-{name}-v2.catalog.json"));
         verify_legal_board_candidate_source_chain(&LegalBoardGenerationOptions {
             profile,
@@ -235,8 +235,8 @@ fn run() -> Result<(), String> {
         qualification.update(input.catalog_identity);
         let qualification_identity: [u8; 32] = qualification.finalize().into();
         let url = format!(
-            "https://github.com/{REPOSITORY}/releases/download/{release_tag}/legal-board-{}.cllb",
-            input.name
+            "https://github.com/{REPOSITORY}/releases/download/{release_tag}/{}",
+            bundle_filename(input.name)
         );
         let statement_json = serde_json::to_string(&json!({
             "algorithm": SIGNATURE_ALGORITHM,
@@ -316,6 +316,10 @@ fn run() -> Result<(), String> {
 
 fn real_directory(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+}
+
+fn bundle_filename(name: &str) -> String {
+    format!("legal-board-{name}-v2.cllb")
 }
 
 fn read_bounded_regular(path: &Path, maximum: usize) -> Result<Vec<u8>, String> {
