@@ -1852,6 +1852,7 @@ mod tests {
         ReachabilityScratch, ReachabilityTemplate, ReachabilityWorkspace, ReachableLocks, State,
         LARGE_SEARCH_EXHAUSTIVE_OBSERVATIONS,
     };
+    use crate::conditioned_local_index::LocalRelationCandidateLookup;
     use crate::conditioned_local_pack::{
         built_in_local_relation_binding, encode_local_relation_candidate_pack,
         load_local_relation_candidate_pack,
@@ -2031,6 +2032,58 @@ mod tests {
                 .expect("complete candidate pack is present");
             let binding = built_in_local_relation_binding(profile).unwrap();
             let pack = load_local_relation_candidate_pack(&bytes, binding, None).unwrap();
+            let mut indexed_boards = 0;
+            for height in 1..=6 {
+                let deleted_frames: &[u16] = if height == 2 { &[0, 1, 2] } else { &[0] };
+                for piece in [
+                    PieceKind::I,
+                    PieceKind::O,
+                    PieceKind::T,
+                    PieceKind::S,
+                    PieceKind::Z,
+                    PieceKind::J,
+                    PieceKind::L,
+                ] {
+                    let template = ReachabilityTemplate::compile(10, height, piece, profile);
+                    let window = ConditionedPoseWindow {
+                        min_x: 0,
+                        max_x: 9,
+                        min_y: height as i8,
+                        max_y: template.ceiling,
+                    };
+                    let mut entries = template
+                        .sky_seeds
+                        .iter()
+                        .map(|&index| {
+                            let state = state_from_index(10, template.ceiling, usize::from(index));
+                            ConditionedReachabilityEntryPose {
+                                rotation: state.rotation,
+                                x: state.x,
+                                y: state.y,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    entries.sort_unstable_by_key(|pose| {
+                        (pose.rotation.quarter_turns(), pose.x, pose.y)
+                    });
+                    for &deleted in deleted_frames {
+                        let frame = LocalRelationRowFrame::new(height, deleted).unwrap();
+                        for board in 0..=255_u64 {
+                            assert!(
+                                matches!(
+                                    pack.lookup_with_frame(
+                                        10, height, board, frame, piece, profile, window, &entries
+                                    ),
+                                    LocalRelationCandidateLookup::Hit(_)
+                                ),
+                                "{name} {height}L {piece:?} deleted={deleted} board={board:#x}"
+                            );
+                            indexed_boards += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(indexed_boards, 56 * 256, "{name} declared occupancy domain");
             install_qualified_local_relation_pack(qualified_local_relation_for_solver_test(pack))
                 .expect("candidate fits the shared memory contract");
             let mut checked_contexts = 0;
