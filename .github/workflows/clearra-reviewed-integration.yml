@@ -1,0 +1,222 @@
+name: Clearra Reviewed Integration Gate
+
+on:
+  push:
+    branches: [codex/clearra-safe-integration-20260925]
+    paths: [.github/workflows/clearra-reviewed-integration.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clearra-reviewed-integration-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      candidate: ${{ steps.prepare.outputs.candidate }}
+    env:
+      GIT_AUTHOR_NAME: Clearra integration
+      GIT_AUTHOR_EMAIL: clearra-integration@users.noreply.github.com
+      GIT_COMMITTER_NAME: github-actions[bot]
+      GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare reviewed pinned tree without updating main
+        id: prepare
+        run: python scripts/integration/prepare-reviewed-27.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reviewed-integration-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/reviewed-integration/receipt.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  contracts:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Bind exact pnpm and install frozen workspace
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Run unchanged release regressions and compiler-path behavior
+        run: |
+          test "$(git rev-parse HEAD)" = "$CLEARRA_SOURCE_COMMIT"
+          node --test scripts/tools/clearra-build-filesystem-path.test.mjs scripts/tools/build-clearra-frontend.test.mjs
+          node scripts/tools/run-release-regression-tests.mjs
+      - name: Exercise artifact-root and isolated-harness scheduling contracts
+        shell: pwsh
+        run: |
+          & ./scripts/test_artifact_path_policy.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/test_release_acceptance_shards.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify source whitespace and boundary test inventory
+        run: |
+          git diff --check HEAD^ HEAD
+          test -s crates/clearra-forward-search/src/boundary_recovery_tests.rs
+
+  acceptance:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        shard:
+          - FoundationNoProductDebt
+          - FoundationAdversarialCorrectness
+          - FoundationDesktopHost
+          - Sanitizer
+          - RustExact
+          - RustProduct
+          - Pages
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Bind exact pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+      - name: Restore immutable dependency inputs only
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/tools/cargo/wasm-bindgen-cli/0.2.126
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-${{ needs.prepare.outputs.candidate }}
+          restore-keys: |
+            release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-
+      - name: Install frozen workspace
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Prepare exact toolchains and bounded compiler parallelism
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne $env:CLEARRA_SOURCE_COMMIT) { throw 'Candidate source mismatch' }
+          rustup show active-toolchain
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $workers = [Math]::Max(1, [Environment]::ProcessorCount)
+          "CARGO_BUILD_JOBS=$workers" >> $env:GITHUB_ENV
+          if ('${{ matrix.shard }}' -eq 'Pages') {
+            rustup target add wasm32-unknown-unknown
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $tool = Get-Command wasm-bindgen -ErrorAction SilentlyContinue
+            if ($null -eq $tool -or (& wasm-bindgen --version) -ne 'wasm-bindgen 0.2.126') {
+              & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+      - name: Run Windows path identity and shard inventory regressions
+        shell: pwsh
+        run: |
+          node --test scripts/tools/clearra-build-filesystem-path.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/test_release_acceptance_shards.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run exact nonpublishing acceptance leaf
+        id: gate
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path $env:RUNNER_TEMP 'clearra-reviewed-gate.log'
+          $workers = [Math]::Max(1, [Environment]::ProcessorCount)
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $workers -VerboseLog -ShowWarnings *> $report
+          $code = $LASTEXITCODE
+          Get-Content -LiteralPath $report
+          $receipt = [ordered]@{
+            schema = 'clearra.nonpublishing-integration-leaf.v1'
+            source_commit = $env:CLEARRA_SOURCE_COMMIT
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            shard = '${{ matrix.shard }}'
+            exit_code = $code
+            publication_authority = $false
+          }
+          $receipt | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $env:RUNNER_TEMP 'clearra-reviewed-leaf.json')
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reviewed-${{ matrix.shard }}-${{ needs.prepare.outputs.candidate }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/clearra-reviewed-gate.log
+            ${{ runner.temp }}/clearra-reviewed-leaf.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  boundary-and-worker-regressions:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
+      CARGO_TARGET_DIR: ${{ runner.temp }}/clearra-reviewed-extra-cargo
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          persist-credentials: false
+      - name: Run Boundary Recovery and drained worker replacement behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --package clearra-forward-search --lib boundary_recovery -- --test-threads=1
+          cargo test --locked --package clearra-wasm-abi --lib warm_minimum_to_geometry_releases_authority -- --test-threads=1
+          cargo test --locked --package clearra-wasm-abi --lib exact_replacement_requires_geometry_finish -- --test-threads=1
+
+  ready:
+    if: always()
+    needs: [prepare, contracts, acceptance, boundary-and-worker-regressions]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every exact-source leaf to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        shell: python
+        run: |
+          import json,os
+          results=json.loads(os.environ['NEEDS_JSON'])
+          failures={name:value['result'] for name,value in results.items() if value['result']!='success'}
+          if failures: raise RuntimeError('Nonpublishing integration gate failed: '+json.dumps(failures))
+          source=results['prepare']['outputs']['candidate']
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
+              f.write('Exact candidate: `'+source+'`\n\nAll seven isolated acceptance leaves and additional regressions passed.\n\nNo main update, tag, Product Release, Pages or Discord deployment was performed.\n')
