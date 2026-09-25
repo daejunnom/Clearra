@@ -7,6 +7,52 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot '../lib/clearra-path-helpers.ps1')
 
+function Invoke-ClearraManagedToolProcess {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string[]]$ArgumentList
+    )
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $FilePath
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    if ($null -ne $start.PSObject.Properties['ArgumentList']) {
+        foreach ($argument in $ArgumentList) { $start.ArgumentList.Add($argument) }
+    } else {
+        # Windows PowerShell 5.1 uses .NET Framework without ArgumentList.
+        # The pinned Cargo arguments and constructed platform root contain
+        # neither embedded quotes nor trailing backslashes. Refuse other
+        # inputs rather than implementing an ambiguous shell fallback.
+        $quoted = foreach ($argument in $ArgumentList) {
+            if ($argument.Contains('"') -or $argument.EndsWith('\')) {
+                throw 'Managed native argument cannot be represented by the legacy launcher'
+            }
+            '"' + $argument + '"'
+        }
+        $start.Arguments = $quoted -join ' '
+    }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) { throw 'Managed native process did not start' }
+        # Read both pipes concurrently to avoid a full stderr pipe blocking
+        # Cargo. Native stderr is text, not a PowerShell ErrorRecord.
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            StandardOutput = $stdoutTask.GetAwaiter().GetResult()
+            StandardError = $stderrTask.GetAwaiter().GetResult()
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
 $expected = if ($ToolName -eq 'wasm-bindgen-cli') { '0.2.126' } else { throw "Unsupported Cargo tool: $ToolName" }
 if ($Version -ne $expected) {
     throw "Clearra requires $ToolName $expected; requested $Version"
@@ -59,24 +105,11 @@ try {
     if (-not $accepted) {
         New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
         $cargoCommand = Get-Command cargo -CommandType Application -ErrorAction Stop
-        $previousErrorActionPreference = $ErrorActionPreference
-        $installExit = $null
-        try {
-            # Cargo writes normal progress to stderr. Windows PowerShell 5.1
-            # wraps redirected stderr as ErrorRecord; it is not an install
-            # failure. Preserve the actual exit code and restore fail-closed
-            # script behavior before checking the result or installed binary.
-            $ErrorActionPreference = 'Continue'
-            $LASTEXITCODE = $null
-            $cargoOutput = @(& $cargoCommand.Source '+1.98.1' install $ToolName --version $Version --locked --root $toolRoot 2>&1 |
-                ForEach-Object { $_.ToString() })
-            $installExit = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $previousErrorActionPreference
-        }
-        if ($null -eq $installExit) {
-            throw 'Cargo install did not provide a native process exit status'
-        }
+        $cargoResult = Invoke-ClearraManagedToolProcess -FilePath $cargoCommand.Source -ArgumentList @(
+            '+1.98.1', 'install', $ToolName, '--version', $Version, '--locked', '--root', $toolRoot
+        )
+        $installExit = $cargoResult.ExitCode
+        $cargoOutput = @($cargoResult.StandardOutput, $cargoResult.StandardError)
         $cargoOutput | ForEach-Object { Write-Output $_ }
         if ($installExit -ne 0) {
             $blocked = ($cargoOutput -join "`n") -match '(?:4551|application control|애플리케이션 제어 정책)'
