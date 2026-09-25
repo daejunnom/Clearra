@@ -9,12 +9,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: clearra-pinned-boundary-validation-b80fab6534855862b050c3391096a3022b59271d
+  group: clearra-pinned-boundary-validation-77880df9c2b0e919cacf5b10145cfab9e5f2b1e8
   cancel-in-progress: false
 
 env:
-  CLEARRA_SOURCE_COMMIT: b80fab6534855862b050c3391096a3022b59271d
-  CLEARRA_ENGINE_BUILD_ID: b80fab6534855862b050c3391096a3022b59271d
+  CLEARRA_SOURCE_COMMIT: 77880df9c2b0e919cacf5b10145cfab9e5f2b1e8
+  CLEARRA_ENGINE_BUILD_ID: 77880df9c2b0e919cacf5b10145cfab9e5f2b1e8
   RUST_MIN_STACK: "16777216"
 
 # Exact-candidate tests only. No branch mutation, publication receipt, tag,
@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: b80fab6534855862b050c3391096a3022b59271d
+          ref: 77880df9c2b0e919cacf5b10145cfab9e5f2b1e8
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -51,6 +51,9 @@ jobs:
           corepack prepare pnpm@11.5.0 --activate
           [[ "$(pnpm --version)" == '11.5.0' ]]
           pnpm install --frozen-lockfile --ignore-scripts
+      - name: Run real managed-process capture tests on PowerShell Core
+        shell: pwsh
+        run: ./tests/tools/managed-cargo-process-capture.test.ps1
       - name: Run the existing complete release regression selector
         run: node scripts/tools/run-release-regression-tests.mjs
 
@@ -61,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: b80fab6534855862b050c3391096a3022b59271d
+          ref: 77880df9c2b0e919cacf5b10145cfab9e5f2b1e8
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -82,6 +85,9 @@ jobs:
           if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
           pnpm install --frozen-lockfile --ignore-scripts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run real native-process capture tests on Windows PowerShell
+        shell: powershell
+        run: ./tests/tools/managed-cargo-process-capture.test.ps1
       - name: Prepare pinned native and WASM toolchains
         shell: powershell
         run: |
