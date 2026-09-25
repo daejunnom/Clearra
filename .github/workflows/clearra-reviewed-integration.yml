@@ -17,22 +17,49 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
-    env:
-      GIT_AUTHOR_NAME: Clearra integration
-      GIT_AUTHOR_EMAIL: clearra-integration@users.noreply.github.com
-      GIT_COMMITTER_NAME: github-actions[bot]
-      GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 4353201129f88b5a9b943e84611b4a8600eaefcd
           fetch-depth: 0
-      - name: Prepare reviewed pinned tree without updating main
+          persist-credentials: false
+      - name: Bind repaired reviewed candidate without rebuilding or updating refs
         id: prepare
-        run: python scripts/integration/prepare-reviewed-27.py
+        shell: python
+        run: |
+          import json, os, pathlib, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          main = '3e06bce344da89212b002d0cba96063703088074'
+          reviewed = '352c42d5536e2ceab0bc55d773c61973c3b96434'
+          candidate = '4353201129f88b5a9b943e84611b4a8600eaefcd'
+          if git('rev-parse', 'HEAD') != candidate:
+              raise RuntimeError('Exact candidate checkout mismatch')
+          for ref, expected in [
+              ('refs/heads/main', main),
+              ('refs/heads/codex/candidate-pinned-boundary-release-20260925', candidate)
+          ]:
+              rows = git('ls-remote', 'origin', ref).splitlines()
+              if len(rows) != 1 or rows[0].split() != [expected, ref]:
+                  raise RuntimeError('Reviewed ref moved; reconcile before a new gate')
+          git('merge-base', '--is-ancestor', main, candidate)
+          git('merge-base', '--is-ancestor', reviewed, candidate)
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'reviewed-integration'
+          output.mkdir(exist_ok=True)
+          receipt = {
+              'schema': 'clearra.nonpublishing-integration-input.v1',
+              'main': main, 'reviewed_candidate': reviewed, 'candidate': candidate,
+              'tree': git('rev-parse', 'HEAD^{tree}'),
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'main_updated': False, 'publication_authority': False
+          }
+          (output / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('candidate=' + candidate + '\n')
+          print(json.dumps(receipt))
       - uses: actions/upload-artifact@v4
         if: always()
         with:
