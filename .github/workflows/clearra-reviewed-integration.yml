@@ -188,7 +188,6 @@ jobs:
     env:
       CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
       CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
-      CARGO_TARGET_DIR: ${{ runner.temp }}/clearra-reviewed-extra-cargo
       RUST_MIN_STACK: '16777216'
     steps:
       - uses: actions/checkout@v4
@@ -199,6 +198,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/clearra-reviewed-extra-cargo"
           cargo test --locked --package clearra-forward-search --lib boundary_recovery -- --test-threads=1
           cargo test --locked --package clearra-wasm-abi --lib warm_minimum_to_geometry_releases_authority -- --test-threads=1
           cargo test --locked --package clearra-wasm-abi --lib exact_replacement_requires_geometry_finish -- --test-threads=1
