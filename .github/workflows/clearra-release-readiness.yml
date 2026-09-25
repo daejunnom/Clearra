@@ -1,0 +1,66 @@
+name: Clearra Release Readiness
+
+on:
+  push:
+    branches: [codex/clearra-safe-integration-20260925]
+    paths: [.github/workflows/clearra-release-readiness.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pages: read
+  deployments: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read current release and Pages authorities
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import json, os, pathlib, subprocess, urllib.request
+          base = 'repos/daejunnom/Clearra'
+          report = {'schema': 'clearra.release-readiness.v1', 'production_mutation': False}
+          def read(endpoint):
+              p = subprocess.run(['gh','api','--method','GET','-H','X-GitHub-Api-Version: 2026-03-10',base + endpoint], capture_output=True, text=True, timeout=30)
+              if p.returncode:
+                  return {'unavailable': True, 'exit_code': p.returncode}
+              return json.loads(p.stdout)
+          report['main'] = read('/git/ref/heads/main')
+          report['candidate'] = read('/git/ref/heads/codex/candidate-pinned-boundary-release-20260925')
+          report['pages'] = read('/pages')
+          deployments = read('/deployments?environment=github-pages&per_page=10')
+          report['pages_deployments'] = deployments
+          if isinstance(deployments, list):
+              report['pages_deployment_statuses'] = {
+                  str(d['id']): read('/deployments/' + str(d['id']) + '/statuses?per_page=5') for d in deployments
+              }
+          for workflow in ['release-cli.yml','pages.yml','pages-rollback.yml','queue-pages-publication.yml','discord-deploy.yml']:
+              runs = read('/actions/workflows/' + workflow + '/runs?per_page=5')
+              report[workflow] = [
+                  {k:r.get(k) for k in ['id','head_sha','head_branch','event','status','conclusion','run_attempt','html_url']}
+                  for r in runs.get('workflow_runs', [])
+              ] if isinstance(runs, dict) and 'workflow_runs' in runs else runs
+          report['release_tag'] = read('/git/ref/tags/v0.8.1')
+          report['release'] = read('/releases/tags/v0.8.1')
+          url = 'https://daejunnom.github.io/Clearra/wasm/clearra_wasm.manifest.json'
+          try:
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  payload = response.read(1024 * 1024 + 1)
+                  if len(payload) > 1024 * 1024: raise RuntimeError('Public manifest exceeds limit')
+                  report['public_wasm_manifest'] = json.loads(payload)
+          except Exception as error:
+              report['public_wasm_manifest'] = {'unavailable': True, 'reason': str(error)}
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'clearra-release-readiness.json'
+          path.write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report, indent=2))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clearra-release-readiness-${{ github.run_id }}
+          path: ${{ runner.temp }}/clearra-release-readiness.json
+          if-no-files-found: error
+          retention-days: 14
