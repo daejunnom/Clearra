@@ -1,0 +1,96 @@
+name: Audit Applied Clearra Source
+
+on:
+  push:
+    branches: [codex/clearra-safe-integration-20260925]
+    paths: [.github/workflows/clearra-applied-source-audit.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 952280950aeb24528279cbff685fe8acec892223
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare actual blobs rather than trusting integration messages or version strings
+        shell: python
+        run: |
+          import json, os, pathlib, subprocess
+          MAIN='952280950aeb24528279cbff685fe8acec892223'
+          BASE='3e06bce344da89212b002d0cba96063703088074'
+          REVIEWED='a18751a5bd9199dd58438df91ef0cdb68fd07f96'
+          PINNED='980806508bd88ab436023d08023cd306fb1904b8'
+          def git(*args, required=True):
+              r=subprocess.run(['git',*args],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=120)
+              if required and r.returncode: raise RuntimeError(r.stderr)
+              return r.stdout.strip() if r.returncode==0 else None
+          def tree(ref):
+              data=git('ls-tree','-r',ref)
+              out={}
+              for row in data.splitlines():
+                  meta,name=row.split('\t',1)
+                  mode,kind,oid=meta.split()
+                  out[name]={'mode':mode,'type':kind,'oid':oid}
+              return out
+          main_tree=tree(MAIN)
+          report={'schema':'clearra.applied-source-map.v1','main':MAIN,'base':BASE,
+                  'tree':git('rev-parse',MAIN+'^{tree}'),
+                  'reviewed_tree':git('rev-parse',REVIEWED+'^{tree}'),
+                  'changes_from_previous_main':git('diff','--name-only',BASE,MAIN).splitlines(),
+                  'branches':[]}
+          if report['tree']!=report['reviewed_tree']: raise RuntimeError('Published source tree is not the reviewed product tree')
+          approved=json.loads(pathlib.Path('docs/integration/approved-branches-2026-09-25.json').read_text())
+          approved.append({'branch':'pinned-minimals-boundary-recovery','head':PINNED,'resolution':'feature-source-reference'})
+          for item in approved:
+              head=item['head']
+              common=git('merge-base',BASE,head)
+              before=tree(common); after=tree(head)
+              rows=[]
+              for name in sorted(set(before)|set(after)):
+                  if before.get(name)==after.get(name): continue
+                  current=main_tree.get(name)
+                  state='exact-tip-present' if current==after.get(name) else 'base-state-remains' if current==before.get(name) else 'changed-or-superseded'
+                  rows.append({'path':name,'state':state,'branch':after.get(name),'main':current})
+              counts={key:sum(row['state']==key for row in rows) for key in ['exact-tip-present','base-state-remains','changed-or-superseded']}
+              entry={**item,'merge_base':common,'counts':counts,'files':rows}
+              report['branches'].append(entry)
+              print('BRANCH_AUDIT '+json.dumps({**item,'merge_base':common,'counts':counts}))
+          important=[
+            'crates/clearra-core-executor/src/backend/wasm_cpu/geometry_projection.rs',
+            'crates/clearra-core-executor/src/backend/wasm_cpu/tiling_parallel.rs',
+            'crates/clearra-forward-search/src/parallel.rs',
+            'crates/clearra-forward-search/src/boundary_recovery.rs',
+            'crates/clearra-forward-search/src/boundary_recovery_tests.rs',
+            'crates/clearra-app/src/commands/pc_app_command.rs',
+            'crates/clearra-coverage/src/cover/pinned_minimum_cover.rs',
+            'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte',
+            'packages/clearra-ui/src/lib/workspace/ProductModeTabs.svelte',
+            'packages/clearra-ui/src/lib/workspace/workspaceNavigation.ts',
+            'packages/clearra-ui/src/lib/workspace/SolverWorkspace.svelte',
+            'packages/clearra-ui/src/lib/workspace/ResultWorkspace.svelte',
+            'packages/clearra-ui/src/lib/workspace/PcSolverStandalone.svelte',
+            'packages/clearra-ui/src/lib/workspace/BuildProbabilityWorkspace.svelte',
+            'packages/clearra-ui/test/pagesEssentialSurface.test.mjs'
+          ]
+          refs={'main':MAIN,'previous_main':BASE,'reviewed':REVIEWED,'pinned_feature':PINNED,'parallel_abba':'65f06c16c296877ad7f98e8313e95e26ebb68bd3'}
+          tables={name:tree(ref) for name,ref in refs.items()}
+          report['important_files']=[{'path':name,'blobs':{key:values.get(name) for key,values in tables.items()}} for name in important]
+          for row in report['important_files']: print('KEY_FILE '+json.dumps(row))
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'clearra-source-map'
+          root.mkdir(exist_ok=True)
+          (root/'source-map.json').write_text(json.dumps(report,indent=2)+'\n')
+          print('SOURCE_SUMMARY '+json.dumps({'main':MAIN,'tree_matches_reviewed':True,'changed_files':len(report['changes_from_previous_main']),'reviewed_branches':len(approved)}))
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clearra-applied-source-map-${{ github.run_id }}
+          path: ${{ runner.temp }}/clearra-source-map
+          if-no-files-found: error
+          retention-days: 30
