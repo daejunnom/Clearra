@@ -1,0 +1,77 @@
+name: Inspect Live Clearra Pages Surface
+
+on:
+  push:
+    branches: [codex/clearra-safe-integration-20260925]
+    paths: [.github/workflows/clearra-pages-surface-audit.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clearra-live-pages-surface-audit
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BROWSER_ROOT: ${{ runner.temp }}/clearra-pages-browser
+      AUDIT_ROOT: ${{ runner.temp }}/clearra-pages-surface-audit
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Install an isolated pinned Chromium inspection tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$BROWSER_ROOT" "$AUDIT_ROOT"
+          npm install --prefix "$BROWSER_ROOT" --ignore-scripts --no-audit --no-fund playwright@1.56.1
+          node "$BROWSER_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Read the public Pages UI and capture visible routes without changing product data
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs/promises');
+          const path = require('node:path');
+          const { chromium } = require(process.env.BROWSER_ROOT + '/node_modules/playwright');
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const context = await browser.newContext({ locale: 'ko-KR', viewport: { width: 1440, height: 1000 } });
+            const report = { schema: 'clearra.pages.surface-inspection.v1', inspectedAt: new Date().toISOString(), routes: [] };
+            try {
+              for (const [name, suffix] of [['home', '/?tool=pc'], ['recovery', '/?tool=recovery'], ['build', '/?tool=build'], ['standalone', '/pc-solver']]) {
+                const page = await context.newPage();
+                const errors = [];
+                page.on('pageerror', error => errors.push(String(error)));
+                const response = await page.goto('https://daejunnom.github.io/Clearra' + suffix, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                await page.waitForSelector('main, .product-tabs, .solver-controls, .workspace-shell', { timeout: 45000 }).catch(() => {});
+                await page.waitForTimeout(1500);
+                const entry = {
+                  name, url: page.url(), status: response?.status(), headers: response ? await response.allHeaders() : {},
+                  title: await page.title(),
+                  navigation: await page.locator('.product-tabs a').evaluateAll(nodes => nodes.map(node => ({ text: node.textContent.trim(), href: node.getAttribute('href') }))),
+                  selects: await page.locator('.product-mode-select option').evaluateAll(nodes => nodes.map(node => ({ text: node.textContent.trim(), value: node.value }))),
+                  text: (await page.locator('body').innerText()).slice(0, 18000),
+                  scripts: await page.locator('script[src]').evaluateAll(nodes => nodes.map(node => node.src)),
+                  errors
+                };
+                report.routes.push(entry);
+                await page.screenshot({ path: path.join(process.env.AUDIT_ROOT, name + '.png'), fullPage: true });
+                console.log(JSON.stringify(entry));
+                await page.close();
+              }
+              await fs.writeFile(path.join(process.env.AUDIT_ROOT, 'inspection.json'), JSON.stringify(report, null, 2) + '\n');
+            } finally { await browser.close(); }
+          })().catch(error => { console.error(error); process.exitCode = 1; });
+          NODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clearra-live-pages-surface-${{ github.run_id }}
+          path: ${{ env.AUDIT_ROOT }}
+          if-no-files-found: error
+          retention-days: 14
