@@ -24,47 +24,48 @@ jobs:
       - name: Install exact frontend dependencies
         shell: pwsh
         run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Probe absolute, normalized and relative generated-directory identifiers
+      - name: Compare folded identity and physical path with product SSR bundling
         shell: python
         run: |
           import json, os, pathlib, subprocess
           root=pathlib.Path.cwd()
-          report=pathlib.Path(os.environ['RUNNER_TEMP'])/'clearra-path-probe'
-          report.mkdir(exist_ok=True)
+          report=pathlib.Path(os.environ['RUNNER_TEMP'])/'Clearra'/'PathProbe'
+          report.mkdir(parents=True,exist_ok=True)
           app=root/'apps/clearra-web'
           vite=root/'node_modules/vite/bin/vite.js'
           results=[]
-          for mode in ['absolute','posix','relative','relative-posix']:
+          for mode in ['folded','physical','realpath']:
               fixture=app/('.path-probe-'+mode)
               (fixture/'src/routes').mkdir(parents=True)
               (fixture/'static').mkdir()
               output=report/mode/'svelte-kit'
-              value=str(output)
-              if mode=='posix': value=output.as_posix()
-              if mode.startswith('relative'): value=os.path.relpath(output,fixture)
-              if mode=='relative-posix': value=value.replace('\\','/')
+              output.mkdir(parents=True)
+              value=str(output).lower() if mode=='folded' else str(output)
+              if mode=='realpath':
+                  value=subprocess.check_output(['node','-e','console.log(require("node:fs").realpathSync.native(process.argv[1]))',str(output)]).decode().strip()
               (fixture/'package.json').write_text('{"type":"module"}')
+              (fixture/'tsconfig.json').write_text('{"compilerOptions":{}}')
               (fixture/'src/app.html').write_text('<!doctype html><html><head>%sveltekit.head%</head><body><div>%sveltekit.body%</div></body></html>')
               (fixture/'src/routes/+page.svelte').write_text('<h1>External output contract</h1>')
               (fixture/'src/routes/+layout.js').write_text('export const prerender = true;')
               config="import adapter from '@sveltejs/adapter-static';\nexport default {kit:{outDir:"+json.dumps(value)+",adapter:adapter({pages:"+json.dumps(str(report/mode/'published'))+",assets:"+json.dumps(str(report/mode/'published'))+"})}};\n"
               (fixture/'svelte.config.js').write_text(config)
-              (fixture/'vite.config.js').write_text("import {sveltekit} from '@sveltejs/kit/vite'; export default {plugins:[sveltekit()]};")
+              (fixture/'vite.config.js').write_text("import {sveltekit} from '@sveltejs/kit/vite'; export default {ssr:{noExternal:true},plugins:[sveltekit()]};")
               p=subprocess.run(['node',str(vite),'build','--configLoader','runner'],cwd=fixture,capture_output=True,timeout=180)
               (report/(mode+'.log')).write_bytes(p.stdout+p.stderr)
-              manifests=list(output.rglob('manifest.json')) if output.exists() else []
+              manifests=list(output.rglob('manifest.json'))
               keys={str(f):list(json.loads(f.read_text()).keys()) for f in manifests if '/.vite/' in f.as_posix()}
               item={'mode':mode,'outDir':value,'exit_code':p.returncode,'manifest_keys':keys}
-              results.append(item)
-              print(json.dumps(item))
+              results.append(item);print(json.dumps(item))
           (report/'results.json').write_text(json.dumps(results,indent=2))
-          if not any(x['exit_code']==0 for x in results):raise RuntimeError('Every external-directory representation failed; no fix validated')
+          if not all(x['exit_code']==0 for x in results if x['mode']!='folded'):
+              raise RuntimeError('Physical output paths did not pass; do not claim a validated fix')
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: clearra-frontend-path-probe-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/clearra-path-probe/*.log
-            ${{ runner.temp }}/clearra-path-probe/results.json
+            ${{ runner.temp }}/Clearra/PathProbe/*.log
+            ${{ runner.temp }}/Clearra/PathProbe/results.json
           if-no-files-found: error
           retention-days: 7
