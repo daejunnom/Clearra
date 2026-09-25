@@ -14,45 +14,62 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write
       actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 3b723fd849b18a2bdaec553ec5596c374c063cc4
+          ref: bef4287ffab83c9f42f7c08acf07393f9e91818a
           fetch-depth: 0
-          persist-credentials: false
-      - name: Bind the authorized exact repair without changing source or refs
+      - name: Apply only the reviewed semantic compiler configuration correction
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
         shell: python
         run: |
-          import json,os,subprocess
+          import hashlib,json,os,pathlib,subprocess
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
           base='952280950aeb24528279cbff685fe8acec892223'
-          parent='b2cff45470e29871c75aa1e44b37ea892e6d5b79'
-          candidate='3b723fd849b18a2bdaec553ec5596c374c063cc4'
+          parent='3b723fd849b18a2bdaec553ec5596c374c063cc4'
           branch='codex/converge-surface-repair-20260926'
-          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
+          expected_tree='b3045e2ed1f0becb83b65b0779f14c80c8b62f66'
+          patch=pathlib.Path('scripts/integration/contract-config-semantics-20260926.patch').read_bytes()
+          if hashlib.sha256(patch).hexdigest()!='8cb757b560c24c569d740f1f1c56d44d8dfb6cf0a0003b532bc8a923db654748':
+              raise RuntimeError('Reviewed patch checksum mismatch')
+          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,parent)]:
               rows=git('ls-remote','origin',ref).splitlines()
-              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before running')
-          if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
-              git('rev-parse','HEAD^{tree}')!='132b113a93a6cf8487b3c5d1c902a30e2f244023'):
-              raise RuntimeError('Reviewed source identity mismatch')
-          git('merge-base','--is-ancestor',base,candidate)
-          git('diff','--check',base,candidate)
-          expected=['.github/workflows/discord-deploy.yml','apps/clearra-web/tsconfig.contract.json',
-              'scripts/release/discord-acceptance-trigger.mjs','scripts/release/discord-acceptance-trigger.test.mjs',
-              'scripts/release/discord-deploy-workflow.test.mjs','scripts/tools/build-clearra-frontend.mjs',
-              'scripts/tools/build-clearra-frontend.test.mjs','scripts/tools/run-release-regression-tests.mjs',
-              'scripts/tools/run-release-regression-tests.test.mjs','scripts/types/node-contract-builtins.d.ts']
-          if git('diff','--name-only',parent,candidate).splitlines()!=expected: raise RuntimeError('Unexpected fix scope')
+              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before applying')
+          target=pathlib.Path(os.environ['RUNNER_TEMP'])/'contract-config-semantics.patch'
+          target.write_bytes(patch)
+          git('checkout','--detach',parent)
+          git('merge-base','--is-ancestor',base,parent)
+          git('apply','--check',str(target)); git('apply','--index',str(target))
+          git('diff','--cached','--check')
+          expected=['scripts/architecture/validate_release_static_contract.ps1','scripts/tools/build-clearra-frontend.test.mjs']
+          if git('diff','--cached','--name-only').splitlines()!=expected or git('write-tree')!=expected_tree:
+              raise RuntimeError('Reviewed source tree or changed scope mismatch')
+          git('config','user.name','github-actions[bot]')
+          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit','-m','fix: validate contract compiler semantics instead of JSON formatting')
+          candidate=git('rev-parse','HEAD')
+          if git('show','-s','--format=%P',candidate)!=parent: raise RuntimeError('Parent mismatch')
+          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':expected_tree,'changed_files':expected,'main_updated':False}
+          (pathlib.Path(os.environ['RUNNER_TEMP'])/'contract-config-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt),flush=True)
+          # The patch changes no workflow files. Normal fast-forward only.
+          git('push','origin',candidate+':refs/heads/'+branch)
+          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate: raise RuntimeError('Candidate readback mismatch')
           subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True)
           with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
-          print(json.dumps({'candidate':candidate,'parent':parent,'base':base,'main_updated':False}))
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: contract-config-preparation-${{ github.run_id }}
+          path: ${{ runner.temp }}/contract-config-preparation.json
+          if-no-files-found: warn
+          retention-days: 14
   verifier-contracts:
     needs: prepare
     runs-on: ${{ matrix.os }}
@@ -63,7 +80,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-        with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
       - uses: actions/setup-node@v4
         with: {node-version: 22.23.2}
       - name: Install the pinned toolchain before bounded compiler provenance probes
@@ -87,6 +104,7 @@ jobs:
           set -euo pipefail
           {
             node -e "const f=require('node:fs'); for(const p of ['apps/clearra-web/.svelte-kit/tsconfig.json','apps/clearra-web/static/wasm/clearra_wasm.manifest.json']) if(f.existsSync(p)) throw Error('prebuild fixture unexpectedly exists: '+p)"
+            node --test --test-name-pattern='source-only worker|standalone contract compiler' scripts/tools/build-clearra-frontend.test.mjs
             pnpm --filter @clearra/web run test
             node -e "const f=require('node:fs'); for(const p of ['apps/clearra-web/.svelte-kit/tsconfig.json','apps/clearra-web/static/wasm/clearra_wasm.manifest.json']) if(f.existsSync(p)) throw Error('source test generated product input: '+p)"
             for attempt in 1 2 3; do
@@ -94,11 +112,20 @@ jobs:
               node scripts/tools/run-typescript-contracts.mjs apps/clearra-web/test/ClearraVerifierPool.contract.ts
             done
           } 2>&1 | tee "$RUNNER_TEMP/verifier-clock.log"
+      - name: Run the complete Windows static architecture gate before expensive compilation
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/validate_architecture.ps1 -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'static-architecture.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: verifier-clock-${{ matrix.os }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/verifier-clock.log
+          path: |
+            ${{ runner.temp }}/verifier-clock.log
+            ${{ runner.temp }}/static-architecture.log
           retention-days: 14
           if-no-files-found: warn
   contracts:
@@ -221,7 +248,7 @@ jobs:
             cargo fmt --all --check
             cargo test --locked --package clearra-forward-search --lib boundary_recovery -- --test-threads=1
             cargo test --locked --package clearra-wasm-abi --lib reset_rejects_a_borrowed_runtime_without_a_second_panic -- --test-threads=1
-            cargo test --locked --package clearra-wasm-abi --lib warm_minimum_to_geometry_releases_authority -- --test-threads=1
+            cargo test --locked --package clearra-wasm-abi --lib warm_minimum_to_geometry_releases_authority -- -- --test-threads=1
             cargo test --locked --package clearra-wasm-abi --lib exact_replacement_requires_geometry_finish -- --test-threads=1
           } 2>&1 | tee "$RUNNER_TEMP/repair-rust.log"
       - uses: actions/upload-artifact@v4
