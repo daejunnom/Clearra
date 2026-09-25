@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4353201129f88b5a9b943e84611b4a8600eaefcd
+          ref: d02ba99c238fb2f4d8a76270b6b1ac273d08ef47
           fetch-depth: 0
           persist-credentials: false
       - name: Bind repaired reviewed candidate without rebuilding or updating refs
@@ -34,7 +34,7 @@ jobs:
               return subprocess.check_output(['git', *args], text=True).strip()
           main = '3e06bce344da89212b002d0cba96063703088074'
           reviewed = '352c42d5536e2ceab0bc55d773c61973c3b96434'
-          candidate = '4353201129f88b5a9b943e84611b4a8600eaefcd'
+          candidate = 'd02ba99c238fb2f4d8a76270b6b1ac273d08ef47'
           if git('rev-parse', 'HEAD') != candidate:
               raise RuntimeError('Exact candidate checkout mismatch')
           for ref, expected in [
