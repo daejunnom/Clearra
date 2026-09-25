@@ -1,0 +1,24 @@
+name: Clearra Surface Repair
+on:
+  push:
+    branches: [codex/clearra-safe-integration-20260925]
+    paths: [.github/workflows/clearra-surface-repair.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 952280950aeb24528279cbff685fe8acec892223
+          persist-credentials: false
+      - name: Export pinned tracked source without local files or Git credentials
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/clearra-repair-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clearra-repair-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/clearra-repair-source.tar.gz
+          retention-days: 7
