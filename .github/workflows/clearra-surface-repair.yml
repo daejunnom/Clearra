@@ -14,47 +14,67 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write
       actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: dc1cf3c39983951b754d722ac5e71f9b7f823808
+          ref: 5dff608cd56de7d81a864115abb5355ca0c2cb05
           fetch-depth: 0
-          persist-credentials: false
-      - name: Bind the exact semantic contract fix without modifying source or refs
+      - name: Apply the reviewed Pages preparation after the semantic contract fix
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
         shell: python
         run: |
-          import json,os,subprocess
+          import hashlib,json,os,pathlib,subprocess
           def cmd(*args): return subprocess.check_output(args,text=True).strip()
           def git(*args): return cmd('git',*args)
           base='952280950aeb24528279cbff685fe8acec892223'
-          parent='3b723fd849b18a2bdaec553ec5596c374c063cc4'
-          candidate='dc1cf3c39983951b754d722ac5e71f9b7f823808'
+          parent='dc1cf3c39983951b754d722ac5e71f9b7f823808'
           branch='codex/converge-surface-repair-20260926'
-          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
+          expected_tree='fddba95d91ba59b0c7ed0dc81e577e5cee6a26db'
+          patch=pathlib.Path('scripts/integration/pages-owned-sync-20260926.patch').read_bytes()
+          if hashlib.sha256(patch).hexdigest()!='3871803e683b9122d18b8c484a4f36cf85e725c3630546e253672b07fff6e3df':
+              raise RuntimeError('Reviewed patch checksum mismatch')
+          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,parent)]:
               rows=git('ls-remote','origin',ref).splitlines()
-              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before running')
-          if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
-              git('rev-parse','HEAD^{tree}')!='b3045e2ed1f0becb83b65b0779f14c80c8b62f66'):
-              raise RuntimeError('Reviewed source identity mismatch')
-          expected=['scripts/architecture/validate_release_static_contract.ps1','scripts/tools/build-clearra-frontend.test.mjs']
-          if git('diff','--name-only',parent,candidate).splitlines()!=expected: raise RuntimeError('Unexpected fix scope')
-          git('merge-base','--is-ancestor',base,candidate)
-          git('diff','--check',base,candidate)
-          # Retire only the immediately superseded run, not the older Pages
-          # diagnostic still collecting evidence. No source or deployment writes.
-          old=json.loads(cmd('gh','api','repos/daejunnom/Clearra/actions/runs/36180978553'))
-          if old['head_sha']!='6dd4bd059cc2acafbc373e7089fd0151be8eca2e': raise RuntimeError('Superseded run identity mismatch')
+              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before applying')
+          target=pathlib.Path(os.environ['RUNNER_TEMP'])/'pages-owned-sync.patch'
+          target.write_bytes(patch)
+          git('checkout','--detach',parent)
+          git('merge-base','--is-ancestor',base,parent)
+          git('apply','--check',str(target)); git('apply','--index',str(target))
+          git('diff','--cached','--check')
+          expected=['scripts/lib/wasm-release-gate.ps1','scripts/tools/build-clearra-frontend.test.mjs']
+          if git('diff','--cached','--name-only').splitlines()!=expected or git('write-tree')!=expected_tree:
+              raise RuntimeError('Reviewed source tree or changed scope mismatch')
+          git('config','user.name','github-actions[bot]')
+          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit','-m','fix: prepare managed Svelte types before Pages frontend compilation')
+          candidate=git('rev-parse','HEAD')
+          if git('show','-s','--format=%P',candidate)!=parent: raise RuntimeError('Parent mismatch')
+          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':expected_tree,'changed_files':expected,'main_updated':False}
+          (pathlib.Path(os.environ['RUNNER_TEMP'])/'pages-sync-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt),flush=True)
+          # Product source only, no workflow changes and no force push.
+          git('push','origin',candidate+':refs/heads/'+branch)
+          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate: raise RuntimeError('Candidate readback mismatch')
+          subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True)
+          old=json.loads(cmd('gh','api','repos/daejunnom/Clearra/actions/runs/36181115800'))
+          if old['head_sha']!='ea8e4e9eac76f6f57f7c63b1d6bd0f5376377abd': raise RuntimeError('Superseded gate identity mismatch')
           if old['status']!='completed':
-              subprocess.run(['gh','run','cancel','36180978553','--repo','daejunnom/Clearra'],check=True)
+              subprocess.run(['gh','run','cancel','36181115800','--repo','daejunnom/Clearra'],check=True)
           with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
-          print(json.dumps({'candidate':candidate,'parent':parent,'base':base,'main_updated':False}))
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pages-sync-preparation-${{ github.run_id }}
+          path: ${{ runner.temp }}/pages-sync-preparation.json
+          if-no-files-found: warn
+          retention-days: 14
   verifier-contracts:
     needs: prepare
     runs-on: ${{ matrix.os }}
@@ -83,13 +103,13 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Typecheck and execute the complete worker suite before any WASM or Svelte generation
+      - name: Test compiler inventory and clean sync then execute all worker contracts
         shell: bash
         run: |
           set -euo pipefail
           {
             node -e "const f=require('node:fs'); for(const p of ['apps/clearra-web/.svelte-kit/tsconfig.json','apps/clearra-web/static/wasm/clearra_wasm.manifest.json']) if(f.existsSync(p)) throw Error('prebuild fixture unexpectedly exists: '+p)"
-            node --test --test-name-pattern='source-only worker|standalone contract compiler' scripts/tools/build-clearra-frontend.test.mjs
+            node --test --test-name-pattern='source-only worker|standalone contract compiler|release frontend sync|Pages acceptance owns' scripts/tools/build-clearra-frontend.test.mjs
             pnpm --filter @clearra/web run test
             node -e "const f=require('node:fs'); for(const p of ['apps/clearra-web/.svelte-kit/tsconfig.json','apps/clearra-web/static/wasm/clearra_wasm.manifest.json']) if(f.existsSync(p)) throw Error('source test generated product input: '+p)"
             for attempt in 1 2 3; do
@@ -102,15 +122,13 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          & ./scripts/validate_architecture.ps1 -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'static-architecture.log')
+          & ./scripts/validate_architecture.ps1 -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: verifier-clock-${{ matrix.os }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/verifier-clock.log
-            ${{ runner.temp }}/static-architecture.log
+          path: ${{ runner.temp }}/verifier-clock.log
           retention-days: 14
           if-no-files-found: warn
   contracts:
@@ -131,7 +149,7 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Test GPU absence, mandatory selection, Svelte and exact Discord release authority
+      - name: Test frontend preparation, GPU fallback, mandatory selection and Discord authority
         shell: bash
         run: |
           set -euo pipefail
@@ -188,7 +206,11 @@ jobs:
         shell: pwsh
         run: |
           if ((git rev-parse HEAD).Trim() -ne $env:CLEARRA_SOURCE_COMMIT) { throw 'Source mismatch' }
-          rustup show active-toolchain
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "CARGO_BUILD_JOBS=$([Math]::Max(1, [Environment]::ProcessorCount))" >> $env:GITHUB_ENV
           if ('${{ matrix.shard }}' -eq 'Pages') {
