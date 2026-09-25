@@ -1,127 +1,37 @@
 name: Clearra Safe Integration Audit
-
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
     paths: [.github/workflows/clearra-safe-integration-audit.yml]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: clearra-safe-integration-audit
   cancel-in-progress: false
-
 jobs:
-  audit:
+  source:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      EXPECTED_MAIN: 3e06bce344da89212b002d0cba96063703088074
-      CANDIDATE: 77880df9c2b0e919cacf5b10145cfab9e5f2b1e8
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: 77880df9c2b0e919cacf5b10145cfab9e5f2b1e8
           persist-credentials: false
-      - name: Inspect all pinned branch deltas in parallel
-        shell: python
+          fetch-depth: 1
+      - name: Export only the pinned tracked source
+        shell: bash
         run: |
-          import concurrent.futures, json, os, pathlib, subprocess, zipfile
-          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'clearra-integration-audit'
-          out.mkdir(parents=True, exist_ok=True)
-          main, candidate = os.environ['EXPECTED_MAIN'], os.environ['CANDIDATE']
-          def git(*args, check=True):
-              p = subprocess.run(['git', *args], capture_output=True, check=False)
-              if check and p.returncode: raise RuntimeError(p.stderr.decode('utf-8', 'replace'))
-              return p
-          actual = git('rev-parse', 'origin/main').stdout.decode().strip()
-          if actual != main: raise RuntimeError('main moved; review new base before integration')
-          git('cat-file', '-e', candidate + '^{commit}')
-          heads = '''pc-all-worker-scheduling-20260912 c73a214a7f0e3bb6faca80c3f294237229310e37
-          v0.8.1-parallelism-range-20260912 19fcb4f438c04162217115cbbbd5a22adaaa85ed
-          v0.8.1-parallel-abba-20260920 65f06c16c296877ad7f98e8313e95e26ebb68bd3
-          v0.8.1-worker-tail-audit-20260912 2206308c08e3dea8b5416267853e13c38657e63a
-          japanese-i18n-prep a83a38b88527b3aae31c14834b86e93f9a23d512
-          japanese-translation-20260910 eada4984deae464ab1e3d0e53560c463ad329973
-          next-gui-render-watchdog 332c92e81b04592987d0425746ca310b28f8f761
-          pc-replay-dp-20260906 8a70c05bb9db60b49bf820cea3896450ed3bc1a8
-          v0.8.1-copy-contract-20260912 02417bf22072058d42ee442224c0c77fa4cc9a36
-          v0.8.1-completion-audit-20260912 b99a086d95b8b29fcc787d916273bb724766305b
-          v0.8.1-product-gap-audit-20260912 c3099ac2a598e38a30e0cf92b135aa31bda6ec7a
-          v0.8.1-product-parity-round2-20260912 b0993a0871cf34775e4c7bf93397a9e1cfafe7e4
-          v081-product-parity-closure-20260912 6246ee9f553880efdad39705a96b3970e4a13ed0
-          actions-tail-parallelism f7ef020d5cecf74138292d32d9da04b4f03aa3c5
-          ci-independent-failure-collection-next 4ef44848048ae46fc0d9cf22131633093952383c
-          fix-pages-bootstrap 0c4f96e9149e6a774669f77d549e298f54fdac8e
-          fix-release-publish fcaa26c252143d80d5e2be60ea4c7d639f2a31a9
-          gate-independent-failure-collection 300c468f9535cf1957e5d9789cce29138f80833f
-          next-fast-deploy 94ed0e79e21670f9d893c340e429abd2fd639f73
-          pages-legacy-contract-fix 15764945f904a155d8cfa115b45edb226f01974d
-          release-build-architecture-ab 03456ed5b2a3554cfe5d133c8629c3a2eff929d3
-          release-pages 2520886b33bfedaa552c23070fca37ef8060b173
-          release-rust-shard-contention e1e0b13541ab17e7788c99f00d026eb989938c54
-          release-rust-shard-contention-ci aea538f61296c918950f9fd303362b47e14518cf
-          release-rust-shard-contention-ci-v2 d7d4e6b2bb559716363533f2d0e9742419094be3
-          release-rust-shard-contention-ci-v3 89beb449d58cf09c570fc9af53ee1e3187709350
-          v0.8.1-strict-clippy-20260912 e3aabe5cd166e85adde7e28f1d6bbbcdfbd02380'''
-          records = [line.split() for line in heads.splitlines() if line.strip()]
-          def blob(ref, path):
-              p = git('rev-parse', ref + ':' + path, check=False)
-              return p.stdout.decode().strip() if p.returncode == 0 else None
-          def inspect(item):
-              name, head = item
-              git('cat-file', '-e', head + '^{commit}')
-              base = git('merge-base', main, head).stdout.decode().strip()
-              paths = git('diff', '--name-only', '-z', base, head).stdout.decode().split('\0')
-              paths = [p for p in paths if p]
-              folder = out / 'branches' / name
-              folder.mkdir(parents=True, exist_ok=True)
-              (folder/'introduced.patch').write_bytes(git('diff', '--no-ext-diff', '--no-renames', base, head).stdout)
-              (folder/'cherry.txt').write_bytes(git('cherry', '-v', candidate, head).stdout)
-              (folder/'history.txt').write_bytes(git('log', '--format=%H %s', candidate + '..' + head).stdout)
-              merge = git('merge-tree', '--write-tree', '--messages', candidate, head, check=False)
-              (folder/'merge.txt').write_bytes(merge.stdout + merge.stderr)
-              files = []
-              for path in paths:
-                  identities = {key:blob(ref,path) for key,ref in [('base',base),('incoming',head),('main',main),('candidate',candidate)]}
-                  files.append({'path':path, **identities})
-                  for key,ref in [('base',base),('incoming',head)]:
-                      if identities[key] is None: continue
-                      data = git('show', ref + ':' + path).stdout
-                      if b'\0' not in data and len(data) <= 4_000_000:
-                          dest = folder/key/path
-                          dest.parent.mkdir(parents=True,exist_ok=True)
-                          dest.write_bytes(data)
-              record={'branch':'codex/'+name,'head':head,'base':base,'merge_status':merge.returncode,'files':files}
-              (folder/'summary.json').write_text(json.dumps(record,indent=2))
-              return record
-          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-              summaries=list(pool.map(inspect,records))
-          paths=set(p['path'] for r in summaries for p in r['files'])
-          paths.update(['AGENTS.md','Cargo.toml','rust-toolchain.toml','package.json','apps/clearra-web/svelte.config.js','apps/clearra-web/vite.config.ts','crates/clearra-forward-search/src/boundary_recovery.rs','scripts/clearra.ps1','scripts/lib/clearra-path-helpers.ps1','scripts/lib/clearra-task-ui-helpers.ps1','scripts/lib/rust-exact-tests.ps1'])
-          for ref,label in [(main,'main'),(candidate,'candidate')]:
-              for path in sorted(paths):
-                  p=git('show',ref+':'+path,check=False)
-                  if p.returncode == 0 and b'\0' not in p.stdout and len(p.stdout)<=4_000_000:
-                      dest=out/label/path;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(p.stdout)
-          (out/'candidate.patch').write_bytes(git('diff','--no-ext-diff',main,candidate).stdout)
-          summary={'main':main,'candidate':candidate,'branch_count':len(summaries),'branches':summaries,'mutation':'none','publication':'none'}
-          (out/'summary.json').write_text(json.dumps(summary,indent=2))
-          for r in summaries:
-              print(json.dumps({'branch':r['branch'],'files':len(r['files']),'identical_candidate':sum(p['candidate']==p['incoming'] for p in r['files']),'merge_status':r['merge_status']}))
-          archive=out.with_suffix('.zip')
-          with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
-              for p in sorted(out.rglob('*')):
-                  if p.is_file():z.write(p,p.relative_to(out))
-          print('audit_archive_bytes='+str(archive.stat().st_size))
-          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
-              f.write('Pinned 27-branch source audit. No merge, main update, tag or publication performed.\n')
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 77880df9c2b0e919cacf5b10145cfab9e5f2b1e8
+          git archive --format=tar.gz --output="$RUNNER_TEMP/clearra-candidate-source.tar.gz" HEAD
+          sha256sum "$RUNNER_TEMP/clearra-candidate-source.tar.gz" > "$RUNNER_TEMP/clearra-candidate-source.sha256"
+          echo 'Read-only source export; no build, main update, tag, publication or deployment.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: clearra-safe-integration-audit-${{ github.run_id }}
-          path: ${{ runner.temp }}/clearra-integration-audit.zip
+          name: clearra-pinned-candidate-source-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/clearra-candidate-source.tar.gz
+            ${{ runner.temp }}/clearra-candidate-source.sha256
           if-no-files-found: error
           retention-days: 7
