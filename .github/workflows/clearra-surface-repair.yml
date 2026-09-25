@@ -13,38 +13,69 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: b2cff45470e29871c75aa1e44b37ea892e6d5b79
+          ref: afb1a2789f782d679d921c41ad298db90651f98a
           fetch-depth: 0
-          persist-credentials: false
-      - name: Bind the corrected source without reapplying changes or updating refs
+      - name: Apply the reviewed source-contract and Discord trigger patch without changing main
         id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: python
         run: |
-          import json,os,subprocess
+          import hashlib,json,os,pathlib,subprocess
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
           base='952280950aeb24528279cbff685fe8acec892223'
-          parent='ecc2f9e80218d6404a3eaee688b861f0f654da87'
-          candidate='b2cff45470e29871c75aa1e44b37ea892e6d5b79'
+          parent='b2cff45470e29871c75aa1e44b37ea892e6d5b79'
           branch='codex/converge-surface-repair-20260926'
-          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
+          expected_tree='132b113a93a6cf8487b3c5d1c902a30e2f244023'
+          patch=pathlib.Path('scripts/integration/pages-discord-contract-fix-20260926.patch').read_bytes()
+          if hashlib.sha256(patch).hexdigest()!='3952ebce4259b106627a05765517deb92deb54f4570d68a5236ae5a04126dbff':
+              raise RuntimeError('Reviewed patch checksum mismatch')
+          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,parent)]:
               rows=git('ls-remote','origin',ref).splitlines()
-              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before running')
-          if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
-              git('show','-s','--format=%P',parent)!=base): raise RuntimeError('Reviewed ancestry mismatch')
-          expected=['apps/clearra-web/test/ClearraVerifierPool.contract.ts','scripts/lib/wasm-release-gate.ps1']
-          if git('diff','--name-only',parent,candidate).splitlines()!=expected: raise RuntimeError('Unexpected correction scope')
-          git('diff','--check',base,candidate)
+              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before applying')
+          target=pathlib.Path(os.environ['RUNNER_TEMP'])/'pages-discord-reviewed.patch'
+          target.write_bytes(patch)
+          git('checkout','--detach',parent)
+          git('apply','--check',str(target)); git('apply',str(target))
+          git('diff','--check'); git('add','--all')
+          expected=['.github/workflows/discord-deploy.yml','apps/clearra-web/tsconfig.contract.json',
+              'scripts/release/discord-acceptance-trigger.mjs','scripts/release/discord-acceptance-trigger.test.mjs',
+              'scripts/release/discord-deploy-workflow.test.mjs','scripts/tools/build-clearra-frontend.mjs',
+              'scripts/tools/build-clearra-frontend.test.mjs','scripts/tools/run-release-regression-tests.mjs',
+              'scripts/tools/run-release-regression-tests.test.mjs','scripts/types/node-contract-builtins.d.ts']
+          if git('diff','--cached','--name-only').splitlines()!=expected or git('write-tree')!=expected_tree:
+              raise RuntimeError('Reviewed source tree or changed scope mismatch')
+          git('config','user.name','github-actions[bot]')
+          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit','-m','fix: separate prebuild worker contracts and bind Discord deployment to exact Release acceptance')
+          candidate=git('rev-parse','HEAD')
+          if git('show','-s','--format=%P',candidate)!=parent: raise RuntimeError('Parent mismatch')
+          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':expected_tree,'changed_files':expected,'main_updated':False}
+          (pathlib.Path(os.environ['RUNNER_TEMP'])/'pages-discord-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt),flush=True)
+          git('push','origin',candidate+':refs/heads/'+branch)
+          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate: raise RuntimeError('Candidate readback mismatch')
+          subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True)
           with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
-          print(json.dumps({'candidate':candidate,'parent':parent,'base':base,'main_updated':False}))
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pages-discord-preparation-${{ github.run_id }}
+          path: ${{ runner.temp }}/pages-discord-preparation.json
+          if-no-files-found: warn
+          retention-days: 14
   verifier-contracts:
     needs: prepare
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -58,7 +89,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup show active-toolchain
+          rustup toolchain install 1.98.1 --profile minimal
           rustc --version
           cargo --version
           echo 'RUSTUP_AUTO_INSTALL=0' >> "$GITHUB_ENV"
@@ -69,11 +100,14 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Repeat the actual verifier lifecycle contract with controlled clocks
+      - name: Typecheck and execute the complete worker suite before any WASM or Svelte generation
         shell: bash
         run: |
           set -euo pipefail
           {
+            node -e "const f=require('node:fs'); for(const p of ['apps/clearra-web/.svelte-kit/tsconfig.json','apps/clearra-web/static/wasm/clearra_wasm.manifest.json']) if(f.existsSync(p)) throw Error('prebuild fixture unexpectedly exists: '+p)"
+            pnpm --filter @clearra/web run test
+            node -e "const f=require('node:fs'); for(const p of ['apps/clearra-web/.svelte-kit/tsconfig.json','apps/clearra-web/static/wasm/clearra_wasm.manifest.json']) if(f.existsSync(p)) throw Error('source test generated product input: '+p)"
             for attempt in 1 2 3; do
               echo "verifier_clock_repetition=$attempt source=${{ needs.prepare.outputs.candidate }}"
               node scripts/tools/run-typescript-contracts.mjs apps/clearra-web/test/ClearraVerifierPool.contract.ts
@@ -104,11 +138,12 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Test GPU absence, mandatory selection, Svelte and release contracts
+      - name: Test GPU absence, mandatory selection, Svelte and exact Discord release authority
         shell: bash
         run: |
           set -euo pipefail
           {
+            node --test scripts/tools/build-clearra-frontend.test.mjs scripts/release/discord-acceptance-trigger.test.mjs
             node --test apps/clearra-web/test/browserGpuAvailability.test.mjs packages/clearra-ui/test/mandatorySolutionSelection.test.mjs
             pnpm --filter @clearra/ui run test
             node scripts/desktop-ui-compile-check.mjs
@@ -229,4 +264,4 @@ jobs:
           failed={k:v['result'] for k,v in results.items() if v['result']!='success'}
           if failed: raise RuntimeError(json.dumps(failed))
           print('Nonpublishing acceptance passed:',results['prepare']['outputs']['candidate'])
-          print('Independent management policy is still required before main promotion. No publication performed.')
+          print('Independent management policy is still required. Canonical Release success will automatically trigger the existing exact-source Discord workflow after main promotion; no deployment runs here.')
