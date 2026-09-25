@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test": "pnpm --filter ctk3 run build && node --test ./test/*.test.mjs && pnpm exec tsc --noEmit -p tsconfig.contract.json && node ../../scripts/tools/run-typescript-contracts.mjs ./test"
+    "test": "node ./scripts/prepare-test-dependencies.mjs && node --test ./test/*.test.mjs && pnpm exec tsc --noEmit -p tsconfig.contract.json && node ../../scripts/tools/run-typescript-contracts.mjs ./test"
   },
   "exports": {
     ".": "./src/lib/index.ts",
