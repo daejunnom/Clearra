@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: d02ba99c238fb2f4d8a76270b6b1ac273d08ef47
+          ref: 8f8263bbb01ab940690e58d6570ee1de5dae42a4
           fetch-depth: 0
           persist-credentials: false
       - name: Bind repaired reviewed candidate without rebuilding or updating refs
@@ -34,7 +34,7 @@ jobs:
               return subprocess.check_output(['git', *args], text=True).strip()
           main = '3e06bce344da89212b002d0cba96063703088074'
           reviewed = '352c42d5536e2ceab0bc55d773c61973c3b96434'
-          candidate = 'd02ba99c238fb2f4d8a76270b6b1ac273d08ef47'
+          candidate = '8f8263bbb01ab940690e58d6570ee1de5dae42a4'
           if git('rev-parse', 'HEAD') != candidate:
               raise RuntimeError('Exact candidate checkout mismatch')
           for ref, expected in [
@@ -94,6 +94,10 @@ jobs:
           test "$(git rev-parse HEAD)" = "$CLEARRA_SOURCE_COMMIT"
           node --test scripts/tools/clearra-build-filesystem-path.test.mjs scripts/tools/build-clearra-frontend.test.mjs
           node scripts/tools/run-release-regression-tests.mjs
+      - name: Verify UI tests prepare CTK3 from a clean checkout
+        run: |
+          pnpm --filter ctk3 run clean
+          pnpm --filter @clearra/ui run test
       - name: Exercise artifact-root and isolated-harness scheduling contracts
         shell: pwsh
         run: |
@@ -179,14 +183,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run exact nonpublishing acceptance leaf
         id: gate
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
           $report = Join-Path $env:RUNNER_TEMP 'clearra-reviewed-gate.log'
           $workers = [Math]::Max(1, [Environment]::ProcessorCount)
-          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $workers -VerboseLog -ShowWarnings *> $report
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $workers -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath $report
           $code = $LASTEXITCODE
-          Get-Content -LiteralPath $report
           $receipt = [ordered]@{
             schema = 'clearra.nonpublishing-integration-leaf.v1'
             source_commit = $env:CLEARRA_SOURCE_COMMIT
