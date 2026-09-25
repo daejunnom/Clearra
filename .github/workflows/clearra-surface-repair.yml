@@ -13,30 +13,88 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ecc2f9e80218d6404a3eaee688b861f0f654da87
+          ref: b923b7490903619e5b27a0d1a9a55cdd97b91257
           fetch-depth: 0
-          persist-credentials: false
-      - name: Bind the existing exact candidate without rebuilding or updating refs
+      - name: Apply only the reviewed watchdog test and early worker-gate changes
         id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: python
         run: |
-          import json,os,subprocess
+          import hashlib,json,os,pathlib,subprocess
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
-          main='952280950aeb24528279cbff685fe8acec892223'
-          candidate='ecc2f9e80218d6404a3eaee688b861f0f654da87'
+          base='952280950aeb24528279cbff685fe8acec892223'
+          parent='ecc2f9e80218d6404a3eaee688b861f0f654da87'
           branch='codex/converge-surface-repair-20260926'
-          for ref,sha in [('refs/heads/main',main),('refs/heads/'+branch,candidate)]:
+          patch=pathlib.Path('scripts/integration/verifier-watchdog-ci-fix.patch').read_bytes()
+          if hashlib.sha256(patch).hexdigest()!='8f7e89c4b56f308f3cf709f752609f3c52b6be52da9feda88add32f041b3e06f': raise RuntimeError('Reviewed patch checksum mismatch')
+          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,parent)]:
               rows=git('ls-remote','origin',ref).splitlines()
-              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved')
-          if git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=main: raise RuntimeError('Candidate ancestry mismatch')
-          git('diff','--check',main,candidate)
+              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before writing')
+          patch_path=pathlib.Path(os.environ['RUNNER_TEMP'])/'verifier-watchdog-ci-fix.patch'
+          patch_path.write_bytes(patch)
+          git('checkout','--detach',parent)
+          git('apply','--check',str(patch_path))
+          git('apply',str(patch_path))
+          expected=['apps/clearra-web/test/ClearraVerifierPool.contract.ts','scripts/lib/wasm-release-gate.ps1']
+          if git('diff','--name-only').splitlines()!=expected: raise RuntimeError('Unexpected changed paths')
+          git('diff','--check')
+          git('add','--',*expected)
+          git('config','user.name','github-actions[bot]')
+          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit','-m','test: make verifier watchdog clocks deterministic and fail worker contracts before WASM builds')
+          candidate=git('rev-parse','HEAD')
+          if git('show','-s','--format=%P',candidate)!=parent: raise RuntimeError('Candidate parent mismatch')
+          git('push','origin','HEAD:refs/heads/'+branch)
+          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate: raise RuntimeError('Candidate readback mismatch')
           with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
-          print(json.dumps({'candidate':candidate,'base':main,'tree':git('rev-parse','HEAD^{tree}'),'main_updated':False}))
+          print(json.dumps({'candidate':candidate,'parent':parent,'base':base,'main_updated':False,'changed_files':expected}),flush=True)
+          subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True)
+  verifier-contracts:
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: 22.23.2}
+      - name: Install exact frozen workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Repeat the actual verifier lifecycle contract with controlled clocks
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            for attempt in 1 2 3; do
+              echo "verifier_clock_repetition=$attempt source=${{ needs.prepare.outputs.candidate }}"
+              node scripts/tools/run-typescript-contracts.mjs apps/clearra-web/test/ClearraVerifierPool.contract.ts
+            done
+          } 2>&1 | tee "$RUNNER_TEMP/verifier-clock.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verifier-clock-${{ matrix.os }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/verifier-clock.log
+          retention-days: 14
+          if-no-files-found: warn
   contracts:
     needs: prepare
     runs-on: ubuntu-latest
@@ -73,7 +131,7 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
   acceptance:
-    needs: prepare
+    needs: [prepare, verifier-contracts]
     runs-on: windows-latest
     timeout-minutes: 120
     strategy:
@@ -168,7 +226,7 @@ jobs:
           retention-days: 14
   ready:
     if: always()
-    needs: [prepare, contracts, acceptance, rust-regressions]
+    needs: [prepare, verifier-contracts, contracts, acceptance, rust-regressions]
     runs-on: ubuntu-latest
     steps:
       - name: Require complete exact-source acceptance
