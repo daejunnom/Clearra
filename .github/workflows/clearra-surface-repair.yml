@@ -13,71 +13,65 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
-      actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: dbaf785a4b85049a66012713dec9604b79081065
+          ref: ecc2f9e80218d6404a3eaee688b861f0f654da87
           fetch-depth: 0
-      - name: Apply reviewed exact product changes without changing publication workflows
+          persist-credentials: false
+      - name: Bind the existing exact candidate without rebuilding or updating refs
         id: prepare
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: python
         run: |
-          import base64,hashlib,json,os,pathlib,subprocess,zlib
+          import json,os,subprocess
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
           main='952280950aeb24528279cbff685fe8acec892223'
+          candidate='ecc2f9e80218d6404a3eaee688b861f0f654da87'
           branch='codex/converge-surface-repair-20260926'
-          data=''.join(pathlib.Path(f'scripts/integration/surface-repair-20260926.part{i}').read_text().strip() for i in range(1,7))
-          patch=zlib.decompress(base64.b64decode(data,validate=True))
-          supplement=pathlib.Path('scripts/integration/surface-repair-gate-owner.patch').read_bytes()
-          for data,sha in [(patch,'5cfd53ff50745ccc584ed4f7c7523365c04c5f8774744cfd5dcc1882c4631c75'),(supplement,'5ee08b5963d72a9fd26de414aa37fefb5e190f1345b43106bdcf798978e7be17')]:
-              if hashlib.sha256(data).hexdigest()!=sha: raise RuntimeError('Patch checksum mismatch')
-          if git('ls-remote','origin','refs/heads/main').split()[0]!=main: raise RuntimeError('Main moved')
-          if git('ls-remote','origin','refs/heads/'+branch): raise RuntimeError('Candidate exists; never overwrite')
-          root=pathlib.Path(os.environ['RUNNER_TEMP'])
-          (root/'repair.patch').write_bytes(patch)
-          (root/'supplement.patch').write_bytes(supplement)
-          git('checkout','--detach',main)
-          for name in ['repair.patch','supplement.patch']:
-              git('apply','--check',str(root/name)); git('apply',str(root/name))
-          git('diff','--check')
-          git('add','--all')
-          paths=git('diff','--cached','--name-only').splitlines()
-          if len(paths)!=24 or any(p.startswith(('.github/','scripts/integration/')) for p in paths): raise RuntimeError('Unexpected product paths')
-          git('config','user.name','github-actions[bot]')
-          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-          git('commit','-m','fix: restore fail-operational browser search and connect Svelte recovery and mandatory solutions')
-          candidate=git('rev-parse','HEAD')
-          print(json.dumps({'candidate':candidate,'base':main,'branch':branch,'changed_files':paths,'main_updated':False}),flush=True)
-          git('push','origin','HEAD:refs/heads/'+branch)
-          subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True)
+          for ref,sha in [('refs/heads/main',main),('refs/heads/'+branch,candidate)]:
+              rows=git('ls-remote','origin',ref).splitlines()
+              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved')
+          if git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=main: raise RuntimeError('Candidate ancestry mismatch')
+          git('diff','--check',main,candidate)
           with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
+          print(json.dumps({'candidate':candidate,'base':main,'tree':git('rev-parse','HEAD^{tree}'),'main_updated':False}))
   contracts:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
       - uses: actions/setup-node@v4
         with: {node-version: 22.23.2}
+      - name: Verify immutable historical fixture before running release regressions
+        run: |
+          test "$(git rev-parse 'refs/tags/v0.7.4^{tag}')" = a95973dbc1c3c1919478328d12e4d25ddaedea71
+          test "$(git rev-parse 'refs/tags/v0.7.4^{commit}')" = 0438d85f90b47c4ce89835f6a6d665a0415aa25a
       - name: Install exact frozen workspace
         run: |
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Test GPU absence, mandatory selection, UI and release contracts
+      - name: Test GPU absence, mandatory selection, Svelte and release contracts
+        shell: bash
         run: |
-          node --test apps/clearra-web/test/browserGpuAvailability.test.mjs packages/clearra-ui/test/mandatorySolutionSelection.test.mjs
-          pnpm --filter @clearra/ui run test
-          node scripts/desktop-ui-compile-check.mjs
-          node scripts/tools/run-release-regression-tests.mjs
+          set -euo pipefail
+          {
+            node --test apps/clearra-web/test/browserGpuAvailability.test.mjs packages/clearra-ui/test/mandatorySolutionSelection.test.mjs
+            pnpm --filter @clearra/ui run test
+            node scripts/desktop-ui-compile-check.mjs
+            node scripts/tools/run-release-regression-tests.mjs
+          } 2>&1 | tee "$RUNNER_TEMP/repair-contracts.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: surface-repair-contracts-${{ github.run_id }}
+          path: ${{ runner.temp }}/repair-contracts.log
+          retention-days: 14
+          if-no-files-found: warn
   acceptance:
     needs: prepare
     runs-on: windows-latest
@@ -155,12 +149,23 @@ jobs:
       - uses: actions/checkout@v4
         with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
       - name: Test exact boundary and borrowed-state cleanup
+        shell: bash
         run: |
-          cargo fmt --all --check
-          cargo test --locked --package clearra-forward-search --lib boundary_recovery -- --test-threads=1
-          cargo test --locked --package clearra-wasm-abi --lib reset_rejects_a_borrowed_runtime_without_a_second_panic -- --test-threads=1
-          cargo test --locked --package clearra-wasm-abi --lib warm_minimum_to_geometry_releases_authority -- --test-threads=1
-          cargo test --locked --package clearra-wasm-abi --lib exact_replacement_requires_geometry_finish -- --test-threads=1
+          set -euo pipefail
+          {
+            cargo fmt --all --check
+            cargo test --locked --package clearra-forward-search --lib boundary_recovery -- --test-threads=1
+            cargo test --locked --package clearra-wasm-abi --lib reset_rejects_a_borrowed_runtime_without_a_second_panic -- --test-threads=1
+            cargo test --locked --package clearra-wasm-abi --lib warm_minimum_to_geometry_releases_authority -- --test-threads=1
+            cargo test --locked --package clearra-wasm-abi --lib exact_replacement_requires_geometry_finish -- --test-threads=1
+          } 2>&1 | tee "$RUNNER_TEMP/repair-rust.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: surface-repair-rust-${{ github.run_id }}
+          path: ${{ runner.temp }}/repair-rust.log
+          if-no-files-found: warn
+          retention-days: 14
   ready:
     if: always()
     needs: [prepare, contracts, acceptance, rust-regressions]
