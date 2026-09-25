@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { access, readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 import { runPowerShellTest } from "../tools/powershell-test-process.mjs";
+import {
+  DISCORD_RECOVERY_JOB_STEPS,
+  DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS,
+} from "./discord-deployment-recovery.mjs";
 
 const primary = await readFile(
   new URL("../../.github/workflows/discord-deploy.yml", import.meta.url),
@@ -28,6 +32,41 @@ const runtimeRecovery = await readFile(
   new URL("./invoke-discord-runtime-recovery-v080.ps1", import.meta.url),
   "utf8",
 );
+
+test("Discord recovery and checkpoint step contracts follow the current workflow", () => {
+  const source = primary.replaceAll("\r\n", "\n");
+  for (const [job, contract] of [
+    ["authority", "authority"],
+    ["candidate", "Prepare immutable Discord candidate inputs"],
+    ["promote", "promote"],
+    ["sync-observe", "sync-observe"],
+  ]) {
+    const block = source.split(`\n  ${job}:\n`)[1]?.split(/^  [a-z][a-z-]*:/mu)[0];
+    assert.ok(block, `${job} must exist in the workflow`);
+    const declared = [...block.matchAll(/^      - name: (.+)$/gmu)].map((match) => match[1]);
+    const recovery = DISCORD_RECOVERY_JOB_STEPS[contract];
+    let priorIndex = -1;
+    for (const name of declared) {
+      const index = recovery.indexOf(name);
+      assert.ok(index > priorIndex, `${job}: ${name} is absent or out of order in recovery`);
+      priorIndex = index;
+    }
+    const successful = DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS[contract].filter(
+      (name) => !["Set up job", "Complete job"].includes(name) && !name.startsWith("Post "),
+    );
+    assert.deepEqual(successful, declared, `${job} checkpoint steps must match the workflow`);
+    if (declared.includes("Cache only the exact pnpm store")) {
+      const post = "Post Cache only the exact pnpm store";
+      for (const [label, contractSteps] of [
+        ["recovery", recovery],
+        ["checkpoint", DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS[contract]],
+      ]) {
+        assert.ok(contractSteps.indexOf(post) > contractSteps.indexOf("Cache only the exact pnpm store"),
+          `${job}: ${label} must admit the cache post step after its setup`);
+      }
+    }
+  }
+});
 
 function assertExactHandoffDownloads(source) {
   const normalized = source.replaceAll('\r\n', '\n');
