@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
 use clearra_pc_graph::request::PcScenarioQuery;
 use clearra_problem::ProblemCompiler;
 use clearra_validation::diagnostic::diagnostic_report::DiagnosticReport;
@@ -15,6 +16,7 @@ use crate::{
     },
     pc_allspin_result::project_pc_allspin_result,
     pc_chance_probability_result::PcChanceCompiledAuthority,
+    pc_minimum_cover_result::validate_pinned_minimum_keys,
     pc_result_projection::{
         validate_scenario_pc_result_projection, PcResultProjection, ValidatedPcResultProjection,
     },
@@ -29,6 +31,9 @@ pub struct ScenarioAppCommand {
     query: Arc<PcScenarioQuery>,
     render_contract: Option<ScenarioAppRenderContract>,
     result_projection: PcResultProjection,
+    pinned_minimum_keys: Vec<String>,
+    pinned_minimum_drawings: Vec<StandardBoard64ColoredTilingIdentity>,
+    expected_source_set_hash: Option<String>,
 }
 
 impl ScenarioAppCommand {
@@ -37,6 +42,9 @@ impl ScenarioAppCommand {
             query: Arc::new(query),
             render_contract: None,
             result_projection: PcResultProjection::Standard,
+            pinned_minimum_keys: Vec::new(),
+            pinned_minimum_drawings: Vec::new(),
+            expected_source_set_hash: None,
         }
     }
 }
@@ -54,6 +62,21 @@ impl ScenarioAppCommand {
     pub const fn with_score_minimals_result(self) -> Self {
         self.with_result_projection(PcResultProjection::pc_score_minimals())
     }
+
+    pub fn with_pinned_minimum_keys(mut self, keys: Vec<String>) -> Self {
+        self.pinned_minimum_keys = keys;
+        self
+    }
+
+    pub fn with_pinned_minimum_drawings(
+        mut self,
+        drawings: Vec<StandardBoard64ColoredTilingIdentity>,
+        expected_source_set_hash: Option<String>,
+    ) -> Self {
+        self.pinned_minimum_drawings = drawings;
+        self.expected_source_set_hash = expected_source_set_hash;
+        self
+    }
 }
 impl ScenarioAppCommand {
     pub fn query(&self) -> &PcScenarioQuery {
@@ -66,6 +89,18 @@ impl ScenarioAppCommand {
 
     pub const fn result_projection(&self) -> PcResultProjection {
         self.result_projection
+    }
+
+    pub fn pinned_minimum_keys(&self) -> &[String] {
+        &self.pinned_minimum_keys
+    }
+
+    pub fn pinned_minimum_drawings(&self) -> &[StandardBoard64ColoredTilingIdentity] {
+        &self.pinned_minimum_drawings
+    }
+
+    pub fn expected_source_set_hash(&self) -> Option<&str> {
+        self.expected_source_set_hash.as_deref()
     }
 
     pub const fn score_minimals_requested(&self) -> bool {
@@ -81,6 +116,25 @@ impl ScenarioAppCommand {
     pub(crate) fn validated_result_projection(
         &self,
     ) -> Result<ValidatedPcResultProjection, &'static str> {
+        validate_pinned_minimum_keys(
+            &self.pinned_minimum_keys,
+            self.result_projection.minimals_origin().is_some(),
+        )?;
+        if !self.pinned_minimum_drawings.is_empty()
+            && (!self.pinned_minimum_keys.is_empty()
+                || self.result_projection.minimals_origin().is_none()
+                || self
+                    .pinned_minimum_drawings
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != self.pinned_minimum_drawings.len())
+        {
+            return Err("pc pinned drawings require a unique minimum-cover selection");
+        }
+        if self.expected_source_set_hash.is_some() && self.pinned_minimum_drawings.is_empty() {
+            return Err("pc source-set hash requires selected drawings");
+        }
         if !self.result_projection.is_standard() && self.render_contract.is_some() {
             return Err(if self.result_projection.chance_origin().is_some() {
                 "pc chance does not accept a scenario render contract"

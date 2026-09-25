@@ -1,10 +1,11 @@
 use crate::commands::{
-    BuildProbabilityAppCommand, BuildV2AppCommand, ContinueAppCommand, ConvertAppCommand,
-    CoverAppCommand, DamageAppCommand, FieldDocumentTransformAppCommand, FumenAppCommand,
-    InspectUnsupportedAppCommand, OperationSequenceAppCommand, ParityAppCommand, PathAppCommand,
-    PcAppCommand, PercentAppCommand, RenAppCommand, RenderAppCommand, RulesAppCommand,
-    ScenarioAppCommand, ScoringAppCommand, SequenceDependenciesAppCommand, SetupAppCommand,
-    SetupScoreAppCommand, SpinFinderAppCommand, SpinStructureAppCommand, VerifyAppCommand,
+    BoundaryRecoveryAppCommand, BuildProbabilityAppCommand, BuildV2AppCommand, ContinueAppCommand,
+    ConvertAppCommand, CoverAppCommand, DamageAppCommand, FieldDocumentTransformAppCommand,
+    FumenAppCommand, InspectUnsupportedAppCommand, OperationSequenceAppCommand, ParityAppCommand,
+    PathAppCommand, PcAppCommand, PercentAppCommand, RenAppCommand, RenderAppCommand,
+    RulesAppCommand, ScenarioAppCommand, ScoringAppCommand, SequenceDependenciesAppCommand,
+    SetupAppCommand, SetupScoreAppCommand, SpinFinderAppCommand, SpinStructureAppCommand,
+    VerifyAppCommand,
 };
 use crate::{app_context::AppExecutionContext, app_response::AppResponse};
 use clearra_core_domain::objective::objective_kind::ObjectiveKind;
@@ -48,6 +49,7 @@ pub enum AppCommand {
     Damage(DamageAppCommand),
     SpinFinder(SpinFinderAppCommand),
     Ren(RenAppCommand),
+    BoundaryRecovery(BoundaryRecoveryAppCommand),
     SpinStructure(SpinStructureAppCommand),
     Cover(CoverAppCommand),
     Rules(RulesAppCommand),
@@ -78,6 +80,7 @@ impl AppCommand {
             Self::Damage(_) => AppCommandKind::Damage,
             Self::SpinFinder(_) => AppCommandKind::SpinFinder,
             Self::Ren(_) => AppCommandKind::Ren,
+            Self::BoundaryRecovery(_) => AppCommandKind::BoundaryRecovery,
             Self::SpinStructure(_) => AppCommandKind::SpinStructure,
             Self::Cover(_) => AppCommandKind::Cover,
             Self::Rules(_) => AppCommandKind::Rules,
@@ -116,6 +119,7 @@ impl AppCommand {
             Self::Damage(_) => QueryEnvelope::Damage,
             Self::SpinFinder(_) => QueryEnvelope::SpinFinder,
             Self::Ren(_) => QueryEnvelope::Ren,
+            Self::BoundaryRecovery(_) => QueryEnvelope::BoundaryRecovery,
             Self::SpinStructure(_) => QueryEnvelope::SpinStructure,
             Self::Cover(_) => QueryEnvelope::BuildCoverage,
             Self::Rules(_) => QueryEnvelope::Rules,
@@ -178,9 +182,11 @@ impl AppCommand {
                     .allow_backend_fallback(),
             ),
             Self::BuildV2(_) | Self::SetupScore(_) => BackendPolicy::new("cpu", false),
-            Self::Damage(_) | Self::SpinFinder(_) | Self::Ren(_) | Self::SpinStructure(_) => {
-                BackendPolicy::new("cpu", false)
-            }
+            Self::Damage(_)
+            | Self::SpinFinder(_)
+            | Self::Ren(_)
+            | Self::BoundaryRecovery(_)
+            | Self::SpinStructure(_) => BackendPolicy::new("cpu", false),
             Self::Path(command) => BackendPolicy::new(
                 command
                     .query()
@@ -246,7 +252,11 @@ impl AppCommand {
             Self::BuildProbability(command) => !command.query().aggregation().is_tiling_only(),
             Self::BuildV2(_) | Self::SetupScore(_) => true,
             Self::Percent(_) => true,
-            Self::Damage(_) | Self::SpinFinder(_) | Self::Ren(_) | Self::SpinStructure(_) => false,
+            Self::Damage(_)
+            | Self::SpinFinder(_)
+            | Self::Ren(_)
+            | Self::BoundaryRecovery(_)
+            | Self::SpinStructure(_) => false,
             _ => false,
         }
     }
@@ -263,9 +273,11 @@ impl RunnableAppCommand for AppCommand {
             Self::SetupScore(_) => DiagnosticReport::new(),
             Self::BuildProbability(_) => DiagnosticReport::new(),
             Self::BuildV2(_) => DiagnosticReport::new(),
-            Self::Damage(_) | Self::SpinFinder(_) | Self::Ren(_) | Self::SpinStructure(_) => {
-                DiagnosticReport::new()
-            }
+            Self::Damage(_)
+            | Self::SpinFinder(_)
+            | Self::Ren(_)
+            | Self::BoundaryRecovery(_)
+            | Self::SpinStructure(_) => DiagnosticReport::new(),
             Self::Cover(command) => validate_build_coverage_query(command.query()),
             Self::Rules(command) => command.validate(),
             Self::Scoring(command) => command.validate(),
@@ -304,6 +316,7 @@ impl RunnableAppCommand for AppCommand {
             Self::Damage(command) => command.run(context),
             Self::SpinFinder(command) => command.run(context),
             Self::Ren(command) => command.run(context),
+            Self::BoundaryRecovery(command) => command.run(context),
             Self::SpinStructure(command) => command.run(context),
             Self::Cover(command) => command.run(context),
             Self::Rules(command) => command.run(context),

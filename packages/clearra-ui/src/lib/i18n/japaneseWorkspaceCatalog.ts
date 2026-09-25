@@ -582,6 +582,7 @@ export const japaneseWorkspaceMessages = Object.freeze({
   setup_next_cycle_duplicate_invalid: '次サイクル用ミノで重複できるのは1種類だけで、ホールドの持ち越しを含めて最大2個までです。',
   setup_max_pieces_invalid: 'セットアップの最大ミノ数は1〜10の整数にしてください。',
   queue_invalid: 'ミノ順、またはP4や[OISZ]などの有効なパターンを入力してください。',
+  pinned_solution_document_invalid: '必須の解法を完全な解法結果から選び直してから探索してください。',
   'visible-seven-minimum-cover-unsupported': '見えているミノを7個に制限した場合、最小カバー集合の選択には対応していません。すべての供給ミノ、または別の集計方法を選択してください。',
   'pc-score-finder-fixed-queue-required': '固定ミノ順の最高スコアには、明示的な1つの厳密なミノ順が必要です。パターンや空の供給は使用できません。',
   target_lines_invalid: '目標ライン数は1〜6の整数にしてください。',

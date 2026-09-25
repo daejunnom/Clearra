@@ -44,6 +44,8 @@
   export let showImport = true;
   export let showStats = true;
   export let showToolbar = true;
+  export let labelOverride: string | null = null;
+  export let enableGlobalPaste = true;
 
   const dispatch = createEventDispatcher<{
     change: Snapshot;
@@ -71,6 +73,7 @@
   $: existingCells = occupiedCellCount(trimMask(existingMask));
   $: targetCells = occupiedCellCount(trimMask(targetMask));
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
+  $: displayedBoardLabel = labelOverride ?? label(boardLabel);
   $: boardLabel =
     mode === 'build-probability'
       ? 'buildField'
@@ -86,13 +89,13 @@
     lastTarget = targetMask;
   }
 
-  onMount(() => installGlobalDocumentPaste({
+  onMount(() => enableGlobalPaste ? installGlobalDocumentPaste({
     importSource: (source) => importField(source),
     importFailed: () => {
       importFailureKey = 'fieldImportInvalid';
       importError = true;
     }
-  }));
+  }) : undefined);
 
   function beginPaint(event: PointerEvent, x: number, y: number) {
     if (!event.isPrimary || event.button !== 0) return;
@@ -283,14 +286,14 @@
 
 <svelte:window on:pointerup={stopPainting} on:pointercancel={stopPainting} />
 
-<section class="board-tool" aria-label={label(boardLabel)}>
+<section class="board-tool" aria-label={displayedBoardLabel}>
   {#if showToolbar}
     <div class="section-heading">
       <div>
-        <span class="eyebrow">{label(boardLabel)}</span>
+        <span class="eyebrow">{displayedBoardLabel}</span>
         <strong>{height}L · 10×{height}</strong>
       </div>
-      <div class="board-actions" role="toolbar" aria-label={label(boardLabel)}>
+      <div class="board-actions" role="toolbar" aria-label={displayedBoardLabel}>
         <button type="button" title={label('undo')} aria-label={label('undo')} disabled={!undoStack.length} on:click={undo}>
           <Undo2 size={16} strokeWidth={1.8} />
         </button>
@@ -336,7 +339,7 @@
   {#if showImport}
     <div class="fumen-import">
       <label>
-        <span>{label(mode === 'pc' ? 'fieldImport' : 'existingFieldImport')}</span>
+        <span>{labelOverride ?? label(mode === 'pc' ? 'fieldImport' : 'existingFieldImport')}</span>
         <input
           value={importInput}
           placeholder="v115@... / ctk3_..."
@@ -385,7 +388,7 @@
       class:build={mode === 'build-probability'}
       class="board"
       role="group"
-      aria-label={label(boardLabel)}
+      aria-label={displayedBoardLabel}
       style={`--board-rows:${height}`}
       on:pointermove={continuePaint}
     >

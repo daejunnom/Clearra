@@ -26,6 +26,7 @@ test('Pages exposes the exact v0.7.5 essential navigation without deleting advan
     'setup-score',
     'spin-structure',
     'build',
+    'recovery',
     'sequence',
     'sequence-dependencies',
     'parity',

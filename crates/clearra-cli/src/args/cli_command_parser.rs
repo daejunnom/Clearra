@@ -64,6 +64,17 @@ pub(crate) fn parse_command(
         "spin-structure" if has_help(command_args) => {
             Ok(ParsedCliCommand::Help(CliHelpTopic::SpinStructure))
         }
+        "recovery"
+            if command_args.first().map(String::as_str) == Some("boundary")
+                && has_help(command_args) =>
+        {
+            Ok(ParsedCliCommand::Help(CliHelpTopic::Product(
+                super::ProductHelpTopic::BoundaryRecovery,
+            )))
+        }
+        "recovery" if command_args.first().map(String::as_str) == Some("boundary") => Ok(
+            ParsedCliCommand::Product(product_tokens(command, command_args)),
+        ),
         "build" | "build-probability" | "finesse" | "damage" | "spin-finder" | "ren"
         | "spin-structure" | "chance" | "minimals" | "score" | "special-minimals"
         | "special_minimals" | "special-cover" | "special_cover" | "score-minimals"
@@ -116,6 +127,7 @@ fn pc_product_help_topic(command_args: &[String]) -> Option<super::ProductHelpTo
     match command_args.first().map(String::as_str) {
         Some("tiling") => Some(ProductHelpTopic::PcTiling),
         Some("minimals") => Some(ProductHelpTopic::PcMinimals),
+        Some("pinned-minimals") => Some(ProductHelpTopic::PcMinimals),
         Some("path") => Some(ProductHelpTopic::PcPath),
         Some("chance") => Some(ProductHelpTopic::PcChance),
         Some("score") => Some(ProductHelpTopic::PcScore),

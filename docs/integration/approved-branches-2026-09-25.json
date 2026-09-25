@@ -1,0 +1,191 @@
+[
+  {
+    "branch": "codex/pc-all-worker-scheduling-20260912",
+    "head": "c73a214a7f0e3bb6faca80c3f294237229310e37",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 2,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/v0.8.1-parallelism-range-20260912",
+    "head": "19fcb4f438c04162217115cbbbd5a22adaaa85ed",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 14,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/v0.8.1-parallel-abba-20260920",
+    "head": "65f06c16c296877ad7f98e8313e95e26ebb68bd3",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 25,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/v0.8.1-worker-tail-audit-20260912",
+    "head": "2206308c08e3dea8b5416267853e13c38657e63a",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 7,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/japanese-i18n-prep",
+    "head": "a83a38b88527b3aae31c14834b86e93f9a23d512",
+    "resolution": "research-note-retained; obsolete-plan-replacement-not-restored",
+    "patch_equivalent_commits": 0,
+    "non_equivalent_commits": 1
+  },
+  {
+    "branch": "codex/japanese-translation-20260910",
+    "head": "eada4984deae464ab1e3d0e53560c463ad329973",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 1,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/next-gui-render-watchdog",
+    "head": "332c92e81b04592987d0425746ca310b28f8f761",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 1,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/pc-replay-dp-20260906",
+    "head": "8a70c05bb9db60b49bf820cea3896450ed3bc1a8",
+    "resolution": "newer-PieceDecision-language-canonical-profile-digest-and-drained-worker-replacement-preserved",
+    "patch_equivalent_commits": 1,
+    "non_equivalent_commits": 2
+  },
+  {
+    "branch": "codex/v0.8.1-copy-contract-20260912",
+    "head": "02417bf22072058d42ee442224c0c77fa4cc9a36",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 10,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/v0.8.1-completion-audit-20260912",
+    "head": "b99a086d95b8b29fcc787d916273bb724766305b",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 20,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/v0.8.1-product-gap-audit-20260912",
+    "head": "c3099ac2a598e38a30e0cf92b135aa31bda6ec7a",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 1,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/v0.8.1-product-parity-round2-20260912",
+    "head": "b0993a0871cf34775e4c7bf93397a9e1cfafe7e4",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 15,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/v081-product-parity-closure-20260912",
+    "head": "6246ee9f553880efdad39705a96b3970e4a13ed0",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 2,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/actions-tail-parallelism",
+    "head": "f7ef020d5cecf74138292d32d9da04b4f03aa3c5",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 1,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/ci-independent-failure-collection-next",
+    "head": "4ef44848048ae46fc0d9cf22131633093952383c",
+    "resolution": "independent-failure-collection-preserved-in-newer-candidate-topology",
+    "patch_equivalent_commits": 0,
+    "non_equivalent_commits": 1
+  },
+  {
+    "branch": "codex/fix-pages-bootstrap",
+    "head": "0c4f96e9149e6a774669f77d549e298f54fdac8e",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 1,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/fix-release-publish",
+    "head": "fcaa26c252143d80d5e2be60ea4c7d639f2a31a9",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 1,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/gate-independent-failure-collection",
+    "head": "300c468f9535cf1957e5d9789cce29138f80833f",
+    "resolution": "independent-failure-collection-preserved-in-newer-candidate-topology",
+    "patch_equivalent_commits": 0,
+    "non_equivalent_commits": 1
+  },
+  {
+    "branch": "codex/next-fast-deploy",
+    "head": "94ed0e79e21670f9d893c340e429abd2fd639f73",
+    "resolution": "superseded-by-current-FastFix-component-ledger-and-recovery; historical-design-retained",
+    "patch_equivalent_commits": 0,
+    "non_equivalent_commits": 1
+  },
+  {
+    "branch": "codex/pages-legacy-contract-fix",
+    "head": "15764945f904a155d8cfa115b45edb226f01974d",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 1,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/release-build-architecture-ab",
+    "head": "03456ed5b2a3554cfe5d133c8629c3a2eff929d3",
+    "resolution": "final-isolated-harness-and-Brepro-integrated; rejected-cache-trials-research-only; newer-CLI-producer-preserved",
+    "patch_equivalent_commits": 0,
+    "non_equivalent_commits": 18
+  },
+  {
+    "branch": "codex/release-pages",
+    "head": "2520886b33bfedaa552c23070fca37ef8060b173",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 1,
+    "non_equivalent_commits": 0
+  },
+  {
+    "branch": "codex/release-rust-shard-contention",
+    "head": "e1e0b13541ab17e7788c99f00d026eb989938c54",
+    "resolution": "final-isolated-harness-and-Brepro-integrated; rejected-cache-trials-research-only; newer-CLI-producer-preserved",
+    "patch_equivalent_commits": 0,
+    "non_equivalent_commits": 13
+  },
+  {
+    "branch": "codex/release-rust-shard-contention-ci",
+    "head": "aea538f61296c918950f9fd303362b47e14518cf",
+    "resolution": "final-isolated-harness-and-Brepro-integrated; rejected-cache-trials-research-only; newer-CLI-producer-preserved",
+    "patch_equivalent_commits": 0,
+    "non_equivalent_commits": 4
+  },
+  {
+    "branch": "codex/release-rust-shard-contention-ci-v2",
+    "head": "d7d4e6b2bb559716363533f2d0e9742419094be3",
+    "resolution": "final-isolated-harness-and-Brepro-integrated; rejected-cache-trials-research-only; newer-CLI-producer-preserved",
+    "patch_equivalent_commits": 0,
+    "non_equivalent_commits": 8
+  },
+  {
+    "branch": "codex/release-rust-shard-contention-ci-v3",
+    "head": "89beb449d58cf09c570fc9af53ee1e3187709350",
+    "resolution": "final-isolated-harness-and-Brepro-integrated; rejected-cache-trials-research-only; newer-CLI-producer-preserved",
+    "patch_equivalent_commits": 0,
+    "non_equivalent_commits": 12
+  },
+  {
+    "branch": "codex/v0.8.1-strict-clippy-20260912",
+    "head": "e3aabe5cd166e85adde7e28f1d6bbbcdfbd02380",
+    "resolution": "already-patch-equivalent-preserve-newer-candidate",
+    "patch_equivalent_commits": 20,
+    "non_equivalent_commits": 0
+  }
+]

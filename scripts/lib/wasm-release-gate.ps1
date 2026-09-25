@@ -238,6 +238,16 @@ function Invoke-WasmBuildTestGate {
         if ($null -eq $nodeCommand) {
             throw 'WASM release requires node on PATH'
         }
+        $pnpmName = if ($env:OS -eq 'Windows_NT') { 'pnpm.cmd' } else { 'pnpm' }
+        $pnpmCommand = Get-Command $pnpmName -ErrorAction SilentlyContinue
+        if ($null -eq $pnpmCommand) {
+            throw 'WASM release requires pnpm on PATH'
+        }
+        # This source-level parity suite owns preparation of its CTK3 package.
+        # Check it before the expensive WASM build, including on a clean runner.
+        Invoke-WasmReleaseCommand $pnpmCommand.Source @(
+            '--filter', '@clearra/ui', 'run', 'test'
+        ) 'clearra-ui runtime contracts'
         if (Test-Path -LiteralPath $webPublicDir) {
             Remove-Item -LiteralPath $webPublicDir -Recurse -Force
         }
@@ -293,14 +303,6 @@ function Invoke-WasmBuildTestGate {
         ) 'clearra-wasm exact worker probe'
         $env:CLEARRA_WEB_PUBLIC_DIR = $webPublicDir
 
-        $pnpmName = if ($env:OS -eq 'Windows_NT') { 'pnpm.cmd' } else { 'pnpm' }
-        $pnpmCommand = Get-Command $pnpmName -ErrorAction SilentlyContinue
-        if ($null -eq $pnpmCommand) {
-            throw 'WASM release requires pnpm on PATH'
-        }
-        Invoke-WasmReleaseCommand $pnpmCommand.Source @(
-            '--filter', '@clearra/ui', 'run', 'test'
-        ) 'clearra-ui runtime contracts'
         Invoke-WasmReleaseCommand $pnpmCommand.Source @(
             '--filter', '@clearra/web', 'run', 'test'
         ) 'clearra-web worker contracts'

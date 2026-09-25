@@ -204,9 +204,9 @@ pub use clearra_output::{
     Ctk3PageFlags, Ctk3Piece, Ctk3Rotation,
 };
 pub use commands::{
-    BuildProbabilityAppCommand, BuildProbabilityResultMode, BuildV2AppCommand, BuildV2AppRequest,
-    ContinueAppCommand, ConvertAppCommand, CoverAppCommand, DamageAppCommand,
-    FieldDocumentTransformAppCommand, FieldDocumentTransformAppCommandError,
+    BoundaryRecoveryAppCommand, BuildProbabilityAppCommand, BuildProbabilityResultMode,
+    BuildV2AppCommand, BuildV2AppRequest, ContinueAppCommand, ConvertAppCommand, CoverAppCommand,
+    DamageAppCommand, FieldDocumentTransformAppCommand, FieldDocumentTransformAppCommandError,
     FieldDocumentTransformKind, FumenAppCommand, FumenAppCommandError, FumenTransformKind,
     InspectUnsupportedAppCommand, OperationSequenceAppCommand, ParityAppCommand, PathAppCommand,
     PcAppCommand, PercentAppCommand, RenAppCommand, RenderAppCommand, RenderAppCommandError,

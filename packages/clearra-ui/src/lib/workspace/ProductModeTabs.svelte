@@ -37,6 +37,7 @@
     { mode: 'spin-structure', icon: RotateCw, text: componentMessage(language, 'spinStructure') },
     { mode: 'build', icon: Blocks, text: componentMessage(language, 'buildTools') },
     { mode: 'build-probability', icon: Blocks, text: label('buildProbability') },
+    { mode: 'recovery', icon: GitBranch, text: componentMessage(language, 'boundaryRecovery') },
     { mode: 'sequence', icon: ListOrdered, text: label('operationSequence') },
     { mode: 'sequence-dependencies', icon: GitBranch, text: label('sequenceDependencies') },
     { mode: 'parity', icon: Scale, text: label('utilityParity') },

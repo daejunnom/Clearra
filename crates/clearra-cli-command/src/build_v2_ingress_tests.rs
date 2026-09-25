@@ -1,6 +1,6 @@
 use clearra_app::{
-    encode_ctk3_compact, AppCommand, BuildObjective, BuildV2AppRequest, Ctk3Color, Ctk3Document,
-    Ctk3Page, Ctk3Piece, QueryEnvelope,
+    encode_ctk3_compact, AppCommand, AppContext, AppCoreExecutorService, AppServices, AppStatus,
+    BuildObjective, BuildV2AppRequest, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece, QueryEnvelope,
 };
 use clearra_pc_graph::request::{RequestedSearchBackend, SupplyWindowSize};
 
@@ -47,6 +47,11 @@ fn canonical_commands() -> Vec<(String, WebBuildV2Capability, ExpectedRequest)> 
         (
             "clearra build cover --base-mask 0 --target-mask 15 --height 4 --queue I --no-hold --objective max-probability-minimum".to_owned(),
             WebBuildV2Capability::Cover,
+            ExpectedRequest::Cover,
+        ),
+        (
+            format!("clearra build pinned-minimals --base-mask 0 --target-mask 15 --height 4 --queue I --no-hold --required-format ctk3 --required-document {document}"),
+            WebBuildV2Capability::PinnedMinimals,
             ExpectedRequest::Cover,
         ),
         (
@@ -145,6 +150,168 @@ fn every_canonical_build_v2_path_lowers_to_its_exact_app_request_variant() {
             "{command_text}"
         );
     }
+}
+
+#[test]
+fn build_minimals_pin_is_bound_to_a_candidate_from_the_supplied_document() {
+    let document = colored_target_document();
+    let base = format!(
+        "clearra build evaluate minimals --solution-format ctk3 \
+         --solution-document {document} --queue I --no-hold"
+    );
+    let ordinary = CliCommandParser::parse(&base)
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let AppCommand::BuildV2(command) = ordinary.command() else {
+        panic!("expected Build v2 command");
+    };
+    let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
+        panic!("expected supplied minimum request");
+    };
+    let pinned_key = &request.supplied().candidate_keys()[0];
+    let pinned = CliCommandParser::parse(&format!("{base} --pin-candidate 1"))
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let AppCommand::BuildV2(command) = pinned.command() else {
+        panic!("expected pinned Build v2 command");
+    };
+    let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
+        panic!("expected pinned supplied minimum request");
+    };
+    assert_eq!(request.pinned_candidate_keys(), [pinned_key.clone()]);
+    let response = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    )
+    .run(pinned);
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    assert!(response.public_result_payload().is_some());
+    let duplicate = CliCommandParser::parse(&format!("{base} --pin-candidate 1 --pin-candidate 1"))
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let AppCommand::BuildV2(command) = duplicate.command() else {
+        panic!("expected duplicate-normalized Build v2 command");
+    };
+    let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
+        panic!("expected duplicate-normalized supplied minimum request");
+    };
+    assert_eq!(request.pinned_candidate_keys(), [pinned_key.clone()]);
+    assert!(CliCommandParser::parse(&format!("{base} --pin-candidate 999")).is_err());
+
+    let document_pinned = CliCommandParser::parse(&format!(
+        "{base} --pin-solution-format ctk3 --pin-solution-document {document}"
+    ))
+    .unwrap()
+    .to_app_request()
+    .unwrap();
+    let AppCommand::BuildV2(command) = document_pinned.command() else {
+        panic!("expected document-pinned Build v2 command");
+    };
+    let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
+        panic!("expected document-pinned supplied minimum request");
+    };
+    assert_eq!(request.pinned_candidate_keys(), [pinned_key.clone()]);
+    assert!(CliCommandParser::parse(&format!("{base} --pin-solution-format ctk3")).is_err());
+    assert!(CliCommandParser::parse(&format!(
+        "{base} --pin-candidate 1 --pin-solution-format ctk3 --pin-solution-document {document}"
+    ))
+    .is_err());
+}
+
+#[test]
+fn build_pinned_minimals_replays_the_full_source_with_a_separate_required_document() {
+    let document = colored_target_document();
+    let base = "clearra build pinned-minimals --base-mask 0 --target-mask 15 \
+                --height 4 --queue I --no-hold";
+    assert!(CliCommandParser::parse(base).is_err());
+    assert!(CliCommandParser::parse(&format!(
+        "{base} --required-format ctk3 --required-document {document} --pin-candidate 1"
+    ))
+    .is_err());
+    assert!(CliCommandParser::parse(&format!(
+        "{base} --required-format ctk3 --required-document {document} \
+         --expected-source-set-hash stale"
+    ))
+    .is_err());
+    assert!(CliCommandParser::parse(&format!(
+        "clearra build evaluate minimals --solution-format ctk3 \
+         --solution-document {document} --queue I --no-hold \
+         --required-format ctk3 --required-document {document}"
+    ))
+    .is_err());
+    let stale = CliCommandParser::parse(&format!(
+        "{base} --required-format ctk3 --required-document {document} \
+         --expected-source-set-hash {}",
+        "cts1:aaaaaaaaaaaaaaaa"
+    ))
+    .unwrap();
+    let parsed = CliCommandParser::parse(&format!(
+        "{base} --required-format ctk3 --required-document {document}"
+    ))
+    .unwrap();
+    assert_eq!(
+        parsed.build_v2_input().unwrap().capability(),
+        WebBuildV2Capability::PinnedMinimals
+    );
+    let request = parsed.to_app_request().unwrap();
+    let AppCommand::BuildV2(command) = request.command() else {
+        panic!("expected Build v2 command");
+    };
+    let BuildV2AppRequest::BuildCover(cover) = command.request() else {
+        panic!("pinned Build must run the full source producer");
+    };
+    assert_eq!(cover.pinned_colored_identities().len(), 1);
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let response = context.run(request);
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    let product = response.product_capability_result().unwrap();
+    assert_eq!(product.contract().as_str(), "build.pinned-minimals");
+    assert_eq!(
+        product.result_kind().as_str(),
+        "build-pinned-minimum-cover.v1"
+    );
+    let public = product.public_result_payload().unwrap();
+    assert_eq!(public.contract(), "build.pinned-minimals");
+    assert_eq!(public.result_kind(), "build-pinned-minimum-cover.v1");
+    let host = response.to_host_response();
+    assert_eq!(
+        host.product_result_payload().unwrap().result_kind(),
+        "build-pinned-minimum-cover.v1"
+    );
+    let portfolio = response
+        .product_capability_result()
+        .and_then(|result| result.build_coverage_portfolio_v2())
+        .expect("complete full-source Build portfolio");
+    assert_eq!(portfolio.source_candidate_count(), 2);
+    assert_eq!(portfolio.selected_candidate_count(), 1);
+    assert_eq!(portfolio.pinned_candidate_keys().len(), 1);
+    assert!(portfolio.completeness().complete());
+    let ordinary = CliCommandParser::parse(&base.replace("pinned-minimals", "cover"))
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let source_response = context.run(ordinary);
+    assert_eq!(source_response.status(), AppStatus::Success);
+    let source_hash = source_response
+        .product_capability_result()
+        .and_then(|result| result.build_coverage_portfolio_v2())
+        .unwrap()
+        .normalized_solution_set_hash();
+    assert_eq!(portfolio.normalized_solution_set_hash(), source_hash);
+    let bound_request = CliCommandParser::parse(&format!(
+        "{base} --required-format ctk3 --required-document {document} \
+         --expected-source-set-hash {source_hash}"
+    ))
+    .unwrap()
+    .to_app_request()
+    .unwrap();
+    assert_eq!(context.run(bound_request).status(), AppStatus::Success);
+    let stale_response = context.run(stale.to_app_request().unwrap());
+    assert_eq!(stale_response.status(), AppStatus::ExecutionFailed);
 }
 
 #[test]

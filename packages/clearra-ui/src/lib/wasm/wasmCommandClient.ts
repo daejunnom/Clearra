@@ -62,6 +62,7 @@ export type ClearraCoveragePortfolioPagePayload = {
   total_member_pages: string;
   members: ClearraProductCandidateMemberPayload[];
   page_handle_available: boolean;
+  pinned_candidate_keys?: string[];
 };
 
 export type ClearraBuildV2CompletenessPayload = {
@@ -110,6 +111,7 @@ export type ClearraBuildV2ProductPayload = {
   b2b_preservation_required: boolean | null;
   candidates: ClearraBuildV2CandidateCoveragePayload[];
   canonical_candidate_keys: string[];
+  pinned_candidate_keys?: string[];
   winners: ClearraBuildV2ScoreWinnerPayload[];
   completeness: ClearraBuildV2CompletenessPayload;
   page_source_available: boolean;
@@ -136,6 +138,8 @@ export type ClearraBuildCoveragePortfolioV2Payload = {
   };
   page_source_available: boolean;
   page_source_identity_sha256: string | null;
+  pinned_candidate_keys?: string[];
+  additional_candidate_keys?: string[];
 };
 
 export type ClearraBuildSetupFamilyV1Payload = {
@@ -435,7 +439,81 @@ export type ClearraRenderArtifactPayload = {
   transport_max_bytes: number;
 };
 
+export type ClearraBoundaryRecoveryStepPayload = {
+  source_queue_index: number;
+  placement_role_index: number;
+  piece: string;
+  rotation: number;
+  x: number;
+  y: number;
+  hold_decision: string;
+  placement_mask: string;
+  cleared_row_mask: number;
+  board_after_mask: string;
+  cleared_lines: number;
+  recognized_spin: boolean;
+  b2b_active_after: boolean;
+  stage_one_complete_after: boolean;
+};
+
+export type ClearraBoundaryRecoveryPayload = {
+  status: 'normal' | 'pc-preserving-recovery' | 'non-pc-recovery' | 'no-path-within-declared-scope' | 'incomplete' | 'population-complete' | 'population-incomplete';
+  knowledge_basis: 'full-fixed-queue' | 'full-pattern-universe';
+  placement_role_scope: 'occupancy-only' | 'exact-lock-time' | 'bag-piece-exact-lock-time';
+  max_early_placements: 0 | 1;
+  borrow_role_index: number;
+  borrow_placement_mask: string;
+  normal_states: number;
+  recovery_states: number;
+  stage_one_checkpoint_step: number | null;
+  checkpoint_is_pc: boolean | null;
+  borrowed_stage_two_count: number;
+  steps: ClearraBoundaryRecoveryStepPayload[];
+  population?: ClearraBoundaryRecoveryPopulationPayload;
+};
+
+export type ClearraBoundaryRecoveryPopulationExamplePayload = {
+  pattern_index: number;
+  queue: string;
+  status: string;
+  stage_one_checkpoint_step: number | null;
+  checkpoint_is_pc: boolean | null;
+  borrowed_stage_two_count: number;
+  steps: ClearraBoundaryRecoveryStepPayload[];
+};
+
+export type ClearraBoundaryRecoveryPopulationPayload = {
+  materialized_pattern_count: number;
+  total_possible_pattern_count: string;
+  evaluated_pattern_count: number;
+  state_count: number;
+  complete: boolean;
+  normal_count: number;
+  pc_preserving_recovery_count: number;
+  non_pc_recovery_count: number;
+  no_path_count: number;
+  incomplete_count: number;
+  diagram_unavailable_count: number;
+  normal_probability: string;
+  pc_preserving_recovery_probability: string;
+  non_pc_recovery_probability: string;
+  additional_recovery_probability: string;
+  total_response_probability: string;
+  no_path_probability: string;
+  unknown_probability: string;
+  normal_example?: ClearraBoundaryRecoveryPopulationExamplePayload;
+  recovery_example?: ClearraBoundaryRecoveryPopulationExamplePayload;
+};
+
 export type ClearraProductResultPayload =
+  | {
+      contract: 'boundary-recovery.v1';
+      result_kind: 'boundary-recovery';
+      content: {
+        payload_kind: 'boundary-recovery';
+        payload: ClearraBoundaryRecoveryPayload;
+      };
+    }
   | {
       contract: string;
       result_kind: string;
@@ -445,8 +523,8 @@ export type ClearraProductResultPayload =
       };
     }
   | {
-      contract: 'build.cover';
-      result_kind: 'build-coverage-portfolio.v2';
+      contract: 'build.cover' | 'build.pinned-minimals';
+      result_kind: 'build-coverage-portfolio.v2' | 'build-pinned-minimum-cover.v1';
       content: {
         payload_kind: 'build-coverage-portfolio-v2';
         payload: ClearraBuildCoveragePortfolioV2Payload;
@@ -506,6 +584,14 @@ export type ClearraProductResultPayload =
   | {
       contract: 'pc.minimals';
       result_kind: 'pc-minimum-cover.v2';
+      content: {
+        payload_kind: 'coverage-portfolio';
+        payload: ClearraCoveragePortfolioPagePayload;
+      };
+    }
+  | {
+      contract: 'pc.pinned-minimals';
+      result_kind: 'pc-pinned-minimum-cover.v1';
       content: {
         payload_kind: 'coverage-portfolio';
         payload: ClearraCoveragePortfolioPagePayload;

@@ -391,6 +391,7 @@ pub(crate) struct BuildSuppliedMinimumCoverV1Result {
     required_pattern_count: usize,
     union_probability: String,
     canonical_candidate_keys: Vec<String>,
+    pinned_candidate_keys: Vec<String>,
     alternatives: Arc<CoveragePortfolioAlternativeSet>,
     completeness: BuildSuppliedReplayCompletenessEvidence,
 }
@@ -613,6 +614,10 @@ impl BuildSuppliedMinimumCoverV1Result {
         &self.canonical_candidate_keys
     }
 
+    pub(crate) fn pinned_candidate_keys(&self) -> &[String] {
+        &self.pinned_candidate_keys
+    }
+
     pub(crate) fn portfolio_alternative_owner(
         &self,
     ) -> Option<&Arc<CoveragePortfolioAlternativeSet>> {
@@ -671,6 +676,7 @@ pub(crate) fn validate_build_supplied_minimum_cover_v1_result(
     query: &BuildProbabilityQuery,
     supplied: &BuildSuppliedSolutionSetV1,
     result: &CoreExecutionResult,
+    pinned_candidate_keys: &[String],
 ) -> Result<BuildSuppliedMinimumCoverV1Result, BuildSuppliedEvaluationResultError> {
     let replay = validate_build_supplied_replay(
         &authority,
@@ -705,12 +711,22 @@ pub(crate) fn validate_build_supplied_minimum_cover_v1_result(
     )
     .map_err(BuildSuppliedEvaluationResultError::Portfolio)?;
     let alternatives = Arc::new(
-        CoveragePortfolioAlternativeSet::new_canonical(
-            identity,
-            supplied.candidate_keys().to_vec(),
-            replay.required.clone(),
-            replay.rows.clone(),
-        )
+        if pinned_candidate_keys.is_empty() {
+            CoveragePortfolioAlternativeSet::new_canonical(
+                identity,
+                supplied.candidate_keys().to_vec(),
+                replay.required.clone(),
+                replay.rows.clone(),
+            )
+        } else {
+            CoveragePortfolioAlternativeSet::new_canonical_with_pinned_keys(
+                identity,
+                supplied.candidate_keys().to_vec(),
+                replay.required.clone(),
+                replay.rows.clone(),
+                pinned_candidate_keys.to_vec(),
+            )
+        }
         .map_err(BuildSuppliedEvaluationResultError::Portfolio)?,
     );
     let canonical_candidate_keys = alternatives
@@ -727,6 +743,7 @@ pub(crate) fn validate_build_supplied_minimum_cover_v1_result(
         required_pattern_count: replay.required.count_ones() as usize,
         union_probability: replay.union_probability,
         canonical_candidate_keys,
+        pinned_candidate_keys: pinned_candidate_keys.to_vec(),
         alternatives,
         completeness: BuildSuppliedReplayCompletenessEvidence {
             input_identity_bound: true,

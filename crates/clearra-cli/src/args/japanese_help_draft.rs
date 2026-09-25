@@ -82,6 +82,10 @@ Clearraのpath/setup/coverは従来のClearraでの意味を維持します。�
 
 pub(super) fn product_help_body(topic: ProductHelpTopic) -> &'static str {
     match topic {
+        ProductHelpTopic::BoundaryRecovery => {
+            r#"使い方: clearra recovery boundary --initial-board-mask HEX --target-board-mask HEX --height 1..25 --queue REFERENCE --stage-one-count N --placements N [--role-mask POSITION:HEX ...] [--queue-pattern PATTERN --max-pattern-evaluations N --max-total-states N] [--max-early-placements 0|1] [--borrow-role-position N --borrow-placement-mask HEX] [--hold|--no-hold] [--rule RULE] [--spin-profile PROFILE] [--initial-b2b 0|1] [--preserve-b2b-bag N ...] [--preserve-b2b-stage-one] [--preserve-b2b-stage-two] [--max-states 1..1000000]
+連続した2～42ミノの供給順を扱います。--role-maskで必要な各供給位置のロック時4マスを指定できます。先行配置を許す場合は第2段階の供給位置を選びます。--queue-patternでは完全な7ミノバッグ、全配置役割、最大100000の供給パターンを対象に通常成功・追加リカバリー・未確定の重み付き確率を計算します。順序が変わっても役割と先行配置はバッグとミノ種に結び付けます。どちらのモードも将来の全供給を知る場合の解析であり、観測制限下の実戦可能性は証明しません。"#
+        }
         ProductHelpTopic::PcTiling => {
             r#"使い方: clearra pc tiling --lines 2 [--patterns PATTERN | --queue QUEUE] [--no-hold] [--backend auto|cpu|gpu|hybrid] [--gpu-device auto|N] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
   または: clearra pc tiling --board-mask HEX --height 1..6 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [--hold empty|PIECE|--no-hold] [バックエンド・リソースオプション]
@@ -90,7 +94,7 @@ PC専用の幾何学的配置検索を実行し、供給されるミノと正確
         ProductHelpTopic::PcMinimals => {
             r#"使い方: clearra pc minimals --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--tablebase|--no-tablebase] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N]
   または: clearra pc minimals --board-mask HEX --height 1..6 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [--hold empty|PIECE|--no-hold] [検索オプション]
-最小解法集合の専用検索を実行します。入力全体のカバー状況を完全にリプレイ検証した後、その検索条件に対する正確な最小カバーを返します。明示的なメモリ上限、スコア、tiling-only、visible-7、依存DAGは利用できません。--tablebaseは正確に適格化された完全候補群だけを使用し、オフライン探索を自動開始しません。トップレベルのminimalsとsfinder minimalsは従来互換の汎用結果を返します。"#
+最小解法集合の専用検索を実行します。--pin-key KEYを複数指定すると、完全な元の候補から選んだ解法を必須として条件付き最小集合を再計算します。入力全体のカバー状況を完全にリプレイ検証した後、その検索条件に対する正確な最小カバーを返します。明示的なメモリ上限、スコア、tiling-only、visible-7、依存DAGは利用できません。--tablebaseは正確に適格化された完全候補群だけを使用し、オフライン探索を自動開始しません。トップレベルのminimalsとsfinder minimalsは従来互換の汎用結果を返します。"#
         }
         ProductHelpTopic::PcPath => {
             r#"使い方: clearra pc path --lines 2|4|6 (--queue QUEUE | --patterns PATTERN) [--hold|--no-hold] [--rule RULE] [--tablebase|--no-tablebase] [検索オプション]
@@ -146,7 +150,7 @@ PC確率の専用検索を実行し、入力ミノ順全体に対する完全な
             r#"使い方: clearra build cover --base-mask HEX --target-mask HEX --height N (--queue QUEUE | --patterns PATTERN) [--source-pieces N] [--objective min-cover|max-probability-minimum] [Build実行オプション]
   または: clearra build <setup|congruent|congruent-cover|setup-cover|setup-cover-percent|setup-cover-score> --target-format ctk3|fumen --target-document DOCUMENT (--queue QUEUE | --patterns PATTERN) [型付きBuildオプション]
   または: clearra build evaluate <cover|minimals|score|b2b-cover|cover-percent> --solution-format ctk3|fumen --solution-document DOCUMENT (--queue QUEUE | --patterns PATTERN) [型付きBuildオプション]
-目標ドキュメントと入力済み解法ドキュメントは異なる型として扱い、相互に代用できません。すべての形式で--queueと--patternsのいずれか一方が必須です。--queue-knowledge oracle|visible-7、--hold PIECE|--no-hold、--rule RULE、--max-patterns N、--max-nodes N、--max-frontier-states N、--max-candidates N、--workers N|--auto-workers N|--use-all-cpu-threads、--cpu-warmupを使用できます。--objective all|unique|min-cover|max-probability-minimum|max-score-coverのうち、各形式で許可された目的だけを指定できます。互換の別名はminimum-coverのみです。スコア形式だけが--score-profile tetrio|guideline|jstris-ultraと--initial-b2b 0..65535を受け付けます。正確な最適集合を返す形式（cover、congruent-cover、setup-cover、setup-cover-score、evaluate minimals、evaluate score）で別の同率解を取得するには、--ties --tie-snapshot PATHの明示が必要です。通常の解法群や確率結果では使用しません。スコアの同率判定と順序に攻撃力は使用しません。型付きBuildはv0.8ではCPU専用です。有限な応答の保証が実装されるまで--max-memory-mibは拒否されます。"#
+目標ドキュメントと入力済み解法ドキュメントは異なる型として扱い、相互に代用できません。すべての形式で--queueと--patternsのいずれか一方が必須です。--queue-knowledge oracle|visible-7、--hold PIECE|--no-hold、--rule RULE、--max-patterns N、--max-nodes N、--max-frontier-states N、--max-candidates N、--workers N|--auto-workers N|--use-all-cpu-threads、--cpu-warmupを使用できます。--objective all|unique|min-cover|max-probability-minimum|max-score-coverのうち、各形式で許可された目的だけを指定できます。互換の別名はminimum-coverのみです。スコア形式だけが--score-profile tetrio|guideline|jstris-ultraと--initial-b2b 0..65535を受け付けます。正確な最適集合を返す形式（cover、congruent-cover、setup-cover、setup-cover-score、evaluate minimals、evaluate score）で別の同率解を取得するには、--ties --tie-snapshot PATHの明示が必要です。通常の解法群や確率結果では使用しません。スコアの同率判定と順序に攻撃力は使用しません。build evaluate minimalsでは--pin-candidate Nを複数指定するか、--pin-solution-format ctk3|fumenと--pin-solution-document DOCUMENTを組み合わせて必須解法を指定できます。両方式は同時使用できません。型付きBuildはv0.8ではCPU専用です。有限な応答の保証が実装されるまで--max-memory-mibは拒否されます。"#
         }
         ProductHelpTopic::BuildProbability => {
             r#"使い方: clearra build-probability --base-mask HEX --target-mask HEX --height 1..24 (--queue QUEUE | --patterns PATTERN) [--hold empty|PIECE|--no-hold] [--source-pieces N] [--aggregate buildability|tiling|spin] [--result-mode all-solutions|complete-replay-paths|field-average-score|fixed-queue-maximum-score|highest-score-minimum-set|failed-queues] [--paths|--score] [--score-profile tetrio|guideline|jstris-ultra] [--initial-b2b N] [--failed-count N] [--tiling-only] [--solution-probabilities] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--preserve-b2b] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--build-dependency-dag|--no-build-dependency-dag] [--finesse off|inputs] [--pattern-knowledge both|oracle|visible-7] [--include-mirror|--no-mirror] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--max-patterns N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
@@ -197,6 +201,7 @@ mod tests {
             CliHelpTopic::Continue,
             CliHelpTopic::SpinStructure,
             CliHelpTopic::Sfinder,
+            CliHelpTopic::Product(ProductHelpTopic::BoundaryRecovery),
             CliHelpTopic::Product(ProductHelpTopic::PcTiling),
             CliHelpTopic::Product(ProductHelpTopic::PcMinimals),
             CliHelpTopic::Product(ProductHelpTopic::PcPath),

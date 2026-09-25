@@ -1,9 +1,9 @@
 // SRP rationale: this module has one change reason: lowering canonical CLI commands into typed application requests.
 use clearra_app::{
-    AppCommand, AppRequest, BuildProbabilityAppCommand, DamageAppCommand,
-    FieldDocumentTransformAppCommand, FieldDocumentTransformKind, FumenAppCommand,
-    OperationDocumentProblem, OperationSequenceAppCommand, ParityAppCommand, PcAppCommand,
-    PcChanceIngressOrigin, PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin,
+    AppCommand, AppRequest, BoundaryRecoveryAppCommand, BuildProbabilityAppCommand,
+    DamageAppCommand, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
+    FumenAppCommand, OperationDocumentProblem, OperationSequenceAppCommand, ParityAppCommand,
+    PcAppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin,
     PcPathIngressOrigin, PcResultProjection, PcSaveIngressOrigin, PcScoreIngressOrigin,
     PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, PercentAppCommand,
     ProductCapabilityContract, RenAppCommand, RenderAppCommand, RequestStructuralProfiles,
@@ -13,7 +13,9 @@ use clearra_app::{
 };
 use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_forward_search::{ForwardSearchMode, ForwardSearchQuery};
+use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
+use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
+use clearra_forward_search::{BoundaryRecoveryQuery, ForwardSearchMode, ForwardSearchQuery};
 use clearra_objectives::policy::{
     objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
 };
@@ -51,6 +53,9 @@ pub struct WebCommandRequest {
     count_policy: PcCountPolicy,
     objective: ObjectivePolicy,
     pc_result_projection: PcResultProjection,
+    pc_minimum_pins: Vec<String>,
+    pc_pinned_drawings: Vec<StandardBoard64ColoredTilingIdentity>,
+    pc_expected_source_set_hash: Option<String>,
     pc_failed_queue_origin: Option<PcFailedQueueIngressOrigin>,
     product_capability_contract: Option<ProductCapabilityContract>,
     queue_observation_policy: QueueObservationPolicy,
@@ -59,6 +64,8 @@ pub struct WebCommandRequest {
     build_v2: Option<WebBuildV2Input>,
     setup_score: Option<WebSetupScoreInput>,
     forward_search: Option<ForwardSearchQuery>,
+    boundary_recovery: Option<BoundaryRecoveryQuery>,
+    boundary_recovery_pattern: Option<(String, usize, usize)>,
     spin_structure: Option<SpinStructureQuery>,
     spin_structure_product_mode: SpinStructureProductMode,
     percent_query: Option<PcScenarioQuery>,
@@ -114,6 +121,9 @@ impl WebCommandRequest {
             count_policy: PcCountPolicy::CountUnique,
             objective: ObjectivePolicy::unique(),
             pc_result_projection: PcResultProjection::Standard,
+            pc_minimum_pins: Vec::new(),
+            pc_pinned_drawings: Vec::new(),
+            pc_expected_source_set_hash: None,
             pc_failed_queue_origin: None,
             product_capability_contract: None,
             queue_observation_policy: QueueObservationPolicy::default(),
@@ -122,6 +132,8 @@ impl WebCommandRequest {
             build_v2: None,
             setup_score: None,
             forward_search: None,
+            boundary_recovery: None,
+            boundary_recovery_pattern: None,
             spin_structure: None,
             spin_structure_product_mode: SpinStructureProductMode::Search,
             percent_query: None,
@@ -178,6 +190,9 @@ impl WebCommandRequest {
             count_policy: PcCountPolicy::CountUnique,
             objective: ObjectivePolicy::unique(),
             pc_result_projection: PcResultProjection::Standard,
+            pc_minimum_pins: Vec::new(),
+            pc_pinned_drawings: Vec::new(),
+            pc_expected_source_set_hash: None,
             pc_failed_queue_origin: None,
             product_capability_contract: None,
             queue_observation_policy: QueueObservationPolicy::default(),
@@ -186,6 +201,8 @@ impl WebCommandRequest {
             build_v2: None,
             setup_score: None,
             forward_search: None,
+            boundary_recovery: None,
+            boundary_recovery_pattern: None,
             spin_structure: None,
             spin_structure_product_mode: SpinStructureProductMode::Search,
             percent_query: None,
@@ -385,6 +402,26 @@ impl WebCommandRequest {
     }
 }
 impl WebCommandRequest {
+    pub fn boundary_recovery(query: BoundaryRecoveryQuery) -> Self {
+        let mut request = Self::pc(query.height, RequestedSearchBackend::Cpu);
+        request.command_kind = "boundary-recovery".to_owned();
+        request.allow_backend_fallback = false;
+        request.boundary_recovery = Some(query);
+        request
+    }
+
+    pub fn boundary_recovery_pattern(
+        query: BoundaryRecoveryQuery,
+        pattern: String,
+        max_pattern_evaluations: usize,
+        max_total_states: usize,
+    ) -> Self {
+        let mut request = Self::boundary_recovery(query);
+        request.boundary_recovery_pattern =
+            Some((pattern, max_pattern_evaluations, max_total_states));
+        request
+    }
+
     pub fn forward(command_kind: &str, query: ForwardSearchQuery) -> Self {
         let mut request = Self::pc(0, RequestedSearchBackend::Cpu);
         request.command_kind = command_kind.to_owned();
@@ -584,6 +621,7 @@ impl WebCommandRequest {
             }
             ProductCapabilityContract::PcChance => PcResultProjection::Standard,
             ProductCapabilityContract::PcMinimals => PcResultProjection::Standard,
+            ProductCapabilityContract::PcPinnedMinimals => PcResultProjection::Standard,
             ProductCapabilityContract::PcFailedQueue => PcResultProjection::Standard,
             ProductCapabilityContract::PcScore => PcResultProjection::Standard,
             ProductCapabilityContract::PcScoreFinder => PcResultProjection::Standard,
@@ -593,9 +631,9 @@ impl WebCommandRequest {
             ProductCapabilityContract::PcSaves | ProductCapabilityContract::PcBestSave => {
                 PcResultProjection::Standard
             }
-            ProductCapabilityContract::BuildCover | ProductCapabilityContract::BuildSetup => {
-                PcResultProjection::Standard
-            }
+            ProductCapabilityContract::BuildCover
+            | ProductCapabilityContract::BuildPinnedMinimals
+            | ProductCapabilityContract::BuildSetup => PcResultProjection::Standard,
         };
         self.product_capability_contract = Some(contract);
         self
@@ -609,8 +647,58 @@ impl WebCommandRequest {
 
     pub fn with_pc_minimals_product_capability(mut self, origin: PcMinimalsIngressOrigin) -> Self {
         self.pc_result_projection = PcResultProjection::MinimumCoverV2(origin);
-        self.product_capability_contract = Some(ProductCapabilityContract::PcMinimals);
+        self.product_capability_contract = Some(match origin {
+            PcMinimalsIngressOrigin::CanonicalPcMinimals => ProductCapabilityContract::PcMinimals,
+            PcMinimalsIngressOrigin::CanonicalPcPinnedMinimals => {
+                ProductCapabilityContract::PcPinnedMinimals
+            }
+        });
         self
+    }
+
+    pub fn with_pc_pinned_drawings(
+        mut self,
+        drawings: Vec<StandardBoard64ColoredTilingIdentity>,
+        expected_source_set_hash: Option<String>,
+    ) -> Result<Self, WebCommandError> {
+        if self.product_capability_contract != Some(ProductCapabilityContract::PcPinnedMinimals)
+            || drawings.is_empty()
+            || expected_source_set_hash.as_deref().is_some_and(|hash| {
+                !hash.strip_prefix("cts1:").is_some_and(|hex| {
+                    hex.len() == 16 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            })
+        {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "pc.pinned-minimals requires selected drawings and an optional canonical cts1 source-set hash",
+            ));
+        }
+        self.pc_pinned_drawings = drawings;
+        self.pc_expected_source_set_hash =
+            expected_source_set_hash.map(|hash| hash.to_ascii_lowercase());
+        Ok(self)
+    }
+
+    pub fn with_pc_minimum_pins(mut self, mut keys: Vec<String>) -> Result<Self, WebCommandError> {
+        if self.pc_result_projection.minimals_origin().is_none() && !keys.is_empty() {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "pins require pc minimals",
+            ));
+        }
+        for key in &keys {
+            NormalizedTilingSolutionKey::parse_canonical(key).map_err(|_| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "invalid normalized PC solution key",
+                )
+            })?;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        keys.retain(|key| seen.insert(key.clone()));
+        self.pc_minimum_pins = keys;
+        Ok(self)
     }
 
     pub fn with_pc_path_product_capability(mut self, origin: PcPathIngressOrigin) -> Self {
@@ -761,6 +849,10 @@ impl WebCommandRequest {
             | (
                 PcResultProjection::MinimumCoverV2(_),
                 Some(ProductCapabilityContract::PcMinimals),
+            )
+            | (
+                PcResultProjection::MinimumCoverV2(_),
+                Some(ProductCapabilityContract::PcPinnedMinimals),
             )
             | (
                 PcResultProjection::ChanceProbabilityV2(_),
@@ -1380,6 +1472,29 @@ impl WebCommandRequest {
             };
             return self.attach_product_capability_contract(request);
         }
+        if self.command_kind == "boundary-recovery" {
+            let query = self.boundary_recovery.clone().ok_or_else(|| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "boundary recovery is missing its typed query",
+                )
+            })?;
+            let command = if let Some((pattern, max_patterns, max_states)) =
+                &self.boundary_recovery_pattern
+            {
+                BoundaryRecoveryAppCommand::new_pattern(
+                    query,
+                    pattern.clone(),
+                    *max_patterns,
+                    *max_states,
+                )
+            } else {
+                BoundaryRecoveryAppCommand::new(query)
+            };
+            return self.attach_product_capability_contract(AppRequest::new(
+                AppCommand::BoundaryRecovery(command),
+            ));
+        }
         if matches!(self.command_kind.as_str(), "damage" | "spin-finder" | "ren") {
             let query = self.forward_search.clone().ok_or_else(|| {
                 WebCommandError::new(
@@ -1791,7 +1906,12 @@ impl WebCommandRequest {
                 })
             } else {
                 let command = ScenarioAppCommand::new(query)
-                    .with_result_projection(self.pc_result_projection);
+                    .with_result_projection(self.pc_result_projection)
+                    .with_pinned_minimum_keys(self.pc_minimum_pins.clone())
+                    .with_pinned_minimum_drawings(
+                        self.pc_pinned_drawings.clone(),
+                        self.pc_expected_source_set_hash.clone(),
+                    );
                 command.validate_result_projection().map_err(|reason| {
                     WebCommandError::new(WebCommandErrorCode::InvalidValue, reason)
                 })?;
@@ -1842,8 +1962,13 @@ impl WebCommandRequest {
                     .with_failed_pattern_limit(self.percent_failed_pattern_limit),
             })
         } else {
-            let command =
-                PcAppCommand::new(query).with_result_projection(self.pc_result_projection);
+            let command = PcAppCommand::new(query)
+                .with_result_projection(self.pc_result_projection)
+                .with_pinned_minimum_keys(self.pc_minimum_pins.clone())
+                .with_pinned_minimum_drawings(
+                    self.pc_pinned_drawings.clone(),
+                    self.pc_expected_source_set_hash.clone(),
+                );
             command.validate_result_projection().map_err(|reason| {
                 WebCommandError::new(WebCommandErrorCode::InvalidValue, reason)
             })?;

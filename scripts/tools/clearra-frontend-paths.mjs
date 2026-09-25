@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { resolveBuildFilesystemPath } from './clearra-build-filesystem-path.mjs';
 import { copyFile, mkdir, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,10 +23,12 @@ export function frontendPaths(app, { sourceRoot = repositoryRoot, environment = 
   }
   // The unowned view is for editor config loading only. Vite and the sync CLI
   // require an active owner before they may write anything to these paths.
-  const transactionRoot = hasOwner
+  const selectedTransactionRoot = hasOwner
     ? validateOwner({ environment, sourceRoot }).transaction
     : resolve(canonicalBuildRoot(environment), 'experiments', buildSourceId(sourceRoot), 'current');
-  const frontendRoot = resolve(transactionRoot, 'frontend', app);
+  // The owner identity is case-insensitive, but Vite manifest keys are not.
+  const transactionRoot = resolveBuildFilesystemPath(selectedTransactionRoot);
+  const frontendRoot = resolveBuildFilesystemPath(resolve(transactionRoot, 'frontend', app));
   assertBuildPathWithin(frontendRoot, transactionRoot);
   assertNoBuildLinks(frontendRoot);
   const appRoot = resolve(sourceRoot, 'apps', `clearra-${app}`);

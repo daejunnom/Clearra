@@ -39,6 +39,7 @@
       source_pieces_invalid: 'sourcePieceCountIsOutOfRange',
       target_document_invalid: 'enterAColoredTargetDocumentInThe',
       solution_document_invalid: 'enterASuppliedSolutionDocumentInThe',
+      pin_solution_document_invalid: 'pinnedDocumentInvalid',
       objective_invalid: 'theObjectiveIsNotAllowedForThis',
       initial_b2b_invalid: 'initialB2bMustBeBetween0And',
       worker_count_invalid: 'workerCountMustBePositive'
