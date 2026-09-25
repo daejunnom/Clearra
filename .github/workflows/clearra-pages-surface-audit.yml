@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: clearra-live-pages-surface-audit
@@ -17,11 +16,11 @@ concurrency:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: cb3dbfb03e63008b300f11994efaf7ce29e23946
+          ref: 00553fd94ec79055f1a668c63efe35f9a80541b4
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -30,15 +29,7 @@ jobs:
         shell: bash
         run: |
           echo "BROWSER_ROOT=$RUNNER_TEMP/clearra-pages-browser" >> "$GITHUB_ENV"
-          echo "AUDIT_ROOT=$RUNNER_TEMP/clearra-pages-surface-audit" >> "$GITHUB_ENV"
-          echo "ACCEPTED_ROOT=$RUNNER_TEMP/clearra-pages-accepted" >> "$GITHUB_ENV"
-      - name: Download the exact previously accepted Pages artifact without rebuilding
-        uses: actions/download-artifact@v4
-        with:
-          name: accepted-pages-build-952280950aeb24528279cbff685fe8acec892223-run-36152785910-attempt-1
-          path: ${{ runner.temp }}/clearra-pages-accepted
-          run-id: 36152785910
-          github-token: ${{ github.token }}
+          echo "AUDIT_ROOT=$RUNNER_TEMP/clearra-pages-worker-audit" >> "$GITHUB_ENV"
       - name: Install an isolated pinned Chromium inspection tool
         shell: bash
         run: |
@@ -46,12 +37,12 @@ jobs:
           mkdir -p "$BROWSER_ROOT" "$AUDIT_ROOT"
           npm install --prefix "$BROWSER_ROOT" --ignore-scripts --no-audit --no-fund playwright@1.56.1
           node "$BROWSER_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
-      - name: Verify public byte provenance and execute the terminal-hold fixture in the real GUI
-        run: node scripts/integration/audit-live-pages-provenance-20260926.mjs
+      - name: Observe unchanged public UI and inspect blocked worker stacks
+        run: node scripts/integration/probe-live-pages-worker-20260926.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: clearra-live-pages-provenance-${{ github.run_id }}
+          name: clearra-live-worker-diagnosis-${{ github.run_id }}
           path: ${{ env.AUDIT_ROOT }}
           if-no-files-found: error
           retention-days: 14
