@@ -28,6 +28,9 @@
     WasmTerminalWorkerController,
     type HostCapabilitySnapshot
   } from '../wasm';
+  import MandatorySelectionSummary from './MandatorySelectionSummary.svelte';
+  import { emptyMandatorySelection, pcMandatorySource, toggleMandatorySolution } from './mandatorySolutionSelection';
+  import { encodeCtkSolutionKeySegment } from './solutionExport';
   import BoardEditor from './BoardEditor.svelte';
   import ResultWorkspace from './ResultWorkspace.svelte';
   import SearchControls from './SearchControls.svelte';
@@ -71,6 +74,32 @@
   let clearedRowsWarning = 0;
   let resultTargetLines = request.lines;
   let resultScoreMode = request.scoreMode;
+  let executedSourceIdentity = '';
+  let pinError = false;
+  $: sourceIdentity = pcMandatorySource(request);
+  $: if (request.pinnedSolutionKeys.length && sourceIdentity !== executedSourceIdentity) {
+    clearMandatorySelection();
+  }
+  function clearMandatorySelection() {
+    request = { ...request, ...emptyMandatorySelection() };
+  }
+  $: allowMandatorySelection = runtimeView.status === 'completed' && resultScoreMode === 'off' &&
+    sourceIdentity === executedSourceIdentity && runtimeView.searchReport?.count_complete === true &&
+    runtimeView.searchReport?.result_completeness !== 'incomplete' && !runtimeView.resourceReport?.truncated;
+
+  function toggleMandatory(key: string) {
+    const hash = runtimeView.searchReport?.normalized_solution_set_hash;
+    if (!allowMandatorySelection || !hash) return;
+    try {
+      request = { ...request, ...toggleMandatorySolution(request, key, hash, encodeCtkSolutionKeySegment) };
+      pinError = false;
+    } catch { pinError = true; }
+  }
+  function runMandatory() {
+    if (active || !request.pinnedSolutionKeys.length || sourceIdentity !== executedSourceIdentity) return;
+    updateRequest({ ...request, scoreMode: 'minimum-cover' });
+    void run();
+  }
 
   $: workerController.setWorkerFactory(workerFactory);
   $: workerAuthority = automaticWorkerAuthority(
@@ -217,6 +246,7 @@
       };
     }
     clearedRowsWarning = normalized.clearedRows;
+    executedSourceIdentity = pcMandatorySource(executionRequest);
     resultTargetLines = executionRequest.lines;
     resultScoreMode = executionRequest.scoreMode;
     if (runtime === 'web') {
@@ -326,8 +356,14 @@
     {workerAuthority}
     on:change={(event) => updateRequest(event.detail)}
   />
+  <svelte:fragment slot="result">
+    <MandatorySelectionSummary count={request.pinnedSolutionKeys.length} {language} disabled={active}
+      on:run={runMandatory} on:clear={() => { request = { ...request, ...emptyMandatorySelection() }; }} />
+    {#if pinError}<p role="alert">{componentMessage(language, 'pinnedDocumentInvalid')}</p>{/if}
   <ResultWorkspace
-    slot="result"
+    {allowMandatorySelection}
+    mandatorySolutionKeys={request.pinnedSolutionKeys}
+    on:toggleMandatory={(event) => toggleMandatory(event.detail)}
     view={runtimeView}
     {language}
     {elapsedMs}
@@ -350,6 +386,7 @@
       ? () => workerController.releaseProductPages()
       : () => releaseDesktopProductPages()}
   />
+  </svelte:fragment>
 </WorkspaceShell>
 
 <style>

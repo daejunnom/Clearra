@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createEventDispatcher } from 'svelte';
   import { Check, ChevronDown, Copy, Search } from '@lucide/svelte';
 
   import { writeClipboardText } from './clipboardText';
@@ -35,6 +36,9 @@
     type WorkspaceLanguage
   } from './workspaceI18n';
 
+  export let allowMandatorySelection = false;
+  export let mandatorySolutionKeys: string[] = [];
+  const dispatch = createEventDispatcher<{ toggleMandatory: string }>();
   export let view: WorkspaceRuntimeView;
   export let language: WorkspaceLanguage;
   export let elapsedMs = 0;
@@ -392,6 +396,9 @@
             <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('solutionSetNotCalculated')}</p></div>
           {:else if solutionCount > 0 && (solutionKeys.length || boundSolutionPageLoader)}
             <SolutionGallery
+              {allowMandatorySelection}
+              {mandatorySolutionKeys}
+              on:toggleMandatory={(event) => dispatch('toggleMandatory', event.detail)}
               {solutionKeys}
               {solutionCount}
               loadSolutionPage={boundSolutionPageLoader}

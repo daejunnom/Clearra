@@ -30,6 +30,9 @@
     WasmTerminalWorkerController,
     type HostCapabilitySnapshot
   } from '../wasm';
+  import MandatorySelectionSummary from './MandatorySelectionSummary.svelte';
+  import { buildMandatorySource, emptyMandatorySelection, toggleMandatorySolution } from './mandatorySolutionSelection';
+  import { encodeCtkSolutionKeySegment } from './solutionExport';
   import BuildProbabilityBoardEditor from './BuildProbabilityBoardEditor.svelte';
   import BuildProbabilityControls from './BuildProbabilityControls.svelte';
   import BuildProbabilityResult from './BuildProbabilityResult.svelte';
@@ -68,6 +71,33 @@
   let resultTargetMask = request.targetMask;
   let resultAggregation = request.aggregation;
   let resultMode = request.resultMode;
+  let executedSourceIdentity = '';
+  let pinError = false;
+  $: sourceIdentity = buildMandatorySource(request);
+  $: if (request.pinnedSolutionKeys?.length && sourceIdentity !== executedSourceIdentity) {
+    clearMandatorySelection();
+  }
+  function clearMandatorySelection() {
+    request = { ...request, ...emptyMandatorySelection() };
+  }
+  $: allowMandatorySelection = runtimeView.status === 'completed' && resultMode === 'all-solutions' &&
+    resultAggregation === 'buildability' && !request.preserveB2B && request.finesse === 'off' &&
+    sourceIdentity === executedSourceIdentity && runtimeView.searchReport?.count_complete === true &&
+    runtimeView.searchReport?.result_completeness !== 'incomplete' && !runtimeView.resourceReport?.truncated;
+  function toggleMandatory(key: string) {
+    const hash = runtimeView.searchReport?.normalized_solution_set_hash;
+    if (!allowMandatorySelection || !hash) return;
+    try {
+      const current = { ...emptyMandatorySelection(), ...request, pinnedSolutionKeys: request.pinnedSolutionKeys ?? [] };
+      request = { ...request, ...toggleMandatorySolution(current, key, hash, encodeCtkSolutionKeySegment) };
+      pinError = false;
+    } catch { pinError = true; }
+  }
+  function runMandatory() {
+    if (active || !request.pinnedSolutionKeys?.length || sourceIdentity !== executedSourceIdentity) return;
+    updateRequest({ ...request, resultMode: 'minimum-solutions' });
+    void run();
+  }
   let continuationApplied = false;
   let workspaceShell: { scrollWorkspaceIntoView: () => void } | null = null;
 
@@ -161,6 +191,7 @@
     if (active || validationCodes.length) return;
     continuationApplied = false;
     const executionRequest = normalizeBuildProbabilityRequest(request);
+    executedSourceIdentity = buildMandatorySource(executionRequest);
     resultHeight = executionRequest.height;
     resultExistingMask = executionRequest.existingMask;
     resultTargetMask = executionRequest.targetMask;
@@ -279,8 +310,14 @@
     on:import={(event) => importExisting(event.detail.existingMask, event.detail.height)}
   />
   <BuildProbabilityControls slot="controls" {request} {language} {validationCodes} {workerAuthority} on:change={(event) => updateRequest(event.detail)} />
+  <svelte:fragment slot="result">
+    <MandatorySelectionSummary count={request.pinnedSolutionKeys?.length ?? 0} {language} disabled={active}
+      on:run={runMandatory} on:clear={() => { request = { ...request, ...emptyMandatorySelection() }; }} />
+    {#if pinError}<p role="alert">{componentMessage(language, 'pinnedDocumentInvalid')}</p>{/if}
   <BuildProbabilityResult
-    slot="result"
+    {allowMandatorySelection}
+    mandatorySolutionKeys={request.pinnedSolutionKeys ?? []}
+    on:toggleMandatory={(event) => toggleMandatory(event.detail)}
     view={runtimeView}
     {language}
     {elapsedMs}
@@ -305,6 +342,7 @@
       : () => releaseDesktopProductPages()}
     on:continue={(event) => continueFromCompletedBuild(event.detail.existingMask, event.detail.height)}
   />
+  </svelte:fragment>
 </WorkspaceShell>
 
 <style>

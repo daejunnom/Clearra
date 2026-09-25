@@ -2962,7 +2962,11 @@ pub extern "C" fn clearra_wasm_distributed_cancel() -> i32 {
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_reset() -> i32 {
     ABI_STATE.with(|state| {
-        let mut state = state.borrow_mut();
+        // A JS adapter exception may unwind across a borrowed WASM frame.
+        // Cleanup must report failure, not create a second borrow panic.
+        let Ok(mut state) = state.try_borrow_mut() else {
+            return ABI_ERROR;
+        };
         if let Err(status) = state.require_released_output_and_page_store() {
             return status;
         }
@@ -3567,6 +3571,14 @@ pub extern "C" fn clearra_wasm_profile_finish() -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reset_rejects_a_borrowed_runtime_without_a_second_panic() {
+        ABI_STATE.with(|state| {
+            let _owned = state.borrow_mut();
+            assert_eq!(clearra_wasm_distributed_reset(), ABI_ERROR);
+        });
+    }
+
     use std::sync::OnceLock;
 
     use super::*;

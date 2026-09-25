@@ -275,9 +275,24 @@ async fn adapter_inventory() -> Result<Vec<SelectedWebGpuAdapter>, WebGpuAdapter
         return Ok(cached);
     }
 
+    // Browser enumeration can wrap a null JS adapter. request_adapter instead
+    // translates absence to RequestAdapterError, before get_info()/limits().
+    #[cfg(target_arch = "wasm32")]
+    let adapters = runtime_instance()
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            ..Default::default()
+        })
+        .await
+        .into_iter()
+        .collect::<Vec<_>>();
+    #[cfg(not(target_arch = "wasm32"))]
     let mut adapters = runtime_instance()
         .enumerate_adapters(product_backends())
         .await;
+    #[cfg(not(target_arch = "wasm32"))]
     if adapters.is_empty() {
         if let Ok(adapter) = runtime_instance()
             .request_adapter(&wgpu::RequestAdapterOptions {

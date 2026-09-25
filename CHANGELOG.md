@@ -4,6 +4,12 @@
 
 ## 0.8.1 - 2026-09-20
 
+- Keep exact CPU search operational when browser WebGPU has no usable adapter,
+  rejects discovery, or exceeds its bounded preparation deadline.
+- Expose the full workspace navigation and connect mandatory solution selection
+  to the main PC and Build Probability workspaces in Web and desktop.
+
+
 - Added exact vertical-parity and modulo-four geometry rejection with exhaustive
   differential coverage for one- through six-line PC targets and nonempty
   initial fields, while keeping rule-specific legal-board pruning disabled.

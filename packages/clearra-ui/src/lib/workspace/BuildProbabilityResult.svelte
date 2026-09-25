@@ -45,6 +45,8 @@
     type WorkspaceLanguage
   } from './workspaceI18n';
 
+  export let allowMandatorySelection = false;
+  export let mandatorySolutionKeys: string[] = [];
   export let view: WorkspaceRuntimeView;
   export let language: WorkspaceLanguage;
   export let elapsedMs = 0;
@@ -65,7 +67,7 @@
   export let loadProductMemberPage: ProductMemberPageLoader | null = null;
   export let releaseProductPages: ProductPageRelease | null = null;
 
-  const dispatch = createEventDispatcher<{ continue: { existingMask: bigint; height: number } }>();
+  const dispatch = createEventDispatcher<{ continue: { existingMask: bigint; height: number }; toggleMandatory: string }>();
   const columns = Array.from({ length: 10 }, (_, index) => index);
   let copyFormat: SolutionCopyFormat = 'ctk';
   let failedQueueCopyComplete = false;
@@ -490,6 +492,9 @@
           <div class="empty-state"><Search size={28} strokeWidth={1.5} /><p>{label('solutionSetNotCalculated')}</p></div>
         {:else if solutionCount > 0 && (solutionKeys.length || boundSolutionPageLoader)}
           <SolutionGallery
+            {allowMandatorySelection}
+            {mandatorySolutionKeys}
+            on:toggleMandatory={(event) => dispatch('toggleMandatory', event.detail)}
             {solutionKeys}
             {solutionCount}
             loadSolutionPage={boundSolutionPageLoader}

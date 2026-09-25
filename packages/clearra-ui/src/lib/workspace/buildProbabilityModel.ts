@@ -28,6 +28,9 @@ import {
 } from './cliCommandModel.ts';
 
 export type BuildProbabilityRequest = {
+  pinnedSolutionKeys?: string[];
+  pinnedSolutionDocument?: string;
+  pinnedSourceSetHash?: string;
   height: number;
   existingMask: bigint;
   targetMask: bigint;
@@ -58,6 +61,7 @@ export type BuildProbabilityRequest = {
 };
 
 export type BuildProbabilityValidationCode =
+  | 'pinned_solution_document_invalid'
   | 'queue_invalid'
   | 'target_lines_invalid'
   | 'build_target_empty'
@@ -88,6 +92,7 @@ export const BUILD_PROBABILITY_PRIMARY_METRIC = Object.freeze({
 
 export function createDefaultBuildProbabilityRequest(): BuildProbabilityRequest {
   return {
+    pinnedSolutionKeys: [],
     height: 8,
     existingMask: 0n,
     targetMask: 0n,
@@ -165,6 +170,11 @@ export function buildProbabilityValidationCodes(
   request: BuildProbabilityRequest
 ): BuildProbabilityValidationCode[] {
   const errors: BuildProbabilityValidationCode[] = [];
+  if (request.resultMode === 'minimum-solutions' && request.pinnedSolutionKeys?.length &&
+      (!request.pinnedSolutionDocument?.startsWith('ctk3_') ||
+       !/^cts1:[0-9a-f]{16}$/u.test(request.pinnedSourceSetHash ?? ''))) {
+    errors.push('pinned_solution_document_invalid');
+  }
   const scoreResultMode = [
     'field-average-score',
     'fixed-queue-maximum-score',
@@ -257,7 +267,7 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
     ? [
         'clearra',
         'build',
-        'cover',
+        request.pinnedSolutionKeys?.length ? 'pinned-minimals' : 'cover',
         '--base-mask',
         boardMaskHex(existing),
         '--target-mask',
@@ -305,6 +315,10 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
   }
   if (request.resultMode === 'minimum-solutions') {
     tokens.push('--queue-knowledge', 'oracle', '--objective', 'min-cover', '--rule', request.rule);
+    if (request.pinnedSolutionKeys?.length) {
+      tokens.push('--required-format', 'ctk3', '--required-document', request.pinnedSolutionDocument ?? '',
+        '--expected-source-set-hash', request.pinnedSourceSetHash ?? '');
+    }
   } else if (request.aggregation === 'tiling') {
     tokens.push('--tiling-only');
   } else {

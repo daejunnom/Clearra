@@ -312,6 +312,35 @@ function Invoke-WasmBuildTestGate {
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
             (Join-Path $Root 'apps/clearra-web/scripts/prepare-pages-fallback.mjs')
         ) 'clearra-web Pages fallback'
+        # This leaf owns actual browser behavior as well as the compiled bytes.
+        # Therefore canonical Release (including Tauri) cannot pass by merely
+        # producing a Pages archive whose default search fails at runtime.
+        $browserTools = Join-Path $CargoTargetDir 'surface-browser-tools'
+        $npmName = if ($env:OS -eq 'Windows_NT') { 'npm.cmd' } else { 'npm' }
+        $npmCommand = Get-Command $npmName -ErrorAction Stop
+        $previousBrowserTools = $env:CLEARRA_BROWSER_TOOLS_ROOT
+        try {
+            Invoke-WasmReleaseCommand $npmCommand.Source @(
+                'install', '--prefix', $browserTools, '--ignore-scripts',
+                '--no-audit', '--no-fund', 'playwright@1.56.1'
+            ) 'clearra-browser pinned tooling'
+            Invoke-WasmReleaseCommand $nodeCommand.Source @(
+                (Join-Path $browserTools 'node_modules/playwright/cli.js'),
+                'install', 'chromium'
+            ) 'clearra-browser Chromium preparation'
+            $env:CLEARRA_BROWSER_TOOLS_ROOT = $browserTools
+            Invoke-WasmReleaseCommand $nodeCommand.Source @(
+                (Join-Path $Root 'scripts/tools/surface-browser-acceptance.mjs'),
+                (Join-Path $Root 'apps/clearra-web/build')
+            ) 'clearra-browser operational acceptance'
+        }
+        finally {
+            if ([string]::IsNullOrWhiteSpace($previousBrowserTools)) {
+                Remove-Item Env:\CLEARRA_BROWSER_TOOLS_ROOT -ErrorAction SilentlyContinue
+            } else {
+                $env:CLEARRA_BROWSER_TOOLS_ROOT = $previousBrowserTools
+            }
+        }
         $buildSource = if ($acceptedProducer) { 'accepted-producer' } else { 'inline' }
         Write-Output "wasm_build_test=passed host_tests=executed runtime_tests=executed wasm32=compiled bindgen_runtime=staged frontend=built build_source=$buildSource"
     }

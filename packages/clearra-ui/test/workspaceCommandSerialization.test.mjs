@@ -401,3 +401,16 @@ function tokenizeBrowserCommandForContract(commandText) {
   if (tokenStarted) tokens.push(token);
   return tokens;
 }
+
+
+test('Build Probability mandatory drawings use the same source-bound CLI command in both hosts', () => {
+  const request = { ...createDefaultBuildProbabilityRequest(), height: 4,
+    existingMask: 0n, targetMask: 15n, queue: 'I', holdEnabled: false,
+    resultMode: 'minimum-solutions', pinnedSolutionKeys: ['ctk1|a'],
+    pinnedSolutionDocument: 'ctk3_selected', pinnedSourceSetHash: 'cts1:0123456789abcdef' };
+  const args = buildProbabilityCommandArguments(request);
+  assert.deepEqual(args.slice(0, 3), ['clearra', 'build', 'pinned-minimals']);
+  assert.equal(args[args.indexOf('--required-document') + 1], 'ctk3_selected');
+  assert.equal(args[args.indexOf('--expected-source-set-hash') + 1], request.pinnedSourceSetHash);
+  assert.deepEqual(buildProbabilityRequestForDesktop(request, 'ko').arguments, args);
+});

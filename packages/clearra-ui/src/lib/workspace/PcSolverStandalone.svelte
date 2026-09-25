@@ -26,6 +26,7 @@
     RELEASED_WORKSPACE_LANGUAGES,
     UI_LANGUAGE_MANIFEST
   } from '../i18n/languageManifest.ts';
+  import { pcMandatorySource } from './mandatorySolutionSelection';
   import BoardEditor from './BoardEditor.svelte';
   import { writeClipboardText } from './clipboardText';
   import {
@@ -86,6 +87,7 @@
   let mounted = false;
   let hasRun = false;
   let executedScoreMode: SolverWorkspaceRequest['scoreMode'] | null = null;
+  let executedSourceIdentity = '';
   let elapsedMs = 0;
   let resultTargetLines = request.lines;
   let runStartedAt = 0;
@@ -286,13 +288,14 @@
     resultTargetLines = executionRequest.lines;
     updateWasmCommandText(buildWorkspaceCommand(executionRequest));
     if (!workerController.run()) return;
+    executedSourceIdentity = pcMandatorySource(executionRequest);
     executedScoreMode = executionRequest.scoreMode;
     hasRun = true;
     startElapsedTimer();
   }
 
   function toggleMandatory(key: string) {
-    if (runtimeView.status !== 'completed' || executedScoreMode !== 'off' ||
+    if (pcMandatorySource(request) !== executedSourceIdentity || runtimeView.status !== 'completed' || executedScoreMode !== 'off' ||
         runtimeView.searchReport?.count_complete !== true ||
         runtimeView.searchReport?.result_completeness === 'incomplete') return;
     const sourceHash = runtimeView.searchReport?.normalized_solution_set_hash;
@@ -592,7 +595,7 @@
     {language}
     {elapsedMs}
     targetLines={resultTargetLines}
-    allowMandatorySelection={executedScoreMode === 'off'}
+    allowMandatorySelection={executedScoreMode === 'off' && pcMandatorySource(request) === executedSourceIdentity}
     mandatorySolutionKeys={request.pinnedSolutionKeys}
     on:toggleMandatory={(event) => toggleMandatory(event.detail)}
     loadSolutionPage={(offset, limit, signal) =>

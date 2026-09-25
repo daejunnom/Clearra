@@ -276,7 +276,7 @@
 
   <ol class="solution-gallery">
     {#each visibleSolutions as solution (`${solution.index}:${solution.key}`)}
-      <li>
+      <li data-solution-key={solution.key}>
         <div class="solution-heading">
           <div>
             <strong>{label('solutionNumber', { number: solutionOrdinal(solution.index) })}</strong>

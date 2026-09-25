@@ -6,41 +6,6 @@ function source(path) {
   return readFileSync(new URL(path, import.meta.url), 'utf8');
 }
 
-test('Pages exposes the exact v0.7.5 essential navigation without deleting advanced routes', () => {
-  const navigation = source('../src/lib/workspace/workspaceNavigation.ts');
-  const tabs = source('../src/lib/workspace/ProductModeTabs.svelte');
-  const route = source('../../../apps/clearra-web/src/routes/+page.svelte');
-  const essentialBlock = navigation.match(
-    /PAGES_ESSENTIAL_WORKSPACE_MODES = Object\.freeze\(\[([\s\S]*?)\]\s+satisfies/u
-  )?.[1];
-
-  assert.ok(essentialBlock, 'Pages essential navigation declaration is missing');
-  assert.deepEqual(
-    Array.from(essentialBlock.matchAll(/'([^']+)'/gu), (match) => match[1]),
-    ['pc', 'setup', 'build-probability', 'damage', 'spin-finder', 'ctk', 'player']
-  );
-  assert.match(route, /setContext\(WORKSPACE_MODE_VISIBILITY_CONTEXT, PAGES_ESSENTIAL_WORKSPACE_MODES\)/u);
-  assert.match(tabs, /allTabs\.filter\(\(tab\) => visibleModes\.includes\(tab\.mode\)\)/u);
-
-  for (const explicitAdvancedRoute of [
-    'setup-score',
-    'spin-structure',
-    'build',
-    'recovery',
-    'sequence',
-    'sequence-dependencies',
-    'parity',
-    'fumen',
-    'render',
-    'to-gray',
-    'mirror',
-    'ren'
-  ]) {
-    assert.match(route, new RegExp(`'${explicitAdvancedRoute}'`, 'u'));
-  }
-  assert.match(route, /DocumentUtilityWorkspace tool=\{selectedTool\}/u);
-});
-
 test('CTK owns the Pages render entry and executes it through the local browser worker', () => {
   const route = source('../../../apps/clearra-web/src/routes/+page.svelte');
   const ctk = source('../src/lib/workspace/CtkDrawerWorkspace.svelte');

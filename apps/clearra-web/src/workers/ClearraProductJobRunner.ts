@@ -77,7 +77,7 @@ export class ClearraProductJobRunner {
         distributed.dispose();
       }
     } catch (error) {
-      this.dispose();
+      try { this.dispose(); } catch { /* Worker termination owns a trapped runtime. */ }
       throw error;
     } finally {
       this.activeRunner = null;

@@ -1,3 +1,5 @@
+import { BrowserGpuAvailability, type BrowserGpuProbe } from './BrowserGpuAvailability';
+
 import type {
   ClearraHostAppResponse,
   ClearraProductPageWorkerPayload,
@@ -165,6 +167,7 @@ export type ClearraWasmHostCapabilities = {
   productRetentionByteCap?: number;
 };
 
+const browserGpuAvailability = new BrowserGpuAvailability();
 let wasmModulePromise: Promise<ClearraWasmModule> | null = null;
 const CONSERVATIVE_HOST_CAPABILITIES: ClearraWasmHostCapabilities = Object.freeze({
   logicalProcessorCount: 1,
@@ -508,7 +511,10 @@ export async function loadClearraWasmModule(
   }
   const attempt = wasmModulePromise;
   try {
-    const module = await attempt;
+    const [module] = await Promise.all([
+      attempt,
+      browserGpuAvailability.qualify(hostCapabilities.webGpuAvailable, (self.navigator as unknown as { gpu?: BrowserGpuProbe } | undefined)?.gpu)
+    ]);
     module.configure_host(hostCapabilities);
     return module;
   } catch (error) {
@@ -1016,7 +1022,7 @@ function wrapRawModule(
     },
     configure_host(capabilities) {
       const flags =
-        (capabilities.webGpuAvailable ? 1 : 0) |
+        (capabilities.webGpuAvailable && browserGpuAvailability.available ? 1 : 0) |
         (capabilities.crossOriginIsolated ? 2 : 0);
       requireOk(
         raw.clearra_wasm_configure_host(
@@ -1480,6 +1486,7 @@ function wrapRawModule(
       return outputBytes();
     },
     async prewarm_gpu(deviceIndex) {
+      if (!browserGpuAvailability.available) return 'unavailable';
       const generation = ++gpuWarmupGeneration;
       requireOk(raw.clearra_wasm_gpu_warmup_start(deviceIndex ?? -1));
       for (;;) {
