@@ -1,0 +1,454 @@
+diff --git a/.github/workflows/discord-deploy.yml b/.github/workflows/discord-deploy.yml
+index 640df57..9498800 100644
+--- a/.github/workflows/discord-deploy.yml
++++ b/.github/workflows/discord-deploy.yml
+@@ -1,4 +1,5 @@
+ name: Deploy Discord Production
++run-name: Discord production · ${{ github.event.workflow_run.head_sha || inputs.accepted_sha }}
+ 
+ # ORACLE_SSH_PRIVATE_KEY_B64 is forbidden as a repository or organization secret.
+ # Configure it separately as an environment secret in discord-path-confirmation,
+@@ -20,6 +21,14 @@ on:
+         description: Exact current main commit with one canonical workflow_dispatch acceptance
+         required: true
+         type: string
++      accepted_run_id:
++        description: Optional exact successful canonical acceptance run (supply attempt together)
++        required: false
++        type: string
++      accepted_run_attempt:
++        description: Optional canonical acceptance attempt; must be 1 and paired with run ID
++        required: false
++        type: string
+ 
+ permissions:
+   contents: read
+@@ -62,38 +71,8 @@ jobs:
+         id: authority
+         env:
+           GH_TOKEN: ${{ github.token }}
+-          MANUAL_SHA: ${{ inputs.accepted_sha }}
+-          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
+-          AUTOMATIC_RUN_ID: ${{ github.event.workflow_run.id }}
+-          AUTOMATIC_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+         shell: bash
+-        run: |
+-          set -euo pipefail
+-          git fetch --force --tags origin main
+-          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+-            source_commit="$AUTOMATIC_SHA"
+-          else
+-            source_commit="$MANUAL_SHA"
+-          fi
+-          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo 'accepted_sha must be a full lowercase commit ID' >&2; exit 2; }
+-          [[ "$(git rev-parse origin/main)" == "$source_commit" ]] || { echo 'Discord source must be exact current main' >&2; exit 2; }
+-          git checkout --detach "$source_commit"
+-          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+-            node scripts/release/canonical-acceptance-run.mjs \
+-              --repository "$GITHUB_REPOSITORY" \
+-              --source-commit "$source_commit" \
+-              --require one \
+-              --expected-run-id "$AUTOMATIC_RUN_ID" \
+-              --expected-run-attempt "$AUTOMATIC_RUN_ATTEMPT" \
+-              --format github-output >> "$GITHUB_OUTPUT"
+-          else
+-            node scripts/release/canonical-acceptance-run.mjs \
+-              --repository "$GITHUB_REPOSITORY" \
+-              --source-commit "$source_commit" \
+-              --require one \
+-              --format github-output >> "$GITHUB_OUTPUT"
+-          fi
+-          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
++        run: node scripts/release/discord-acceptance-trigger.mjs
+       - name: Classify deployment impact from the last production tag
+         id: impact
+         env:
+diff --git a/apps/clearra-web/tsconfig.contract.json b/apps/clearra-web/tsconfig.contract.json
+index a7869de..725d91e 100644
+--- a/apps/clearra-web/tsconfig.contract.json
++++ b/apps/clearra-web/tsconfig.contract.json
+@@ -1,9 +1,29 @@
+ {
+-  "extends": "./tsconfig.json",
+   "compilerOptions": {
++    "allowImportingTsExtensions": true,
++    "esModuleInterop": true,
++    "forceConsistentCasingInFileNames": true,
++    "lib": [
++      "ES2022",
++      "DOM",
++      "WebWorker"
++    ],
++    "module": "ESNext",
++    "moduleResolution": "Bundler",
+     "noEmit": true,
+-    "types": []
++    "skipLibCheck": true,
++    "strict": true,
++    "target": "ES2022",
++    "types": [],
++    "allowJs": true,
++    "checkJs": true,
++    "resolveJsonModule": true,
++    "sourceMap": true
+   },
+-  "include": ["test/*.contract.ts"],
+-  "files": ["../../scripts/types/node-contract-builtins.d.ts"]
++  "include": [
++    "test/*.contract.ts"
++  ],
++  "files": [
++    "../../scripts/types/node-contract-builtins.d.ts"
++  ]
+ }
+diff --git a/scripts/release/discord-acceptance-trigger.mjs b/scripts/release/discord-acceptance-trigger.mjs
+new file mode 100644
+index 0000000..d08567b
+--- /dev/null
++++ b/scripts/release/discord-acceptance-trigger.mjs
+@@ -0,0 +1,96 @@
++import { spawnSync } from 'node:child_process';
++import { appendFile, readFile } from 'node:fs/promises';
++import { resolve } from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { resolveCanonicalAcceptanceRun } from './canonical-acceptance-run.mjs';
++
++const RELEASE_WORKFLOW = '.github/workflows/release-cli.yml';
++const SHA = /^[0-9a-f]{40}$/u;
++const ID = /^[1-9][0-9]*$/u;
++
++function decimalId(value, label) {
++  if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new Error(`${label} is not exact`);
++  const text = String(value ?? '');
++  if (!ID.test(text)) throw new Error(`${label} must be a positive decimal ID`);
++  return text;
++}
++
++// The completion event is a routing input, not acceptance proof. Resolve the
++// exact successful canonical run independently before emitting any authority.
++export async function resolveDiscordAcceptanceTrigger(context, dependencies = {}) {
++  const { repository, ref, eventName, event, currentMain } = context;
++  if (repository !== 'daejunnom/Clearra' || ref !== 'refs/heads/main' ||
++      event?.repository?.full_name !== repository || !SHA.test(currentMain ?? '')) {
++    throw new Error('Discord trigger must belong to the protected repository and current main');
++  }
++  let sourceCommit, expectedRunId, expectedRunAttempt;
++  if (eventName === 'workflow_run') {
++    const upstream = event.workflow_run;
++    if (event.action !== 'completed' || upstream?.path !== RELEASE_WORKFLOW ||
++        upstream?.event !== 'workflow_dispatch' || upstream?.head_branch !== 'main' ||
++        upstream?.head_repository?.full_name !== repository ||
++        upstream?.status !== 'completed' || upstream?.conclusion !== 'success') {
++      throw new Error('Discord automatic deployment requires a successful canonical Release completion');
++    }
++    sourceCommit = upstream.head_sha;
++    expectedRunId = decimalId(upstream.id, 'upstream run');
++    expectedRunAttempt = decimalId(upstream.run_attempt, 'upstream attempt');
++  } else if (eventName === 'workflow_dispatch') {
++    sourceCommit = event.inputs?.accepted_sha;
++    const run = event.inputs?.accepted_run_id || '';
++    const attempt = event.inputs?.accepted_run_attempt || '';
++    if (Boolean(run) !== Boolean(attempt)) throw new Error('Manual acceptance run and attempt must be supplied together');
++    if (run) {
++      expectedRunId = decimalId(run, 'manual acceptance run');
++      expectedRunAttempt = decimalId(attempt, 'manual acceptance attempt');
++    }
++  } else {
++    throw new Error('Unsupported Discord deployment trigger');
++  }
++  if (!SHA.test(sourceCommit ?? '') || sourceCommit !== currentMain) {
++    throw new Error('Discord source must be exact current main');
++  }
++  if (expectedRunAttempt && expectedRunAttempt !== '1') {
++    throw new Error('Canonical Release reruns cannot authorize Discord deployment');
++  }
++  const acceptance = await resolveCanonicalAcceptanceRun({
++    repository, sourceCommit, expectedCount: 1, expectedRunId, expectedRunAttempt,
++  }, dependencies);
++  return Object.freeze({ sourceCommit, acceptedRunId: acceptance.id, acceptedRunAttempt: acceptance.attempt });
++}
++
++function git(...args) {
++  const result = spawnSync('git', args, {
++    encoding: 'utf8', shell: false, timeout: 120_000, maxBuffer: 1024 * 1024,
++    stdio: ['ignore', 'pipe', 'pipe'],
++  });
++  if (result.error || result.status !== 0) throw new Error('Discord source authority Git command failed');
++  return result.stdout.trim();
++}
++
++export async function main(environment = process.env) {
++  if (!environment.GITHUB_EVENT_PATH || !environment.GITHUB_OUTPUT) throw new Error('GitHub event and output paths are required');
++  const event = JSON.parse(await readFile(environment.GITHUB_EVENT_PATH, 'utf8'));
++  git('fetch', '--tags', 'origin', 'main');
++  const currentMain = git('rev-parse', 'origin/main');
++  if (git('rev-parse', 'HEAD') !== currentMain) throw new Error('Main moved after Discord workflow checkout');
++  const result = await resolveDiscordAcceptanceTrigger({
++    repository: environment.GITHUB_REPOSITORY, ref: environment.GITHUB_REF,
++    eventName: environment.GITHUB_EVENT_NAME, event,
++    currentMain,
++  });
++  git('checkout', '--detach', result.sourceCommit);
++  const remote = git('ls-remote', 'origin', 'refs/heads/main').split(/\s+/u);
++  if (remote.length !== 2 || remote[0] !== result.sourceCommit || remote[1] !== 'refs/heads/main') {
++    throw new Error('Main moved during Discord acceptance resolution');
++  }
++  await appendFile(environment.GITHUB_OUTPUT, [
++    'canonical_acceptance_count=1', `source_commit=${result.sourceCommit}`,
++    `accepted_run_id=${result.acceptedRunId}`, `accepted_run_attempt=${result.acceptedRunAttempt}`, '',
++  ].join('\n'));
++  console.log(`discord_acceptance=verified source=${result.sourceCommit} run=${result.acceptedRunId} attempt=${result.acceptedRunAttempt}`);
++}
++
++if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
++  await main().catch(error => { console.error(error.message); process.exitCode = 2; });
++}
+diff --git a/scripts/release/discord-acceptance-trigger.test.mjs b/scripts/release/discord-acceptance-trigger.test.mjs
+new file mode 100644
+index 0000000..4ce5b63
+--- /dev/null
++++ b/scripts/release/discord-acceptance-trigger.test.mjs
+@@ -0,0 +1,87 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { resolveDiscordAcceptanceTrigger } from './discord-acceptance-trigger.mjs';
++
++const sha = '7'.repeat(40);
++function run(overrides = {}) {
++  return { id: 123, run_attempt: 1, event: 'workflow_dispatch', status: 'completed',
++    conclusion: 'success', head_branch: 'main', head_sha: sha,
++    head_repository: { full_name: 'daejunnom/Clearra' },
++    path: '.github/workflows/release-cli.yml', ...overrides };
++}
++function context(overrides = {}) {
++  return { repository: 'daejunnom/Clearra', ref: 'refs/heads/main', currentMain: sha,
++    eventName: 'workflow_run', event: { action: 'completed', repository: { full_name: 'daejunnom/Clearra' }, workflow_run: run() }, ...overrides };
++}
++function api(runs = [run()]) {
++  const calls = [];
++  return { calls, run(command, args) {
++    calls.push({ command, args });
++    return JSON.stringify({ total_count: runs.length, workflow_runs: runs });
++  } };
++}
++
++test('Release completion resolves one independently verified exact-SHA acceptance without dispatching a second workflow', async () => {
++  const provider = api();
++  assert.deepEqual(await resolveDiscordAcceptanceTrigger(context(), provider), {
++    sourceCommit: sha, acceptedRunId: '123', acceptedRunAttempt: '1',
++  });
++  assert.equal(provider.calls.length, 1);
++  assert.equal(provider.calls[0].command, 'gh');
++  assert.ok(provider.calls[0].args.includes(`head_sha=${sha}`));
++  assert.ok(provider.calls[0].args.includes('event=workflow_dispatch'));
++  assert.ok(provider.calls[0].args.includes('GET'));
++  assert.ok(!provider.calls[0].args.includes('POST'));
++});
++
++for (const [name, mutate] of [
++  ['failed gate', c => { c.event.workflow_run.conclusion = 'failure'; }],
++  ['cancelled gate', c => { c.event.workflow_run.conclusion = 'cancelled'; }],
++  ['running gate', c => { c.event.workflow_run.status = 'in_progress'; }],
++  ['wrong workflow with the same display name', c => { c.event.workflow_run.path = '.github/workflows/clearra-surface-repair.yml'; }],
++  ['foreign repository', c => { c.event.workflow_run.head_repository.full_name = 'other/fork'; }],
++  ['foreign event owner', c => { c.event.repository.full_name = 'other/fork'; }],
++  ['unpromoted candidate', c => { c.event.workflow_run.head_branch = 'candidate'; }],
++  ['tag run', c => { c.event.workflow_run.event = 'push'; }],
++  ['pull-request event', c => { c.eventName = 'pull_request'; }],
++  ['moved main', c => { c.currentMain = '8'.repeat(40); }],
++  ['noncompletion action', c => { c.event.action = 'requested'; }],
++  ['rerun authority', c => { c.event.workflow_run.run_attempt = 2; }],
++  ['imprecise run ID', c => { c.event.workflow_run.id = Number.MAX_SAFE_INTEGER + 1; }],
++  ['nonmain receiver', c => { c.ref = 'refs/heads/candidate'; }],
++]) {
++  test(`${name} cannot reach acceptance lookup or produce deployment authority`, async () => {
++    const input = context(); mutate(input); const provider = api();
++    await assert.rejects(resolveDiscordAcceptanceTrigger(input, provider));
++    assert.equal(provider.calls.length, 0);
++  });
++}
++
++for (const [name, runs] of [
++  ['no accepted run', []],
++  ['different run than triggering event', [run({ id: 124 })]],
++  ['unverified success', [run({ conclusion: 'failure' })]],
++  ['duplicate canonical successes', [run(), run({ id: 124 })]],
++]) {
++  test(`${name} cannot authorize automatic deployment`, async () => {
++    await assert.rejects(resolveDiscordAcceptanceTrigger(context(), api(runs)));
++  });
++}
++
++test('manual recovery can bind the same exact run and attempt or use the existing unique-acceptance lookup', async () => {
++  for (const inputs of [
++    { accepted_sha: sha },
++    { accepted_sha: sha, accepted_run_id: '123', accepted_run_attempt: '1' },
++  ]) {
++    const input = context({ eventName: 'workflow_dispatch' }); input.event = { repository: input.event.repository, inputs };
++    assert.equal((await resolveDiscordAcceptanceTrigger(input, api())).acceptedRunId, '123');
++  }
++  for (const inputs of [
++    { accepted_sha: sha, accepted_run_id: '123' },
++    { accepted_sha: sha, accepted_run_attempt: '1' },
++    { accepted_sha: sha, accepted_run_id: '124', accepted_run_attempt: '1' },
++  ]) {
++    const input = context({ eventName: 'workflow_dispatch' }); input.event = { repository: input.event.repository, inputs };
++    await assert.rejects(resolveDiscordAcceptanceTrigger(input, api()));
++  }
++});
+diff --git a/scripts/release/discord-deploy-workflow.test.mjs b/scripts/release/discord-deploy-workflow.test.mjs
+index c24efa8..acb169f 100644
+--- a/scripts/release/discord-deploy-workflow.test.mjs
++++ b/scripts/release/discord-deploy-workflow.test.mjs
+@@ -208,7 +208,7 @@ const discordRuntimeRecovery = await readFile(
+   "utf8",
+ );
+ 
+-test("primary has exact automatic/manual authority and explicit impact no-op", () => {
++test("primary has exact automatic/manual authority and explicit impact no-op", async () => {
+   for (const marker of [
+     'workflows: ["Publish Product Release"]',
+     "workflow_dispatch:",
+@@ -217,10 +217,9 @@ test("primary has exact automatic/manual authority and explicit impact no-op", (
+     "github.event.workflow_run.event == 'workflow_dispatch'",
+     "github.event.workflow_run.head_branch == 'main'",
+     "github.event.workflow_run.head_repository.full_name == github.repository",
+-    "--require one",
+-    "--expected-run-id",
+-    "--expected-run-attempt",
+-    "Discord source must be exact current main",
++    "accepted_run_id:",
++    "accepted_run_attempt:",
++    "node scripts/release/discord-acceptance-trigger.mjs",
+     "deployment-impact.mjs",
+     "deploy_discord != 'true'",
+   ]) assert.ok(primary.includes(marker), marker);
+@@ -238,7 +237,11 @@ test("primary has exact automatic/manual authority and explicit impact no-op", (
+     primary.indexOf("Resolve exact current main and one canonical acceptance"),
+   );
+   assert.match(authorityCheckout, /ref: main[\s\S]*fetch-depth: 0/u);
+-  assert.match(primary, /git fetch --force --tags origin main/u);
++  const trigger = await readFile(new URL('./discord-acceptance-trigger.mjs', import.meta.url), 'utf8');
++  assert.match(trigger, /git\('fetch', '--tags', 'origin', 'main'\)/u);
++  assert.match(trigger, /resolveCanonicalAcceptanceRun/u);
++  assert.match(trigger, /expectedCount: 1, expectedRunId, expectedRunAttempt/u);
++  assert.match(trigger, /Discord source must be exact current main/u);
+   assert.doesNotMatch(primary, /Discord deployment rerun attempts are forbidden/u);
+ });
+ 
+diff --git a/scripts/tools/build-clearra-frontend.mjs b/scripts/tools/build-clearra-frontend.mjs
+index 25117ac..70c67aa 100644
+--- a/scripts/tools/build-clearra-frontend.mjs
++++ b/scripts/tools/build-clearra-frontend.mjs
+@@ -31,12 +31,14 @@ export function frontendOptions(args) {
+ }
+ 
+ export function frontendPlan(options, paths) {
+-  const commands = [{ kind: 'sync', arguments: ['sync'] }];
+-  if (options.task === 'sync') return commands;
+-  if (options.task === 'test') return [...commands,
++  // Worker contracts are source-only. Loading Svelte/Vite here would require
++  // the verified WASM that this pre-build check is meant to precede.
++  if (options.task === 'test') return [
+     { kind: 'typecheck', arguments: ['--noEmit', '-p', 'tsconfig.contract.json'] },
+     { kind: 'contracts', arguments: ['./test'] },
+   ];
++  const commands = [{ kind: 'sync', arguments: ['sync'] }];
++  if (options.task === 'sync') return commands;
+   if (options.app === 'web' && !options.recovery) {
+     commands.push({ kind: 'public-assets', arguments: [] });
+     commands.push({ kind: 'wasm', arguments: ['--environment', options.environment,
+diff --git a/scripts/tools/build-clearra-frontend.test.mjs b/scripts/tools/build-clearra-frontend.test.mjs
+index d585289..bcd76b9 100644
+--- a/scripts/tools/build-clearra-frontend.test.mjs
++++ b/scripts/tools/build-clearra-frontend.test.mjs
+@@ -63,7 +63,7 @@ test('web build, WSL build, dev, sync and tests keep one ordered owner payload',
+     if (task === 'dev') assert.deepEqual(vite.slice(-3), ['--port', '4194', '--strictPort']);
+   }
+   assert.deepEqual(frontendPlan(frontendOptions(['--app', 'web', '--task', 'test']), paths).map(command => command.kind),
+-    ['sync', 'typecheck', 'contracts']);
++    ['typecheck', 'contracts']);
+   assert.deepEqual(frontendPlan(frontendOptions(['--app', 'web', '--task', 'sync']), paths).map(command => command.kind), ['sync']);
+   assert.deepEqual(frontendPlan(frontendOptions(['--app', 'desktop']), paths).map(command => command.kind), ['sync', 'vite']);
+ });
+@@ -144,3 +144,26 @@ test('older snapshots fail closed before frontend compilation without source pol
+   const guard = workflow.indexOf('node authority-source/scripts/tools/validate-managed-frontend-source.mjs --source-root snapshot-source');
+   assert.ok(guard > 0 && guard < workflow.indexOf('- name: Prepare Rust WASM toolchain'));
+ });
++
++
++test('source-only worker checks never load Vite or generated Svelte/WASM configuration', async () => {
++  const commands = frontendPlan(frontendOptions(['--app', 'web', '--task', 'test']), paths);
++  const seen = [];
++  await executeFrontendPlan(commands, {
++    run: async command => seen.push(command.kind),
++    afterSync: async () => assert.fail('source-only contracts must not synchronize Svelte'),
++  });
++  assert.deepEqual(seen, ['typecheck', 'contracts']);
++  const config = JSON.parse(await readFile(resolve(root, 'apps/clearra-web/tsconfig.contract.json'), 'utf8'));
++  assert.equal(config.extends, undefined);
++  assert.equal(config.compilerOptions.strict, true);
++  assert.equal(config.compilerOptions.noEmit, true);
++  assert.deepEqual(config.files, ['../../scripts/types/node-contract-builtins.d.ts']);
++  await assert.rejects(executeFrontendPlan(commands, {
++    run: async command => {
++      assert.equal(command.kind, 'typecheck');
++      throw new Error('intentional typecheck failure');
++    },
++    afterSync: async () => assert.fail('unexpected Svelte synchronization'),
++  }), /intentional typecheck failure/);
++});
+diff --git a/scripts/tools/run-release-regression-tests.mjs b/scripts/tools/run-release-regression-tests.mjs
+index 1cea146..10d4bcd 100644
+--- a/scripts/tools/run-release-regression-tests.mjs
++++ b/scripts/tools/run-release-regression-tests.mjs
+@@ -28,6 +28,7 @@ export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
+   "scripts/release/fast-fix-qualification-workflow.test.mjs",
+   "scripts/release/discord-catalog-recovery-authority.test.mjs",
+   "scripts/release/discord-deploy-workflow.test.mjs",
++  "scripts/release/discord-acceptance-trigger.test.mjs",
+   "scripts/release/discord-deployment-recovery.test.mjs",
+   "scripts/release/discord-deployment-state.test.mjs",
+   "scripts/release/discord-production-checkpoint-receipt.test.mjs",
+diff --git a/scripts/tools/run-release-regression-tests.test.mjs b/scripts/tools/run-release-regression-tests.test.mjs
+index fefab87..bea5b91 100644
+--- a/scripts/tools/run-release-regression-tests.test.mjs
++++ b/scripts/tools/run-release-regression-tests.test.mjs
+@@ -32,6 +32,7 @@ const EXPECTED_RELEASE_REGRESSIONS = Object.freeze([
+   "scripts/release/fast-fix-qualification-workflow.test.mjs",
+   "scripts/release/discord-catalog-recovery-authority.test.mjs",
+   "scripts/release/discord-deploy-workflow.test.mjs",
++  "scripts/release/discord-acceptance-trigger.test.mjs",
+   "scripts/release/discord-deployment-recovery.test.mjs",
+   "scripts/release/discord-deployment-state.test.mjs",
+   "scripts/release/discord-production-checkpoint-receipt.test.mjs",
+diff --git a/scripts/types/node-contract-builtins.d.ts b/scripts/types/node-contract-builtins.d.ts
+index 9d971f6..e6a148b 100644
+--- a/scripts/types/node-contract-builtins.d.ts
++++ b/scripts/types/node-contract-builtins.d.ts
+@@ -44,3 +44,25 @@ declare module 'node:path' {
+ declare const process: {
+   cwd(): string;
+ };
++
++// Minimal, dependency-free declarations for the Node 22 clock APIs used by
++// executable contracts. Keep this shim typed; it is not a wildcard module.
++declare module 'node:test' {
++  interface MockFunctionContext {
++    restore(): void;
++  }
++  interface MockTimers {
++    enable(options: { apis: Array<'setInterval' | 'setTimeout' | 'setImmediate' | 'Date'>; now?: number | Date }): void;
++    tick(milliseconds: number): void;
++    reset(): void;
++  }
++  interface MockTracker {
++    readonly timers: MockTimers;
++    method<T extends object, K extends keyof T>(
++      object: T,
++      methodName: K,
++      implementation: T[K] extends (...args: infer A) => infer R ? (...args: A) => R : never
++    ): T[K] & { readonly mock: MockFunctionContext };
++  }
++  export const mock: MockTracker;
++}
