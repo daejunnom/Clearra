@@ -1,0 +1,122 @@
+diff --git a/.github/workflows/release-cli.yml b/.github/workflows/release-cli.yml
+index 207cd14..ff5c811 100644
+--- a/.github/workflows/release-cli.yml
++++ b/.github/workflows/release-cli.yml
+@@ -864,40 +864,10 @@ jobs:
+           name: release-acceptance-pages-shard-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+           path: release-shard-evidence/clearra-release-acceptance-pages-shard.v1.json
+           if-no-files-found: error
+-  release-acceptance-browser:
+-    if: github.event_name == 'workflow_dispatch'
+-    needs: [metadata, release-acceptance-pages]
+-    runs-on: ubuntu-latest
+-    timeout-minutes: 15
+-    steps:
+-      - uses: actions/checkout@v4
+-        with:
+-          persist-credentials: false
+-      - uses: actions/setup-node@v4
+-        with:
+-          node-version: 22.23.2
+-      - uses: actions/download-artifact@v4
+-        with:
+-          name: accepted-pages-build-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
+-          path: apps/clearra-web/build
+-      - name: Install isolated browser acceptance tooling
+-        run: |
+-          echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
+-          npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --ignore-scripts --no-audit --no-fund playwright@1.56.1
+-          node "$RUNNER_TEMP/clearra-browser-tools/node_modules/playwright/cli.js" install --with-deps chromium
+-      - name: Require operational CPU fallback and visible Svelte product features
+-        run: node scripts/tools/surface-browser-acceptance.mjs apps/clearra-web/build
+-      - uses: actions/upload-artifact@v4
+-        if: failure()
+-        with:
+-          name: surface-browser-failure-${{ github.run_id }}
+-          path: ${{ runner.temp }}/clearra-surface-acceptance
+-          if-no-files-found: warn
+-
+   release-acceptance:
+     if: github.event_name == 'workflow_dispatch'
+     needs:
+-      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-rust-product, release-acceptance-pages, release-acceptance-browser]
++      [metadata, release-acceptance-foundation-no-product-debt, release-acceptance-foundation-adversarial-correctness, release-acceptance-foundation-desktop-host, release-acceptance-sanitizer, release-acceptance-rust, release-acceptance-rust-product, release-acceptance-pages]
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+diff --git a/apps/clearra-web/src/workers/clearraWasmRuntime.ts b/apps/clearra-web/src/workers/clearraWasmRuntime.ts
+index 765cbc0..644b02a 100644
+--- a/apps/clearra-web/src/workers/clearraWasmRuntime.ts
++++ b/apps/clearra-web/src/workers/clearraWasmRuntime.ts
+@@ -513,7 +513,7 @@ export async function loadClearraWasmModule(
+   try {
+     const [module] = await Promise.all([
+       attempt,
+-      browserGpuAvailability.qualify(hostCapabilities.webGpuAvailable, (self.navigator as unknown as { gpu?: BrowserGpuProbe }).gpu)
++      browserGpuAvailability.qualify(hostCapabilities.webGpuAvailable, (self.navigator as unknown as { gpu?: BrowserGpuProbe } | undefined)?.gpu)
+     ]);
+     module.configure_host(hostCapabilities);
+     return module;
+diff --git a/scripts/lib/wasm-release-gate.ps1 b/scripts/lib/wasm-release-gate.ps1
+index 229e5c0..b846871 100644
+--- a/scripts/lib/wasm-release-gate.ps1
++++ b/scripts/lib/wasm-release-gate.ps1
+@@ -312,6 +312,35 @@ function Invoke-WasmBuildTestGate {
+         Invoke-WasmReleaseCommand $nodeCommand.Source @(
+             (Join-Path $Root 'apps/clearra-web/scripts/prepare-pages-fallback.mjs')
+         ) 'clearra-web Pages fallback'
++        # This leaf owns actual browser behavior as well as the compiled bytes.
++        # Therefore canonical Release (including Tauri) cannot pass by merely
++        # producing a Pages archive whose default search fails at runtime.
++        $browserTools = Join-Path $CargoTargetDir 'surface-browser-tools'
++        $npmName = if ($env:OS -eq 'Windows_NT') { 'npm.cmd' } else { 'npm' }
++        $npmCommand = Get-Command $npmName -ErrorAction Stop
++        $previousBrowserTools = $env:CLEARRA_BROWSER_TOOLS_ROOT
++        try {
++            Invoke-WasmReleaseCommand $npmCommand.Source @(
++                'install', '--prefix', $browserTools, '--ignore-scripts',
++                '--no-audit', '--no-fund', 'playwright@1.56.1'
++            ) 'clearra-browser pinned tooling'
++            Invoke-WasmReleaseCommand $nodeCommand.Source @(
++                (Join-Path $browserTools 'node_modules/playwright/cli.js'),
++                'install', 'chromium'
++            ) 'clearra-browser Chromium preparation'
++            $env:CLEARRA_BROWSER_TOOLS_ROOT = $browserTools
++            Invoke-WasmReleaseCommand $nodeCommand.Source @(
++                (Join-Path $Root 'scripts/tools/surface-browser-acceptance.mjs'),
++                (Join-Path $Root 'apps/clearra-web/build')
++            ) 'clearra-browser operational acceptance'
++        }
++        finally {
++            if ([string]::IsNullOrWhiteSpace($previousBrowserTools)) {
++                Remove-Item Env:\CLEARRA_BROWSER_TOOLS_ROOT -ErrorAction SilentlyContinue
++            } else {
++                $env:CLEARRA_BROWSER_TOOLS_ROOT = $previousBrowserTools
++            }
++        }
+         $buildSource = if ($acceptedProducer) { 'accepted-producer' } else { 'inline' }
+         Write-Output "wasm_build_test=passed host_tests=executed runtime_tests=executed wasm32=compiled bindgen_runtime=staged frontend=built build_source=$buildSource"
+     }
+diff --git a/scripts/tools/surface-browser-acceptance.mjs b/scripts/tools/surface-browser-acceptance.mjs
+index 60d5200..31c7ad7 100644
+--- a/scripts/tools/surface-browser-acceptance.mjs
++++ b/scripts/tools/surface-browser-acceptance.mjs
+@@ -10,7 +10,8 @@ const { chromium } = require('playwright');
+ const root = resolve(process.argv[2] || 'apps/clearra-web/build');
+ const reportRoot = resolve(process.env.RUNNER_TEMP || 'build', 'clearra-surface-acceptance');
+ await mkdir(reportRoot, { recursive: true });
+-const base = '/Clearra';
++const base = process.env.CLEARRA_WEB_BASE_PATH || '';
++assert.match(base, /^(?:\/[A-Za-z0-9._-]+)?$/u);
+ const mime = { '.js': 'text/javascript', '.json': 'application/json', '.css': 'text/css', '.wasm': 'application/wasm', '.html': 'text/html', '.svg': 'image/svg+xml' };
+ const server = createServer(async (req, res) => {
+   try {
+@@ -63,7 +64,7 @@ try {
+     const errors = [];
+     page.on('pageerror', error => errors.push(String(error)));
+     try {
+-      await page.goto('http://127.0.0.1:4194/Clearra/?tool=pc');
++      await page.goto(`http://127.0.0.1:4194${base}/?tool=pc`);
+       await page.locator('.product-tabs').waitFor();
+       const nav = await page.locator('.product-tabs a').evaluateAll(nodes => nodes.map(n => n.getAttribute('href')));
+       assert.ok(nav.length > 7, 'obsolete seven-item navigation is still active');
