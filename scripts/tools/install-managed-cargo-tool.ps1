@@ -58,8 +58,25 @@ try {
         ((& $executable --version) -eq $expectedVersion)
     if (-not $accepted) {
         New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
-        $cargoOutput = @(& cargo '+1.98.1' install $ToolName --version $Version --locked --root $toolRoot 2>&1)
-        $installExit = $LASTEXITCODE
+        $cargoCommand = Get-Command cargo -CommandType Application -ErrorAction Stop
+        $previousErrorActionPreference = $ErrorActionPreference
+        $installExit = $null
+        try {
+            # Cargo writes normal progress to stderr. Windows PowerShell 5.1
+            # wraps redirected stderr as ErrorRecord; it is not an install
+            # failure. Preserve the actual exit code and restore fail-closed
+            # script behavior before checking the result or installed binary.
+            $ErrorActionPreference = 'Continue'
+            $LASTEXITCODE = $null
+            $cargoOutput = @(& $cargoCommand.Source '+1.98.1' install $ToolName --version $Version --locked --root $toolRoot 2>&1 |
+                ForEach-Object { $_.ToString() })
+            $installExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($null -eq $installExit) {
+            throw 'Cargo install did not provide a native process exit status'
+        }
         $cargoOutput | ForEach-Object { Write-Output $_ }
         if ($installExit -ne 0) {
             $blocked = ($cargoOutput -join "`n") -match '(?:4551|application control|애플리케이션 제어 정책)'
