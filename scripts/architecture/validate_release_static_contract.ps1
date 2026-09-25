@@ -19,6 +19,49 @@ function Assert-ReleasePublicContractContains {
     }
 }
 
+# These are standalone JSON compiler configurations. Check their values rather
+# than their formatting: pretty-printing an include array cannot remove tests.
+function Assert-ReleaseTypeScriptContractConfig {
+    param([string]$Text, [string]$Contract)
+
+    try {
+        $config = ConvertFrom-Json -InputObject $Text -ErrorAction Stop
+        if ($null -eq $config -or $config -isnot [pscustomobject]) {
+            throw 'the configuration must be a JSON object'
+        }
+        $keys = @($config.PSObject.Properties.Name)
+        if ($keys -contains 'extends') {
+            throw 'source-only contract checks must not inherit generated configuration'
+        }
+        $options = $config.compilerOptions
+        if ($options -isnot [pscustomobject] -or
+            $options.noEmit -isnot [bool] -or $options.noEmit -ne $true -or
+            $options.strict -isnot [bool] -or $options.strict -ne $true) {
+            throw 'compilerOptions must enable boolean noEmit and strict'
+        }
+        $includes = @($config.include)
+        if ($includes.Count -ne 1 -or $includes[0] -cne 'test/*.contract.ts') {
+            throw 'include must select every test/*.contract.ts'
+        }
+        if ($keys -contains 'exclude' -and @($config.exclude).Count -ne 0) {
+            throw 'contract inputs must not be excluded from the compiler'
+        }
+        $optionKeys = @($options.PSObject.Properties.Name)
+        foreach ($name in @('noCheck', 'noResolve', 'emitDeclarationOnly', 'incremental', 'composite')) {
+            if ($optionKeys -contains $name -and
+                ($options.$name -isnot [bool] -or $options.$name -ne $false)) {
+                throw "compiler option '$name' must not skip checks or emit build artifacts"
+            }
+        }
+        if (@($config.files) -cnotcontains '../../scripts/types/node-contract-builtins.d.ts') {
+            throw 'the explicit Node contract declarations must remain compiler inputs'
+        }
+    }
+    catch {
+        Add-ArchitectureError "$Contract TypeScript contract configuration is invalid: $($_.Exception.Message)"
+    }
+}
+
 function Get-ReleaseSourceSurface {
     param([string[]]$Paths)
 
@@ -3549,10 +3592,7 @@ function Invoke-ReleaseIdentityGateValidation {
                 Add-ArchitectureError "$($package.Name) test script is missing TypeScript contract gate '$required'"
             }
         }
-        if ($package.Config.IndexOf('"noEmit": true', [System.StringComparison]::Ordinal) -lt 0 -or
-            $package.Config.IndexOf('"include": ["test/*.contract.ts"]', [System.StringComparison]::Ordinal) -lt 0) {
-            Add-ArchitectureError "$($package.Name) TypeScript contract typecheck must compile every tracked .contract.ts without emitting artifacts"
-        }
+        Assert-ReleaseTypeScriptContractConfig -Text $package.Config -Contract $package.Name
     }
     foreach ($required in @(
         '"test": "node ../../scripts/tools/build-clearra-frontend.mjs --app web --task test"',
@@ -3566,10 +3606,7 @@ function Invoke-ReleaseIdentityGateValidation {
             Add-ArchitectureError "Web managed TypeScript contract gate is missing '$required'"
         }
     }
-    if ($webContractTypecheck.IndexOf('"noEmit": true', [System.StringComparison]::Ordinal) -lt 0 -or
-        $webContractTypecheck.IndexOf('"include": ["test/*.contract.ts"]', [System.StringComparison]::Ordinal) -lt 0) {
-        Add-ArchitectureError 'Web TypeScript contract typecheck must compile every tracked .contract.ts without emitting artifacts'
-    }
+    Assert-ReleaseTypeScriptContractConfig -Text $webContractTypecheck -Contract 'Web'
     foreach ($required in @(
         'apps/clearra-discord-bot/scripts/verify-terminal-supply-product.mjs',
         'packages/clearra-ui/scripts/verify-terminal-supply-product.mjs',

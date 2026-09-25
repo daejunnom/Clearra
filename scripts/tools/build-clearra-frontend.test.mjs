@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -166,4 +168,32 @@ test('source-only worker checks never load Vite or generated Svelte/WASM configu
     },
     afterSync: async () => assert.fail('unexpected Svelte synchronization'),
   }), /intentional typecheck failure/);
+});
+
+// Inspect TypeScript's actual input set, not include-array spelling. A future
+// nested contract or exclusion must not silently disappear from typechecking.
+test('standalone contract compiler inputs match every tracked UI and web contract', () => {
+  for (const packagePath of ['packages/clearra-ui', 'apps/clearra-web']) {
+    const packageRoot = resolve(root, packagePath);
+    const require = createRequire(resolve(packageRoot, 'package.json'));
+    const ts = require('typescript');
+    const configPath = resolve(packageRoot, 'tsconfig.contract.json');
+    const read = ts.readConfigFile(configPath, ts.sys.readFile);
+    assert.equal(read.error, undefined, `${packagePath}: configuration must parse`);
+    const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, packageRoot);
+    assert.deepEqual(parsed.errors, [], `${packagePath}: compiler configuration must resolve`);
+    assert.equal(parsed.options.noEmit, true);
+    assert.equal(parsed.options.strict, true);
+    for (const option of ['noCheck', 'noResolve', 'emitDeclarationOnly', 'incremental', 'composite']) {
+      assert.notEqual(parsed.options[option], true, `${packagePath}: ${option}`);
+    }
+    const tracked = execFileSync('git', ['ls-files', '-z', '--',
+      `:(glob)${packagePath}/test/**/*.contract.ts`], { cwd: root, encoding: 'utf8' })
+      .split('\0').filter(Boolean).map(file => resolve(root, file)).sort();
+    assert.ok(tracked.length > 0, `${packagePath}: empty contract inventory`);
+    const actual = parsed.fileNames.filter(file => file.endsWith('.contract.ts')).map(file => resolve(file)).sort();
+    assert.deepEqual(actual, tracked, `${packagePath}: TypeScript must include every tracked contract`);
+    assert.ok(parsed.fileNames.map(file => resolve(file)).includes(
+      resolve(root, 'scripts/types/node-contract-builtins.d.ts')));
+  }
 });
