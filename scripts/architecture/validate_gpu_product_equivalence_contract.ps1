@@ -23,6 +23,7 @@ function Invoke-GpuProductEquivalenceContractValidation() {
         'Assert-ProductE2EJsonFieldUniqueEquals',
         'Assert-ProductE2EGpuCpuFallbackReport',
         'Assert-ProductE2EHybridCpuSelectionReport',
+        'ReuseExactReadOnlyProbe', 'exact read-only probes',
         'gpu_backend_not_connected', 'gpu_device_not_found', 'gpu_kernel_unavailable',
         'cpu-selected', 'reported inconsistent values'
     )) {
