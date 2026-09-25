@@ -1055,6 +1055,12 @@ function validateToolchains(value) {
 
 function releaseShardToolchainCompatibilityKey(tool, value) {
   const version = requireNonEmptyString(value, `release shard ${tool} toolchain`);
+  if (tool === "powershell") {
+    // Hosted Windows runners can differ only in the OS servicing revision of
+    // Windows PowerShell 5.1. Every shard still retains its measured version.
+    const windowsPowerShell = /^5\.1\.([0-9]+)\.[0-9]+$/u.exec(version);
+    return windowsPowerShell ? `powershell 5.1.${windowsPowerShell[1]}` : version;
+  }
   const patchCompatiblePatterns = {
     rust: /^rustc ([0-9]+)\.([0-9]+)\.[0-9]+(?: .*)?$/u,
     cargo: /^cargo ([0-9]+)\.([0-9]+)\.[0-9]+(?: .*)?$/u,

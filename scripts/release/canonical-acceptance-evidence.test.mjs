@@ -319,6 +319,7 @@ test("seven isolated shard reports preserve unique stage ownership and delegated
         rust: "rustc 1.91.2 (hosted-runner)",
         cargo: "cargo 1.91.7 (hosted-runner)",
         cmake: "cmake version 3.31.4",
+        powershell: "5.1.26100.33296",
       });
     }
     if (shard.shard === "rust-exact") {
@@ -333,6 +334,7 @@ test("seven isolated shard reports preserve unique stage ownership and delegated
       return createReleaseAcceptanceShardEvidence(authority(), shard.shard, {
         ...SHARD_TOOLCHAINS[shard.shard],
         cmake: "cmake version 3.31.5",
+        powershell: "5.1.26100.33438",
       });
     }
     return shard;
@@ -346,6 +348,20 @@ test("seven isolated shard reports preserve unique stage ownership and delegated
     "rustc 1.91.9 (authoritative-rust-shard)",
   );
   assert.equal(compatibleReports.toolchainManifest.cmake, "cmake version 3.31.5");
+  assert.equal(compatibleReports.toolchainManifest.powershell, "5.1.26100.33296");
+
+  const differentWindowsPowerShellBuild = createReleaseAcceptanceShardEvidence(
+    authority(),
+    "sanitizer",
+    { ...SHARD_TOOLCHAINS.sanitizer, powershell: "5.1.26000.33438" },
+  );
+  assert.throws(
+    () => createShardedReleaseGateReports(
+      authority(),
+      shards.map((shard) => shard.shard === "sanitizer" ? differentWindowsPowerShellBuild : shard),
+    ),
+    /disagree on the powershell toolchain/u,
+  );
 
   const malformedRust = createReleaseAcceptanceShardEvidence(
     authority(),
