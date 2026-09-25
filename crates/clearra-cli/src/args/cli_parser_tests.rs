@@ -275,6 +275,39 @@ fn gui_pc_full_solution_argv_routes_to_the_shared_compiler_and_keeps_legacy_pc_i
 }
 
 #[test]
+fn boundary_recovery_reaches_the_native_product_parser_and_its_help() {
+    let help = CliParser::parse(["clearra", "recovery", "boundary", "--help"])
+        .expect("boundary recovery help")
+        .into_command();
+    assert_eq!(
+        help,
+        ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::BoundaryRecovery))
+    );
+    let command = CliParser::parse([
+        "clearra",
+        "recovery",
+        "boundary",
+        "--initial-board-mask",
+        "0x3f0",
+        "--target-board-mask",
+        "0xc030",
+        "--height",
+        "4",
+        "--queue",
+        "IO",
+        "--stage-one-count",
+        "1",
+        "--placements",
+        "2",
+        "--max-early-placements",
+        "0",
+    ])
+    .expect("native boundary recovery route")
+    .into_command();
+    assert!(matches!(command, ParsedCliCommand::Product(_)));
+}
+
+#[test]
 fn pc_minimals_routes_only_the_grouped_canonical_spelling_to_product_help_and_tokens() {
     let help = CliParser::parse(["clearra", "pc", "minimals", "--help"])
         .expect("canonical pc minimals help")

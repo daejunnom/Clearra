@@ -1,6 +1,7 @@
 <script lang="ts">
   import { AlertTriangle } from '@lucide/svelte';
-  import { onDestroy, tick } from 'svelte';
+  import { createEventDispatcher, onDestroy, tick } from 'svelte';
+  import { componentMessage } from '../i18n/componentCatalog';
 
   import SolutionBoardPreview from './SolutionBoardPreview.svelte';
   import SolutionCopyButton from './SolutionCopyButton.svelte';
@@ -50,6 +51,10 @@
   export let targetLines = 4;
   export let language: WorkspaceLanguage;
   export let copyFormat: SolutionCopyFormat = 'ctk';
+  export let allowMandatorySelection = false;
+  export let mandatorySolutionKeys: string[] = [];
+
+  const dispatch = createEventDispatcher<{ toggleMandatory: string }>();
 
   const PAGE_SIZE = 100;
 
@@ -308,6 +313,16 @@
             format={copyFormat}
             {language}
           />
+          {#if allowMandatorySelection}
+            <label class="mandatory-choice">
+              <input
+                type="checkbox"
+                checked={mandatorySolutionKeys.includes(solution.key)}
+                on:change={() => dispatch('toggleMandatory', solution.key)}
+              />
+              {componentMessage(language, 'mandatorySolutions')}
+            </label>
+          {/if}
         </div>
 
         <SolutionBoardPreview
@@ -338,6 +353,8 @@
 {/if}
 
 <style>
+  .mandatory-choice { align-items: center; display: inline-flex; font-size: 12px; gap: 6px; }
+  .mandatory-choice input { height: 16px; width: 16px; }
   .gallery-status {
     color: #68736f;
     font-size: 12px;

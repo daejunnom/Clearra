@@ -296,7 +296,8 @@ pub fn project_build_supplied_minimum_cover_v1(
         report.canonical_candidate_keys().to_vec(),
         supplied_replay_completeness(report.completeness(), false),
         owner.set_identity_sha256(),
-    )?;
+    )?
+    .with_pinned_candidate_keys(report.pinned_candidate_keys().to_vec())?;
     Ok(ProjectedBuildV2Product::new(
         "build.evaluate.minimals",
         report.contract_id(),

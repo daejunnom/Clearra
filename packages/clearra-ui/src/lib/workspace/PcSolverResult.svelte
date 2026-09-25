@@ -1,5 +1,6 @@
 <script lang="ts">
   import { AlertTriangle, CheckCircle2, LoaderCircle, Search } from '@lucide/svelte';
+  import { createEventDispatcher } from 'svelte';
 
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import ProductResultPager from './ProductResultPager.svelte';
@@ -39,6 +40,10 @@
   export let loadNextProductPage: ProductNextPageLoader | null = null;
   export let loadProductMemberPage: ProductMemberPageLoader | null = null;
   export let releaseProductPages: ProductPageRelease | null = null;
+  export let allowMandatorySelection = false;
+  export let mandatorySolutionKeys: string[] = [];
+
+  const dispatch = createEventDispatcher<{ toggleMandatory: string }>();
 
   let copyFormat: SolutionCopyFormat = 'ctk';
 
@@ -191,6 +196,9 @@
             <SolutionGallery
               {solutionKeys}
               {solutionCount}
+              allowMandatorySelection={allowMandatorySelection && report?.count_complete === true && report?.result_completeness !== 'incomplete' && !resultIncomplete}
+              {mandatorySolutionKeys}
+              on:toggleMandatory={(event) => dispatch('toggleMandatory', event.detail)}
               loadSolutionPage={boundSolutionPageLoader}
               solutionProbabilities={solutionProbabilityByKey}
               solutionAverageScores={solutionAverageScoreByKey}

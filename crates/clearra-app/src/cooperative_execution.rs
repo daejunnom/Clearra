@@ -783,9 +783,14 @@ impl CooperativeSearchResponseKind {
                 result_projection: projection,
                 ..
             } => match projection.projection() {
-                PcResultProjection::MinimumCoverV2(_) => {
-                    Some(ProductCapabilityContract::PcMinimals)
-                }
+                PcResultProjection::MinimumCoverV2(origin) => Some(match origin {
+                    crate::PcMinimalsIngressOrigin::CanonicalPcMinimals => {
+                        ProductCapabilityContract::PcMinimals
+                    }
+                    crate::PcMinimalsIngressOrigin::CanonicalPcPinnedMinimals => {
+                        ProductCapabilityContract::PcPinnedMinimals
+                    }
+                }),
                 PcResultProjection::PathFamilyV2(_) => Some(ProductCapabilityContract::PcPath),
                 PcResultProjection::AllSpinSolution(_) => {
                     Some(ProductCapabilityContract::PcAllSpinSolution)
@@ -1679,7 +1684,7 @@ fn checked_build_minimum_source_external_bytes(
         .checked_add(diagnostics.checked_retained_capacity_bytes()?)?
         .checked_add(backend.capacity() as u128)?
         .checked_add(checked_optional_string_retained_capacity_bytes(gpu)?)?
-        .checked_add(request.query().checked_retained_capacity_bytes()?)?
+        .checked_add(request.checked_retained_capacity_bytes()?)?
         .checked_add(expected_problem.checked_build_probability_pointee_retained_bytes()?)?
         .checked_add((2 * core::mem::size_of::<usize>()) as u128)
 }
@@ -3364,7 +3369,11 @@ impl CooperativeAppExecution {
                             .product_capability_contract
                             .as_ref()
                             .is_some_and(|contract| {
-                                contract.contract() == ProductCapabilityContract::PcMinimals
+                                matches!(
+                                    contract.contract(),
+                                    ProductCapabilityContract::PcMinimals
+                                        | ProductCapabilityContract::PcPinnedMinimals
+                                )
                             })
                     {
                         let command_kind = postprocess.command_kind;

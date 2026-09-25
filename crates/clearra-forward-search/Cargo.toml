@@ -16,5 +16,8 @@ clearra-supply = { path = "../clearra-supply" }
 [lib]
 doctest = false
 
+[dev-dependencies]
+clearra-coverage = { path = "../clearra-coverage" }
+
 [lints]
 workspace = true

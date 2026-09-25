@@ -6,6 +6,7 @@ pub mod exact_minimum_cover_portfolios;
 mod exact_rounded_packing;
 pub mod minimum_cover_solver;
 pub mod minimum_hotfix_policy;
+pub mod pinned_minimum_cover;
 
 pub use cover_selection::{
     CoverSelection, CoverSelectionLimit, CoverSelectionOptimality, CoverSelectionStrategy,
@@ -30,4 +31,7 @@ pub use exact_minimum_cover_portfolios::{
     ExactMinimumCoverPortfolioPage, ExactMinimumCoverPortfolioPreparation,
     ExactMinimumCoverPortfolioPreparationAdvance, ExactMinimumCoverPortfolioPreparationSession,
     ExactMinimumCoverRestart,
+};
+pub use pinned_minimum_cover::{
+    PinnedMinimumCoverError, PinnedMinimumCoverInput, PinnedMinimumCoverPortfolio,
 };

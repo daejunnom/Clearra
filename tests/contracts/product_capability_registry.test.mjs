@@ -23,6 +23,10 @@ const registryUrl = new URL(
   '../fixtures/contracts/product_capability_registry.v1.json',
   import.meta.url,
 );
+const recoveryCandidateUrl = new URL(
+  '../fixtures/contracts/boundary_recovery_candidate.v1.json',
+  import.meta.url,
+);
 const legacyAliasFixtureUrl = new URL(
   '../fixtures/contracts/legacy_alias_equivalence.v1.json',
   import.meta.url,
@@ -119,6 +123,10 @@ const SFINDERBOT_ONLY_COMMANDS = Object.freeze([
 
 function registry() {
   return JSON.parse(readFileSync(registryUrl, 'utf8'));
+}
+
+function recoveryCandidate() {
+  return JSON.parse(readFileSync(recoveryCandidateUrl, 'utf8'));
 }
 
 function legacyAliasFixture() {
@@ -412,6 +420,7 @@ test('capabilities keep algorithm authority, timeout policy, effects, and public
 
 test('every current Discord capability and legacy route is a fail-closed fieldwise runtime projection', () => {
   const contract = registry();
+  const candidate = recoveryCandidate();
   const projection = contract.runtime_projection;
   assert.equal(projection.schema_id, 'clearra.discord-runtime-projection.v1');
   assert.match(projection.authority_note, /independent of target capability v2/u);
@@ -444,7 +453,7 @@ test('every current Discord capability and legacy route is a fail-closed fieldwi
     .sort(byStableId);
   assert.deepEqual(
     activeAndHidden,
-    projection.current_capabilities.slice().sort(byStableId),
+    [...projection.current_capabilities, candidate.runtime_capability].sort(byStableId),
     'active/hidden runtime projection drifted fieldwise',
   );
 
@@ -686,7 +695,9 @@ test('legacy parser fixture exhaustively binds slash and text routes to frozen a
 
 test('implemented Discord runtime capabilities are a complete fieldwise product-authority projection', () => {
   const contract = registry();
-  const productById = new Map(contract.capabilities.map((capability) => [capability.id, capability]));
+  const candidate = recoveryCandidate();
+  const productById = new Map([...contract.capabilities, candidate.product]
+    .map((capability) => [capability.id, capability]));
   const implementationById = new Map(
     contract.capability_implementation.map((entry) => [entry.capability_id, entry]),
   );

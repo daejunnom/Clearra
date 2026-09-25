@@ -10,6 +10,7 @@ import type {
   ClearraSolutionSetArtifactPayload
 } from '../wasm/wasmCommandClient';
 import { validatePcReplayPage } from './pcReplayPager';
+import { validateBoundaryRecoveryPayload } from './boundaryRecoveryPayloadValidation';
 
 export const PRODUCT_MEMBER_PAGE_SIZE = 100;
 
@@ -809,6 +810,20 @@ export function productResultIdentity(payload: ClearraProductResultPayload | nul
       ...payload.content.payload.documents.map((document) => document.canonical_sha256)
     ].join(':');
   }
+  if (payload.content.payload_kind === 'boundary-recovery') {
+    const report = payload.content.payload;
+    if (report.population) {
+      const population = report.population;
+      return [payload.contract, payload.result_kind, report.status, report.placement_role_scope,
+        population.total_possible_pattern_count, population.evaluated_pattern_count,
+        population.state_count, population.normal_probability,
+        population.pc_preserving_recovery_probability, population.non_pc_recovery_probability,
+        population.unknown_probability, population.normal_example?.queue ?? '',
+        population.recovery_example?.queue ?? ''].join(':');
+    }
+    return [payload.contract, payload.result_kind, report.status, report.knowledge_basis, report.placement_role_scope, report.max_early_placements, report.borrow_role_index, report.borrow_placement_mask, report.normal_states, report.recovery_states,
+      ...report.steps.map((step) => `${step.source_queue_index}:${step.placement_role_index}:${step.piece}:${step.placement_mask}:${step.board_after_mask}`)].join(':');
+  }
   return [payload.contract, payload.result_kind, payload.content.payload.sha256].join(':');
 }
 
@@ -933,8 +948,21 @@ export function validateProductResultPayload(
   if (payload.content.payload_kind === 'build-coverage-portfolio-v2') {
     const portfolio = payload.content.payload;
     const complete = portfolio.completeness;
-    return payload.contract === 'build.cover' &&
-      payload.result_kind === 'build-coverage-portfolio.v2' &&
+    const pinned = portfolio.pinned_candidate_keys ?? [];
+    const additional = portfolio.additional_candidate_keys ?? [];
+    const selectedKeys = [...pinned, ...additional];
+    const pinnedResult = payload.contract === 'build.pinned-minimals' &&
+      payload.result_kind === 'build-pinned-minimum-cover.v1';
+    const ordinaryResult = payload.contract === 'build.cover' &&
+      payload.result_kind === 'build-coverage-portfolio.v2';
+    const selectionValid = pinnedResult
+      ? pinned.length > 0 &&
+        selectedKeys.length.toString() === portfolio.selected_candidate_count &&
+        new Set(selectedKeys).size === selectedKeys.length &&
+        selectedKeys.every(validArtifactIdentity) &&
+        selectedKeys.includes(portfolio.canonical_first_candidate_id)
+      : pinned.length === 0 && additional.length === 0;
+    return (pinnedResult || ordinaryResult) && selectionValid &&
       portfolio.contract === 'build-coverage-portfolio.v2' &&
       ['min-cover', 'max-probability-minimum'].includes(portfolio.objective) &&
       [
@@ -1009,8 +1037,12 @@ export function validateProductResultPayload(
   }
   if (payload.content.payload_kind === 'coverage-portfolio') {
     const page = payload.content.payload;
+    const pinnedPc = payload.contract === 'pc.pinned-minimals' &&
+      payload.result_kind === 'pc-pinned-minimum-cover.v1';
+    const pinnedKeys = page.pinned_candidate_keys ?? [];
     const expectedPair =
       (payload.contract === 'pc.minimals' && payload.result_kind === 'pc-minimum-cover.v2') ||
+      pinnedPc ||
       (payload.contract === 'pc.score-minimals' &&
         payload.result_kind === 'pc-score-portfolio.v2') ||
       (payload.contract === 'build.highest-score-minimum-set' &&
@@ -1025,6 +1057,12 @@ export function validateProductResultPayload(
     });
     if (
       !expectedPair ||
+      (pinnedPc
+        ? pinnedKeys.length === 0 ||
+          !canonicalNonNegativeDecimal(page.optimal_cardinality) ||
+          BigInt(pinnedKeys.length) > BigInt(page.optimal_cardinality) ||
+          pinnedKeys.some((key, index) => !key || pinnedKeys.indexOf(key) !== index)
+        : false) ||
       page.set_contract !== 'portfolio-alternative-set.v1' ||
       typeof page.page_handle_available !== 'boolean' ||
       pageValidationError
@@ -1113,6 +1151,9 @@ export function validateProductResultPayload(
       set.documents.every((document) => validateFieldDocument(document) === null)
       ? null
       : 'invalid field document set payload';
+  }
+  if (payload.content.payload_kind === 'boundary-recovery') {
+    return validateBoundaryRecoveryPayload(payload);
   }
   const artifact = payload.content.payload;
   return artifact.render_exact === true &&

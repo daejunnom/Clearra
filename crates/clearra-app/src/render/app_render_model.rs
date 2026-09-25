@@ -128,6 +128,7 @@ pub enum AppRenderModel {
     Damage(ForwardSearchReport),
     SpinFinder(ForwardSearchReport),
     Ren(ForwardSearchReport),
+    BoundaryRecovery(AppMessage),
     SpinStructure(SpinStructureReport),
     Cover(CoreExecutionResult),
     CoverMessage(AppMessage),
@@ -155,7 +156,8 @@ impl AppRenderModel {
             Self::Cover(_) => AppResultKind::Cover,
             Self::Percent(_) => AppResultKind::Percent,
             Self::CoverMessage(message) => message.kind(),
-            Self::Path(message)
+            Self::BoundaryRecovery(message)
+            | Self::Path(message)
             | Self::Rules(message)
             | Self::Scoring(message)
             | Self::Convert(message)
@@ -256,6 +258,7 @@ impl AppRenderModel {
         match self {
             Self::CoverMessage(message)
             | Self::ScenarioMessage(message)
+            | Self::BoundaryRecovery(message)
             | Self::Path(message)
             | Self::Rules(message)
             | Self::Scoring(message)

@@ -43,12 +43,12 @@ const LEGACY_PUBLIC_SEARCH_COMMANDS = [
   "damage",
 ];
 
-const CANONICAL_SEARCH_ROOTS = ["pc", "build", "setup", "forward", "spin-structure", "utility"];
+const CANONICAL_SEARCH_ROOTS = ["pc", "recovery", "build", "setup", "forward", "spin-structure", "utility"];
 const COMPATIBILITY_SEARCH_ROOTS = ["finesse"];
 
 test("slash catalog registers only curated active commands", () => {
-  assert.equal(slashCommandCatalog.length, 27);
-  assert.equal(globalCommands.length, 28);
+  assert.equal(slashCommandCatalog.length, 28);
+  assert.equal(globalCommands.length, 29);
   assert.equal(globalCommands.filter(({ type }) => type === 3).length, 1);
   assert.deepEqual(
     slashCommandCatalog.map((command) => command.name),
@@ -2795,8 +2795,9 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     evaluate_score: ["supplied-solution score portfolio", "제공 해법 점수 포트폴리오"],
     evaluate_b2b_cover: ["supplied-solution B2B coverage family", "제공 해법 B2B 커버리지 패밀리"],
     evaluate_cover_percent: ["supplied-solution coverage probability", "제공 해법 커버리지 확률"],
+    boundary_recovery: ["boundary-recovery search", "경계 리커버리 탐색"],
   };
-  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 55);
+  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 56);
   assert.equal(Object.isFrozen(DISCORD_PUBLIC_SEARCH_CONTRACT), true);
   assert.equal(
     DISCORD_PUBLIC_SEARCH_CONTRACT.every((entry) =>
@@ -2864,6 +2865,27 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
               exitCode: 0,
               stderr: "",
               stdout: JSON.stringify(validPcBestSaveStructured()),
+            };
+          }
+          if (engineKind === "boundary-recovery") {
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify({
+                kind: "boundary-recovery",
+                summary: {
+                  contract: "boundary-recovery.v1",
+                  knowledge_basis: "full-fixed-queue",
+                  placement_role_scope: "occupancy-only",
+                  status: "no-path-within-declared-scope",
+                  normal_states: 0,
+                  recovery_states: 0,
+                  borrowed_stage_two_count: 0,
+                  stage_one_checkpoint_step: null,
+                  checkpoint_is_pc: null,
+                  steps: [],
+                },
+              }),
             };
           }
           if (requestedCapabilityId?.startsWith("build.")) {
@@ -4397,6 +4419,17 @@ function validBuildV2Structured(capabilityId, resultContract) {
 
 function validSearchOptions(command, field, finesseDocument, coloredDocument) {
   switch (command.input) {
+    case "boundary-recovery-v1":
+      return [{ name: "scenario", value: JSON.stringify({
+        initial_board_mask: "0x3f0",
+        target_board_mask: "0xc030",
+        height: 4,
+        queue: "IO",
+        stage_one_count: 1,
+        placements: 2,
+        borrow_role_position: 2,
+        borrow_placement_mask: "0x300c000",
+      }) }];
     case "pc":
     case "pc-v2":
     case "pc-path-v2":

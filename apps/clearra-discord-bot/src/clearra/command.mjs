@@ -29,6 +29,7 @@ const NATIVE_COMMANDS = new Set([
   "damage",
   "spin-finder",
   "ren",
+  "recovery",
   "spin-structure",
   "finesse",
   "utility",
@@ -89,6 +90,7 @@ const FORWARD_SEARCH_COMMANDS = new Set([
   "damage",
   "spin-finder",
   "ren",
+  "recovery",
 ]);
 const STRUCTURE_SEARCH_COMMANDS = new Set([
   "spin-structure",
@@ -367,6 +369,10 @@ export function canonicalClearraOperationalCommand(value) {
     }
     return !pathInput || tokens.length === 1 ? command : null;
   }
+  if (command === "recovery") {
+    return normalizedOperationalPart(tokens[1]) === "boundary" &&
+      (!pathInput || tokens.length === 2) ? "recovery.boundary" : null;
+  }
   if (command === "setup") {
     const subcommand = normalizedOperationalPart(tokens[1]);
     if (DISCORD_SETUP_SUBCOMMANDS.has(subcommand)) {
@@ -529,6 +535,9 @@ export function prepareClearraArguments(tokens, execution = {}) {
   const buildV2Contract = command === "build" ? validateBuildV2Command(tokens) : null;
   if (command === "finesse" && !["search", "score"].includes(tokens[1]?.toLowerCase())) {
     throw new Error("Discord finesse calculations require a search or score subcommand.");
+  }
+  if (command === "recovery" && tokens[1]?.toLowerCase() !== "boundary") {
+    throw new Error("Discord recovery execution requires the boundary subcommand.");
   }
   if (
     command === "utility" &&

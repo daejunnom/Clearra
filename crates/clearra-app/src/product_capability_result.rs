@@ -47,6 +47,7 @@ pub enum ProductCapabilityResultKind {
     PcSaveGroupsV2,
     PcBestSaveV2,
     PcMinimumCoverV2,
+    PcPinnedMinimumCoverV1,
     PcPathFamilyV2,
     PcProbabilityV2,
     PcFailedQueueV2,
@@ -56,6 +57,7 @@ pub enum ProductCapabilityResultKind {
     PcB2bPreservingWitnessV1,
     PcB2bPreservationProbabilityV1,
     BuildCoveragePortfolioV2,
+    BuildPinnedMinimumCoverV1,
     BuildSetupFamilyV1,
 }
 
@@ -66,6 +68,7 @@ impl ProductCapabilityResultKind {
             Self::PcSaveGroupsV2 => "pc-save-groups.v2",
             Self::PcBestSaveV2 => "pc-best-save.v2",
             Self::PcMinimumCoverV2 => "pc-minimum-cover.v2",
+            Self::PcPinnedMinimumCoverV1 => "pc-pinned-minimum-cover.v1",
             Self::PcPathFamilyV2 => "pc-path-family.v2",
             Self::PcProbabilityV2 => "pc-probability.v2",
             Self::PcFailedQueueV2 => "pc-failed-queue.v2",
@@ -75,6 +78,7 @@ impl ProductCapabilityResultKind {
             Self::PcB2bPreservingWitnessV1 => "pc-b2b-preserving-witness.v1",
             Self::PcB2bPreservationProbabilityV1 => "pc-b2b-preservation-probability.v1",
             Self::BuildCoveragePortfolioV2 => "build-coverage-portfolio.v2",
+            Self::BuildPinnedMinimumCoverV1 => "build-pinned-minimum-cover.v1",
             Self::BuildSetupFamilyV1 => "build-target-family.v2",
         }
     }
@@ -371,9 +375,31 @@ impl ProductCapabilityResult {
         if owner.set_identity_sha256().len() != 64 {
             return Err(ProductCapabilityContractError::ResponseResultContractMismatch);
         }
+        let pinned_keys = report.pinned_candidate_keys();
+        if pinned_keys.iter().any(|key| {
+            !report.canonical_candidate_keys().contains(key)
+                || pinned_keys
+                    .iter()
+                    .filter(|candidate| *candidate == key)
+                    .count()
+                    != 1
+        }) {
+            return Err(ProductCapabilityContractError::ResponseResultContractMismatch);
+        }
+        let (contract, result_kind) = if pinned_keys.is_empty() {
+            (
+                ProductCapabilityContract::BuildCover,
+                ProductCapabilityResultKind::BuildCoveragePortfolioV2,
+            )
+        } else {
+            (
+                ProductCapabilityContract::BuildPinnedMinimals,
+                ProductCapabilityResultKind::BuildPinnedMinimumCoverV1,
+            )
+        };
         Ok(Self {
-            contract: ProductCapabilityContract::BuildCover,
-            result_kind: ProductCapabilityResultKind::BuildCoveragePortfolioV2,
+            contract,
+            result_kind,
             command_kind: AppCommandKind::BuildProbability,
             query: QueryEnvelope::BuildCoverage,
             pc_probability_v2: None,
@@ -455,11 +481,15 @@ impl ProductCapabilityResult {
             (
                 ProductCapabilityContract::BuildCover,
                 ProductCapabilityResultKind::BuildCoveragePortfolioV2,
+            )
+            | (
+                ProductCapabilityContract::BuildPinnedMinimals,
+                ProductCapabilityResultKind::BuildPinnedMinimumCoverV1,
             ) => {
                 let report = self.build_coverage_portfolio_v2.as_deref()?;
                 let owner = report.portfolio_alternative_owner()?;
                 let completeness = report.completeness();
-                let payload = BuildCoveragePortfolioV2Payload::try_new(
+                let mut payload = BuildCoveragePortfolioV2Payload::try_new(
                     report.contract_id(),
                     report.objective().as_str(),
                     report.probability_basis(),
@@ -484,6 +514,18 @@ impl ProductCapabilityResult {
                     Some(owner.set_identity_sha256().to_owned()),
                 )
                 .ok()?;
+                if self.contract == ProductCapabilityContract::BuildPinnedMinimals {
+                    let pinned = report.pinned_candidate_keys();
+                    let additional = report
+                        .canonical_candidate_keys()
+                        .iter()
+                        .filter(|key| !pinned.contains(key))
+                        .cloned()
+                        .collect();
+                    payload = payload
+                        .with_pinned_selection(pinned.to_vec(), additional)
+                        .ok()?;
+                }
                 Some(ProductResultPayload::new(
                     self.contract.as_str(),
                     self.result_kind.as_str(),
@@ -493,6 +535,10 @@ impl ProductCapabilityResult {
             (
                 ProductCapabilityContract::PcMinimals,
                 ProductCapabilityResultKind::PcMinimumCoverV2,
+            )
+            | (
+                ProductCapabilityContract::PcPinnedMinimals,
+                ProductCapabilityResultKind::PcPinnedMinimumCoverV1,
             ) => {
                 let report = self.pc_minimum_cover_v2.as_ref()?;
                 let set = report.portfolio_alternatives();
@@ -539,6 +585,15 @@ impl ProductCapabilityResult {
                         .to_string(),
                     members,
                     true,
+                )
+                .with_pinned_candidate_keys(
+                    set.pinned_candidate_ids()
+                        .iter()
+                        .map(|candidate_id| {
+                            let index = usize::try_from(candidate_id.checked_sub(1)?).ok()?;
+                            Some(set.candidates().get(index)?.normalized_key().to_owned())
+                        })
+                        .collect::<Option<Vec<_>>>()?,
                 );
                 let page_payload = match canonical_candidate {
                     Some((canonical_candidate_id, canonical_solution_key)) => page_payload
@@ -872,6 +927,10 @@ impl ProductCapabilityResult {
             (
                 ProductCapabilityContract::PcMinimals,
                 ProductCapabilityResultKind::PcMinimumCoverV2,
+            )
+            | (
+                ProductCapabilityContract::PcPinnedMinimals,
+                ProductCapabilityResultKind::PcPinnedMinimumCoverV1,
             ) => self.pc_minimum_cover_v2.as_ref().map(|report| {
                 ProductPageSourceOwner::CoveragePortfolio(
                     report.portfolio_alternative_owner().clone(),
@@ -888,6 +947,10 @@ impl ProductCapabilityResult {
             (
                 ProductCapabilityContract::BuildCover,
                 ProductCapabilityResultKind::BuildCoveragePortfolioV2,
+            )
+            | (
+                ProductCapabilityContract::BuildPinnedMinimals,
+                ProductCapabilityResultKind::BuildPinnedMinimumCoverV1,
             ) => self
                 .build_coverage_portfolio_v2
                 .as_ref()
@@ -927,7 +990,10 @@ impl ProductCapabilityResult {
         response: &AppResponse,
         page_source: Option<Arc<crate::PcReplayPageSource>>,
     ) -> Result<Self, ProductCapabilityContractError> {
-        if validated.contract() == ProductCapabilityContract::PcMinimals {
+        if matches!(
+            validated.contract(),
+            ProductCapabilityContract::PcMinimals | ProductCapabilityContract::PcPinnedMinimals
+        ) {
             return Self::prepare_pc_minimum_cover(validated, response)?.complete();
         }
         if response.status() != AppStatus::Success {
@@ -1002,6 +1068,9 @@ impl ProductCapabilityResult {
             ProductCapabilityContract::PcMinimals => {
                 unreachable!("pc minimals result returned through its dedicated validator")
             }
+            ProductCapabilityContract::PcPinnedMinimals => {
+                unreachable!("pc pinned minimals result returned through its dedicated validator")
+            }
             ProductCapabilityContract::PcPath => {
                 unreachable!("pc path result returned through its dedicated validator")
             }
@@ -1028,6 +1097,9 @@ impl ProductCapabilityResult {
             }
             ProductCapabilityContract::BuildCover => {
                 unreachable!("build cover uses the direct validated facade constructor")
+            }
+            ProductCapabilityContract::BuildPinnedMinimals => {
+                unreachable!("pinned build uses the direct validated facade constructor")
             }
             ProductCapabilityContract::BuildSetup => {
                 unreachable!("build setup uses the direct validated facade constructor")
@@ -1329,7 +1401,10 @@ impl ProductCapabilityResult {
         validated: ValidatedProductCapabilityContract,
         response: &AppResponse,
     ) -> Result<PcMinimumCoverProductPreparation, ProductCapabilityContractError> {
-        if validated.contract() != ProductCapabilityContract::PcMinimals {
+        if !matches!(
+            validated.contract(),
+            ProductCapabilityContract::PcMinimals | ProductCapabilityContract::PcPinnedMinimals
+        ) {
             return Err(ProductCapabilityContractError::UnexpectedContract {
                 actual: validated.contract(),
             });
@@ -1361,16 +1436,25 @@ impl ProductCapabilityResult {
             | (QueryEnvelope::PcScenario, AppRenderModel::Scenario(result)) => result,
             _ => return Err(ProductCapabilityContractError::ResponseRenderFamilyMismatch),
         };
-        let (query, origin) = validated.pc_minimum_cover_binding().ok_or(
-            ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch(
-                "validated pc.minimals query binding is missing",
-            ),
-        )?;
+        let (query, origin, pinned_keys, pinned_drawings, expected_source_set_hash) =
+            validated.pc_minimum_cover_binding().ok_or(
+                ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch(
+                    "validated pc.minimals query binding is missing",
+                ),
+            )?;
         let source = validate_pc_minimum_cover_v2_source(query, origin, core_result)
             .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)?;
         Self::validate_pc_minimum_cover_resources(response)?;
-        let report = PcMinimumCoverV2Preparation::new(source)
-            .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)?;
+        let report = if pinned_drawings.is_empty() {
+            PcMinimumCoverV2Preparation::new_with_pins(source, pinned_keys.to_vec())
+        } else {
+            PcMinimumCoverV2Preparation::new_with_drawings(
+                source,
+                pinned_drawings,
+                expected_source_set_hash,
+            )
+        }
+        .map_err(ProductCapabilityContractError::ResponseMinimumCoverEvidenceMismatch)?;
         Ok(PcMinimumCoverProductPreparation {
             validated: Some(validated),
             report,
@@ -1393,8 +1477,12 @@ impl ProductCapabilityResult {
         }
 
         Ok(Self {
-            contract: ProductCapabilityContract::PcMinimals,
-            result_kind: ProductCapabilityResultKind::PcMinimumCoverV2,
+            contract: validated.contract(),
+            result_kind: if validated.contract() == ProductCapabilityContract::PcPinnedMinimals {
+                ProductCapabilityResultKind::PcPinnedMinimumCoverV1
+            } else {
+                ProductCapabilityResultKind::PcMinimumCoverV2
+            },
             command_kind: validated.command_kind(),
             query: validated.query().clone(),
             pc_probability_v2: None,

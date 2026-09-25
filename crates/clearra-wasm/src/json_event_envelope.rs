@@ -370,6 +370,19 @@ fn write_coverage_portfolio_runtime_page(
     object.boolean("enumeration_complete", page.enumeration_complete());
     object.string("member_page_number", &member_page_number.to_string());
     object.string("total_member_pages", &total_member_pages.to_string());
+    if !source.pinned_candidate_ids().is_empty() {
+        object.array("pinned_candidate_keys", |output| {
+            output.push('[');
+            for (index, candidate_id) in source.pinned_candidate_ids().iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                let candidate = &candidates[(*candidate_id as usize) - 1];
+                write_json_string(output, candidate.normalized_key());
+            }
+            output.push(']');
+        });
+    }
     object.array("members", |output| {
         output.push('[');
         for (member_index, candidate_id) in page.portfolio().candidate_ids()
@@ -1083,6 +1096,160 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
     object.string("contract", payload.contract());
     object.string("result_kind", payload.result_kind());
     object.object("content", |nested| match payload.content() {
+        ProductResultPayloadContent::BoundaryRecovery(report) => {
+            nested.string("payload_kind", "boundary-recovery");
+            nested.object("payload", |result| {
+                result.string("status", &report.status);
+                result.string("knowledge_basis", &report.knowledge_basis);
+                result.string("placement_role_scope", &report.placement_role_scope);
+                result.number("normal_states", report.normal_states);
+                result.number("max_early_placements", report.max_early_placements);
+                result.number("borrow_role_index", report.borrow_role_index);
+                result.string("borrow_placement_mask", &report.borrow_placement_mask);
+                result.number("recovery_states", report.recovery_states);
+                result.optional_number(
+                    "stage_one_checkpoint_step",
+                    report.stage_one_checkpoint_step,
+                );
+                result.optional_boolean("checkpoint_is_pc", report.checkpoint_is_pc);
+                result.number("borrowed_stage_two_count", report.borrowed_stage_two_count);
+                result.array("steps", |output| {
+                    write_object_array(output, &report.steps, |object, step| {
+                        object.number("source_queue_index", step.source_queue_index);
+                        object.number("placement_role_index", step.placement_role_index);
+                        object.string("piece", &step.piece);
+                        object.number("rotation", step.rotation);
+                        object.number("x", step.x);
+                        object.number("y", step.y);
+                        object.string("hold_decision", &step.hold_decision);
+                        object.string("placement_mask", &step.placement_mask);
+                        object.number("cleared_row_mask", step.cleared_row_mask);
+                        object.string("board_after_mask", &step.board_after_mask);
+                        object.number("cleared_lines", step.cleared_lines);
+                        object.boolean("recognized_spin", step.recognized_spin);
+                        object.boolean("b2b_active_after", step.b2b_active_after);
+                        object.boolean("stage_one_complete_after", step.stage_one_complete_after);
+                    });
+                });
+                if let Some(population) = &report.population {
+                    result.object("population", |value| {
+                        value.number(
+                            "materialized_pattern_count",
+                            population.materialized_pattern_count,
+                        );
+                        value.string(
+                            "total_possible_pattern_count",
+                            &population.total_possible_pattern_count,
+                        );
+                        value.number(
+                            "evaluated_pattern_count",
+                            population.evaluated_pattern_count,
+                        );
+                        value.number("state_count", population.state_count);
+                        value.boolean("complete", population.complete);
+                        value.number("normal_count", population.normal_count);
+                        value.number(
+                            "pc_preserving_recovery_count",
+                            population.pc_preserving_recovery_count,
+                        );
+                        value.number("non_pc_recovery_count", population.non_pc_recovery_count);
+                        value.number("no_path_count", population.no_path_count);
+                        value.number("incomplete_count", population.incomplete_count);
+                        value.number(
+                            "diagram_unavailable_count",
+                            population.diagram_unavailable_count,
+                        );
+                        value.string("normal_probability", &population.normal_probability);
+                        value.string(
+                            "pc_preserving_recovery_probability",
+                            &population.pc_preserving_recovery_probability,
+                        );
+                        value.string(
+                            "non_pc_recovery_probability",
+                            &population.non_pc_recovery_probability,
+                        );
+                        value.string(
+                            "additional_recovery_probability",
+                            &population.additional_recovery_probability,
+                        );
+                        value.string(
+                            "total_response_probability",
+                            &population.total_response_probability,
+                        );
+                        value.string("no_path_probability", &population.no_path_probability);
+                        value.string("unknown_probability", &population.unknown_probability);
+                        for (name, example) in [
+                            ("normal_example", &population.normal_example),
+                            ("recovery_example", &population.recovery_example),
+                        ] {
+                            if let Some(example) = example {
+                                value.object(name, |sample| {
+                                    sample.number("pattern_index", example.pattern_index);
+                                    sample.string("queue", &example.queue);
+                                    sample.string("status", &example.status);
+                                    sample.optional_number(
+                                        "stage_one_checkpoint_step",
+                                        example.stage_one_checkpoint_step,
+                                    );
+                                    sample.optional_boolean(
+                                        "checkpoint_is_pc",
+                                        example.checkpoint_is_pc,
+                                    );
+                                    sample.number(
+                                        "borrowed_stage_two_count",
+                                        example.borrowed_stage_two_count,
+                                    );
+                                    sample.array("steps", |output| {
+                                        write_object_array(
+                                            output,
+                                            &example.steps,
+                                            |object, step| {
+                                                object.number(
+                                                    "source_queue_index",
+                                                    step.source_queue_index,
+                                                );
+                                                object.number(
+                                                    "placement_role_index",
+                                                    step.placement_role_index,
+                                                );
+                                                object.string("piece", &step.piece);
+                                                object.number("rotation", step.rotation);
+                                                object.number("x", step.x);
+                                                object.number("y", step.y);
+                                                object.string("hold_decision", &step.hold_decision);
+                                                object
+                                                    .string("placement_mask", &step.placement_mask);
+                                                object.number(
+                                                    "cleared_row_mask",
+                                                    step.cleared_row_mask,
+                                                );
+                                                object.string(
+                                                    "board_after_mask",
+                                                    &step.board_after_mask,
+                                                );
+                                                object.number("cleared_lines", step.cleared_lines);
+                                                object.boolean(
+                                                    "recognized_spin",
+                                                    step.recognized_spin,
+                                                );
+                                                object.boolean(
+                                                    "b2b_active_after",
+                                                    step.b2b_active_after,
+                                                );
+                                                object.boolean(
+                                                    "stage_one_complete_after",
+                                                    step.stage_one_complete_after,
+                                                );
+                                            },
+                                        );
+                                    });
+                                });
+                            }
+                        }
+                    });
+                }
+            });
+        }
         ProductResultPayloadContent::CoveragePortfolio(page) => {
             nested.string("payload_kind", "coverage-portfolio");
             nested.object("payload", |page_object| {
@@ -1107,6 +1274,11 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                     })
                 });
                 page_object.boolean("page_handle_available", page.page_handle_available());
+                if !page.pinned_candidate_keys().is_empty() {
+                    page_object.array("pinned_candidate_keys", |output| {
+                        write_string_array(output, page.pinned_candidate_keys())
+                    });
+                }
                 if let Some(selection) = page.canonical_selection() {
                     page_object.string("canonical_selection", selection);
                 }
@@ -1620,6 +1792,11 @@ fn write_build_v2_payload(
     object.array("canonical_candidate_keys", |output| {
         write_string_array(output, payload.canonical_candidate_keys())
     });
+    if !payload.pinned_candidate_keys().is_empty() {
+        object.array("pinned_candidate_keys", |output| {
+            write_string_array(output, payload.pinned_candidate_keys())
+        });
+    }
     object.array("winners", |output| {
         write_object_array(output, payload.winners(), |row, winner| {
             row.string("pattern_id", winner.pattern_id());
@@ -2976,6 +3153,114 @@ mod exact_json_tests {
             1,
         )
         .is_err());
+    }
+
+    #[test]
+    fn weighted_boundary_recovery_payload_is_lossless_json() {
+        use clearra_host_contract::{
+            BoundaryRecoveryPayload, BoundaryRecoveryPopulationExamplePayload,
+            BoundaryRecoveryPopulationPayload, BoundaryRecoveryStepPayload,
+        };
+
+        let step = BoundaryRecoveryStepPayload {
+            source_queue_index: 7,
+            placement_role_index: 10,
+            piece: "O".to_owned(),
+            rotation: 0,
+            x: 2,
+            y: 3,
+            hold_decision: "store".to_owned(),
+            placement_mask: "0xf".to_owned(),
+            cleared_row_mask: 0,
+            board_after_mask: "0xf".to_owned(),
+            cleared_lines: 0,
+            recognized_spin: false,
+            b2b_active_after: true,
+            stage_one_complete_after: false,
+        };
+        let recovery = BoundaryRecoveryPayload {
+            status: "population-incomplete".to_owned(),
+            knowledge_basis: "full-pattern-universe".to_owned(),
+            placement_role_scope: "bag-piece-exact-lock-time".to_owned(),
+            max_early_placements: 1,
+            borrow_role_index: 7,
+            borrow_placement_mask: "0xf".to_owned(),
+            normal_states: 0,
+            recovery_states: 0,
+            stage_one_checkpoint_step: None,
+            checkpoint_is_pc: None,
+            borrowed_stage_two_count: 0,
+            steps: Vec::new(),
+            population: Some(Box::new(BoundaryRecoveryPopulationPayload {
+                materialized_pattern_count: 2,
+                total_possible_pattern_count: "2".to_owned(),
+                evaluated_pattern_count: 1,
+                state_count: 40,
+                complete: false,
+                normal_count: 0,
+                pc_preserving_recovery_count: 0,
+                non_pc_recovery_count: 1,
+                no_path_count: 0,
+                incomplete_count: 0,
+                diagram_unavailable_count: 0,
+                normal_probability: "0.00000000000000000".to_owned(),
+                pc_preserving_recovery_probability: "0.00000000000000000".to_owned(),
+                non_pc_recovery_probability: "0.50000000000000000".to_owned(),
+                additional_recovery_probability: "0.50000000000000000".to_owned(),
+                total_response_probability: "0.50000000000000000".to_owned(),
+                no_path_probability: "0.00000000000000000".to_owned(),
+                unknown_probability: "0.50000000000000000".to_owned(),
+                normal_example: None,
+                recovery_example: Some(BoundaryRecoveryPopulationExamplePayload {
+                    pattern_index: 0,
+                    queue: "IJLOSTZIJLOSTZ".to_owned(),
+                    status: "non-pc-recovery".to_owned(),
+                    stage_one_checkpoint_step: Some(8),
+                    checkpoint_is_pc: Some(false),
+                    borrowed_stage_two_count: 1,
+                    steps: vec![step],
+                }),
+            })),
+        };
+        let payload = ProductResultPayload::new(
+            "boundary-recovery.v1",
+            "boundary-recovery",
+            ProductResultPayloadContent::BoundaryRecovery(recovery.clone()),
+        );
+        let json = serialize_json(|output| {
+            let mut object = JsonObject::begin(output);
+            write_product_result_payload(&mut object, &payload);
+            object.finish();
+        })
+        .expect("boundary recovery JSON");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(value["content"]["payload_kind"], "boundary-recovery");
+        assert_eq!(value, serde_json::to_value(&payload).unwrap());
+        assert_eq!(
+            serde_json::from_value::<BoundaryRecoveryPayload>(value["content"]["payload"].clone())
+                .expect("lossless typed boundary recovery payload"),
+            recovery,
+        );
+
+        let mut fixed = recovery;
+        fixed.status = "normal".to_owned();
+        fixed.knowledge_basis = "full-fixed-queue".to_owned();
+        fixed.placement_role_scope = "exact-lock-time".to_owned();
+        fixed.population = None;
+        let payload = ProductResultPayload::new(
+            "boundary-recovery.v1",
+            "boundary-recovery",
+            ProductResultPayloadContent::BoundaryRecovery(fixed),
+        );
+        let json = serialize_json(|output| {
+            let mut object = JsonObject::begin(output);
+            write_product_result_payload(&mut object, &payload);
+            object.finish();
+        })
+        .expect("fixed boundary recovery JSON");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid fixed JSON");
+        assert!(value["content"]["payload"].get("population").is_none());
+        assert_eq!(value, serde_json::to_value(&payload).unwrap());
     }
 
     #[test]

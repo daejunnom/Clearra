@@ -36,6 +36,7 @@
   } from './pcSolverLinkState';
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import PcSolverResult from './PcSolverResult.svelte';
+  import { encodeCtkSolutionKeySegment } from './solutionExport';
   import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
   import {
     automaticPcTargetLines,
@@ -84,6 +85,7 @@
   let language: WorkspaceLanguage = 'en';
   let mounted = false;
   let hasRun = false;
+  let executedScoreMode: SolverWorkspaceRequest['scoreMode'] | null = null;
   let elapsedMs = 0;
   let resultTargetLines = request.lines;
   let runStartedAt = 0;
@@ -171,8 +173,23 @@
     const requestedUseAll = next.useAllLogicalProcessors;
     const useAllChanged = requestedUseAll !== request.useAllLogicalProcessors;
     const scoreModeChanged = next.scoreMode !== request.scoreMode;
+    const sourceChanged =
+      next.lines !== request.lines ||
+      next.boardMask !== request.boardMask ||
+      next.queue !== request.queue ||
+      next.queueKnowledge !== request.queueKnowledge ||
+      next.holdEnabled !== request.holdEnabled ||
+      next.holdPiece !== request.holdPiece ||
+      next.rule !== request.rule ||
+      next.preserveB2B !== request.preserveB2B ||
+      next.spinProfile !== request.spinProfile ||
+      next.initialB2B !== request.initialB2B ||
+      next.maxPatterns !== request.maxPatterns;
     request = withAutomaticTarget({
       ...next,
+      pinnedSolutionKeys: sourceChanged ? [] : next.pinnedSolutionKeys,
+      pinnedSolutionDocument: sourceChanged ? undefined : next.pinnedSolutionDocument,
+      pinnedSourceSetHash: sourceChanged ? undefined : next.pinnedSourceSetHash,
       workers: useAllChanged
         ? automaticWorkerAuthority(
             hostCapabilitySnapshot,
@@ -253,15 +270,48 @@
     const executionRequest = {
       ...request,
       lines: targetLines,
-      boardMask: normalized.boardMask
+      boardMask: normalized.boardMask,
+      pinnedSolutionKeys: normalized.boardMask === request.boardMask
+        ? request.pinnedSolutionKeys
+        : [],
+      pinnedSolutionDocument: normalized.boardMask === request.boardMask
+        ? request.pinnedSolutionDocument
+        : undefined,
+      pinnedSourceSetHash: normalized.boardMask === request.boardMask
+        ? request.pinnedSourceSetHash
+        : undefined
     };
     completedRowsWarning = normalized.clearedRows;
     if (executionRequest !== request) updateRequest(executionRequest);
     resultTargetLines = executionRequest.lines;
     updateWasmCommandText(buildWorkspaceCommand(executionRequest));
     if (!workerController.run()) return;
+    executedScoreMode = executionRequest.scoreMode;
     hasRun = true;
     startElapsedTimer();
+  }
+
+  function toggleMandatory(key: string) {
+    if (runtimeView.status !== 'completed' || executedScoreMode !== 'off' ||
+        runtimeView.searchReport?.count_complete !== true ||
+        runtimeView.searchReport?.result_completeness === 'incomplete') return;
+    const sourceHash = runtimeView.searchReport?.normalized_solution_set_hash;
+    if (!sourceHash || !/^cts1:[0-9a-f]{16}$/u.test(sourceHash)) return;
+    const pins = new Set(request.pinnedSolutionKeys);
+    if (pins.has(key)) pins.delete(key);
+    else pins.add(key);
+    let document: string | undefined;
+    try {
+      document = pins.size ? encodeCtkSolutionKeySegment([...pins]) : undefined;
+    } catch {
+      return;
+    }
+    updateRequest({
+      ...request,
+      pinnedSolutionKeys: [...pins],
+      pinnedSolutionDocument: document,
+      pinnedSourceSetHash: pins.size ? sourceHash : undefined
+    });
   }
 
   function cancel() {
@@ -465,6 +515,16 @@
           </div>
         </fieldset>
 
+        {#if request.pinnedSolutionKeys.length}
+          <div class="pinned-summary" role="status">
+            <strong>{componentMessage(language, 'mandatorySolutions')}: {request.pinnedSolutionKeys.length}</strong>
+            <span>{componentMessage(language, 'runPinnedMinimum')}</span>
+            <button type="button" on:click={() => updateRequest({ ...request, pinnedSolutionKeys: [], pinnedSolutionDocument: undefined, pinnedSourceSetHash: undefined })}>
+              {componentMessage(language, 'clearMandatorySelection')}
+            </button>
+          </div>
+        {/if}
+
         <div class="option-row">
           <span>{label('hold')}</span>
           <button
@@ -532,6 +592,9 @@
     {language}
     {elapsedMs}
     targetLines={resultTargetLines}
+    allowMandatorySelection={executedScoreMode === 'off'}
+    mandatorySolutionKeys={request.pinnedSolutionKeys}
+    on:toggleMandatory={(event) => toggleMandatory(event.detail)}
     loadSolutionPage={(offset, limit, signal) =>
       workerController.loadSolutionPage(offset, limit, signal)}
     loadNextProductPage={(signal) => workerController.loadNextProductPage(signal)}
@@ -542,6 +605,8 @@
 </main>
 
 <style>
+  .pinned-summary { background: #f3f8f5; border: 1px solid #d2e3d8; border-radius: 6px; display: grid; font-size: 12px; gap: 6px; padding: 10px; }
+  .pinned-summary button { background: #fff; border: 1px solid #cbd3ce; border-radius: 5px; justify-self: start; padding: 6px 10px; }
   :global(*) { box-sizing: border-box; }
   :global(html) { background: #fff; font-family: Inter, "Noto Sans KR", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   :global(body) { margin: 0; min-width: 320px; }

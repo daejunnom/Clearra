@@ -93,6 +93,19 @@
   $: coveragePage = coveragePages[outerPageIndex] ?? null;
   $: currentAlternativeIndex = coveragePage?.alternative_index ?? null;
   $: coverageSolutionKeys = currentMembers.map((member) => member.normalized_solution_key);
+  $: pinnedPortfolioKeys = buildV2?.kind === 'portfolio'
+    ? buildV2.pinned_candidate_keys ?? []
+    : payload?.content.payload_kind === 'coverage-portfolio'
+      ? payload.content.payload.pinned_candidate_keys ?? []
+      : payload?.content.payload_kind === 'build-coverage-portfolio-v2'
+        ? payload.content.payload.pinned_candidate_keys ?? []
+        : [];
+  $: coverageSolutionCaptions = pinnedPortfolioKeys.length
+    ? coverageSolutionKeys.map((key) => componentMessage(
+        language,
+        pinnedPortfolioKeys.includes(key) ? 'mandatorySolutions' : 'additionalSolutions'
+      ))
+    : [];
   $: coverageSolutionPageIdentity = coveragePage
     ? `${coveragePage.set_identity_sha256}:${coveragePage.candidate_map_sha256}:${coveragePage.alternative_index}:${memberPageNumber}`
     : '';
@@ -697,6 +710,10 @@
       <div class="member-meta">
         <span>{componentMessage(language, 'minimumCardinality')}: {coveragePage.optimal_cardinality}</span>
         <span>{componentMessage(language, 'memberPage')}: {memberPageNumber} / {coveragePage.total_member_pages}</span>
+        {#if pinnedPortfolioKeys.length}
+          <span>{componentMessage(language, 'mandatorySolutions')}: {pinnedPortfolioKeys.length}</span>
+          <span>{componentMessage(language, 'additionalSolutions')}: {Math.max(0, Number(coveragePage.optimal_cardinality) - pinnedPortfolioKeys.length)}</span>
+        {/if}
       </div>
       {#if coveragePage.optimal_cardinality === '0'}
         <p class="empty-result" role="status">
@@ -705,6 +722,7 @@
       {:else}
         <SolutionSubsetPage
           solutionKeys={coverageSolutionKeys}
+          solutionCaptions={coverageSolutionCaptions}
           solutionSetIdentity={coverageSolutionPageIdentity}
           solutionOrdinalBase={coverageSolutionOrdinalBase}
           exportKeySource={coverageExportKeySource}

@@ -1271,6 +1271,7 @@ fn render_success(
             CommandRenderer::render_output(model.kind().as_str(), fields, format)
         }
         AppRenderModel::CoverMessage(message)
+        | AppRenderModel::BoundaryRecovery(message)
         | AppRenderModel::ScenarioMessage(message)
         | AppRenderModel::Path(message)
         | AppRenderModel::Rules(message)
@@ -1665,6 +1666,17 @@ fn coverage_portfolio_fields(
         RenderField::new("page_handle_available", payload.page_handle_available()),
     ];
     if expected_canonical_selection.is_some() {
+        if !payload.pinned_candidate_keys().is_empty() {
+            fields.push(RenderField::new(
+                "pinned_candidate_keys",
+                RenderFieldValue::array(
+                    payload
+                        .pinned_candidate_keys()
+                        .iter()
+                        .map(|key| RenderFieldValue::string(key)),
+                ),
+            ));
+        }
         fields.extend([
             RenderField::new(
                 "canonical_selection",
@@ -2107,7 +2119,7 @@ fn setup_score_fields(payload: &SetupScoreRankingPayload) -> Vec<RenderField> {
 
 fn build_v2_fields(payload: &BuildV2ProductPayload) -> Vec<RenderField> {
     let completeness = payload.completeness();
-    vec![
+    let mut fields = vec![
         RenderField::new("capability_id", payload.capability_id()),
         RenderField::new("result_contract", payload.result_contract()),
         RenderField::new(
@@ -2255,7 +2267,19 @@ fn build_v2_fields(payload: &BuildV2ProductPayload) -> Vec<RenderField> {
             "page_source_identity_sha256",
             optional_string_value(payload.page_source_identity_sha256()),
         ),
-    ]
+    ];
+    if !payload.pinned_candidate_keys().is_empty() {
+        fields.push(RenderField::new(
+            "pinned_candidate_keys",
+            RenderFieldValue::array(
+                payload
+                    .pinned_candidate_keys()
+                    .iter()
+                    .map(RenderFieldValue::string),
+            ),
+        ));
+    }
+    fields
 }
 
 fn build_cover_fields(
