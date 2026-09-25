@@ -30,8 +30,8 @@ jobs:
           candidate='b2cff45470e29871c75aa1e44b37ea892e6d5b79'
           parent='ecc2f9e80218d6404a3eaee688b861f0f654da87'
           base='952280950aeb24528279cbff685fe8acec892223'
-          gate=36171584807
-          gate_control='88f87414bcef87d1ba571b8070f2d865023d8311'
+          gate=36172095923
+          gate_control='f77b5b1e9c85e4748917b1309b1b68c21c1a2048'
           def cmd(*args): return subprocess.check_output(args,text=True).strip()
           def api(path): return json.loads(cmd('gh','api','repos/'+repo+'/'+path))
           def git(*args): return cmd('git',*args)
