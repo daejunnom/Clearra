@@ -1,0 +1,167 @@
+name: User-authorized branch reconciliation (2026-09-25)
+
+on:
+  push:
+    branches: ["codex/release-integrate-pinned-boundary-20260925"]
+    paths:
+      - .github/workflows/user-branch-reconciliation-20260925.yml
+      - scripts/maintenance/user-branch-reconciliation-20260925.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clearra-user-branch-reconciliation-20260925
+  cancel-in-progress: false
+
+jobs:
+  prepare-and-clean-ancestors:
+    if: github.repository == 'daejunnom/Clearra' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    outputs:
+      candidate_sha: ${{ steps.prepare.outputs.candidate_sha }}
+      candidate_branch: ${{ steps.prepare.outputs.candidate_branch }}
+      main_snapshot: ${{ steps.prepare.outputs.main_snapshot }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Prepare clean, scope-filtered integration and delete only proven main ancestors
+        id: prepare
+        run: python scripts/maintenance/user-branch-reconciliation-20260925.py --report-dir build/branch-reconciliation
+      - name: Preserve reconciliation and deletion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: branch-reconciliation-${{ github.run_id }}
+          path: build/branch-reconciliation/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Summarize completed changes and retained conflicts
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f build/branch-reconciliation/reconciliation.md ]]; then
+            cat build/branch-reconciliation/reconciliation.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  exact-source-full-preflight:
+    needs: prepare-and-clean-ancestors
+    if: needs.prepare-and-clean-ancestors.outputs.candidate_sha != ''
+    runs-on: windows-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare-and-clean-ancestors.outputs.candidate_sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare-and-clean-ancestors.outputs.candidate_sha }}
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-and-clean-ancestors.outputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Require frozen candidate and no maintenance code in the product tree
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne $env:CLEARRA_SOURCE_COMMIT) { throw 'Candidate source mismatch' }
+          if (Test-Path '.github/workflows/user-branch-reconciliation-20260925.yml') { throw 'Maintenance workflow leaked into product tree' }
+          if (Test-Path 'scripts/maintenance/user-branch-reconciliation-20260925.py') { throw 'Maintenance script leaked into product tree' }
+      - name: Install exact JavaScript dependencies without lifecycle scripts
+        shell: pwsh
+        run: |
+          corepack enable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          corepack prepare pnpm@11.5.0 --activate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+          pnpm install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare the existing native and WASM gate toolchains
+        shell: powershell
+        run: |
+          rustup target add wasm32-unknown-unknown
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tool = Get-Command wasm-bindgen -ErrorAction SilentlyContinue
+          if ($null -eq $tool -or (& wasm-bindgen --version) -ne 'wasm-bindgen 0.2.126') {
+            & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Execute existing release regressions and full non-publishing acceptance once
+        shell: powershell
+        run: |
+          . ./scripts/lib/clearra-path-helpers.ps1
+          Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose experiment
+          try {
+            & node scripts/tools/run-release-regression-tests.mjs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $workers = [Math]::Max(1, [Environment]::ProcessorCount)
+            & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Full -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $workers -VerboseLog -ShowWarnings
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Complete-ClearraBuildTransaction
+          } finally {
+            Exit-ClearraBuildArtifactCacheUsage
+          }
+      - name: Record exact-source preflight success (not a publication receipt)
+        shell: pwsh
+        run: |
+          "Full preflight passed for ``$env:CLEARRA_SOURCE_COMMIT``. No products were published by this job." >> $env:GITHUB_STEP_SUMMARY
+
+  promote-and-start-canonical-gate:
+    needs: [prepare-and-clean-ancestors, exact-source-full-preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CANDIDATE_SHA: ${{ needs.prepare-and-clean-ancestors.outputs.candidate_sha }}
+      MAIN_SNAPSHOT: ${{ needs.prepare-and-clean-ancestors.outputs.main_snapshot }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: branch-reconciliation-${{ github.run_id }}
+          path: build/branch-reconciliation
+      - name: Fast-forward only the unchanged main to the exact successfully tested candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ && "$MAIN_SNAPSHOT" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin main "$CANDIDATE_SHA"
+          [[ "$(git ls-remote --heads origin refs/heads/main | cut -f1)" == "$MAIN_SNAPSHOT" ]]
+          git merge-base --is-ancestor "$MAIN_SNAPSHOT" "$CANDIDATE_SHA"
+          git push origin "$CANDIDATE_SHA:refs/heads/main"
+          [[ "$(git ls-remote --heads origin refs/heads/main | cut -f1)" == "$CANDIDATE_SHA" ]]
+          printf 'Main fast-forwarded to verified candidate `%s`.\n' "$CANDIDATE_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Start the existing canonical exact-main deployment gate, without creating a tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git ls-remote --heads origin refs/heads/main | cut -f1)" == "$CANDIDATE_SHA" ]]
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/release-cli.yml/dispatches" -f ref=main
+          echo 'Canonical release-cli workflow dispatched on main. This is a start, not an acceptance or deployment-success claim.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Delete only reviewed branches now completely contained in main
+        shell: bash
+        run: python scripts/maintenance/user-branch-reconciliation-20260925.py --phase finalize --candidate-sha "$CANDIDATE_SHA" --report-dir build/branch-reconciliation
+      - name: Preserve final main and deletion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: branch-reconciliation-final-${{ github.run_id }}
+          path: build/branch-reconciliation/
+          if-no-files-found: error
+          retention-days: 30
