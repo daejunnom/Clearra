@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ecc2f9e80218d6404a3eaee688b861f0f654da87
+          ref: b2cff45470e29871c75aa1e44b37ea892e6d5b79
           fetch-depth: 0
       - name: Require complete exact-source gate and protected checks before normal fast-forward
         env:
@@ -27,10 +27,11 @@ jobs:
         run: |
           import json,os,subprocess,time,urllib.request,pathlib
           repo='daejunnom/Clearra'
-          candidate='ecc2f9e80218d6404a3eaee688b861f0f654da87'
+          candidate='b2cff45470e29871c75aa1e44b37ea892e6d5b79'
+          parent='ecc2f9e80218d6404a3eaee688b861f0f654da87'
           base='952280950aeb24528279cbff685fe8acec892223'
-          gate=36167273343
-          gate_control='2b1ec9ec782f579afe97308b7a785a409ba5993a'
+          gate=36171584807
+          gate_control='88f87414bcef87d1ba571b8070f2d865023d8311'
           def cmd(*args): return subprocess.check_output(args,text=True).strip()
           def api(path): return json.loads(cmd('gh','api','repos/'+repo+'/'+path))
           def git(*args): return cmd('git',*args)
@@ -46,20 +47,29 @@ jobs:
                   break
               if time.monotonic()>deadline: raise RuntimeError('Integration gate deadline; no promotion')
               time.sleep(30)
-          jobs=api('actions/runs/'+str(gate)+'/jobs?per_page=100')['jobs']
-          required={'prepare','contracts','rust-regressions','ready'}|{'acceptance ('+s+')' for s in [
+          response=api('actions/runs/'+str(gate)+'/jobs?per_page=100')
+          jobs=response['jobs']
+          required={'prepare','contracts','rust-regressions','ready',
+              'verifier-contracts (ubuntu-latest)','verifier-contracts (windows-latest)'}|{'acceptance ('+s+')' for s in [
               'FoundationNoProductDebt','FoundationAdversarialCorrectness','FoundationDesktopHost',
               'Sanitizer','RustExact','RustProduct','Pages']}
+          if response['total_count']!=len(jobs) or len(jobs)!=len(required): raise RuntimeError('Incomplete or unexpected gate job set')
           for name in required:
               matching=[j for j in jobs if j['name']==name]
-              if len(matching)!=1 or matching[0]['conclusion']!='success': raise RuntimeError('Missing accepted leaf: '+name)
+              if len(matching)!=1 or matching[0]['status']!='completed' or matching[0]['conclusion']!='success':
+                  raise RuntimeError('Missing accepted leaf: '+name)
+              if any(s['conclusion'] in ['failure','cancelled','timed_out'] for s in matching[0]['steps']):
+                  raise RuntimeError('Failed gate step: '+name)
           checks=api('commits/'+candidate+'/check-runs?per_page=100')['check_runs']
           for name in ['Clearra management policy','Clearra management Windows runtime']:
               matching=sorted([c for c in checks if c['name']==name and c['head_sha']==candidate],key=lambda c:c['id'])
               if not matching or matching[-1]['status']!='completed' or matching[-1]['conclusion']!='success':
                   raise RuntimeError('Protected candidate check is not successful: '+name)
-          if git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=base:
-              raise RuntimeError('Exact single-parent candidate identity mismatch')
+          if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
+              git('show','-s','--format=%P',parent)!=base):
+              raise RuntimeError('Exact candidate ancestry mismatch')
+          expected=['apps/clearra-web/test/ClearraVerifierPool.contract.ts','scripts/lib/wasm-release-gate.ps1']
+          if git('diff','--name-only',parent,candidate).splitlines()!=expected: raise RuntimeError('Unexpected CI correction scope')
           current=main_sha()
           if current not in [base,candidate]: raise RuntimeError('Main moved; reconcile rather than overwrite')
           if current==base:
@@ -80,8 +90,8 @@ jobs:
                   time.sleep(2)
           if len(rows)!=1: raise RuntimeError('Canonical Release dispatch could not be uniquely identified')
           release=rows[0]
-          # This existing workflow builds CLI and the Tauri executable from the
-          # same SHA and owns all canonical acceptance; no assets are relabeled.
+          # Canonical Release builds CLI and the Tauri executable from this SHA.
+          # Its original artifact, acceptance, and publication checks stay intact.
           request=urllib.request.Request('https://daejunnom.github.io/Clearra/clearra-build-identity.json',headers={'Cache-Control':'no-cache'})
           live=json.loads(urllib.request.urlopen(request,timeout=30).read())
           snapshot=live.get('sourceCommit')
@@ -90,7 +100,7 @@ jobs:
                   '-f','acceptance_run_id='+str(release['id']),'-f','snapshot_sha='+base)
           elif snapshot!=candidate:
               raise RuntimeError('Unexpected live Pages source; do not infer rollback authority')
-          receipt={'candidate':candidate,'integration_run':gate,'main_readback':main_sha(),
+          receipt={'candidate':candidate,'parent':parent,'integration_run':gate,'main_readback':main_sha(),
               'canonical_release_run_id':release['id'],'pages_snapshot_sha':snapshot,
               'release_publication_complete':False,'tag_created':False}
           path=pathlib.Path(os.environ['RUNNER_TEMP'])/'surface-promotion.json'
