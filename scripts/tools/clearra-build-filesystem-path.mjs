@@ -1,7 +1,7 @@
 // Path identity may be case-folded for comparison. Compiler module identifiers
 // must retain the filesystem spelling (in particular on Windows). This resolver
 // is read-only and never grants authority outside the already validated path.
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { assertBuildPathWithin, assertNoBuildLinks } from './clearra-build-policy.mjs';
 
@@ -12,10 +12,21 @@ export function resolveBuildFilesystemPath(value) {
   const missing = [];
   for (;;) {
     try {
-      const physical = resolve(realpathSync.native(ancestor), ...missing);
-      // Case aliases are allowed; link escapes and another physical root are not.
-      assertBuildPathWithin(physical, selected);
-      assertBuildPathWithin(selected, physical);
+      const selectedStat = lstatSync(ancestor, { bigint: true });
+      const physicalAncestor = realpathSync.native(ancestor);
+      assertNoBuildLinks(physicalAncestor);
+      const physicalStat = lstatSync(physicalAncestor, { bigint: true });
+      // Windows TEMP can use an 8.3 alias such as RUNNER~1. Case folding cannot
+      // equate that spelling with runneradmin. Prove the existing ancestor's
+      // device/file identity instead; never make lexical root policy permissive.
+      if (selectedStat.isSymbolicLink() || physicalStat.isSymbolicLink() ||
+          selectedStat.ino === 0n || selectedStat.dev !== physicalStat.dev ||
+          selectedStat.ino !== physicalStat.ino) {
+        throw new Error('Clearra filesystem path changed its physical ancestor');
+      }
+      const physical = resolve(physicalAncestor, ...missing);
+      assertBuildPathWithin(physical, physicalAncestor);
+      assertNoBuildLinks(selected);
       assertNoBuildLinks(physical);
       return physical;
     } catch (error) {
