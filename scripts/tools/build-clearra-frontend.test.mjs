@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { frontendOptions, frontendPlan, executeFrontendPlan } from './build-clearra-frontend.mjs';
-import { frontendPaths } from './clearra-frontend-paths.mjs';
+import { frontendPaths, writeFrontendTypeForwarder } from './clearra-frontend-paths.mjs';
 import { validateManagedFrontendSource } from './validate-managed-frontend-source.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -196,4 +197,63 @@ test('standalone contract compiler inputs match every tracked UI and web contrac
     assert.ok(parsed.fileNames.map(file => resolve(file)).includes(
       resolve(root, 'scripts/types/node-contract-builtins.d.ts')));
   }
+});
+
+
+// Reproduce a clean checkout: no local .svelte-kit entry exists. A successful
+// managed sync must create the real compiler input and only then its forwarder.
+test('release frontend sync prepares resolvable TypeScript forwarding before Vite', async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'clearra-release-sync-'));
+  const fixture = {
+    appRoot: resolve(directory, 'web'),
+    kitOutDir: resolve(directory, 'transaction/frontend/web/svelte-kit'),
+  };
+  const forwarder = resolve(fixture.appRoot, '.svelte-kit/tsconfig.json');
+  const kitConfig = resolve(fixture.kitOutDir, 'tsconfig.json');
+  try {
+    await assert.rejects(readFile(forwarder), { code: 'ENOENT' });
+    const plan = frontendPlan(frontendOptions(['--app', 'web', '--task', 'sync']), fixture);
+    assert.deepEqual(plan.map(command => command.kind), ['sync']);
+    const order = [];
+    await executeFrontendPlan(plan, {
+      run: async command => {
+        order.push(command.kind);
+        await mkdir(fixture.kitOutDir, { recursive: true });
+        await writeFile(resolve(fixture.kitOutDir, 'input.ts'), 'export const value: number = 1;\n');
+        await writeFile(kitConfig, JSON.stringify({
+          compilerOptions: { noEmit: true, strict: true }, files: ['./input.ts'],
+        }));
+      },
+      afterSync: async () => { await writeFrontendTypeForwarder(fixture); order.push('forwarder'); },
+    });
+    assert.deepEqual(order, ['sync', 'forwarder']);
+    assert.deepEqual(JSON.parse(await readFile(forwarder, 'utf8')), { extends: kitConfig });
+    const require = createRequire(resolve(root, 'apps/clearra-web/package.json'));
+    const ts = require('typescript');
+    const config = ts.readConfigFile(forwarder, ts.sys.readFile);
+    assert.equal(config.error, undefined);
+    const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, dirname(forwarder));
+    assert.deepEqual(parsed.errors, []);
+    assert.equal(parsed.options.noEmit, true);
+    assert.equal(parsed.options.strict, true);
+    assert.deepEqual(parsed.fileNames.map(path => resolve(path)), [resolve(fixture.kitOutDir, 'input.ts')]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('Pages acceptance owns managed sync after verified WASM and before direct Vite', async () => {
+  const gate = await readFile(resolve(root, 'scripts/lib/wasm-release-gate.ps1'), 'utf8');
+  const leaf = gate.slice(gate.indexOf('function Invoke-WasmBuildTestGate'));
+  const sourceTest = leaf.indexOf("'clearra-web worker contracts'");
+  const probe = leaf.indexOf("'clearra-wasm exact worker probe'");
+  const stage = leaf.indexOf('$env:CLEARRA_WEB_PUBLIC_DIR = $webPublicDir');
+  const sync = leaf.indexOf("'--filter', '@clearra/web', 'run', 'sync'");
+  const vite = leaf.indexOf("'--filter', '@clearra/web', 'exec', 'vite', 'build', '--configLoader', 'runner'");
+  const browser = leaf.indexOf("'clearra-browser operational acceptance'");
+  assert.ok(sourceTest >= 0 && probe > sourceTest && stage > probe);
+  assert.ok(sync > stage && vite > sync && browser > vite,
+    'verified WASM must feed a successful managed sync before Vite/browser acceptance');
+  assert.doesNotMatch(leaf.slice(stage, vite), /Invoke-WasmProductArtifactBuild/u,
+    'frontend preparation must not recompile or relabel the accepted WASM');
 });

@@ -307,6 +307,12 @@ function Invoke-WasmBuildTestGate {
         ) 'clearra-wasm exact worker probe'
         $env:CLEARRA_WEB_PUBLIC_DIR = $webPublicDir
 
+        # Source-only worker tests intentionally do not prepare SvelteKit. This
+        # product leaf owns the sync and IDE type forwarder before Vite loads
+        # tsconfig.json. Reuse the exact staged WASM; do not compile it again.
+        Invoke-WasmReleaseCommand $pnpmCommand.Source @(
+            '--filter', '@clearra/web', 'run', 'sync'
+        ) 'clearra-web managed Svelte preparation'
         Invoke-WasmReleaseCommand $pnpmCommand.Source @(
             '--filter', '@clearra/web', 'exec', 'vite', 'build', '--configLoader', 'runner'
         ) 'clearra-web frontend build'
