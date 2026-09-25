@@ -17,14 +17,29 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 8f8263bbb01ab940690e58d6570ee1de5dae42a4
+          ref: a18751a5bd9199dd58438df91ef0cdb68fd07f96
           fetch-depth: 0
           persist-credentials: false
+      - name: Stop only the superseded diagnostic candidate run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          old=36144147358
+          payload="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$old")"
+          echo "$payload" | jq -e '.head_sha == "df6eb55db1f44c779bca1f24e408378106a7e6c5" and .path == ".github/workflows/clearra-reviewed-integration.yml" and .head_branch == "codex/clearra-safe-integration-20260925"' >/dev/null
+          if [[ "$(echo "$payload" | jq -r '.status')" != completed ]]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$old/cancel"
+          fi
       - name: Bind repaired reviewed candidate without rebuilding or updating refs
         id: prepare
         shell: python
@@ -34,7 +49,7 @@ jobs:
               return subprocess.check_output(['git', *args], text=True).strip()
           main = '3e06bce344da89212b002d0cba96063703088074'
           reviewed = '352c42d5536e2ceab0bc55d773c61973c3b96434'
-          candidate = '8f8263bbb01ab940690e58d6570ee1de5dae42a4'
+          candidate = 'a18751a5bd9199dd58438df91ef0cdb68fd07f96'
           if git('rev-parse', 'HEAD') != candidate:
               raise RuntimeError('Exact candidate checkout mismatch')
           for ref, expected in [
