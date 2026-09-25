@@ -14,62 +14,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
       actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: bef4287ffab83c9f42f7c08acf07393f9e91818a
+          ref: dc1cf3c39983951b754d722ac5e71f9b7f823808
           fetch-depth: 0
-      - name: Apply only the reviewed semantic compiler configuration correction
+          persist-credentials: false
+      - name: Bind the exact semantic contract fix without modifying source or refs
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
         shell: python
         run: |
-          import hashlib,json,os,pathlib,subprocess
-          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+          import json,os,subprocess
+          def cmd(*args): return subprocess.check_output(args,text=True).strip()
+          def git(*args): return cmd('git',*args)
           base='952280950aeb24528279cbff685fe8acec892223'
           parent='3b723fd849b18a2bdaec553ec5596c374c063cc4'
+          candidate='dc1cf3c39983951b754d722ac5e71f9b7f823808'
           branch='codex/converge-surface-repair-20260926'
-          expected_tree='b3045e2ed1f0becb83b65b0779f14c80c8b62f66'
-          patch=pathlib.Path('scripts/integration/contract-config-semantics-20260926.patch').read_bytes()
-          if hashlib.sha256(patch).hexdigest()!='8cb757b560c24c569d740f1f1c56d44d8dfb6cf0a0003b532bc8a923db654748':
-              raise RuntimeError('Reviewed patch checksum mismatch')
-          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,parent)]:
+          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
               rows=git('ls-remote','origin',ref).splitlines()
-              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before applying')
-          target=pathlib.Path(os.environ['RUNNER_TEMP'])/'contract-config-semantics.patch'
-          target.write_bytes(patch)
-          git('checkout','--detach',parent)
-          git('merge-base','--is-ancestor',base,parent)
-          git('apply','--check',str(target)); git('apply','--index',str(target))
-          git('diff','--cached','--check')
+              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before running')
+          if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
+              git('rev-parse','HEAD^{tree}')!='b3045e2ed1f0becb83b65b0779f14c80c8b62f66'):
+              raise RuntimeError('Reviewed source identity mismatch')
           expected=['scripts/architecture/validate_release_static_contract.ps1','scripts/tools/build-clearra-frontend.test.mjs']
-          if git('diff','--cached','--name-only').splitlines()!=expected or git('write-tree')!=expected_tree:
-              raise RuntimeError('Reviewed source tree or changed scope mismatch')
-          git('config','user.name','github-actions[bot]')
-          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-          git('commit','-m','fix: validate contract compiler semantics instead of JSON formatting')
-          candidate=git('rev-parse','HEAD')
-          if git('show','-s','--format=%P',candidate)!=parent: raise RuntimeError('Parent mismatch')
-          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':expected_tree,'changed_files':expected,'main_updated':False}
-          (pathlib.Path(os.environ['RUNNER_TEMP'])/'contract-config-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
-          print(json.dumps(receipt),flush=True)
-          # The patch changes no workflow files. Normal fast-forward only.
-          git('push','origin',candidate+':refs/heads/'+branch)
-          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate: raise RuntimeError('Candidate readback mismatch')
-          subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True)
+          if git('diff','--name-only',parent,candidate).splitlines()!=expected: raise RuntimeError('Unexpected fix scope')
+          git('merge-base','--is-ancestor',base,candidate)
+          git('diff','--check',base,candidate)
+          # Retire only the immediately superseded run, not the older Pages
+          # diagnostic still collecting evidence. No source or deployment writes.
+          old=json.loads(cmd('gh','api','repos/daejunnom/Clearra/actions/runs/36180978553'))
+          if old['head_sha']!='6dd4bd059cc2acafbc373e7089fd0151be8eca2e': raise RuntimeError('Superseded run identity mismatch')
+          if old['status']!='completed':
+              subprocess.run(['gh','run','cancel','36180978553','--repo','daejunnom/Clearra'],check=True)
           with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: contract-config-preparation-${{ github.run_id }}
-          path: ${{ runner.temp }}/contract-config-preparation.json
-          if-no-files-found: warn
-          retention-days: 14
+          print(json.dumps({'candidate':candidate,'parent':parent,'base':base,'main_updated':False}))
   verifier-contracts:
     needs: prepare
     runs-on: ${{ matrix.os }}
@@ -240,16 +225,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
-      - name: Test exact boundary and borrowed-state cleanup
+      - name: Test exact boundary and borrowed-state cleanup and require nonempty results
         shell: bash
         run: |
           set -euo pipefail
           {
             cargo fmt --all --check
-            cargo test --locked --package clearra-forward-search --lib boundary_recovery -- --test-threads=1
-            cargo test --locked --package clearra-wasm-abi --lib reset_rejects_a_borrowed_runtime_without_a_second_panic -- --test-threads=1
-            cargo test --locked --package clearra-wasm-abi --lib warm_minimum_to_geometry_releases_authority -- -- --test-threads=1
-            cargo test --locked --package clearra-wasm-abi --lib exact_replacement_requires_geometry_finish -- --test-threads=1
+            cargo test --locked --package clearra-forward-search --lib boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/boundary-regression.log"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/boundary-regression.log"
+            for filter in reset_rejects_a_borrowed_runtime_without_a_second_panic warm_minimum_to_geometry_releases_authority exact_replacement_requires_geometry_finish; do
+              cargo test --locked --package clearra-wasm-abi --lib "$filter" -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/$filter.log"
+              grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/$filter.log"
+            done
           } 2>&1 | tee "$RUNNER_TEMP/repair-rust.log"
       - uses: actions/upload-artifact@v4
         if: always()
