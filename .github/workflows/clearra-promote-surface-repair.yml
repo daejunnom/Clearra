@@ -1,0 +1,107 @@
+name: Promote Accepted Surface Repair
+on:
+  push:
+    branches: [codex/clearra-safe-integration-20260925]
+    paths: [.github/workflows/clearra-promote-surface-repair.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: clearra-promote-surface-repair-20260926
+  cancel-in-progress: false
+jobs:
+  promote:
+    if: github.repository == 'daejunnom/Clearra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 125
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ecc2f9e80218d6404a3eaee688b861f0f654da87
+          fetch-depth: 0
+      - name: Require complete exact-source gate and protected checks before normal fast-forward
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import json,os,subprocess,time,urllib.request,pathlib
+          repo='daejunnom/Clearra'
+          candidate='ecc2f9e80218d6404a3eaee688b861f0f654da87'
+          base='952280950aeb24528279cbff685fe8acec892223'
+          gate=36167273343
+          gate_control='2b1ec9ec782f579afe97308b7a785a409ba5993a'
+          def cmd(*args): return subprocess.check_output(args,text=True).strip()
+          def api(path): return json.loads(cmd('gh','api','repos/'+repo+'/'+path))
+          def git(*args): return cmd('git',*args)
+          def main_sha(): return git('ls-remote','origin','refs/heads/main').split()[0]
+          deadline=time.monotonic()+115*60
+          while True:
+              run=api('actions/runs/'+str(gate))
+              if (run['head_sha']!=gate_control or run['path']!='.github/workflows/clearra-surface-repair.yml' or
+                  run['head_repository']['full_name']!=repo or run['run_attempt']!=1):
+                  raise RuntimeError('Integration gate identity mismatch')
+              if run['status']=='completed':
+                  if run['conclusion']!='success': raise RuntimeError('Integration gate did not pass; no refs or deployments changed')
+                  break
+              if time.monotonic()>deadline: raise RuntimeError('Integration gate deadline; no promotion')
+              time.sleep(30)
+          jobs=api('actions/runs/'+str(gate)+'/jobs?per_page=100')['jobs']
+          required={'prepare','contracts','rust-regressions','ready'}|{'acceptance ('+s+')' for s in [
+              'FoundationNoProductDebt','FoundationAdversarialCorrectness','FoundationDesktopHost',
+              'Sanitizer','RustExact','RustProduct','Pages']}
+          for name in required:
+              matching=[j for j in jobs if j['name']==name]
+              if len(matching)!=1 or matching[0]['conclusion']!='success': raise RuntimeError('Missing accepted leaf: '+name)
+          checks=api('commits/'+candidate+'/check-runs?per_page=100')['check_runs']
+          for name in ['Clearra management policy','Clearra management Windows runtime']:
+              matching=sorted([c for c in checks if c['name']==name and c['head_sha']==candidate],key=lambda c:c['id'])
+              if not matching or matching[-1]['status']!='completed' or matching[-1]['conclusion']!='success':
+                  raise RuntimeError('Protected candidate check is not successful: '+name)
+          if git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=base:
+              raise RuntimeError('Exact single-parent candidate identity mismatch')
+          current=main_sha()
+          if current not in [base,candidate]: raise RuntimeError('Main moved; reconcile rather than overwrite')
+          if current==base:
+              git('merge-base','--is-ancestor',base,candidate)
+              # Normal push only. Repository protection is never bypassed.
+              git('push','origin',candidate+':refs/heads/main')
+          if main_sha()!=candidate: raise RuntimeError('Main readback mismatch')
+          def canonical_runs():
+              rows=api('actions/workflows/release-cli.yml/runs?head_sha='+candidate+'&event=workflow_dispatch&per_page=100')['workflow_runs']
+              return [r for r in rows if r['head_sha']==candidate and r['head_branch']=='main' and r['conclusion'] not in ['failure','cancelled','timed_out','action_required','stale']]
+          rows=canonical_runs()
+          if len(rows)>1: raise RuntimeError('Ambiguous canonical runs; do not dispatch another')
+          if not rows:
+              cmd('gh','workflow','run','release-cli.yml','--ref','main','--repo',repo)
+              for _ in range(30):
+                  rows=canonical_runs()
+                  if rows: break
+                  time.sleep(2)
+          if len(rows)!=1: raise RuntimeError('Canonical Release dispatch could not be uniquely identified')
+          release=rows[0]
+          # This existing workflow builds CLI and the Tauri executable from the
+          # same SHA and owns all canonical acceptance; no assets are relabeled.
+          request=urllib.request.Request('https://daejunnom.github.io/Clearra/clearra-build-identity.json',headers={'Cache-Control':'no-cache'})
+          live=json.loads(urllib.request.urlopen(request,timeout=30).read())
+          snapshot=live.get('sourceCommit')
+          if snapshot==base:
+              cmd('gh','workflow','run','queue-pages-publication.yml','--ref','main','--repo',repo,
+                  '-f','acceptance_run_id='+str(release['id']),'-f','snapshot_sha='+base)
+          elif snapshot!=candidate:
+              raise RuntimeError('Unexpected live Pages source; do not infer rollback authority')
+          receipt={'candidate':candidate,'integration_run':gate,'main_readback':main_sha(),
+              'canonical_release_run_id':release['id'],'pages_snapshot_sha':snapshot,
+              'release_publication_complete':False,'tag_created':False}
+          path=pathlib.Path(os.environ['RUNNER_TEMP'])/'surface-promotion.json'
+          path.write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt))
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
+              f.write('Accepted source: `'+candidate+'`\n\nCanonical Release (including Tauri) run: '+str(release['id'])+'\n\nPages uses the existing acceptance-and-rollback queue. No tag or final GitHub Release was created by this workflow.\n')
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: surface-promotion-${{ github.run_id }}
+          path: ${{ runner.temp }}/surface-promotion.json
+          if-no-files-found: warn
+          retention-days: 30
