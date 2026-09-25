@@ -17,30 +17,15 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
-      actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: a18751a5bd9199dd58438df91ef0cdb68fd07f96
+          ref: 952280950aeb24528279cbff685fe8acec892223
           fetch-depth: 0
           persist-credentials: false
-      - name: Stop only the superseded diagnostic candidate run
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          old=36144147358
-          payload="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$old")"
-          echo "$payload" | jq -e '.head_sha == "df6eb55db1f44c779bca1f24e408378106a7e6c5" and .path == ".github/workflows/clearra-reviewed-integration.yml" and .head_branch == "codex/clearra-safe-integration-20260925"' >/dev/null
-          if [[ "$(echo "$payload" | jq -r '.status')" != completed ]]; then
-            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$old/cancel"
-          fi
-      - name: Bind repaired reviewed candidate without rebuilding or updating refs
+      - name: Bind the identical single-parent candidate without updating refs
         id: prepare
         shell: python
         run: |
@@ -48,25 +33,29 @@ jobs:
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
           main = '3e06bce344da89212b002d0cba96063703088074'
-          reviewed = '352c42d5536e2ceab0bc55d773c61973c3b96434'
-          candidate = 'a18751a5bd9199dd58438df91ef0cdb68fd07f96'
+          reviewed = 'a18751a5bd9199dd58438df91ef0cdb68fd07f96'
+          candidate = '952280950aeb24528279cbff685fe8acec892223'
+          tree = 'ddb0eeb91b3202f6ae89c270bceb3c33ee435756'
           if git('rev-parse', 'HEAD') != candidate:
               raise RuntimeError('Exact candidate checkout mismatch')
           for ref, expected in [
               ('refs/heads/main', main),
-              ('refs/heads/codex/candidate-pinned-boundary-release-20260925', candidate)
+              ('refs/heads/codex/converge-reviewed-linear-20260925', candidate)
           ]:
               rows = git('ls-remote', 'origin', ref).splitlines()
               if len(rows) != 1 or rows[0].split() != [expected, ref]:
                   raise RuntimeError('Reviewed ref moved; reconcile before a new gate')
+          if git('show', '-s', '--format=%P', candidate).split() != [main]:
+              raise RuntimeError('Linear candidate must have exactly the pinned main as its parent')
+          if git('rev-parse', candidate + '^{tree}') != tree or git('rev-parse', reviewed + '^{tree}') != tree:
+              raise RuntimeError('Linear integration changed the already reviewed product tree')
           git('merge-base', '--is-ancestor', main, candidate)
-          git('merge-base', '--is-ancestor', reviewed, candidate)
           output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'reviewed-integration'
           output.mkdir(exist_ok=True)
           receipt = {
               'schema': 'clearra.nonpublishing-integration-input.v1',
               'main': main, 'reviewed_candidate': reviewed, 'candidate': candidate,
-              'tree': git('rev-parse', 'HEAD^{tree}'),
+              'tree': tree,
               'run_id': os.environ['GITHUB_RUN_ID'],
               'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
               'main_updated': False, 'publication_authority': False
@@ -265,4 +254,4 @@ jobs:
           if failures: raise RuntimeError('Nonpublishing integration gate failed: '+json.dumps(failures))
           source=results['prepare']['outputs']['candidate']
           with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
-              f.write('Exact candidate: `'+source+'`\n\nAll seven isolated acceptance leaves and additional regressions passed.\n\nNo main update, tag, Product Release, Pages or Discord deployment was performed.\n')
+              f.write('Exact candidate: `'+source+'`\n\nAll seven isolated acceptance leaves and additional regressions passed.\n\nProtected-main management policy must also pass independently. No main update, tag, Product Release, Pages or Discord deployment was performed.\n')
