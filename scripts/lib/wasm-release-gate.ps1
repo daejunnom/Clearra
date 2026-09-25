@@ -248,6 +248,10 @@ function Invoke-WasmBuildTestGate {
         Invoke-WasmReleaseCommand $pnpmCommand.Source @(
             '--filter', '@clearra/ui', 'run', 'test'
         ) 'clearra-ui runtime contracts'
+        # Worker contracts are source-only; fail here before compiling WASM.
+        Invoke-WasmReleaseCommand $pnpmCommand.Source @(
+            '--filter', '@clearra/web', 'run', 'test'
+        ) 'clearra-web worker contracts'
         if (Test-Path -LiteralPath $webPublicDir) {
             Remove-Item -LiteralPath $webPublicDir -Recurse -Force
         }
@@ -303,9 +307,6 @@ function Invoke-WasmBuildTestGate {
         ) 'clearra-wasm exact worker probe'
         $env:CLEARRA_WEB_PUBLIC_DIR = $webPublicDir
 
-        Invoke-WasmReleaseCommand $pnpmCommand.Source @(
-            '--filter', '@clearra/web', 'run', 'test'
-        ) 'clearra-web worker contracts'
         Invoke-WasmReleaseCommand $pnpmCommand.Source @(
             '--filter', '@clearra/web', 'exec', 'vite', 'build', '--configLoader', 'runner'
         ) 'clearra-web frontend build'

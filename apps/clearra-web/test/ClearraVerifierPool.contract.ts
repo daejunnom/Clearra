@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { mock } from 'node:test';
 
 // SRP rationale: this executable contract's single change reason is the verifier
 // pool's exact delegated-work lifecycle across readiness, failure, cancellation
@@ -693,82 +694,110 @@ assert.equal(latchWorker.cancellationIds.length, 1, 'previous query cancellation
   selective.cancel();
 }
 
-class HeartbeatVerifierWorker extends FakeVerifierWorker {
-  constructor() {
-    super(false);
-  }
-
-  override postMessage(message: WorkerMessage) {
-    if (message.type !== 'consume') {
-      super.postMessage(message);
-      return;
-    }
-    const heartbeat = setInterval(() => {
-      if (this.terminated) {
-        clearInterval(heartbeat);
-        return;
+// Only the pool's watchdog interval and monotonic clock are controlled. The
+// outer bounded() timeout and asynchronous journal work keep their real clock,
+// so a broken handshake still fails rather than hanging under frozen timers.
+async function withVerifierWatchdogClock(
+  run: (advance: (milliseconds: number) => void) => Promise<void>
+): Promise<void> {
+  let now = 0;
+  const monotonic = mock.method(performance, 'now', () => now);
+  try {
+    mock.timers.enable({ apis: ['setInterval'] });
+    await run((milliseconds) => {
+      assert.ok(Number.isSafeInteger(milliseconds) && milliseconds >= 0);
+      // Advance both clocks together so each scan observes its own due time.
+      for (let elapsed = 0; elapsed < milliseconds; elapsed += 1) {
+        now += 1;
+        mock.timers.tick(1);
       }
-      this.emit({
-        type: 'heartbeat',
-        requestId: message.requestId,
-        progress: {
-          ...exactVerifierProgress(0),
-          buildNodes: 1,
-          coverageChecks: 2
-        }
-      });
-    }, 10);
-    setTimeout(() => {
-      clearInterval(heartbeat);
-      if (!this.terminated) super.postMessage(message);
-    }, 80);
+    });
+  } finally {
+    mock.timers.reset();
+    monotonic.mock.restore();
   }
 }
 
-const heartbeatWorkers: HeartbeatVerifierWorker[] = [];
-const heartbeatPool = new ClearraVerifierPool(() => {
-  const worker = new HeartbeatVerifierWorker();
-  heartbeatWorkers.push(worker);
-  return worker as unknown as Worker;
-}, {
-  requestStallTimeoutMs: 25
-});
-await bounded(
-  'heartbeat initialize',
-  heartbeatPool.initialize(
-    new ArrayBuffer(0),
-    1,
-    undefined,
-    'heartbeat-contract-owner',
-    'atomic-task'
-  )
-);
-await bounded(
-  'heartbeat enqueue',
-  heartbeatPool.enqueue(Uint8Array.of(4).buffer, () => undefined)
-);
-await bounded('heartbeat idle', heartbeatPool.waitForIdle());
-assert.equal(heartbeatWorkers.length, 1);
-assert.deepEqual(heartbeatPool.progressSnapshot(), {
-  candidatesVerified: 1,
-  buildNodes: 0,
-  coverageChecks: 0,
-  availability: {
-    candidatesVerified: true,
-    buildNodes: true,
-    coverageChecks: true
-  },
-  exactness: {
-    candidatesVerified: true,
-    buildNodes: true,
-    coverageChecks: true
-  },
-  readyWorkers: 1,
-  activeWorkers: 0,
-  workerCount: 1,
-  oldestBatchMs: 0
-});
-await bounded('heartbeat finish', heartbeatPool.finish(() => undefined));
+class HeartbeatVerifierWorker extends FakeVerifierWorker {
+  readonly consumeStarted = signal();
+  private pendingConsume: WorkerMessage | null = null;
+
+  constructor() { super(false); }
+
+  override postMessage(message: WorkerMessage) {
+    if (message.type !== 'consume') { super.postMessage(message); return; }
+    this.pendingConsume = message;
+    this.consumeStarted.resolve();
+  }
+
+  heartbeat() {
+    assert.ok(this.pendingConsume);
+    this.emit({
+      type: 'heartbeat',
+      requestId: this.pendingConsume.requestId,
+      progress: { ...exactVerifierProgress(0), buildNodes: 1, coverageChecks: 2 }
+    });
+  }
+
+  releaseConsume() {
+    assert.ok(this.pendingConsume);
+    const message = this.pendingConsume;
+    this.pendingConsume = null;
+    if (!this.terminated) super.postMessage(message);
+  }
+}
+
+for (const stopHeartbeats of [false, true]) {
+  await withVerifierWatchdogClock(async (advance) => {
+    const workers: HeartbeatVerifierWorker[] = [];
+    const pool = new ClearraVerifierPool(() => {
+      const worker = new HeartbeatVerifierWorker();
+      workers.push(worker);
+      return worker as unknown as Worker;
+    }, { requestStallTimeoutMs: 25 });
+    try {
+      await bounded('heartbeat initialize', pool.initialize(
+        new ArrayBuffer(0), 1, undefined, `heartbeat-owner-${stopHeartbeats}`, 'atomic-task'
+      ));
+      await bounded('heartbeat enqueue', pool.enqueue(Uint8Array.of(4).buffer, () => undefined));
+      await bounded('heartbeat consume posted', workers[0].consumeStarted.promise);
+      // Eight explicit heartbeats keep one task alive beyond three original
+      // deadlines. This is independent of Windows runner timer granularity.
+      for (let heartbeat = 0; heartbeat < 8; heartbeat += 1) {
+        advance(10);
+        assert.equal(workers[0].terminated, false);
+        workers[0].heartbeat();
+      }
+      assert.equal(pool.progressSnapshot().activeWorkers, 1);
+      if (stopHeartbeats) {
+        const rejected = assert.rejects(
+          bounded('heartbeat loss fails closed', pool.waitForIdle()),
+          /distributed verifier consume stalled for 25 ms/
+        );
+        advance(24);
+        assert.equal(workers[0].terminated, false, 'the renewed deadline has not expired');
+        advance(7);
+        await bounded('heartbeat loss observed', rejected);
+        assert.equal(workers[0].terminated, true);
+        workers[0].releaseConsume();
+        assert.equal(workers.length, 1, 'timed-out executable work is not retried');
+      } else {
+        workers[0].releaseConsume();
+        await bounded('heartbeat idle', pool.waitForIdle());
+        assert.equal(workers.length, 1);
+        assert.deepEqual(pool.progressSnapshot(), {
+          candidatesVerified: 1, buildNodes: 0, coverageChecks: 0,
+          availability: { candidatesVerified: true, buildNodes: true, coverageChecks: true },
+          exactness: { candidatesVerified: true, buildNodes: true, coverageChecks: true },
+          readyWorkers: 1, activeWorkers: 0, workerCount: 1, oldestBatchMs: 0
+        });
+        await bounded('heartbeat finish', pool.finish(() => undefined));
+      }
+    } finally {
+      pool.cancel();
+    }
+  });
+}
 
 class FinishGateVerifierWorker extends FakeVerifierWorker {
   private pendingFinish: WorkerMessage | null = null;
@@ -1083,93 +1112,115 @@ for (const size of [1, 3, 11]) {
 }
 
 class StalledConsumeVerifierWorker extends FakeVerifierWorker {
+  readonly consumeStarted = signal();
   constructor(private readonly stallConsume: boolean) {
     super(false);
   }
 
   override postMessage(message: WorkerMessage) {
-    if (message.type === 'consume' && this.stallConsume) return;
+    if (message.type === 'consume' && this.stallConsume) {
+      this.consumeStarted.resolve();
+      return;
+    }
     super.postMessage(message);
   }
 }
 
-const stalledConsumeWorkers: StalledConsumeVerifierWorker[] = [];
-const stalledConsumePool = new ClearraVerifierPool(() => {
-  const worker = new StalledConsumeVerifierWorker(stalledConsumeWorkers.length === 0);
-  stalledConsumeWorkers.push(worker);
-  return worker as unknown as Worker;
-}, {
-  requestStallTimeoutMs: 25
+await withVerifierWatchdogClock(async (advance) => {
+  const stalledConsumeWorkers: StalledConsumeVerifierWorker[] = [];
+  const stalledConsumePool = new ClearraVerifierPool(() => {
+    const worker = new StalledConsumeVerifierWorker(stalledConsumeWorkers.length === 0);
+    stalledConsumeWorkers.push(worker);
+    return worker as unknown as Worker;
+  }, {
+    requestStallTimeoutMs: 25
+  });
+  await bounded(
+    'stalled consume initialize',
+    stalledConsumePool.initialize(
+      new ArrayBuffer(0),
+      1,
+      undefined,
+      'stalled-consume-owner',
+      'replay-state'
+    )
+  );
+  await bounded(
+    'stalled consume enqueue',
+    stalledConsumePool.enqueue(Uint8Array.of(5).buffer, () => undefined)
+  );
+  await bounded('stalled consume posted', stalledConsumeWorkers[0].consumeStarted.promise);
+  const rejected = assert.rejects(
+    bounded('stalled consume fail closed', stalledConsumePool.waitForIdle()),
+    /stalled/
+  );
+  advance(24);
+  assert.equal(stalledConsumeWorkers[0].terminated, false);
+  advance(7);
+  await bounded('stalled consume observed', rejected);
+  assert.equal(stalledConsumeWorkers.length, 1);
+  assert.equal(stalledConsumeWorkers[0].terminated, true);
 });
-await bounded(
-  'stalled consume initialize',
-  stalledConsumePool.initialize(
-    new ArrayBuffer(0),
-    1,
-    undefined,
-    'stalled-consume-owner',
-    'replay-state'
-  )
-);
-await bounded(
-  'stalled consume enqueue',
-  stalledConsumePool.enqueue(Uint8Array.of(5).buffer, () => undefined)
-);
-await assert.rejects(
-  bounded('stalled consume fail closed', stalledConsumePool.waitForIdle()),
-  /stalled/
-);
-assert.equal(stalledConsumeWorkers.length, 1);
-assert.equal(stalledConsumeWorkers[0].terminated, true);
 
 class StalledFinishVerifierWorker extends FakeVerifierWorker {
+  readonly finishStarted = signal();
   constructor(private readonly stallFinish: boolean) {
     super(false);
   }
 
   override postMessage(message: WorkerMessage) {
-    if (message.type === 'finish' && this.stallFinish) return;
+    if (message.type === 'finish' && this.stallFinish) {
+      this.finishStarted.resolve();
+      return;
+    }
     super.postMessage(message);
   }
 }
 
-const stalledFinishWorkers: StalledFinishVerifierWorker[] = [];
-const stalledFinishPool = new ClearraVerifierPool(() => {
-  const worker = new StalledFinishVerifierWorker(stalledFinishWorkers.length === 0);
-  stalledFinishWorkers.push(worker);
-  return worker as unknown as Worker;
-}, {
-  requestStallTimeoutMs: 25,
-  finishStallTimeoutMs: 25
-});
-await bounded(
-  'stalled finish initialize',
-  stalledFinishPool.initialize(
-    new ArrayBuffer(0),
-    1,
-    undefined,
-    'stalled-finish-owner',
-    'replay-state'
-  )
-);
-await bounded(
-  'stalled finish enqueue',
-  stalledFinishPool.enqueue(Uint8Array.of(6).buffer, () => undefined)
-);
-await bounded('stalled finish idle', stalledFinishPool.waitForIdle());
-const stalledFinishPartials: number[] = [];
-await assert.rejects(
-  bounded(
-    'stalled finish fail closed',
-    stalledFinishPool.finish((partial) =>
-      stalledFinishPartials.push(new Uint8Array(partial)[0])
+await withVerifierWatchdogClock(async (advance) => {
+  const stalledFinishWorkers: StalledFinishVerifierWorker[] = [];
+  const stalledFinishPool = new ClearraVerifierPool(() => {
+    const worker = new StalledFinishVerifierWorker(stalledFinishWorkers.length === 0);
+    stalledFinishWorkers.push(worker);
+    return worker as unknown as Worker;
+  }, {
+    requestStallTimeoutMs: 25,
+    finishStallTimeoutMs: 25
+  });
+  await bounded(
+    'stalled finish initialize',
+    stalledFinishPool.initialize(
+      new ArrayBuffer(0),
+      1,
+      undefined,
+      'stalled-finish-owner',
+      'replay-state'
     )
-  ),
-  /stalled/
-);
-assert.equal(stalledFinishWorkers.length, 1);
-assert.equal(stalledFinishWorkers[0].terminated, true);
-assert.deepEqual(stalledFinishPartials, []);
+  );
+  await bounded(
+    'stalled finish enqueue',
+    stalledFinishPool.enqueue(Uint8Array.of(6).buffer, () => undefined)
+  );
+  await bounded('stalled finish idle', stalledFinishPool.waitForIdle());
+  const stalledFinishPartials: number[] = [];
+  const rejected = assert.rejects(
+    bounded(
+      'stalled finish fail closed',
+      stalledFinishPool.finish((partial) =>
+        stalledFinishPartials.push(new Uint8Array(partial)[0])
+      )
+    ),
+    /stalled/
+  );
+  await bounded('stalled finish posted', stalledFinishWorkers[0].finishStarted.promise);
+  advance(24);
+  assert.equal(stalledFinishWorkers[0].terminated, false);
+  advance(7);
+  await bounded('stalled finish observed', rejected);
+  assert.equal(stalledFinishWorkers.length, 1);
+  assert.equal(stalledFinishWorkers[0].terminated, true);
+  assert.deepEqual(stalledFinishPartials, []);
+});
 
 class SaturatedTelemetryVerifierWorker extends FakeVerifierWorker {
   constructor(private readonly saturated: boolean) {
