@@ -17,19 +17,19 @@ jobs:
   promote-and-dispatch:
     if: github.repository == 'daejunnom/Clearra' && github.ref == 'refs/heads/codex/clearra-safe-integration-20260925'
     runs-on: ubuntu-latest
-    timeout-minutes: 100
+    timeout-minutes: 120
     permissions:
       contents: write
       actions: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 5626918e9316752af7b8213d4ab0f48da15a6c1e
+          ref: d50226b34fddc7cf4ed958edff8f252af282660d
           persist-credentials: false
       - name: Validate the fixed orchestration source syntax
         shell: bash
         run: python -m py_compile scripts/integration/promote-approved-candidate-20260925.py
-      - name: Wait for all exact-source leaves, fast-forward and dispatch canonical owners
+      - name: Wait for exact integration and actual management policy before non-force promotion
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
