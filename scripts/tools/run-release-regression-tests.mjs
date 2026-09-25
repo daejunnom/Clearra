@@ -28,6 +28,7 @@ export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
   "scripts/release/fast-fix-qualification-workflow.test.mjs",
   "scripts/release/discord-catalog-recovery-authority.test.mjs",
   "scripts/release/discord-deploy-workflow.test.mjs",
+  "scripts/release/discord-acceptance-trigger.test.mjs",
   "scripts/release/discord-deployment-recovery.test.mjs",
   "scripts/release/discord-deployment-state.test.mjs",
   "scripts/release/discord-production-checkpoint-receipt.test.mjs",

@@ -1,4 +1,5 @@
 name: Deploy Discord Production
+run-name: Discord production · ${{ github.event.workflow_run.head_sha || inputs.accepted_sha }}
 
 # ORACLE_SSH_PRIVATE_KEY_B64 is forbidden as a repository or organization secret.
 # Configure it separately as an environment secret in discord-path-confirmation,
@@ -19,6 +20,14 @@ on:
       accepted_sha:
         description: Exact current main commit with one canonical workflow_dispatch acceptance
         required: true
+        type: string
+      accepted_run_id:
+        description: Optional exact successful canonical acceptance run (supply attempt together)
+        required: false
+        type: string
+      accepted_run_attempt:
+        description: Optional canonical acceptance attempt; must be 1 and paired with run ID
+        required: false
         type: string
 
 permissions:
@@ -62,38 +71,8 @@ jobs:
         id: authority
         env:
           GH_TOKEN: ${{ github.token }}
-          MANUAL_SHA: ${{ inputs.accepted_sha }}
-          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
-          AUTOMATIC_RUN_ID: ${{ github.event.workflow_run.id }}
-          AUTOMATIC_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --force --tags origin main
-          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
-            source_commit="$AUTOMATIC_SHA"
-          else
-            source_commit="$MANUAL_SHA"
-          fi
-          [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo 'accepted_sha must be a full lowercase commit ID' >&2; exit 2; }
-          [[ "$(git rev-parse origin/main)" == "$source_commit" ]] || { echo 'Discord source must be exact current main' >&2; exit 2; }
-          git checkout --detach "$source_commit"
-          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
-            node scripts/release/canonical-acceptance-run.mjs \
-              --repository "$GITHUB_REPOSITORY" \
-              --source-commit "$source_commit" \
-              --require one \
-              --expected-run-id "$AUTOMATIC_RUN_ID" \
-              --expected-run-attempt "$AUTOMATIC_RUN_ATTEMPT" \
-              --format github-output >> "$GITHUB_OUTPUT"
-          else
-            node scripts/release/canonical-acceptance-run.mjs \
-              --repository "$GITHUB_REPOSITORY" \
-              --source-commit "$source_commit" \
-              --require one \
-              --format github-output >> "$GITHUB_OUTPUT"
-          fi
-          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+        run: node scripts/release/discord-acceptance-trigger.mjs
       - name: Classify deployment impact from the last production tag
         id: impact
         env:

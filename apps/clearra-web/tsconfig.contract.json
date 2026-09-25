@@ -1,9 +1,29 @@
 {
-  "extends": "./tsconfig.json",
   "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "WebWorker"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "noEmit": true,
-    "types": []
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": [],
+    "allowJs": true,
+    "checkJs": true,
+    "resolveJsonModule": true,
+    "sourceMap": true
   },
-  "include": ["test/*.contract.ts"],
-  "files": ["../../scripts/types/node-contract-builtins.d.ts"]
+  "include": [
+    "test/*.contract.ts"
+  ],
+  "files": [
+    "../../scripts/types/node-contract-builtins.d.ts"
+  ]
 }

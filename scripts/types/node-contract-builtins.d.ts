@@ -44,3 +44,25 @@ declare module 'node:path' {
 declare const process: {
   cwd(): string;
 };
+
+// Minimal, dependency-free declarations for the Node 22 clock APIs used by
+// executable contracts. Keep this shim typed; it is not a wildcard module.
+declare module 'node:test' {
+  interface MockFunctionContext {
+    restore(): void;
+  }
+  interface MockTimers {
+    enable(options: { apis: Array<'setInterval' | 'setTimeout' | 'setImmediate' | 'Date'>; now?: number | Date }): void;
+    tick(milliseconds: number): void;
+    reset(): void;
+  }
+  interface MockTracker {
+    readonly timers: MockTimers;
+    method<T extends object, K extends keyof T>(
+      object: T,
+      methodName: K,
+      implementation: T[K] extends (...args: infer A) => infer R ? (...args: A) => R : never
+    ): T[K] & { readonly mock: MockFunctionContext };
+  }
+  export const mock: MockTracker;
+}

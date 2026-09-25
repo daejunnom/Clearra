@@ -31,12 +31,14 @@ export function frontendOptions(args) {
 }
 
 export function frontendPlan(options, paths) {
-  const commands = [{ kind: 'sync', arguments: ['sync'] }];
-  if (options.task === 'sync') return commands;
-  if (options.task === 'test') return [...commands,
+  // Worker contracts are source-only. Loading Svelte/Vite here would require
+  // the verified WASM that this pre-build check is meant to precede.
+  if (options.task === 'test') return [
     { kind: 'typecheck', arguments: ['--noEmit', '-p', 'tsconfig.contract.json'] },
     { kind: 'contracts', arguments: ['./test'] },
   ];
+  const commands = [{ kind: 'sync', arguments: ['sync'] }];
+  if (options.task === 'sync') return commands;
   if (options.app === 'web' && !options.recovery) {
     commands.push({ kind: 'public-assets', arguments: [] });
     commands.push({ kind: 'wasm', arguments: ['--environment', options.environment,

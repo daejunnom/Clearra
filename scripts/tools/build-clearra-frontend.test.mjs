@@ -63,7 +63,7 @@ test('web build, WSL build, dev, sync and tests keep one ordered owner payload',
     if (task === 'dev') assert.deepEqual(vite.slice(-3), ['--port', '4194', '--strictPort']);
   }
   assert.deepEqual(frontendPlan(frontendOptions(['--app', 'web', '--task', 'test']), paths).map(command => command.kind),
-    ['sync', 'typecheck', 'contracts']);
+    ['typecheck', 'contracts']);
   assert.deepEqual(frontendPlan(frontendOptions(['--app', 'web', '--task', 'sync']), paths).map(command => command.kind), ['sync']);
   assert.deepEqual(frontendPlan(frontendOptions(['--app', 'desktop']), paths).map(command => command.kind), ['sync', 'vite']);
 });
@@ -143,4 +143,27 @@ test('older snapshots fail closed before frontend compilation without source pol
   const workflow = await readFile(resolve(root, '.github/workflows/pages-rollback.yml'), 'utf8');
   const guard = workflow.indexOf('node authority-source/scripts/tools/validate-managed-frontend-source.mjs --source-root snapshot-source');
   assert.ok(guard > 0 && guard < workflow.indexOf('- name: Prepare Rust WASM toolchain'));
+});
+
+
+test('source-only worker checks never load Vite or generated Svelte/WASM configuration', async () => {
+  const commands = frontendPlan(frontendOptions(['--app', 'web', '--task', 'test']), paths);
+  const seen = [];
+  await executeFrontendPlan(commands, {
+    run: async command => seen.push(command.kind),
+    afterSync: async () => assert.fail('source-only contracts must not synchronize Svelte'),
+  });
+  assert.deepEqual(seen, ['typecheck', 'contracts']);
+  const config = JSON.parse(await readFile(resolve(root, 'apps/clearra-web/tsconfig.contract.json'), 'utf8'));
+  assert.equal(config.extends, undefined);
+  assert.equal(config.compilerOptions.strict, true);
+  assert.equal(config.compilerOptions.noEmit, true);
+  assert.deepEqual(config.files, ['../../scripts/types/node-contract-builtins.d.ts']);
+  await assert.rejects(executeFrontendPlan(commands, {
+    run: async command => {
+      assert.equal(command.kind, 'typecheck');
+      throw new Error('intentional typecheck failure');
+    },
+    afterSync: async () => assert.fail('unexpected Svelte synchronization'),
+  }), /intentional typecheck failure/);
 });

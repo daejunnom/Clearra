@@ -208,7 +208,7 @@ const discordRuntimeRecovery = await readFile(
   "utf8",
 );
 
-test("primary has exact automatic/manual authority and explicit impact no-op", () => {
+test("primary has exact automatic/manual authority and explicit impact no-op", async () => {
   for (const marker of [
     'workflows: ["Publish Product Release"]',
     "workflow_dispatch:",
@@ -217,10 +217,9 @@ test("primary has exact automatic/manual authority and explicit impact no-op", (
     "github.event.workflow_run.event == 'workflow_dispatch'",
     "github.event.workflow_run.head_branch == 'main'",
     "github.event.workflow_run.head_repository.full_name == github.repository",
-    "--require one",
-    "--expected-run-id",
-    "--expected-run-attempt",
-    "Discord source must be exact current main",
+    "accepted_run_id:",
+    "accepted_run_attempt:",
+    "node scripts/release/discord-acceptance-trigger.mjs",
     "deployment-impact.mjs",
     "deploy_discord != 'true'",
   ]) assert.ok(primary.includes(marker), marker);
@@ -238,7 +237,11 @@ test("primary has exact automatic/manual authority and explicit impact no-op", (
     primary.indexOf("Resolve exact current main and one canonical acceptance"),
   );
   assert.match(authorityCheckout, /ref: main[\s\S]*fetch-depth: 0/u);
-  assert.match(primary, /git fetch --force --tags origin main/u);
+  const trigger = await readFile(new URL('./discord-acceptance-trigger.mjs', import.meta.url), 'utf8');
+  assert.match(trigger, /git\('fetch', '--tags', 'origin', 'main'\)/u);
+  assert.match(trigger, /resolveCanonicalAcceptanceRun/u);
+  assert.match(trigger, /expectedCount: 1, expectedRunId, expectedRunAttempt/u);
+  assert.match(trigger, /Discord source must be exact current main/u);
   assert.doesNotMatch(primary, /Discord deployment rerun attempts are forbidden/u);
 });
 
