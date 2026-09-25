@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -149,6 +150,50 @@ def suspicious_paths(current: str, tree: str, group: str) -> list[str]:
     return sorted(set(blocked))
 
 
+def resolve_reviewed_dependency_conflict(current: str, head: str, output: str) -> str | None:
+    """Resolve only the reviewed ^5.9.3 vs 5.9.3 declaration, not code conflicts."""
+    if current != EXPECTED_MAIN or head != EXPECTED_PINNED:
+        return None
+    paths = {line.split('\t', 1)[1] for line in output.splitlines()
+             if re.match(r'^100644 [0-9a-f]{40} [123]\t', line)}
+    expected = {'apps/clearra-web/package.json', 'pnpm-lock.yaml'}
+    if paths != expected:
+        return None
+    package_path = 'apps/clearra-web/package.json'
+    ours = json.loads(git('show', current + ':' + package_path).stdout)
+    theirs = json.loads(git('show', head + ':' + package_path).stdout)
+    if ours.get('devDependencies', {}).get('typescript') != '^5.9.3':
+        return None
+    if theirs.get('devDependencies', {}).get('typescript') != '5.9.3':
+        return None
+    theirs['devDependencies']['typescript'] = '^5.9.3'
+    if ours != theirs:
+        return None
+    ours_lock = git('show', current + ':pnpm-lock.yaml').stdout
+    theirs_lock = git('show', head + ':pnpm-lock.yaml').stdout
+    old = '      typescript:\n        specifier: 5.9.3\n        version: 5.9.3\n'
+    new = '      typescript:\n        specifier: ^5.9.3\n        version: 5.9.3\n'
+    if theirs_lock.count(old) != 1 or theirs_lock.replace(old, new, 1) != ours_lock:
+        return None
+    tree = output.splitlines()[0]
+    if not re.fullmatch('[0-9a-f]{40}', tree):
+        return None
+    temp_root = Path('build/branch-reconciliation')
+    temp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='reviewed-merge-', dir=temp_root) as temp:
+        env = dict(os.environ, GIT_INDEX_FILE=str((Path(temp) / 'index').resolve()))
+        def index_git(*args):
+            result = subprocess.run(['git', *args], text=True, capture_output=True, env=env, timeout=60)
+            if result.returncode:
+                raise RuntimeError('reviewed dependency merge index operation failed')
+            return result.stdout.strip()
+        index_git('read-tree', tree)
+        for path in sorted(expected):
+            blob = git('rev-parse', current + ':' + path).stdout.strip()
+            index_git('update-index', '--add', '--cacheinfo', '100644,' + blob + ',' + path)
+        return index_git('write-tree')
+
+
 def merge_candidate(current: str, head: str, branch: str, group: str) -> tuple[str, dict]:
     row = {'branch': branch, 'head': head, 'group': group}
     if ancestor(head, current):
@@ -156,15 +201,20 @@ def merge_candidate(current: str, head: str, branch: str, group: str) -> tuple[s
     p = git('merge-tree', '--write-tree', current, head, check=False, timeout=600)
     lines = p.stdout.splitlines()
     if p.returncode != 0:
-        return current, dict(row, status='retained_conflict', reason='clean merge unavailable', conflict_report=p.stdout[-20000:])
-    if not lines or not re.fullmatch('[0-9a-f]{40}', lines[0]):
-        raise RuntimeError('merge-tree did not produce a valid tree')
-    tree = lines[0]
+        reviewed = resolve_reviewed_dependency_conflict(current, head, p.stdout) if group == 'pinned-and-boundary' else None
+        if reviewed is None:
+            return current, dict(row, status='retained_conflict', reason='clean merge unavailable', conflict_report=p.stdout[-20000:])
+        tree = reviewed
+        row['reviewed_resolution'] = 'Keep main TypeScript ^5.9.3 declaration and the identical frozen 5.9.3 dependency graph'
+    else:
+        if not lines or not re.fullmatch('[0-9a-f]{40}', lines[0]):
+            raise RuntimeError('merge-tree did not produce a valid tree')
+        tree = lines[0]
     if group != 'pinned-and-boundary':
         blocked = suspicious_paths(current, tree, group)
         if blocked:
             return current, dict(row, status='retained_scope_review', reason='net merge modifies protected algorithm/research/asset paths', blocked_paths=blocked)
-    message = f"Merge {branch} for the user-approved release integration\n\nPreserve both histories. No conflict auto-resolution. Research activation is excluded."
+    message = f"Merge {branch} for the user-approved release integration\n\nPreserve both histories. Research activation is excluded. Any dependency conflict resolution is recorded in the source-bound audit."
     new = git('commit-tree', tree, '-p', current, '-p', head, '-m', message).stdout.strip()
     return new, dict(row, status='integrated_candidate', merge_commit=new,
                      changed_files=git('diff', '--name-only', current, tree).stdout.splitlines())
