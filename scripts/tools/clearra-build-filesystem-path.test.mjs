@@ -63,9 +63,11 @@ test('Windows short-name aliases resolve both existing and missing compiler path
     const expected = realpathSync.native(parent);
     const alias = execFileSync(process.env.ComSpec ?? 'cmd.exe',
       ['/d', '/s', '/c', 'for %I in ("%CLEARRA_TEST_LONG_PATH%") do @echo %~sI'],
-      { encoding: 'utf8', windowsHide: true, timeout: 10000,
+      // cmd.exe parses this fixed command itself; do not add CRT quote escapes.
+      { encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, timeout: 10000,
         env: { ...process.env, CLEARRA_TEST_LONG_PATH: parent } }).trim();
     assert.ok(alias, 'the native short-name query returned a path');
+    assert.equal(realpathSync.native(alias), expected, 'the query returned a real alias of the fixture');
     if (alias.toLowerCase() === expected.toLowerCase()) {
       t.skip('this Windows volume has no distinct 8.3 alias');
       return;
