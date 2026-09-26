@@ -6,32 +6,90 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
-  group: clearra-safe-integration-audit
+  group: clearra-oneoff-workflow-maintenance
   cancel-in-progress: false
 jobs:
-  source:
+  inventory:
+    if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 77880df9c2b0e919cacf5b10145cfab9e5f2b1e8
+          fetch-depth: 0
           persist-credentials: false
-          fetch-depth: 1
-      - name: Export only the pinned tracked source
-        shell: bash
+      - name: Read complete Actions catalog and dependencies; no writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
         run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = 77880df9c2b0e919cacf5b10145cfab9e5f2b1e8
-          git archive --format=tar.gz --output="$RUNNER_TEMP/clearra-candidate-source.tar.gz" HEAD
-          sha256sum "$RUNNER_TEMP/clearra-candidate-source.tar.gz" > "$RUNNER_TEMP/clearra-candidate-source.sha256"
-          echo 'Read-only source export; no build, main update, tag, publication or deployment.' >> "$GITHUB_STEP_SUMMARY"
+          import json,os,pathlib,subprocess
+          repo='daejunnom/Clearra'
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'workflow-retirement-inventory'
+          out.mkdir()
+          def cmd(*args): return subprocess.check_output(args,text=True,timeout=90).strip()
+          def api(path): return json.loads(cmd('gh','api','repos/'+repo+'/'+path))
+          def git(*args): return cmd('git',*args)
+          def catalog(path,key):
+              pages=json.loads(cmd('gh','api','--paginate','--slurp','repos/'+repo+'/'+path))
+              rows=[row for page in pages for row in page[key]]
+              if len({r['id'] for r in rows})!=len(rows): raise RuntimeError('Duplicate catalog identity')
+              if pages and pages[0]['total_count']!=len(rows): raise RuntimeError('Incomplete catalog: '+path)
+              return rows
+          main=api('git/ref/heads/main')['object']['sha']
+          control=git('rev-parse','HEAD')
+          workflows=catalog('actions/workflows?per_page=100','workflows')
+          runs=catalog('actions/runs?per_page=100','workflow_runs')
+          fields=['id','workflow_id','name','path','head_branch','head_sha','event','status','conclusion','run_attempt','created_at','updated_at','html_url']
+          runs=[{k:r.get(k) for k in fields} for r in runs]
+          main_paths=git('ls-tree','-r','--name-only',main,'--','.github/workflows').splitlines()
+          control_paths=git('ls-tree','-r','--name-only',control,'--','.github/workflows').splitlines()
+          definitions={}
+          for ref,paths in [(main,main_paths),(control,control_paths)]:
+              for path in paths:
+                  if not path.endswith(('.yml','.yaml')): continue
+                  key=ref+':'+path
+                  definitions[key]=git('show',key)
+          summaries=[]
+          for w in workflows:
+              history=sorted([r for r in runs if r['workflow_id']==w['id']],key=lambda r:r['id'],reverse=True)
+              path=w['path']
+              item={k:w.get(k) for k in ['id','name','path','state','created_at','updated_at','html_url']}
+              item.update(in_main=path in main_paths,in_control=path in control_paths,run_count=len(history),
+                  latest_runs=history[:3],active_runs=[r for r in history if r['status']!='completed'])
+              if history and path.startswith('.github/workflows/') and path.endswith(('.yml','.yaml')):
+                  key=history[0]['head_sha']+':'+path
+                  try: definitions[key]=git('show',key)
+                  except subprocess.CalledProcessError: item['latest_source_unavailable']=True
+              summaries.append(item)
+          operational_paths=git('ls-tree','-r','--name-only',main,'--','.github/workflows','scripts/release','scripts/tools','scripts/integration').splitlines()
+          dependencies=[]
+          filenames={w['path'].rsplit('/',1)[-1]:w['id'] for w in workflows}
+          names={w['name']:w['id'] for w in workflows if len(w['name'])>5}
+          for path in operational_paths:
+              if not path.endswith(('.yml','.yaml','.mjs','.js','.ts','.py','.ps1','.json','.sh')): continue
+              text=git('show',main+':'+path)
+              for number,line in enumerate(text.splitlines(),1):
+                  hits=sorted(set([value for word,value in (filenames|names).items() if word in line]))
+                  if hits: dependencies.append({'path':path,'line':number,'workflow_ids':hits,'text':line})
+          if api('git/ref/heads/main')['object']['sha']!=main: raise RuntimeError('Main moved during inventory')
+          result={'schema':'clearra.workflow-retirement-inventory.v1','main':main,'control':control,
+              'run_id':os.environ['GITHUB_RUN_ID'],'workflows':summaries,'main_paths':main_paths,
+              'control_paths':control_paths,'active_runs':[r for r in runs if r['status']!='completed'],
+              'main_references':dependencies,'writes_performed':False}
+          (out/'inventory.json').write_text(json.dumps(result,indent=2)+'\n')
+          (out/'workflow-definitions.json').write_text(json.dumps(definitions,indent=2)+'\n')
+          (out/'runs.json').write_text(json.dumps(runs,indent=2)+'\n')
+          print(json.dumps({'main':main,'workflow_count':len(workflows),'run_count':len(runs),
+              'active_runs':result['active_runs'],'non_main':[(w['id'],w['name'],w['path'],w['state']) for w in summaries if not w['in_main']]},indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
+              f.write('Read-only inventory completed. Main, workflow states, runs, artifacts and deployments were not changed.\n')
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: clearra-pinned-candidate-source-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/clearra-candidate-source.tar.gz
-            ${{ runner.temp }}/clearra-candidate-source.sha256
+          name: workflow-retirement-inventory-${{ github.run_id }}
+          path: ${{ runner.temp }}/workflow-retirement-inventory
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
