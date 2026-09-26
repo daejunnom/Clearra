@@ -13,47 +13,41 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
-      actions: write
+    permissions: {contents: write, actions: write}
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: 5be0eb20932e00eb90e18ece0b77f80363a31955
-          fetch-depth: 0
-      - name: Bind reviewed pin validation and restore the exact centered fixture
+        with: {ref: 5eb515f67c759e2176b5fac68dc2265536421e3e, fetch-depth: 0}
+      - name: Apply reviewed page-readiness assertion without changing main
         id: prepare
-        env:
-          GH_TOKEN: ${{ github.token }}
+        env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
           import json,os,pathlib,subprocess
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
           base='952280950aeb24528279cbff685fe8acec892223'
           before='54df724b04498aaec987d41483efe4d075172522'
-          parent='5be0eb20932e00eb90e18ece0b77f80363a31955'
+          parent='5eb515f67c759e2176b5fac68dc2265536421e3e'
           branch='codex/converge-surface-repair-20260926'
-          tree='6466b0a94008f30911fa01257de5a6faf09787d2'
+          tree='814cb6bdaf9b38fc49fcf2f273ed400905811aa4'
           if git('ls-remote','origin','refs/heads/main').split()[0]!=base:
               raise RuntimeError('main moved; reconcile before running')
           tip=git('ls-remote','origin','refs/heads/'+branch).split()[0]
           if tip==parent:
               git('checkout','--detach',parent)
-              p=pathlib.Path('crates/clearra-wasm/tests/wasm_host_contract.rs')
+              p=pathlib.Path('scripts/tools/surface-browser-acceptance.mjs')
               text=p.read_text()
-              old='const CENTER_I: &str = "ctk1|initial=0000000000000000|placements=I:0000000000000000078";'
-              new='const CENTER_I: &str = "ctk1|initial=0000000000000000|placements=I:'+format(0x78,'016x')+'";'
-              if text.count(old)!=1: raise RuntimeError('Reviewed fixture correction mismatch')
+              old="  // Computation has finished. A wrong set is an assertion failure, not a timeout.\n  const actual = await keys(page);"
+              new="  // Computation and lazy result-page loading have separate completion points.\n  // Wait for the real page loader, never for a particular expected key count.\n  await page.locator('.pager-loading').waitFor({ state: 'hidden', timeout: 60000 });\n  const actual = await keys(page);"
+              if text.count(old)!=1: raise RuntimeError('Reviewed assertion correction mismatch')
               p.write_text(text.replace(old,new))
-              git('add',str(p))
-              git('diff','--cached','--check')
+              git('add',str(p)); git('diff','--cached','--check')
               if git('write-tree')!=tree or git('diff','--cached','--name-only')!=str(p):
                   raise RuntimeError('Reviewed tree or correction scope mismatch')
               git('config','user.name','github-actions[bot]')
               git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-              git('commit','-m','test: retain the fixed-width centered I fixture')
+              git('commit','-m','test: wait for lazy member readiness independently of solution cardinality')
               candidate=git('rev-parse','HEAD')
               git('push','origin',candidate+':refs/heads/'+branch)
           else:
@@ -67,8 +61,7 @@ jobs:
           if (git('show','-s','--format=%P',candidate)!=parent or
               git('rev-parse',candidate+'^{tree}')!=tree or git('diff','--name-only',before,candidate).splitlines()!=expected):
               raise RuntimeError('Reviewed source identity or scope mismatch')
-          git('merge-base','--is-ancestor',base,candidate)
-          git('diff','--check',before,candidate)
+          git('merge-base','--is-ancestor',base,candidate); git('diff','--check',before,candidate)
           if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate:
               raise RuntimeError('Candidate readback mismatch')
           receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'changed_files':expected,'main_updated':False}
@@ -89,8 +82,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+      matrix: {os: [ubuntu-latest, windows-latest]}
     env:
       CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
       CLEARRA_BROWSER_TOOLS_ROOT: ${{ github.workspace }}/build/tools/control-browser
@@ -128,8 +120,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+      matrix: {os: [ubuntu-latest, windows-latest]}
     steps:
       - uses: actions/checkout@v4
         with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
