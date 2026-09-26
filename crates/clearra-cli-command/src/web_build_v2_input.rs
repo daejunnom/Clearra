@@ -303,9 +303,9 @@ impl WebBuildV2Input {
         Ok(self)
     }
 
-    /// The second CLI input contains the solutions to keep in every minimum
-    /// portfolio. Decode it through the same normalization as the first input
-    /// so document order and command-line escaping never identify a solution.
+    /// Required drawings constrain the full source, which remains the only
+    /// coverage authority. Unlike a target document, a selection may contain
+    /// both original and mirrored masks; the producer resolves every identity.
     pub fn with_pinned_solution_document(
         self,
         format: FieldDocumentFormat,
@@ -319,6 +319,14 @@ impl WebBuildV2Input {
                 "only build.evaluate.minimals and build.pinned-minimals accept a pinned solution document",
             ));
         }
+        if self.capability == WebBuildV2Capability::PinnedMinimals {
+            validate_document_size(document, "pinned solution")?;
+            let decoded = clearra_app::BuildPinnedSolutionDocument::decode(format, document)
+                .map_err(|error| invalid(format!("invalid pinned solution document: {error:?}")))?;
+            let mut selected = self;
+            selected.pinned_colored_identities = decoded.into_identities();
+            return Ok(selected);
+        }
         let decoded = decode_document(format, document, "pinned solution")?;
         let normalized = decoded.target();
         let pins = BuildSuppliedSolutionSetV1::new(
@@ -328,13 +336,7 @@ impl WebBuildV2Input {
             normalized.identities().iter().copied(),
         )
         .map_err(|error| invalid(format!("invalid pinned solution document: {error:?}")))?;
-        if self.capability == WebBuildV2Capability::PinnedMinimals {
-            let mut selected = self;
-            selected.pinned_colored_identities = pins.identities().to_vec();
-            Ok(selected)
-        } else {
-            self.with_pinned_candidate_keys(pins.candidate_keys().to_vec())
-        }
+        self.with_pinned_candidate_keys(pins.candidate_keys().to_vec())
     }
 
     pub fn with_expected_source_set_hash(
@@ -584,13 +586,18 @@ fn decode_document(
     document: &str,
     role: &str,
 ) -> Result<BuildColoredTargetDocument, WebCommandError> {
+    validate_document_size(document, role)?;
+    BuildColoredTargetDocument::decode(format, document)
+        .map_err(|error| invalid(format!("invalid Build v2 {role} document: {error:?}")))
+}
+
+fn validate_document_size(document: &str, role: &str) -> Result<(), WebCommandError> {
     if document.len() > FIELD_DOCUMENT_MAX_INPUT_BYTES {
         return Err(invalid(format!(
             "Build v2 {role} document exceeds {FIELD_DOCUMENT_MAX_INPUT_BYTES} bytes"
         )));
     }
-    BuildColoredTargetDocument::decode(format, document)
-        .map_err(|error| invalid(format!("invalid Build v2 {role} document: {error:?}")))
+    Ok(())
 }
 
 fn document_query_input(

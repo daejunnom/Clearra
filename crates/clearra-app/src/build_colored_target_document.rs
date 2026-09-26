@@ -17,6 +17,7 @@ pub enum BuildColoredTargetDocumentError {
     PendingGarbageUnsupported,
     InitialBoardDiffers,
     TargetMaskDiffers,
+    TargetAreaDiffers,
     TargetEmpty,
     InitialTargetOverlap,
     ColoredAreaInvalid,
@@ -35,10 +36,8 @@ impl BuildColoredTargetDocument {
         format: FieldDocumentFormat,
         source: &str,
     ) -> Result<Self, BuildColoredTargetDocumentError> {
-        let (page_count, visible_height, canonical, identities) = match format {
-            FieldDocumentFormat::Ctk3 => decode_ctk3(source)?,
-            FieldDocumentFormat::Fumen => decode_fumen(source)?,
-        };
+        let (page_count, visible_height, canonical, identities) =
+            decode_colored_pages(format, source)?;
         validate_and_build(page_count, visible_height, canonical, identities)
     }
 
@@ -59,7 +58,19 @@ impl BuildColoredTargetDocument {
     }
 }
 
-type Decoded = (usize, u8, String, Vec<StandardBoard64ColoredTilingIdentity>);
+pub(crate) type Decoded = (usize, u8, String, Vec<StandardBoard64ColoredTilingIdentity>);
+
+// Wire decoding is shared; target documents and required selections deliberately
+// apply different cross-page contracts after these same per-page safety checks.
+pub(crate) fn decode_colored_pages(
+    format: FieldDocumentFormat,
+    source: &str,
+) -> Result<Decoded, BuildColoredTargetDocumentError> {
+    match format {
+        FieldDocumentFormat::Ctk3 => decode_ctk3(source),
+        FieldDocumentFormat::Fumen => decode_fumen(source),
+    }
+}
 
 fn decode_ctk3(source: &str) -> Result<Decoded, BuildColoredTargetDocumentError> {
     let document =

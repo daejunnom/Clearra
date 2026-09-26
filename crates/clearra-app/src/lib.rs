@@ -7,6 +7,7 @@ pub mod app_request;
 pub mod app_response;
 pub mod app_services;
 mod build_colored_target_document;
+mod build_pinned_solution_document;
 mod build_probability_product_result;
 mod build_setup_product_projection;
 mod build_solution_probability_result;
@@ -146,6 +147,7 @@ pub use app_services::{
 pub use build_colored_target_document::{
     BuildColoredTargetDocument, BuildColoredTargetDocumentError,
 };
+pub use build_pinned_solution_document::BuildPinnedSolutionDocument;
 pub use build_probability_product_result::{
     BUILD_FIELD_AVERAGE_CAPABILITY, BUILD_FIELD_AVERAGE_RESULT_CONTRACT,
     BUILD_FIXED_SCORE_CAPABILITY, BUILD_FIXED_SCORE_RESULT_CONTRACT,

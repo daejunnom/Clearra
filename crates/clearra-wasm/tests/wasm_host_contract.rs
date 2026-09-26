@@ -151,6 +151,23 @@ fn build_mirror_source_and_pins_preserve_exact_sets_and_union_probability() {
         if target != "0xf" || mirror != "--include-mirror" {
             continue;
         }
+        // Syntactically valid selections are never proof of membership. Keep
+        // exact-source and source-digest rejection at the real product boundary.
+        for (mask, digest) in [
+            (0x1e_u64, report.normalized_solution_set_hash.as_str()),
+            (0x3c0_u64, "cts1:0000000000000000"),
+        ] {
+            let document = selected_document(&[mask]);
+            let rejected = runtime
+                .run_command_text(&format!(
+                    "clearra build pinned-minimals --base-mask 0 --target-mask 0xf --height 4 \
+                     --queue I --no-hold --objective min-cover --queue-knowledge oracle \
+                     --required-format ctk3 --required-document {document} \
+                     --expected-source-set-hash {digest} --backend cpu --workers 1"
+                ))
+                .expect("valid selection syntax must reach exact-source validation");
+            assert_eq!(rejected.app_response().status(), AppStatus::ExecutionFailed);
+        }
         // Both candidates cover the same queue. A single mirrored pin must
         // select that drawing; requiring both must increase the minimum to two.
         for (masks, expected_pins) in [
