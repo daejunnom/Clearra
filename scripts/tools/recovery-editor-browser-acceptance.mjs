@@ -34,6 +34,7 @@ const fixture = `<script>
   <output hidden data-testid="request">{JSON.stringify({ initial: request.initialBoardMask.toString(),
     first: request.stageOneBoardMask.toString(), final: request.targetBoardMask.toString(),
     hold: request.holdEnabled, roles: request.placementRoleMasks.length, maxEarly: request.maxEarlyPlacements,
+    rolePosition: selectedRolePosition,
     args: boundaryRecoveryArguments(request), undo: workspaceMessage(language,'undo'), redo: workspaceMessage(language,'redo') })}</output>
 </main>`;
 const preprocessor = vitePreprocess();
@@ -67,9 +68,9 @@ const server = createServer((request, response) => {
   } else response.writeHead(404).end();
 });
 const cases = [
-  { language: 'en', width: 1440, touch: false, fields: ['Existing field', 'First-stage field', 'Final field'], hold: 'Hold', exact: 'Require an exact placement for every role', normal: 'Normal only' },
-  { language: 'en', width: 320, touch: true, fields: ['Existing field', 'First-stage field', 'Final field'], hold: 'Hold', exact: 'Require an exact placement for every role', normal: 'Normal only' },
-  { language: 'ko', width: 390, touch: true, fields: ['기존 필드', '1단계 필드', '최종 필드'], hold: '홀드', exact: '각 배치 역할의 정확한 위치 지정', normal: '정상 연결만' },
+  { language: 'en', width: 1440, touch: false, fields: ['Existing field', 'First-stage field', 'Final field'], hold: 'Hold', exact: 'Require an exact placement for every role', normal: 'Normal only', role: 'Placement role to edit (1-based)' },
+  { language: 'en', width: 320, touch: true, fields: ['Existing field', 'First-stage field', 'Final field'], hold: 'Hold', exact: 'Require an exact placement for every role', normal: 'Normal only', role: 'Placement role to edit (1-based)' },
+  { language: 'ko', width: 390, touch: true, fields: ['기존 필드', '1단계 필드', '최종 필드'], hold: '홀드', exact: '각 배치 역할의 정확한 위치 지정', normal: '정상 연결만', role: '편집할 배치 역할 위치 (1부터)' },
 ];
 async function state(page) { return JSON.parse(await page.getByTestId('request').textContent()); }
 async function flush(page) { await page.evaluate(() => new Promise(requestAnimationFrame)); }
@@ -118,6 +119,19 @@ try {
       assert.equal((await state(page)).roles, 2);
       await click(page, page.getByRole('button', { name: spec.normal, exact: true }), spec.touch);
       assert.equal((await state(page)).maxEarly, 0);
+      // Exercise the same exact-name role selector before the expensive WASM
+      // gate, and prove native changes reach the actual component event owner.
+      const role = page.getByRole('combobox', { name: spec.role, exact: true });
+      await role.waitFor();
+      assert.deepEqual(await role.locator('option').evaluateAll(options => options.map(option => option.value)), ['1', '2']);
+      const rolePositions = [(await state(page)).rolePosition];
+      for (const position of ['2', '1']) {
+        await role.selectOption(position);
+        await flush(page);
+        assert.equal(await role.inputValue(), position);
+        rolePositions.push((await state(page)).rolePosition);
+      }
+      assert.deepEqual(rolePositions, [1, 2, 1]);
       const args = (await state(page)).args;
       assert.equal(args[args.indexOf('--initial-board-mask')+1], '0x0000000000000001');
       assert.equal(args[args.indexOf('--stage-one-board-mask')+1], '0x0000000000000002');
@@ -133,7 +147,7 @@ try {
       }
       assert.deepEqual(errors, []);
       await page.screenshot({ path: resolve(reportRoot, `${spec.language}-${spec.width}.png`), fullPage: true });
-      results.push({ ...spec, colors, status: 'passed' });
+      results.push({ ...spec, colors, rolePositions, status: 'passed' });
     } catch(error) {
       await page.screenshot({ path: resolve(reportRoot, `failed-${spec.language}-${spec.width}.png`), fullPage: true });
       throw error;
