@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Verify multiple early recovery roles and quota dropdown
+run-name: Verify automatic early counts and complete pattern traversal
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: clearra-recovery-multiple-review
+  group: clearra-recovery-auto-review
   cancel-in-progress: true
 jobs:
   prepare:
@@ -21,17 +21,17 @@ jobs:
       tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: 370d010fbe54e11b1b45f1a283d6bca13157792a, fetch-depth: 0}
+        with: {ref: 66bb3d3857d54803e7af6b7b646918e2dceaff9f, fetch-depth: 0}
       - name: Install exact formatter
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-      - name: Apply reviewed quota accessibility and test-dependency fix without changing main
+      - name: Apply reviewed automatic quota and pattern defaults without updating main
         id: source
-        run: python scripts/integration/recovery-multiple-20260927/fix-ci.py
+        run: python scripts/integration/recovery-auto-20260927/prepare.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multiple-recovery-source-${{ github.run_id }}
-          path: ${{ runner.temp }}/multiple-recovery-source
+          name: automatic-recovery-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/automatic-recovery-source
           if-no-files-found: warn
           retention-days: 14
   frontend:
@@ -60,7 +60,7 @@ jobs:
           pnpm install --frozen-lockfile --ignore-scripts
           npm install --prefix "$CLEARRA_BROWSER_TOOLS_ROOT" --ignore-scripts --no-audit --no-fund playwright@1.56.1
           node "$CLEARRA_BROWSER_TOOLS_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
-      - name: Exercise actual dropdown and preserved card controls
+      - name: Exercise actual automatic dropdown and preserved card controls
         shell: bash
         run: |
           set -euo pipefail
@@ -70,7 +70,7 @@ jobs:
               node "scripts/tools/$source.mjs" || status=1
             done
             exit "$status"
-          } 2>&1 | tee "$RUNNER_TEMP/multiple-browser.log"
+          } 2>&1 | tee "$RUNNER_TEMP/automatic-browser.log"
       - name: Test full UI worker and Discord request contracts
         if: ${{ !cancelled() }}
         shell: bash
@@ -82,21 +82,21 @@ jobs:
             pnpm --filter @clearra/web run test
             pnpm --filter ctk3 run build
             node --test apps/clearra-discord-bot/test/boundary-recovery-input.test.mjs
-          } 2>&1 | tee "$RUNNER_TEMP/multiple-contracts.log"
+          } 2>&1 | tee "$RUNNER_TEMP/automatic-contracts.log"
       - name: Run canonical release regressions on Linux
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/tools/run-release-regression-tests.mjs 2>&1 | tee "$RUNNER_TEMP/multiple-release-regressions.log"
+          node scripts/tools/run-release-regression-tests.mjs 2>&1 | tee "$RUNNER_TEMP/automatic-release-regressions.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multiple-recovery-frontend-${{ matrix.os }}-${{ github.run_id }}
+          name: automatic-recovery-frontend-${{ matrix.os }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/multiple-browser.log
-            ${{ runner.temp }}/multiple-contracts.log
-            ${{ runner.temp }}/multiple-release-regressions.log
+            ${{ runner.temp }}/automatic-browser.log
+            ${{ runner.temp }}/automatic-contracts.log
+            ${{ runner.temp }}/automatic-release-regressions.log
             ${{ runner.temp }}/clearra-recovery-editor-acceptance
             ${{ runner.temp }}/clearra-solution-toolbar-acceptance
             ${{ runner.temp }}/clearra-control-acceptance
@@ -105,7 +105,7 @@ jobs:
   native:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
       CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
@@ -114,35 +114,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
-      - name: Test concrete two and three role witnesses and deferred B2B locks
+      - name: Compare Auto with explicit quota union and exercise unlimited identities
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt --all --check
-          cargo test --locked -p clearra-forward-search --lib boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/multiple-core.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/multiple-core.log"
-      - name: Test public CLI execution and legacy selected-role compatibility
+          cargo test --locked -p clearra-forward-search --lib boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/automatic-core.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/automatic-core.log"
+      - name: Test public CLI and exact legacy selected-role compatibility
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p clearra-cli-command --test boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/multiple-cli.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/multiple-cli.log"
-      - name: Match nullable multi-role JSON to the typed host payload
+          cargo test --locked -p clearra-cli-command --test boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/automatic-cli.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/automatic-cli.log"
+      - name: Match automatic mode JSON with typed payload and real WASM host execution
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p clearra-wasm --lib weighted_boundary_recovery_payload_is_lossless_json -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/multiple-wire.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/multiple-wire.log"
+          cargo test --locked -p clearra-wasm --lib weighted_boundary_recovery_payload_is_lossless_json -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/automatic-json.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/automatic-json.log"
+          cargo test --locked -p clearra-wasm --test boundary_recovery_auto_wire -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/automatic-wire.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/automatic-wire.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multiple-recovery-native-${{ github.run_id }}
+          name: automatic-recovery-native-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/multiple-core.log
-            ${{ runner.temp }}/multiple-cli.log
-            ${{ runner.temp }}/multiple-wire.log
+            ${{ runner.temp }}/automatic-core.log
+            ${{ runner.temp }}/automatic-cli.log
+            ${{ runner.temp }}/automatic-json.log
+            ${{ runner.temp }}/automatic-wire.log
           if-no-files-found: warn
           retention-days: 14
   acceptance:
@@ -187,14 +190,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'multiple-acceptance.log')
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'automatic-acceptance.log')
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multiple-recovery-acceptance-${{ matrix.shard }}-${{ github.run_id }}
+          name: automatic-recovery-acceptance-${{ matrix.shard }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/multiple-acceptance.log
+            ${{ runner.temp }}/automatic-acceptance.log
             ${{ runner.temp }}/clearra-surface-acceptance
             ${{ runner.temp }}/clearra-recovery-editor-acceptance
           if-no-files-found: warn
@@ -212,5 +215,5 @@ jobs:
           results = json.loads(os.environ['RESULTS'])
           failed = {key: value['result'] for key, value in results.items() if value['result'] != 'success'}
           if failed: raise RuntimeError(json.dumps(failed))
-          print('Exact multi-role recovery accepted:', results['prepare']['outputs']['candidate'])
-          print('Main and all deployments are unchanged. Independent push-based management protection is required before any promotion.')
+          print('Automatic declared-role recovery accepted:', results['prepare']['outputs']['candidate'])
+          print('No main update or deployment. Two-Build-catalog integration remains a separate requirement; this gate does not claim it is implemented.')
