@@ -97,7 +97,7 @@ fn wasm_worker_event_maps_to_host_contract_job_event() {
 // Exercise the public command runtime, not a synthetic coverage/result fixture.
 const LEFT_I: &str = "ctk1|initial=0000000000000000|placements=I:000000000000000f";
 const RIGHT_I: &str = "ctk1|initial=0000000000000000|placements=I:00000000000003c0";
-const CENTER_I: &str = "ctk1|initial=0000000000000000|placements=I:0000000000000000078";
+const CENTER_I: &str = "ctk1|initial=0000000000000000|placements=I:0000000000000078";
 
 fn selected_document(masks: &[u64]) -> String {
     let pages = masks
