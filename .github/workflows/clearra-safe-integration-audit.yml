@@ -21,92 +21,13 @@ jobs:
       tree: ${{ steps.prepare.outputs.tree }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: 91c099731884f0b8e6dd744f34e4b66ed0f51a84
-          fetch-depth: 0
+        with: {ref: f4e797027219038f5711e909024a5234037d4827, fetch-depth: 0}
       - name: Install the exact formatter
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-      - name: Apply reviewed source edits and fast-forward only the candidate
+      - name: Apply exact reviewed source without updating main
         id: prepare
         env: {GH_TOKEN: '${{ github.token }}'}
-        shell: python
-        run: |
-          import hashlib,json,os,pathlib,subprocess
-          def cmd(*args): return subprocess.check_output(args,text=True,timeout=120).strip()
-          def git(*args): return cmd('git',*args)
-          def blob(text):
-              data=text.encode('utf-8')
-              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
-          base='521fee125b478a5a39a90a808d6c471c430c8494'
-          parent='246e1c5ee9a743ab9a24ba731af55ccc6b805ddd'
-          branch='codex/recovery-gray-fields-20260926'
-          spec_root=pathlib.Path('scripts/integration/ui-polish-20260927')
-          documents=[json.loads((spec_root/name).read_text()) for name in
-                     ['core-edits.json','ui-edits.json','completion-1.json','completion-2.json','completion-3.json']]
-          # The recovered English-help record contained a stale digest only.
-          # Its reviewed replacement bytes include a literal newline; bind that
-          # exact text here and also verify the entire resulting source tree.
-          english=next(x for x in documents[0] if x['path']=='crates/clearra-cli/src/args/cli_parser.rs')
-          if english['after']!='ba5822cb62503c19e2c077f72bab0f42e80c7863':
-              raise RuntimeError('Recovered help manifest changed')
-          english['after']='5b53655bee6fa1c49fd5d88e68f8a40a60408a42'
-          expected=sorted({x['path'] for group in documents for x in group})
-          if len(expected)!=37: raise RuntimeError('Unexpected reviewed scope')
-          for path in expected:
-              p=pathlib.PurePosixPath(path)
-              if p.is_absolute() or '..' in p.parts or p.parts[0] not in {'crates','packages','scripts'}:
-                  raise RuntimeError('Invalid source path')
-          def refs():
-              for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,parent)]:
-                  if git('ls-remote','origin',ref).split()!=[sha,ref]:
-                      raise RuntimeError('Reviewed ref moved; reconcile before applying')
-          refs()
-          git('checkout','--detach',parent)
-          if git('rev-parse','HEAD^{tree}')!='1d40c2161033065fdb7036c2ae7b535e50a64691':
-              raise RuntimeError('Reviewed parent tree mismatch')
-          git('merge-base','--is-ancestor',base,parent)
-          for group in documents:
-              for item in group:
-                  path=pathlib.Path(item['path'])
-                  if path.is_symlink(): raise RuntimeError('Source path is a link')
-                  old=path.read_text() if path.exists() else None
-                  if (blob(old) if old is not None else None)!=item['before']:
-                      raise RuntimeError('Source before digest mismatch: '+str(path))
-                  text=old or ''
-                  end=0
-                  for first,last,value in item['edits']:
-                      if not (isinstance(first,int) and isinstance(last,int) and isinstance(value,str) and end<=first<=last<=len(text)):
-                          raise RuntimeError('Invalid nonoverlapping edit')
-                      end=last
-                  for first,last,value in reversed(item['edits']): text=text[:first]+value+text[last:]
-                  if blob(text)!=item['after']: raise RuntimeError('Source after digest mismatch: '+str(path))
-                  path.parent.mkdir(parents=True,exist_ok=True)
-                  path.write_text(text)
-          git('add','--',*expected)
-          if git('write-tree')!='0028b7b2b173c21e3a18eb58371de555b17d4088':
-              raise RuntimeError('Complete reviewed source tree mismatch')
-          subprocess.run(['cargo','+1.98.1','fmt','--all'],check=True,timeout=120)
-          if git('diff','HEAD','--name-only').splitlines()!=expected:
-              raise RuntimeError('Formatter changed unreviewed files')
-          git('add','--',*expected)
-          git('diff','--cached','--check')
-          subprocess.run(['cargo','+1.98.1','fmt','--all','--check'],check=True,timeout=120)
-          tree=git('write-tree')
-          output=pathlib.Path(os.environ['RUNNER_TEMP'])/'ui-polish-source';output.mkdir()
-          (output/'complete.patch').write_text(git('diff','--cached','--binary')+'\n')
-          git('config','user.name','github-actions[bot]')
-          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-          git('commit','-m','feat: streamline mandatory solution controls and infer recovery placement counts')
-          candidate=git('rev-parse','HEAD')
-          if git('show','-s','--format=%P',candidate)!=parent: raise RuntimeError('Candidate parent mismatch')
-          refs()
-          git('push','origin',candidate+':refs/heads/'+branch)
-          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate: raise RuntimeError('Candidate readback mismatch')
-          receipt={'source_commit':candidate,'parent':parent,'base':base,'tree':tree,'files':expected,'main_written':False}
-          (output/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
-          print(json.dumps(receipt),flush=True)
-          subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True,timeout=120)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidate='+candidate+'\ntree='+tree+'\n')
+        run: python scripts/integration/ui-polish-20260927/apply-reviewed.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
