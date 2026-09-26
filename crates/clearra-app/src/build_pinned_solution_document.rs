@@ -121,8 +121,12 @@ mod tests {
                 BuildColoredTargetDocumentError::TargetAreaDiffers,
             ),
             (
-                vec![page(0, 0)],
+                vec![page(0, 0x10)],
                 BuildColoredTargetDocumentError::TargetEmpty,
+            ),
+            (
+                vec![page(0, 0)],
+                BuildColoredTargetDocumentError::HeightInvalid,
             ),
             (
                 vec![page(0x7, 0)],
