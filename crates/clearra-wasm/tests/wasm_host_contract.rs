@@ -120,16 +120,21 @@ fn selected_document(masks: &[u64]) -> String {
 
 #[test]
 fn build_mirror_source_and_pins_preserve_exact_sets_and_union_probability() {
-    // The native test must not depend on an enlarged CI RUST_MIN_STACK. Each
-    // response is inspected in its own frame and dropped before the next query.
-    // Match the existing native runtime contract even when CI supplies 16 MiB.
+    // Own the same 16 MiB budget as the existing native Build integration tests
+    // instead of relying on CI's RUST_MIN_STACK. Optimized production code is
+    // separately exercised on two MiB; the PC two MiB contract is unchanged.
+    let stack_bytes = if cfg!(debug_assertions) {
+        16 * 1024 * 1024
+    } else {
+        2 * 1024 * 1024
+    };
     std::thread::Builder::new()
-        .name("build-mirror-and-pins-2mib".to_owned())
-        .stack_size(2 * 1024 * 1024)
+        .name("build-mirror-and-pins".to_owned())
+        .stack_size(stack_bytes)
         .spawn(assert_build_mirror_and_pins)
-        .expect("spawn the explicit two MiB Build contract thread")
+        .expect("spawn the explicitly bounded native Build contract thread")
         .join()
-        .expect("Build mirror and pin contract must fit two MiB");
+        .expect("Build mirror and pin contract exceeded its native stack budget");
 }
 
 fn assert_build_mirror_and_pins() {
