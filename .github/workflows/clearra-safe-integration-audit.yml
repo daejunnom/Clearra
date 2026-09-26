@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Validate isolated recovery fields and shared controls
+run-name: Validate reactive recovery fields and shared controls
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -14,93 +14,57 @@ jobs:
   prepare:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions: {contents: write, actions: write}
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: 793415affc1d0d5a38170d7396bf82e290f60904
-          fetch-depth: 0
-      - name: Install the pinned formatter
-        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-      - name: Apply the reviewed patch to an isolated branch, never main
+        with: {ref: ed0fc10be925744d44e379d463db8d04d9f740d6, fetch-depth: 0}
+      - name: Apply only the reviewed reactive-color fix to the isolated candidate
         id: prepare
         env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import base64,hashlib,json,os,pathlib,subprocess,zlib
+          import hashlib,json,os,pathlib,subprocess
           repo='daejunnom/Clearra'
           base='521fee125b478a5a39a90a808d6c471c430c8494'
-          base_tree='ba8f0617b2d2011fa80a9a808d141c9adc916278'
+          parent='eccfdbf5c6db5da76d71f69b75e27a3f80d4085f'
           branch='codex/recovery-gray-fields-20260926'
-          expected={
-              'crates/clearra-cli-command/src/web_command_parser.rs':'c7be62b6e803d3fd39d720c4e6fb2f47f33ca37e',
-              'crates/clearra-cli-command/tests/boundary_recovery.rs':'06f120a7bdeb9a0c4d134c0c0cbb37570c15acb4',
-              'crates/clearra-forward-search/src/boundary_recovery.rs':'e5883bbdf9d4819dd1f318fbf4ab0ffbdf70c139',
-              'crates/clearra-forward-search/src/boundary_recovery_pattern.rs':'e3ed9e6b579b4d332be1453f404ef34fe0b43aca',
-              'crates/clearra-forward-search/src/boundary_recovery_population.rs':'60205da535bd2f27d97edb730b730ecab6cef2b0',
-              'crates/clearra-forward-search/src/boundary_recovery_tests.rs':'dea823d6e8fed5d0a4481c8164f0f1ff37c33656',
-              'packages/clearra-ui/src/lib/i18n/componentCatalog.ts':'34c2d4b8cd4119eb25b83ed4b147c5f98a4dcba4',
-              'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryControls.svelte':'ad688d7fb0f3dfafa339befeca7fd27c83568195',
-              'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryFields.svelte':'2e5c5db8066a6555527f7b13c9d5188d0140e391',
-              'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte':'82d2e0d7c30b3187972b244485ffe11e6058cf05',
-              'packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte':'a1939b315a0d1fdc8fdd6753708d65044806a833',
-              'packages/clearra-ui/src/lib/workspace/boundaryRecoveryModel.ts':'1039176d4aafe61865c5577fd4334b2dbde71c59',
-              'packages/clearra-ui/test/boundaryRecoveryFields.test.mjs':'00a5b884fcb4abbd9b9d3c34e8e3433182627ccf',
-              'scripts/desktop-ui-compile-check.mjs':'a4d4213b5b2bf23afd3686492da4e026c482174b',
-              'scripts/lib/wasm-release-gate.ps1':'8ad0356f6e2202b4b7606682729bd007aeba9c8d',
-              'scripts/tools/recovery-editor-browser-acceptance.mjs':'1debb830486f46297985b4ee458826b46c3771ac',
-              'scripts/tools/surface-browser-acceptance.mjs':'b74ffc105abd8eab856a9e67a679061e03ab6c2e'}
-          def cmd(*args): return subprocess.check_output(args,text=True,timeout=180).strip()
+          expected={'packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte':'ed64aaf449ad4f13839152c3844fb6e7c6639d72',
+              'scripts/tools/recovery-editor-browser-acceptance.mjs':'9de5dfdb1a92a3b210082fad099a30a43f9e495f'}
+          def cmd(*args): return subprocess.check_output(args,text=True,timeout=120).strip()
           def git(*args): return cmd('git',*args)
           def api(path): return json.loads(cmd('gh','api','repos/'+repo+'/'+path))
-          # These three checked-in chunks transport one previously reviewed text
-          # patch. Bound decoding and verify its raw digest before applying it.
-          encoded=''.join(pathlib.Path('scripts/integration/recovery-fields-review-20260926.part'+str(i)).read_text().strip() for i in (1,2,3))
-          if len(encoded)!=23820: raise RuntimeError('Patch transport length changed')
-          packed=base64.b64decode(encoded,validate=True)
-          decoder=zlib.decompressobj()
-          patch=decoder.decompress(packed,71357)
-          if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail or len(patch)!=71356:
-              raise RuntimeError('Patch decoding exceeded its exact bound')
-          if hashlib.sha256(patch).hexdigest()!='836872d6bc76874863c98bc6a952f8a9b35b983ee6535ec59ac2d56bc46b9abe':
+          patch=pathlib.Path('scripts/integration/recovery-fields-reactivity-20260926.patch').read_bytes()
+          if hashlib.sha256(patch).hexdigest()!='b4c06d839f4501f9437493ef4320b7e8c3a7e2d0444118bfe7d40b3701a9bf98':
               raise RuntimeError('Reviewed patch digest mismatch')
-          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'recovery-preparation'
-          out.mkdir()
-          patch_path=out/'reviewed.patch'; patch_path.write_bytes(patch)
-          if git('ls-remote','origin','refs/heads/'+branch):
-              raise RuntimeError('Recovery branch already exists; inspect rather than overwrite')
-          if api('git/ref/heads/main')['object']['sha']!=base:
-              raise RuntimeError('Main moved; reconcile exact menu source first')
-          git('checkout','--detach',base)
-          if git('rev-parse','HEAD^{tree}')!=base_tree: raise RuntimeError('Base tree mismatch')
-          git('apply','--check',str(patch_path)); git('apply','--index',str(patch_path))
-          if git('diff','--cached','--name-only').splitlines()!=sorted(expected):
-              raise RuntimeError('Patch scope differs from review')
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'recovery-preparation';out.mkdir()
+          patch_path=out/'reviewed.patch';patch_path.write_bytes(patch)
+          if api('git/ref/heads/main')['object']['sha']!=base or api('git/ref/heads/'+branch)['object']['sha']!=parent:
+              raise RuntimeError('Reviewed refs moved')
+          git('checkout','--detach',parent)
+          if git('rev-parse','HEAD^{tree}')!='a0910e6f46467e48e405aaaec3606ec8751da334': raise RuntimeError('Parent tree mismatch')
+          git('apply','--check',str(patch_path));git('apply','--index',str(patch_path))
+          if git('diff','--cached','--name-only').splitlines()!=sorted(expected): raise RuntimeError('Scope mismatch')
           for path,blob in expected.items():
-              if git('hash-object',path)!=blob: raise RuntimeError('Reviewed file differs: '+path)
-          subprocess.run(['cargo','+1.98.1','fmt','--all'],check=True,timeout=120)
-          if git('diff','HEAD','--name-only').splitlines()!=sorted(expected):
-              raise RuntimeError('Formatter changed unrelated files')
-          git('add','--',*sorted(expected)); git('diff','--cached','--check')
-          subprocess.run(['cargo','+1.98.1','fmt','--all','--check'],check=True,timeout=120)
-          (out/'formatted.patch').write_text(git('diff','--cached','--binary')+'\n')
+              if git('hash-object',path)!=blob: raise RuntimeError('Content mismatch: '+path)
+          git('diff','--cached','--check')
           git('config','user.name','github-actions[bot]')
           git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-          git('commit','-m','feat: share recovery field editor and preserve explicit first-stage targets')
-          candidate=git('rev-parse','HEAD'); tree=git('rev-parse','HEAD^{tree}')
-          if git('show','-s','--format=%P',candidate)!=base: raise RuntimeError('Wrong parent')
-          if git('ls-remote','origin','refs/heads/'+branch): raise RuntimeError('Branch created concurrently')
+          git('commit','-m','fix: track recovery field paint state when applying gray tones')
+          candidate=git('rev-parse','HEAD');tree=git('rev-parse','HEAD^{tree}')
+          if git('show','-s','--format=%P',candidate)!=parent: raise RuntimeError('Parent mismatch')
+          if api('git/ref/heads/'+branch)['object']['sha']!=parent: raise RuntimeError('Candidate changed concurrently')
           git('push','origin',candidate+':refs/heads/'+branch)
           if api('git/ref/heads/'+branch)['object']['sha']!=candidate: raise RuntimeError('Push readback mismatch')
-          receipt={'candidate':candidate,'parent':base,'tree':tree,'branch':branch,'changed_files':sorted(expected),
-              'formatted_blobs':{path:git('hash-object',path) for path in sorted(expected)},'main_updated':False,'publishing':False}
+          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'branch':branch,
+              'changed_files':git('diff','--name-only',base,candidate).splitlines(),'main_updated':False,'publishing':False}
           (out/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          (out/'complete.patch').write_text(git('diff','--binary',base,candidate)+'\n')
           print(json.dumps(receipt),flush=True)
           subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True,timeout=120)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidate='+candidate+'\n')
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -139,11 +103,11 @@ jobs:
           set -euo pipefail
           {
             node --test packages/clearra-ui/test/boundaryRecoveryFields.test.mjs
-            pnpm --filter @clearra/ui run test
-            pnpm --filter @clearra/web run test
             node scripts/desktop-ui-compile-check.mjs
             node scripts/tools/recovery-editor-browser-acceptance.mjs
             node scripts/tools/workspace-controls-browser-acceptance.mjs
+            pnpm --filter @clearra/ui run test
+            pnpm --filter @clearra/web run test
             node scripts/tools/run-release-regression-tests.mjs
           } 2>&1 | tee "$RUNNER_TEMP/recovery-frontend.log"
       - uses: actions/upload-artifact@v4
