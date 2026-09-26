@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
-  import { BoundaryRecoveryWorkspace, BuildProbabilityWorkspace, BuildV2Workspace, CtkDrawerWorkspace, DocumentUtilityWorkspace, ForwardSearchWorkspace, OperationSequenceWorkspace, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SequenceDependenciesWorkspace, SetupFinderWorkspace, SetupScoreWorkspace, SolverWorkspace, SpinStructureWorkspace } from '@clearra/ui/workspace';
+  import { BoundaryRecoveryWorkspace, BuildProbabilityWorkspace, BuildV2Workspace, CtkDrawerWorkspace, DocumentUtilityWorkspace, ForwardSearchWorkspace, OperationSequenceWorkspace, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SequenceDependenciesWorkspace, SetupFinderWorkspace, SetupScoreWorkspace, SolverWorkspace, SpinStructureWorkspace, WORKSPACE_MODE_VISIBILITY_CONTEXT, type WorkspaceMode } from '@clearra/ui/workspace';
   import {
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     sharedBrowserHostCapabilitySnapshot
@@ -13,6 +13,14 @@
   import { isLocalSearchProfileMode, localSearchProfileText } from '../lib/localSearchProfile';
   import Pc4DownloadPanel from '../lib/Pc4DownloadPanel.svelte';
   setContext('clearra.pc4-download-control.v1', Pc4DownloadPanel);
+
+  // Pages publishes this product menu, not every tool implemented by the shared
+  // library. Keep direct tool links and the desktop menu independent of it.
+  const pagesModes = [
+    'pc', 'setup', 'build-probability', 'recovery',
+    'damage', 'spin-finder', 'ctk', 'player'
+  ] as const satisfies readonly WorkspaceMode[];
+  setContext(WORKSPACE_MODE_VISIBILITY_CONTEXT, pagesModes);
 
   const showLocalProfile = isLocalSearchProfileMode(import.meta.env.MODE);
   let localProfile = '';
