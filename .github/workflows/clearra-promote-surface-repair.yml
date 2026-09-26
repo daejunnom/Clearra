@@ -1,5 +1,5 @@
 name: Start verified release gates
-run-name: Deploy recovery after committed-view navigation acceptance
+run-name: Publish accepted mandatory toolbar and automatic recovery
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -21,28 +21,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 246e1c5ee9a743ab9a24ba731af55ccc6b805ddd
+          ref: 51084c78c3a06f355a352b4c013314c151c47709
           fetch-depth: 0
           persist-credentials: true
-      - name: Require exact acceptance then fast-forward and start canonical gates
+      - name: Require exact UI acceptance then fast-forward and start canonical gates
         env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import json, os, pathlib, subprocess, time
+          import hashlib, json, os, pathlib, subprocess, time, zipfile
 
           REPO = 'daejunnom/Clearra'
           BASE = '521fee125b478a5a39a90a808d6c471c430c8494'
-          SOURCE = '246e1c5ee9a743ab9a24ba731af55ccc6b805ddd'
-          PARENT = '29c268e095f6a6f8ce66cdf57c8c451481b29873'
-          TREE = '1d40c2161033065fdb7036c2ae7b535e50a64691'
-          GATE_ID = 36250381491
-          GATE_CONTROL = '80a863782b5a1b29c303eeb7c5f6f5604dabb260'
-          GATE_WORKFLOW_BLOB = 'bf7b3e83db8907f7dfae470616a7b9f7672fcbaf'
+          SOURCE = '51084c78c3a06f355a352b4c013314c151c47709'
+          PARENT = '6d1d5ca38f6019b62a640eb2976f5d38cc8ddd56'
+          TREE = '1de6091e27351282dc4a4fe9e4aacc455beecef0'
+          GATE_ID = 36258323208
+          GATE_CONTROL = '7fb9c4e63b4cd58c121cc851bb13bab6db33b701'
+          GATE_WORKFLOW_BLOB = '786a391a16387af768ad12050fe857844e870863'
           BRANCH = 'codex/recovery-gray-fields-20260926'
+          SOURCE_ARTIFACT_ID = 10911930346
+          SOURCE_ARTIFACT_DIGEST = 'e866611d14b38636ce755fd9a611c0f5c57ba11b7c9f44bf86bc3dcaf1f3ab4a'
           EXPECTED = [
+              'crates/clearra-app/src/commands/boundary_recovery_app_command.rs',
               'crates/clearra-cli-command/src/web_command_parser.rs',
+              'crates/clearra-cli-command/src/web_command_request.rs',
               'crates/clearra-cli-command/tests/boundary_recovery.rs',
+              'crates/clearra-cli/src/args/cli_parser.rs',
+              'crates/clearra-cli/src/args/japanese_help_draft.rs',
               'crates/clearra-forward-search/src/boundary_recovery.rs',
+              'crates/clearra-forward-search/src/boundary_recovery_auto.rs',
               'crates/clearra-forward-search/src/boundary_recovery_pattern.rs',
               'crates/clearra-forward-search/src/boundary_recovery_population.rs',
               'crates/clearra-forward-search/src/boundary_recovery_tests.rs',
@@ -50,19 +57,37 @@ jobs:
               'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryControls.svelte',
               'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryFields.svelte',
               'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte',
+              'packages/clearra-ui/src/lib/workspace/BuildProbabilityControls.svelte',
+              'packages/clearra-ui/src/lib/workspace/BuildProbabilityResult.svelte',
+              'packages/clearra-ui/src/lib/workspace/BuildProbabilityWorkspace.svelte',
+              'packages/clearra-ui/src/lib/workspace/MandatorySelectionSummary.svelte',
+              'packages/clearra-ui/src/lib/workspace/PcSolverResult.svelte',
+              'packages/clearra-ui/src/lib/workspace/PcSolverStandalone.svelte',
+              'packages/clearra-ui/src/lib/workspace/ProductResultPager.svelte',
+              'packages/clearra-ui/src/lib/workspace/ResultWorkspace.svelte',
+              'packages/clearra-ui/src/lib/workspace/RuleProfileSelect.svelte',
+              'packages/clearra-ui/src/lib/workspace/SearchControls.svelte',
+              'packages/clearra-ui/src/lib/workspace/SolutionGallery.svelte',
+              'packages/clearra-ui/src/lib/workspace/SolutionSubsetPage.svelte',
+              'packages/clearra-ui/src/lib/workspace/SolutionToolbar.svelte',
+              'packages/clearra-ui/src/lib/workspace/SolverWorkspace.svelte',
+              'packages/clearra-ui/src/lib/workspace/SpinProfileSelect.svelte',
               'packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte',
+              'packages/clearra-ui/src/lib/workspace/WorkspaceToggle.svelte',
               'packages/clearra-ui/src/lib/workspace/boundaryRecoveryModel.ts',
+              'packages/clearra-ui/test/boundaryRecoveryAutomatic.test.mjs',
               'packages/clearra-ui/test/boundaryRecoveryFields.test.mjs',
               'scripts/desktop-ui-compile-check.mjs',
               'scripts/lib/wasm-release-gate.ps1',
               'scripts/tools/recovery-editor-browser-acceptance.mjs',
+              'scripts/tools/solution-toolbar-browser-acceptance.mjs',
               'scripts/tools/surface-browser-acceptance.mjs',
           ]
           SHARDS = ['FoundationNoProductDebt', 'FoundationAdversarialCorrectness',
                     'FoundationDesktopHost', 'Sanitizer', 'RustExact', 'RustProduct', 'Pages']
           EXPECTED_JOBS = {'prepare', 'frontend (ubuntu-latest)', 'frontend (windows-latest)',
                            'exact-recovery', 'ready', *(f'acceptance ({s})' for s in SHARDS)}
-          receipt_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'recovery-publication.json'
+          receipt_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'ui-polish-publication.json'
           receipt = {'source_commit': SOURCE, 'source_tree': TREE, 'base': BASE,
                      'validation_run_id': GATE_ID, 'validation_control_sha': GATE_CONTROL,
                      'main_written': False, 'tag_written': False, 'stage': 'validating'}
@@ -93,7 +118,7 @@ jobs:
               if main not in ({BASE, SOURCE} if allow_promoted else {SOURCE}):
                   raise RuntimeError('Main moved; reconcile instead of overwriting it')
               if api('git/ref/heads/' + BRANCH)['object']['sha'] != SOURCE:
-                  raise RuntimeError('Recovery candidate moved')
+                  raise RuntimeError('Reviewed UI candidate moved')
               return main
 
           def runs_for(path):
@@ -115,7 +140,6 @@ jobs:
               body = {'ref': 'main'}
               if inputs is not None:
                   body['inputs'] = inputs
-              # Resolve an accepted empty response by reads, never another POST.
               subprocess.run(['gh', 'api', '--method', 'POST', 'repos/' + REPO + '/actions/workflows/' + path + '/dispatches', '--input', '-'],
                              input=json.dumps(body), text=True, check=True, timeout=120)
               for _ in range(24):
@@ -141,32 +165,31 @@ jobs:
               raise RuntimeError('Validation workflow definition mismatch')
           require_refs()
 
-          # This candidate branch is outside management-policy.yml's push
-          # filter. Start its real independent checks once, never copy an old
-          # commit's protection status onto the corrected source.
-          def policy_runs():
-              return [r for r in collection('actions/runs?head_sha=' + SOURCE + '&event=workflow_dispatch&per_page=100', 'workflow_runs')
-                      if r['head_branch'] == BRANCH and r['path'] == '.github/workflows/management-policy.yml']
-          policy = policy_runs()
-          if not policy:
-              receipt['dispatch_intent'] = 'management-policy.yml'
-              save()
-              subprocess.run(['gh', 'api', '--method', 'POST', 'repos/' + REPO + '/actions/workflows/management-policy.yml/dispatches', '--input', '-'],
-                             input=json.dumps({'ref': BRANCH}), text=True, check=True, timeout=120)
-              for _ in range(24):
-                  policy = policy_runs()
-                  if policy:
-                      break
-                  time.sleep(5)
-          if len(policy) != 1 or policy[0]['run_attempt'] != 1:
-              raise RuntimeError('Independent protection dispatch identity unresolved; inspect before retrying')
-          if policy[0]['status'] == 'completed' and policy[0]['conclusion'] != 'success':
-              raise RuntimeError('Independent protection failed: ' + str(policy[0]['id']))
-          require_refs()
-          receipt['management_policy_run_id'] = policy[0]['id']
-          receipt.pop('dispatch_intent', None)
+          # The gate's prepare job generated a commit. Bind its exact receipt,
+          # not the control branch SHA, and never execute downloaded artifacts.
+          metadata = api('actions/artifacts/' + str(SOURCE_ARTIFACT_ID))
+          if (metadata['name'] != 'ui-polish-source-' + str(GATE_ID) or metadata['expired']
+                  or metadata['workflow_run']['id'] != GATE_ID
+                  or metadata['workflow_run']['head_sha'] != GATE_CONTROL
+                  or metadata['digest'] != 'sha256:' + SOURCE_ARTIFACT_DIGEST):
+              raise RuntimeError('Source preparation artifact identity mismatch')
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'ui-polish-source.zip'
+          with archive.open('xb') as output:
+              subprocess.run(['gh', 'api', 'repos/' + REPO + '/actions/artifacts/' + str(SOURCE_ARTIFACT_ID) + '/zip'],
+                             stdout=output, check=True, timeout=120)
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != SOURCE_ARTIFACT_DIGEST:
+              raise RuntimeError('Source preparation artifact checksum mismatch')
+          with zipfile.ZipFile(archive) as bundle:
+              if bundle.namelist().count('receipt.json') != 1 or bundle.getinfo('receipt.json').file_size > 65536:
+                  raise RuntimeError('Ambiguous or oversized source receipt')
+              prepared = json.loads(bundle.read('receipt.json'))
+          for field, expected in [('source_commit', SOURCE), ('parent', PARENT), ('base', BASE), ('tree', TREE)]:
+              if prepared.get(field) != expected:
+                  raise RuntimeError('Prepared source mismatch: ' + field)
+          if prepared.get('main_written') is not False:
+              raise RuntimeError('Source preparation unexpectedly promoted main')
+          receipt['source_artifact_id'] = SOURCE_ARTIFACT_ID
           save()
-          print('Independent protection run:', policy[0]['id'], flush=True)
 
           deadline = time.monotonic() + 9000
           while True:
@@ -182,7 +205,8 @@ jobs:
                   break
               if time.monotonic() >= deadline:
                   raise RuntimeError('Validation wait exceeded its finite deadline')
-              print('Waiting for exact recovery acceptance', GATE_ID, gate['status'], flush=True)
+              require_refs()
+              print('Waiting for exact UI acceptance', GATE_ID, gate['status'], flush=True)
               time.sleep(30)
 
           jobs = collection('actions/runs/' + str(GATE_ID) + '/attempts/1/jobs?per_page=100', 'jobs')
@@ -199,7 +223,8 @@ jobs:
           receipt['validated_jobs'] = sorted(EXPECTED_JOBS)
           save()
           if require_refs() == BASE:
-              # A normal fast-forward subject to repository protection, never force.
+              # Subject to repository protection. A rejection stops here; never
+              # force, forge a status, or modify a repository rule to promote.
               subprocess.run(['git', 'push', 'origin', SOURCE + ':refs/heads/main'], check=True, timeout=120)
               receipt['main_written'] = True
           require_refs(False)
@@ -217,13 +242,13 @@ jobs:
           save()
           print(json.dumps(receipt, indent=2), flush=True)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
-              f.write('## Exact recovery release gates started\n\n')
+              f.write('## Exact UI release gates started\n\n')
               f.write(f'Source: `{SOURCE}`\n\nRelease/Tauri: `{release["id"]}`\n\nPages queue: `{queue["id"]}`\n\n')
-              f.write('The Pages queue waits for canonical acceptance and captures the existing rollback payload. No tag or final GitHub Release was created here.\n')
+              f.write('Pages waits for canonical acceptance and rollback capture. Discord follows the existing exact-source release-success path. No tag or final GitHub Release is created here.\n')
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: recovery-publication-${{ github.run_id }}
-          path: ${{ runner.temp }}/recovery-publication.json
+          name: ui-polish-publication-${{ github.run_id }}
+          path: ${{ runner.temp }}/ui-polish-publication.json
           if-no-files-found: warn
           retention-days: 30
