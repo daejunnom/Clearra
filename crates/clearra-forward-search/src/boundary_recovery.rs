@@ -90,8 +90,9 @@ pub struct BoundaryRecoveryQuery {
     /// adapters retain reference roles while permuting supply tokens.
     pub placement_role_pieces: Vec<PieceKind>,
     /// Maximum cumulative second-stage locks before the first-stage checkpoint.
-    /// Cleared or compacted early cells still count. Zero proves normal paths only.
-    pub max_early_placements: u8,
+    /// None explores every feasible early count; Some(0) proves normal paths only.
+    /// Cleared or compacted early cells still count. This is a role constraint, not a work budget.
+    pub max_early_placements: Option<u8>,
     pub early_placement: EarlyPlacementPolicy,
     pub hold_enabled: bool,
     pub rule_profile: RuleProfileId,
@@ -298,6 +299,18 @@ struct Pass<'a> {
 }
 
 impl BoundaryRecoveryQuery {
+    /// Resolves Auto using only the finite declared role set. A completed role
+    /// cannot be filled twice, so this structural maximum removes no path.
+    /// Validation must precede execution; saturating subtraction keeps draft
+    /// reporting safe without accepting an invalid stage boundary.
+    pub fn effective_max_early_placements(&self) -> u8 {
+        self.max_early_placements.unwrap_or_else(|| {
+            self.placement_horizon()
+                .saturating_sub(self.stage_one_queue_len)
+                .min(MAX_BOUNDARY_QUEUE_PIECES) as u8
+        })
+    }
+
     fn placement_horizon(&self) -> usize {
         self.required_placements.unwrap_or_else(|| {
             if self.placement_role_masks.is_empty() {
@@ -369,12 +382,14 @@ impl BoundaryRecoveryQuery {
         {
             return Err(BoundaryRecoveryError::InvalidStageBoundary);
         }
-        if usize::from(self.max_early_placements)
-            > self.placement_horizon() - self.stage_one_queue_len
-        {
+        if self.max_early_placements.is_some_and(|maximum| {
+            usize::from(maximum) > self.placement_horizon() - self.stage_one_queue_len
+        }) {
             return Err(BoundaryRecoveryError::InvalidEarlyPlacementLimit);
         }
-        if self.max_early_placements > 1 && self.early_placement.selected().is_some() {
+        if self.early_placement.selected().is_some()
+            && self.max_early_placements.is_none_or(|maximum| maximum > 1)
+        {
             return Err(BoundaryRecoveryError::InvalidBorrowRole);
         }
         if !self.placement_role_masks.is_empty()
@@ -408,7 +423,7 @@ impl BoundaryRecoveryQuery {
                 return Err(BoundaryRecoveryError::InvalidPlacementRoles);
             }
         }
-        if self.max_early_placements > 0 {
+        if self.effective_max_early_placements() > 0 {
             if let Some((index, placement)) = self.early_placement.selected() {
                 if index < self.stage_one_queue_len
                     || index >= self.placement_horizon()
@@ -451,7 +466,7 @@ impl BoundaryRecoveryQuery {
         if !matches!(normal, PassResult::NoPath) {
             return Ok(report(normal, normal_states, 0, false));
         }
-        if self.max_early_placements == 0 {
+        if self.effective_max_early_placements() == 0 {
             return Ok(report(normal, normal_states, 0, false));
         }
         // The declared state budget covers both passes together. Exhausting
@@ -464,8 +479,12 @@ impl BoundaryRecoveryQuery {
         }
         let mut recovery_query = self.clone();
         recovery_query.max_states = remaining_states;
-        let (recovery, recovery_states) =
-            Pass::new(&recovery_query, control, self.max_early_placements)?.run()?;
+        let (recovery, recovery_states) = Pass::new(
+            &recovery_query,
+            control,
+            self.effective_max_early_placements(),
+        )?
+        .run()?;
         Ok(report(recovery, normal_states, recovery_states, true))
     }
 }

@@ -105,3 +105,21 @@ test('multi-role maximum and a global B2B policy reach the CLI without selected-
   assert.throws(() => lower({ initial_board_mask: '0x0', target_board_mask: '0x0',
     height: 6, queue: 'OOO', placements: 3, stage_one_count: 1, max_early_placements: 3 }), /max_early_placements/u);
 });
+
+
+test("automatic early scope and unlimited defaults survive Discord lowering", () => {
+  const scenario = { initial_board_mask: "0x0", target_board_mask: "0x0", height: 8,
+    queue: "IJLOSTZIJLOSTZ", placements: 14, stage_one_count: 7,
+    role_masks: Array(14).fill("0xf"), queue_pattern: "P7P7" };
+  for (const settings of [{}, {max_early_placements: "auto", max_states: "unlimited",
+      max_pattern_evaluations: "unlimited", max_total_states: "unlimited"}]) {
+    const args = lower({...scenario, ...settings});
+    assert.equal(args[args.indexOf("--max-early-placements") + 1], "auto");
+    for (const flag of ["--max-states", "--max-pattern-evaluations", "--max-total-states"])
+      assert.equal(args.includes(flag), false);
+  }
+  assert.throws(() => lower({...scenario, max_early_placements: "auto", borrow_role_position: 8}), /selected early role/u);
+  for (const field of ["max_states", "max_pattern_evaluations", "max_total_states"])
+    for (const value of [0, -1, null, 1.5, "100"])
+      assert.throws(() => lower({...scenario, [field]: value}), new RegExp(field, "u"));
+});

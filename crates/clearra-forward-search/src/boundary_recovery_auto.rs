@@ -46,10 +46,12 @@ pub(super) fn search(
     let mut recovery_states = 0_usize;
     // Never classify recovery from an early horizon before ruling out a
     // normal connection at every other horizon. Unknown stays unknown.
-    for borrowed in
-        [0, source.max_early_placements]
+    // One normal pass over all terminal horizons, then one recovery pass.
+    // Auto does NOT restart the search once per allowed early count.
+    for recovery in
+        [false, true]
             .into_iter()
-            .take(if source.max_early_placements == 0 {
+            .take(if source.effective_max_early_placements() == 0 {
                 1
             } else {
                 2
@@ -59,7 +61,7 @@ pub(super) fn search(
             if control.is_cancelled() {
                 return Err(BoundaryRecoveryError::Cancelled);
             }
-            if borrowed > 0
+            if recovery
                 && source
                     .early_placement
                     .selected()
@@ -69,7 +71,11 @@ pub(super) fn search(
             }
             let mut query = source.clone();
             query.required_placements = Some(count);
-            query.max_early_placements = borrowed;
+            let borrowed = if recovery {
+                query.effective_max_early_placements()
+            } else {
+                0
+            };
             // A policy on a future, unconsumed bag does not require consuming it.
             query.preserve_b2b_bag_mask &= (1_u64 << query.bag_count()) - 1;
             let used = normal_states.saturating_add(recovery_states);
@@ -122,7 +128,7 @@ mod tests {
             required_placements: None,
             placement_role_masks: Vec::new(),
             placement_role_pieces: Vec::new(),
-            max_early_placements: 0,
+            max_early_placements: Some(0),
             early_placement: EarlyPlacementPolicy::AnyStageTwoRole,
             hold_enabled: false,
             rule_profile: RuleProfileId::SrsPlus,

@@ -1,7 +1,7 @@
 import { DiscordInputError } from "./i18n.mjs";
 
 // Discord collects this two-stage request once. The CLI remains the search
-// authority; this adapter only rejects ambiguous or unbounded ingress.
+// authority; this adapter validates bounded input bytes, not an implicit search cutoff.
 const MAX_SCENARIO_CHARS = 6_000;
 const MAX_PATTERN_CHARS = 2_048;
 const PIECES = /^[IJLOSTZ]{2,42}$/i;
@@ -28,6 +28,12 @@ function integer(value, name, minimum, maximum) {
     throw invalid(`${name} must be an integer from ${minimum} through ${maximum}.`);
   }
   return value;
+}
+
+// Legacy explicit limits are preserved; absent/unlimited never invents a cap.
+function optionalBudget(value, name) {
+  if (value === undefined || value === "unlimited") return undefined;
+  return integer(value, name, 1, Number.MAX_SAFE_INTEGER);
 }
 
 function boolean(value, name, fallback) {
@@ -81,14 +87,15 @@ export function boundaryRecoveryArguments(command, scenarioText) {
   if (queue === null) throw invalid("queue must contain 2 through 42 exact IOTSZJL pieces.");
   const placements = integer(scenario.placements, "placements", 2, queue.length);
   const stageOne = integer(scenario.stage_one_count, "stage_one_count", 1, placements - 1);
-  const early = integer(scenario.max_early_placements ?? 1, "max_early_placements", 0, placements - stageOne);
-  const maxStates = integer(scenario.max_states ?? 100_000, "max_states", 1, 1_000_000);
+  const selected = scenario.borrow_role_position !== undefined || scenario.borrow_placement_mask !== undefined;
+  const requestedEarly = scenario.max_early_placements === undefined ? (selected ? 1 : "auto") : scenario.max_early_placements;
+  const early = requestedEarly === "auto" ? "auto" : integer(requestedEarly, "max_early_placements", 0, placements - stageOne);
+  const maxStates = optionalBudget(scenario.max_states, "max_states");
   const roleMasks = scenario.role_masks === undefined ? [] : scenario.role_masks;
   if (!Array.isArray(roleMasks) || roleMasks.length > 0 && roleMasks.length !== placements) {
     throw invalid("role_masks must specify every required placement role or be omitted.");
   }
   const roles = roleMasks.map((value, index) => mask(value, `role_masks[${index}]`, fieldLimit, true));
-  const selected = scenario.borrow_role_position !== undefined || scenario.borrow_placement_mask !== undefined;
   if (selected && early !== 1) throw invalid("a selected early role requires max_early_placements=1; omit borrow options for multiple roles.");
   const borrowPosition = selected
     ? integer(scenario.borrow_role_position, "borrow_role_position", stageOne + 1, placements) : undefined;
@@ -143,7 +150,7 @@ export function boundaryRecoveryArguments(command, scenarioText) {
     "--rule", rule,
     "--spin-profile", spinProfile,
     "--initial-b2b", initialB2B ? "1" : "0",
-    "--max-states", String(maxStates),
+    ...(maxStates === undefined ? [] : ["--max-states", String(maxStates)]),
   ];
   roles.forEach((value, index) => args.push("--role-mask", `${index + 1}:${value}`));
   if (preserveB2B) args.push("--preserve-b2b");
@@ -152,12 +159,11 @@ export function boundaryRecoveryArguments(command, scenarioText) {
   b2bBags.forEach((bag) => args.push("--preserve-b2b-bag", String(bag)));
   if (pattern !== undefined) {
     args.push("--queue-pattern", pattern.trim());
-    args.push("--max-pattern-evaluations", String(integer(
-      scenario.max_pattern_evaluations ?? 100, "max_pattern_evaluations", 1, 100_000,
-    )));
-    args.push("--max-total-states", String(integer(
-      scenario.max_total_states ?? 1_000_000, "max_total_states", 1, 100_000_000,
-    )));
+    for (const [field, flag] of [["max_pattern_evaluations", "--max-pattern-evaluations"],
+        ["max_total_states", "--max-total-states"]]) {
+      const limit = optionalBudget(scenario[field], field);
+      if (limit !== undefined) args.push(flag, String(limit));
+    }
   }
   return args;
 }

@@ -96,6 +96,7 @@ try {
       assert.equal(await page.locator('input[type="number"]').count(), 1, 'only the legacy stage boundary is a numeric input');
       const ruleLabel = spec.language === 'ko' ? '룰' : 'Rule';
       const spinLabel = spec.language === 'ko' ? '스핀 프로필' : 'Spin profile';
+      assert.equal((await state(page)).maxEarly, 'auto');
       const rules = page.getByRole('combobox', { name: ruleLabel, exact: true });
       assert.deepEqual(await rules.locator('option').allTextContents(), ['SRS+', 'SRS', 'SRS-X', 'Jstris 180']);
       await rules.selectOption('srs');
@@ -112,7 +113,7 @@ try {
       const source = page.locator('.workspace-control-section').first().getByRole('textbox');
       await source.fill('OOOO');
       await flush(page);
-      assert.deepEqual(await early.locator('option').evaluateAll(options => options.map(option => option.value)), ['0', '1', '2', '3']);
+      assert.deepEqual(await early.locator('option').evaluateAll(options => options.map(option => option.value)), ['auto', '0', '1', '2', '3']);
       for (const count of ['2', '3']) {
         await early.selectOption(count);
         await flush(page);
@@ -126,6 +127,12 @@ try {
       await flush(page);
       assert.equal((await state(page)).maxEarly, 3, 'shorter drafts do not silently clamp a requested quota');
       assert.equal(await early.getAttribute('aria-invalid'), 'true');
+      await early.selectOption('auto');
+      await flush(page);
+      assert.equal((await state(page)).maxEarly, 'auto');
+      assert.equal(await early.getAttribute('aria-invalid'), 'false');
+      assert.equal((await state(page)).args[(await state(page)).args.indexOf('--max-early-placements') + 1], 'auto');
+      assert.ok(!(await state(page)).args.includes('--max-pattern-evaluations'));
       await early.selectOption('1');
       await flush(page);
       const b2b = page.getByRole('checkbox', { name: spec.language === 'ko' ? 'B2B 보존' : 'Preserve B2B', exact: true });

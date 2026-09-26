@@ -18,6 +18,8 @@ export function validateBoundaryRecoveryPayload(product: ClearraProductResultPay
         ['occupancy-only', 'exact-lock-time'].includes(report.placement_role_scope) &&
         population === undefined &&
         ['normal', 'pc-preserving-recovery', 'non-pc-recovery', 'no-path-within-declared-scope', 'incomplete'].includes(report.status)) &&
+    (report.early_placement_limit_mode === undefined || ['auto', 'maximum'].includes(report.early_placement_limit_mode)) &&
+    (report.early_placement_limit_mode !== 'auto' || report.borrow_role_index === null) &&
     Number.isInteger(report.max_early_placements) && report.max_early_placements >= 0 && report.max_early_placements < 42 &&
     ((report.borrow_role_index === null && report.borrow_placement_mask === null) ||
       (Number.isInteger(report.borrow_role_index) && report.borrow_role_index !== null &&

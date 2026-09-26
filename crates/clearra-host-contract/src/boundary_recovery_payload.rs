@@ -40,7 +40,13 @@ pub struct BoundaryRecoveryPayload {
     pub status: String,
     pub knowledge_basis: String,
     pub placement_role_scope: String,
+    /// Effective structural maximum; the requested mode is retained separately.
     pub max_early_placements: u8,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub early_placement_limit_mode: Option<String>,
     /// Both fields are null when every eligible second-stage role may be early.
     pub borrow_role_index: Option<u8>,
     pub borrow_placement_mask: Option<String>,
@@ -149,6 +155,11 @@ impl BoundaryRecoveryPayload {
         let mut bytes = (self.status.capacity() as u128)
             .checked_add(self.knowledge_basis.capacity() as u128)?
             .checked_add(self.placement_role_scope.capacity() as u128)?
+            .checked_add(
+                self.early_placement_limit_mode
+                    .as_ref()
+                    .map_or(0, |mode| mode.capacity()) as u128,
+            )?
             .checked_add(
                 self.borrow_placement_mask
                     .as_ref()

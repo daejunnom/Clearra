@@ -56,15 +56,16 @@
     <label class="workspace-field">
       <span>{label('recoveryMaxEarlyPlacements')}</span>
       <select aria-label={label('recoveryMaxEarlyPlacements')} aria-description={label('recoveryEarlyCountHelp')}
-        value={request.maxEarlyPlacements} aria-invalid={!earlyOptions.includes(request.maxEarlyPlacements)}
+        value={request.maxEarlyPlacements} aria-invalid={request.maxEarlyPlacements !== 'auto' && !earlyOptions.includes(request.maxEarlyPlacements)}
         disabled={earlyLimit === 0}
-        on:change={(event) => patch({ maxEarlyPlacements: Number(event.currentTarget.value) })}>
-        {#if !earlyOptions.includes(request.maxEarlyPlacements)}
+        on:change={(event) => patch({ maxEarlyPlacements: event.currentTarget.value === 'auto' ? 'auto' : Number(event.currentTarget.value) })}>
+        <option value="auto">{label('recoveryAutomaticEarly')}</option>
+        {#if request.maxEarlyPlacements !== 'auto' && !earlyOptions.includes(request.maxEarlyPlacements)}
           <option value={request.maxEarlyPlacements} disabled>{request.maxEarlyPlacements}</option>
         {/if}
         {#each earlyOptions as count}<option value={count}>{count}</option>{/each}
       </select>
-      <small class="workspace-field-help">{label('recoveryEarlyCountHelp')}</small>
+      <small class="workspace-field-help">{label(request.maxEarlyPlacements === 'auto' ? 'recoveryAutomaticEarlyHelp' : 'recoveryEarlyCountHelp')}</small>
     </label>
     <div class="workspace-field-grid">
       <RuleProfileSelect value={request.rule} {language}
@@ -102,14 +103,5 @@
     <p class="workspace-field-help">{label('recoveryPatternReferenceHelp')}</p>
     <p class="workspace-field-help">{label('recoveryScope')}</p>
   </section>
-  {#if request.queuePattern.trim()}
-    <section class="workspace-control-section">
-      <h2 class="workspace-control-heading">{label('recoveryBudget')}</h2>
-      <label class="workspace-field"><span>{label('recoveryPatternEvaluations')}</span>
-        <input type="number" min="1" max="100000" value={request.maxPatternEvaluations}
-          on:input={(event) => patch({ maxPatternEvaluations: (event.currentTarget as HTMLInputElement).valueAsNumber })} />
-      </label>
-    </section>
-  {/if}
   {#if validation.length > 0}<div class="workspace-validation" role="alert"><p>{label('recoveryInvalid')}</p></div>{/if}
 </WorkspaceControlPanel>

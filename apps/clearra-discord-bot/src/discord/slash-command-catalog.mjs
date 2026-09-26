@@ -2032,9 +2032,9 @@ function inputHelp(entry, locale = "en") {
     case "boundary-recovery-v1":
       return [
         "Provide one JSON object with `initial_board_mask`, `target_board_mask`, `height`, `queue`, `stage_one_count`, and `placements`. Board masks are hexadecimal; the queue is 2–42 exact IOTSZJL pieces.",
-        "Set `max_early_placements` to a number from 0 through the second-stage role count. Without borrow options, the solver chooses all matching early roles. Cleared early placements still count. The optional legacy borrow options restrict exactly one role and require a maximum of 1. Supply tokens and placement roles remain distinct; no token is used twice.",
+        "Omit `max_early_placements` or set it to `auto` to allow every feasible early count in the declared role set. A number is an at-most quota, not an exact count. Cleared early placements still count. Legacy borrow options select one role and require a maximum of 1; they cannot describe automatic all-role search.",
         "Optional `preserve_b2b_bags` is an array of one-based supply-bag positions; `preserve_b2b_stage_one` and `preserve_b2b_stage_two` toggle whole stages. `initial_b2b`, `hold`, `rule`, `spin_profile`, and `max_states` are optional.",
-        "Add `queue_pattern` with complete seven-piece reference bags and all exact roles for weighted exhaustive evaluation. Bound it with `max_pattern_evaluations` and `max_total_states`; incomplete supply is reported separately from a proven no-path result.",
+        "Add `queue_pattern` with complete seven-piece reference bags and all exact roles for weighted exhaustive evaluation. State and pattern limits are absent by default. Legacy positive limits remain explicit; cancellation or incomplete supply never becomes a proven no-path result.",
       ];
     case "render-file":
       return [
@@ -2340,9 +2340,9 @@ function koreanInputHelp(entry) {
     case "boundary-recovery-v1":
       return [
         "한 JSON 객체에 `initial_board_mask`, `target_board_mask`, `height`, `queue`, `stage_one_count`, `placements`를 넣습니다. 보드 마스크는 16진수이고 큐는 정확한 IOTSZJL 미노 2~42개입니다.",
-        "`max_early_placements`는 0부터 2단계 역할 수까지 지정합니다. borrow 옵션을 생략하면 탐색기가 가능한 선행 배치를 선택하며, 줄 삭제로 사라진 배치도 개수에 포함합니다. 기존 borrow 옵션은 최대값 1에서 특정 역할 하나를 제한할 때만 사용합니다. 공급 미노와 배치 역할은 구분하며 같은 미노를 두 번 사용하지 않습니다.",
+        "`max_early_placements`를 생략하거나 `auto`로 지정하면 선언된 역할 집합에서 가능한 선행 개수를 모두 허용합니다. 숫자는 정확한 개수가 아닌 최대 허용 개수이며, 삭제된 선행 배치도 누적합니다. 기존 borrow 옵션은 최대 1에서 특정 역할 하나를 제한하므로 자동 전체 역할 탐색과 함께 사용할 수 없습니다.",
         "`preserve_b2b_bags`는 1부터 시작하는 공급 가방 위치 배열입니다. 두 단계 전체 토글과 `initial_b2b`, `hold`, `rule`, `spin_profile`, `max_states`도 선택할 수 있습니다.",
-        "완전한 7미노 기준 가방과 정확한 역할 전체가 있으면 `queue_pattern`으로 가중 전수 평가를 요청합니다. `max_pattern_evaluations`와 `max_total_states`로 범위를 제한하며 미완료 공급을 무경로 증명과 구분합니다.",
+        "완전한 7미노 기준 가방과 정확한 역할 전체가 있으면 `queue_pattern`으로 가중 전수 평가를 요청합니다. 상태 수와 패턴 평가 수의 기본 제한은 없습니다. 기존 양수 제한은 명시적으로 유지하며, 취소나 미완료 공급을 무경로 증명으로 취급하지 않습니다.",
       ];
     case "render-file":
       return [

@@ -33,7 +33,7 @@ fn tower(early: usize) -> BoundaryRecoveryQuery {
         required_placements: Some(early + 1),
         placement_role_masks: roles,
         placement_role_pieces: Vec::new(),
-        max_early_placements: early as u8,
+        max_early_placements: Some(early as u8),
         early_placement: EarlyPlacementPolicy::AnyStageTwoRole,
         hold_enabled: false,
         rule_profile: RuleProfileId::SrsPlus,
@@ -95,7 +95,7 @@ fn assert_witness(query: &BoundaryRecoveryQuery, report: &BoundaryRecoveryReport
         board = next;
     }
     assert_eq!(early, report.borrowed_stage_two_count);
-    assert!(early <= usize::from(query.max_early_placements));
+    assert!(early <= usize::from(query.effective_max_early_placements()));
     assert_eq!(source.count_ones() as usize, report.steps.len());
     assert_eq!(roles.count_ones() as usize, report.steps.len());
     assert_eq!(board.words(), query.final_board.words());
@@ -108,11 +108,11 @@ fn two_and_three_early_roles_are_real_execution_capabilities() {
     for required in [2, 3] {
         let mut query = tower(required);
         for cap in 0..required {
-            query.max_early_placements = cap as u8;
+            query.max_early_placements = Some(cap as u8);
             let failed = query.search(&ExecutionControl::default()).unwrap();
             assert_eq!(failed.status, BoundaryRecoveryStatus::NoPath);
         }
-        query.max_early_placements = required as u8;
+        query.max_early_placements = Some(required as u8);
         for automatic in [false, true] {
             if automatic {
                 query.required_placements = None;
@@ -152,7 +152,7 @@ fn clear_events_do_not_refund_early_placement_count() {
         4
     );
     assert_eq!(result.steps.last().unwrap().board_after, [0xf, 0, 0, 0]);
-    query.max_early_placements = 1;
+    query.max_early_placements = Some(1);
     assert_eq!(
         query.search(&ExecutionControl::default()).unwrap().status,
         BoundaryRecoveryStatus::NoPath
@@ -201,12 +201,12 @@ fn larger_cap_does_not_force_extra_early_locks_or_discard_normal_paths() {
 #[test]
 fn invalid_quotas_and_ambiguous_single_role_compatibility_fail_explicitly() {
     let mut query = tower(2);
-    query.max_early_placements = 3;
+    query.max_early_placements = Some(3);
     assert_eq!(
         query.search(&ExecutionControl::default()),
         Err(BoundaryRecoveryError::InvalidEarlyPlacementLimit)
     );
-    query.max_early_placements = 2;
+    query.max_early_placements = Some(2);
     query.early_placement = EarlyPlacementPolicy::SelectedRole {
         index: 1,
         placement: query.placement_role_masks[1],
@@ -291,4 +291,101 @@ fn early_supports_can_turn_an_isolated_b2b_break_into_a_real_tetris_save() {
     assert_eq!(late.placement_role_index, 0);
     assert_eq!(late.cleared_lines, 4);
     assert!(late.b2b_active_after);
+}
+
+#[test]
+fn automatic_early_count_matches_the_union_of_all_explicit_quotas() {
+    for required in [2, 3] {
+        for terminal_auto in [false, true] {
+            let mut query = tower(required);
+            if terminal_auto {
+                query.required_placements = None;
+            }
+            let mut explicit_success = false;
+            for cap in 0..=required {
+                query.max_early_placements = Some(cap as u8);
+                let result = query.search(&ExecutionControl::default()).unwrap();
+                let success = matches!(
+                    result.status,
+                    BoundaryRecoveryStatus::Normal
+                        | BoundaryRecoveryStatus::PcPreservingRecovery
+                        | BoundaryRecoveryStatus::NonPcRecovery
+                );
+                explicit_success |= success;
+                if success {
+                    assert_witness(&query, &result);
+                }
+            }
+            query.max_early_placements = None;
+            let automatic = query.search(&ExecutionControl::default()).unwrap();
+            assert_eq!(
+                explicit_success,
+                !matches!(automatic.status, BoundaryRecoveryStatus::NoPath)
+            );
+            assert_eq!(automatic.borrowed_stage_two_count, required);
+            assert_witness(&query, &automatic);
+            // The maximum structural quota and Auto invoke exactly the same
+            // recovery search; there are no hidden 1,2,... capped reruns.
+            query.max_early_placements = Some(required as u8);
+            assert_eq!(
+                query.search(&ExecutionControl::default()).unwrap(),
+                automatic
+            );
+        }
+    }
+}
+
+#[test]
+fn automatic_limits_do_not_weaken_b2b_or_refund_deleted_early_cells() {
+    let mut query = tower(2);
+    query.height = 6;
+    query.initial_board = mask((0..4).fold(0, |board, row| board | (0x3fc_u64 << (10 * row))));
+    query.stage_one_target = mask(0xf);
+    query.final_board = mask(0xf);
+    query.queue = vec![PieceKind::O, PieceKind::O, PieceKind::I];
+    query.placement_role_pieces = vec![PieceKind::I, PieceKind::O, PieceKind::O];
+    query.placement_role_masks = vec![mask(0xf), mask(0xc03), mask(0xc03)];
+    query.max_early_placements = None;
+    let result = query.search(&ExecutionControl::default()).unwrap();
+    assert_witness(&query, &result);
+    assert_eq!(result.borrowed_stage_two_count, 2);
+    assert_eq!(
+        result.steps[..2]
+            .iter()
+            .map(|step| step.cleared_lines)
+            .sum::<u8>(),
+        4
+    );
+    query.preserve_b2b_by_stage = [true, true];
+    // The first O's ordinary double is still a breaking actual edge.
+    assert_eq!(
+        query.search(&ExecutionControl::default()).unwrap().status,
+        BoundaryRecoveryStatus::NoPath
+    );
+}
+
+#[test]
+fn automatic_mode_keeps_failure_cancellation_and_selected_scope_distinct() {
+    let mut query = tower(2);
+    query.max_early_placements = None;
+    query.max_states = Some(1);
+    assert_eq!(
+        query.search(&ExecutionControl::default()).unwrap().status,
+        BoundaryRecoveryStatus::Incomplete
+    );
+    query.max_states = None;
+    let token = clearra_core_domain::execution_cancellation::ExecutionCancellationToken::new();
+    token.handle().cancel();
+    assert_eq!(
+        query.search(&ExecutionControl::new(token)),
+        Err(BoundaryRecoveryError::Cancelled)
+    );
+    query.early_placement = EarlyPlacementPolicy::SelectedRole {
+        index: 1,
+        placement: query.placement_role_masks[1],
+    };
+    assert_eq!(
+        query.search(&ExecutionControl::default()),
+        Err(BoundaryRecoveryError::InvalidBorrowRole)
+    );
 }

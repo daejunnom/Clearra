@@ -159,6 +159,8 @@ try {
         assert.equal(await recovery.getByLabel('Required placements', { exact: true }).count(), 0);
         assert.equal(await recovery.getByLabel('Maximum search states', { exact: true }).count(), 0);
         assert.match(await recovery.locator('.recovery-required-pieces').innerText(), /Automatic/);
+        assert.equal(await recovery.getByRole('combobox', { name: 'Maximum early placements', exact: true }).inputValue(), 'auto');
+        assert.equal(await recovery.getByLabel('Maximum pattern evaluations', { exact: true }).count(), 0);
         assert.equal(await page.getByLabel('Selected early placement role (1-based)', { exact: true }).count(), 0);
         await page.getByRole('checkbox', { name: 'Hold', exact: true }).uncheck();
         await paint(page, 0, 0x3f0n, 4);

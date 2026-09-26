@@ -2335,11 +2335,11 @@ fn parse_boundary_recovery_command(
     let mut height = None;
     let mut queue = None;
     let mut queue_pattern = None;
-    let mut max_pattern_evaluations = 100_usize;
+    let mut max_pattern_evaluations: Option<usize> = None;
     let mut max_total_states: Option<usize> = None;
     let mut stage_one_queue_len: Option<usize> = None;
     let mut required_placements: Option<usize> = None;
-    let mut max_early_placements = 1_u8;
+    let mut max_early_placements: Option<u8> = None;
     let mut borrow_role_index = None;
     let mut borrow_placement_mask = None;
     let mut placement_roles = std::collections::BTreeMap::new();
@@ -2410,8 +2410,12 @@ fn parse_boundary_recovery_command(
                 queue_pattern = Some(next_value(tokens, &mut cursor, option)?.to_owned());
             }
             "--max-pattern-evaluations" => {
-                max_pattern_evaluations =
-                    parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
+                let value = next_value(tokens, &mut cursor, option)?;
+                max_pattern_evaluations = if value == "unlimited" {
+                    None
+                } else {
+                    Some(parse_positive(value, option)?)
+                };
             }
             "--max-total-states" => {
                 let value = next_value(tokens, &mut cursor, option)?;
@@ -2437,12 +2441,16 @@ fn parse_boundary_recovery_command(
             }
             "--max-early-placements" => {
                 let value = next_value(tokens, &mut cursor, option)?;
-                max_early_placements = value.parse::<u8>().ok()
-                    .filter(|value| usize::from(*value) < clearra_forward_search::MAX_BOUNDARY_QUEUE_PIECES)
-                    .ok_or_else(|| WebCommandError::new(
-                        WebCommandErrorCode::InvalidValue,
-                        "--max-early-placements requires a nonnegative integer within the second-stage role count",
-                    ))?;
+                max_early_placements = if value == "auto" {
+                    None
+                } else {
+                    Some(value.parse::<u8>().ok()
+                        .filter(|value| usize::from(*value) < clearra_forward_search::MAX_BOUNDARY_QUEUE_PIECES)
+                        .ok_or_else(|| WebCommandError::new(
+                            WebCommandErrorCode::InvalidValue,
+                            "--max-early-placements requires auto or a nonnegative integer within the second-stage role count",
+                        ))?)
+                };
             }
             "--borrow-role-position" => {
                 let position: usize =
@@ -2597,11 +2605,16 @@ fn parse_boundary_recovery_command(
         }
         placement_roles.into_values().collect()
     };
-    if usize::from(max_early_placements) > placement_horizon - stage_one_queue_len {
+    if max_early_placements
+        .is_some_and(|maximum| usize::from(maximum) > placement_horizon - stage_one_queue_len)
+    {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
             "--max-early-placements exceeds the available second-stage roles",
         ));
+    }
+    if borrow_role_index.is_some() && !seen.contains("--max-early-placements") {
+        max_early_placements = Some(1);
     }
     let early_placement = match (borrow_role_index, borrow_placement_mask) {
         (None, None) => clearra_forward_search::EarlyPlacementPolicy::AnyStageTwoRole,
@@ -2611,13 +2624,13 @@ fn parse_boundary_recovery_command(
             ))
         }
         (Some(index), mask) => {
-            if max_early_placements > 1 {
+            if max_early_placements.is_none_or(|maximum| maximum > 1) {
                 return Err(WebCommandError::new(WebCommandErrorCode::InvalidValue,
                     "a selected single early role cannot be combined with a maximum above one; omit both borrow options to search every role"));
             }
             let placement = mask
                 .or_else(|| placement_role_masks.get(index).copied())
-                .or_else(|| (max_early_placements == 0).then_some(Board256Mask::EMPTY))
+                .or_else(|| (max_early_placements == Some(0)).then_some(Board256Mask::EMPTY))
                 .ok_or_else(|| required("--borrow-placement-mask or complete --role-mask set"))?;
             clearra_forward_search::EarlyPlacementPolicy::SelectedRole { index, placement }
         }
@@ -2643,12 +2656,6 @@ fn parse_boundary_recovery_command(
         max_states,
     };
     if let Some(pattern) = queue_pattern {
-        if max_pattern_evaluations > 100_000 {
-            return Err(WebCommandError::new(
-                WebCommandErrorCode::InvalidValue,
-                "boundary recovery pattern limits exceed the supported scope",
-            ));
-        }
         Ok(WebCommandRequest::boundary_recovery_pattern(
             query,
             pattern,

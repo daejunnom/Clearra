@@ -71,7 +71,7 @@ test('boundary recovery exact roles serialize every placement mask without a dup
   const request = {
     ...createBoundaryRecoveryRequest(),
     queue: 'IO', height: 4, placements: 2, stageOneCount: 1,
-    borrowRolePosition: 2, placementRoleMasks: [0xfn, 0x300c000n]
+    borrowRolePosition: 2, maxEarlyPlacements: 1, placementRoleMasks: [0xfn, 0x300c000n]
   };
   assert.deepEqual(validateBoundaryRecoveryRequest(request), []);
   const args = boundaryRecoveryArguments(request);

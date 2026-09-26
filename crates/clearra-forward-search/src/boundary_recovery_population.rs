@@ -17,7 +17,7 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BoundaryRecoveryPopulationLimits {
-    pub max_pattern_evaluations: usize,
+    pub max_pattern_evaluations: Option<usize>,
     pub max_total_states: Option<usize>,
 }
 
@@ -76,7 +76,7 @@ pub fn search_boundary_recovery_population(
     )
         -> Result<Option<BoundaryRecoveryQuery>, BoundaryRecoveryError>,
 ) -> Result<BoundaryRecoveryPopulationReport, BoundaryRecoveryPopulationError> {
-    if limits.max_pattern_evaluations == 0 || limits.max_total_states == Some(0) {
+    if limits.max_pattern_evaluations == Some(0) || limits.max_total_states == Some(0) {
         return Err(BoundaryRecoveryPopulationError::InvalidLimits);
     }
     let pattern_count = universe.pattern_count();
@@ -95,7 +95,9 @@ pub fn search_boundary_recovery_population(
     let mut normal_example = None;
     let mut recovery_example = None;
     while evaluated < pattern_count
-        && evaluated < limits.max_pattern_evaluations
+        && limits
+            .max_pattern_evaluations
+            .is_none_or(|limit| evaluated < limit)
         && limits.max_total_states.is_none_or(|limit| states < limit)
     {
         if control.is_cancelled() {
@@ -238,7 +240,7 @@ mod tests {
             &universe,
             &control,
             BoundaryRecoveryPopulationLimits {
-                max_pattern_evaluations: 2,
+                max_pattern_evaluations: Some(2),
                 max_total_states: Some(20_000),
             },
             |_, sequence| {
@@ -260,7 +262,7 @@ mod tests {
             &universe,
             &control,
             BoundaryRecoveryPopulationLimits {
-                max_pattern_evaluations: 1,
+                max_pattern_evaluations: Some(1),
                 max_total_states: Some(20_000),
             },
             |_, sequence| {
@@ -293,7 +295,7 @@ mod tests {
             &universe,
             &control,
             BoundaryRecoveryPopulationLimits {
-                max_pattern_evaluations: 1,
+                max_pattern_evaluations: Some(1),
                 max_total_states: Some(20_000),
             },
             |_, sequence| {
@@ -303,7 +305,7 @@ mod tests {
                     Board256Mask::from_words([0xf, 0, 0, 0]),
                     Board256Mask::from_words([0x300c000, 0, 0, 0]),
                 ];
-                query.max_early_placements = 1;
+                query.max_early_placements = Some(1);
                 query.early_placement = crate::EarlyPlacementPolicy::SelectedRole {
                     index: 1,
                     placement: query.placement_role_masks[1],
@@ -335,7 +337,7 @@ mod tests {
             required_placements: Some(2),
             placement_role_masks: Vec::new(),
             placement_role_pieces: Vec::new(),
-            max_early_placements: 0,
+            max_early_placements: Some(0),
             early_placement: crate::EarlyPlacementPolicy::AnyStageTwoRole,
             hold_enabled: false,
             rule_profile: RuleProfileId::SrsPlus,
@@ -345,5 +347,39 @@ mod tests {
             initial_b2b: true,
             max_states: Some(10_000),
         }
+    }
+
+    #[test]
+    fn unlimited_evaluation_visits_the_complete_identity_set_not_a_default_prefix() {
+        use clearra_supply::{
+            pattern_universe::pattern_universe_materializer::PatternUniverseMaterializer,
+            queue::queue_pattern_expression::QueuePatternExpression,
+        };
+        let expression = QueuePatternExpression::parse("P7", 0).unwrap();
+        let universe =
+            PatternUniverseMaterializer::queue_pattern_expression(&expression, 0).unwrap();
+        let mut visited = 0;
+        let report = search_boundary_recovery_population(
+            &universe,
+            &ExecutionControl::default(),
+            BoundaryRecoveryPopulationLimits {
+                max_pattern_evaluations: None,
+                max_total_states: None,
+            },
+            |index, sequence| {
+                assert_eq!(index, visited);
+                assert_eq!(sequence.len(), 7);
+                visited += 1;
+                // This test supplies a deliberately empty diagram catalog. It
+                // tests population iteration, not a fabricated geometry proof.
+                Ok(None)
+            },
+        )
+        .unwrap();
+        assert_eq!(visited, 5040);
+        assert_eq!(report.evaluated_pattern_count, 5040);
+        assert!(report.complete);
+        assert_eq!(report.diagram_unavailable_count, 5040);
+        assert_eq!(report.unknown_probability, ProbabilityValue::ZERO);
     }
 }

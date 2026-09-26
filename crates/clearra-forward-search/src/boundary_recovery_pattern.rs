@@ -13,13 +13,11 @@ use crate::{
     BoundaryRecoveryPopulationReport, BoundaryRecoveryQuery,
 };
 
-const MAX_PATTERN_IDENTITIES: usize = 100_000;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundaryRecoveryPatternQuery {
     pub reference: BoundaryRecoveryQuery,
     pub queue_pattern: String,
-    pub max_pattern_evaluations: usize,
+    pub max_pattern_evaluations: Option<usize>,
     pub max_total_states: Option<usize>,
 }
 
@@ -39,7 +37,7 @@ impl BoundaryRecoveryPatternQuery {
     ) -> Result<BoundaryRecoveryPopulationReport, BoundaryRecoveryPatternError> {
         let roles = BoundaryRecoveryBagRolePlan::new(self.reference.clone())
             .map_err(BoundaryRecoveryPatternError::InvalidRolePlan)?;
-        let expression = QueuePatternExpression::parse(&self.queue_pattern, MAX_PATTERN_IDENTITIES)
+        let expression = QueuePatternExpression::parse(&self.queue_pattern, 0)
             .map_err(|_| BoundaryRecoveryPatternError::InvalidPattern)?;
         if expression.sequence_len() != self.reference.queue.len() {
             return Err(BoundaryRecoveryPatternError::PatternLengthMismatch);
@@ -90,7 +88,7 @@ mod tests {
             required_placements: Some(14),
             placement_role_masks: vec![Board256Mask::from_words([0xf, 0, 0, 0]); 14],
             placement_role_pieces: Vec::new(),
-            max_early_placements: 0,
+            max_early_placements: Some(0),
             early_placement: crate::EarlyPlacementPolicy::AnyStageTwoRole,
             hold_enabled: false,
             rule_profile: RuleProfileId::SrsPlus,
@@ -103,7 +101,7 @@ mod tests {
         let query = BoundaryRecoveryPatternQuery {
             reference,
             queue_pattern: "IJLOSTZP7".to_owned(),
-            max_pattern_evaluations: 1,
+            max_pattern_evaluations: Some(1),
             max_total_states: Some(1),
         };
         let control = ExecutionControl::new(ExecutionCancellationToken::new());
@@ -114,5 +112,54 @@ mod tests {
         assert_eq!(report.incomplete_count, 1);
         assert_eq!(report.no_path_count, 0);
         assert!(report.unknown_probability.get() > 0.99);
+    }
+
+    #[test]
+    fn factorized_pattern_above_old_cutoff_reaches_cancellation_not_invalid_pattern() {
+        let bag = vec![
+            PieceKind::I,
+            PieceKind::J,
+            PieceKind::L,
+            PieceKind::O,
+            PieceKind::S,
+            PieceKind::T,
+            PieceKind::Z,
+        ];
+        let query = BoundaryRecoveryPatternQuery {
+            reference: BoundaryRecoveryQuery {
+                initial_board: Board256Mask::EMPTY,
+                stage_one_target: Board256Mask::EMPTY,
+                final_board: Board256Mask::EMPTY,
+                height: 8,
+                queue: bag.iter().chain(&bag).copied().collect(),
+                stage_one_queue_len: 7,
+                required_placements: Some(14),
+                placement_role_masks: vec![Board256Mask::from_words([0xf, 0, 0, 0]); 14],
+                placement_role_pieces: Vec::new(),
+                max_early_placements: None,
+                early_placement: crate::EarlyPlacementPolicy::AnyStageTwoRole,
+                hold_enabled: true,
+                rule_profile: RuleProfileId::SrsPlus,
+                spin_profile: SpinProfileId::AllSpinPlus,
+                preserve_b2b_by_stage: [false; 2],
+                preserve_b2b_bag_mask: 0,
+                initial_b2b: true,
+                max_states: None,
+            },
+            queue_pattern: "P7P7".into(),
+            max_pattern_evaluations: None,
+            max_total_states: None,
+        };
+        let expression = QueuePatternExpression::parse("P7P7", 0).unwrap();
+        assert!(expression.is_factorized());
+        assert_eq!(expression.pattern_count(), 25_401_600);
+        let token = ExecutionCancellationToken::new();
+        token.handle().cancel();
+        // Parsing uses the canonical factorized representation, without eagerly
+        // allocating 25 million sequences or silently retaining only 100,000.
+        assert_eq!(
+            query.search(&ExecutionControl::new(token)).unwrap_err(),
+            BoundaryRecoveryPatternError::Population(BoundaryRecoveryPopulationError::Cancelled)
+        );
     }
 }

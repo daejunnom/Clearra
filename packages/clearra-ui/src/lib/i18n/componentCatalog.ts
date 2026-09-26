@@ -75,6 +75,8 @@ export const COMPONENT_MESSAGES = {
   recoveryTotalResponseProbability: { en: 'Total response probability', ko: '총 대응 확률', ja: '総対応確率' },
   recoveryUnknownProbability: { en: 'Unresolved probability', ko: '미확정 확률', ja: '未確定確率' },
   recoveryStageOneCount: { en: 'Stage-one supply tokens', ko: '1단계 공급 미노 수', ja: '第1段階の供給ミノ数' },
+  recoveryAutomaticEarly: { en: 'Automatic — all feasible counts', ko: '자동 — 가능한 모든 개수', ja: '自動 — 可能な全個数' },
+  recoveryAutomaticEarlyHelp: { en: 'Automatic searches every early count within this supplied role set in one pass, without imposing a one-piece cap. A found path is a witness, not an enumeration of every path.', ko: '자동은 지정된 배치 집합에서 가능한 모든 선행 개수를 한 번의 탐색에 허용합니다. 한 개 제한을 두지 않으며, 성공 경로 하나와 전체 경로 목록은 구분합니다.', ja: '自動は指定配置集合の可能な全先行個数を一度の探索で許可します。1個制限はなく、成功経路1件と全経路の列挙は区別します。' },
   recoveryAutomaticPieces: { en: 'Automatic', ko: '자동', ja: '自動' },
   recoveryAutomaticPiecesHelp: { en: 'Check every feasible placement count within the supplied queue, including line clears. Unused tokens stay as lookahead. Exact placement roles determine their own count.', ko: '줄 삭제를 포함해 입력 큐에서 가능한 배치 수를 모두 탐색합니다. 남는 미노는 미리보기로 유지하며, 정확한 배치 역할을 지정하면 그 개수로 확정합니다.', ja: 'ライン消去を含め、供給内の可能な配置数をすべて探索します。未使用ミノは先読みとして保持し、正確な配置役割は個数を確定します。' },
   recoveryPatternReferenceHelp: { en: 'Pattern syntax applies to the optional pattern below the fixed reference queue. Weighted recovery currently requires complete seven-piece bags and exact placement roles.', ko: '패턴 문법은 고정 기준 큐가 아닌 선택적 큐 패턴에 적용됩니다. 확률 계산에는 완전한 7-bag과 정확한 배치 역할이 필요합니다.', ja: 'パターン文法は固定参照キューではなく任意パターンに適用されます。確率計算には完全な7-bagと正確な配置役割が必要です。' },

@@ -27,7 +27,7 @@ pub struct BoundaryRecoveryAppCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BoundaryRecoveryPatternOptions {
     source: String,
-    max_pattern_evaluations: usize,
+    max_pattern_evaluations: Option<usize>,
     max_total_states: Option<usize>,
 }
 
@@ -42,7 +42,7 @@ impl BoundaryRecoveryAppCommand {
     pub fn new_pattern(
         query: BoundaryRecoveryQuery,
         source: String,
-        max_pattern_evaluations: usize,
+        max_pattern_evaluations: Option<usize>,
         max_total_states: Option<usize>,
     ) -> Self {
         Self {
@@ -100,7 +100,15 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
                 "exact-lock-time"
             }
             .to_owned(),
-            max_early_placements: self.query.max_early_placements,
+            max_early_placements: self.query.effective_max_early_placements(),
+            early_placement_limit_mode: Some(
+                if self.query.max_early_placements.is_none() {
+                    "auto"
+                } else {
+                    "maximum"
+                }
+                .to_owned(),
+            ),
             borrow_role_index: self
                 .query
                 .early_placement
@@ -204,7 +212,18 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
                     "exact-lock-time"
                 },
             ),
-            RenderField::new("max_early_placements", self.query.max_early_placements),
+            RenderField::new(
+                "max_early_placements",
+                self.query.effective_max_early_placements(),
+            ),
+            RenderField::new(
+                "early_placement_limit_mode",
+                if self.query.max_early_placements.is_none() {
+                    "auto"
+                } else {
+                    "maximum"
+                },
+            ),
             RenderField::new(
                 "borrow_role_index",
                 self.query
@@ -322,7 +341,15 @@ impl BoundaryRecoveryAppCommand {
             status: status.to_owned(),
             knowledge_basis: "full-pattern-universe".to_owned(),
             placement_role_scope: "bag-piece-exact-lock-time".to_owned(),
-            max_early_placements: self.query.max_early_placements,
+            max_early_placements: self.query.effective_max_early_placements(),
+            early_placement_limit_mode: Some(
+                if self.query.max_early_placements.is_none() {
+                    "auto"
+                } else {
+                    "maximum"
+                }
+                .to_owned(),
+            ),
             borrow_role_index: self
                 .query
                 .early_placement

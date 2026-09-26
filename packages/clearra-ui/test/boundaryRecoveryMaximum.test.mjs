@@ -52,3 +52,39 @@ test('browser response accepts multi-role evidence but rejects count overflow or
   assert.notEqual(validateBoundaryRecoveryPayload(wrap({ ...report, borrowed_stage_two_count: 4 })), null);
   assert.notEqual(validateBoundaryRecoveryPayload(wrap({ ...report, borrow_role_index: 1, borrow_placement_mask: '0xc03' })), null);
 });
+
+test('Auto is a distinct request mode and is never serialized as NaN or a guessed numeric cap', () => {
+  for (const queue of ['OO', 'OOOO', 'OOOOO']) {
+    const input = { ...request(), queue };
+    assert.equal(input.maxEarlyPlacements, 'auto');
+    assert.deepEqual(validateBoundaryRecoveryRequest(input), []);
+    const args = boundaryRecoveryArguments(input);
+    assert.equal(args[args.indexOf('--max-early-placements') + 1], 'auto');
+    assert.deepEqual(boundaryRecoveryDesktopRequest(input, 'ko').arguments, args);
+    assert.ok(!args.some(argument => argument.includes('NaN')));
+  }
+});
+
+test('Auto response mode and actual quota survive while inconsistent selected-role evidence is rejected', () => {
+  const report = { status: 'incomplete', knowledge_basis: 'full-fixed-queue', placement_role_scope: 'exact-lock-time',
+    max_early_placements: 3, early_placement_limit_mode: 'auto', borrow_role_index: null, borrow_placement_mask: null,
+    normal_states: 3, recovery_states: 1, stage_one_checkpoint_step: null, checkpoint_is_pc: null,
+    borrowed_stage_two_count: 0, steps: [] };
+  const wrap = payload => ({ contract: 'boundary-recovery.v1', result_kind: 'boundary-recovery',
+    content: { payload_kind: 'boundary-recovery', payload } });
+  assert.equal(validateBoundaryRecoveryPayload(wrap(report)), null);
+  assert.notEqual(validateBoundaryRecoveryPayload(wrap({ ...report, early_placement_limit_mode: 'guess' })), null);
+  assert.notEqual(validateBoundaryRecoveryPayload(wrap({ ...report, max_early_placements: 'auto' })), null);
+  assert.notEqual(validateBoundaryRecoveryPayload(wrap({ ...report, max_early_placements: 1,
+    borrow_role_index: 1, borrow_placement_mask: '0xc03' })), null);
+});
+
+test('a pattern request no longer contains default evaluation or state cutoffs', () => {
+  const input = { ...request(), queue: 'IJLOSTZIJLOSTZ', stageOneCount: 7,
+    queuePattern: 'P7P7', placementRoleMasks: Array(14).fill(0xfn) };
+  assert.equal(input.maxPatternEvaluations, null);
+  assert.deepEqual(validateBoundaryRecoveryRequest(input), []);
+  const args = boundaryRecoveryArguments(input);
+  for (const flag of ['--max-pattern-evaluations', '--max-states', '--max-total-states']) assert.ok(!args.includes(flag));
+  assert.deepEqual(boundaryRecoveryDesktopRequest(input, 'en').arguments, args);
+});

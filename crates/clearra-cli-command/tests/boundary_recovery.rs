@@ -76,7 +76,7 @@ fn zero_early_placements_does_not_require_a_borrow_role() {
     let AppCommand::BoundaryRecovery(command) = request.command() else {
         panic!("expected typed boundary recovery command");
     };
-    assert_eq!(command.query().max_early_placements, 0);
+    assert_eq!(command.query().max_early_placements, Some(0));
     let response = AppContext::default().run(request);
     assert_eq!(response.status(), AppStatus::Success, "{response:?}");
 }
@@ -260,9 +260,10 @@ fn multiple_early_roles_execute_through_the_public_cli_and_preserve_their_scope(
                 0xc03_u128 << (20 * index)
             ));
         }
-        for cap in [early - 1, early] {
+        for cap in [Some(early - 1), Some(early), None] {
+            let cap_text = cap.map_or_else(|| "auto".to_owned(), |cap| cap.to_string());
             let request = CliCommandParser::parse(&format!(
-                "{base} --max-early-placements {cap} --preserve-b2b"
+                "{base} --max-early-placements {cap_text} --preserve-b2b"
             ))
             .unwrap()
             .to_app_request()
@@ -279,10 +280,14 @@ fn multiple_early_roles_execute_through_the_public_cli_and_preserve_their_scope(
             let ProductResultPayloadContent::BoundaryRecovery(report) = payload.content() else {
                 panic!("typed result");
             };
-            assert_eq!(report.max_early_placements, cap as u8);
+            assert_eq!(report.max_early_placements, cap.unwrap_or(early) as u8);
+            assert_eq!(
+                report.early_placement_limit_mode.as_deref(),
+                Some(if cap.is_none() { "auto" } else { "maximum" })
+            );
             assert_eq!(report.borrow_role_index, None);
             assert_eq!(report.borrow_placement_mask, None);
-            if cap == early {
+            if cap.is_none_or(|cap| cap == early) {
                 assert_eq!(report.status, "non-pc-recovery");
                 assert_eq!(report.borrowed_stage_two_count, early as usize);
                 assert_eq!(report.steps.len(), (early + 1) as usize);
@@ -301,4 +306,38 @@ fn multiple_early_roles_execute_through_the_public_cli_and_preserve_their_scope(
         ))
         .is_err());
     }
+}
+
+#[test]
+fn automatic_early_quota_survives_typed_execution_and_public_payload() {
+    use clearra_host_contract::ProductResultPayloadContent;
+    let mut source = String::from("clearra recovery boundary --initial-board-mask 0 --stage-one-board-mask 0xf --target-board-mask 0xc03f --height 4 --queue IOT --stage-one-count 1 --no-hold");
+    for suffix in ["", " --max-early-placements auto"] {
+        let request = CliCommandParser::parse(&format!("{source}{suffix}"))
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+        let AppCommand::BoundaryRecovery(command) = request.command() else {
+            panic!("typed boundary");
+        };
+        assert_eq!(command.query().max_early_placements, None);
+        assert_eq!(command.query().effective_max_early_placements(), 2);
+        let response = AppContext::default().run(request);
+        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+        let host = response.to_host_response();
+        let ProductResultPayloadContent::BoundaryRecovery(payload) =
+            host.product_result_payload().unwrap().content()
+        else {
+            panic!("boundary payload");
+        };
+        assert_eq!(payload.early_placement_limit_mode.as_deref(), Some("auto"));
+        assert_eq!(payload.max_early_placements, 2);
+    }
+    source.push_str(
+        " --max-early-placements auto --borrow-role-position 2 --borrow-placement-mask 0xc03",
+    );
+    assert!(
+        CliCommandParser::parse(&source).is_err(),
+        "Auto cannot falsely describe a selected single-role scope"
+    );
 }

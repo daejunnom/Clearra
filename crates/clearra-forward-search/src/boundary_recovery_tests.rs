@@ -17,7 +17,7 @@ fn two_stage_query() -> BoundaryRecoveryQuery {
         required_placements: Some(2),
         placement_role_masks: Vec::new(),
         placement_role_pieces: Vec::new(),
-        max_early_placements: 1,
+        max_early_placements: Some(1),
         early_placement: EarlyPlacementPolicy::SelectedRole {
             index: 1,
             placement: Board256Mask::from_words([0x300c000, 0, 0, 0]),
@@ -94,7 +94,7 @@ fn exhausted_state_budget_is_not_reported_as_impossibility() {
 #[test]
 fn zero_early_placements_runs_only_the_normal_connection() {
     let mut query = two_stage_query();
-    query.max_early_placements = 0;
+    query.max_early_placements = Some(0);
     query.early_placement = EarlyPlacementPolicy::AnyStageTwoRole;
     let report = query.search(&control()).unwrap();
     assert_eq!(report.status, BoundaryRecoveryStatus::Normal);
@@ -106,14 +106,14 @@ fn lookahead_token_cannot_replace_a_required_second_stage_token() {
     let mut query = two_stage_query();
     query.queue.push(PieceKind::T);
     query.hold_enabled = true;
-    query.max_early_placements = 0;
+    query.max_early_placements = Some(0);
     // After I clears the initial row, T could make this board, but the
     // declared second-stage token is O and T is only queue lookahead.
     query.final_board = Board256Mask::from_words([0x807, 0, 0, 0]);
     let report = query.search(&control()).unwrap();
     assert_eq!(report.status, BoundaryRecoveryStatus::NoPath);
 
-    query.max_early_placements = 1;
+    query.max_early_placements = Some(1);
     query.early_placement = EarlyPlacementPolicy::SelectedRole {
         index: 2,
         placement: Board256Mask::from_words([0xf, 0, 0, 0]),
@@ -127,7 +127,7 @@ fn lookahead_token_cannot_replace_a_required_second_stage_token() {
 #[test]
 fn exact_stage_roles_follow_source_tokens_through_the_same_search() {
     let mut query = two_stage_query();
-    query.max_early_placements = 0;
+    query.max_early_placements = Some(0);
     let ordinary = query.search(&control()).unwrap();
     query.placement_role_masks = ordinary
         .steps
@@ -224,7 +224,7 @@ fn five_stage_one_bags_and_one_adjacent_bag_fit_without_bitmask_wraparound() {
         .collect();
     query.stage_one_queue_len = 35;
     query.required_placements = Some(42);
-    query.max_early_placements = 0;
+    query.max_early_placements = Some(0);
     query.max_states = Some(1);
     assert_eq!(
         query.search(&control()).unwrap().status,
@@ -359,7 +359,7 @@ fn nonempty_first_stage_goal_is_checked_without_requiring_a_pc() {
     query.initial_board = Board256Mask::EMPTY;
     query.stage_one_target = Board256Mask::from_words([0xf, 0, 0, 0]);
     query.final_board = Board256Mask::from_words([0xc03f, 0, 0, 0]);
-    query.max_early_placements = 0;
+    query.max_early_placements = Some(0);
     query.placement_role_masks = vec![
         Board256Mask::from_words([0xf, 0, 0, 0]),
         Board256Mask::from_words([0xc030, 0, 0, 0]),
@@ -382,7 +382,7 @@ fn first_stage_goal_uses_post_clear_coordinates_and_retains_initial_cells() {
     query.initial_board = Board256Mask::from_words([0x803f0, 0, 0, 0]);
     query.stage_one_target = Board256Mask::from_words([0x200, 0, 0, 0]);
     query.final_board = Board256Mask::from_words([0xe03, 0, 0, 0]);
-    query.max_early_placements = 0;
+    query.max_early_placements = Some(0);
     query.placement_role_masks = vec![
         Board256Mask::from_words([0xf, 0, 0, 0]),
         Board256Mask::from_words([0xc03, 0, 0, 0]),

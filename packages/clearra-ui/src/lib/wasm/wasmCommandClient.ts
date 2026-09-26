@@ -461,6 +461,7 @@ export type ClearraBoundaryRecoveryPayload = {
   knowledge_basis: 'full-fixed-queue' | 'full-pattern-universe';
   placement_role_scope: 'occupancy-only' | 'exact-lock-time' | 'bag-piece-exact-lock-time';
   max_early_placements: number;
+  early_placement_limit_mode?: 'auto' | 'maximum';
   borrow_role_index: number | null;
   borrow_placement_mask: string | null;
   normal_states: number;
