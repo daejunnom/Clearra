@@ -2,7 +2,7 @@
 // This is an acceptance test: every assertion and timeout is a failing exit.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFile, mkdir, stat } from 'node:fs/promises';
+import { readFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { createRequire } from 'node:module';
 const require = createRequire(resolve(process.env.CLEARRA_BROWSER_TOOLS_ROOT, 'package.json'));
@@ -44,10 +44,49 @@ async function context(mode) {
 async function keys(page) {
   return page.locator('.solution-gallery > li[data-solution-key]').evaluateAll(nodes => nodes.map(n => n.dataset.solutionKey));
 }
-async function awaitKeys(page, count) {
-  await page.waitForFunction(n => document.querySelectorAll('.solution-gallery > li[data-solution-key]').length === n, count, { timeout: 60000 });
-  return keys(page);
+// Arm before clicking: an old Completed result must not satisfy a new run.
+// Observe the real header lifecycle, including short jobs between polling ticks.
+async function completeRun(page, action, label) {
+  await page.evaluate(() => {
+    window.__clearraAcceptanceRun?.observer.disconnect();
+    const status = document.querySelector('.header-status > span');
+    if (!status) throw new Error('workspace status is missing');
+    const state = { started: false, status: null, observer: null };
+    const observer = new MutationObserver(records => {
+      const active = status.classList.contains('running');
+      state.started ||= active || records.some(record => record.type === 'attributes' &&
+        record.attributeName === 'class' && (record.oldValue || '').split(/\s+/u).includes('running'));
+      const text = status.textContent.trim();
+      if (state.started && !active && ['Completed', 'Failed', 'Cancelled', 'Terminated'].includes(text)) {
+        state.status = text;
+        observer.disconnect();
+      }
+    });
+    state.observer = observer;
+    window.__clearraAcceptanceRun = state;
+    observer.observe(status, { attributes: true, attributeOldValue: true,
+      childList: true, subtree: true, characterData: true });
+  });
+  try {
+    await action();
+    await page.waitForFunction(() => window.__clearraAcceptanceRun.status !== null, null, { timeout: 60000 });
+    const status = await page.evaluate(() => window.__clearraAcceptanceRun.status);
+    assert.equal(status, 'Completed', `${label}: execution did not complete successfully`);
+  } finally {
+    await page.evaluate(() => window.__clearraAcceptanceRun?.observer.disconnect());
+  }
 }
+async function completedKeys(page, count, label) {
+  // Computation has finished. A wrong set is an assertion failure, not a timeout.
+  const actual = await keys(page);
+  assert.equal(actual.length, count, `${label}: unexpected complete solution set: ${JSON.stringify(actual)}`);
+  assert.equal(new Set(actual).size, count, `${label}: duplicate solution keys`);
+  return actual;
+}
+const LEFT_I = 'ctk1|initial=0000000000000000|placements=I:000000000000000f';
+const RIGHT_I = 'ctk1|initial=0000000000000000|placements=I:00000000000003c0';
+const CENTER_I = 'ctk1|initial=0000000000000000|placements=I:0000000000000078';
+
 async function paint(page, index, mask, height) {
   const board = page.locator('.board-tool .board').nth(index);
   for (let y = 0; y < height; y++) for (let x = 0; x < 10; x++) {
@@ -75,21 +114,20 @@ try {
       await page.locator('.fumen-import input:not([type="file"])').fill('ctk3_w0kCQBhwwAEHHABh4Q');
       await page.locator('.fumen-import button').last().click();
       await page.locator('.workspace-queue-input').fill('STOILJZ');
-      await page.getByRole('button', { name: 'Run search', exact: true }).click();
-      const actual = (await awaitKeys(page, 18)).sort();
+      await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), `${mode}: PC`);
+      const actual = (await completedKeys(page, 18, `${mode}: PC`)).sort();
       assert.equal(new Set(actual).size, 18);
       if (reference) assert.deepEqual(actual, reference); else reference = actual;
       assert.equal(await page.locator('.mandatory-choice input').count(), 18);
       // A new run through the same controller must also finish (no leaked lease).
-      await page.getByRole('button', { name: 'Run search', exact: true }).click();
-      await page.waitForFunction(() => !document.querySelector('.workspace-nav .run').disabled, null, { timeout: 60000 });
-      assert.deepEqual((await awaitKeys(page, 18)).sort(), reference);
+      await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), `${mode}: repeated PC`);
+      assert.deepEqual((await completedKeys(page, 18, `${mode}: repeated PC`)).sort(), reference);
       if (mode === 'null') {
         const selected = [(await keys(page))[0], (await keys(page))[17]];
         await page.locator('.mandatory-choice input').first().check();
         await page.locator('.mandatory-choice input').last().check();
-        await page.locator('.mandatory-summary button').first().click();
-        assert.deepEqual((await awaitKeys(page, 2)).sort(), selected.sort(), 'mandatory solutions were not retained');
+        await completeRun(page, () => page.locator('.mandatory-summary button').first().click(), 'pinned PC');
+        assert.deepEqual((await completedKeys(page, 2, 'pinned PC')).sort(), selected.sort(), 'mandatory solutions were not retained');
         await page.locator('.workspace-queue-input').fill('I');
         await page.waitForFunction(() => !document.querySelector('.mandatory-summary'));
         // Navigate using the visible menu, then execute a known two-stage case.
@@ -104,7 +142,7 @@ try {
         await paint(page, 0, 0x3f0n, 4);
         await paint(page, 1, 0xc030n, 4);
         await paint(page, 2, 0x300c000n, 4);
-        await page.getByRole('button', { name: 'Run search', exact: true }).click();
+        await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), 'boundary recovery');
         await page.locator('.recovery-result .outcome').waitFor({ timeout: 60000 });
         assert.equal(await page.locator('.recovery-result .outcome').innerText(), 'Normal PC connection');
         assert.equal(await page.locator('.recovery-result ol li').count(), 2);
@@ -116,12 +154,32 @@ try {
         await hold.uncheck();
         assert.equal(await hold.isChecked(), false, 'build request must disable hold through the real control');
         await paint(page, 0, 0xfn, 4);
-        await page.getByRole('button', { name: 'Run search', exact: true }).click();
-        const buildKeys = await awaitKeys(page, 1);
-        await page.locator('.mandatory-choice input').first().check();
-        await page.locator('.mandatory-summary button').first().click();
-        await page.waitForFunction(() => !document.querySelector('.workspace-nav .run').disabled, null, { timeout: 60000 });
-        assert.deepEqual(await awaitKeys(page, 1), buildKeys);
+        await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), 'mirrored Build source');
+        // A symmetric empty base includes both the drawn target and its mirror.
+        // These are two tilings covering ONE queue, not two probability events.
+        const buildKeys = (await completedKeys(page, 2, 'mirrored Build source')).sort();
+        assert.deepEqual(buildKeys, [LEFT_I, RIGHT_I].sort());
+        // Select the mirrored drawing, not just the first canonical solution.
+        await page.locator(`.solution-gallery > li[data-solution-key="${RIGHT_I}"] .mandatory-choice input`).check();
+        await completeRun(page, () => page.locator('.mandatory-summary button').first().click(), 'mirrored mandatory Build');
+        assert.deepEqual(await completedKeys(page, 1, 'mirrored mandatory Build'), [RIGHT_I]);
+        // Request both pins from the complete source: ordinary minimum size is
+        // one, but mandatory inclusion must retain both selected drawings.
+        await page.getByRole('combobox', { name: 'Result aggregation', exact: true }).selectOption('all-solutions');
+        await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), 'Build source replay');
+        assert.deepEqual((await completedKeys(page, 2, 'Build source replay')).sort(), buildKeys);
+        await page.locator(`.solution-gallery > li[data-solution-key="${LEFT_I}"] .mandatory-choice input`).check();
+        await completeRun(page, () => page.locator('.mandatory-summary button').first().click(), 'two mandatory Build drawings');
+        assert.deepEqual((await completedKeys(page, 2, 'two mandatory Build drawings')).sort(), buildKeys);
+        // Changing the target invalidates the old pins. A centered I equals its
+        // mirror and must be deduplicated to exactly one source solution.
+        await page.getByRole('combobox', { name: 'Result aggregation', exact: true }).selectOption('all-solutions');
+        await paint(page, 0, 0xfn ^ 0x78n, 4);
+        await page.waitForFunction(() => !document.querySelector('.mandatory-summary'));
+        await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), 'symmetric Build source');
+        assert.deepEqual(await completedKeys(page, 1, 'symmetric Build source'), [CENTER_I]);
+        results.push({ case: 'Build mirror and mandatory source', original: LEFT_I, mirrored: RIGHT_I,
+          sourceCount: 2, mirroredPinCount: 1, twoPinsCount: 2, symmetricCount: 1 });
 
       }
       assert.deepEqual(errors, []);
@@ -129,12 +187,13 @@ try {
     } catch (error) {
       await page.screenshot({ path: resolve(reportRoot, `failed-${mode}.png`), fullPage: true });
       const text = await page.locator('body').innerText().catch(() => 'unavailable');
-      const { writeFile } = await import('node:fs/promises');
       await writeFile(resolve(reportRoot, `failed-${mode}.txt`), `${error.stack}\n${errors.join('\n')}\n${text}`).catch(() => {});
       throw error;
     } finally { await ctx.close(); }
   }
-  console.log(JSON.stringify({ source: process.env.CLEARRA_SOURCE_COMMIT, results }));
+  const report = { source: process.env.CLEARRA_SOURCE_COMMIT, results };
+  await writeFile(resolve(reportRoot, 'results.json'), JSON.stringify(report, null, 2) + '\n');
+  console.log(JSON.stringify(report));
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));
