@@ -80,7 +80,7 @@ pub fn search_boundary_recovery_population(
         return Err(BoundaryRecoveryPopulationError::InvalidLimits);
     }
     let pattern_count = universe.pattern_count();
-    if pattern_count == 0 || pattern_count > u32::MAX as usize {
+    if pattern_count == 0 {
         return Err(BoundaryRecoveryPopulationError::InvalidPatternCount);
     }
 
@@ -381,5 +381,35 @@ mod tests {
         assert!(report.complete);
         assert_eq!(report.diagram_unavailable_count, 5040);
         assert_eq!(report.unknown_probability, ProbabilityValue::ZERO);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn native_pattern_indices_are_not_truncated_to_thirty_two_bits() {
+        use clearra_supply::{
+            pattern_universe::pattern_universe_materializer::PatternUniverseMaterializer,
+            queue::queue_pattern_expression::QueuePatternExpression,
+        };
+        let expression = QueuePatternExpression::parse("P7P7P7", 0).unwrap();
+        let universe =
+            PatternUniverseMaterializer::queue_pattern_expression(&expression, 0).unwrap();
+        assert_eq!(universe.pattern_count(), 128_024_064_000);
+        let cancellation = ExecutionCancellationToken::new();
+        cancellation.handle().cancel();
+        // No huge evaluation is performed. The typed usize index domain must
+        // reach cancellation rather than an unrelated legacy u32 guard.
+        let result = search_boundary_recovery_population(
+            &universe,
+            &ExecutionControl::new(cancellation),
+            BoundaryRecoveryPopulationLimits {
+                max_pattern_evaluations: None,
+                max_total_states: None,
+            },
+            |_, _| panic!("a cancelled search must not evaluate a pattern"),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            BoundaryRecoveryPopulationError::Cancelled
+        );
     }
 }
