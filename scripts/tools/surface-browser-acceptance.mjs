@@ -41,6 +41,21 @@ async function context(mode) {
   });
   return ctx;
 }
+// A completed click is not a completed SvelteKit view transition. Both the
+// URL and the destination component's own active tab must agree before any
+// shared control is queried. Keep strict selection; never pick an old input.
+async function navigateWorkspace(page, tool) {
+  assert.match(tool, /^[a-z][a-z-]*$/u);
+  const destination = new URL(`?tool=${tool}`, page.url());
+  const tab = `.product-tabs a[href="?tool=${tool}"]`;
+  await page.locator(tab).click();
+  await page.waitForURL(destination.href, { waitUntil: 'commit', timeout: 30000 });
+  const workspace = page.locator('main.app-shell').filter({
+    has: page.locator(`${tab}[aria-current="page"]`)
+  });
+  await workspace.waitFor({ state: 'visible', timeout: 30000 });
+  return workspace;
+}
 async function keys(page) {
   return page.locator('.solution-gallery > li[data-solution-key]').evaluateAll(nodes => nodes.map(n => n.dataset.solutionKey));
 }
@@ -134,8 +149,8 @@ try {
         await page.locator('.workspace-queue-input').fill('I');
         await page.waitForFunction(() => !document.querySelector('.mandatory-summary'));
         // Navigate using the visible menu, then execute a known two-stage case.
-        await page.locator('.product-tabs a[href="?tool=recovery"]').click();
-        await page.locator('.recovery-field-editor').waitFor();
+        const recovery = await navigateWorkspace(page, 'recovery');
+        await recovery.locator('.recovery-field-editor').waitFor();
         await page.locator('.dimension-field input').fill('4');
         await page.getByLabel('Known queue across both stages', { exact: true }).fill('IO');
         await page.getByLabel('Stage-one supply tokens', { exact: true }).fill('1');
@@ -166,12 +181,16 @@ try {
         assert.equal(await page.locator('.recovery-result .outcome').innerText(), 'Normal connection');
         assert.equal(await page.locator('.recovery-result ol li').count(), 2);
         assert.match(await page.locator('.recovery-result ol li').first().innerText(), /0x0*f\b/);
+        console.log('surface_recovery_checkpoints=passed empty=true nonempty=true');
 
-        await page.locator('.product-tabs a[href="?tool=build-probability"]').click();
-        await page.locator('.workspace-queue-input').waitFor();
-        await page.locator('.dimension-field input').fill('4');
-        await page.locator('.workspace-queue-input').fill('I');
-        const hold = page.getByRole('checkbox', { name: 'Hold', exact: true });
+        const build = await navigateWorkspace(page, 'build-probability');
+        await page.locator('.recovery-field-editor').waitFor({ state: 'detached' });
+        const buildQueue = build.locator('.workspace-controls .workspace-queue-input');
+        await buildQueue.waitFor();
+        assert.equal(await buildQueue.count(), 1, 'the mounted Build workspace owns one queue input');
+        await build.locator('.dimension-field input').fill('4');
+        await buildQueue.fill('I');
+        const hold = build.getByRole('checkbox', { name: 'Hold', exact: true });
         await hold.uncheck();
         assert.equal(await hold.isChecked(), false, 'build request must disable hold through the real control');
         await paint(page, 0, 0xfn, 4);
