@@ -2,7 +2,7 @@ name: Clearra Surface Repair
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
-    paths: [.github/workflows/clearra-surface-repair.yml]
+    paths: [.github/workflows/clearra-surface-repair.yml, scripts/integration/surface-repair-source.json]
   workflow_dispatch:
 permissions:
   contents: read
@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 788a0cdfeff4e20daf080bb7a2796996b5b995b1
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Bind reviewed finite Build response repair without changing source or main
@@ -27,14 +27,16 @@ jobs:
         env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import json,os,pathlib,subprocess
+          import json,os,pathlib,re,subprocess
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+          control=git('rev-parse','HEAD')
+          spec=json.loads(pathlib.Path('scripts/integration/surface-repair-source.json').read_text())
+          if set(spec)!={'candidate','parent','tree'} or any(not isinstance(v,str) or not re.fullmatch('[0-9a-f]{40}',v) for v in spec.values()):
+              raise RuntimeError('Invalid exact-source manifest')
+          candidate,parent,tree=(spec[k] for k in ('candidate','parent','tree'))
           base='952280950aeb24528279cbff685fe8acec892223'
           before='e1ae99287a0986d190962c9cd48fca574b48d1d6'
-          parent='275fa79a1458c7e6152c80165e247107cb77865a'
-          candidate='788a0cdfeff4e20daf080bb7a2796996b5b995b1'
           branch='codex/converge-surface-repair-20260926'
-          tree='a522562ad19f889958bb129704ca1ad2b2d9ff23'
           expected=['crates/clearra-wasm/src/json_event_envelope.rs',
               'crates/clearra-wasm/src/wasm_command_runtime.rs',
               'crates/clearra-wasm/src/wasm_command_runtime/build_coverage_projection.rs',
@@ -43,12 +45,13 @@ jobs:
               rows=git('ls-remote','origin',ref).splitlines()
               if len(rows)!=1 or rows[0].split()!=[sha,ref]:
                   raise RuntimeError('Reviewed ref moved; reconcile before running')
+          git('checkout','--detach',candidate)
           if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
               git('rev-parse','HEAD^{tree}')!=tree or git('diff','--name-only',before,candidate).splitlines()!=expected):
               raise RuntimeError('Reviewed source identity or scope mismatch')
           git('merge-base','--is-ancestor',base,candidate)
           git('diff','--check',before,candidate)
-          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'changed_files':expected,'main_updated':False}
+          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'control_sha':control,'changed_files':expected,'main_updated':False}
           (pathlib.Path(os.environ['RUNNER_TEMP'])/'build-wire-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps(receipt),flush=True)
           subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True)
