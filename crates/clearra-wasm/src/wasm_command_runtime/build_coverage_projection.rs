@@ -190,8 +190,10 @@ mod tests {
                 .product_result_payload()
                 .cloned()
                 .unwrap();
-            let live = (core::mem::size_of_val(&response) as u128)
-                + response.checked_retained_capacity_bytes().unwrap();
+            // App owns its private source-memory census. This projection unit
+            // supplies a nonzero caller-live baseline and checks the exact
+            // added DTO allocations, not an estimated AppResponse heap size.
+            let live = 4_096_u128;
             let mut measured = WasmFiniteMemoryLedger::new(
                 live,
                 u128::MAX,
