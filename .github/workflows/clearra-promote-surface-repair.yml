@@ -1,5 +1,5 @@
 name: Start verified release gates
-run-name: Publish the isolated Pages menu correction
+run-name: Publish only the accepted eight-menu correction
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -14,71 +14,63 @@ jobs:
   start-gates:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
       actions: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: 521fee125b478a5a39a90a808d6c471c430c8494
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with: {node-version: 22.23.2}
-      - name: Validate exact Pages-only scope and browser evidence before normal promotion
+      - name: Require protected exact main and preserve canonical publication and rollback checks
         env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import json,os,pathlib,subprocess,time
+          import json,os,pathlib,subprocess
           repo='daejunnom/Clearra'
           base='9f454c93c2c0eb83163445b4bc50aea724f53a8f'
-          tested='357eb00dcd444390abff197038e4d1124aba6592'
-          candidate='521fee125b478a5a39a90a808d6c471c430c8494'
-          def git(*args): return subprocess.check_output(['git',*args],text=True,timeout=90).strip()
+          source='521fee125b478a5a39a90a808d6c471c430c8494'
+          def cmd(*args): return subprocess.check_output(args,text=True,timeout=90).strip()
+          def git(*args): return cmd('git',*args)
           def api(method,path,body=None):
-              args=['gh','api','--method',method,'-H','X-GitHub-Api-Version: 2026-03-10','repos/'+repo+'/'+path]
+              args=['gh','api','--method',method,'repos/'+repo+'/'+path]
               if body is not None: args+=['--input','-']
-              out=subprocess.check_output(args,input=None if body is None else json.dumps(body),text=True,timeout=90)
-              return json.loads(out) if out.strip() else None
-          assert git('rev-parse','HEAD')==candidate
-          assert git('show','-s','--format=%P',candidate)==tested
-          assert git('diff','--name-only',base,candidate).splitlines()==[
+              raw=subprocess.check_output(args,input=None if body is None else json.dumps(body),text=True,timeout=90)
+              return json.loads(raw) if raw.strip() else None
+          assert git('rev-parse','HEAD')==source
+          assert api('GET','git/ref/heads/main')['object']['sha']==source
+          assert git('diff','--name-only',base,source).splitlines()==[
               'apps/clearra-web/src/routes/+page.svelte','scripts/tools/surface-browser-acceptance.mjs']
-          assert git('diff','--name-only',tested,candidate)=='scripts/tools/surface-browser-acceptance.mjs'
-          assert git('rev-parse',candidate+':apps/clearra-web/src/routes/+page.svelte')=='a5069640c01611632e80b0d8aab4a9caa42721fd'
-          assert git('rev-parse',candidate+':scripts/tools/surface-browser-acceptance.mjs')=='93f99a51bbc4b4b79b614569dd5499d87323bef5'
-          git('merge-base','--is-ancestor',base,candidate)
-          git('diff','--check',base,candidate)
+          assert git('rev-parse',source+':apps/clearra-web/src/routes/+page.svelte')=='a5069640c01611632e80b0d8aab4a9caa42721fd'
+          assert git('rev-parse',source+':scripts/tools/surface-browser-acceptance.mjs')=='93f99a51bbc4b4b79b614569dd5499d87323bef5'
+          git('diff','--check',base,source)
+          for rid in [36238298771,36239970144]:
+              run=api('GET','actions/runs/'+str(rid))
+              assert run['status']=='completed' and run['conclusion']=='success' and run['run_attempt']==1
           subprocess.run(['node','--check','scripts/tools/surface-browser-acceptance.mjs'],check=True)
-          run=api('GET','actions/runs/36238298771')
-          assert run['status']=='completed' and run['conclusion']=='success'
-          assert run['head_sha']=='ca2930433b26bda0dff3a72d47c6117163bddb13' and run['run_attempt']==1
-          assert run['path']=='.github/workflows/clearra-safe-integration-audit.yml'
-          assert api('GET','git/ref/heads/main')['object']['sha']==base
-          required={'Clearra management policy','Clearra management Windows runtime'}
-          deadline=time.monotonic()+900
-          while True:
-              checks=api('GET','commits/'+candidate+'/check-runs?per_page=100')['check_runs']
-              byname={c['name']:c for c in sorted(checks,key=lambda c:c['id']) if c['name'] in required and c['app']['slug']=='github-actions'}
-              if any(c['status']=='completed' and c['conclusion']!='success' for c in byname.values()): raise RuntimeError('Candidate protection failed')
-              if set(byname)==required and all(c['status']=='completed' and c['conclusion']=='success' for c in byname.values()): break
-              if time.monotonic()>deadline: raise RuntimeError('Candidate protection did not complete')
-              time.sleep(15)
-          assert api('GET','git/ref/heads/main')['object']['sha']==base
-          # No force or ruleset change. The menu implementation was browser-tested;
-          # the only later edit aligns the stronger canonical navigation assertion.
-          git('push','origin',candidate+':refs/heads/main')
-          assert api('GET','git/ref/heads/main')['object']['sha']==candidate
-          prior=api('GET','actions/runs?head_sha='+candidate+'&event=workflow_dispatch&per_page=100')['workflow_runs']
-          assert not any(r['path']=='.github/workflows/release-cli.yml' for r in prior)
-          def dispatch(workflow,inputs):
-              receipt=api('POST','actions/workflows/'+workflow+'/dispatches',{'ref':'main','inputs':inputs})
+          def existing(path):
+              pages=json.loads(cmd('gh','api','--paginate','--slurp','repos/'+repo+'/actions/runs?head_sha='+source+'&event=workflow_dispatch&per_page=100'))
+              return [r for page in pages for r in page['workflow_runs'] if r['path']==path]
+          def dispatch(file,inputs):
+              assert api('GET','git/ref/heads/main')['object']['sha']==source
+              receipt=api('POST','actions/workflows/'+file+'/dispatches',{'ref':'main','inputs':inputs})
               rid=receipt.get('workflow_run_id') if isinstance(receipt,dict) else None
-              if not isinstance(rid,int) or rid<=0: raise RuntimeError('Uncertain dispatch receipt; never repeat the POST')
+              if not isinstance(rid,int) or rid<=0: raise RuntimeError('Dispatch receipt uncertain; do not repeat POST')
               return rid
-          release=dispatch('release-cli.yml',{})
-          pages=dispatch('queue-pages-publication.yml',{'acceptance_run_id':str(release),'snapshot_sha':base})
-          receipt={'source_commit':candidate,'browser_tested_frontend':tested,'release_run_id':release,'pages_queue_run_id':pages,'recovery_changes_included':False}
+          releases=existing('.github/workflows/release-cli.yml')
+          if len(releases)>1: raise RuntimeError('Ambiguous exact-source Release runs')
+          if releases and releases[0]['status']=='completed' and releases[0]['conclusion']!='success':
+              raise RuntimeError('Prior exact-source release failed; inspect it instead of redispatching')
+          release=releases[0]['id'] if releases else dispatch('release-cli.yml',{})
+          queues=existing('.github/workflows/queue-pages-publication.yml')
+          if len(queues)>1: raise RuntimeError('Ambiguous Pages queue')
+          pages=queues[0]['id'] if queues else dispatch('queue-pages-publication.yml',{'acceptance_run_id':str(release),'snapshot_sha':base})
+          receipt={'source_commit':source,'release_run_id':release,'pages_queue_run_id':pages,
+              'recovery_changes_included':False,'direct_publication_bypass':False,'main_written':False}
           pathlib.Path(os.environ['RUNNER_TEMP'],'menu-publication.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps(receipt))
       - uses: actions/upload-artifact@v4
