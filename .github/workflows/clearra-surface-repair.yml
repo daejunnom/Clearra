@@ -12,61 +12,90 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions: {contents: read, actions: write}
+    timeout-minutes: 15
+    permissions: {contents: write, actions: write}
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: e1ae99287a0986d190962c9cd48fca574b48d1d6
+          ref: 4c94423bb034c128911e9d6c8737f71e6d32afe0
           fetch-depth: 0
-          persist-credentials: false
-      - name: Bind reviewed source and stop only its superseded nonpublishing gate
+      - name: Install the pinned formatter before preparing the reviewed source
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Apply only the reviewed finite Build response repair without changing main
         id: prepare
         env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import json,os,pathlib,subprocess
+          import hashlib,json,os,pathlib,subprocess
           def cmd(*args): return subprocess.check_output(args,text=True).strip()
           def git(*args): return cmd('git',*args)
           base='952280950aeb24528279cbff685fe8acec892223'
-          before='54df724b04498aaec987d41483efe4d075172522'
-          parent='6363440e9d7c11c8d048801e210cd0263b5a7a28'
-          candidate='e1ae99287a0986d190962c9cd48fca574b48d1d6'
+          parent='e1ae99287a0986d190962c9cd48fca574b48d1d6'
           branch='codex/converge-surface-repair-20260926'
-          tree='f683306f1b198b9ab7dd85a1a7d9f825f4820394'
-          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
-              rows=git('ls-remote','origin',ref).splitlines()
-              if len(rows)!=1 or rows[0].split()!=[sha,ref]:
-                  raise RuntimeError('Reviewed ref moved; reconcile before running')
-          expected=['crates/clearra-app/src/build_colored_target_document.rs',
-              'crates/clearra-app/src/build_pinned_solution_document.rs','crates/clearra-app/src/lib.rs',
-              'crates/clearra-cli-command/src/web_build_v2_input.rs',
-              'crates/clearra-wasm/tests/wasm_host_contract.rs',
-              'packages/clearra-ui/test/buildProbabilityMirrorSelection.test.mjs',
-              'scripts/tools/surface-browser-acceptance.mjs']
-          if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
-              git('rev-parse','HEAD^{tree}')!=tree or git('diff','--name-only',before,candidate).splitlines()!=expected):
-              raise RuntimeError('Reviewed source identity or scope mismatch')
-          git('merge-base','--is-ancestor',base,candidate); git('diff','--check',before,candidate)
-          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'changed_files':expected,'main_updated':False}
-          (pathlib.Path(os.environ['RUNNER_TEMP'])/'mirror-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          expected_blobs={
+              'crates/clearra-wasm/src/json_event_envelope.rs':'b0d71702ca13b54b1254a255337d3d85675c3fcb',
+              'crates/clearra-wasm/src/wasm_command_runtime.rs':'cbd8581988cdc8f0c35c6189c06304201db4ea67',
+              'crates/clearra-wasm/src/wasm_command_runtime/build_coverage_projection.rs':'9e49bde86222b5636b84adad2f4d9d9ea8ba420e',
+              'crates/clearra-wasm/tests/build_coverage_wire.rs':'cedbddb6079704e6b8a49e3ddf00a304ffcfeba9'}
+          expected=sorted(expected_blobs)
+          patch=pathlib.Path('scripts/integration/build-coverage-wire-20260926.patch').read_bytes()
+          digest=hashlib.sha256(patch).hexdigest()
+          if digest!='c0e5bc28f857378bf319f35838e58e7b42a1afeb20df2d65cf8ebb6a8614b375':
+              raise RuntimeError('Reviewed patch checksum mismatch')
+          def verify_refs():
+              for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,parent)]:
+                  rows=git('ls-remote','origin',ref).splitlines()
+                  if len(rows)!=1 or rows[0].split()!=[sha,ref]:
+                      raise RuntimeError('Reviewed ref moved; reconcile before applying')
+          verify_refs()
+          target=pathlib.Path(os.environ['RUNNER_TEMP'])/'build-coverage-wire.patch'
+          target.write_bytes(patch)
+          git('checkout','--detach',parent)
+          git('merge-base','--is-ancestor',base,parent)
+          if git('rev-parse','HEAD^{tree}')!='f683306f1b198b9ab7dd85a1a7d9f825f4820394':
+              raise RuntimeError('Reviewed parent tree mismatch')
+          git('apply','--check',str(target)); git('apply','--index',str(target))
+          if git('diff','--cached','--name-only').splitlines()!=expected:
+              raise RuntimeError('Reviewed patch scope mismatch')
+          for path,sha in expected_blobs.items():
+              if git('hash-object',path)!=sha: raise RuntimeError('Reviewed content mismatch: '+path)
+          # Only formatting is delegated to the pinned toolchain. No generated
+          # replacements, test expectation edits, or runtime fallback changes.
+          subprocess.run(['cargo','+1.98.1','fmt','--all'],check=True)
+          if git('diff','HEAD','--name-only').splitlines()!=expected:
+              raise RuntimeError('Formatter touched an unreviewed file')
+          git('add','--',*expected)
+          git('diff','--cached','--check')
+          subprocess.run(['cargo','+1.98.1','fmt','--all','--check'],check=True)
+          tree=git('write-tree')
+          blobs={path:git('hash-object',path) for path in expected}
+          (pathlib.Path(os.environ['RUNNER_TEMP'])/'build-coverage-wire-formatted.patch').write_text(
+              git('diff','--cached','--binary')+'\n')
+          git('config','user.name','github-actions[bot]')
+          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit','-m','fix: preserve Build portfolios across finite WASM projection and browser JSON')
+          candidate=git('rev-parse','HEAD')
+          if git('show','-s','--format=%P',candidate)!=parent: raise RuntimeError('Parent mismatch')
+          verify_refs()
+          # Normal non-force fast-forward of the candidate only, never main.
+          git('push','origin',candidate+':refs/heads/'+branch)
+          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate:
+              raise RuntimeError('Candidate readback mismatch')
+          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,
+              'patch_sha256':digest,'formatted_blobs':blobs,'changed_files':expected,'main_updated':False}
+          (pathlib.Path(os.environ['RUNNER_TEMP'])/'build-wire-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps(receipt),flush=True)
           subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True)
-          old=json.loads(cmd('gh','api','repos/daejunnom/Clearra/actions/runs/36212905844'))
-          if (old['head_sha']!='a63337431d11612c6e20cc67f8258826bf8dddca' or
-              old['path']!='.github/workflows/clearra-surface-repair.yml' or
-              old['head_branch']!='codex/clearra-safe-integration-20260925'):
-              raise RuntimeError('Superseded gate identity mismatch')
-          if old['status']!='completed':
-              subprocess.run(['gh','run','cancel','36212905844','--repo','daejunnom/Clearra'],check=True)
           with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mirror-preparation-${{ github.run_id }}
-          path: ${{ runner.temp }}/mirror-preparation.json
+          name: build-wire-preparation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/build-wire-preparation.json
+            ${{ runner.temp }}/build-coverage-wire-formatted.patch
           if-no-files-found: warn
           retention-days: 14
   control-browser:
@@ -280,11 +309,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
-      - name: Test real mirrored Build and pins before expensive acceptance
+      - name: Test finite Build projection and exact JSON before expensive acceptance
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt --all --check
+          cargo test --locked --package clearra-wasm --lib build_coverage_projection -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/build-finite-projection.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/build-finite-projection.log"
+          cargo test --locked --package clearra-wasm --lib build_coverage_selection_json_preserves_both_partitions -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/build-selection-json.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/build-selection-json.log"
+          cargo test --locked --package clearra-wasm --test build_coverage_wire -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/build-coverage-wire.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/build-coverage-wire.log"
+      - name: Test real mirrored Build and pins before expensive acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test --locked --package clearra-wasm --test wasm_host_contract build_mirror_source_and_pins_preserve_exact_sets_and_union_probability -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/build-mirror.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/build-mirror.log"
       - name: Test both document formats and keep single-target validation strict
@@ -313,6 +352,9 @@ jobs:
             ${{ runner.temp }}/repair-rust.log
             ${{ runner.temp }}/build-mirror.log
             ${{ runner.temp }}/pinned-document.log
+            ${{ runner.temp }}/build-finite-projection.log
+            ${{ runner.temp }}/build-selection-json.log
+            ${{ runner.temp }}/build-coverage-wire.log
           if-no-files-found: warn
           retention-days: 14
   ready:
