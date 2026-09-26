@@ -97,7 +97,7 @@ fn wasm_worker_event_maps_to_host_contract_job_event() {
 // Exercise the public command runtime, not a synthetic coverage/result fixture.
 const LEFT_I: &str = "ctk1|initial=0000000000000000|placements=I:000000000000000f";
 const RIGHT_I: &str = "ctk1|initial=0000000000000000|placements=I:00000000000003c0";
-const CENTER_I: &str = "ctk1|initial=0000000000000000|placements=I:0000000000000078";
+const CENTER_I: &str = "ctk1|initial=0000000000000000|placements=I:0000000000000000078";
 
 fn selected_document(masks: &[u64]) -> String {
     let pages = masks
@@ -166,7 +166,15 @@ fn build_mirror_source_and_pins_preserve_exact_sets_and_union_probability() {
                      --expected-source-set-hash {digest} --backend cpu --workers 1"
                 ))
                 .expect("valid selection syntax must reach exact-source validation");
-            assert_eq!(rejected.app_response().status(), AppStatus::ExecutionFailed);
+            // Cooperative source admission uses the typed Unsupported envelope;
+            // distinguish this precise rejection from unrelated runtime errors.
+            assert_eq!(rejected.app_response().status(), AppStatus::Unsupported);
+            assert!(rejected.app_response().diagnostics().iter().any(|item| {
+                item.code() == "E_PRODUCT_RUNTIME_UNSUPPORTED"
+                    && item.message().contains("build_minimum_source_rejected")
+            }));
+            assert!(rejected.app_response().product_result_payload().is_none());
+            assert!(rejected.product_page_source_owner().is_none());
         }
         // Both candidates cover the same queue. A single mirrored pin must
         // select that drawing; requiring both must increase the minimum to two.
