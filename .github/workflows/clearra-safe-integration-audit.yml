@@ -10,7 +10,7 @@ permissions:
   actions: read
 concurrency:
   group: clearra-pages-menu-repair
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   source:
     runs-on: ubuntu-latest
@@ -64,7 +64,7 @@ jobs:
           mkdir -p "$CLEARRA_WEB_PUBLIC_DIR/wasm"
           cp -a apps/clearra-web/static/. "$CLEARRA_WEB_PUBLIC_DIR/"
           cp -a build/menu-accepted-wasm/. "$CLEARRA_WEB_PUBLIC_DIR/wasm/"
-          pnpm --filter @clearra/ctk3 run build
+          pnpm --filter ctk3 run build
           pnpm --filter @clearra/web run sync
           pnpm --filter @clearra/web exec vite build --configLoader runner
           node apps/clearra-web/scripts/prepare-pages-fallback.mjs
@@ -101,7 +101,7 @@ jobs:
               const errors=[];page.on('pageerror',e=>errors.push(e.message));
               await page.goto('http://127.0.0.1:4194/Clearra/?tool=recovery');
               const nav=page.locator('nav.product-tabs');
-              await page.locator('select[aria-label]').first().waitFor();
+              await page.locator('.product-mode-select option').first().waitFor({state:'attached'});
               assert.deepEqual(await nav.locator('a').evaluateAll(xs=>xs.map(x=>new URL(x.href).searchParams.get('tool'))),expected);
               assert.deepEqual(await page.locator('.product-mode-select option').evaluateAll(xs=>xs.map(x=>new URL(x.value,'http://x').searchParams.get('tool'))),expected);
               assert.equal(await nav.locator('a[aria-current="page"]').getAttribute('href'),'?tool=recovery');
