@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Validate exact recovery editor candidate
+run-name: Validate recovery role selector and exact editor candidate
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -19,15 +19,15 @@ jobs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: 4b29711a4b67d283bcf66d727156913f6107e2e5, fetch-depth: 0, persist-credentials: false}
+        with: {ref: 29c268e095f6a6f8ce66cdf57c8c451481b29873, fetch-depth: 0, persist-credentials: false}
       - name: Bind the already-reviewed candidate without changing refs or source
         id: prepare
         shell: python
         run: |
           import json,os,pathlib,subprocess
           base='521fee125b478a5a39a90a808d6c471c430c8494'
-          candidate='4b29711a4b67d283bcf66d727156913f6107e2e5'
-          parent='eccfdbf5c6db5da76d71f69b75e27a3f80d4085f'
+          candidate='29c268e095f6a6f8ce66cdf57c8c451481b29873'
+          parent='41e2f4a16920204ab495e0ff3f60cc668cbe2242'
           branch='codex/recovery-gray-fields-20260926'
           expected=['crates/clearra-cli-command/src/web_command_parser.rs','crates/clearra-cli-command/tests/boundary_recovery.rs',
             'crates/clearra-forward-search/src/boundary_recovery.rs','crates/clearra-forward-search/src/boundary_recovery_pattern.rs',
