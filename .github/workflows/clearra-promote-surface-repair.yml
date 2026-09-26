@@ -1,5 +1,5 @@
 name: Start verified release gates
-run-name: Publish accepted mandatory toolbar and automatic recovery
+run-name: Retry UI publication with eligible push-based management checks
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -14,7 +14,7 @@ jobs:
   start-gates:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 160
+    timeout-minutes: 180
     permissions:
       contents: write
       actions: write
@@ -24,7 +24,7 @@ jobs:
           ref: 51084c78c3a06f355a352b4c013314c151c47709
           fetch-depth: 0
           persist-credentials: true
-      - name: Require exact UI acceptance then fast-forward and start canonical gates
+      - name: Require exact UI and eligible policy acceptance then start canonical gates
         env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
@@ -39,6 +39,11 @@ jobs:
           GATE_CONTROL = '7fb9c4e63b4cd58c121cc851bb13bab6db33b701'
           GATE_WORKFLOW_BLOB = '786a391a16387af768ad12050fe857844e870863'
           BRANCH = 'codex/recovery-gray-fields-20260926'
+          # Created through the user's GitHub connection at the unchanged
+          # source SHA. A GITHUB_TOKEN push would suppress this new push run;
+          # workflow_dispatch is deliberately not a substitute for it.
+          POLICY_BRANCH = 'codex/converge-ui-polish-20260927'
+          POLICY_RUN_ID = 36262224114
           SOURCE_ARTIFACT_ID = 10911930346
           SOURCE_ARTIFACT_DIGEST = 'e866611d14b38636ce755fd9a611c0f5c57ba11b7c9f44bf86bc3dcaf1f3ab4a'
           EXPECTED = [
@@ -117,9 +122,64 @@ jobs:
               main = api('git/ref/heads/main')['object']['sha']
               if main not in ({BASE, SOURCE} if allow_promoted else {SOURCE}):
                   raise RuntimeError('Main moved; reconcile instead of overwriting it')
-              if api('git/ref/heads/' + BRANCH)['object']['sha'] != SOURCE:
-                  raise RuntimeError('Reviewed UI candidate moved')
+              for branch in [BRANCH, POLICY_BRANCH]:
+                  if api('git/ref/heads/' + branch)['object']['sha'] != SOURCE:
+                      raise RuntimeError('Reviewed source or policy branch moved: ' + branch)
               return main
+
+          def require_policy_identity(policy):
+              expected = {
+                  'id': POLICY_RUN_ID, 'workflow_id': 362749959,
+                  'event': 'push', 'head_sha': SOURCE, 'head_branch': POLICY_BRANCH,
+                  'path': '.github/workflows/management-policy.yml', 'run_attempt': 1,
+              }
+              for key, value in expected.items():
+                  if policy.get(key) != value:
+                      raise RuntimeError('Required-check origin mismatch: ' + key)
+              if (policy.get('repository', {}).get('full_name') != REPO
+                      or policy.get('head_repository', {}).get('full_name') != REPO):
+                  raise RuntimeError('Required-check repository mismatch')
+
+          def require_policy_success():
+              # workflow_dispatch success is not an eligible ruleset check. Bind the
+              # actual push run and its job/check identities, not only a matching name.
+              deadline = time.monotonic() + 1200
+              while True:
+                  require_refs()
+                  policy = api('actions/runs/' + str(POLICY_RUN_ID))
+                  require_policy_identity(policy)
+                  if policy['status'] == 'completed':
+                      if policy['conclusion'] != 'success':
+                          raise RuntimeError('Push-based management policy failed')
+                      break
+                  if policy['status'] not in ('queued', 'in_progress', 'pending', 'waiting', 'requested'):
+                      raise RuntimeError('Unexpected required-check lifecycle state')
+                  if time.monotonic() >= deadline:
+                      raise RuntimeError('Push-based management policy wait expired')
+                  time.sleep(15)
+              jobs = collection('actions/runs/' + str(POLICY_RUN_ID) + '/attempts/1/jobs?per_page=100', 'jobs')
+              expected_names = {'Clearra management policy', 'Clearra management Windows runtime'}
+              if len(jobs) != 2 or {job['name'] for job in jobs} != expected_names:
+                  raise RuntimeError('Required-check job inventory mismatch')
+              checks = collection('commits/' + SOURCE + '/check-runs?filter=all&per_page=100', 'check_runs')
+              for job in jobs:
+                  if (job['run_id'] != POLICY_RUN_ID or job['run_attempt'] != 1
+                          or job['head_sha'] != SOURCE or job['status'] != 'completed'
+                          or job['conclusion'] != 'success'):
+                      raise RuntimeError('Required-check job did not succeed on exact source')
+                  matching = [check for check in checks if check['id'] == job['id']]
+                  if len(matching) != 1:
+                      raise RuntimeError('Required-check job/check binding is missing or ambiguous')
+                  check = matching[0]
+                  if (check['name'] != job['name'] or check['head_sha'] != SOURCE
+                          or check['check_suite']['id'] != policy['check_suite_id']
+                          or check['app']['id'] != 15368 or check['app']['slug'] != 'github-actions'
+                          or check['status'] != 'completed' or check['conclusion'] != 'success'):
+                      raise RuntimeError('Required-check evidence mismatch')
+              receipt['management_policy_run_id'] = POLICY_RUN_ID
+              receipt['management_policy_event'] = 'push'
+              receipt['management_policy_branch'] = POLICY_BRANCH
+              save()
 
           def runs_for(path):
               return [r for r in collection('actions/runs?head_sha=' + SOURCE + '&event=workflow_dispatch&per_page=100', 'workflow_runs')
@@ -164,6 +224,7 @@ jobs:
           if git('rev-parse', GATE_CONTROL + ':.github/workflows/clearra-safe-integration-audit.yml') != GATE_WORKFLOW_BLOB:
               raise RuntimeError('Validation workflow definition mismatch')
           require_refs()
+          require_policy_identity(api('actions/runs/' + str(POLICY_RUN_ID)))
 
           # The gate's prepare job generated a commit. Bind its exact receipt,
           # not the control branch SHA, and never execute downloaded artifacts.
@@ -214,11 +275,7 @@ jobs:
               raise RuntimeError('Expected full independent acceptance inventory')
           if any(j['status'] != 'completed' or j['conclusion'] != 'success' for j in jobs):
               raise RuntimeError('An acceptance job was not successful')
-          checks = collection('commits/' + SOURCE + '/check-runs?filter=latest&per_page=100', 'check_runs')
-          for name in ['Clearra management policy', 'Clearra management Windows runtime']:
-              matching = [c for c in checks if c['name'] == name and c['head_sha'] == SOURCE and c['app']['slug'] == 'github-actions']
-              if len(matching) != 1 or matching[0]['status'] != 'completed' or matching[0]['conclusion'] != 'success':
-                  raise RuntimeError('Required independent protection is not successful: ' + name)
+          require_policy_success()
           receipt['stage'] = 'validated'
           receipt['validated_jobs'] = sorted(EXPECTED_JOBS)
           save()
@@ -243,7 +300,7 @@ jobs:
           print(json.dumps(receipt, indent=2), flush=True)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write('## Exact UI release gates started\n\n')
-              f.write(f'Source: `{SOURCE}`\n\nRelease/Tauri: `{release["id"]}`\n\nPages queue: `{queue["id"]}`\n\n')
+              f.write(f'Source: `{SOURCE}`\n\nPush-based policy: `{POLICY_RUN_ID}`\n\nRelease/Tauri: `{release["id"]}`\n\nPages queue: `{queue["id"]}`\n\n')
               f.write('Pages waits for canonical acceptance and rollback capture. Discord follows the existing exact-source release-success path. No tag or final GitHub Release is created here.\n')
       - uses: actions/upload-artifact@v4
         if: always()
