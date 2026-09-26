@@ -14,59 +14,45 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
       actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: b7a5b7d568d605a9d053e34af1a7783740280380
+          ref: c47a369cf7b606edae17df1d9a9d0d2500ae5f3f
           fetch-depth: 0
-      - name: Apply the reviewed pinned document boundary repair without changing main
+          persist-credentials: false
+      - name: Bind the exact pinned-document repair without changing source or main
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
         shell: python
         run: |
-          import hashlib,json,os,pathlib,subprocess
+          import json,os,pathlib,subprocess
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
           base='952280950aeb24528279cbff685fe8acec892223'
-          parent='dc379d89153270bcb7d959be7b11f080f849238a'
+          before='54df724b04498aaec987d41483efe4d075172522'
+          parent='e339c26f9230c525d4c6757bd754aa11b1e0c3d1'
+          candidate='c47a369cf7b606edae17df1d9a9d0d2500ae5f3f'
           branch='codex/converge-surface-repair-20260926'
-          tree='380f3be1269f502c0c92e035df54b2a817ca5403'
-          patch=pathlib.Path('scripts/integration/build-pinned-mirror-document-20260926.patch').read_bytes()
-          if hashlib.sha256(patch).hexdigest()!='a5b7ad0856e623de2a618802b5089ffb97bd8a9a9c1b8cb11667d0f2f01c7467':
-              raise RuntimeError('Reviewed patch bytes differ')
-          if git('ls-remote','origin','refs/heads/main').split()[0]!=base:
-              raise RuntimeError('main moved; reconcile before applying')
+          tree='74f555d5628705cb33bcc19f7d2d87d831179a89'
+          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
+              rows=git('ls-remote','origin',ref).splitlines()
+              if len(rows)!=1 or rows[0].split()!=[sha,ref]:
+                  raise RuntimeError('Reviewed ref moved; reconcile before running')
           expected=['crates/clearra-app/src/build_colored_target_document.rs',
               'crates/clearra-app/src/build_pinned_solution_document.rs','crates/clearra-app/src/lib.rs',
               'crates/clearra-cli-command/src/web_build_v2_input.rs',
-              'crates/clearra-wasm/tests/wasm_host_contract.rs']
-          tip=git('ls-remote','origin','refs/heads/'+branch).split()[0]
-          if tip==parent:
-              target=pathlib.Path(os.environ['RUNNER_TEMP'])/'build-pinned-mirror.patch'
-              target.write_bytes(patch)
-              git('checkout','--detach',parent)
-              git('merge-base','--is-ancestor',base,parent)
-              git('apply','--check',str(target)); git('apply','--index',str(target))
-              git('diff','--cached','--check')
-              if git('diff','--cached','--name-only').splitlines()!=expected or git('write-tree')!=tree:
-                  raise RuntimeError('Reviewed source scope or tree mismatch')
-              git('config','user.name','github-actions[bot]')
-              git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-              git('commit','-m','fix: distinguish required mirrored drawings from a single Build target')
-              candidate=git('rev-parse','HEAD')
-              git('push','origin',candidate+':refs/heads/'+branch)
-          else:
-              candidate=tip
-          if (git('show','-s','--format=%P',candidate)!=parent or
-              git('rev-parse',candidate+'^{tree}')!=tree or
-              git('diff','--name-only',parent,candidate).splitlines()!=expected):
-              raise RuntimeError('Candidate identity changed; reconcile before running')
-          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate:
-              raise RuntimeError('Candidate readback mismatch')
+              'crates/clearra-wasm/tests/wasm_host_contract.rs',
+              'packages/clearra-ui/test/buildProbabilityMirrorSelection.test.mjs',
+              'scripts/tools/surface-browser-acceptance.mjs']
+          if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
+              git('rev-parse','HEAD^{tree}')!=tree or git('diff','--name-only',before,candidate).splitlines()!=expected):
+              raise RuntimeError('Reviewed source identity or scope mismatch')
+          git('merge-base','--is-ancestor',base,candidate)
+          git('diff','--check',before,candidate)
           receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'changed_files':expected,'main_updated':False}
           (pathlib.Path(os.environ['RUNNER_TEMP'])/'mirror-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps(receipt),flush=True)
