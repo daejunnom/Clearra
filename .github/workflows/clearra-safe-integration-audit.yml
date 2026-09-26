@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Validate reactive recovery fields and shared controls
+run-name: Validate exact recovery editor candidate
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -9,61 +9,48 @@ permissions:
   contents: read
 concurrency:
   group: clearra-recovery-fields-review
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   prepare:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions: {contents: write, actions: write}
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: ed0fc10be925744d44e379d463db8d04d9f740d6, fetch-depth: 0}
-      - name: Apply only the reviewed reactive-color fix to the isolated candidate
+        with: {ref: 4b29711a4b67d283bcf66d727156913f6107e2e5, fetch-depth: 0, persist-credentials: false}
+      - name: Bind the already-reviewed candidate without changing refs or source
         id: prepare
-        env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import hashlib,json,os,pathlib,subprocess
-          repo='daejunnom/Clearra'
+          import json,os,pathlib,subprocess
           base='521fee125b478a5a39a90a808d6c471c430c8494'
+          candidate='4b29711a4b67d283bcf66d727156913f6107e2e5'
           parent='eccfdbf5c6db5da76d71f69b75e27a3f80d4085f'
           branch='codex/recovery-gray-fields-20260926'
-          expected={'packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte':'ed64aaf449ad4f13839152c3844fb6e7c6639d72',
-              'scripts/tools/recovery-editor-browser-acceptance.mjs':'9de5dfdb1a92a3b210082fad099a30a43f9e495f'}
-          def cmd(*args): return subprocess.check_output(args,text=True,timeout=120).strip()
-          def git(*args): return cmd('git',*args)
-          def api(path): return json.loads(cmd('gh','api','repos/'+repo+'/'+path))
-          patch=pathlib.Path('scripts/integration/recovery-fields-reactivity-20260926.patch').read_bytes()
-          if hashlib.sha256(patch).hexdigest()!='b4c06d839f4501f9437493ef4320b7e8c3a7e2d0444118bfe7d40b3701a9bf98':
-              raise RuntimeError('Reviewed patch digest mismatch')
+          expected=['crates/clearra-cli-command/src/web_command_parser.rs','crates/clearra-cli-command/tests/boundary_recovery.rs',
+            'crates/clearra-forward-search/src/boundary_recovery.rs','crates/clearra-forward-search/src/boundary_recovery_pattern.rs',
+            'crates/clearra-forward-search/src/boundary_recovery_population.rs','crates/clearra-forward-search/src/boundary_recovery_tests.rs',
+            'packages/clearra-ui/src/lib/i18n/componentCatalog.ts','packages/clearra-ui/src/lib/workspace/BoundaryRecoveryControls.svelte',
+            'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryFields.svelte','packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte',
+            'packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte','packages/clearra-ui/src/lib/workspace/boundaryRecoveryModel.ts',
+            'packages/clearra-ui/test/boundaryRecoveryFields.test.mjs','scripts/desktop-ui-compile-check.mjs',
+            'scripts/lib/wasm-release-gate.ps1','scripts/tools/recovery-editor-browser-acceptance.mjs','scripts/tools/surface-browser-acceptance.mjs']
+          def git(*args):return subprocess.check_output(['git',*args],text=True,timeout=120).strip()
+          if git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent:
+            raise RuntimeError('Exact candidate or parent mismatch')
+          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
+            if git('ls-remote','origin',ref).split()!=[sha,ref]:raise RuntimeError('Reviewed ref moved')
+          git('merge-base','--is-ancestor',base,candidate)
+          if git('diff','--name-only',base,candidate).splitlines()!=expected:raise RuntimeError('Reviewed scope changed')
+          git('diff','--check',base,candidate)
           out=pathlib.Path(os.environ['RUNNER_TEMP'])/'recovery-preparation';out.mkdir()
-          patch_path=out/'reviewed.patch';patch_path.write_bytes(patch)
-          if api('git/ref/heads/main')['object']['sha']!=base or api('git/ref/heads/'+branch)['object']['sha']!=parent:
-              raise RuntimeError('Reviewed refs moved')
-          git('checkout','--detach',parent)
-          if git('rev-parse','HEAD^{tree}')!='a0910e6f46467e48e405aaaec3606ec8751da334': raise RuntimeError('Parent tree mismatch')
-          git('apply','--check',str(patch_path));git('apply','--index',str(patch_path))
-          if git('diff','--cached','--name-only').splitlines()!=sorted(expected): raise RuntimeError('Scope mismatch')
-          for path,blob in expected.items():
-              if git('hash-object',path)!=blob: raise RuntimeError('Content mismatch: '+path)
-          git('diff','--cached','--check')
-          git('config','user.name','github-actions[bot]')
-          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-          git('commit','-m','fix: track recovery field paint state when applying gray tones')
-          candidate=git('rev-parse','HEAD');tree=git('rev-parse','HEAD^{tree}')
-          if git('show','-s','--format=%P',candidate)!=parent: raise RuntimeError('Parent mismatch')
-          if api('git/ref/heads/'+branch)['object']['sha']!=parent: raise RuntimeError('Candidate changed concurrently')
-          git('push','origin',candidate+':refs/heads/'+branch)
-          if api('git/ref/heads/'+branch)['object']['sha']!=candidate: raise RuntimeError('Push readback mismatch')
-          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'branch':branch,
-              'changed_files':git('diff','--name-only',base,candidate).splitlines(),'main_updated':False,'publishing':False}
+          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':git('rev-parse','HEAD^{tree}'),
+            'branch':branch,'changed_files':expected,'main_updated':False,'publishing':False}
           (out/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
           (out/'complete.patch').write_text(git('diff','--binary',base,candidate)+'\n')
           print(json.dumps(receipt),flush=True)
-          subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True,timeout=120)
           with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidate='+candidate+'\n')
       - uses: actions/upload-artifact@v4
         if: always()
@@ -81,6 +68,7 @@ jobs:
       matrix: {os: [ubuntu-latest, windows-latest]}
     env:
       CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
       CLEARRA_BROWSER_TOOLS_ROOT: ${{ github.workspace }}/build/tools/recovery-browser
     steps:
       - uses: actions/checkout@v4
