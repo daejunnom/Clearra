@@ -12,6 +12,7 @@ fn fixed_queue_boundary_recovery_uses_one_continuous_app_request() {
         panic!("expected typed boundary recovery command");
     };
     assert_eq!(command.query().queue.len(), 2);
+    assert!(command.query().stage_one_target.is_empty());
     assert_eq!(command.query().stage_one_queue_len, 1);
     assert_eq!(command.query().borrow_role_index, 1);
     assert_eq!(
@@ -141,4 +142,24 @@ fn pattern_recovery_keeps_unknown_weight_and_rejects_nonmatching_diagram_bags() 
 
     let without_pattern = command.replace(" --queue-pattern \"IJLOSTZIJLOSTZ;IJLOSTZIIIIIII\"", "");
     assert!(CliCommandParser::parse(&without_pattern).is_err());
+}
+
+#[test]
+fn explicit_first_stage_target_is_one_continuous_non_pc_app_request() {
+    let base = "clearra recovery boundary --initial-board-mask 0 --stage-one-board-mask 0xf --target-board-mask 0xc03f --height 4 --queue IO --stage-one-count 1 --placements 2 --max-early-placements 0 --no-hold --role-mask 1:0xf --role-mask 2:0xc030";
+    let request = CliCommandParser::parse(base)
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let AppCommand::BoundaryRecovery(recovery) = request.command() else {
+        panic!("typed recovery");
+    };
+    assert_eq!(recovery.query().stage_one_target.words(), [0xf, 0, 0, 0]);
+    let response = AppContext::default().run(request);
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    let fields = response.render_model().unwrap().message().unwrap().fields();
+    assert!(fields
+        .iter()
+        .any(|field| field.key() == "status" && field.value().as_text() == "normal"));
+    assert!(CliCommandParser::parse(&format!("{base} --stage-one-board-mask 0")).is_err());
 }

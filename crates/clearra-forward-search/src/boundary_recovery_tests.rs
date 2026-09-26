@@ -9,6 +9,7 @@ fn control() -> ExecutionControl {
 fn two_stage_query() -> BoundaryRecoveryQuery {
     BoundaryRecoveryQuery {
         initial_board: Board256Mask::from_words([0x3f0, 0, 0, 0]),
+        stage_one_target: Board256Mask::EMPTY,
         final_board: Board256Mask::from_words([0xc030, 0, 0, 0]),
         height: 4,
         queue: vec![PieceKind::I, PieceKind::O],
@@ -337,4 +338,92 @@ fn exact_early_roles_can_prove_recovery_only_after_normal_failure() {
     assert_eq!(bounded.status, BoundaryRecoveryStatus::Incomplete);
     assert_eq!(bounded.recovery_states, 0);
     assert!(bounded.normal_states <= query.max_states);
+}
+
+#[test]
+fn nonempty_first_stage_goal_is_checked_without_requiring_a_pc() {
+    let mut query = two_stage_query();
+    query.initial_board = Board256Mask::EMPTY;
+    query.stage_one_target = Board256Mask::from_words([0xf, 0, 0, 0]);
+    query.final_board = Board256Mask::from_words([0xc03f, 0, 0, 0]);
+    query.max_early_placements = 0;
+    query.placement_role_masks = vec![
+        Board256Mask::from_words([0xf, 0, 0, 0]),
+        Board256Mask::from_words([0xc030, 0, 0, 0]),
+    ];
+    let report = query.search(&control()).unwrap();
+    assert_eq!(report.status, BoundaryRecoveryStatus::Normal);
+    assert_eq!(report.stage_one_checkpoint_step, Some(1));
+    assert_eq!(report.checkpoint_is_pc, Some(false));
+    assert_eq!(report.steps[0].board_after, [0xf, 0, 0, 0]);
+    query.stage_one_target = Board256Mask::from_words([0x1e, 0, 0, 0]);
+    assert_eq!(
+        query.search(&control()).unwrap().status,
+        BoundaryRecoveryStatus::NoPath
+    );
+}
+
+#[test]
+fn first_stage_goal_uses_post_clear_coordinates_and_retains_initial_cells() {
+    let mut query = two_stage_query();
+    query.initial_board = Board256Mask::from_words([0x803f0, 0, 0, 0]);
+    query.stage_one_target = Board256Mask::from_words([0x200, 0, 0, 0]);
+    query.final_board = Board256Mask::from_words([0xe03, 0, 0, 0]);
+    query.max_early_placements = 0;
+    query.placement_role_masks = vec![
+        Board256Mask::from_words([0xf, 0, 0, 0]),
+        Board256Mask::from_words([0xc03, 0, 0, 0]),
+    ];
+    let report = query.search(&control()).unwrap();
+    assert_eq!(report.status, BoundaryRecoveryStatus::Normal);
+    assert_eq!(report.steps[0].board_after, [0x200, 0, 0, 0]);
+    assert_eq!(report.checkpoint_is_pc, Some(false));
+    query.stage_one_target = Board256Mask::from_words([0x80000, 0, 0, 0]);
+    assert_eq!(
+        query.search(&control()).unwrap().status,
+        BoundaryRecoveryStatus::NoPath
+    );
+}
+
+#[test]
+fn early_second_stage_cells_cannot_impersonate_the_first_stage_target() {
+    let mut query = two_stage_query();
+    query.queue.push(PieceKind::T);
+    query.hold_enabled = true;
+    query.stage_one_target = query.final_board;
+    let (result, _) = Pass::new(&query, &control(), 1).unwrap().run().unwrap();
+    assert!(matches!(result, PassResult::NoPath));
+}
+
+#[test]
+fn nonempty_first_stage_provenance_allows_a_real_early_second_stage_piece() {
+    let mut query = two_stage_query();
+    query.initial_board = Board256Mask::from_words([0x803f0, 0, 0, 0]);
+    query.stage_one_target = Board256Mask::from_words([0x200, 0, 0, 0]);
+    query.final_board = Board256Mask::from_words([0xc230, 0, 0, 0]);
+    query.queue.push(PieceKind::T);
+    query.hold_enabled = true;
+    let (result, states) = Pass::new(&query, &control(), 1).unwrap().run().unwrap();
+    let PassResult::Found {
+        steps,
+        checkpoint_is_pc,
+        borrowed_count,
+        ..
+    } = result
+    else {
+        panic!("expected continuous early placement: {result:?}, states={states}");
+    };
+    assert_eq!(borrowed_count, 1);
+    assert!(!checkpoint_is_pc);
+    assert_eq!(steps[1].board_after, [0xc230, 0, 0, 0]);
+}
+
+#[test]
+fn first_stage_target_cannot_extend_outside_the_declared_field() {
+    let mut query = two_stage_query();
+    query.stage_one_target = Board256Mask::from_words([1_u64 << 40, 0, 0, 0]);
+    assert_eq!(
+        query.search(&control()),
+        Err(BoundaryRecoveryError::BoardOutsideField)
+    );
 }

@@ -270,6 +270,9 @@ function Invoke-WasmBuildTestGate {
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
             (Join-Path $Root 'scripts/tools/workspace-controls-browser-acceptance.mjs')
         ) 'clearra-browser native control acceptance'
+        Invoke-WasmReleaseCommand $nodeCommand.Source @(
+            (Join-Path $Root 'scripts/tools/recovery-editor-browser-acceptance.mjs')
+        ) 'clearra-browser recovery editor acceptance'
         if (Test-Path -LiteralPath $webPublicDir) {
             Remove-Item -LiteralPath $webPublicDir -Recurse -Force
         }

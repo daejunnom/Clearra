@@ -34,6 +34,10 @@ const MAX_SEARCH_STATES: usize = 1_000_000;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundaryRecoveryQuery {
     pub initial_board: Board256Mask,
+    /// Exact remaining initial/first-stage cells at the checkpoint, after real
+    /// line clears. Early second-stage cells are excluded; EMPTY preserves the
+    /// original PC boundary. This is a goal predicate, never a geometric prune.
+    pub stage_one_target: Board256Mask,
     pub final_board: Board256Mask,
     pub height: u8,
     pub queue: Vec<PieceKind>,
@@ -303,6 +307,7 @@ impl BoundaryRecoveryQuery {
         }
         let cells = u16::from(self.height) * 10;
         if self.initial_board.fits_cell_count(cells) != Ok(true)
+            || self.stage_one_target.fits_cell_count(cells) != Ok(true)
             || self.final_board.fits_cell_count(cells) != Ok(true)
         {
             return Err(BoundaryRecoveryError::BoardOutsideField);
@@ -667,7 +672,7 @@ impl<'a> Pass<'a> {
                     let stage_one_mask = (1_u64 << self.query.stage_one_queue_len) - 1;
                     let checkpoint_reached = state.checkpoint_step.is_none()
                         && fulfilled_role_mask & stage_one_mask == stage_one_mask
-                        && stage_one_board.is_empty();
+                        && stage_one_board.words() == self.query.stage_one_target.words();
                     let next_queue_index = choice.next_queue_index;
                     let active = if usize::from(next_queue_index) < self.query.queue.len() {
                         Some(Token {

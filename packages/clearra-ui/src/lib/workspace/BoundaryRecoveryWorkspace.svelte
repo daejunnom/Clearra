@@ -13,7 +13,7 @@
     wasmWorkerState, WasmTerminalWorkerController, type HostCapabilitySnapshot
   } from '../wasm';
   import {
-    boundaryRecoveryBagSlots, boundaryRecoveryCommand, boundaryRecoveryDesktopRequest, boundaryRecoveryPayload,
+    boundaryRecoveryCommand, boundaryRecoveryDesktopRequest, boundaryRecoveryPayload,
     createBoundaryRecoveryRequest, validateBoundaryRecoveryRequest
   } from './boundaryRecoveryModel';
   import { trimForwardBoardMask } from './forwardSearchModel';
@@ -22,7 +22,8 @@
   import WorkspaceShell from './WorkspaceShell.svelte';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
   import { workspaceViewFromDesktop, workspaceViewFromWasm } from './workspaceRuntime';
-  import type { RuleProfile, SpinProfile } from './solverWorkspaceModel';
+  import BoundaryRecoveryFields from './BoundaryRecoveryFields.svelte';
+  import BoundaryRecoveryControls from './BoundaryRecoveryControls.svelte';
 
   export let workerFactory: (() => Worker) | null = null;
   export let runtime: 'web' | 'desktop' = 'web';
@@ -30,8 +31,6 @@
   const hostCapabilitySnapshot = getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT)
     ?? sharedBrowserHostCapabilitySnapshot();
   const workerController = new WasmTerminalWorkerController(workerFactory, hostCapabilitySnapshot);
-  const rules: RuleProfile[] = ['srs-plus', 'srs', 'srs-x', 'jstris-180'];
-  const spins: SpinProfile[] = ['t-spins', 't-spins-plus', 'all-spin', 'all-spin-plus', 'all-mini', 'all-mini-plus'];
   let request = createBoundaryRecoveryRequest();
   let selectedRolePosition = 1;
   let language: WorkspaceLanguage = 'en';
@@ -45,7 +44,9 @@
   $: displayCheckpoint = payload?.population ? example?.stage_one_checkpoint_step : payload?.stage_one_checkpoint_step;
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: validation = validateBoundaryRecoveryRequest(request);
-  $: bagSlots = boundaryRecoveryBagSlots(request.stageOneCount, request.placements);
+  $: if (Number.isInteger(request.placements) && request.placements >= 2 && request.placements <= 42) {
+    selectedRolePosition = Math.min(selectedRolePosition, request.placements);
+  }
   $: label = (key: ComponentMessageKey) => componentMessage(language, key);
   $: standardLabel = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
 
@@ -87,48 +88,16 @@
     request = {
       ...request, height,
       initialBoardMask: trimForwardBoardMask(request.initialBoardMask, height),
+      stageOneBoardMask: trimForwardBoardMask(request.stageOneBoardMask, height),
       targetBoardMask: trimForwardBoardMask(request.targetBoardMask, height),
       borrowPlacementMask: trimForwardBoardMask(request.borrowPlacementMask, height),
       placementRoleMasks: request.placementRoleMasks.map((mask) => trimForwardBoardMask(mask, height))
     };
   }
 
-  function importBoard(mask: bigint, height: number, target: boolean) {
-    const nextHeight = Math.max(request.height, Math.max(1, Math.min(24, height)));
-    request = {
-      ...request, height: nextHeight,
-      [target ? 'targetBoardMask' : 'initialBoardMask']: trimForwardBoardMask(mask, nextHeight)
-    };
-  }
-
   function importBorrowPlacement(mask: bigint, height: number) {
     const nextHeight = Math.max(request.height, Math.max(1, Math.min(24, height)));
     request = { ...request, height: nextHeight, borrowPlacementMask: trimForwardBoardMask(mask, nextHeight) };
-  }
-
-  function setPlacements(value: number) {
-    const placements = Math.max(2, Math.min(42, Math.trunc(value || 2)));
-    request = {
-      ...request, placements,
-      preserveB2BBags: placements === request.placements ? request.preserveB2BBags : [],
-      placementRoleMasks: request.placementRoleMasks.length === 0 ? [] :
-        Array.from({ length: placements }, (_, index) => request.placementRoleMasks[index] ?? 0n)
-    };
-    selectedRolePosition = Math.min(selectedRolePosition, placements);
-  }
-
-  function setExactRoles(enabled: boolean) {
-    request = {
-      ...request,
-      placementRoleMasks: enabled ? Array.from({ length: request.placements }, () => 0n) : []
-    };
-  }
-
-  function setBagB2B(position: number, enabled: boolean) {
-    const bags = new Set(request.preserveB2BBags);
-    if (enabled) bags.add(position);
-    else bags.delete(position);
-    request = { ...request, preserveB2BBags: [...bags].sort((a, b) => a - b) };
   }
 
   function setRoleMask(position: number, mask: bigint) {
@@ -212,20 +181,9 @@
   on:run={run}
 >
   <div slot="editor" class="recovery-fields">
-    <WorkspaceBoardEditor
-      mode="forward" height={request.height} existingMask={request.initialBoardMask}
-      targetMask={0n} piecesNeeded={request.stageOneCount} {language}
-      labelOverride={label('recoveryInitialField')} enableGlobalPaste={false}
-      on:change={(event) => request = { ...request, initialBoardMask: event.detail.existingMask }}
-      on:import={(event) => importBoard(event.detail.existingMask, event.detail.height, false)}
-    />
-    <WorkspaceBoardEditor
-      mode="forward" height={request.height} existingMask={request.targetBoardMask}
-      targetMask={0n} piecesNeeded={request.placements - request.stageOneCount} {language}
-      labelOverride={label('recoveryTargetField')} enableGlobalPaste={false}
-      on:change={(event) => request = { ...request, targetBoardMask: event.detail.existingMask }}
-      on:import={(event) => importBoard(event.detail.existingMask, event.detail.height, true)}
-    />
+    <BoundaryRecoveryFields {request} {language} on:change={(event) => request = event.detail} />
+    <details class="placement-constraints" open={request.placementRoleMasks.length > 0 || request.maxEarlyPlacements === 1}>
+      <summary>{label('recoveryAdvanced')}</summary>
     {#if request.placementRoleMasks.length > 0}
       <WorkspaceBoardEditor
         mode="forward" height={request.height} existingMask={request.placementRoleMasks[selectedRolePosition - 1] ?? 0n}
@@ -244,80 +202,12 @@
         on:import={(event) => importBorrowPlacement(event.detail.existingMask, event.detail.height)}
       />
     {/if}
+    </details>
   </div>
-  <section slot="controls" class="recovery-controls" aria-label={label('boundaryRecovery')}>
-    <p>{label('recoveryScope')}</p>
-    <label class="check"><input type="checkbox" checked={request.placementRoleMasks.length > 0}
-      on:change={(event) => setExactRoles((event.currentTarget as HTMLInputElement).checked)} />{label('recoveryExactRoles')}</label>
-    {#if request.placementRoleMasks.length > 0}
-      <label><span>{label('recoveryRolePosition')}</span>
-        <select value={selectedRolePosition} on:change={(event) => selectedRolePosition = Number((event.currentTarget as HTMLSelectElement).value)}>
-          {#each Array.from({ length: request.placements }, (_, index) => index + 1) as position}
-            <option value={position}>{position} · {request.queue[position - 1]?.toUpperCase() ?? '?'}</option>
-          {/each}
-        </select>
-      </label>
-    {/if}
-    <label><span>{label('recoveryQueue')}</span>
-      <input value={request.queue} placeholder="IOTSZJL" spellcheck="false"
-        on:input={(event) => request = { ...request, queue: (event.currentTarget as HTMLInputElement).value }} />
-    </label>
-    <label><span>{label('recoveryQueuePattern')}</span>
-      <input value={request.queuePattern} placeholder="IJLOSTZP7" spellcheck="false"
-        on:input={(event) => request = { ...request, queuePattern: (event.currentTarget as HTMLInputElement).value }} />
-    </label>
-    <label><span>{label('recoveryStageOneCount')}</span>
-      <input type="number" min="1" max="41" value={request.stageOneCount}
-        on:input={(event) => request = { ...request, stageOneCount: Number((event.currentTarget as HTMLInputElement).value), preserveB2BBags: [] }} />
-    </label>
-    <label><span>{label('recoveryPlacements')}</span>
-      <input type="number" min="2" max="42" value={request.placements}
-        on:input={(event) => setPlacements(Number((event.currentTarget as HTMLInputElement).value))} />
-    </label>
-    {#if request.maxEarlyPlacements === 1}
-      <label><span>{label('recoveryBorrowPosition')}</span>
-        <input type="number" min={request.stageOneCount + 1} max={request.placements} value={request.borrowRolePosition}
-          on:input={(event) => request = { ...request, borrowRolePosition: Number((event.currentTarget as HTMLInputElement).value) }} />
-      </label>
-    {/if}
-    <label><span>{label('recoveryMaxEarlyPlacements')}</span>
-      <select value={request.maxEarlyPlacements} on:change={(event) => request = { ...request, maxEarlyPlacements: Number((event.currentTarget as HTMLSelectElement).value) as 0 | 1 }}>
-        <option value="0">0</option><option value="1">1</option>
-      </select>
-    </label>
-    <label><span>{label('rule')}</span>
-      <select value={request.rule} on:change={(event) => request = { ...request, rule: (event.currentTarget as HTMLSelectElement).value as RuleProfile }}>
-        {#each rules as rule}<option value={rule}>{rule}</option>{/each}
-      </select>
-    </label>
-    <label><span>{standardLabel('spinProfile')}</span>
-      <select value={request.spinProfile} on:change={(event) => request = { ...request, spinProfile: (event.currentTarget as HTMLSelectElement).value as SpinProfile }}>
-        {#each spins as spin}<option value={spin}>{spin}</option>{/each}
-      </select>
-    </label>
-    <label class="check"><input type="checkbox" checked={request.holdEnabled} on:change={(event) => request = { ...request, holdEnabled: (event.currentTarget as HTMLInputElement).checked }} />{label('enableHold')}</label>
-    <label class="check"><input type="checkbox" checked={request.initialB2B} on:change={(event) => request = { ...request, initialB2B: (event.currentTarget as HTMLInputElement).checked }} />{label('recoveryInitialB2b')}</label>
-    {#each bagSlots as bag}
-      <label class="check"><input type="checkbox" checked={request.preserveB2BBags.includes(bag.position)}
-        on:change={(event) => setBagB2B(bag.position, (event.currentTarget as HTMLInputElement).checked)}
-      />{bag.stage === 1 ? label('recoveryPreserveStageOne') : label('recoveryPreserveStageTwo')} · {label('recoveryBagUnit')} {bag.stageBag}</label>
-    {/each}
-    <label><span>{label('recoveryMaxStates')}</span>
-      <input type="number" min="1" max="1000000" value={request.maxStates}
-        on:input={(event) => request = { ...request, maxStates: Number((event.currentTarget as HTMLInputElement).value) }} />
-    </label>
-    {#if request.queuePattern.trim()}
-      <label><span>{label('recoveryPatternEvaluations')}</span>
-        <input type="number" min="1" max="100000" value={request.maxPatternEvaluations}
-          on:input={(event) => request = { ...request, maxPatternEvaluations: Number((event.currentTarget as HTMLInputElement).value) }} />
-      </label>
-      <label><span>{label('recoveryTotalStates')}</span>
-        <input type="number" min="1" max="100000000" value={request.maxTotalStates}
-          on:input={(event) => request = { ...request, maxTotalStates: Number((event.currentTarget as HTMLInputElement).value) }} />
-      </label>
-    {/if}
-    {#if validation.length > 0}<p role="alert">{label('recoveryInvalid')}</p>{/if}
-  </section>
+  <div slot="controls">
+    <BoundaryRecoveryControls {request} {language} {validation} {selectedRolePosition}
+      on:change={(event) => request = event.detail} on:role={(event) => selectedRolePosition = event.detail} />
+  </div>
   <section slot="result" class="recovery-result" aria-live="polite">
     <h2>{label('boundaryRecovery')}</h2>
     {#if payload}
@@ -352,11 +242,7 @@
 
 <style>
   .recovery-fields { display: grid; gap: 18px; min-width: 0; }
-  .recovery-controls { display: grid; align-content: start; gap: 12px; padding: 18px; background: white; border-radius: 12px; }
-  .recovery-controls > p { margin: 0 0 4px; line-height: 1.5; }
-  .recovery-controls label:not(.check) { display: grid; gap: 5px; font-size: 13px; font-weight: 650; }
-  .recovery-controls input:not([type='checkbox']), .recovery-controls select { width: 100%; padding: 8px; border: 1px solid #bac8be; border-radius: 6px; }
-  .recovery-controls .check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .placement-constraints summary { cursor: pointer; color: #34403c; font-size: 13px; font-weight: 700; padding: 12px 0; }
   .recovery-result { max-width: 1460px; margin: 22px auto; padding: 18px 24px; background: white; border-radius: 12px; }
   .recovery-result h2 { margin: 0 0 12px; }
   .recovery-result .outcome { font-size: 18px; font-weight: 750; }

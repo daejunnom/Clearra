@@ -82,6 +82,7 @@ mod tests {
         ];
         let reference = BoundaryRecoveryQuery {
             initial_board: Board256Mask::EMPTY,
+            stage_one_target: Board256Mask::EMPTY,
             final_board: Board256Mask::EMPTY,
             height: 8,
             queue: bag.into_iter().chain(bag).collect(),

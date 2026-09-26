@@ -320,6 +320,7 @@ mod tests {
     fn query_for_test() -> BoundaryRecoveryQuery {
         BoundaryRecoveryQuery {
             initial_board: Board256Mask::from_words([0x3f0, 0, 0, 0]),
+            stage_one_target: Board256Mask::EMPTY,
             final_board: Board256Mask::from_words([0xc030, 0, 0, 0]),
             height: 4,
             queue: Vec::new(),

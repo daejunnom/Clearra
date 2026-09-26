@@ -46,6 +46,19 @@
   export let showToolbar = true;
   export let labelOverride: string | null = null;
   export let enableGlobalPaste = true;
+  // Optional snapshot references are visual context only and never enter edits/imports.
+  export let occupiedTone: 'dark' | 'medium' | 'light' | null = null;
+  export let referenceLayers: Array<{ mask: bigint; tone: 'dark' | 'medium' | 'light'; label: string }> = [];
+  const tones = { dark: '#606060', medium: '#a0a0a0', light: '#dedede' };
+  function cellTone(x: number, y: number): string | undefined {
+    if (mode !== 'forward' || occupiedTone === null) return undefined;
+    if (boardCellOccupied(existingMask, x, y)) return tones[occupiedTone];
+    const reference = referenceLayers.find((layer) => boardCellOccupied(layer.mask, x, y));
+    return reference ? tones[reference.tone] : undefined;
+  }
+  function referenceLabel(x: number, y: number): string {
+    return referenceLayers.filter((layer) => boardCellOccupied(layer.mask, x, y)).map((layer) => layer.label).join(' · ');
+  }
 
   const dispatch = createEventDispatcher<{
     change: Snapshot;
@@ -397,8 +410,11 @@
           <button
             type="button"
             class:existing={boardCellOccupied(existingMask, x, y)}
+            class:reference={mode === 'forward' && !boardCellOccupied(existingMask, x, y) && Boolean(cellTone(x, y))}
+            style:background-color={cellTone(x, y)}
+            title={referenceLabel(x, y) || undefined}
             class:target={mode === 'build-probability' && boardCellOccupied(targetMask, x, y)}
-            aria-label={`${label(mode === 'pc' ? 'field' : mode === 'forward' || activeLayer === 'existing' ? 'existingField' : 'targetBuild')} ${x + 1}, ${y + 1}`}
+            aria-label={`${labelOverride ?? label(mode === 'pc' ? 'field' : mode === 'forward' || activeLayer === 'existing' ? 'existingField' : 'targetBuild')} ${x + 1}, ${y + 1}`}
             aria-pressed={boardCellOccupied(activeLayer === 'existing' ? existingMask : targetMask, x, y)}
             on:pointerdown={(event) => beginPaint(event, x, y)}
             on:click={(event) => keyboardToggle(event, x, y)}
@@ -466,6 +482,7 @@
   .board > button:hover, .board > button:focus-visible { background: #33423f; outline: 2px solid #75c8bc; outline-offset: -2px; }
   .board.build > button.existing { background: #737d79; box-shadow: inset 2px 2px 0 rgba(255,255,255,.1), inset -2px -2px 0 rgba(20,26,24,.25); }
   .board.pc > button.existing, .board > button.target { background: #d8e2de; box-shadow: inset 2px 2px 0 rgba(255,255,255,.16), inset -2px -2px 0 rgba(41,56,51,.18); }
+  .board > button.reference { background-image: repeating-linear-gradient(135deg, transparent 0 5px, #10181777 5px 7px); }
   .board > button span { display: block; height: 100%; width: 100%; }
   .board-stats { display: grid; gap: 1px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 10px 0 0; }
   .board-stats.build-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }

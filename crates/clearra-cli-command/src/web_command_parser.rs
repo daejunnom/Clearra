@@ -2330,6 +2330,7 @@ fn parse_boundary_recovery_command(
 ) -> Result<WebCommandRequest, WebCommandError> {
     let mut seen = std::collections::BTreeSet::new();
     let mut initial_board = None;
+    let mut stage_one_target = Board256Mask::EMPTY;
     let mut final_board = None;
     let mut height = None;
     let mut queue = None;
@@ -2371,6 +2372,12 @@ fn parse_boundary_recovery_command(
                     next_value(tokens, &mut cursor, option)?,
                     option,
                 )?));
+            }
+            "--stage-one-board-mask" => {
+                stage_one_target = Board256Mask::from_words(parse_board_words(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?);
             }
             "--target-board-mask" => {
                 final_board = Some(Board256Mask::from_words(parse_board_words(
@@ -2587,6 +2594,7 @@ fn parse_boundary_recovery_command(
     };
     let query = BoundaryRecoveryQuery {
         initial_board: initial_board.ok_or_else(|| required("--initial-board-mask"))?,
+        stage_one_target,
         final_board: final_board.ok_or_else(|| required("--target-board-mask"))?,
         height: height.ok_or_else(|| required("--height"))?,
         queue: queue.ok_or_else(|| required("--queue"))?,

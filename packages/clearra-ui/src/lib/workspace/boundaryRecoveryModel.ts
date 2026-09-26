@@ -7,6 +7,8 @@ import { validateBoundaryRecoveryPayload } from './boundaryRecoveryPayloadValida
 
 export type BoundaryRecoveryRequest = {
   initialBoardMask: bigint;
+  /** First-stage provenance after clears, excluding any early second-stage cells. */
+  stageOneBoardMask: bigint;
   targetBoardMask: bigint;
   height: number;
   queue: string;
@@ -34,6 +36,7 @@ export type BoundaryRecoveryRequest = {
 export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
   return {
     initialBoardMask: 0n,
+    stageOneBoardMask: 0n,
     targetBoardMask: 0n,
     height: 8,
     queue: '',
@@ -76,7 +79,7 @@ export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest
   if (!/^[IJLOSTZ]{2,42}$/u.test(queue)) errors.push('queue');
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 25) errors.push('height');
   if (!Number.isInteger(request.stageOneCount) || request.stageOneCount < 1 || request.stageOneCount >= request.placements) errors.push('stage-one');
-  if (!Number.isInteger(request.placements) || request.placements > queue.length) errors.push('placements');
+  if (!Number.isInteger(request.placements) || request.placements < 2 || request.placements > 42 || request.placements > queue.length) errors.push('placements');
   if (request.maxEarlyPlacements !== 0 && request.maxEarlyPlacements !== 1) errors.push('max-early');
   if (request.maxEarlyPlacements === 1 && (!Number.isInteger(request.borrowRolePosition) || request.borrowRolePosition <= request.stageOneCount || request.borrowRolePosition > request.placements)) errors.push('borrow-role');
   if (!Number.isInteger(request.maxStates) || request.maxStates < 1 || request.maxStates > 1_000_000) errors.push('max-states');
@@ -93,8 +96,11 @@ export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest
     if (!Number.isInteger(request.maxPatternEvaluations) || request.maxPatternEvaluations < 1 || request.maxPatternEvaluations > 100_000) errors.push('max-pattern-evaluations');
     if (!Number.isInteger(request.maxTotalStates) || request.maxTotalStates < 1 || request.maxTotalStates > 100_000_000) errors.push('max-total-states');
   }
-  const fieldLimit = 1n << BigInt(Math.max(1, Math.min(25, request.height)) * 10);
-  if (request.initialBoardMask < 0n || request.initialBoardMask >= fieldLimit || request.targetBoardMask < 0n || request.targetBoardMask >= fieldLimit) errors.push('board');
+  // Invalid numeric drafts remain editable and are reported, never passed to BigInt(NaN).
+  const safeHeight = Number.isInteger(request.height) && request.height >= 1 && request.height <= 25 ? request.height : 1;
+  const fieldLimit = 1n << BigInt(safeHeight * 10);
+  if ([request.initialBoardMask, request.stageOneBoardMask, request.targetBoardMask]
+      .some((mask) => mask < 0n || mask >= fieldLimit)) errors.push('board');
   if (request.maxEarlyPlacements === 1 && request.placementRoleMasks.length === 0 &&
       (request.borrowPlacementMask < 0n || request.borrowPlacementMask >= fieldLimit || bitCount(request.borrowPlacementMask) !== 4)) errors.push('borrow-placement');
   if (request.placementRoleMasks.length > 0 &&
@@ -115,6 +121,7 @@ export function boundaryRecoveryArguments(request: BoundaryRecoveryRequest): str
   const args = [
     'clearra', 'recovery', 'boundary',
     '--initial-board-mask', boardMaskHex(request.initialBoardMask),
+    '--stage-one-board-mask', boardMaskHex(request.stageOneBoardMask),
     '--target-board-mask', boardMaskHex(request.targetBoardMask),
     '--height', String(request.height),
     '--queue', request.queue.trim().toUpperCase(),
@@ -160,4 +167,22 @@ export function boundaryRecoveryPayload(response: { product_result_payload?: Cle
     validateBoundaryRecoveryPayload(product) === null
     ? product.content.payload
     : null;
+}
+
+/** Edit field snapshots independently: clears can move/remove cells between them. */
+export type RecoveryField = 'initialBoardMask' | 'stageOneBoardMask' | 'targetBoardMask';
+
+export function updateRecoveryField(request: BoundaryRecoveryRequest, field: RecoveryField, mask: bigint,
+    importedHeight = request.height): BoundaryRecoveryRequest {
+  const height = Number.isInteger(importedHeight) ? Math.max(request.height, Math.min(24, Math.max(1, importedHeight))) : request.height;
+  const limit = (1n << BigInt(height * 10)) - 1n;
+  return { ...request, height, [field]: mask & limit };
+}
+
+export function updateRecoveryPlacements(request: BoundaryRecoveryRequest, value: number): BoundaryRecoveryRequest {
+  if (!Number.isInteger(value) || value < 2 || value > 42) return { ...request, placements: value };
+  return { ...request, placements: value,
+    preserveB2BBags: value === request.placements ? request.preserveB2BBags : [],
+    placementRoleMasks: request.placementRoleMasks.length === 0 ? [] :
+      Array.from({ length: value }, (_, index) => request.placementRoleMasks[index] ?? 0n) };
 }
