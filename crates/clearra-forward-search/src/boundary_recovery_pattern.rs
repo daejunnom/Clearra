@@ -20,7 +20,7 @@ pub struct BoundaryRecoveryPatternQuery {
     pub reference: BoundaryRecoveryQuery,
     pub queue_pattern: String,
     pub max_pattern_evaluations: usize,
-    pub max_total_states: usize,
+    pub max_total_states: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,7 +87,7 @@ mod tests {
             height: 8,
             queue: bag.into_iter().chain(bag).collect(),
             stage_one_queue_len: 7,
-            required_placements: 14,
+            required_placements: Some(14),
             placement_role_masks: vec![Board256Mask::from_words([0xf, 0, 0, 0]); 14],
             placement_role_pieces: Vec::new(),
             max_early_placements: 0,
@@ -99,13 +99,13 @@ mod tests {
             preserve_b2b_by_stage: [false; 2],
             preserve_b2b_bag_mask: 0,
             initial_b2b: true,
-            max_states: 1,
+            max_states: Some(1),
         };
         let query = BoundaryRecoveryPatternQuery {
             reference,
             queue_pattern: "IJLOSTZP7".to_owned(),
             max_pattern_evaluations: 1,
-            max_total_states: 1,
+            max_total_states: Some(1),
         };
         let control = ExecutionControl::new(ExecutionCancellationToken::new());
         let report = query.search(&control).unwrap();

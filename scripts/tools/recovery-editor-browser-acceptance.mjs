@@ -34,7 +34,7 @@ const fixture = `<script>
   <output hidden data-testid="request">{JSON.stringify({ initial: request.initialBoardMask.toString(),
     first: request.stageOneBoardMask.toString(), final: request.targetBoardMask.toString(),
     hold: request.holdEnabled, roles: request.placementRoleMasks.length, maxEarly: request.maxEarlyPlacements,
-    rolePosition: selectedRolePosition,
+    rolePosition: selectedRolePosition, rule: request.rule, spin: request.spinProfile, placements: request.placements, maxStates: request.maxStates,
     args: boundaryRecoveryArguments(request), undo: workspaceMessage(language,'undo'), redo: workspaceMessage(language,'redo') })}</output>
 </main>`;
 const preprocessor = vitePreprocess();
@@ -91,6 +91,22 @@ try {
       const select = async (index) => click(page, page.getByRole('button', { name: spec.fields[index], exact: true }), spec.touch);
       const cell = (index, x, y) => page.getByRole('button', { name: `${spec.fields[index]} ${x}, ${y}`, exact: true });
       assert.equal(await page.locator('.recovery-field-editor .board').count(), 1);
+      assert.equal((await state(page)).placements, null);
+      assert.equal((await state(page)).maxStates, null);
+      assert.equal(await page.locator('input[type="number"]').count(), 2, 'only stage boundary and early role need numeric controls');
+      const ruleLabel = spec.language === 'ko' ? '룰' : 'Rule';
+      const spinLabel = spec.language === 'ko' ? '스핀 프로필' : 'Spin profile';
+      const rules = page.getByRole('combobox', { name: ruleLabel, exact: true });
+      assert.deepEqual(await rules.locator('option').allTextContents(), ['SRS+', 'SRS', 'SRS-X', 'Jstris 180']);
+      await rules.selectOption('srs');
+      await page.getByRole('combobox', { name: spinLabel, exact: true }).selectOption('t-spins');
+      await flush(page);
+      assert.equal((await state(page)).rule, 'srs');
+      assert.equal((await state(page)).spin, 't-spins');
+      await click(page, page.locator('.pattern-help summary'), spec.touch);
+      assert.equal(await page.locator('.pattern-help').getAttribute('open'), '');
+      assert.equal(await page.locator('.pattern-help dl').isVisible(), true);
+      await click(page, page.locator('.pattern-help summary'), spec.touch);
       const colors = [];
       for (let i = 0; i < 3; i++) {
         await select(i);

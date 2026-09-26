@@ -1,4 +1,7 @@
 <script lang="ts">
+  import SpinProfileSelect from './SpinProfileSelect.svelte';
+  import RuleProfileSelect from './RuleProfileSelect.svelte';
+  import WorkspaceToggle from './WorkspaceToggle.svelte';
   import { Database, Gauge } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
@@ -73,10 +76,8 @@
     </label>
 
     <div class="workspace-switch-row">
-      <label class="workspace-switch-label">
-        <input type="checkbox" checked={request.holdEnabled} on:change={(event) => patch({ holdEnabled: (event.currentTarget as HTMLInputElement).checked })} />
-        <span class="workspace-switch" aria-hidden="true"></span><span>{label('hold')}</span>
-      </label>
+      <WorkspaceToggle label={label('hold')} checked={request.holdEnabled}
+        on:change={(event) => patch({ holdEnabled: event.detail })} />
     </div>
   </section>
 
@@ -113,34 +114,10 @@
           <small class="workspace-field-help">{label('buildResultModeCompatibility')}</small>
         {/if}
       </label>
-      <label class="workspace-field">
-        <span>{label('rule')}</span>
-        <select
-          value={request.rule}
-          disabled={request.resultMode === 'all-solutions' && request.aggregation === 'tiling'}
-          on:change={(event) => patch({ rule: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['rule'] })}
-        >
-          <option value="srs-plus">SRS+</option>
-          <option value="srs">SRS</option>
-          <option value="srs-x">SRS-X</option>
-          <option value="jstris-180">Jstris 180</option>
-        </select>
-      </label>
-      <label class="workspace-field">
-        <span>{label('spinProfile')}</span>
-        <select
-          value={request.spinProfile}
-          disabled={request.resultMode !== 'all-solutions' || request.aggregation === 'tiling' || (request.aggregation === 'buildability' && !request.preserveB2B)}
-          on:change={(event) => patch({ spinProfile: (event.currentTarget as HTMLSelectElement).value as BuildProbabilityRequest['spinProfile'] })}
-        >
-          <option value="t-spins">T-Spins</option>
-          <option value="t-spins-plus">T-Spins+</option>
-          <option value="all-spin">All-Spin</option>
-          <option value="all-spin-plus">All-Spin+</option>
-          <option value="all-mini">All-Mini</option>
-          <option value="all-mini-plus">All-Mini+</option>
-        </select>
-      </label>
+      <RuleProfileSelect value={request.rule} {language} disabled={request.resultMode === 'all-solutions' && request.aggregation === 'tiling'}
+        on:change={(event) => patch({ rule: event.detail })} />
+      <SpinProfileSelect value={request.spinProfile} {language} disabled={request.resultMode !== 'all-solutions' || request.aggregation === 'tiling' || (request.aggregation === 'buildability' && !request.preserveB2B)}
+        on:change={(event) => patch({ spinProfile: event.detail })} />
       {#if ['field-average-score', 'fixed-queue-maximum-score', 'highest-score-minimum-set'].includes(request.resultMode)}
         <label class="workspace-field">
           <span>{label('scoreProfile')}</span>

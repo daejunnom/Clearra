@@ -9,6 +9,13 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(scriptDirectory, '..');
 const svelteSources = [
+  'packages/clearra-ui/src/lib/workspace/PcSolverResult.svelte',
+  'packages/clearra-ui/src/lib/workspace/SpinProfileSelect.svelte',
+  'packages/clearra-ui/src/lib/workspace/RuleProfileSelect.svelte',
+  'packages/clearra-ui/src/lib/workspace/WorkspaceToggle.svelte',
+  'packages/clearra-ui/src/lib/workspace/MandatorySelectionSummary.svelte',
+  'packages/clearra-ui/src/lib/workspace/SolutionToolbar.svelte',
+  'packages/clearra-ui/src/lib/workspace/SolutionGallery.svelte',
   'apps/clearra-desktop/src/routes/+page.svelte',
   'packages/clearra-ui/src/lib/components/DesktopHostShell.svelte',
   'packages/clearra-ui/src/lib/render/RenderStatusPanel.svelte',

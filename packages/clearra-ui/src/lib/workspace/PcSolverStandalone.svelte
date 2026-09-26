@@ -1,4 +1,5 @@
 <script lang="ts">
+  import MandatorySelectionSummary from './MandatorySelectionSummary.svelte';
   import { componentMessage } from '../i18n/componentCatalog';
   import {
     ArrowLeft,
@@ -518,15 +519,7 @@
           </div>
         </fieldset>
 
-        {#if request.pinnedSolutionKeys.length}
-          <div class="pinned-summary" role="status">
-            <strong>{componentMessage(language, 'mandatorySolutions')}: {request.pinnedSolutionKeys.length}</strong>
-            <span>{componentMessage(language, 'runPinnedMinimum')}</span>
-            <button type="button" on:click={() => updateRequest({ ...request, pinnedSolutionKeys: [], pinnedSolutionDocument: undefined, pinnedSourceSetHash: undefined })}>
-              {componentMessage(language, 'clearMandatorySelection')}
-            </button>
-          </div>
-        {/if}
+
 
         <div class="option-row">
           <span>{label('hold')}</span>
@@ -604,12 +597,16 @@
     loadProductMemberPage={(outerPageNumber, memberPageNumber, signal, maximumWorkSteps) =>
       workerController.loadProductMemberPage(outerPageNumber, memberPageNumber, signal, maximumWorkSteps)}
     releaseProductPages={() => workerController.releaseProductPages()}
-  />
+  >
+    <svelte:fragment slot="solution-actions">
+      <MandatorySelectionSummary count={request.pinnedSolutionKeys.length} {language} disabled={active}
+        on:run={() => { updateRequest({ ...request, scoreMode: 'minimum-cover' }); run(); }}
+        on:clear={() => updateRequest({ ...request, pinnedSolutionKeys: [], pinnedSolutionDocument: undefined, pinnedSourceSetHash: undefined })} />
+    </svelte:fragment>
+  </PcSolverResult>
 </main>
 
 <style>
-  .pinned-summary { background: #f3f8f5; border: 1px solid #d2e3d8; border-radius: 6px; display: grid; font-size: 12px; gap: 6px; padding: 10px; }
-  .pinned-summary button { background: #fff; border: 1px solid #cbd3ce; border-radius: 5px; justify-self: start; padding: 6px 10px; }
   :global(*) { box-sizing: border-box; }
   :global(html) { background: #fff; font-family: Inter, "Noto Sans KR", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   :global(body) { margin: 0; min-width: 320px; }

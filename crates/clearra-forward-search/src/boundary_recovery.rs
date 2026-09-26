@@ -1,4 +1,4 @@
-//! Exact, bounded two-stage search over one continuous queue and board.
+//! Exact, cancellable two-stage search over one continuous queue and board.
 //!
 //! A stage-two token may be locked before stage one has cleared, but never
 //! appears twice in the supply. Every lock is replayed on the same board with
@@ -27,9 +27,10 @@ use crate::{
 };
 
 // Five stage-one 7-bags plus the adjacent stage-two bag remain addressable.
-// Search still has a finite state budget and reports exhaustion as incomplete.
+// An optional explicit state budget reports exhaustion as incomplete.
 const MAX_QUEUE_PIECES: usize = 42;
-const MAX_SEARCH_STATES: usize = 1_000_000;
+#[path = "boundary_recovery_auto.rs"]
+mod automatic;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundaryRecoveryQuery {
@@ -43,9 +44,10 @@ pub struct BoundaryRecoveryQuery {
     pub queue: Vec<PieceKind>,
     /// The first `stage_one_queue_len` supply tokens belong to stage one.
     pub stage_one_queue_len: usize,
-    /// Number of locks needed to reach the declared second-stage target.
-    /// Remaining queue tokens are lookahead, not silently consumed.
-    pub required_placements: usize,
+    /// Some(n) requires exactly n locks. None considers every feasible prefix
+    /// of the finite supply, without consuming lookahead or guessing a clear count.
+    /// Exact placement roles determine their own count when this is None.
+    pub required_placements: Option<usize>,
     /// Empty means unconstrained geometry. Otherwise each entry is one
     /// four-cell lock-time role independent of the source token that fills it.
     pub placement_role_masks: Vec<Board256Mask>,
@@ -70,7 +72,9 @@ pub struct BoundaryRecoveryQuery {
     /// This augments the legacy whole-stage switches without changing them.
     pub preserve_b2b_bag_mask: u64,
     pub initial_b2b: bool,
-    pub max_states: usize,
+    /// None removes the algorithmic state cutoff, not cancellation or the
+    /// host's memory/process containment. Some(0) is invalid, never unlimited.
+    pub max_states: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,17 +109,20 @@ pub enum BoundaryRecoveryBagRoleError {
 }
 
 impl BoundaryRecoveryBagRolePlan {
-    pub fn new(reference: BoundaryRecoveryQuery) -> Result<Self, BoundaryRecoveryBagRoleError> {
+    pub fn new(mut reference: BoundaryRecoveryQuery) -> Result<Self, BoundaryRecoveryBagRoleError> {
+        if reference.required_placements.is_none() {
+            reference.required_placements = Some(reference.placement_role_masks.len());
+        }
         reference
             .validate()
             .map_err(BoundaryRecoveryBagRoleError::InvalidReference)?;
         if reference.queue.len() % 7 != 0
             || reference.stage_one_queue_len % 7 != 0
-            || reference.required_placements != reference.queue.len()
+            || reference.required_placements != Some(reference.queue.len())
         {
             return Err(BoundaryRecoveryBagRoleError::RequiresCompleteSevenBags);
         }
-        if reference.placement_role_masks.len() != reference.required_placements {
+        if Some(reference.placement_role_masks.len()) != reference.required_placements {
             return Err(BoundaryRecoveryBagRoleError::RequiresExactRoles);
         }
         for bag in reference.queue.chunks_exact(7) {
@@ -260,6 +267,16 @@ struct Pass<'a> {
 }
 
 impl BoundaryRecoveryQuery {
+    fn placement_horizon(&self) -> usize {
+        self.required_placements.unwrap_or_else(|| {
+            if self.placement_role_masks.is_empty() {
+                self.queue.len()
+            } else {
+                self.placement_role_masks.len()
+            }
+        })
+    }
+
     fn role_piece(&self, role_index: usize) -> PieceKind {
         self.placement_role_pieces
             .get(role_index)
@@ -273,7 +290,7 @@ impl BoundaryRecoveryQuery {
 
     fn bag_count(&self) -> usize {
         self.stage_one_bag_count()
-            + (self.required_placements - self.stage_one_queue_len).div_ceil(7)
+            + (self.placement_horizon() - self.stage_one_queue_len).div_ceil(7)
     }
 
     fn bag_index(&self, source_index: usize) -> usize {
@@ -291,7 +308,7 @@ impl BoundaryRecoveryQuery {
             (start, (start + 7).min(self.stage_one_queue_len))
         } else {
             let start = self.stage_one_queue_len + (bag - first) * 7;
-            (start, (start + 7).min(self.required_placements))
+            (start, (start + 7).min(self.placement_horizon()))
         };
         ((1_u64 << end) - 1) ^ ((1_u64 << start) - 1)
     }
@@ -316,8 +333,8 @@ impl BoundaryRecoveryQuery {
             return Err(BoundaryRecoveryError::QueueTooLong);
         }
         if self.stage_one_queue_len == 0
-            || self.stage_one_queue_len >= self.required_placements
-            || self.required_placements > self.queue.len()
+            || self.stage_one_queue_len >= self.placement_horizon()
+            || self.placement_horizon() > self.queue.len()
         {
             return Err(BoundaryRecoveryError::InvalidStageBoundary);
         }
@@ -325,7 +342,7 @@ impl BoundaryRecoveryQuery {
             return Err(BoundaryRecoveryError::InvalidEarlyPlacementLimit);
         }
         if !self.placement_role_masks.is_empty()
-            && (self.placement_role_masks.len() != self.required_placements
+            && (self.placement_role_masks.len() != self.placement_horizon()
                 || self.placement_role_masks.iter().any(|mask| {
                     mask.fits_cell_count(cells) != Ok(true)
                         || mask
@@ -340,12 +357,12 @@ impl BoundaryRecoveryQuery {
         }
         if !self.placement_role_pieces.is_empty() {
             if self.placement_role_masks.is_empty()
-                || self.placement_role_pieces.len() != self.required_placements
+                || self.placement_role_pieces.len() != self.placement_horizon()
             {
                 return Err(BoundaryRecoveryError::InvalidPlacementRoles);
             }
             let mut counts = [0_i8; 7];
-            for piece in self.queue.iter().take(self.required_placements) {
+            for piece in self.queue.iter().take(self.placement_horizon()) {
                 counts[piece_index(*piece) as usize] += 1;
             }
             for piece in &self.placement_role_pieces {
@@ -357,7 +374,7 @@ impl BoundaryRecoveryQuery {
         }
         if self.max_early_placements == 1
             && (self.borrow_role_index < self.stage_one_queue_len
-                || self.borrow_role_index >= self.required_placements
+                || self.borrow_role_index >= self.placement_horizon()
                 || self.borrow_placement_mask.fits_cell_count(cells) != Ok(true)
                 || self
                     .borrow_placement_mask
@@ -372,7 +389,7 @@ impl BoundaryRecoveryQuery {
         {
             return Err(BoundaryRecoveryError::InvalidBorrowRole);
         }
-        if self.max_states == 0 || self.max_states > MAX_SEARCH_STATES {
+        if self.max_states == Some(0) {
             return Err(BoundaryRecoveryError::InvalidStateLimit);
         }
         if self.preserve_b2b_bag_mask >> self.bag_count() != 0 {
@@ -390,6 +407,9 @@ impl BoundaryRecoveryQuery {
         control: &ExecutionControl,
     ) -> Result<BoundaryRecoveryReport, BoundaryRecoveryError> {
         self.validate()?;
+        if self.required_placements.is_none() {
+            return automatic::search(self, control);
+        }
         let (normal, normal_states) = Pass::new(self, control, 0)?.run()?;
         if !matches!(normal, PassResult::NoPath) {
             return Ok(report(normal, normal_states, 0, false));
@@ -399,8 +419,10 @@ impl BoundaryRecoveryQuery {
         }
         // The declared state budget covers both passes together. Exhausting
         // it after proving normal failure cannot prove recovery failure.
-        let remaining_states = self.max_states.saturating_sub(normal_states);
-        if remaining_states == 0 {
+        let remaining_states = self
+            .max_states
+            .map(|limit| limit.saturating_sub(normal_states));
+        if remaining_states == Some(0) {
             return Ok(report(PassResult::Incomplete, normal_states, 0, true));
         }
         let mut recovery_query = self.clone();
@@ -463,7 +485,7 @@ impl<'a> Pass<'a> {
         // remains active. Conversely, after borrowing from a selected bag,
         // an older held token can lock before that selected bag completes.
         // Neither cross-boundary lock may silently break the live B2B chain.
-        let required_mask = (1_u64 << self.query.required_placements) - 1;
+        let required_mask = (1_u64 << self.query.placement_horizon()) - 1;
         let pending = required_mask & !state.placed_mask;
         if pending != 0
             && self
@@ -546,8 +568,8 @@ impl<'a> Pass<'a> {
         if self.control.is_cancelled() {
             return Err(BoundaryRecoveryError::Cancelled);
         }
-        if state.placed_mask.count_ones() as usize == self.query.required_placements {
-            let required_mask = (1_u64 << self.query.required_placements) - 1;
+        if state.placed_mask.count_ones() as usize == self.query.placement_horizon() {
+            let required_mask = (1_u64 << self.query.placement_horizon()) - 1;
             if state.checkpoint_step.is_some()
                 && state.placed_mask == required_mask
                 && state.fulfilled_role_mask == required_mask
@@ -561,7 +583,11 @@ impl<'a> Pass<'a> {
         if self.seen.contains(&state) {
             return Ok(None);
         }
-        if self.seen.len() >= self.query.max_states {
+        if self
+            .query
+            .max_states
+            .is_some_and(|limit| self.seen.len() >= limit)
+        {
             self.incomplete = true;
             return Ok(None);
         }
@@ -571,14 +597,14 @@ impl<'a> Pass<'a> {
         for choice in choices {
             // The tail is lookahead for the one-slot hold, not another target
             // role that can replace one of the declared placement tokens.
-            if usize::from(choice.token.index) >= self.query.required_placements {
+            if usize::from(choice.token.index) >= self.query.placement_horizon() {
                 continue;
             }
             let preserve_b2b = self.requires_b2b_for_lock(state, usize::from(choice.token.index));
             let role_candidates: Vec<usize> = if self.query.placement_role_masks.is_empty() {
                 vec![usize::from(choice.token.index)]
             } else {
-                (0..self.query.required_placements)
+                (0..self.query.placement_horizon())
                     .filter(|role| {
                         state.fulfilled_role_mask & (1_u64 << role) == 0
                             && self.query.role_piece(*role) == choice.token.piece

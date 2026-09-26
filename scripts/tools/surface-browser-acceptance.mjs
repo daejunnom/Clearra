@@ -144,6 +144,8 @@ try {
         const selected = [(await keys(page))[0], (await keys(page))[17]];
         await page.locator('.mandatory-choice input').first().check();
         await page.locator('.mandatory-choice input').last().check();
+        assert.equal(await page.locator('.solution-toolbar .mandatory-summary').count(), 1);
+        assert.equal(await page.locator('.mandatory-choice').first().innerText(), 'Solution 1');
         await completeRun(page, () => page.locator('.mandatory-summary button').first().click(), 'pinned PC');
         assert.deepEqual((await completedKeys(page, 2, 'pinned PC')).sort(), selected.sort(), 'mandatory solutions were not retained');
         await page.locator('.workspace-queue-input').fill('I');
@@ -152,9 +154,11 @@ try {
         const recovery = await navigateWorkspace(page, 'recovery');
         await recovery.locator('.recovery-field-editor').waitFor();
         await page.locator('.dimension-field input').fill('4');
-        await page.getByLabel('Known queue across both stages', { exact: true }).fill('IO');
+        await page.getByLabel('Known queue across both stages', { exact: true }).fill('IOT');
         await page.getByLabel('Stage-one supply tokens', { exact: true }).fill('1');
-        await page.getByLabel('Required placements', { exact: true }).fill('2');
+        assert.equal(await recovery.getByLabel('Required placements', { exact: true }).count(), 0);
+        assert.equal(await recovery.getByLabel('Maximum search states', { exact: true }).count(), 0);
+        assert.match(await recovery.locator('.recovery-required-pieces').innerText(), /Automatic/);
         await page.getByLabel('Selected early placement role (1-based)', { exact: true }).fill('2');
         await page.getByRole('checkbox', { name: 'Hold', exact: true }).uncheck();
         await paint(page, 0, 0x3f0n, 4);
@@ -165,6 +169,8 @@ try {
         await page.locator('.recovery-result .outcome').waitFor({ timeout: 60000 });
         assert.equal(await page.locator('.recovery-result .outcome').innerText(), 'Normal connection');
         assert.equal(await page.locator('.recovery-result ol li').count(), 2);
+        assert.match(await recovery.locator('.recovery-resolved-pieces').innerText(), /2/);
+        await page.getByLabel('Known queue across both stages', { exact: true }).fill('IO');
         await page.getByRole('button', { name: 'Normal only', exact: true }).click();
         await page.getByRole('button', { name: 'Existing field', exact: true }).click();
         await paint(page, 0, 0x3f0n, 4); // erase only the original snapshot

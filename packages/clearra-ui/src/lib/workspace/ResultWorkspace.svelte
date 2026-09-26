@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SolutionToolbar from './SolutionToolbar.svelte';
   import { createEventDispatcher } from 'svelte';
   import { Check, ChevronDown, Copy, Search } from '@lucide/svelte';
 
@@ -377,12 +378,15 @@
         loadNextPage={loadNextProductPage}
         loadMemberPage={loadProductMemberPage}
         releasePages={releaseProductPages}
-      />
+      >
+        <svelte:fragment slot="solution-actions"><slot name="solution-actions" /></svelte:fragment>
+      </ProductResultPager>
 
       {#if !productSolutionPageActive}
         <section class="solutions-section" aria-label={label('solutions')}>
-          <div class="solutions-heading">
-            <h2>{label('solutions')}</h2>
+          <SolutionToolbar {language}>
+            <svelte:fragment slot="actions"><slot name="solution-actions" /></svelte:fragment>
+            <svelte:fragment slot="copy">
             {#if solutionCount !== null}
               <SolutionCopyFormatControl
                 bind:value={copyFormat}
@@ -391,7 +395,8 @@
                 keySource={solutionExportKeySource}
               />
             {/if}
-          </div>
+          </svelte:fragment>
+          </SolutionToolbar>
           {#if solutionCount === null}
             <div class="empty-state compact"><Search size={26} strokeWidth={1.5} /><p>{label('solutionSetNotCalculated')}</p></div>
           {:else if solutionCount > 0 && (solutionKeys.length || boundSolutionPageLoader)}

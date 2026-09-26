@@ -14,7 +14,7 @@
   } from '../wasm';
   import {
     boundaryRecoveryCommand, boundaryRecoveryDesktopRequest, boundaryRecoveryPayload,
-    createBoundaryRecoveryRequest, validateBoundaryRecoveryRequest
+    createBoundaryRecoveryRequest, recoveryPlacementHorizon, validateBoundaryRecoveryRequest
   } from './boundaryRecoveryModel';
   import { trimForwardBoardMask } from './forwardSearchModel';
   import WorkspaceBoardEditor from './WorkspaceBoardEditor.svelte';
@@ -44,8 +44,9 @@
   $: displayCheckpoint = payload?.population ? example?.stage_one_checkpoint_step : payload?.stage_one_checkpoint_step;
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: validation = validateBoundaryRecoveryRequest(request);
-  $: if (Number.isInteger(request.placements) && request.placements >= 2 && request.placements <= 42) {
-    selectedRolePosition = Math.min(selectedRolePosition, request.placements);
+  $: placementHorizon = recoveryPlacementHorizon(request);
+  $: if (Number.isInteger(placementHorizon) && placementHorizon >= 2 && placementHorizon <= 42) {
+    selectedRolePosition = Math.min(selectedRolePosition, placementHorizon);
   }
   $: label = (key: ComponentMessageKey) => componentMessage(language, key);
   $: standardLabel = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
@@ -224,7 +225,8 @@
       {/if}
       {#if displaySteps.length > 0}
         <h3>{label('recoveryTimeline')}</h3>
-        <ol>
+        <p class="recovery-resolved-pieces">{standardLabel('piecesNeeded')}: {displaySteps.length}</p>
+      <ol>
           {#each displaySteps as step, index}
             <li><strong>{step.piece}</strong> · {label('recoverySourceToken')} #{step.source_queue_index + 1} · {label('recoveryPlacementRole')} #{step.placement_role_index + 1} · {holdLabel(step.hold_decision)} · ({step.x}, {step.y}) · {label('recoveryClearedLines')}: {step.cleared_lines} · B2B {step.b2b_active_after ? '✓' : '—'}{displayCheckpoint === index + 1 ? ` · ${label('recoveryCheckpoint')}` : ''}<code>{step.board_after_mask}</code></li>
           {/each}

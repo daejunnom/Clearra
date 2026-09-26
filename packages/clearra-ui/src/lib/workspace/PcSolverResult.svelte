@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SolutionToolbar from './SolutionToolbar.svelte';
   import { AlertTriangle, CheckCircle2, LoaderCircle, Search } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
@@ -169,15 +170,7 @@
         {#if scoringRequested || pcScoreFieldSummary}
           <div><strong>{pcScoreFieldSummary?.overall_score ?? summaryFields.score_field_average_score ?? summaryFields.score_unconditional_expected_score ?? '—'}</strong><span>{pcScoreFieldSummary ? label('overallScore') : label('averageScore')}</span></div>
         {/if}
-        {#if solutionCount !== null && !productSolutionPageActive}
-          <SolutionCopyFormatControl
-            bind:value={copyFormat}
-            {language}
-            compact
-            solutionKeys={exportableSolutionKeys}
-            keySource={exportKeySource}
-          />
-        {/if}
+
       </div>
 
       <ProductResultPager
@@ -187,9 +180,24 @@
         loadNextPage={loadNextProductPage}
         loadMemberPage={loadProductMemberPage}
         releasePages={releaseProductPages}
-      />
+      >
+        <svelte:fragment slot="solution-actions"><slot name="solution-actions" /></svelte:fragment>
+      </ProductResultPager>
 
       {#if !productSolutionPageActive}
+        <SolutionToolbar {language}>
+          <svelte:fragment slot="actions"><slot name="solution-actions" /></svelte:fragment>
+          <svelte:fragment slot="copy">
+        {#if solutionCount !== null && !productSolutionPageActive}
+          <SolutionCopyFormatControl
+            bind:value={copyFormat}
+            {language}
+            solutionKeys={exportableSolutionKeys}
+            keySource={exportKeySource}
+          />
+        {/if}
+          </svelte:fragment>
+        </SolutionToolbar>
         {#if solutionCount === null}
             <div class="empty"><Search size={24} strokeWidth={1.5} /><span>{label('solutionSetNotCalculated')}</span></div>
           {:else if solutionCount > 0}

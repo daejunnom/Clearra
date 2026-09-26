@@ -311,8 +311,6 @@
   />
   <BuildProbabilityControls slot="controls" {request} {language} {validationCodes} {workerAuthority} on:change={(event) => updateRequest(event.detail)} />
   <svelte:fragment slot="result">
-    <MandatorySelectionSummary count={request.pinnedSolutionKeys?.length ?? 0} {language} disabled={active}
-      on:run={runMandatory} on:clear={() => { request = { ...request, ...emptyMandatorySelection() }; }} />
     {#if pinError}<p role="alert">{componentMessage(language, 'pinnedDocumentInvalid')}</p>{/if}
   <BuildProbabilityResult
     {allowMandatorySelection}
@@ -341,7 +339,12 @@
       ? () => workerController.releaseProductPages()
       : () => releaseDesktopProductPages()}
     on:continue={(event) => continueFromCompletedBuild(event.detail.existingMask, event.detail.height)}
-  />
+  >
+    <svelte:fragment slot="solution-actions">
+      <MandatorySelectionSummary count={request.pinnedSolutionKeys?.length ?? 0} {language} disabled={active}
+      on:run={runMandatory} on:clear={() => { request = { ...request, ...emptyMandatorySelection() }; }} />
+    </svelte:fragment>
+  </BuildProbabilityResult>
   </svelte:fragment>
 </WorkspaceShell>
 

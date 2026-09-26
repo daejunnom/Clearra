@@ -18,7 +18,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BoundaryRecoveryPopulationLimits {
     pub max_pattern_evaluations: usize,
-    pub max_total_states: usize,
+    pub max_total_states: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,7 +76,7 @@ pub fn search_boundary_recovery_population(
     )
         -> Result<Option<BoundaryRecoveryQuery>, BoundaryRecoveryError>,
 ) -> Result<BoundaryRecoveryPopulationReport, BoundaryRecoveryPopulationError> {
-    if limits.max_pattern_evaluations == 0 || limits.max_total_states == 0 {
+    if limits.max_pattern_evaluations == 0 || limits.max_total_states == Some(0) {
         return Err(BoundaryRecoveryPopulationError::InvalidLimits);
     }
     let pattern_count = universe.pattern_count();
@@ -96,7 +96,7 @@ pub fn search_boundary_recovery_population(
     let mut recovery_example = None;
     while evaluated < pattern_count
         && evaluated < limits.max_pattern_evaluations
-        && states < limits.max_total_states
+        && limits.max_total_states.is_none_or(|limit| states < limit)
     {
         if control.is_cancelled() {
             return Err(BoundaryRecoveryPopulationError::Cancelled);
@@ -123,9 +123,14 @@ pub fn search_boundary_recovery_population(
                 pattern_index: evaluated,
             });
         }
-        query.max_states = query
-            .max_states
-            .min(limits.max_total_states.saturating_sub(states));
+        // None is unlimited, not zero. Intersect only actual finite budgets.
+        let remaining = limits
+            .max_total_states
+            .map(|limit| limit.saturating_sub(states));
+        query.max_states = match (query.max_states, remaining) {
+            (Some(local), Some(global)) => Some(local.min(global)),
+            (local, global) => local.or(global),
+        };
         let report = query.search(control).map_err(|cause| match cause {
             BoundaryRecoveryError::Cancelled => BoundaryRecoveryPopulationError::Cancelled,
             cause => BoundaryRecoveryPopulationError::InvalidQuery {
@@ -234,7 +239,7 @@ mod tests {
             &control,
             BoundaryRecoveryPopulationLimits {
                 max_pattern_evaluations: 2,
-                max_total_states: 20_000,
+                max_total_states: Some(20_000),
             },
             |_, sequence| {
                 Ok(Some(BoundaryRecoveryQuery {
@@ -256,7 +261,7 @@ mod tests {
             &control,
             BoundaryRecoveryPopulationLimits {
                 max_pattern_evaluations: 1,
-                max_total_states: 20_000,
+                max_total_states: Some(20_000),
             },
             |_, sequence| {
                 Ok(Some(BoundaryRecoveryQuery {
@@ -289,7 +294,7 @@ mod tests {
             &control,
             BoundaryRecoveryPopulationLimits {
                 max_pattern_evaluations: 1,
-                max_total_states: 20_000,
+                max_total_states: Some(20_000),
             },
             |_, sequence| {
                 let mut query = query_for_test();
@@ -325,7 +330,7 @@ mod tests {
             height: 4,
             queue: Vec::new(),
             stage_one_queue_len: 1,
-            required_placements: 2,
+            required_placements: Some(2),
             placement_role_masks: Vec::new(),
             placement_role_pieces: Vec::new(),
             max_early_placements: 0,
@@ -337,7 +342,7 @@ mod tests {
             preserve_b2b_by_stage: [false, false],
             preserve_b2b_bag_mask: 0,
             initial_b2b: true,
-            max_states: 10_000,
+            max_states: Some(10_000),
         }
     }
 }

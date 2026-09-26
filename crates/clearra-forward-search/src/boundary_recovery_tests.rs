@@ -14,7 +14,7 @@ fn two_stage_query() -> BoundaryRecoveryQuery {
         height: 4,
         queue: vec![PieceKind::I, PieceKind::O],
         stage_one_queue_len: 1,
-        required_placements: 2,
+        required_placements: Some(2),
         placement_role_masks: Vec::new(),
         placement_role_pieces: Vec::new(),
         max_early_placements: 1,
@@ -26,7 +26,7 @@ fn two_stage_query() -> BoundaryRecoveryQuery {
         preserve_b2b_by_stage: [false, false],
         preserve_b2b_bag_mask: 0,
         initial_b2b: true,
-        max_states: 10_000,
+        max_states: Some(10_000),
     }
 }
 
@@ -81,7 +81,7 @@ fn recovery_rejects_a_different_early_placement_for_the_same_piece() {
 #[test]
 fn exhausted_state_budget_is_not_reported_as_impossibility() {
     let mut query = two_stage_query();
-    query.max_states = 1;
+    query.max_states = Some(1);
     let report = query.search(&control()).unwrap();
     assert_eq!(report.status, BoundaryRecoveryStatus::Incomplete);
 }
@@ -190,7 +190,7 @@ fn borrowed_token_cannot_break_an_active_selected_bag() {
 fn complete_and_partial_stages_keep_distinct_bag_indices() {
     let mut query = two_stage_query();
     query.stage_one_queue_len = 8;
-    query.required_placements = 15;
+    query.required_placements = Some(15);
     assert_eq!(query.bag_count(), 3);
     assert_eq!(query.bag_index(0), 0);
     assert_eq!(query.bag_index(7), 1);
@@ -215,9 +215,9 @@ fn five_stage_one_bags_and_one_adjacent_bag_fit_without_bitmask_wraparound() {
         })
         .collect();
     query.stage_one_queue_len = 35;
-    query.required_placements = 42;
+    query.required_placements = Some(42);
     query.max_early_placements = 0;
-    query.max_states = 1;
+    query.max_states = Some(1);
     assert_eq!(
         query.search(&control()).unwrap().status,
         BoundaryRecoveryStatus::Incomplete
@@ -253,7 +253,7 @@ fn bag_roles_remain_fixed_while_supply_tokens_permute() {
         PieceKind::I,
     ];
     reference.stage_one_queue_len = 7;
-    reference.required_placements = 14;
+    reference.required_placements = Some(14);
     reference.borrow_role_index = 10;
     reference.placement_role_masks = (0..14)
         .map(|index| Board256Mask::from_words([0xf_u64 << (index * 4), 0, 0, 0]))
@@ -322,7 +322,7 @@ fn exact_early_roles_can_prove_recovery_only_after_normal_failure() {
     else {
         panic!("expected an early-placement witness");
     };
-    query.placement_role_masks = vec![Board256Mask::EMPTY; query.required_placements];
+    query.placement_role_masks = vec![Board256Mask::EMPTY; query.required_placements.unwrap()];
     for step in steps {
         query.placement_role_masks[step.source_queue_index] =
             Board256Mask::from_words(step.placement_mask);
@@ -333,11 +333,11 @@ fn exact_early_roles_can_prove_recovery_only_after_normal_failure() {
     assert!(report.normal_states > 0);
     assert!(report.recovery_states > 0);
 
-    query.max_states = report.normal_states;
+    query.max_states = Some(report.normal_states);
     let bounded = query.search(&control()).unwrap();
     assert_eq!(bounded.status, BoundaryRecoveryStatus::Incomplete);
     assert_eq!(bounded.recovery_states, 0);
-    assert!(bounded.normal_states <= query.max_states);
+    assert!(bounded.normal_states <= query.max_states.unwrap());
 }
 
 #[test]

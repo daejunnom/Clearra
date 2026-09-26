@@ -1,4 +1,7 @@
 <script lang="ts">
+  import WorkspaceToggle from './WorkspaceToggle.svelte';
+  import RuleProfileSelect from './RuleProfileSelect.svelte';
+  import SpinProfileSelect from './SpinProfileSelect.svelte';
   import { Database, Gauge } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
@@ -120,11 +123,8 @@
     <QueuePatternHelp {language} />
 
     <div class="workspace-switch-row">
-      <label class="workspace-switch-label">
-        <input type="checkbox" checked={request.holdEnabled} on:change={(event) => patch({ holdEnabled: (event.currentTarget as HTMLInputElement).checked })} />
-        <span class="workspace-switch" aria-hidden="true"></span>
-        <span>{label('hold')}</span>
-      </label>
+      <WorkspaceToggle label={label('hold')} checked={request.holdEnabled}
+        on:change={(event) => patch({ holdEnabled: event.detail })} />
     </div>
     <label class="workspace-field wide">
       <span>{label('queueKnowledge')}</span>
@@ -157,15 +157,8 @@
           <option value="failed-queue">{label('failedQueues')}</option>
         </select>
       </label>
-      <label class="workspace-field">
-        <span>{label('rule')}</span>
-        <select value={request.rule} disabled={tilingOnly} on:change={(event) => patch({ rule: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['rule'] })}>
-          <option value="srs-plus">SRS+</option>
-          <option value="srs">SRS</option>
-          <option value="srs-x">SRS-X</option>
-          <option value="jstris-180">Jstris 180</option>
-        </select>
-      </label>
+      <RuleProfileSelect value={request.rule} {language} disabled={tilingOnly}
+        on:change={(event) => patch({ rule: event.detail })} />
       <label class="workspace-field">
         <span>{label('initialB2B')}</span>
         <input
@@ -190,21 +183,9 @@
           <option value="jstris-ultra">{label('scoreProfileJstrisUltra')}</option>
         </select>
       </label>
-      <label class="workspace-field">
-        <span>{label('spinProfile')}</span>
-        <select
-          value={scoreFinderOnly ? 't-spins' : request.spinProfile}
-          disabled={tilingOnly || pathOnly || scoreFinderOnly || (!fixedScoreProduct && !request.preserveB2B)}
-          on:change={(event) => patch({ spinProfile: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['spinProfile'] })}
-        >
-          <option value="t-spins">T-Spins</option>
-          <option value="t-spins-plus">T-Spins+</option>
-          <option value="all-spin">All-Spin</option>
-          <option value="all-spin-plus">All-Spin+</option>
-          <option value="all-mini">All-Mini</option>
-          <option value="all-mini-plus">All-Mini+</option>
-        </select>
-      </label>
+      <SpinProfileSelect value={scoreFinderOnly ? 't-spins' : request.spinProfile} {language}
+        disabled={tilingOnly || pathOnly || scoreFinderOnly || (!fixedScoreProduct && !request.preserveB2B)}
+        on:change={(event) => patch({ spinProfile: event.detail })} />
     </div>
     <div class="workspace-toggle-grid policy-toggle">
       <div class="b2b-preservation-control">

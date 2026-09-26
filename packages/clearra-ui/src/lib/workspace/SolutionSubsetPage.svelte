@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SolutionToolbar from './SolutionToolbar.svelte';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
   import type { SolutionCopyFormat } from './solutionExport';
   import type { SolutionExportKeySource } from './solutionExportAsync';
@@ -18,6 +19,9 @@
 </script>
 
 <div class="solution-subset-page">
+  <SolutionToolbar {language}>
+    <svelte:fragment slot="actions"><slot name="solution-actions" /></svelte:fragment>
+    <svelte:fragment slot="copy">
   {#key exportSetIdentity || solutionSetIdentity}
     <SolutionCopyFormatControl
       bind:value={copyFormat}
@@ -26,6 +30,8 @@
       keySource={exportKeySource}
     />
   {/key}
+    </svelte:fragment>
+  </SolutionToolbar>
   <SolutionGallery
     {solutionKeys}
     solutionCount={solutionKeys.length}

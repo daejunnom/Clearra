@@ -28,7 +28,7 @@ pub struct BoundaryRecoveryAppCommand {
 struct BoundaryRecoveryPatternOptions {
     source: String,
     max_pattern_evaluations: usize,
-    max_total_states: usize,
+    max_total_states: Option<usize>,
 }
 
 impl BoundaryRecoveryAppCommand {
@@ -43,7 +43,7 @@ impl BoundaryRecoveryAppCommand {
         query: BoundaryRecoveryQuery,
         source: String,
         max_pattern_evaluations: usize,
-        max_total_states: usize,
+        max_total_states: Option<usize>,
     ) -> Self {
         Self {
             query,
@@ -166,6 +166,28 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
             RenderField::new("contract", "boundary-recovery.v1"),
             RenderField::new("status", status),
             RenderField::new("knowledge_basis", "full-fixed-queue"),
+            RenderField::new(
+                "placement_count_mode",
+                if self.query.required_placements.is_some() {
+                    "exact"
+                } else {
+                    "automatic"
+                },
+            ),
+            RenderField::new(
+                "resolved_placements",
+                if report.steps.is_empty() {
+                    RenderFieldValue::Null
+                } else {
+                    RenderFieldValue::from(report.steps.len())
+                },
+            ),
+            RenderField::new(
+                "state_limit",
+                self.query
+                    .max_states
+                    .map_or(RenderFieldValue::Null, RenderFieldValue::from),
+            ),
             RenderField::new(
                 "placement_role_scope",
                 if self.query.placement_role_masks.is_empty() {

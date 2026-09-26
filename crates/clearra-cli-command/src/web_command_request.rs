@@ -65,7 +65,7 @@ pub struct WebCommandRequest {
     setup_score: Option<WebSetupScoreInput>,
     forward_search: Option<ForwardSearchQuery>,
     boundary_recovery: Option<BoundaryRecoveryQuery>,
-    boundary_recovery_pattern: Option<(String, usize, usize)>,
+    boundary_recovery_pattern: Option<(String, usize, Option<usize>)>,
     spin_structure: Option<SpinStructureQuery>,
     spin_structure_product_mode: SpinStructureProductMode,
     percent_query: Option<PcScenarioQuery>,
@@ -414,7 +414,7 @@ impl WebCommandRequest {
         query: BoundaryRecoveryQuery,
         pattern: String,
         max_pattern_evaluations: usize,
-        max_total_states: usize,
+        max_total_states: Option<usize>,
     ) -> Self {
         let mut request = Self::boundary_recovery(query);
         request.boundary_recovery_pattern =

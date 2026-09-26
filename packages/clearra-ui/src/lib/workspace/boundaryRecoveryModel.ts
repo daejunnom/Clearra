@@ -14,7 +14,8 @@ export type BoundaryRecoveryRequest = {
   queue: string;
   queuePattern: string;
   stageOneCount: number;
-  placements: number;
+  /** null delegates terminal count to the exact search. */
+  placements: number | null;
   /** Empty keeps occupancy-only search; otherwise one exact lock-time mask per placement role. */
   placementRoleMasks: bigint[];
   maxEarlyPlacements: 0 | 1;
@@ -28,9 +29,10 @@ export type BoundaryRecoveryRequest = {
   /** One-based bag positions; the stage boundary starts a new bag. */
   preserveB2BBags: number[];
   initialB2B: boolean;
-  maxStates: number;
+  /** null is unlimited search states, not an unlimited host resource budget. */
+  maxStates: number | null;
   maxPatternEvaluations: number;
-  maxTotalStates: number;
+  maxTotalStates: number | null;
 };
 
 export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
@@ -42,7 +44,7 @@ export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
     queue: '',
     queuePattern: '',
     stageOneCount: 1,
-    placements: 2,
+    placements: null,
     placementRoleMasks: [],
     maxEarlyPlacements: 1,
     borrowRolePosition: 2,
@@ -54,10 +56,25 @@ export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
     preserveB2BStageTwo: false,
     preserveB2BBags: [],
     initialB2B: true,
-    maxStates: 100_000,
+    maxStates: null,
     maxPatternEvaluations: 100,
-    maxTotalStates: 1_000_000
+    maxTotalStates: null
   };
+}
+
+/** The upper lock horizon is not a guessed terminal count. */
+export function recoveryPlacementHorizon(request: BoundaryRecoveryRequest): number {
+  return request.placements ?? (request.placementRoleMasks.length || request.queue.trim().length);
+}
+
+export function updateRecoveryQueue(request: BoundaryRecoveryRequest, queue: string): BoundaryRecoveryRequest {
+  // Geometry belongs to explicit roles, not to the latest queue text length.
+  // Keep it editable if a shorter draft queue temporarily makes it invalid.
+  return { ...request, queue };
+}
+
+function validOptionalStateLimit(value: number | null): boolean {
+  return value === null || (Number.isSafeInteger(value) && value >= 1 && value <= 0xffff_ffff);
 }
 
 export function boundaryRecoveryBagSlots(stageOneCount: number, placements: number):
@@ -76,25 +93,27 @@ export function boundaryRecoveryBagSlots(stageOneCount: number, placements: numb
 export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest): string[] {
   const errors: string[] = [];
   const queue = request.queue.trim().toUpperCase();
+  const horizon = recoveryPlacementHorizon(request);
   if (!/^[IJLOSTZ]{2,42}$/u.test(queue)) errors.push('queue');
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 25) errors.push('height');
-  if (!Number.isInteger(request.stageOneCount) || request.stageOneCount < 1 || request.stageOneCount >= request.placements) errors.push('stage-one');
-  if (!Number.isInteger(request.placements) || request.placements < 2 || request.placements > 42 || request.placements > queue.length) errors.push('placements');
+  if (!Number.isInteger(request.stageOneCount) || request.stageOneCount < 1 || request.stageOneCount >= horizon) errors.push('stage-one');
+  if ((request.placements !== null && !Number.isInteger(request.placements)) ||
+      !Number.isInteger(horizon) || horizon < 2 || horizon > 42 || horizon > queue.length) errors.push('placements');
   if (request.maxEarlyPlacements !== 0 && request.maxEarlyPlacements !== 1) errors.push('max-early');
-  if (request.maxEarlyPlacements === 1 && (!Number.isInteger(request.borrowRolePosition) || request.borrowRolePosition <= request.stageOneCount || request.borrowRolePosition > request.placements)) errors.push('borrow-role');
-  if (!Number.isInteger(request.maxStates) || request.maxStates < 1 || request.maxStates > 1_000_000) errors.push('max-states');
-  const bagCount = boundaryRecoveryBagSlots(request.stageOneCount, request.placements).length;
+  if (request.maxEarlyPlacements === 1 && (!Number.isInteger(request.borrowRolePosition) || request.borrowRolePosition <= request.stageOneCount || request.borrowRolePosition > horizon)) errors.push('borrow-role');
+  if (!validOptionalStateLimit(request.maxStates)) errors.push('max-states');
+  const bagCount = boundaryRecoveryBagSlots(request.stageOneCount, horizon).length;
   if (new Set(request.preserveB2BBags).size !== request.preserveB2BBags.length ||
       request.preserveB2BBags.some((bag) => !Number.isInteger(bag) || bag < 1 || bag > bagCount)) {
     errors.push('b2b-bags');
   }
   if (request.queuePattern.trim()) {
-    if (queue.length % 7 !== 0 || request.stageOneCount % 7 !== 0 || request.placements !== queue.length ||
+    if (queue.length % 7 !== 0 || request.stageOneCount % 7 !== 0 || horizon !== queue.length ||
         request.placementRoleMasks.length !== queue.length ||
         !Array.from({ length: queue.length / 7 }, (_, bag) => queue.slice(bag * 7, bag * 7 + 7))
           .every((bag) => new Set(bag).size === 7)) errors.push('pattern-roles');
     if (!Number.isInteger(request.maxPatternEvaluations) || request.maxPatternEvaluations < 1 || request.maxPatternEvaluations > 100_000) errors.push('max-pattern-evaluations');
-    if (!Number.isInteger(request.maxTotalStates) || request.maxTotalStates < 1 || request.maxTotalStates > 100_000_000) errors.push('max-total-states');
+    if (!validOptionalStateLimit(request.maxTotalStates)) errors.push('max-total-states');
   }
   // Invalid numeric drafts remain editable and are reported, never passed to BigInt(NaN).
   const safeHeight = Number.isInteger(request.height) && request.height >= 1 && request.height <= 25 ? request.height : 1;
@@ -104,7 +123,7 @@ export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest
   if (request.maxEarlyPlacements === 1 && request.placementRoleMasks.length === 0 &&
       (request.borrowPlacementMask < 0n || request.borrowPlacementMask >= fieldLimit || bitCount(request.borrowPlacementMask) !== 4)) errors.push('borrow-placement');
   if (request.placementRoleMasks.length > 0 &&
-      (request.placementRoleMasks.length !== request.placements ||
+      (request.placementRoleMasks.length !== horizon ||
        request.placementRoleMasks.some((mask) => mask < 0n || mask >= fieldLimit || bitCount(mask) !== 4))) {
     errors.push('placement-roles');
   }
@@ -126,15 +145,15 @@ export function boundaryRecoveryArguments(request: BoundaryRecoveryRequest): str
     '--height', String(request.height),
     '--queue', request.queue.trim().toUpperCase(),
     '--stage-one-count', String(request.stageOneCount),
-    '--placements', String(request.placements),
+    '--placements', request.placements === null ? 'auto' : String(request.placements),
     '--max-early-placements', String(request.maxEarlyPlacements),
     '--borrow-role-position', String(request.borrowRolePosition),
     request.holdEnabled ? '--hold' : '--no-hold',
     '--rule', request.rule,
     '--spin-profile', request.spinProfile,
-    '--initial-b2b', request.initialB2B ? '1' : '0',
-    '--max-states', String(request.maxStates)
+    '--initial-b2b', request.initialB2B ? '1' : '0'
   ];
+  if (request.maxStates !== null) args.push('--max-states', String(request.maxStates));
   if (request.placementRoleMasks.length === 0) {
     args.push('--borrow-placement-mask', boardMaskHex(request.borrowPlacementMask));
   } else {
@@ -146,7 +165,7 @@ export function boundaryRecoveryArguments(request: BoundaryRecoveryRequest): str
   if (request.queuePattern.trim()) {
     args.push('--queue-pattern', request.queuePattern.trim());
     args.push('--max-pattern-evaluations', String(request.maxPatternEvaluations));
-    args.push('--max-total-states', String(request.maxTotalStates));
+    if (request.maxTotalStates !== null) args.push('--max-total-states', String(request.maxTotalStates));
   }
   return args;
 }

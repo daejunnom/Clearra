@@ -730,7 +730,9 @@
           bind:copyFormat={solutionCopyFormat}
           {targetLines}
           {language}
-        />
+        >
+          <svelte:fragment slot="solution-actions"><slot name="solution-actions" /></svelte:fragment>
+        </SolutionSubsetPage>
       {/if}
       <footer>
         <button type="button" disabled={loadingMember || navigatingOuter || memberPageNumber === '1'} on:click={() => showMemberPage(decrementCanonicalDecimal(memberPageNumber))}><ChevronLeft size={15} />{componentMessage(language, 'previous100')}</button>

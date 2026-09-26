@@ -163,3 +163,66 @@ fn explicit_first_stage_target_is_one_continuous_non_pc_app_request() {
         .any(|field| field.key() == "status" && field.value().as_text() == "normal"));
     assert!(CliCommandParser::parse(&format!("{base} --stage-one-board-mask 0")).is_err());
 }
+
+#[test]
+fn automatic_recovery_preserves_lookahead_and_has_no_default_state_cutoff() {
+    let command = "clearra recovery boundary --initial-board-mask 0 --stage-one-board-mask 0xf --target-board-mask 0xc03f --height 4 --queue IOT --stage-one-count 1 --max-early-placements 0 --no-hold";
+    for suffix in ["", " --placements auto --max-states unlimited"] {
+        let request = CliCommandParser::parse(&format!("{command}{suffix}"))
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+        let AppCommand::BoundaryRecovery(recovery) = request.command() else {
+            panic!("typed recovery");
+        };
+        assert_eq!(recovery.query().required_placements, None);
+        assert_eq!(recovery.query().max_states, None);
+        assert!(!recovery.query().hold_enabled);
+        let response = AppContext::default().run(request);
+        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+        let fields = response.render_model().unwrap().message().unwrap().fields();
+        assert!(fields
+            .iter()
+            .any(|field| field.key() == "status" && field.value().as_text() == "normal"));
+        assert!(fields
+            .iter()
+            .any(|field| field.key() == "resolved_placements" && field.value().as_text() == "2"));
+    }
+    let explicit = CliCommandParser::parse(&format!("{command} --placements 2 --max-states 17"))
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let AppCommand::BoundaryRecovery(recovery) = explicit.command() else {
+        panic!("typed recovery");
+    };
+    assert_eq!(recovery.query().required_placements, Some(2));
+    assert_eq!(recovery.query().max_states, Some(17));
+    assert!(CliCommandParser::parse(&format!("{command} --max-states 0")).is_err());
+    assert!(CliCommandParser::parse(&format!("{command} --placements 0")).is_err());
+}
+
+#[test]
+fn automatic_exact_roles_keep_pattern_contract_and_explicit_total_limits() {
+    let base = "clearra recovery boundary --initial-board-mask 0 --target-board-mask 0 --height 8 --queue IJLOSTZIJLOSTZ --queue-pattern IJLOSTZIJLOSTZ --stage-one-count 7 --max-early-placements 0 --no-hold --max-states 1 --max-pattern-evaluations 1";
+    let mut command = base.to_owned();
+    for position in 1..=14 {
+        command.push_str(&format!(" --role-mask {position}:0xf"));
+    }
+    for suffix in ["", " --max-total-states unlimited", " --max-total-states 1"] {
+        let request = CliCommandParser::parse(&format!("{command}{suffix}"))
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+        let response = AppContext::default().run(request);
+        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+        let fields = response.render_model().unwrap().message().unwrap().fields();
+        assert!(fields
+            .iter()
+            .any(|field| field.key() == "status"
+                && field.value().as_text() == "population-incomplete"));
+    }
+    assert!(CliCommandParser::parse(&format!("{command} --max-total-states 0")).is_err());
+    assert!(CliCommandParser::parse(base)
+        .map(|parsed| parsed.to_app_request().is_err())
+        .unwrap_or(true));
+}

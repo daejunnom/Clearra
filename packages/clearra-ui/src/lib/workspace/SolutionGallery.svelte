@@ -279,7 +279,16 @@
       <li data-solution-key={solution.key}>
         <div class="solution-heading">
           <div>
-            <strong>{label('solutionNumber', { number: solutionOrdinal(solution.index) })}</strong>
+            {#if allowMandatorySelection}
+              <label class="mandatory-choice" title={label('solutionNumber', { number: solutionOrdinal(solution.index) })}>
+                <input type="checkbox" checked={mandatorySolutionKeys.includes(solution.key)}
+                  aria-label={`${componentMessage(language, 'mandatorySolutions')}: ${label('solutionNumber', { number: solutionOrdinal(solution.index) })}`}
+                  on:change={() => dispatch('toggleMandatory', solution.key)} />
+                <strong>{label('solutionNumber', { number: solutionOrdinal(solution.index) })}</strong>
+              </label>
+            {:else}
+              <strong class="solution-title" title={label('solutionNumber', { number: solutionOrdinal(solution.index) })}>{label('solutionNumber', { number: solutionOrdinal(solution.index) })}</strong>
+            {/if}
             <div class="solution-metrics">
               {#if solution.probability}
                 <span class="solution-probability">
@@ -313,16 +322,6 @@
             format={copyFormat}
             {language}
           />
-          {#if allowMandatorySelection}
-            <label class="mandatory-choice">
-              <input
-                type="checkbox"
-                checked={mandatorySolutionKeys.includes(solution.key)}
-                on:change={() => dispatch('toggleMandatory', solution.key)}
-              />
-              {componentMessage(language, 'mandatorySolutions')}
-            </label>
-          {/if}
         </div>
 
         <SolutionBoardPreview
@@ -353,8 +352,10 @@
 {/if}
 
 <style>
-  .mandatory-choice { align-items: center; display: inline-flex; font-size: 12px; gap: 6px; }
-  .mandatory-choice input { height: 16px; width: 16px; }
+  .mandatory-choice { align-items: center; display: flex; cursor: pointer; gap: 6px; min-width: 0; max-width: 100%; white-space: nowrap; }
+  .mandatory-choice input { flex: 0 0 16px; height: 16px; width: 16px; margin: 0; }
+  .mandatory-choice strong, .solution-title { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: keep-all; }
+  @media (pointer: coarse) { .mandatory-choice { min-height: 44px; } }
   .gallery-status {
     color: #68736f;
     font-size: 12px;
@@ -379,10 +380,11 @@
   }
 
   .solution-heading {
-    align-items: flex-start;
-    display: flex;
+    align-items: start;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
-    justify-content: space-between;
+    min-width: 0;
     margin-bottom: 8px;
   }
 

@@ -1,9 +1,13 @@
 <script lang="ts">
+  import SpinProfileSelect from './SpinProfileSelect.svelte';
+  import RuleProfileSelect from './RuleProfileSelect.svelte';
+  import WorkspaceToggle from './WorkspaceToggle.svelte';
   import { Database, Gauge } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
+  import QueuePatternHelp from './QueuePatternHelp.svelte';
   import QueueTextInput from '../components/QueueTextInput.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
-  import { boundaryRecoveryBagSlots, updateRecoveryPlacements, type BoundaryRecoveryRequest } from './boundaryRecoveryModel';
+  import { boundaryRecoveryBagSlots, recoveryPlacementHorizon, updateRecoveryQueue, type BoundaryRecoveryRequest } from './boundaryRecoveryModel';
   import { componentMessage, type ComponentMessageKey } from '../i18n/componentCatalog';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
@@ -12,13 +16,12 @@
   export let validation: string[] = [];
   export let selectedRolePosition = 1;
   const dispatch = createEventDispatcher<{ change: BoundaryRecoveryRequest; role: number }>();
-  const rules = ['srs-plus', 'srs', 'srs-x', 'jstris-180'] as const;
-  const spins = ['t-spins', 't-spins-plus', 'all-spin', 'all-spin-plus', 'all-mini', 'all-mini-plus'] as const;
   let savedRoles: bigint[] = [];
   $: label = (key: ComponentMessageKey) => componentMessage(language, key);
   $: standard = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
-  $: bagSlots = boundaryRecoveryBagSlots(request.stageOneCount, request.placements);
-  $: roleCount = Number.isInteger(request.placements) && request.placements >= 2 && request.placements <= 42 ? request.placements : 0;
+  $: horizon = recoveryPlacementHorizon(request);
+  $: bagSlots = boundaryRecoveryBagSlots(request.stageOneCount, horizon);
+  $: roleCount = Number.isInteger(horizon) && horizon >= 2 && horizon <= 42 ? horizon : 0;
   function patch(value: Partial<BoundaryRecoveryRequest>) { dispatch('change', { ...request, ...value }); }
   function exactRoles(enabled: boolean) {
     if (!enabled) savedRoles = request.placementRoleMasks;
@@ -36,22 +39,21 @@
     <h2 class="workspace-control-heading"><Database size={16} strokeWidth={1.8} />{standard('source')}</h2>
     <label class="workspace-field"><span>{label('recoveryQueue')}</span>
       <QueueTextInput class="workspace-queue-input" value={request.queue} maxlength="42" placeholder="IOTSZJL"
-        spellcheck="false" on:value={(event) => patch({ queue: event.detail })} />
+        spellcheck="false" on:value={(event) => dispatch('change', updateRecoveryQueue(request, event.detail))} />
     </label>
     <div class="workspace-field-grid">
       <label class="workspace-field"><span>{label('recoveryStageOneCount')}</span>
         <input type="number" min="1" max="41" value={request.stageOneCount}
           on:input={(event) => patch({ stageOneCount: (event.currentTarget as HTMLInputElement).valueAsNumber, preserveB2BBags: [] })} />
       </label>
-      <label class="workspace-field"><span>{label('recoveryPlacements')}</span>
-        <input type="number" min="2" max="42" value={request.placements}
-          on:input={(event) => dispatch('change', updateRecoveryPlacements(request, (event.currentTarget as HTMLInputElement).valueAsNumber))} />
-      </label>
+      <div class="workspace-field recovery-required-pieces" role="status">
+        <span>{standard('piecesNeeded')}</span>
+        <output>{request.placements ?? (request.placementRoleMasks.length || label('recoveryAutomaticPieces'))}</output>
+        <small class="workspace-field-help">{label('recoveryAutomaticPiecesHelp')}</small>
+      </div>
     </div>
-    <div class="workspace-switch-row"><label class="workspace-switch-label">
-      <input type="checkbox" checked={request.holdEnabled} on:change={(event) => patch({ holdEnabled: (event.currentTarget as HTMLInputElement).checked })} />
-      <span class="workspace-switch" aria-hidden="true"></span><span>{standard('hold')}</span>
-    </label></div>
+    <div class="workspace-switch-row"><WorkspaceToggle label={standard('hold')} checked={request.holdEnabled}
+        on:change={(event) => patch({ holdEnabled: event.detail })} /></div>
   </section>
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading"><Gauge size={16} strokeWidth={1.8} />{standard('search')}</h2>
@@ -63,16 +65,10 @@
       {/each}
     </div>
     <div class="workspace-field-grid">
-      <label class="workspace-field"><span>{standard('rule')}</span>
-        <select value={request.rule} on:change={(event) => patch({ rule: (event.currentTarget as HTMLSelectElement).value as BoundaryRecoveryRequest['rule'] })}>
-          {#each rules as rule}<option value={rule}>{rule}</option>{/each}
-        </select>
-      </label>
-      <label class="workspace-field"><span>{standard('spinProfile')}</span>
-        <select value={request.spinProfile} on:change={(event) => patch({ spinProfile: (event.currentTarget as HTMLSelectElement).value as BoundaryRecoveryRequest['spinProfile'] })}>
-          {#each spins as spin}<option value={spin}>{spin}</option>{/each}
-        </select>
-      </label>
+      <RuleProfileSelect value={request.rule} {language}
+        on:change={(event) => patch({ rule: event.detail })} />
+      <SpinProfileSelect value={request.spinProfile} {language}
+        on:change={(event) => patch({ spinProfile: event.detail })} />
     </div>
   </section>
   <section class="workspace-control-section">
@@ -106,7 +102,7 @@
       {/if}
       {#if request.maxEarlyPlacements === 1}
         <label class="workspace-field"><span>{label('recoveryBorrowPosition')}</span>
-          <input type="number" min={request.stageOneCount + 1} max={request.placements} value={request.borrowRolePosition}
+          <input type="number" min={request.stageOneCount + 1} max={horizon} value={request.borrowRolePosition}
             on:input={(event) => patch({ borrowRolePosition: (event.currentTarget as HTMLInputElement).valueAsNumber })} />
         </label>
       {/if}
@@ -115,26 +111,18 @@
       <QueueTextInput class="workspace-queue-input" value={request.queuePattern} placeholder="IJLOSTZP7" spellcheck="false"
         on:value={(event) => patch({ queuePattern: event.detail })} />
     </label>
+    <QueuePatternHelp {language} />
+    <p class="workspace-field-help">{label('recoveryPatternReferenceHelp')}</p>
     <p class="workspace-field-help">{label('recoveryScope')}</p>
   </section>
-  <section class="workspace-control-section">
-    <h2 class="workspace-control-heading">{label('recoveryBudget')}</h2>
-    <label class="workspace-field"><span>{label('recoveryMaxStates')}</span>
-      <input type="number" min="1" max="1000000" value={request.maxStates}
-        on:input={(event) => patch({ maxStates: (event.currentTarget as HTMLInputElement).valueAsNumber })} />
-    </label>
-    {#if request.queuePattern.trim()}
-      <div class="workspace-field-grid">
-        <label class="workspace-field"><span>{label('recoveryPatternEvaluations')}</span>
-          <input type="number" min="1" max="100000" value={request.maxPatternEvaluations}
-            on:input={(event) => patch({ maxPatternEvaluations: (event.currentTarget as HTMLInputElement).valueAsNumber })} />
-        </label>
-        <label class="workspace-field"><span>{label('recoveryTotalStates')}</span>
-          <input type="number" min="1" max="100000000" value={request.maxTotalStates}
-            on:input={(event) => patch({ maxTotalStates: (event.currentTarget as HTMLInputElement).valueAsNumber })} />
-        </label>
-      </div>
-    {/if}
-  </section>
+  {#if request.queuePattern.trim()}
+    <section class="workspace-control-section">
+      <h2 class="workspace-control-heading">{label('recoveryBudget')}</h2>
+      <label class="workspace-field"><span>{label('recoveryPatternEvaluations')}</span>
+        <input type="number" min="1" max="100000" value={request.maxPatternEvaluations}
+          on:input={(event) => patch({ maxPatternEvaluations: (event.currentTarget as HTMLInputElement).valueAsNumber })} />
+      </label>
+    </section>
+  {/if}
   {#if validation.length > 0}<div class="workspace-validation" role="alert"><p>{label('recoveryInvalid')}</p></div>{/if}
 </WorkspaceControlPanel>

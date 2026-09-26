@@ -357,8 +357,6 @@
     on:change={(event) => updateRequest(event.detail)}
   />
   <svelte:fragment slot="result">
-    <MandatorySelectionSummary count={request.pinnedSolutionKeys.length} {language} disabled={active}
-      on:run={runMandatory} on:clear={() => { request = { ...request, ...emptyMandatorySelection() }; }} />
     {#if pinError}<p role="alert">{componentMessage(language, 'pinnedDocumentInvalid')}</p>{/if}
   <ResultWorkspace
     {allowMandatorySelection}
@@ -385,7 +383,12 @@
     releaseProductPages={runtime === 'web'
       ? () => workerController.releaseProductPages()
       : () => releaseDesktopProductPages()}
-  />
+  >
+    <svelte:fragment slot="solution-actions">
+    <MandatorySelectionSummary count={request.pinnedSolutionKeys.length} {language} disabled={active}
+      on:run={runMandatory} on:clear={() => { request = { ...request, ...emptyMandatorySelection() }; }} />
+    </svelte:fragment>
+  </ResultWorkspace>
   </svelte:fragment>
 </WorkspaceShell>
 

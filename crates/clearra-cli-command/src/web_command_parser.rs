@@ -2336,7 +2336,7 @@ fn parse_boundary_recovery_command(
     let mut queue = None;
     let mut queue_pattern = None;
     let mut max_pattern_evaluations = 100_usize;
-    let mut max_total_states = 1_000_000_usize;
+    let mut max_total_states: Option<usize> = None;
     let mut stage_one_queue_len: Option<usize> = None;
     let mut required_placements: Option<usize> = None;
     let mut max_early_placements = 1_u8;
@@ -2349,7 +2349,7 @@ fn parse_boundary_recovery_command(
     let mut preserve_b2b_by_stage = [false; 2];
     let mut preserve_b2b_bags = std::collections::BTreeSet::new();
     let mut initial_b2b = true;
-    let mut max_states = 100_000;
+    let mut max_states: Option<usize> = None;
     let mut cursor = 0;
     while cursor < tokens.len() {
         let option_cursor = cursor;
@@ -2414,8 +2414,12 @@ fn parse_boundary_recovery_command(
                     parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
             }
             "--max-total-states" => {
-                max_total_states =
-                    parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
+                let value = next_value(tokens, &mut cursor, option)?;
+                max_total_states = if value == "unlimited" {
+                    None
+                } else {
+                    Some(parse_positive(value, option)?)
+                };
             }
             "--stage-one-count" => {
                 stage_one_queue_len = Some(parse_positive(
@@ -2424,10 +2428,12 @@ fn parse_boundary_recovery_command(
                 )?);
             }
             "--placements" => {
-                required_placements = Some(parse_positive(
-                    next_value(tokens, &mut cursor, option)?,
-                    option,
-                )?);
+                let value = next_value(tokens, &mut cursor, option)?;
+                required_placements = if value == "auto" {
+                    None
+                } else {
+                    Some(parse_positive(value, option)?)
+                };
             }
             "--max-early-placements" => {
                 max_early_placements = match next_value(tokens, &mut cursor, option)? {
@@ -2519,7 +2525,12 @@ fn parse_boundary_recovery_command(
                 };
             }
             "--max-states" => {
-                max_states = parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
+                let value = next_value(tokens, &mut cursor, option)?;
+                max_states = if value == "unlimited" {
+                    None
+                } else {
+                    Some(parse_positive(value, option)?)
+                };
             }
             _ => {
                 return Err(WebCommandError::new(
@@ -2544,16 +2555,25 @@ fn parse_boundary_recovery_command(
             format!("boundary recovery requires {name}"),
         )
     };
-    let required_placements = required_placements.ok_or_else(|| required("--placements"))?;
+    let queue: Vec<clearra_core_domain::piece::piece_kind::PieceKind> =
+        queue.ok_or_else(|| required("--queue"))?;
+    // Complete explicit role geometry supplies its own count. An occupancy-only
+    // automatic request keeps None so the core searches every feasible horizon.
+    let role_count = if placement_roles.is_empty() {
+        queue.len()
+    } else {
+        placement_roles.len()
+    };
+    let placement_horizon = required_placements.unwrap_or(role_count);
     let stage_one_queue_len = stage_one_queue_len.ok_or_else(|| required("--stage-one-count"))?;
-    if stage_one_queue_len >= required_placements {
+    if placement_horizon > queue.len() || stage_one_queue_len >= placement_horizon {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
             "--stage-one-count must be smaller than --placements",
         ));
     }
     let bag_count =
-        stage_one_queue_len.div_ceil(7) + (required_placements - stage_one_queue_len).div_ceil(7);
+        stage_one_queue_len.div_ceil(7) + (placement_horizon - stage_one_queue_len).div_ceil(7);
     let mut preserve_b2b_bag_mask = 0_u64;
     for bag in preserve_b2b_bags {
         if bag > bag_count || bag > 64 {
@@ -2567,8 +2587,8 @@ fn parse_boundary_recovery_command(
     let placement_role_masks = if placement_roles.is_empty() {
         Vec::new()
     } else {
-        if placement_roles.len() != required_placements
-            || (1..=required_placements).any(|position| !placement_roles.contains_key(&position))
+        if placement_roles.len() != placement_horizon
+            || (1..=placement_horizon).any(|position| !placement_roles.contains_key(&position))
         {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::InvalidValue,
@@ -2597,7 +2617,7 @@ fn parse_boundary_recovery_command(
         stage_one_target,
         final_board: final_board.ok_or_else(|| required("--target-board-mask"))?,
         height: height.ok_or_else(|| required("--height"))?,
-        queue: queue.ok_or_else(|| required("--queue"))?,
+        queue,
         stage_one_queue_len,
         required_placements,
         placement_role_masks,
@@ -2614,7 +2634,7 @@ fn parse_boundary_recovery_command(
         max_states,
     };
     if let Some(pattern) = queue_pattern {
-        if max_pattern_evaluations > 100_000 || max_total_states > 100_000_000 {
+        if max_pattern_evaluations > 100_000 {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::InvalidValue,
                 "boundary recovery pattern limits exceed the supported scope",
