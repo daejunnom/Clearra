@@ -14,69 +14,51 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
       actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ce9d3f787d305f626337d51c7dbfe8f66c502958
+          ref: dc379d89153270bcb7d959be7b11f080f849238a
           fetch-depth: 0
-      - name: Apply the reviewed native control repair without changing main
+          persist-credentials: false
+      - name: Bind the reviewed mirror regression fix without changing source or main
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
         shell: python
         run: |
-          import hashlib,json,os,pathlib,subprocess
-          def cmd(*args): return subprocess.check_output(args,text=True).strip()
-          def git(*args): return cmd('git',*args)
+          import json,os,pathlib,subprocess
+          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
           base='952280950aeb24528279cbff685fe8acec892223'
-          parent='6c064c788bbd6cfb2f2fbcb7f28c9c5f6187e8e9'
+          parent='54df724b04498aaec987d41483efe4d075172522'
+          candidate='dc379d89153270bcb7d959be7b11f080f849238a'
           branch='codex/converge-surface-repair-20260926'
-          tree='a03e5656e49cfeb45b81e3226f35ce035279a1a7'
-          patch=pathlib.Path('scripts/integration/workspace-control-hitarea-20260926.patch').read_bytes()
-          if hashlib.sha256(patch).hexdigest()!='0ede1bd06cf94b6428a449acb47ae7a8576318ed7dd5bec690e1b928de0a5d4c':
-              raise RuntimeError('Reviewed patch checksum mismatch')
-          if git('ls-remote','origin','refs/heads/main').split()[0]!=base:
-              raise RuntimeError('main moved; reconcile before applying')
-          tip=git('ls-remote','origin','refs/heads/'+branch).split()[0]
-          expected=['packages/clearra-ui/src/lib/workspace/WorkspaceControlPanel.svelte',
-              'scripts/lib/wasm-release-gate.ps1','scripts/tools/surface-browser-acceptance.mjs',
-              'scripts/tools/workspace-controls-browser-acceptance.mjs']
-          if tip==parent:
-              target=pathlib.Path(os.environ['RUNNER_TEMP'])/'workspace-controls.patch'
-              target.write_bytes(patch)
-              git('checkout','--detach',parent)
-              git('merge-base','--is-ancestor',base,parent)
-              git('apply','--check',str(target)); git('apply','--index',str(target))
-              git('diff','--cached','--check')
-              if git('diff','--cached','--name-only').splitlines()!=expected or git('write-tree')!=tree:
-                  raise RuntimeError('Reviewed tree or changed scope mismatch')
-              git('config','user.name','github-actions[bot]')
-              git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-              git('commit','-m','fix: align native workspace switch hit areas and verify real Svelte controls before WASM')
-              candidate=git('rev-parse','HEAD')
-              git('push','origin',candidate+':refs/heads/'+branch)
-          else:
-              candidate=tip
-              if git('show','-s','--format=%P',candidate)!=parent or git('rev-parse',candidate+'^{tree}')!=tree:
-                  raise RuntimeError('Candidate moved; reconcile before running')
-          if git('show','-s','--format=%P',candidate)!=parent or git('diff','--name-only',parent,candidate).splitlines()!=expected:
-              raise RuntimeError('Parent or scope mismatch')
-          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate:
-              raise RuntimeError('Candidate readback mismatch')
+          tree='6fb9287d79c283819a3d0e675b3c67c9d2acc6ad'
+          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
+              rows=git('ls-remote','origin',ref).splitlines()
+              if len(rows)!=1 or rows[0].split()!=[sha,ref]:
+                  raise RuntimeError('Reviewed ref moved; reconcile before running')
+          expected=['crates/clearra-wasm/tests/wasm_host_contract.rs',
+              'packages/clearra-ui/test/buildProbabilityMirrorSelection.test.mjs',
+              'scripts/tools/surface-browser-acceptance.mjs']
+          if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
+              git('rev-parse','HEAD^{tree}')!=tree or git('diff','--name-only',parent,candidate).splitlines()!=expected):
+              raise RuntimeError('Reviewed source identity or scope mismatch')
+          git('merge-base','--is-ancestor',base,candidate)
+          git('diff','--check',parent,candidate)
           receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'changed_files':expected,'main_updated':False}
-          (pathlib.Path(os.environ['RUNNER_TEMP'])/'control-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          (pathlib.Path(os.environ['RUNNER_TEMP'])/'mirror-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps(receipt),flush=True)
           subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True)
           with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: control-preparation-${{ github.run_id }}
-          path: ${{ runner.temp }}/control-preparation.json
+          name: mirror-preparation-${{ github.run_id }}
+          path: ${{ runner.temp }}/mirror-preparation.json
           if-no-files-found: warn
           retention-days: 14
   control-browser:
@@ -153,6 +135,7 @@ jobs:
           {
             node -e "const f=require('node:fs'); for(const p of ['apps/clearra-web/.svelte-kit/tsconfig.json','apps/clearra-web/static/wasm/clearra_wasm.manifest.json']) if(f.existsSync(p)) throw Error('prebuild fixture unexpectedly exists: '+p)"
             node --test --test-name-pattern='source-only worker|standalone contract compiler|release frontend sync|Pages acceptance owns' scripts/tools/build-clearra-frontend.test.mjs
+            node --test packages/clearra-ui/test/buildProbabilityMirrorSelection.test.mjs
             pnpm --filter @clearra/web run test
             node -e "const f=require('node:fs'); for(const p of ['apps/clearra-web/.svelte-kit/tsconfig.json','apps/clearra-web/static/wasm/clearra_wasm.manifest.json']) if(f.existsSync(p)) throw Error('source test generated product input: '+p)"
             for attempt in 1 2 3; do
@@ -198,7 +181,7 @@ jobs:
           set -euo pipefail
           {
             node --test scripts/tools/build-clearra-frontend.test.mjs scripts/release/discord-acceptance-trigger.test.mjs
-            node --test apps/clearra-web/test/browserGpuAvailability.test.mjs packages/clearra-ui/test/mandatorySolutionSelection.test.mjs
+            node --test apps/clearra-web/test/browserGpuAvailability.test.mjs packages/clearra-ui/test/mandatorySolutionSelection.test.mjs packages/clearra-ui/test/buildProbabilityMirrorSelection.test.mjs
             pnpm --filter @clearra/ui run test
             node scripts/desktop-ui-compile-check.mjs
             node scripts/tools/run-release-regression-tests.mjs
@@ -211,7 +194,7 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
   acceptance:
-    needs: [prepare, verifier-contracts, control-browser]
+    needs: [prepare, verifier-contracts, control-browser, rust-regressions]
     runs-on: windows-latest
     timeout-minutes: 120
     strategy:
@@ -291,12 +274,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
+      - name: Test real mirrored Build and pins before expensive acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo test --locked --package clearra-wasm --test wasm_host_contract build_mirror_source_and_pins_preserve_exact_sets_and_union_probability -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/build-mirror.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/build-mirror.log"
       - name: Test exact boundary and borrowed-state cleanup and require nonempty results
         shell: bash
         run: |
           set -euo pipefail
           {
-            cargo fmt --all --check
             cargo test --locked --package clearra-forward-search --lib boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/boundary-regression.log"
             grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/boundary-regression.log"
             for filter in reset_rejects_a_borrowed_runtime_without_a_second_panic warm_minimum_to_geometry_releases_authority exact_replacement_requires_geometry_finish; do
@@ -308,7 +297,9 @@ jobs:
         if: always()
         with:
           name: surface-repair-rust-${{ github.run_id }}
-          path: ${{ runner.temp }}/repair-rust.log
+          path: |
+            ${{ runner.temp }}/repair-rust.log
+            ${{ runner.temp }}/build-mirror.log
           if-no-files-found: warn
           retention-days: 14
   ready:
