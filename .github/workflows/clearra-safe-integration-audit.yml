@@ -19,12 +19,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
-      CLEARRA_SOURCE_COMMIT: 56d1d1830825eb1a09cde113e4e96675238da46a
-      CLEARRA_ENGINE_BUILD_ID: 56d1d1830825eb1a09cde113e4e96675238da46a
+      CLEARRA_SOURCE_COMMIT: 589493d4a9f70a126ddbdc312bbd1e211f803c68
+      CLEARRA_ENGINE_BUILD_ID: 589493d4a9f70a126ddbdc312bbd1e211f803c68
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 56d1d1830825eb1a09cde113e4e96675238da46a
+          ref: 589493d4a9f70a126ddbdc312bbd1e211f803c68
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -35,9 +35,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CLEARRA_SOURCE_COMMIT"
-          test "$(git show -s --format=%P HEAD)" = 44c104ff242196f2f06be9bc5162c7d0a1f1b878
-          test "$(git diff --name-only HEAD^ HEAD)" = crates/clearra-wasm/tests/wasm_host_contract.rs
-          git diff --check HEAD^ HEAD
+          test "$(git show -s --format=%P HEAD)" = 56d1d1830825eb1a09cde113e4e96675238da46a
+          test "$(git diff --name-only 44c104ff242196f2f06be9bc5162c7d0a1f1b878 HEAD)" = crates/clearra-wasm/tests/wasm_host_contract.rs
+          git diff --check 44c104ff242196f2f06be9bc5162c7d0a1f1b878 HEAD
           rustup toolchain install 1.98.1 --profile minimal --component rustfmt
           cargo fmt --all --check
       - name: Execute real Build and PC contracts without a large inherited stack
