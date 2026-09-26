@@ -44,7 +44,7 @@ index 8d4bf8a..360dd57 100644
  
  fn decode_ctk3(source: &str) -> Result<Decoded, BuildColoredTargetDocumentError> {
      let document =
- diff --git a/crates/clearra-app/src/build_pinned_solution_document.rs b/crates/clearra-app/src/build_pinned_solution_document.rs
+diff --git a/crates/clearra-app/src/build_pinned_solution_document.rs b/crates/clearra-app/src/build_pinned_solution_document.rs
 new file mode 100644
 index 0000000..bba0607
 --- /dev/null
