@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
-  import { BoundaryRecoveryWorkspace, BuildProbabilityWorkspace, BuildV2Workspace, CtkDrawerWorkspace, DocumentUtilityWorkspace, ForwardSearchWorkspace, OperationSequenceWorkspace, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SequenceDependenciesWorkspace, SetupFinderWorkspace, SetupScoreWorkspace, SolverWorkspace, SpinStructureWorkspace, WORKSPACE_MODE_VISIBILITY_CONTEXT, type WorkspaceMode } from '@clearra/ui/workspace';
+  import { BoundaryRecoveryWorkspace, BuildProbabilityWorkspace, BuildV2Workspace, CtkDrawerWorkspace, DocumentUtilityWorkspace, ForwardSearchWorkspace, OperationSequenceWorkspace, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SequenceDependenciesWorkspace, SetupFinderWorkspace, SetupScoreWorkspace, SolverWorkspace, SpinStructureWorkspace, WORKSPACE_MODE_VISIBILITY_CONTEXT } from '@clearra/ui/workspace';
   import {
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     sharedBrowserHostCapabilitySnapshot
@@ -19,7 +19,7 @@
   const pagesModes = [
     'pc', 'setup', 'build-probability', 'recovery',
     'damage', 'spin-finder', 'ctk', 'player'
-  ] as const satisfies readonly WorkspaceMode[];
+  ] as const;
   setContext(WORKSPACE_MODE_VISIBILITY_CONTEXT, pagesModes);
 
   const showLocalProfile = isLocalSearchProfileMode(import.meta.env.MODE);
