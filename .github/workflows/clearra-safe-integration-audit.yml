@@ -21,13 +21,13 @@ jobs:
       tree: ${{ steps.prepare.outputs.tree }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: f4e797027219038f5711e909024a5234037d4827, fetch-depth: 0}
+        with: {ref: 702349688caec506bc8cf6c739ace6d79f32e2da, fetch-depth: 0}
       - name: Install the exact formatter
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
       - name: Apply exact reviewed source without updating main
         id: prepare
         env: {GH_TOKEN: '${{ github.token }}'}
-        run: python scripts/integration/ui-polish-20260927/apply-reviewed.py
+        run: python scripts/integration/ui-polish-20260927/verification-fix.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
