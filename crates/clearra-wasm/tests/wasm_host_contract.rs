@@ -235,8 +235,7 @@ fn assert_pinned_portfolio(
         .app_response()
         .product_result_payload()
         .expect("typed minimum payload");
-    let ProductResultPayloadContent::BuildCoveragePortfolioV2(minimum) = payload.content()
-    else {
+    let ProductResultPayloadContent::BuildCoveragePortfolioV2(minimum) = payload.content() else {
         panic!("expected a Build minimum portfolio");
     };
     assert_eq!(minimum.source_candidate_count(), "2");
@@ -246,8 +245,7 @@ fn assert_pinned_portfolio(
     );
     assert_eq!(minimum.union_probability(), "1");
     assert!(minimum.completeness().complete());
-    let Some(ProductPageSourceOwner::CoveragePortfolio(owner)) =
-        pinned.product_page_source_owner()
+    let Some(ProductPageSourceOwner::CoveragePortfolio(owner)) = pinned.product_page_source_owner()
     else {
         panic!("minimum must retain its real member page source");
     };
