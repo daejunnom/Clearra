@@ -120,7 +120,10 @@ mod tests {
                 vec![page(0xf, 0), page(0xff, 0)],
                 BuildColoredTargetDocumentError::TargetAreaDiffers,
             ),
-            (vec![page(0, 0)], BuildColoredTargetDocumentError::TargetEmpty),
+            (
+                vec![page(0, 0)],
+                BuildColoredTargetDocumentError::TargetEmpty,
+            ),
             (
                 vec![page(0x7, 0)],
                 BuildColoredTargetDocumentError::ColoredAreaInvalid,
