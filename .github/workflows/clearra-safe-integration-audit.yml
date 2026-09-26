@@ -21,12 +21,12 @@ jobs:
       tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: bd92409044c06b167e31e71701d40e495c3bd70b, fetch-depth: 0}
+        with: {ref: 370d010fbe54e11b1b45f1a283d6bca13157792a, fetch-depth: 0}
       - name: Install exact formatter
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-      - name: Apply only reviewed source without publishing or changing main
+      - name: Apply reviewed quota accessibility and test-dependency fix without changing main
         id: source
-        run: python scripts/integration/recovery-multiple-20260927/prepare.py
+        run: python scripts/integration/recovery-multiple-20260927/fix-ci.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
