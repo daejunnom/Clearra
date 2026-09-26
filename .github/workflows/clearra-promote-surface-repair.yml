@@ -35,9 +35,9 @@ jobs:
           SOURCE = '4b29711a4b67d283bcf66d727156913f6107e2e5'
           PARENT = 'eccfdbf5c6db5da76d71f69b75e27a3f80d4085f'
           TREE = '1120697ba93984d5e1ad5fc882e747f402a579a9'
-          GATE_ID = 36243394821
-          GATE_CONTROL = '3ab80555185c4c788f3698746aec385cc034f2fd'
-          GATE_WORKFLOW_BLOB = '302e733a093cbf069d7cf7870aa1c3bd97544b45'
+          GATE_ID = 36243883647
+          GATE_CONTROL = '849ee8a6f42f345c7ec7717a2df790bb51f9edc8'
+          GATE_WORKFLOW_BLOB = 'c99bf9027600927e1e791472ca4051549cdee9bf'
           BRANCH = 'codex/recovery-gray-fields-20260926'
           EXPECTED = [
               'crates/clearra-cli-command/src/web_command_parser.rs',
