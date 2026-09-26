@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Collect exact source for requested UI implementation (not acceptance)
+run-name: Recover staged implementation (not acceptance)
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -7,42 +7,28 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: clearra-ui-source-collection
-  cancel-in-progress: true
 jobs:
   source:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 246e1c5ee9a743ab9a24ba731af55ccc6b805ddd
-          fetch-depth: 1
+          ref: 9808829d176dcd5eae78521fb51f7a3a99aaf1d4
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with: {node-version: 22.23.2}
-      - name: Archive verified tracked source and frozen frontend dependencies
+      - name: Recover only the two reviewed source-edit documents
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 246e1c5ee9a743ab9a24ba731af55ccc6b805ddd
-          test "$(git rev-parse 'HEAD^{tree}')" = 1d40c2161033065fdb7036c2ae7b535e50a64691
-          mkdir -p "$RUNNER_TEMP/clearra-ui-source"
-          node scripts/release/create-exact-source-archive.mjs --source-commit "$(git rev-parse HEAD)" --output "$RUNNER_TEMP/clearra-ui-source/source.tar.gz"
-          git ls-tree -r -z HEAD > "$RUNNER_TEMP/clearra-ui-source/tree.z"
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          pnpm install --frozen-lockfile --ignore-scripts
-          npm install --prefix build/tools/ui-browser --ignore-scripts --no-audit --no-fund playwright@1.56.1
-          tar -czf "$RUNNER_TEMP/clearra-ui-source/dependencies.tar.gz" node_modules apps/clearra-web/node_modules apps/clearra-desktop/node_modules packages/clearra-ui/node_modules build/tools/ui-browser
-          cd "$RUNNER_TEMP/clearra-ui-source"
-          sha256sum source.tar.gz dependencies.tar.gz tree.z > SHA256SUMS
-          echo 'Source collection only; no acceptance, ref update, release, or deployment.' >> "$GITHUB_STEP_SUMMARY"
+          test "$(git rev-parse HEAD)" = 9808829d176dcd5eae78521fb51f7a3a99aaf1d4
+          mkdir -p "$RUNNER_TEMP/clearra-staged-ui"
+          cp scripts/integration/ui-polish-20260927/core-edits.json scripts/integration/ui-polish-20260927/ui-edits.json "$RUNNER_TEMP/clearra-staged-ui/"
+          cd "$RUNNER_TEMP/clearra-staged-ui"
+          sha256sum *.json > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: clearra-ui-source-${{ github.run_id }}
-          path: ${{ runner.temp }}/clearra-ui-source
+          name: clearra-staged-ui-${{ github.run_id }}
+          path: ${{ runner.temp }}/clearra-staged-ui
           if-no-files-found: error
           retention-days: 3
