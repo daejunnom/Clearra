@@ -38,8 +38,9 @@ fn member_keys(owner: &ProductPageSourceOwner) -> Vec<String> {
 
 #[test]
 fn build_coverage_wire_matches_typed_completion_and_retains_page_ownership() {
+    // Three requested workers must leave the fourth reported CPU for the host.
     let runtime = WasmCommandRuntime::default()
-        .with_host_capabilities(WasmHostCapabilities::new(3, false, false));
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
     let source = runtime
         .run_command_text(
             "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 \
@@ -95,7 +96,7 @@ fn build_coverage_wire_matches_typed_completion_and_retains_page_ownership() {
 
             let mut worker = WasmWorkerJobRuntime::new(
                 WasmCommandRuntime::default()
-                    .with_host_capabilities(WasmHostCapabilities::new(3, false, false)),
+                    .with_host_capabilities(WasmHostCapabilities::new(4, false, false)),
             );
             // Reuse the controller after draining its first result and releasing
             // the old page owner; stale terminal data must not satisfy run two.
