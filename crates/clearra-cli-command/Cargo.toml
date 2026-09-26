@@ -18,6 +18,9 @@ clearra-scoring = { path = "../clearra-scoring" }
 clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
 clearra-supply = { path = "../clearra-supply" }
 
+[dev-dependencies]
+clearra-host-contract = { path = "../clearra-host-contract" }
+
 [lib]
 doctest = false
 

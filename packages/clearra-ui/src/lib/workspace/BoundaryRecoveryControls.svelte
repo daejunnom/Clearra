@@ -55,7 +55,8 @@
     <h2 class="workspace-control-heading"><Gauge size={16} strokeWidth={1.8} />{standard('search')}</h2>
     <label class="workspace-field">
       <span>{label('recoveryMaxEarlyPlacements')}</span>
-      <select value={request.maxEarlyPlacements} aria-invalid={!earlyOptions.includes(request.maxEarlyPlacements)}
+      <select aria-label={label('recoveryMaxEarlyPlacements')} aria-description={label('recoveryEarlyCountHelp')}
+        value={request.maxEarlyPlacements} aria-invalid={!earlyOptions.includes(request.maxEarlyPlacements)}
         disabled={earlyLimit === 0}
         on:change={(event) => patch({ maxEarlyPlacements: Number(event.currentTarget.value) })}>
         {#if !earlyOptions.includes(request.maxEarlyPlacements)}

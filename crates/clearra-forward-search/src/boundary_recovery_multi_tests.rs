@@ -257,3 +257,38 @@ fn one_slot_hold_can_defer_first_stage_while_two_other_tokens_lock_early() {
         BoundaryRecoveryStatus::NoPath
     );
 }
+
+#[test]
+fn early_supports_can_turn_an_isolated_b2b_break_into_a_real_tetris_save() {
+    let mut query = tower(2);
+    let i_vertical = (0..4).fold(0_u64, |value, row| value | (1_u64 << (10 * row)));
+    let lower_o = 0xc03_u64 << 11;
+    let upper_o = 0xc03_u64 << 31;
+    query.height = 6;
+    query.initial_board =
+        mask(0x3fe | (1..4).fold(0, |value, row| value | (0x3f8_u64 << (10 * row))));
+    query.stage_one_target = Board256Mask::EMPTY;
+    query.final_board = mask(6);
+    query.queue = vec![PieceKind::I, PieceKind::O, PieceKind::O, PieceKind::T];
+    query.placement_role_masks = vec![mask(i_vertical), mask(lower_o), mask(upper_o)];
+    query.hold_enabled = true;
+    query.preserve_b2b_by_stage = [true, true];
+    // An isolated first-stage I clears just one row and leaves garbage behind.
+    // That old evidence must not prune the geometry of the combined replay.
+    let (isolated, _, lines) = place_and_clear(
+        10,
+        query.height,
+        ForwardBoard::from_mask(query.initial_board)
+            .union_for_height(ForwardBoard::from_mask(mask(i_vertical)), query.height),
+    );
+    assert_eq!(lines, 1);
+    assert!(!isolated.is_empty());
+    let result = query.search(&ExecutionControl::default()).unwrap();
+    assert_witness(&query, &result);
+    assert_eq!(result.borrowed_stage_two_count, 2);
+    assert!(result.steps.iter().all(|step| step.b2b_active_after));
+    let late = result.steps.last().unwrap();
+    assert_eq!(late.placement_role_index, 0);
+    assert_eq!(late.cleared_lines, 4);
+    assert!(late.b2b_active_after);
+}

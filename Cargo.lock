@@ -224,6 +224,7 @@ dependencies = [
  "clearra-core-domain",
  "clearra-forward-search",
  "clearra-fumen",
+ "clearra-host-contract",
  "clearra-objectives",
  "clearra-pc-graph",
  "clearra-problem",
