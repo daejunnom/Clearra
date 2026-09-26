@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Verify mandatory toolbar and automatic recovery
+run-name: Verify multiple early recovery roles and quota dropdown
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -8,31 +8,30 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: clearra-recovery-fields-review
+  group: clearra-recovery-multiple-review
   cancel-in-progress: true
 jobs:
   prepare:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions: {contents: write, actions: write}
+    permissions: {contents: write}
     outputs:
-      candidate: ${{ steps.prepare.outputs.candidate }}
-      tree: ${{ steps.prepare.outputs.tree }}
+      candidate: ${{ steps.source.outputs.candidate }}
+      tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: 702349688caec506bc8cf6c739ace6d79f32e2da, fetch-depth: 0}
-      - name: Install the exact formatter
+        with: {ref: bd92409044c06b167e31e71701d40e495c3bd70b, fetch-depth: 0}
+      - name: Install exact formatter
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-      - name: Apply exact reviewed source without updating main
-        id: prepare
-        env: {GH_TOKEN: '${{ github.token }}'}
-        run: python scripts/integration/ui-polish-20260927/verification-fix.py
+      - name: Apply only reviewed source without publishing or changing main
+        id: source
+        run: python scripts/integration/recovery-multiple-20260927/prepare.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ui-polish-source-${{ github.run_id }}
-          path: ${{ runner.temp }}/ui-polish-source
+          name: multiple-recovery-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/multiple-recovery-source
           if-no-files-found: warn
           retention-days: 14
   frontend:
@@ -51,7 +50,7 @@ jobs:
         with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
       - uses: actions/setup-node@v4
         with: {node-version: 22.23.2}
-      - name: Install exact frozen dependencies and pinned Chromium
+      - name: Install frozen dependencies and pinned Chromium
         shell: bash
         run: |
           set -euo pipefail
@@ -61,18 +60,18 @@ jobs:
           pnpm install --frozen-lockfile --ignore-scripts
           npm install --prefix "$CLEARRA_BROWSER_TOOLS_ROOT" --ignore-scripts --no-audit --no-fund playwright@1.56.1
           node "$CLEARRA_BROWSER_TOOLS_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
-      - name: Test actual toolbar and recovery controls before WASM compilation
+      - name: Exercise actual dropdown and preserved card controls
         shell: bash
         run: |
           set -euo pipefail
           {
             status=0
-            for source in solution-toolbar-browser-acceptance recovery-editor-browser-acceptance workspace-controls-browser-acceptance; do
+            for source in recovery-editor-browser-acceptance solution-toolbar-browser-acceptance workspace-controls-browser-acceptance; do
               node "scripts/tools/$source.mjs" || status=1
             done
             exit "$status"
-          } 2>&1 | tee "$RUNNER_TEMP/ui-browser.log"
-      - name: Test UI types shared behavior and worker contracts
+          } 2>&1 | tee "$RUNNER_TEMP/multiple-browser.log"
+      - name: Test full UI worker and Discord request contracts
         if: ${{ !cancelled() }}
         shell: bash
         run: |
@@ -81,30 +80,32 @@ jobs:
             node scripts/desktop-ui-compile-check.mjs
             pnpm --filter @clearra/ui run test
             pnpm --filter @clearra/web run test
-          } 2>&1 | tee "$RUNNER_TEMP/ui-contracts.log"
+            pnpm --filter ctk3 run build
+            node --test apps/clearra-discord-bot/test/boundary-recovery-input.test.mjs
+          } 2>&1 | tee "$RUNNER_TEMP/multiple-contracts.log"
       - name: Run canonical release regressions on Linux
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/tools/run-release-regression-tests.mjs 2>&1 | tee "$RUNNER_TEMP/ui-release-regressions.log"
+          node scripts/tools/run-release-regression-tests.mjs 2>&1 | tee "$RUNNER_TEMP/multiple-release-regressions.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ui-polish-frontend-${{ matrix.os }}-${{ github.run_id }}
+          name: multiple-recovery-frontend-${{ matrix.os }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/ui-browser.log
-            ${{ runner.temp }}/ui-contracts.log
-            ${{ runner.temp }}/ui-release-regressions.log
-            ${{ runner.temp }}/clearra-solution-toolbar-acceptance
+            ${{ runner.temp }}/multiple-browser.log
+            ${{ runner.temp }}/multiple-contracts.log
+            ${{ runner.temp }}/multiple-release-regressions.log
             ${{ runner.temp }}/clearra-recovery-editor-acceptance
+            ${{ runner.temp }}/clearra-solution-toolbar-acceptance
             ${{ runner.temp }}/clearra-control-acceptance
           if-no-files-found: warn
           retention-days: 14
-  exact-recovery:
+  native:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
     env:
       CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
       CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
@@ -113,31 +114,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
-      - name: Test all feasible horizons line clears explicit limits and cancellation
+      - name: Test concrete two and three role witnesses and deferred B2B locks
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt --all --check
-          cargo test --locked -p clearra-forward-search --lib boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/ui-recovery-core.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/ui-recovery-core.log"
-      - name: Test real command execution and explicit compatibility
+          cargo test --locked -p clearra-forward-search --lib boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/multiple-core.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/multiple-core.log"
+      - name: Test public CLI execution and legacy selected-role compatibility
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p clearra-cli-command --test boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/ui-recovery-command.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/ui-recovery-command.log"
+          cargo test --locked -p clearra-cli-command --test boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/multiple-cli.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/multiple-cli.log"
+      - name: Match nullable multi-role JSON to the typed host payload
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p clearra-wasm --lib weighted_boundary_recovery_payload_is_lossless_json -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/multiple-wire.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/multiple-wire.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ui-polish-core-${{ github.run_id }}
+          name: multiple-recovery-native-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/ui-recovery-core.log
-            ${{ runner.temp }}/ui-recovery-command.log
+            ${{ runner.temp }}/multiple-core.log
+            ${{ runner.temp }}/multiple-cli.log
+            ${{ runner.temp }}/multiple-wire.log
           if-no-files-found: warn
           retention-days: 14
   acceptance:
-    needs: [prepare, frontend, exact-recovery]
+    needs: [prepare, frontend, native]
     runs-on: windows-latest
     timeout-minutes: 120
     strategy:
@@ -178,31 +187,30 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'ui-acceptance.log')
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'multiple-acceptance.log')
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ui-polish-acceptance-${{ matrix.shard }}-${{ github.run_id }}
+          name: multiple-recovery-acceptance-${{ matrix.shard }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/ui-acceptance.log
+            ${{ runner.temp }}/multiple-acceptance.log
             ${{ runner.temp }}/clearra-surface-acceptance
-            ${{ runner.temp }}/clearra-solution-toolbar-acceptance
             ${{ runner.temp }}/clearra-recovery-editor-acceptance
           if-no-files-found: warn
           retention-days: 14
   ready:
     if: always()
-    needs: [prepare, frontend, exact-recovery, acceptance]
+    needs: [prepare, frontend, native, acceptance]
     runs-on: ubuntu-latest
     steps:
-      - name: Require all independent checks without publishing
+      - name: Require every independent check without promoting or deploying
         env: {RESULTS: '${{ toJSON(needs) }}'}
         shell: python
         run: |
-          import json,os
-          results=json.loads(os.environ['RESULTS'])
-          failed={key:value['result'] for key,value in results.items() if value['result']!='success'}
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          failed = {key: value['result'] for key, value in results.items() if value['result'] != 'success'}
           if failed: raise RuntimeError(json.dumps(failed))
-          print('UI polish source accepted:',results['prepare']['outputs']['candidate'])
-          print('Independent management protection is required before main promotion. This workflow does not publish or deploy.')
+          print('Exact multi-role recovery accepted:', results['prepare']['outputs']['candidate'])
+          print('Main and all deployments are unchanged. Independent push-based management protection is required before any promotion.')
