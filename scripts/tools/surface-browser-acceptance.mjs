@@ -108,11 +108,12 @@ try {
       await page.goto(`http://127.0.0.1:4194${base}/?tool=pc`);
       await page.locator('.product-tabs').waitFor();
       const nav = await page.locator('.product-tabs a').evaluateAll(nodes => nodes.map(n => n.getAttribute('href')));
-      assert.ok(nav.length > 7, 'obsolete seven-item navigation is still active');
+      const publishedTools = ['pc', 'setup', 'build-probability', 'recovery', 'damage', 'spin-finder', 'ctk', 'player'];
+      assert.deepEqual(nav, publishedTools.map(tool => `?tool=${tool}`), 'Pages must publish only the approved eight tools');
       const index = nav.indexOf('?tool=recovery');
       assert.equal(nav[index - 1], '?tool=build-probability');
       assert.equal(nav[index + 1], '?tool=damage');
-      assert.ok(nav.includes('?tool=build'));
+      assert.ok(!nav.includes('?tool=build'), 'internal Build tools remain reachable only by explicit routes');
       await page.locator('.fumen-import input:not([type="file"])').fill('ctk3_w0kCQBhwwAEHHABh4Q');
       await page.locator('.fumen-import button').last().click();
       await page.locator('.workspace-queue-input').fill('STOILJZ');
