@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Verify the isolated eight-menu Pages correction
+run-name: Resume menu protection and prepare isolated recovery UI review
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -7,107 +7,47 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
+  actions: write
 concurrency:
-  group: clearra-pages-menu-repair
-  cancel-in-progress: true
+  group: clearra-recovery-source-review
+  cancel-in-progress: false
 jobs:
-  menu:
+  prepare:
+    if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      CLEARRA_SOURCE_COMMIT: 9f454c93c2c0eb83163445b4bc50aea724f53a8f
-      CLEARRA_ENGINE_BUILD_ID: 9f454c93c2c0eb83163445b4bc50aea724f53a8f
-      CLEARRA_WEB_BASE_PATH: /Clearra
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with: {ref: 357eb00dcd444390abff197038e4d1124aba6592, fetch-depth: 0, persist-credentials: false}
-      - name: Verify the exact isolated menu change
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = 357eb00dcd444390abff197038e4d1124aba6592
-          test "$(git diff --name-only 9f454c93c2c0eb83163445b4bc50aea724f53a8f HEAD)" = apps/clearra-web/src/routes/+page.svelte
-          git diff --check 9f454c93c2c0eb83163445b4bc50aea724f53a8f HEAD
-      - uses: actions/setup-node@v4
-        with: {node-version: 22.23.2}
-      - name: Install locked frontend toolchain
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          pnpm install --frozen-lockfile --ignore-scripts
-          rustup toolchain install 1.98.1 --profile minimal
-      - uses: actions/download-artifact@v4
         with:
-          name: accepted-wasm-build-9f454c93c2c0eb83163445b4bc50aea724f53a8f-run-36233060652-attempt-1
-          run-id: 36233060652
-          github-token: ${{ github.token }}
-          path: build/menu-accepted-wasm
-      - name: Verify the original engine and compile only the corrected Svelte frontend
+          ref: 521fee125b478a5a39a90a808d6c471c430c8494
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify reviewed menu candidate and start missing independent protection
+        env: {GH_TOKEN: '${{ github.token }}'}
+        shell: python
         run: |
-          set -euo pipefail
-          node scripts/release/accepted-wasm-build.mjs --verify build/menu-accepted-wasm --expected-source-commit "$CLEARRA_SOURCE_COMMIT" --expected-run-id 36233060652 --expected-run-attempt 1
-          export CLEARRA_WEB_PUBLIC_DIR="$GITHUB_WORKSPACE/build/menu-public"
-          mkdir -p "$CLEARRA_WEB_PUBLIC_DIR/wasm"
-          cp -a apps/clearra-web/static/. "$CLEARRA_WEB_PUBLIC_DIR/"
-          cp -a build/menu-accepted-wasm/. "$CLEARRA_WEB_PUBLIC_DIR/wasm/"
-          pnpm --filter ctk3 run build
-          node scripts/tools/invoke-clearra-build.mjs --source-root "$GITHUB_WORKSPACE" --purpose product -- bash -euo pipefail -c '
-            pnpm --filter @clearra/web run sync
-            pnpm --filter @clearra/web exec vite build --configLoader runner
-            node apps/clearra-web/scripts/prepare-pages-fallback.mjs
-          '
-      - name: Verify eight desktop links and eight mobile options in the real built page
-        run: |
-          set -euo pipefail
-          npm install --prefix build/menu-browser --ignore-scripts --no-audit --no-fund playwright@1.56.1
-          node build/menu-browser/node_modules/playwright/cli.js install --with-deps chromium
-          cat > build/menu-browser/check.mjs <<'JS'
-          import { chromium } from 'playwright';
-          import { createServer } from 'node:http';
-          import { readFile, stat, writeFile } from 'node:fs/promises';
-          import { resolve, extname, sep } from 'node:path';
-          import assert from 'node:assert/strict';
-          const root=resolve('apps/clearra-web/build');
-          const expected=['pc','setup','build-probability','recovery','damage','spin-finder','ctk','player'];
-          const server=createServer(async(req,res)=>{
-            try {
-              const url=new URL(req.url,'http://localhost');
-              if(!url.pathname.startsWith('/Clearra/')) {res.writeHead(404).end();return;}
-              let p=resolve(root,'.'+decodeURIComponent(url.pathname.slice('/Clearra'.length)));
-              if(p!==root && !p.startsWith(root+sep)) {res.writeHead(403).end();return;}
-              if((await stat(p)).isDirectory()) p=resolve(p,'index.html');
-              const types={'.html':'text/html','.js':'text/javascript','.css':'text/css','.json':'application/json','.wasm':'application/wasm','.svg':'image/svg+xml'};
-              res.setHeader('Content-Type',types[extname(p)]??'application/octet-stream');res.end(await readFile(p));
-            } catch {res.writeHead(404).end();}
-          });
-          await new Promise(r=>server.listen(4194,'127.0.0.1',r));
-          const browser=await chromium.launch({headless:true});
-          try {
-            for(const width of [1440,390]) {
-              const page=await browser.newPage({viewport:{width,height:1000}});
-              const errors=[];page.on('pageerror',e=>errors.push(e.message));
-              for(const tool of ['pc','build-probability','recovery']) {
-                await page.goto('http://127.0.0.1:4194/Clearra/?tool='+tool);
-                const nav=page.locator('nav.product-tabs');
-                await page.locator('.product-mode-select option').first().waitFor({state:'attached'});
-                assert.deepEqual(await nav.locator('a').evaluateAll(xs=>xs.map(x=>new URL(x.href).searchParams.get('tool'))),expected);
-                assert.deepEqual(await page.locator('.product-mode-select option').evaluateAll(xs=>xs.map(x=>new URL(x.value,'http://x').searchParams.get('tool'))),expected);
-                assert.equal(await nav.locator('a[aria-current="page"]').getAttribute('href'),'?tool='+tool);
-              }
-              assert.deepEqual(errors,[]);
-              await page.screenshot({path:`build/menu-browser/menu-${width}.png`,fullPage:true});
-              await page.close();
-            }
-            await writeFile('build/menu-browser/result.json',JSON.stringify({frontend_source:'357eb00dcd444390abff197038e4d1124aba6592',engine_source:process.env.CLEARRA_SOURCE_COMMIT,expected,passed:true,publication:false},null,2));
-          } finally {await browser.close();server.close();}
-          JS
-          node build/menu-browser/check.mjs
+          import json,os,pathlib,subprocess
+          repo='daejunnom/Clearra'
+          candidate='521fee125b478a5a39a90a808d6c471c430c8494'
+          branch='codex/pages-eight-menu-hotfix-20260926'
+          def cmd(*args): return subprocess.check_output(args,text=True,timeout=90).strip()
+          def api(path): return json.loads(cmd('gh','api','repos/'+repo+'/'+path))
+          assert cmd('git','rev-parse','HEAD')==candidate
+          assert api('git/ref/heads/'+branch)['object']['sha']==candidate
+          checks=api('commits/'+candidate+'/check-runs?per_page=100')['check_runs']
+          present={c['name'] for c in checks if c['app']['slug']=='github-actions'}
+          required={'Clearra management policy','Clearra management Windows runtime'}
+          runs=api('actions/workflows/management-policy.yml/runs?head_sha='+candidate+'&per_page=100')['workflow_runs']
+          if not required.issubset(present) and not any(r['status']!='completed' for r in runs):
+              subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True,timeout=90)
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'recovery-source'
+          out.mkdir()
+          subprocess.run(['git','archive','--format=tar.gz','--output='+str(out/'source.tar.gz'),candidate],check=True)
+          (out/'source.json').write_text(json.dumps({'source':candidate,'tree':cmd('git','rev-parse','HEAD^{tree}'),'main_unchanged':True})+'\n')
+          print('Only independent candidate protection dispatched; no main, tag, release or Pages changes in this job.')
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: clearra-menu-browser-${{ github.run_id }}
-          path: |
-            build/menu-browser/*.png
-            build/menu-browser/result.json
-          if-no-files-found: warn
+          name: recovery-ui-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/recovery-source
+          if-no-files-found: error
           retention-days: 14
