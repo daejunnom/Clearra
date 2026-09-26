@@ -230,6 +230,7 @@ function Invoke-WasmBuildTestGate {
 
     $previousCargoTargetDir = $env:CARGO_TARGET_DIR
     $previousWebPublicDir = $env:CLEARRA_WEB_PUBLIC_DIR
+    $previousBrowserTools = $env:CLEARRA_BROWSER_TOOLS_ROOT
     $webPublicDir = Join-Path $CargoTargetDir 'clearra-web-public'
     New-Item -ItemType Directory -Force -Path $CargoTargetDir | Out-Null
     try {
@@ -252,6 +253,23 @@ function Invoke-WasmBuildTestGate {
         Invoke-WasmReleaseCommand $pnpmCommand.Source @(
             '--filter', '@clearra/web', 'run', 'test'
         ) 'clearra-web worker contracts'
+        # Real control hit-testing needs no WASM. Fail before compiling the solver
+        # if a custom checkbox cannot receive pointer, touch or keyboard input.
+        $browserTools = Join-Path $CargoTargetDir 'surface-browser-tools'
+        $npmName = if ($env:OS -eq 'Windows_NT') { 'npm.cmd' } else { 'npm' }
+        $npmCommand = Get-Command $npmName -ErrorAction Stop
+        Invoke-WasmReleaseCommand $npmCommand.Source @(
+            'install', '--prefix', $browserTools, '--ignore-scripts',
+            '--no-audit', '--no-fund', 'playwright@1.56.1'
+        ) 'clearra-browser pinned tooling'
+        Invoke-WasmReleaseCommand $nodeCommand.Source @(
+            (Join-Path $browserTools 'node_modules/playwright/cli.js'),
+            'install', 'chromium'
+        ) 'clearra-browser Chromium preparation'
+        $env:CLEARRA_BROWSER_TOOLS_ROOT = $browserTools
+        Invoke-WasmReleaseCommand $nodeCommand.Source @(
+            (Join-Path $Root 'scripts/tools/workspace-controls-browser-acceptance.mjs')
+        ) 'clearra-browser native control acceptance'
         if (Test-Path -LiteralPath $webPublicDir) {
             Remove-Item -LiteralPath $webPublicDir -Recurse -Force
         }
@@ -319,39 +337,20 @@ function Invoke-WasmBuildTestGate {
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
             (Join-Path $Root 'apps/clearra-web/scripts/prepare-pages-fallback.mjs')
         ) 'clearra-web Pages fallback'
-        # This leaf owns actual browser behavior as well as the compiled bytes.
-        # Therefore canonical Release (including Tauri) cannot pass by merely
-        # producing a Pages archive whose default search fails at runtime.
-        $browserTools = Join-Path $CargoTargetDir 'surface-browser-tools'
-        $npmName = if ($env:OS -eq 'Windows_NT') { 'npm.cmd' } else { 'npm' }
-        $npmCommand = Get-Command $npmName -ErrorAction Stop
-        $previousBrowserTools = $env:CLEARRA_BROWSER_TOOLS_ROOT
-        try {
-            Invoke-WasmReleaseCommand $npmCommand.Source @(
-                'install', '--prefix', $browserTools, '--ignore-scripts',
-                '--no-audit', '--no-fund', 'playwright@1.56.1'
-            ) 'clearra-browser pinned tooling'
-            Invoke-WasmReleaseCommand $nodeCommand.Source @(
-                (Join-Path $browserTools 'node_modules/playwright/cli.js'),
-                'install', 'chromium'
-            ) 'clearra-browser Chromium preparation'
-            $env:CLEARRA_BROWSER_TOOLS_ROOT = $browserTools
-            Invoke-WasmReleaseCommand $nodeCommand.Source @(
-                (Join-Path $Root 'scripts/tools/surface-browser-acceptance.mjs'),
-                (Join-Path $Root 'apps/clearra-web/build')
-            ) 'clearra-browser operational acceptance'
-        }
-        finally {
-            if ([string]::IsNullOrWhiteSpace($previousBrowserTools)) {
-                Remove-Item Env:\CLEARRA_BROWSER_TOOLS_ROOT -ErrorAction SilentlyContinue
-            } else {
-                $env:CLEARRA_BROWSER_TOOLS_ROOT = $previousBrowserTools
-            }
-        }
+        # Keep the full compiled Svelte + WASM acceptance after the cheap control probe.
+        Invoke-WasmReleaseCommand $nodeCommand.Source @(
+            (Join-Path $Root 'scripts/tools/surface-browser-acceptance.mjs'),
+            (Join-Path $Root 'apps/clearra-web/build')
+        ) 'clearra-browser operational acceptance'
         $buildSource = if ($acceptedProducer) { 'accepted-producer' } else { 'inline' }
         Write-Output "wasm_build_test=passed host_tests=executed runtime_tests=executed wasm32=compiled bindgen_runtime=staged frontend=built build_source=$buildSource"
     }
     finally {
+        if ([string]::IsNullOrWhiteSpace($previousBrowserTools)) {
+            Remove-Item Env:\CLEARRA_BROWSER_TOOLS_ROOT -ErrorAction SilentlyContinue
+        } else {
+            $env:CLEARRA_BROWSER_TOOLS_ROOT = $previousBrowserTools
+        }
         if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {
             Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
         } else {

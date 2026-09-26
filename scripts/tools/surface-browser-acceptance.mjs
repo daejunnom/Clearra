@@ -112,7 +112,9 @@ try {
         await page.locator('.workspace-queue-input').waitFor();
         await page.locator('.dimension-field input').fill('4');
         await page.locator('.workspace-queue-input').fill('I');
-        await page.locator('input[type="checkbox"]').first().uncheck();
+        const hold = page.getByRole('checkbox', { name: 'Hold', exact: true });
+        await hold.uncheck();
+        assert.equal(await hold.isChecked(), false, 'build request must disable hold through the real control');
         await paint(page, 0, 0xfn, 4);
         await page.getByRole('button', { name: 'Run search', exact: true }).click();
         const buildKeys = await awaitKeys(page, 1);

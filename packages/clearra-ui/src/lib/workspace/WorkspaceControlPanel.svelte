@@ -22,9 +22,11 @@
   .control-panel :global(.workspace-queue-input) { color: #1d544f; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 14px; font-weight: 750; }
   .control-panel :global(.workspace-field-help) { color: #7a8580; font-size: 10px; line-height: 1.45; }
   .control-panel :global(.workspace-switch-row) { align-items: end; display: flex; gap: 18px; justify-content: space-between; margin-top: 15px; }
-  .control-panel :global(.workspace-switch-label) { align-items: center; color: #34403c; cursor: pointer; display: inline-flex; font-size: 12px; font-weight: 650; gap: 8px; min-width: 0; }
-  .control-panel :global(.workspace-switch-label > input) { height: 1px; opacity: 0; position: absolute; width: 1px; }
-  .control-panel :global(.workspace-switch) { background: #aeb8b4; border-radius: 10px; display: block; flex: 0 0 auto; height: 18px; position: relative; transition: background 120ms ease; width: 32px; }
+  .control-panel :global(.workspace-switch-label) { align-items: center; color: #34403c; cursor: pointer; display: inline-flex; font-size: 12px; font-weight: 650; gap: 8px; isolation: isolate; min-height: 24px; min-width: 0; position: relative; }
+  /* The native control owns the complete label hit area and keyboard state.
+     Decorative siblings must never intercept its pointer/touch events. */
+  .control-panel :global(.workspace-switch-label > input) { border: 0; cursor: inherit; height: 100%; inset: 0; margin: 0; opacity: 0; padding: 0; position: absolute; width: 100%; z-index: 1; }
+  .control-panel :global(.workspace-switch) { background: #aeb8b4; border-radius: 10px; display: block; flex: 0 0 auto; height: 18px; pointer-events: none; position: relative; transition: background 120ms ease; width: 32px; }
   .control-panel :global(.workspace-switch::after) { background: #fff; border-radius: 50%; box-shadow: 0 1px 2px #00000026; content: ''; height: 14px; left: 2px; position: absolute; top: 2px; transition: transform 120ms ease; width: 14px; }
   .control-panel :global(.workspace-switch-label input:checked + .workspace-switch) { background: #16877d; }
   .control-panel :global(.workspace-switch-label input:checked + .workspace-switch::after) { transform: translateX(14px); }
@@ -39,6 +41,10 @@
   .control-panel :global(.workspace-segmented.two) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .control-panel :global(.workspace-segmented button) { background: transparent; border: 0; border-radius: 4px; color: #55605c; cursor: pointer; font-size: 12px; font-weight: 700; min-height: 34px; min-width: 0; padding: 0 8px; }
   .control-panel :global(.workspace-segmented button.active) { background: #fff; box-shadow: 0 1px 3px #17211e1c; color: #075f58; }
+
+  @media (pointer: coarse) {
+    .control-panel :global(.workspace-switch-label) { min-height: 44px; min-width: 44px; }
+  }
 
   @media (max-width: 560px) {
     .control-panel :global(.workspace-field-grid), .control-panel :global(.workspace-toggle-grid) { grid-template-columns: 1fr; }
