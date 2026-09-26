@@ -1,5 +1,5 @@
 name: Start verified release gates
-run-name: Retry verified Release after native stack repair
+run-name: Publish the isolated Pages menu correction
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -8,162 +8,83 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: clearra-promote-surface-repair-20260926
+  group: clearra-menu-publication
   cancel-in-progress: false
 jobs:
   start-gates:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 25
     permissions:
       contents: write
       actions: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 9f454c93c2c0eb83163445b4bc50aea724f53a8f
+          ref: 521fee125b478a5a39a90a808d6c471c430c8494
           fetch-depth: 0
       - uses: actions/setup-node@v4
-        with:
-          node-version: 22.23.2
-      - name: Require exact stack evidence and protected checks before normal fast-forward and fresh release
-        env:
-          GH_TOKEN: ${{ github.token }}
+        with: {node-version: 22.23.2}
+      - name: Validate exact Pages-only scope and browser evidence before normal promotion
+        env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import json,os,pathlib,subprocess,time,urllib.request
+          import json,os,pathlib,subprocess,time
           repo='daejunnom/Clearra'
-          source='9f454c93c2c0eb83163445b4bc50aea724f53a8f'
-          parent='589493d4a9f70a126ddbdc312bbd1e211f803c68'
-          base='44c104ff242196f2f06be9bc5162c7d0a1f1b878'
-          tree='f80045e876c50c9e8ebc189c3911201f680f1640'
-          stack_run=36231815453
-          stack_control='cf3e5ac3b273797518d0493902f41f65c583fe6e'
-          receipt={'source_commit':source,'base':base,'stack_run_id':stack_run,
-              'main_updated':False,'tag_created':False,'publication_complete':False}
-          output=pathlib.Path(os.environ['RUNNER_TEMP'])/'surface-release-gates.json'
-          def save(): output.write_text(json.dumps(receipt,indent=2)+'\n')
-          def cmd(*args): return subprocess.check_output(args,text=True,timeout=90).strip()
-          def git(*args): return cmd('git',*args)
-          def api(path): return json.loads(cmd('gh','api','repos/'+repo+'/'+path))
-          def main_sha(): return api('git/ref/heads/main')['object']['sha']
-          def require_main():
-              if main_sha()!=source: raise RuntimeError('Current main differs from the validated source')
-          def checked_run(run_id,control,path,required,wait=False):
-              deadline=time.monotonic()+55*60
-              while True:
-                  run=api('actions/runs/'+str(run_id))
-                  if (run['head_sha']!=control or run['path']!=path or run['run_attempt']!=1 or
-                      run['head_branch']!='codex/clearra-safe-integration-20260925' or
-                      run['head_repository']['full_name']!=repo):
-                      raise RuntimeError('Gate identity mismatch')
-                  if run['status']=='completed': break
-                  if not wait or time.monotonic()>deadline:
-                      raise RuntimeError('Required gate has not completed')
-                  if main_sha() not in [base,source]: raise RuntimeError('Main moved while waiting')
-                  time.sleep(30)
-              if run['conclusion']!='success': raise RuntimeError('Gate failed: '+str(run_id))
-              catalog=api('actions/runs/'+str(run_id)+'/jobs?per_page=100')
-              jobs=catalog['jobs']
-              if (catalog['total_count']!=len(jobs) or len(jobs)!=len(required) or
-                  {j['name'] for j in jobs}!=required):
-                  raise RuntimeError('Incomplete or unexpected required job set')
-              for job in jobs:
-                  if job['status']!='completed' or job['conclusion']!='success':
-                      raise RuntimeError('Unsuccessful required job: '+job['name'])
-                  if any(s['conclusion'] in ['failure','cancelled','timed_out','action_required'] for s in job['steps']):
-                      raise RuntimeError('Failed step within required job: '+job['name'])
-              return jobs
-          def runs(name):
-              data=api('actions/workflows/'+name+'/runs?head_sha='+source+'&branch=main&per_page=100')
-              if data['total_count']>len(data['workflow_runs']): raise RuntimeError('Incomplete workflow catalog')
-              return [r for r in data['workflow_runs'] if r['head_sha']==source and r['head_branch']=='main'
-                      and r['event']=='workflow_dispatch' and r['head_repository']['full_name']==repo]
-          def active_or_success(name):
-              selected=[r for r in runs(name) if r['status']!='completed' or r['conclusion']=='success']
-              if len(selected)>1: raise RuntimeError('Ambiguous workflow catalog: '+name)
-              return selected
-          def dispatch(name,inputs=()):
-              before={r['id'] for r in runs(name)}
-              require_main()
-              cmd('gh','workflow','run',name,'--ref','main','--repo',repo,*inputs)
-              for _ in range(30):
-                  found=[r for r in runs(name) if r['id'] not in before]
-                  if len(found)==1: return found[0]
-                  if len(found)>1: raise RuntimeError('Multiple dispatch results: '+name)
-                  time.sleep(2)
-              raise RuntimeError('Dispatch identity unavailable; do not dispatch another')
-          save()
-          try:
-              if (git('rev-parse','HEAD')!=source or git('rev-parse','HEAD^{tree}')!=tree or
-                  git('show','-s','--format=%P',source)!=parent):
-                  raise RuntimeError('Reviewed candidate identity mismatch')
-              git('merge-base','--is-ancestor',base,source)
-              if git('diff','--name-only',base,source).splitlines()!=['crates/clearra-wasm/tests/wasm_host_contract.rs']:
-                  raise RuntimeError('Only the reviewed native test fixture may differ')
-              git('diff','--check',base,source)
-              integration_required={'prepare','contracts','rust-regressions','ready',
-                  'control-browser (ubuntu-latest)','control-browser (windows-latest)',
-                  'verifier-contracts (ubuntu-latest)','verifier-contracts (windows-latest)'}
-              integration_required|={'acceptance ('+s+')' for s in ['FoundationNoProductDebt',
-                  'FoundationAdversarialCorrectness','FoundationDesktopHost','Sanitizer','RustExact','RustProduct','Pages']}
-              checked_run(36217573805,'38a2595945329512b7e618ae1a118cad30bd1e57',
-                  '.github/workflows/clearra-surface-repair.yml',integration_required)
-              required={'native-stack ('+os_name+', '+profile+')' for os_name in ['ubuntu-latest','windows-latest']
-                  for profile in ['debug','release']}
-              jobs=checked_run(stack_run,stack_control,'.github/workflows/clearra-safe-integration-audit.yml',required,wait=True)
-              windows=next(j for j in jobs if j['name']=='native-stack (windows-latest, debug)')
-              exact=[s for s in windows['steps'] if s['name']=='Execute the exact Windows canonical source-contract entrypoint']
-              if len(exact)!=1 or exact[0]['conclusion']!='success': raise RuntimeError('Canonical entrypoint not executed')
-              checks=api('commits/'+source+'/check-runs?per_page=100')
-              if checks['total_count']!=len(checks['check_runs']): raise RuntimeError('Incomplete protection catalog')
-              for name in ['Clearra management policy','Clearra management Windows runtime']:
-                  matching=sorted([c for c in checks['check_runs'] if c['name']==name and c['head_sha']==source],key=lambda c:c['id'])
-                  if not matching or matching[-1]['status']!='completed' or matching[-1]['conclusion']!='success':
-                      raise RuntimeError('Required protected check has not succeeded: '+name)
-              current=main_sha()
-              if current not in [base,source]: raise RuntimeError('Main moved; reconcile rather than overwrite')
-              if current==base:
-                  # Only an ordinary fast-forward; repository protections remain authoritative.
-                  git('push','origin',source+':refs/heads/main')
-                  receipt['main_updated']=True
-              require_main()
-              receipt['main_readback']=main_sha()
-              save()
-              existing=active_or_success('release-cli.yml')
-              if existing: release=existing[0]
-              else:
-                  cmd('node','scripts/release/canonical-acceptance-run.mjs','--repository',repo,'--source-commit',source,'--require','zero')
-                  release=dispatch('release-cli.yml')
-              if release['run_attempt']!=1: raise RuntimeError('Canonical release requires a fresh dispatch, not rerun')
-              receipt['canonical_release_run_id']=release['id']
-              receipt['canonical_release_url']=release['html_url']
-              save()
-              if release['status']=='completed' and release['conclusion']!='success':
-                  raise RuntimeError('Canonical release failed; no Pages queue')
-              request=urllib.request.Request('https://daejunnom.github.io/Clearra/clearra-build-identity.json',headers={'Cache-Control':'no-cache'})
-              with urllib.request.urlopen(request,timeout=30) as response: raw=response.read(65537)
-              if len(raw)>65536: raise RuntimeError('Unexpected Pages identity length')
-              snapshot=json.loads(raw).get('sourceCommit')
-              if snapshot not in ['952280950aeb24528279cbff685fe8acec892223',base,source]:
-                  raise RuntimeError('Unexpected active Pages version; do not infer rollback authority')
-              receipt['pages_snapshot_sha']=snapshot
-              if snapshot!=source:
-                  if active_or_success('queue-pages-publication.yml'):
-                      raise RuntimeError('Existing Pages queue requires input verification; do not duplicate')
-                  queue=dispatch('queue-pages-publication.yml',('-f','acceptance_run_id='+str(release['id']),'-f','snapshot_sha='+snapshot))
-                  receipt['pages_queue_run_id']=queue['id']
-              receipt['discord_trigger']='existing canonical Release success trigger, with environment approval and recovery checks'
-              save()
-              print(json.dumps(receipt,indent=2))
-          except Exception as error:
-              receipt['error']=str(error)
-              save()
-              raise
+          base='9f454c93c2c0eb83163445b4bc50aea724f53a8f'
+          tested='357eb00dcd444390abff197038e4d1124aba6592'
+          candidate='521fee125b478a5a39a90a808d6c471c430c8494'
+          def git(*args): return subprocess.check_output(['git',*args],text=True,timeout=90).strip()
+          def api(method,path,body=None):
+              args=['gh','api','--method',method,'-H','X-GitHub-Api-Version: 2026-03-10','repos/'+repo+'/'+path]
+              if body is not None: args+=['--input','-']
+              out=subprocess.check_output(args,input=None if body is None else json.dumps(body),text=True,timeout=90)
+              return json.loads(out) if out.strip() else None
+          assert git('rev-parse','HEAD')==candidate
+          assert git('show','-s','--format=%P',candidate)==tested
+          assert git('diff','--name-only',base,candidate).splitlines()==[
+              'apps/clearra-web/src/routes/+page.svelte','scripts/tools/surface-browser-acceptance.mjs']
+          assert git('diff','--name-only',tested,candidate)=='scripts/tools/surface-browser-acceptance.mjs'
+          assert git('rev-parse',candidate+':apps/clearra-web/src/routes/+page.svelte')=='a5069640c01611632e80b0d8aab4a9caa42721fd'
+          assert git('rev-parse',candidate+':scripts/tools/surface-browser-acceptance.mjs')=='93f99a51bbc4b4b79b614569dd5499d87323bef5'
+          git('merge-base','--is-ancestor',base,candidate)
+          git('diff','--check',base,candidate)
+          subprocess.run(['node','--check','scripts/tools/surface-browser-acceptance.mjs'],check=True)
+          run=api('GET','actions/runs/36238298771')
+          assert run['status']=='completed' and run['conclusion']=='success'
+          assert run['head_sha']=='ca2930433b26bda0dff3a72d47c6117163bddb13' and run['run_attempt']==1
+          assert run['path']=='.github/workflows/clearra-safe-integration-audit.yml'
+          assert api('GET','git/ref/heads/main')['object']['sha']==base
+          required={'Clearra management policy','Clearra management Windows runtime'}
+          deadline=time.monotonic()+900
+          while True:
+              checks=api('GET','commits/'+candidate+'/check-runs?per_page=100')['check_runs']
+              byname={c['name']:c for c in sorted(checks,key=lambda c:c['id']) if c['name'] in required and c['app']['slug']=='github-actions'}
+              if any(c['status']=='completed' and c['conclusion']!='success' for c in byname.values()): raise RuntimeError('Candidate protection failed')
+              if set(byname)==required and all(c['status']=='completed' and c['conclusion']=='success' for c in byname.values()): break
+              if time.monotonic()>deadline: raise RuntimeError('Candidate protection did not complete')
+              time.sleep(15)
+          assert api('GET','git/ref/heads/main')['object']['sha']==base
+          # No force or ruleset change. The menu implementation was browser-tested;
+          # the only later edit aligns the stronger canonical navigation assertion.
+          git('push','origin',candidate+':refs/heads/main')
+          assert api('GET','git/ref/heads/main')['object']['sha']==candidate
+          prior=api('GET','actions/runs?head_sha='+candidate+'&event=workflow_dispatch&per_page=100')['workflow_runs']
+          assert not any(r['path']=='.github/workflows/release-cli.yml' for r in prior)
+          def dispatch(workflow,inputs):
+              receipt=api('POST','actions/workflows/'+workflow+'/dispatches',{'ref':'main','inputs':inputs})
+              rid=receipt.get('workflow_run_id') if isinstance(receipt,dict) else None
+              if not isinstance(rid,int) or rid<=0: raise RuntimeError('Uncertain dispatch receipt; never repeat the POST')
+              return rid
+          release=dispatch('release-cli.yml',{})
+          pages=dispatch('queue-pages-publication.yml',{'acceptance_run_id':str(release),'snapshot_sha':base})
+          receipt={'source_commit':candidate,'browser_tested_frontend':tested,'release_run_id':release,'pages_queue_run_id':pages,'recovery_changes_included':False}
+          pathlib.Path(os.environ['RUNNER_TEMP'],'menu-publication.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt))
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: surface-release-gates-${{ github.run_id }}
-          path: ${{ runner.temp }}/surface-release-gates.json
+          name: menu-publication-${{ github.run_id }}
+          path: ${{ runner.temp }}/menu-publication.json
           if-no-files-found: warn
           retention-days: 30
