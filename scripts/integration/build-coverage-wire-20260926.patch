@@ -1,0 +1,401 @@
+diff --git a/crates/clearra-wasm/src/json_event_envelope.rs b/crates/clearra-wasm/src/json_event_envelope.rs
+index e8f78a3..b0d7170 100644
+--- a/crates/clearra-wasm/src/json_event_envelope.rs
++++ b/crates/clearra-wasm/src/json_event_envelope.rs
+@@ -1313,6 +1313,18 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
+                     "canonical_first_candidate_id",
+                     portfolio.canonical_first_candidate_id(),
+                 );
++                // Match the typed host contract, including omission of empty
++                // optional selections. Pins are evidence, not display-only data.
++                if !portfolio.pinned_candidate_keys().is_empty() {
++                    value.array("pinned_candidate_keys", |output| {
++                        write_string_array(output, portfolio.pinned_candidate_keys())
++                    });
++                }
++                if !portfolio.additional_candidate_keys().is_empty() {
++                    value.array("additional_candidate_keys", |output| {
++                        write_string_array(output, portfolio.additional_candidate_keys())
++                    });
++                }
+                 let completeness = portfolio.completeness();
+                 value.object("completeness", |evidence| {
+                     evidence.boolean(
+@@ -3312,6 +3324,35 @@ mod exact_json_tests {
+         );
+     }
+ 
++    #[test]
++    fn build_coverage_selection_json_preserves_both_partitions() {
++        let base = clearra_host_contract::BuildCoveragePortfolioV2Payload::try_new(
++            "build-coverage-portfolio.v2", "min-cover", "exact-union",
++            "3", "2", "2", "2", "1", "cts1:0123456789abcdef", "first",
++            clearra_host_contract::BuildCoverageCompletenessPayload::new(
++                true, true, true, true, true,
++            ), true, Some("a".repeat(64)),
++        ).unwrap();
++        for (pinned, additional) in [
++            (vec!["first".to_owned()], vec!["second".to_owned()]),
++            (vec!["first".to_owned(), "second".to_owned()], vec![]),
++        ] {
++            let build = base.clone().with_pinned_selection(pinned, additional).unwrap();
++            let payload = ProductResultPayload::new(
++                "build.pinned-minimals", "build-pinned-minimum-cover.v1",
++                ProductResultPayloadContent::BuildCoveragePortfolioV2(build),
++            );
++            let json = serialize_json(|output| {
++                let mut object = JsonObject::begin(output);
++                write_product_result_payload(&mut object, &payload);
++                object.finish();
++            }).unwrap();
++            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
++            assert_eq!(value, serde_json::to_value(&payload).unwrap());
++            assert_eq!(serde_json::from_value::<ProductResultPayload>(value).unwrap(), payload);
++        }
++    }
++
+     #[test]
+     fn every_build_v2_payload_shape_is_lossless_json() {
+         use clearra_host_contract::{
+diff --git a/crates/clearra-wasm/src/wasm_command_runtime.rs b/crates/clearra-wasm/src/wasm_command_runtime.rs
+index c105257..cbd8581 100644
+--- a/crates/clearra-wasm/src/wasm_command_runtime.rs
++++ b/crates/clearra-wasm/src/wasm_command_runtime.rs
+@@ -44,6 +44,8 @@ use clearra_host_contract::{
+ 
+ use crate::{WasmHostCapabilities, WebGpuBackendOutcomeState, WebGpuBackendReport};
+ 
++mod build_coverage_projection;
++
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ pub struct WasmExecutionResult {
+     app_response: HostAppResponse,
+@@ -1891,6 +1893,14 @@ fn try_host_product_result_payload(
+         return Ok(None);
+     };
+     match (product.contract(), product.result_kind()) {
++        (
++            ProductCapabilityContract::BuildCover,
++            ProductCapabilityResultKind::BuildCoveragePortfolioV2,
++        )
++        | (
++            ProductCapabilityContract::BuildPinnedMinimals,
++            ProductCapabilityResultKind::BuildPinnedMinimumCoverV1,
++        ) => build_coverage_projection::project(product, ledger).map(Some),
+         (ProductCapabilityContract::PcMinimals, ProductCapabilityResultKind::PcMinimumCoverV2) => {
+             let report = product
+                 .pc_minimum_cover_v2()
+@@ -2206,6 +2216,11 @@ fn try_clone_public_product_result_payload(
+     let contract = try_owned_string(source.contract(), ledger)?;
+     let result_kind = try_owned_string(source.result_kind(), ledger)?;
+     let content = match source.content() {
++        ProductResultPayloadContent::BuildCoveragePortfolioV2(payload) => {
++            ProductResultPayloadContent::BuildCoveragePortfolioV2(
++                build_coverage_projection::copy_payload(payload, ledger)?,
++            )
++        }
+         ProductResultPayloadContent::CoveragePortfolio(payload) => {
+             let members = try_owned_vec(payload.members(), ledger, |member, ledger| {
+                 Ok(ProductCandidateMemberPayload::new(
+diff --git a/crates/clearra-wasm/src/wasm_command_runtime/build_coverage_projection.rs b/crates/clearra-wasm/src/wasm_command_runtime/build_coverage_projection.rs
+new file mode 100644
+index 0000000..9e49bde
+--- /dev/null
++++ b/crates/clearra-wasm/src/wasm_command_runtime/build_coverage_projection.rs
+@@ -0,0 +1,195 @@
++//! Allocation-admitted projection of nominal Build portfolios into the WASM DTO.
++//! The producer remains the authority for membership, probability and page ownership.
++
++use super::*;
++use clearra_host_contract::{BuildCoverageCompletenessPayload, BuildCoveragePortfolioV2Payload};
++
++pub(super) fn project(
++    product: &clearra_app::ProductCapabilityResult,
++    ledger: &mut WasmFiniteMemoryLedger,
++) -> Result<ProductResultPayload, WasmCommandRuntimeError> {
++    let report = product
++        .build_coverage_portfolio_v2()
++        .ok_or_else(finite_projection_error)?;
++    let owner = report
++        .portfolio_alternative_owner()
++        .ok_or_else(finite_projection_error)?;
++    let completeness = report.completeness();
++    let contract = try_owned_string(product.contract().as_str(), ledger)?;
++    let result_kind = try_owned_string(product.result_kind().as_str(), ledger)?;
++    let mut payload = BuildCoveragePortfolioV2Payload::try_new(
++        try_owned_string(report.contract_id(), ledger)?,
++        try_owned_string(report.objective().as_str(), ledger)?,
++        try_owned_string(report.probability_basis(), ledger)?,
++        try_decimal_u128(report.source_candidate_count() as u128, ledger)?,
++        try_decimal_u128(report.selected_candidate_count() as u128, ledger)?,
++        try_decimal_u128(report.pattern_count() as u128, ledger)?,
++        try_decimal_u128(report.required_pattern_count() as u128, ledger)?,
++        try_owned_string(report.union_probability(), ledger)?,
++        try_owned_string(report.normalized_solution_set_hash(), ledger)?,
++        try_owned_string(report.canonical_candidate_keys().first().map_or("", String::as_str), ledger)?,
++        BuildCoverageCompletenessPayload::new(
++            completeness.source_universe_complete(),
++            completeness.coverage_rows_complete(),
++            completeness.probability_weights_complete(),
++            completeness.exact_minimum_proven(),
++            completeness.query_bound(),
++        ),
++        true,
++        Some(try_owned_string(owner.set_identity_sha256(), ledger)?),
++    )
++    .map_err(|_| finite_projection_error())?;
++    if product.contract() == ProductCapabilityContract::BuildPinnedMinimals {
++        let pins = report.pinned_candidate_keys();
++        let pinned = try_owned_string_vec(pins, ledger)?;
++        let additional = copy_additional_keys(report.canonical_candidate_keys(), pins, ledger)?;
++        payload = payload
++            .with_pinned_selection(pinned, additional)
++            .map_err(|_| finite_projection_error())?;
++    }
++    Ok(ProductResultPayload::from_owned_memory_authorized_parts(
++        contract,
++        result_kind,
++        ProductResultPayloadContent::BuildCoveragePortfolioV2(payload),
++    ))
++}
++
++// Count first without allocating a temporary filtered Vec or cloning rejected
++// keys. Charge vector capacity and each retained String before allocation.
++fn copy_additional_keys(
++    selected: &[String],
++    pins: &[String],
++    ledger: &mut WasmFiniteMemoryLedger,
++) -> Result<Vec<String>, WasmCommandRuntimeError> {
++    let count = selected.iter().filter(|key| !pins.contains(key)).count();
++    let slot_size = core::mem::size_of::<String>() as u128;
++    ledger.authorize_requested((count as u128).checked_mul(slot_size).ok_or_else(finite_projection_error)?)?;
++    let mut output = Vec::new();
++    output.try_reserve_exact(count).map_err(|_| finite_allocation_error())?;
++    let capacity = output.capacity();
++    ledger.retain_actual((capacity as u128).checked_mul(slot_size).ok_or_else(finite_projection_error)?)?;
++    if capacity < count {
++        return Err(finite_projection_error());
++    }
++    for key in selected.iter().filter(|key| !pins.contains(key)) {
++        output.push(try_owned_string(key, ledger)?);
++        if output.capacity() != capacity {
++            return Err(finite_projection_error());
++        }
++    }
++    Ok(output)
++}
++
++pub(super) fn copy_payload(
++    source: &BuildCoveragePortfolioV2Payload,
++    ledger: &mut WasmFiniteMemoryLedger,
++) -> Result<BuildCoveragePortfolioV2Payload, WasmCommandRuntimeError> {
++    let mut payload = BuildCoveragePortfolioV2Payload::try_new(
++        try_owned_string(source.contract(), ledger)?,
++        try_owned_string(source.objective(), ledger)?,
++        try_owned_string(source.probability_basis(), ledger)?,
++        try_owned_string(source.source_candidate_count(), ledger)?,
++        try_owned_string(source.selected_candidate_count(), ledger)?,
++        try_owned_string(source.pattern_count(), ledger)?,
++        try_owned_string(source.required_pattern_count(), ledger)?,
++        try_owned_string(source.union_probability(), ledger)?,
++        try_owned_string(source.normalized_solution_set_hash(), ledger)?,
++        try_owned_string(source.canonical_first_candidate_id(), ledger)?,
++        source.completeness(),
++        source.page_source_available(),
++        try_optional_owned_string(source.page_source_identity_sha256(), ledger)?,
++    )
++    .map_err(|_| finite_projection_error())?;
++    if !source.pinned_candidate_keys().is_empty() {
++        payload = payload
++            .with_pinned_selection(
++                try_owned_string_vec(source.pinned_candidate_keys(), ledger)?,
++                try_owned_string_vec(source.additional_candidate_keys(), ledger)?,
++            )
++            .map_err(|_| finite_projection_error())?;
++    } else if !source.additional_candidate_keys().is_empty() {
++        return Err(finite_projection_error());
++    }
++    Ok(payload)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use clearra_app::{encode_ctk3_compact, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece};
++
++    fn selected_document(masks: &[u64]) -> String {
++        let pages = masks.iter().map(|mask| {
++            Ctk3Page::new(1, (0..10).map(|x| {
++                if mask & (1_u64 << x) == 0 { Ctk3Color::Empty }
++                else { Ctk3Color::Piece(Ctk3Piece::I) }
++            }).collect())
++        }).collect();
++        encode_ctk3_compact(&Ctk3Document::new(10, pages)).unwrap()
++    }
++
++    #[test]
++    fn real_build_portfolios_survive_finite_projection_at_exact_memory_boundaries() {
++        let runtime = WasmCommandRuntime::default()
++            .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
++        let source = runtime.run_command_text(
++            "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 \
++             --queue I --no-hold --include-mirror --backend cpu --workers 1"
++        ).unwrap();
++        let hash = &source.search_report().unwrap().normalized_solution_set_hash;
++        for masks in [vec![], vec![0x3c0], vec![0xf, 0x3c0]] {
++            let suffix = if masks.is_empty() { String::new() } else {
++                format!(" --required-format ctk3 --required-document {} --expected-source-set-hash {hash}",
++                    selected_document(&masks))
++            };
++            let command = format!(
++                "clearra build {} --base-mask 0 --target-mask 0xf --height 4 \
++                 --queue I --no-hold --objective min-cover --queue-knowledge oracle \
++                 --backend cpu --workers 1{suffix}",
++                if masks.is_empty() { "cover" } else { "pinned-minimals" }
++            );
++            let request = runtime.compile_command_text(&command).unwrap();
++            let response = runtime.app_context().run(request);
++            let expected = response.to_host_response().product_result_payload().cloned().unwrap();
++            let live = (core::mem::size_of_val(&response) as u128)
++                + response.checked_retained_capacity_bytes().unwrap();
++            let mut measured = WasmFiniteMemoryLedger::new(live, u128::MAX, WasmFiniteConversionRoute::PublicDirect).unwrap();
++            let actual = try_host_product_result_payload(&response, &mut measured).unwrap().unwrap();
++            assert_eq!(actual, expected);
++            assert_eq!(measured.target_heap_bytes(), actual.checked_retained_capacity_bytes().unwrap());
++            let peak = live + core::mem::size_of::<WasmExecutionResult>() as u128 + measured.target_heap_bytes();
++            for (limit, succeeds) in [(peak, true), (peak - 1, false)] {
++                let mut ledger = WasmFiniteMemoryLedger::new(live, limit, WasmFiniteConversionRoute::PublicDirect).unwrap();
++                let result = try_host_product_result_payload(&response, &mut ledger);
++                if succeeds { assert_eq!(result.unwrap(), Some(expected.clone())); }
++                else { assert_eq!(result.unwrap_err().code(), WASM_FINITE_MEMORY_LIMIT); }
++            }
++            // The public DTO-copy path must preserve the same selection too.
++            let mut ledger = WasmFiniteMemoryLedger::new(live, u128::MAX, WasmFiniteConversionRoute::PublicDirect).unwrap();
++            let copied = try_clone_public_product_result_payload(&expected, &mut ledger).unwrap();
++            assert_eq!(copied, expected);
++            assert_eq!(ledger.target_heap_bytes(), copied.checked_retained_capacity_bytes().unwrap());
++        }
++    }
++
++    #[test]
++    fn additional_members_are_allocated_and_preserved_without_reconstructing_coverage() {
++        let source = BuildCoveragePortfolioV2Payload::try_new(
++            "build-coverage-portfolio.v2", "min-cover", "exact-union",
++            "3", "2", "2", "2", "1", "cts1:0123456789abcdef", "first",
++            BuildCoverageCompletenessPayload::new(true, true, true, true, true), true, Some("a".repeat(64)),
++        ).unwrap().with_pinned_selection(vec!["first".into()], vec!["second".into()]).unwrap();
++        let live = core::mem::size_of_val(&source) as u128 + source.checked_retained_capacity_bytes().unwrap();
++        let mut ledger = WasmFiniteMemoryLedger::new(live, u128::MAX, WasmFiniteConversionRoute::PublicDirect).unwrap();
++        let actual = copy_payload(&source, &mut ledger).unwrap();
++        assert_eq!(actual, source);
++        assert_eq!(ledger.target_heap_bytes(), actual.checked_retained_capacity_bytes().unwrap());
++        let peak = live + core::mem::size_of::<WasmExecutionResult>() as u128 + ledger.target_heap_bytes();
++        for (limit, succeeds) in [(peak, true), (peak - 1, false)] {
++            let mut ledger = WasmFiniteMemoryLedger::new(live, limit, WasmFiniteConversionRoute::PublicDirect).unwrap();
++            let result = copy_payload(&source, &mut ledger);
++            if succeeds { assert_eq!(result.unwrap(), source); }
++            else { assert_eq!(result.unwrap_err().code(), WASM_FINITE_MEMORY_LIMIT); }
++        }
++    }
++}
+diff --git a/crates/clearra-wasm/tests/build_coverage_wire.rs b/crates/clearra-wasm/tests/build_coverage_wire.rs
+new file mode 100644
+index 0000000..cedbddb
+--- /dev/null
++++ b/crates/clearra-wasm/tests/build_coverage_wire.rs
+@@ -0,0 +1,95 @@
++//! Run the same producer through typed completion and the browser JSON boundary.
++use clearra_app::{encode_ctk3_compact, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece};
++use clearra_host_contract::{AppStatus, ProductResultPayloadContent};
++use clearra_wasm::{
++    serialize_distributed_final_events, ProductPageSourceOwner, WasmCommandRuntime,
++    WasmHostCapabilities, WasmWorkerJobRuntime,
++};
++
++fn document(masks: &[u64]) -> String {
++    let pages = masks.iter().map(|mask| Ctk3Page::new(1, (0..10).map(|x| {
++        if mask & (1_u64 << x) == 0 { Ctk3Color::Empty }
++        else { Ctk3Color::Piece(Ctk3Piece::I) }
++    }).collect())).collect();
++    encode_ctk3_compact(&Ctk3Document::new(10, pages)).unwrap()
++}
++
++fn member_keys(owner: &ProductPageSourceOwner) -> Vec<String> {
++    let ProductPageSourceOwner::CoveragePortfolio(owner) = owner else {
++        panic!("Build must retain a real coverage page owner");
++    };
++    let mut keys = owner.canonical_candidate_keys_owned().unwrap();
++    keys.sort();
++    keys
++}
++
++#[test]
++fn build_coverage_wire_matches_typed_completion_and_retains_page_ownership() {
++    let runtime = WasmCommandRuntime::default()
++        .with_host_capabilities(WasmHostCapabilities::new(3, false, false));
++    let source = runtime.run_command_text(
++        "clearra build-probability --base-mask 0 --target-mask 0xf --height 4 \
++         --queue I --no-hold --include-mirror --backend cpu --workers 1"
++    ).unwrap();
++    let digest = &source.search_report().unwrap().normalized_solution_set_hash;
++    for workers in [1, 3] {
++        for masks in [vec![], vec![0x3c0], vec![0xf, 0x3c0]] {
++            let suffix = if masks.is_empty() { String::new() } else {
++                format!(" --required-format ctk3 --required-document {} --expected-source-set-hash {digest}", document(&masks))
++            };
++            let command = format!(
++                "clearra build {} --base-mask 0 --target-mask 0xf --height 4 \
++                 --queue I --no-hold --objective min-cover --queue-knowledge oracle \
++                 --backend cpu --workers {workers}{suffix}",
++                if masks.is_empty() { "cover" } else { "pinned-minimals" }
++            );
++            let typed = runtime.run_command_text(&command).unwrap();
++            assert_eq!(typed.app_response().status(), AppStatus::Success);
++            let expected = typed.app_response().product_result_payload().unwrap();
++            let ProductResultPayloadContent::BuildCoveragePortfolioV2(portfolio) = expected.content() else {
++                panic!("typed Build portfolio");
++            };
++            assert_eq!(portfolio.source_candidate_count(), "2");
++            assert_eq!(portfolio.selected_candidate_count(), masks.len().max(1).to_string());
++            assert_eq!(portfolio.union_probability(), "1");
++            let expected_keys = member_keys(typed.product_page_source_owner().unwrap());
++            let direct_json = serialize_distributed_final_events(41, &typed).unwrap();
++            let direct: serde_json::Value = serde_json::from_str(&direct_json).unwrap();
++            let expected_json = serde_json::to_value(expected).unwrap();
++            let terminal = direct.as_array().unwrap().iter().find(|event| event["event"] == "final_response").unwrap();
++            assert_eq!(terminal["response"]["product_result_payload"], expected_json);
++
++            let mut worker = WasmWorkerJobRuntime::new(WasmCommandRuntime::default()
++                .with_host_capabilities(WasmHostCapabilities::new(3, false, false)));
++            // Reuse the controller after draining its first result and releasing
++            // the old page owner; stale terminal data must not satisfy run two.
++            for _ in 0..2 {
++                let job = worker.start_job(&command).unwrap();
++                let mut completed = false;
++                for _ in 0..10_000 {
++                    if worker.advance_job(job, 256).unwrap().is_terminal() {
++                        completed = true;
++                        break;
++                    }
++                }
++                assert!(completed, "bounded worker execution must terminate");
++                let wire = if worker.has_completed_governed_events() {
++                    let output = worker.drain_governed_events_json(job).unwrap();
++                    assert_eq!(member_keys(output.completed_product_page_source_owner().unwrap()), expected_keys);
++                    output.into_json()
++                } else {
++                    let output = worker.drain_events_json(job).unwrap();
++                    let owner = worker.take_completed_product_page_source_owner().unwrap();
++                    assert_eq!(member_keys(&owner), expected_keys);
++                    output
++                };
++                let events: serde_json::Value = serde_json::from_str(&wire).unwrap();
++                let finals: Vec<_> = events.as_array().unwrap().iter()
++                    .filter(|event| event["event"] == "final_response").collect();
++                assert_eq!(finals.len(), 1, "one terminal response per job");
++                assert_eq!(finals[0]["response"]["status"], "success");
++                assert_eq!(finals[0]["response"]["product_result_payload"], expected_json);
++            }
++        }
++    }
++}
