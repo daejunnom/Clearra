@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Validate recovery navigation and exact editor candidate
+run-name: Collect exact source for requested UI implementation (not acceptance)
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -8,213 +8,41 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: clearra-recovery-fields-review
+  group: clearra-ui-source-collection
   cancel-in-progress: true
 jobs:
-  prepare:
+  source:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      candidate: ${{ steps.prepare.outputs.candidate }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with: {ref: 246e1c5ee9a743ab9a24ba731af55ccc6b805ddd, fetch-depth: 0, persist-credentials: false}
-      - name: Bind the already-reviewed candidate without changing refs or source
-        id: prepare
-        shell: python
-        run: |
-          import json,os,pathlib,subprocess
-          base='521fee125b478a5a39a90a808d6c471c430c8494'
-          candidate='246e1c5ee9a743ab9a24ba731af55ccc6b805ddd'
-          parent='29c268e095f6a6f8ce66cdf57c8c451481b29873'
-          branch='codex/recovery-gray-fields-20260926'
-          expected=['crates/clearra-cli-command/src/web_command_parser.rs','crates/clearra-cli-command/tests/boundary_recovery.rs',
-            'crates/clearra-forward-search/src/boundary_recovery.rs','crates/clearra-forward-search/src/boundary_recovery_pattern.rs',
-            'crates/clearra-forward-search/src/boundary_recovery_population.rs','crates/clearra-forward-search/src/boundary_recovery_tests.rs',
-            'packages/clearra-ui/src/lib/i18n/componentCatalog.ts','packages/clearra-ui/src/lib/workspace/BoundaryRecoveryControls.svelte',
-            'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryFields.svelte','packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte',
-            'packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte','packages/clearra-ui/src/lib/workspace/boundaryRecoveryModel.ts',
-            'packages/clearra-ui/test/boundaryRecoveryFields.test.mjs','scripts/desktop-ui-compile-check.mjs',
-            'scripts/lib/wasm-release-gate.ps1','scripts/tools/recovery-editor-browser-acceptance.mjs','scripts/tools/surface-browser-acceptance.mjs']
-          def git(*args):return subprocess.check_output(['git',*args],text=True,timeout=120).strip()
-          if git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent:
-            raise RuntimeError('Exact candidate or parent mismatch')
-          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
-            if git('ls-remote','origin',ref).split()!=[sha,ref]:raise RuntimeError('Reviewed ref moved')
-          git('merge-base','--is-ancestor',base,candidate)
-          if git('diff','--name-only',base,candidate).splitlines()!=expected:raise RuntimeError('Reviewed scope changed')
-          git('diff','--check',base,candidate)
-          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'recovery-preparation';out.mkdir()
-          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':git('rev-parse','HEAD^{tree}'),
-            'branch':branch,'changed_files':expected,'main_updated':False,'publishing':False}
-          (out/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
-          (out/'complete.patch').write_text(git('diff','--binary',base,candidate)+'\n')
-          print(json.dumps(receipt),flush=True)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidate='+candidate+'\n')
-      - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: recovery-preparation-${{ github.run_id }}
-          path: ${{ runner.temp }}/recovery-preparation
-          if-no-files-found: warn
-          retention-days: 30
-  frontend:
-    needs: prepare
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix: {os: [ubuntu-latest, windows-latest]}
-    env:
-      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
-      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
-      CLEARRA_BROWSER_TOOLS_ROOT: ${{ github.workspace }}/build/tools/recovery-browser
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
+          ref: 246e1c5ee9a743ab9a24ba731af55ccc6b805ddd
+          fetch-depth: 1
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with: {node-version: 22.23.2}
-      - name: Install frozen workspace and browser tooling
+      - name: Archive verified tracked source and frozen frontend dependencies
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install 1.98.1 --profile minimal
+          test "$(git rev-parse HEAD)" = 246e1c5ee9a743ab9a24ba731af55ccc6b805ddd
+          test "$(git rev-parse 'HEAD^{tree}')" = 1d40c2161033065fdb7036c2ae7b535e50a64691
+          mkdir -p "$RUNNER_TEMP/clearra-ui-source"
+          node scripts/release/create-exact-source-archive.mjs --source-commit "$(git rev-parse HEAD)" --output "$RUNNER_TEMP/clearra-ui-source/source.tar.gz"
+          git ls-tree -r -z HEAD > "$RUNNER_TEMP/clearra-ui-source/tree.z"
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts
-          npm install --prefix "$CLEARRA_BROWSER_TOOLS_ROOT" --ignore-scripts --no-audit --no-fund playwright@1.56.1
-          node "$CLEARRA_BROWSER_TOOLS_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
-      - name: Test real shared Svelte editor and input-to-command contracts
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            node --test packages/clearra-ui/test/boundaryRecoveryFields.test.mjs
-            node scripts/desktop-ui-compile-check.mjs
-            node scripts/tools/recovery-editor-browser-acceptance.mjs
-            node scripts/tools/workspace-controls-browser-acceptance.mjs
-            pnpm --filter @clearra/ui run test
-            pnpm --filter @clearra/web run test
-          } 2>&1 | tee "$RUNNER_TEMP/recovery-frontend.log"
-      # Match release-cli.yml metadata: the complete deployment-regression
-      # selector runs on Linux. Windows keeps every UI/worker test above and
-      # the real seven native acceptance leaves below; no assertion is relaxed.
-      - name: Run the complete canonical Linux release regression selector
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse 'refs/tags/v0.7.4^{tag}')" = a95973dbc1c3c1919478328d12e4d25ddaedea71
-          test "$(git rev-parse 'refs/tags/v0.7.4^{commit}')" = 0438d85f90b47c4ce89835f6a6d665a0415aa25a
-          node scripts/tools/run-release-regression-tests.mjs 2>&1 | tee "$RUNNER_TEMP/recovery-release-regressions.log"
+          npm install --prefix build/tools/ui-browser --ignore-scripts --no-audit --no-fund playwright@1.56.1
+          tar -czf "$RUNNER_TEMP/clearra-ui-source/dependencies.tar.gz" node_modules apps/clearra-web/node_modules apps/clearra-desktop/node_modules packages/clearra-ui/node_modules build/tools/ui-browser
+          cd "$RUNNER_TEMP/clearra-ui-source"
+          sha256sum source.tar.gz dependencies.tar.gz tree.z > SHA256SUMS
+          echo 'Source collection only; no acceptance, ref update, release, or deployment.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: recovery-frontend-${{ matrix.os }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/recovery-frontend.log
-            ${{ runner.temp }}/recovery-release-regressions.log
-            ${{ runner.temp }}/clearra-recovery-editor-acceptance
-            ${{ runner.temp }}/clearra-control-acceptance
-          if-no-files-found: warn
-          retention-days: 30
-  exact-recovery:
-    needs: prepare
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
-      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
-      RUST_MIN_STACK: '16777216'
-      CARGO_BUILD_JOBS: '4'
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
-      - name: Test exact checkpoints line-clear coordinates and legacy empty checkpoints
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo fmt --all --check
-          cargo test --locked -p clearra-forward-search --lib boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/recovery-core.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-core.log"
-          cargo test --locked -p clearra-cli-command --test boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/recovery-command.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-command.log"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: recovery-exact-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/recovery-core.log
-            ${{ runner.temp }}/recovery-command.log
-          if-no-files-found: warn
-          retention-days: 30
-  acceptance:
-    needs: [prepare, frontend, exact-recovery]
-    runs-on: windows-latest
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      max-parallel: 7
-      matrix:
-        shard: [FoundationNoProductDebt, FoundationAdversarialCorrectness, FoundationDesktopHost, Sanitizer, RustExact, RustProduct, Pages]
-    env:
-      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
-      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
-      CLEARRA_WEB_BASE_PATH: /Clearra
-      RUST_MIN_STACK: '16777216'
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
-      - uses: actions/setup-node@v4
-        with: {node-version: 22.23.2}
-      - name: Prepare exact toolchains and frozen workspace
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ((git rev-parse HEAD).Trim() -ne $env:CLEARRA_SOURCE_COMMIT) { throw 'Candidate mismatch' }
-          rustup toolchain install 1.98.1 --profile minimal
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          pnpm install --frozen-lockfile --ignore-scripts
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "CARGO_BUILD_JOBS=$([Math]::Max(1, [Environment]::ProcessorCount))" >> $env:GITHUB_ENV
-          if ('${{ matrix.shard }}' -eq 'Pages') {
-            rustup target add wasm32-unknown-unknown
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-      - name: Run the existing nonpublishing acceptance leaf
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $false
-          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'recovery-acceptance.log')
-          exit $LASTEXITCODE
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: recovery-acceptance-${{ matrix.shard }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/recovery-acceptance.log
-            ${{ runner.temp }}/clearra-surface-acceptance
-            ${{ runner.temp }}/clearra-recovery-editor-acceptance
-          if-no-files-found: warn
-          retention-days: 30
-  ready:
-    if: always()
-    needs: [prepare, frontend, exact-recovery, acceptance]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require every independent check without publishing
-        env: {RESULTS: '${{ toJSON(needs) }}'}
-        shell: python
-        run: |
-          import json,os
-          results=json.loads(os.environ['RESULTS'])
-          failed={key:value['result'] for key,value in results.items() if value['result']!='success'}
-          if failed: raise RuntimeError(json.dumps(failed))
-          print('Recovery source accepted:',results['prepare']['outputs']['candidate'])
-          print('No main update, tag, release or Pages deployment is performed by this workflow.')
+          name: clearra-ui-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/clearra-ui-source
+          if-no-files-found: error
+          retention-days: 3
