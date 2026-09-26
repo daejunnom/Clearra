@@ -1313,6 +1313,18 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                     "canonical_first_candidate_id",
                     portfolio.canonical_first_candidate_id(),
                 );
+                // Match the typed host contract, including omission of empty
+                // optional selections. Pins are evidence, not display-only data.
+                if !portfolio.pinned_candidate_keys().is_empty() {
+                    value.array("pinned_candidate_keys", |output| {
+                        write_string_array(output, portfolio.pinned_candidate_keys())
+                    });
+                }
+                if !portfolio.additional_candidate_keys().is_empty() {
+                    value.array("additional_candidate_keys", |output| {
+                        write_string_array(output, portfolio.additional_candidate_keys())
+                    });
+                }
                 let completeness = portfolio.completeness();
                 value.object("completeness", |evidence| {
                     evidence.boolean(
@@ -3310,6 +3322,54 @@ mod exact_json_tests {
             .expect("lossless typed payload"),
             build,
         );
+    }
+
+    #[test]
+    fn build_coverage_selection_json_preserves_both_partitions() {
+        let base = clearra_host_contract::BuildCoveragePortfolioV2Payload::try_new(
+            "build-coverage-portfolio.v2",
+            "min-cover",
+            "exact-union",
+            "3",
+            "2",
+            "2",
+            "2",
+            "1",
+            "cts1:0123456789abcdef",
+            "first",
+            clearra_host_contract::BuildCoverageCompletenessPayload::new(
+                true, true, true, true, true,
+            ),
+            true,
+            Some("a".repeat(64)),
+        )
+        .unwrap();
+        for (pinned, additional) in [
+            (vec!["first".to_owned()], vec!["second".to_owned()]),
+            (vec!["first".to_owned(), "second".to_owned()], vec![]),
+        ] {
+            let build = base
+                .clone()
+                .with_pinned_selection(pinned, additional)
+                .unwrap();
+            let payload = ProductResultPayload::new(
+                "build.pinned-minimals",
+                "build-pinned-minimum-cover.v1",
+                ProductResultPayloadContent::BuildCoveragePortfolioV2(build),
+            );
+            let json = serialize_json(|output| {
+                let mut object = JsonObject::begin(output);
+                write_product_result_payload(&mut object, &payload);
+                object.finish();
+            })
+            .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value, serde_json::to_value(&payload).unwrap());
+            assert_eq!(
+                serde_json::from_value::<ProductResultPayload>(value).unwrap(),
+                payload
+            );
+        }
     }
 
     #[test]

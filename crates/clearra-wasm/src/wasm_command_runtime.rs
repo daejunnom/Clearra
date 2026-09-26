@@ -44,6 +44,8 @@ use clearra_host_contract::{
 
 use crate::{WasmHostCapabilities, WebGpuBackendOutcomeState, WebGpuBackendReport};
 
+mod build_coverage_projection;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WasmExecutionResult {
     app_response: HostAppResponse,
@@ -1891,6 +1893,14 @@ fn try_host_product_result_payload(
         return Ok(None);
     };
     match (product.contract(), product.result_kind()) {
+        (
+            ProductCapabilityContract::BuildCover,
+            ProductCapabilityResultKind::BuildCoveragePortfolioV2,
+        )
+        | (
+            ProductCapabilityContract::BuildPinnedMinimals,
+            ProductCapabilityResultKind::BuildPinnedMinimumCoverV1,
+        ) => build_coverage_projection::project(product, ledger).map(Some),
         (ProductCapabilityContract::PcMinimals, ProductCapabilityResultKind::PcMinimumCoverV2) => {
             let report = product
                 .pc_minimum_cover_v2()
@@ -2206,6 +2216,11 @@ fn try_clone_public_product_result_payload(
     let contract = try_owned_string(source.contract(), ledger)?;
     let result_kind = try_owned_string(source.result_kind(), ledger)?;
     let content = match source.content() {
+        ProductResultPayloadContent::BuildCoveragePortfolioV2(payload) => {
+            ProductResultPayloadContent::BuildCoveragePortfolioV2(
+                build_coverage_projection::copy_payload(payload, ledger)?,
+            )
+        }
         ProductResultPayloadContent::CoveragePortfolio(payload) => {
             let members = try_owned_vec(payload.members(), ledger, |member, ledger| {
                 Ok(ProductCandidateMemberPayload::new(
