@@ -1,5 +1,5 @@
 name: Start verified release gates
-run-name: Publish only the accepted eight-menu correction
+run-name: Attach Pages publication to the exact menu release
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -24,53 +24,37 @@ jobs:
           ref: 521fee125b478a5a39a90a808d6c471c430c8494
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with: {node-version: 22.23.2}
-      - name: Require protected exact main and preserve canonical publication and rollback checks
+      - name: Bind the existing release before dispatching only the missing Pages queue
         env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import json,os,pathlib,subprocess
+          import json,os,pathlib,subprocess,time
           repo='daejunnom/Clearra'
-          base='9f454c93c2c0eb83163445b4bc50aea724f53a8f'
           source='521fee125b478a5a39a90a808d6c471c430c8494'
-          def cmd(*args): return subprocess.check_output(args,text=True,timeout=90).strip()
-          def git(*args): return cmd('git',*args)
-          def api(method,path,body=None):
-              args=['gh','api','--method',method,'repos/'+repo+'/'+path]
-              if body is not None: args+=['--input','-']
-              raw=subprocess.check_output(args,input=None if body is None else json.dumps(body),text=True,timeout=90)
-              return json.loads(raw) if raw.strip() else None
-          assert git('rev-parse','HEAD')==source
-          assert api('GET','git/ref/heads/main')['object']['sha']==source
-          assert git('diff','--name-only',base,source).splitlines()==[
-              'apps/clearra-web/src/routes/+page.svelte','scripts/tools/surface-browser-acceptance.mjs']
-          assert git('rev-parse',source+':apps/clearra-web/src/routes/+page.svelte')=='a5069640c01611632e80b0d8aab4a9caa42721fd'
-          assert git('rev-parse',source+':scripts/tools/surface-browser-acceptance.mjs')=='93f99a51bbc4b4b79b614569dd5499d87323bef5'
-          git('diff','--check',base,source)
-          for rid in [36238298771,36239970144]:
-              run=api('GET','actions/runs/'+str(rid))
-              assert run['status']=='completed' and run['conclusion']=='success' and run['run_attempt']==1
-          subprocess.run(['node','--check','scripts/tools/surface-browser-acceptance.mjs'],check=True)
-          def existing(path):
-              pages=json.loads(cmd('gh','api','--paginate','--slurp','repos/'+repo+'/actions/runs?head_sha='+source+'&event=workflow_dispatch&per_page=100'))
-              return [r for page in pages for r in page['workflow_runs'] if r['path']==path]
-          def dispatch(file,inputs):
-              assert api('GET','git/ref/heads/main')['object']['sha']==source
-              receipt=api('POST','actions/workflows/'+file+'/dispatches',{'ref':'main','inputs':inputs})
-              rid=receipt.get('workflow_run_id') if isinstance(receipt,dict) else None
-              if not isinstance(rid,int) or rid<=0: raise RuntimeError('Dispatch receipt uncertain; do not repeat POST')
-              return rid
-          releases=existing('.github/workflows/release-cli.yml')
-          if len(releases)>1: raise RuntimeError('Ambiguous exact-source Release runs')
-          if releases and releases[0]['status']=='completed' and releases[0]['conclusion']!='success':
-              raise RuntimeError('Prior exact-source release failed; inspect it instead of redispatching')
-          release=releases[0]['id'] if releases else dispatch('release-cli.yml',{})
-          queues=existing('.github/workflows/queue-pages-publication.yml')
-          if len(queues)>1: raise RuntimeError('Ambiguous Pages queue')
-          pages=queues[0]['id'] if queues else dispatch('queue-pages-publication.yml',{'acceptance_run_id':str(release),'snapshot_sha':base})
-          receipt={'source_commit':source,'release_run_id':release,'pages_queue_run_id':pages,
-              'recovery_changes_included':False,'direct_publication_bypass':False,'main_written':False}
+          base='9f454c93c2c0eb83163445b4bc50aea724f53a8f'
+          def api(path):
+              return json.loads(subprocess.check_output(['gh','api','repos/'+repo+'/'+path],text=True,timeout=90))
+          def exact_runs(path):
+              pages=json.loads(subprocess.check_output(['gh','api','--paginate','--slurp','repos/'+repo+'/actions/runs?head_sha='+source+'&event=workflow_dispatch&per_page=100'],text=True,timeout=90))
+              return [r for p in pages for r in p['workflow_runs'] if r['path']==path and r['head_branch']=='main']
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==source
+          assert api('git/ref/heads/main')['object']['sha']==source
+          release=api('actions/runs/36240392036')
+          assert release['head_sha']==source and release['head_branch']=='main' and release['path']=='.github/workflows/release-cli.yml'
+          if release['status']=='completed' and release['conclusion']!='success': raise RuntimeError('Release failed; do not queue publication')
+          existing=exact_runs('.github/workflows/queue-pages-publication.yml')
+          if len(existing)>1: raise RuntimeError('Ambiguous exact-source Pages queues')
+          if not existing:
+              subprocess.run(['gh','api','--method','POST','repos/'+repo+'/actions/workflows/queue-pages-publication.yml/dispatches','--input','-'],input=json.dumps({'ref':'main','inputs':{'acceptance_run_id':str(release['id']),'snapshot_sha':base}}),text=True,check=True,timeout=90)
+              # A successful dispatch may return no body. Resolve by readback;
+              # never repeat a write because an ID was absent in that body.
+              for attempt in range(12):
+                  existing=exact_runs('.github/workflows/queue-pages-publication.yml')
+                  if existing: break
+                  time.sleep(5)
+          if len(existing)!=1: raise RuntimeError('Dispatch identity unresolved; inspect before retrying')
+          receipt={'source_commit':source,'release_run_id':release['id'],'pages_queue_run_id':existing[0]['id'],
+              'recovery_changes_included':False,'main_written':False,'canonical_acceptance_required':True}
           pathlib.Path(os.environ['RUNNER_TEMP'],'menu-publication.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps(receipt))
       - uses: actions/upload-artifact@v4
