@@ -1,4 +1,5 @@
 name: Clearra Safe Integration Audit
+run-name: Verify native stack repair without publishing
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -6,90 +7,65 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 concurrency:
-  group: clearra-oneoff-workflow-maintenance
+  group: clearra-native-stack-repair
   cancel-in-progress: false
 jobs:
-  inventory:
-    if: github.repository == 'daejunnom/Clearra'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  native-stack:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      CLEARRA_SOURCE_COMMIT: 56d1d1830825eb1a09cde113e4e96675238da46a
+      CLEARRA_ENGINE_BUILD_ID: 56d1d1830825eb1a09cde113e4e96675238da46a
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 56d1d1830825eb1a09cde113e4e96675238da46a
           fetch-depth: 0
           persist-credentials: false
-      - name: Read complete Actions catalog and dependencies; no writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: python
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Check exact source and the test-only change
+        shell: bash
         run: |
-          import json,os,pathlib,subprocess
-          repo='daejunnom/Clearra'
-          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'workflow-retirement-inventory'
-          out.mkdir()
-          def cmd(*args): return subprocess.check_output(args,text=True,timeout=90).strip()
-          def api(path): return json.loads(cmd('gh','api','repos/'+repo+'/'+path))
-          def git(*args): return cmd('git',*args)
-          def catalog(path,key):
-              pages=json.loads(cmd('gh','api','--paginate','--slurp','repos/'+repo+'/'+path))
-              rows=[row for page in pages for row in page[key]]
-              if len({r['id'] for r in rows})!=len(rows): raise RuntimeError('Duplicate catalog identity')
-              if pages and pages[0]['total_count']!=len(rows): raise RuntimeError('Incomplete catalog: '+path)
-              return rows
-          main=api('git/ref/heads/main')['object']['sha']
-          control=git('rev-parse','HEAD')
-          workflows=catalog('actions/workflows?per_page=100','workflows')
-          runs=catalog('actions/runs?per_page=100','workflow_runs')
-          fields=['id','workflow_id','name','path','head_branch','head_sha','event','status','conclusion','run_attempt','created_at','updated_at','html_url']
-          runs=[{k:r.get(k) for k in fields} for r in runs]
-          main_paths=git('ls-tree','-r','--name-only',main,'--','.github/workflows').splitlines()
-          control_paths=git('ls-tree','-r','--name-only',control,'--','.github/workflows').splitlines()
-          definitions={}
-          for ref,paths in [(main,main_paths),(control,control_paths)]:
-              for path in paths:
-                  if not path.endswith(('.yml','.yaml')): continue
-                  key=ref+':'+path
-                  definitions[key]=git('show',key)
-          summaries=[]
-          for w in workflows:
-              history=sorted([r for r in runs if r['workflow_id']==w['id']],key=lambda r:r['id'],reverse=True)
-              path=w['path']
-              item={k:w.get(k) for k in ['id','name','path','state','created_at','updated_at','html_url']}
-              item.update(in_main=path in main_paths,in_control=path in control_paths,run_count=len(history),
-                  latest_runs=history[:3],active_runs=[r for r in history if r['status']!='completed'])
-              if history and path.startswith('.github/workflows/') and path.endswith(('.yml','.yaml')):
-                  key=history[0]['head_sha']+':'+path
-                  try: definitions[key]=git('show',key)
-                  except subprocess.CalledProcessError: item['latest_source_unavailable']=True
-              summaries.append(item)
-          operational_paths=git('ls-tree','-r','--name-only',main,'--','.github/workflows','scripts/release','scripts/tools','scripts/integration').splitlines()
-          dependencies=[]
-          filenames={w['path'].rsplit('/',1)[-1]:w['id'] for w in workflows}
-          names={w['name']:w['id'] for w in workflows if len(w['name'])>5}
-          for path in operational_paths:
-              if not path.endswith(('.yml','.yaml','.mjs','.js','.ts','.py','.ps1','.json','.sh')): continue
-              text=git('show',main+':'+path)
-              for number,line in enumerate(text.splitlines(),1):
-                  hits=sorted(set([value for word,value in (filenames|names).items() if word in line]))
-                  if hits: dependencies.append({'path':path,'line':number,'workflow_ids':hits,'text':line})
-          if api('git/ref/heads/main')['object']['sha']!=main: raise RuntimeError('Main moved during inventory')
-          result={'schema':'clearra.workflow-retirement-inventory.v1','main':main,'control':control,
-              'run_id':os.environ['GITHUB_RUN_ID'],'workflows':summaries,'main_paths':main_paths,
-              'control_paths':control_paths,'active_runs':[r for r in runs if r['status']!='completed'],
-              'main_references':dependencies,'writes_performed':False}
-          (out/'inventory.json').write_text(json.dumps(result,indent=2)+'\n')
-          (out/'workflow-definitions.json').write_text(json.dumps(definitions,indent=2)+'\n')
-          (out/'runs.json').write_text(json.dumps(runs,indent=2)+'\n')
-          print(json.dumps({'main':main,'workflow_count':len(workflows),'run_count':len(runs),
-              'active_runs':result['active_runs'],'non_main':[(w['id'],w['name'],w['path'],w['state']) for w in summaries if not w['in_main']]},indent=2))
-          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
-              f.write('Read-only inventory completed. Main, workflow states, runs, artifacts and deployments were not changed.\n')
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CLEARRA_SOURCE_COMMIT"
+          test "$(git show -s --format=%P HEAD)" = 44c104ff242196f2f06be9bc5162c7d0a1f1b878
+          test "$(git diff --name-only HEAD^ HEAD)" = crates/clearra-wasm/tests/wasm_host_contract.rs
+          git diff --check HEAD^ HEAD
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          cargo fmt --all --check
+      - name: Execute real Build and PC contracts without a large inherited stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset RUST_MIN_STACK
+          echo "source=$CLEARRA_SOURCE_COMMIT inherited_stack=unset explicit_build_stack=2097152"
+          cargo test --locked -p clearra-wasm --test wasm_host_contract --test terminal_supply_public_contract --test pc_minimals_stack_contract -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/native-stack.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/native-stack.log"
+      - name: Execute the exact Windows canonical source-contract entrypoint
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CLEARRA_BUILD_PURPOSE: product
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Remove-Item Env:\RUST_MIN_STACK -ErrorAction SilentlyContinue
+          $env:CARGO_BUILD_JOBS = [string][Math]::Max(1, [Environment]::ProcessorCount)
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task WasmBuildContracts -ExecutionSurface Trusted -RuntimeEnvironment windows -VerboseLog 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'canonical-wasm-contracts.log')
+          exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: workflow-retirement-inventory-${{ github.run_id }}
-          path: ${{ runner.temp }}/workflow-retirement-inventory
-          if-no-files-found: error
+          name: native-stack-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/native-stack.log
+            ${{ runner.temp }}/canonical-wasm-contracts.log
+          if-no-files-found: warn
           retention-days: 30
