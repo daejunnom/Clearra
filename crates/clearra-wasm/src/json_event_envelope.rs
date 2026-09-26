@@ -1104,8 +1104,11 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
                 result.string("placement_role_scope", &report.placement_role_scope);
                 result.number("normal_states", report.normal_states);
                 result.number("max_early_placements", report.max_early_placements);
-                result.number("borrow_role_index", report.borrow_role_index);
-                result.string("borrow_placement_mask", &report.borrow_placement_mask);
+                result.optional_number("borrow_role_index", report.borrow_role_index);
+                result.optional_string(
+                    "borrow_placement_mask",
+                    report.borrow_placement_mask.as_deref(),
+                );
                 result.number("recovery_states", report.recovery_states);
                 result.optional_number(
                     "stage_one_checkpoint_step",
@@ -3195,8 +3198,8 @@ mod exact_json_tests {
             knowledge_basis: "full-pattern-universe".to_owned(),
             placement_role_scope: "bag-piece-exact-lock-time".to_owned(),
             max_early_placements: 1,
-            borrow_role_index: 7,
-            borrow_placement_mask: "0xf".to_owned(),
+            borrow_role_index: Some(7),
+            borrow_placement_mask: Some("0xf".to_owned()),
             normal_states: 0,
             recovery_states: 0,
             stage_one_checkpoint_step: None,
@@ -3259,6 +3262,9 @@ mod exact_json_tests {
         fixed.knowledge_basis = "full-fixed-queue".to_owned();
         fixed.placement_role_scope = "exact-lock-time".to_owned();
         fixed.population = None;
+        fixed.max_early_placements = 3;
+        fixed.borrow_role_index = None;
+        fixed.borrow_placement_mask = None;
         let payload = ProductResultPayload::new(
             "boundary-recovery.v1",
             "boundary-recovery",

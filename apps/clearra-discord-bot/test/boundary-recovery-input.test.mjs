@@ -92,3 +92,16 @@ test("recovery command help is available in every released Discord locale", () =
     assert.match(formatSlashCommandHelp("recovery boundary", locale), /recovery boundary/u);
   }
 });
+
+test('multi-role maximum and a global B2B policy reach the CLI without selected-role flags', () => {
+  const args = lower({ initial_board_mask: '0x0', stage_one_board_mask: '0xc030000000000',
+    target_board_mask: '0xc0300c0300c03', height: 6, queue: 'OOO', placements: 3,
+    stage_one_count: 1, max_early_placements: 2, preserve_b2b: true });
+  assert.equal(args[args.indexOf('--max-early-placements') + 1], '2');
+  assert.ok(args.includes('--preserve-b2b'));
+  assert.ok(args.includes('--stage-one-board-mask'));
+  assert.ok(!args.includes('--borrow-role-position'));
+  assert.ok(!args.includes('--borrow-placement-mask'));
+  assert.throws(() => lower({ initial_board_mask: '0x0', target_board_mask: '0x0',
+    height: 6, queue: 'OOO', placements: 3, stage_one_count: 1, max_early_placements: 3 }), /max_early_placements/u);
+});

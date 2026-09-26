@@ -41,8 +41,9 @@ pub struct BoundaryRecoveryPayload {
     pub knowledge_basis: String,
     pub placement_role_scope: String,
     pub max_early_placements: u8,
-    pub borrow_role_index: u8,
-    pub borrow_placement_mask: String,
+    /// Both fields are null when every eligible second-stage role may be early.
+    pub borrow_role_index: Option<u8>,
+    pub borrow_placement_mask: Option<String>,
     pub normal_states: usize,
     pub recovery_states: usize,
     pub stage_one_checkpoint_step: Option<usize>,
@@ -148,7 +149,11 @@ impl BoundaryRecoveryPayload {
         let mut bytes = (self.status.capacity() as u128)
             .checked_add(self.knowledge_basis.capacity() as u128)?
             .checked_add(self.placement_role_scope.capacity() as u128)?
-            .checked_add(self.borrow_placement_mask.capacity() as u128)?
+            .checked_add(
+                self.borrow_placement_mask
+                    .as_ref()
+                    .map_or(0, |mask| mask.capacity()) as u128,
+            )?
             .checked_add(
                 (self.steps.capacity() as u128)
                     .checked_mul(core::mem::size_of::<BoundaryRecoveryStepPayload>() as u128)?,

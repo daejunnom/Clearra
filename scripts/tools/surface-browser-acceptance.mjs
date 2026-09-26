@@ -159,19 +159,18 @@ try {
         assert.equal(await recovery.getByLabel('Required placements', { exact: true }).count(), 0);
         assert.equal(await recovery.getByLabel('Maximum search states', { exact: true }).count(), 0);
         assert.match(await recovery.locator('.recovery-required-pieces').innerText(), /Automatic/);
-        await page.getByLabel('Selected early placement role (1-based)', { exact: true }).fill('2');
+        assert.equal(await page.getByLabel('Selected early placement role (1-based)', { exact: true }).count(), 0);
         await page.getByRole('checkbox', { name: 'Hold', exact: true }).uncheck();
         await paint(page, 0, 0x3f0n, 4);
         await page.getByRole('button', { name: 'Final field', exact: true }).click();
         await paint(page, 0, 0xc030n, 4);
-        await paint(page, 1, 0x300c000n, 4);
         await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), 'boundary recovery');
         await page.locator('.recovery-result .outcome').waitFor({ timeout: 60000 });
         assert.equal(await page.locator('.recovery-result .outcome').innerText(), 'Normal connection');
         assert.equal(await page.locator('.recovery-result ol li').count(), 2);
         assert.match(await recovery.locator('.recovery-resolved-pieces').innerText(), /2/);
         await page.getByLabel('Known queue across both stages', { exact: true }).fill('IO');
-        await page.getByRole('button', { name: 'Normal only', exact: true }).click();
+        await page.getByRole('combobox', { name: 'Maximum early placements', exact: true }).selectOption('0');
         await page.getByRole('button', { name: 'Existing field', exact: true }).click();
         await paint(page, 0, 0x3f0n, 4); // erase only the original snapshot
         await page.getByRole('button', { name: 'First-stage field', exact: true }).click();

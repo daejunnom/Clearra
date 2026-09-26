@@ -61,6 +61,8 @@ export const COMPONENT_MESSAGES = {
   recoveryRolePosition: { en: 'Placement role to edit (1-based)', ko: '편집할 배치 역할 위치 (1부터)', ja: '編集する配置役割の位置（1始まり）' },
   recoveryRolePlacement: { en: 'Exact lock-time placement for role', ko: '배치 역할의 잠금 순간 위치', ja: '配置役割の固定時点の位置' },
   recoveryBorrowPosition: { en: 'Selected early placement role (1-based)', ko: '선행할 배치 역할 위치 (1부터)', ja: '先行する配置役割の位置 (1始まり)' },
+  recoveryB2bReplayHelp: { en: 'Preserve B2B throughout actual execution, including first-stage placements completed after early second-stage placements. An isolated first-stage build is not filtered by this option.', ko: '선행한 2단계 배치 이후에 완성하는 1단계 배치까지 실제 실행 경로 전체에서 B2B를 보존합니다. 1단계 단독 구축 후보를 이 옵션으로 제거하지 않습니다.', ja: '先行した第2段階配置の後に完成する第1段階配置も含め、実行経路全体でB2Bを維持します。単独の第1段階候補はこの設定で除外しません。' },
+  recoveryEarlyCountHelp: { en: 'Maximum second-stage placements before the first-stage checkpoint. The solver chooses the roles; cleared placements still count.', ko: '1단계 완성 전 선행할 2단계 배치의 최대 개수입니다. 배치는 탐색기가 선택하며 줄 삭제로 사라진 배치도 개수에 포함합니다.', ja: '第1段階の完了前に先行する第2段階配置の最大数です。配置は探索器が選び、消去された配置も数えます。' },
   recoveryMaxEarlyPlacements: { en: 'Maximum early placements', ko: '최대 선행 배치 수', ja: '先行設置の最大数' },
   recoveryQueue: { en: 'Known queue across both stages', ko: '두 단계의 확정 공급 큐', ja: '両段階の確定ミノ順' },
   recoveryQueuePattern: { en: 'Optional queue pattern (complete seven-piece bags)', ko: '선택적 공급 패턴 (완전한 7미노 가방)', ja: '任意のミノ順パターン（完全な7ミノバッグ）' },

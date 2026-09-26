@@ -18,12 +18,15 @@ export type BoundaryRecoveryRequest = {
   placements: number | null;
   /** Empty keeps occupancy-only search; otherwise one exact lock-time mask per placement role. */
   placementRoleMasks: bigint[];
-  maxEarlyPlacements: 0 | 1;
-  borrowRolePosition: number;
-  borrowPlacementMask: bigint;
+  maxEarlyPlacements: number;
+  /** Legacy opt-in selection; omit both fields to search any second-stage role. */
+  borrowRolePosition?: number;
+  borrowPlacementMask?: bigint;
   holdEnabled: boolean;
   rule: RuleProfile;
   spinProfile: SpinProfile;
+  /** Global constraint on actual interleaved replay, not isolated stage-one candidates. */
+  preserveB2B?: boolean;
   preserveB2BStageOne: boolean;
   preserveB2BStageTwo: boolean;
   /** One-based bag positions; the stage boundary starts a new bag. */
@@ -47,11 +50,10 @@ export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
     placements: null,
     placementRoleMasks: [],
     maxEarlyPlacements: 1,
-    borrowRolePosition: 2,
-    borrowPlacementMask: 0n,
     holdEnabled: true,
     rule: 'srs-plus',
     spinProfile: 'all-spin-plus',
+    preserveB2B: false,
     preserveB2BStageOne: false,
     preserveB2BStageTwo: false,
     preserveB2BBags: [],
@@ -65,6 +67,15 @@ export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
 /** The upper lock horizon is not a guessed terminal count. */
 export function recoveryPlacementHorizon(request: BoundaryRecoveryRequest): number {
   return request.placements ?? (request.placementRoleMasks.length || request.queue.trim().length);
+}
+
+/** A physical role bound, not an arbitrary search budget. Do not clamp a user's draft. */
+export function availableEarlyPlacementCount(request: BoundaryRecoveryRequest): number {
+  const horizon = recoveryPlacementHorizon(request);
+  if (!Number.isSafeInteger(horizon) || horizon > 42 ||
+      !Number.isSafeInteger(request.stageOneCount) || request.stageOneCount < 1 ||
+      request.stageOneCount >= horizon) return 0;
+  return horizon - request.stageOneCount;
 }
 
 export function updateRecoveryQueue(request: BoundaryRecoveryRequest, queue: string): BoundaryRecoveryRequest {
@@ -99,8 +110,11 @@ export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest
   if (!Number.isInteger(request.stageOneCount) || request.stageOneCount < 1 || request.stageOneCount >= horizon) errors.push('stage-one');
   if ((request.placements !== null && !Number.isInteger(request.placements)) ||
       !Number.isInteger(horizon) || horizon < 2 || horizon > 42 || horizon > queue.length) errors.push('placements');
-  if (request.maxEarlyPlacements !== 0 && request.maxEarlyPlacements !== 1) errors.push('max-early');
-  if (request.maxEarlyPlacements === 1 && (!Number.isInteger(request.borrowRolePosition) || request.borrowRolePosition <= request.stageOneCount || request.borrowRolePosition > horizon)) errors.push('borrow-role');
+  if (!Number.isSafeInteger(request.maxEarlyPlacements) || request.maxEarlyPlacements < 0 ||
+      request.maxEarlyPlacements > availableEarlyPlacementCount(request)) errors.push('max-early');
+  if (request.borrowRolePosition !== undefined &&
+      (!Number.isInteger(request.borrowRolePosition) || request.borrowRolePosition <= request.stageOneCount ||
+       request.borrowRolePosition > horizon || request.maxEarlyPlacements > 1)) errors.push('borrow-role');
   if (!validOptionalStateLimit(request.maxStates)) errors.push('max-states');
   const bagCount = boundaryRecoveryBagSlots(request.stageOneCount, horizon).length;
   if (new Set(request.preserveB2BBags).size !== request.preserveB2BBags.length ||
@@ -120,8 +134,11 @@ export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest
   const fieldLimit = 1n << BigInt(safeHeight * 10);
   if ([request.initialBoardMask, request.stageOneBoardMask, request.targetBoardMask]
       .some((mask) => mask < 0n || mask >= fieldLimit)) errors.push('board');
-  if (request.maxEarlyPlacements === 1 && request.placementRoleMasks.length === 0 &&
-      (request.borrowPlacementMask < 0n || request.borrowPlacementMask >= fieldLimit || bitCount(request.borrowPlacementMask) !== 4)) errors.push('borrow-placement');
+  if (request.borrowPlacementMask !== undefined &&
+      (request.borrowRolePosition === undefined || request.borrowPlacementMask < 0n ||
+       request.borrowPlacementMask >= fieldLimit || bitCount(request.borrowPlacementMask) !== 4)) errors.push('borrow-placement');
+  if (request.borrowRolePosition !== undefined && request.maxEarlyPlacements > 0 &&
+      request.borrowPlacementMask === undefined && request.placementRoleMasks.length === 0) errors.push('borrow-placement');
   if (request.placementRoleMasks.length > 0 &&
       (request.placementRoleMasks.length !== horizon ||
        request.placementRoleMasks.some((mask) => mask < 0n || mask >= fieldLimit || bitCount(mask) !== 4))) {
@@ -147,21 +164,21 @@ export function boundaryRecoveryArguments(request: BoundaryRecoveryRequest): str
     '--stage-one-count', String(request.stageOneCount),
     '--placements', request.placements === null ? 'auto' : String(request.placements),
     '--max-early-placements', String(request.maxEarlyPlacements),
-    '--borrow-role-position', String(request.borrowRolePosition),
     request.holdEnabled ? '--hold' : '--no-hold',
     '--rule', request.rule,
     '--spin-profile', request.spinProfile,
     '--initial-b2b', request.initialB2B ? '1' : '0'
   ];
   if (request.maxStates !== null) args.push('--max-states', String(request.maxStates));
-  if (request.placementRoleMasks.length === 0) {
-    args.push('--borrow-placement-mask', boardMaskHex(request.borrowPlacementMask));
-  } else {
-    request.placementRoleMasks.forEach((mask, index) => args.push('--role-mask', `${index + 1}:${boardMaskHex(mask)}`));
+  if (request.borrowRolePosition !== undefined) args.push('--borrow-role-position', String(request.borrowRolePosition));
+  if (request.borrowPlacementMask !== undefined) args.push('--borrow-placement-mask', boardMaskHex(request.borrowPlacementMask));
+  request.placementRoleMasks.forEach((mask, index) => args.push('--role-mask', `${index + 1}:${boardMaskHex(mask)}`));
+  if (request.preserveB2B) args.push('--preserve-b2b');
+  else if (request.preserveB2B === undefined) {
+    if (request.preserveB2BStageOne) args.push('--preserve-b2b-stage-one');
+    if (request.preserveB2BStageTwo) args.push('--preserve-b2b-stage-two');
+    for (const bag of request.preserveB2BBags) args.push('--preserve-b2b-bag', String(bag));
   }
-  if (request.preserveB2BStageOne) args.push('--preserve-b2b-stage-one');
-  if (request.preserveB2BStageTwo) args.push('--preserve-b2b-stage-two');
-  for (const bag of request.preserveB2BBags) args.push('--preserve-b2b-bag', String(bag));
   if (request.queuePattern.trim()) {
     args.push('--queue-pattern', request.queuePattern.trim());
     args.push('--max-pattern-evaluations', String(request.maxPatternEvaluations));

@@ -460,9 +460,9 @@ export type ClearraBoundaryRecoveryPayload = {
   status: 'normal' | 'pc-preserving-recovery' | 'non-pc-recovery' | 'no-path-within-declared-scope' | 'incomplete' | 'population-complete' | 'population-incomplete';
   knowledge_basis: 'full-fixed-queue' | 'full-pattern-universe';
   placement_role_scope: 'occupancy-only' | 'exact-lock-time' | 'bag-piece-exact-lock-time';
-  max_early_placements: 0 | 1;
-  borrow_role_index: number;
-  borrow_placement_mask: string;
+  max_early_placements: number;
+  borrow_role_index: number | null;
+  borrow_placement_mask: string | null;
   normal_states: number;
   recovery_states: number;
   stage_one_checkpoint_step: number | null;

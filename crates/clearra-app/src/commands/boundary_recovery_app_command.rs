@@ -101,8 +101,16 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
             }
             .to_owned(),
             max_early_placements: self.query.max_early_placements,
-            borrow_role_index: self.query.borrow_role_index as u8,
-            borrow_placement_mask: mask_hex(self.query.borrow_placement_mask.words()),
+            borrow_role_index: self
+                .query
+                .early_placement
+                .selected()
+                .map(|(index, _)| index as u8),
+            borrow_placement_mask: self
+                .query
+                .early_placement
+                .selected()
+                .map(|(_, mask)| mask_hex(mask.words())),
             normal_states: report.normal_states,
             recovery_states: report.recovery_states,
             stage_one_checkpoint_step: report.stage_one_checkpoint_step,
@@ -197,10 +205,23 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
                 },
             ),
             RenderField::new("max_early_placements", self.query.max_early_placements),
-            RenderField::new("borrow_role_index", self.query.borrow_role_index),
+            RenderField::new(
+                "borrow_role_index",
+                self.query
+                    .early_placement
+                    .selected()
+                    .map_or(RenderFieldValue::Null, |(index, _)| {
+                        RenderFieldValue::from(index)
+                    }),
+            ),
             RenderField::new(
                 "borrow_placement_mask",
-                mask_hex(self.query.borrow_placement_mask.words()),
+                self.query
+                    .early_placement
+                    .selected()
+                    .map_or(RenderFieldValue::Null, |(_, mask)| {
+                        RenderFieldValue::from(mask_hex(mask.words()))
+                    }),
             ),
             RenderField::new("normal_states", report.normal_states),
             RenderField::new("recovery_states", report.recovery_states),
@@ -302,8 +323,16 @@ impl BoundaryRecoveryAppCommand {
             knowledge_basis: "full-pattern-universe".to_owned(),
             placement_role_scope: "bag-piece-exact-lock-time".to_owned(),
             max_early_placements: self.query.max_early_placements,
-            borrow_role_index: self.query.borrow_role_index as u8,
-            borrow_placement_mask: mask_hex(self.query.borrow_placement_mask.words()),
+            borrow_role_index: self
+                .query
+                .early_placement
+                .selected()
+                .map(|(index, _)| index as u8),
+            borrow_placement_mask: self
+                .query
+                .early_placement
+                .selected()
+                .map(|(_, mask)| mask_hex(mask.words())),
             normal_states: 0,
             recovery_states: 0,
             stage_one_checkpoint_step: None,

@@ -2032,7 +2032,7 @@ function inputHelp(entry, locale = "en") {
     case "boundary-recovery-v1":
       return [
         "Provide one JSON object with `initial_board_mask`, `target_board_mask`, `height`, `queue`, `stage_one_count`, and `placements`. Board masks are hexadecimal; the queue is 2–42 exact IOTSZJL pieces.",
-        "For one early placement, set `borrow_role_position` and either `borrow_placement_mask` or an exact `role_masks` array. A role is fixed geometry; supply pieces may fill matching roles in a different order. Set `max_early_placements` to 0 to search only the normal connection.",
+        "Set `max_early_placements` to a number from 0 through the second-stage role count. Without borrow options, the solver chooses all matching early roles. Cleared early placements still count. The optional legacy borrow options restrict exactly one role and require a maximum of 1. Supply tokens and placement roles remain distinct; no token is used twice.",
         "Optional `preserve_b2b_bags` is an array of one-based supply-bag positions; `preserve_b2b_stage_one` and `preserve_b2b_stage_two` toggle whole stages. `initial_b2b`, `hold`, `rule`, `spin_profile`, and `max_states` are optional.",
         "Add `queue_pattern` with complete seven-piece reference bags and all exact roles for weighted exhaustive evaluation. Bound it with `max_pattern_evaluations` and `max_total_states`; incomplete supply is reported separately from a proven no-path result.",
       ];
@@ -2340,7 +2340,7 @@ function koreanInputHelp(entry) {
     case "boundary-recovery-v1":
       return [
         "한 JSON 객체에 `initial_board_mask`, `target_board_mask`, `height`, `queue`, `stage_one_count`, `placements`를 넣습니다. 보드 마스크는 16진수이고 큐는 정확한 IOTSZJL 미노 2~42개입니다.",
-        "선행 배치 하나를 허용할 때 `borrow_role_position`과 `borrow_placement_mask` 또는 모든 `role_masks`를 지정합니다. 역할의 도형은 고정되며 같은 미노의 공급 순서는 달라질 수 있습니다. 일반 연결만 탐색하려면 `max_early_placements`를 0으로 둡니다.",
+        "`max_early_placements`는 0부터 2단계 역할 수까지 지정합니다. borrow 옵션을 생략하면 탐색기가 가능한 선행 배치를 선택하며, 줄 삭제로 사라진 배치도 개수에 포함합니다. 기존 borrow 옵션은 최대값 1에서 특정 역할 하나를 제한할 때만 사용합니다. 공급 미노와 배치 역할은 구분하며 같은 미노를 두 번 사용하지 않습니다.",
         "`preserve_b2b_bags`는 1부터 시작하는 공급 가방 위치 배열입니다. 두 단계 전체 토글과 `initial_b2b`, `hold`, `rule`, `spin_profile`, `max_states`도 선택할 수 있습니다.",
         "완전한 7미노 기준 가방과 정확한 역할 전체가 있으면 `queue_pattern`으로 가중 전수 평가를 요청합니다. `max_pattern_evaluations`와 `max_total_states`로 범위를 제한하며 미완료 공급을 무경로 증명과 구분합니다.",
       ];

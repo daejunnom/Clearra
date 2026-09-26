@@ -18,8 +18,10 @@ fn two_stage_query() -> BoundaryRecoveryQuery {
         placement_role_masks: Vec::new(),
         placement_role_pieces: Vec::new(),
         max_early_placements: 1,
-        borrow_role_index: 1,
-        borrow_placement_mask: Board256Mask::from_words([0x300c000, 0, 0, 0]),
+        early_placement: EarlyPlacementPolicy::SelectedRole {
+            index: 1,
+            placement: Board256Mask::from_words([0x300c000, 0, 0, 0]),
+        },
         hold_enabled: false,
         rule_profile: RuleProfileId::SrsPlus,
         spin_profile: SpinProfileId::AllSpinPlus,
@@ -73,7 +75,10 @@ fn recovery_rejects_a_different_early_placement_for_the_same_piece() {
     let mut query = two_stage_query();
     query.queue.push(PieceKind::T);
     query.hold_enabled = true;
-    query.borrow_placement_mask = Board256Mask::from_words([0x600c000, 0, 0, 0]);
+    query.early_placement = EarlyPlacementPolicy::SelectedRole {
+        index: 1,
+        placement: Board256Mask::from_words([0x600c000, 0, 0, 0]),
+    };
     let (result, _) = Pass::new(&query, &control(), 1).unwrap().run().unwrap();
     assert!(matches!(result, PassResult::NoPath));
 }
@@ -90,7 +95,7 @@ fn exhausted_state_budget_is_not_reported_as_impossibility() {
 fn zero_early_placements_runs_only_the_normal_connection() {
     let mut query = two_stage_query();
     query.max_early_placements = 0;
-    query.borrow_placement_mask = Board256Mask::EMPTY;
+    query.early_placement = EarlyPlacementPolicy::AnyStageTwoRole;
     let report = query.search(&control()).unwrap();
     assert_eq!(report.status, BoundaryRecoveryStatus::Normal);
     assert_eq!(report.recovery_states, 0);
@@ -109,7 +114,10 @@ fn lookahead_token_cannot_replace_a_required_second_stage_token() {
     assert_eq!(report.status, BoundaryRecoveryStatus::NoPath);
 
     query.max_early_placements = 1;
-    query.borrow_role_index = 2;
+    query.early_placement = EarlyPlacementPolicy::SelectedRole {
+        index: 2,
+        placement: Board256Mask::from_words([0xf, 0, 0, 0]),
+    };
     assert_eq!(
         query.search(&control()),
         Err(BoundaryRecoveryError::InvalidBorrowRole)
@@ -254,11 +262,13 @@ fn bag_roles_remain_fixed_while_supply_tokens_permute() {
     ];
     reference.stage_one_queue_len = 7;
     reference.required_placements = Some(14);
-    reference.borrow_role_index = 10;
     reference.placement_role_masks = (0..14)
         .map(|index| Board256Mask::from_words([0xf_u64 << (index * 4), 0, 0, 0]))
         .collect();
-    reference.borrow_placement_mask = reference.placement_role_masks[10];
+    reference.early_placement = EarlyPlacementPolicy::SelectedRole {
+        index: 10,
+        placement: reference.placement_role_masks[10],
+    };
     let plan = BoundaryRecoveryBagRolePlan::new(reference.clone()).unwrap();
     let mut sequence = reference.queue.clone();
     sequence[..7].reverse();
@@ -270,11 +280,7 @@ fn bag_roles_remain_fixed_while_supply_tokens_permute() {
         projected.placement_role_masks,
         reference.placement_role_masks
     );
-    assert_eq!(projected.borrow_role_index, reference.borrow_role_index);
-    assert_eq!(
-        projected.borrow_placement_mask,
-        reference.borrow_placement_mask
-    );
+    assert_eq!(projected.early_placement, reference.early_placement);
 
     sequence[7] = PieceKind::I;
     assert!(plan.query_for_sequence(&sequence).is_none());
@@ -290,7 +296,10 @@ fn identical_supply_pieces_can_fill_roles_across_the_stage_boundary() {
         Board256Mask::from_words([0xc03000000, 0, 0, 0]),
     ];
     query.placement_role_pieces = query.queue.clone();
-    query.borrow_placement_mask = query.placement_role_masks[1];
+    query.early_placement = EarlyPlacementPolicy::SelectedRole {
+        index: 1,
+        placement: query.placement_role_masks[1],
+    };
 
     let (result, states) = Pass::new(&query, &control(), 1).unwrap().run().unwrap();
     let PassResult::Found {
@@ -327,7 +336,11 @@ fn exact_early_roles_can_prove_recovery_only_after_normal_failure() {
         query.placement_role_masks[step.source_queue_index] =
             Board256Mask::from_words(step.placement_mask);
     }
-    query.borrow_placement_mask = query.placement_role_masks[query.borrow_role_index];
+    let (index, _) = query.early_placement.selected().unwrap();
+    query.early_placement = EarlyPlacementPolicy::SelectedRole {
+        index,
+        placement: query.placement_role_masks[index],
+    };
     let report = query.search(&control()).unwrap();
     assert_eq!(report.status, BoundaryRecoveryStatus::NonPcRecovery);
     assert!(report.normal_states > 0);

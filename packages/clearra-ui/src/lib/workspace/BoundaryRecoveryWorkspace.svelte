@@ -183,7 +183,7 @@
 >
   <div slot="editor" class="recovery-fields">
     <BoundaryRecoveryFields {request} {language} on:change={(event) => request = event.detail} />
-    <details class="placement-constraints" open={request.placementRoleMasks.length > 0 || request.maxEarlyPlacements === 1}>
+    <details class="placement-constraints" open={request.placementRoleMasks.length > 0}>
       <summary>{label('recoveryAdvanced')}</summary>
     {#if request.placementRoleMasks.length > 0}
       <WorkspaceBoardEditor
@@ -193,14 +193,6 @@
         enableGlobalPaste={false}
         on:change={(event) => setRoleMask(selectedRolePosition, event.detail.existingMask)}
         on:import={(event) => importRoleMask(event.detail.existingMask, event.detail.height)}
-      />
-    {:else if request.maxEarlyPlacements === 1}
-      <WorkspaceBoardEditor
-        mode="forward" height={request.height} existingMask={request.borrowPlacementMask}
-        targetMask={0n} piecesNeeded={1} {language}
-        labelOverride={label('recoveryBorrowPlacement')} enableGlobalPaste={false}
-        on:change={(event) => request = { ...request, borrowPlacementMask: event.detail.existingMask }}
-        on:import={(event) => importBorrowPlacement(event.detail.existingMask, event.detail.height)}
       />
     {/if}
     </details>

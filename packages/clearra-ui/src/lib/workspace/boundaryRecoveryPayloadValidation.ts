@@ -18,9 +18,17 @@ export function validateBoundaryRecoveryPayload(product: ClearraProductResultPay
         ['occupancy-only', 'exact-lock-time'].includes(report.placement_role_scope) &&
         population === undefined &&
         ['normal', 'pc-preserving-recovery', 'non-pc-recovery', 'no-path-within-declared-scope', 'incomplete'].includes(report.status)) &&
-    (report.max_early_placements === 0 || report.max_early_placements === 1) &&
-    Number.isInteger(report.borrow_role_index) && report.borrow_role_index >= 0 && report.borrow_role_index < 42 &&
-    /^0x[0-9a-f]{1,64}$/u.test(report.borrow_placement_mask) &&
+    Number.isInteger(report.max_early_placements) && report.max_early_placements >= 0 && report.max_early_placements < 42 &&
+    ((report.borrow_role_index === null && report.borrow_placement_mask === null) ||
+      (Number.isInteger(report.borrow_role_index) && report.borrow_role_index !== null &&
+       report.borrow_role_index >= 0 && report.borrow_role_index < 42 &&
+       typeof report.borrow_placement_mask === 'string' && /^0x[0-9a-f]{1,64}$/u.test(report.borrow_placement_mask) &&
+       report.max_early_placements <= 1)) &&
+    Number.isInteger(report.borrowed_stage_two_count) && report.borrowed_stage_two_count >= 0 &&
+    report.borrowed_stage_two_count <= report.max_early_placements &&
+    (!population || [population.normal_example, population.recovery_example].every((example) =>
+      !example || (Number.isInteger(example.borrowed_stage_two_count) && example.borrowed_stage_two_count >= 0 &&
+        example.borrowed_stage_two_count <= report.max_early_placements))) &&
     Number.isSafeInteger(report.normal_states) && report.normal_states >= 0 &&
     Number.isSafeInteger(report.recovery_states) && report.recovery_states >= 0 &&
     validSteps(report.steps) ? null : 'invalid boundary recovery payload';

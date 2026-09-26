@@ -2436,16 +2436,13 @@ fn parse_boundary_recovery_command(
                 };
             }
             "--max-early-placements" => {
-                max_early_placements = match next_value(tokens, &mut cursor, option)? {
-                    "0" => 0,
-                    "1" => 1,
-                    _ => {
-                        return Err(WebCommandError::new(
-                            WebCommandErrorCode::InvalidValue,
-                            "--max-early-placements must be 0 or 1",
-                        ))
-                    }
-                };
+                let value = next_value(tokens, &mut cursor, option)?;
+                max_early_placements = value.parse::<u8>().ok()
+                    .filter(|value| usize::from(*value) < clearra_forward_search::MAX_BOUNDARY_QUEUE_PIECES)
+                    .ok_or_else(|| WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "--max-early-placements requires a nonnegative integer within the second-stage role count",
+                    ))?;
             }
             "--borrow-role-position" => {
                 let position: usize =
@@ -2500,6 +2497,9 @@ fn parse_boundary_recovery_command(
                     )
                 })?;
             }
+            // This command executes the combined path; it does not filter an
+            // isolated stage-one Build candidate using its old spin evidence.
+            "--preserve-b2b" => preserve_b2b_by_stage = [true, true],
             "--preserve-b2b-stage-one" => preserve_b2b_by_stage[0] = true,
             "--preserve-b2b-stage-two" => preserve_b2b_by_stage[1] = true,
             "--preserve-b2b-bag" => {
@@ -2597,20 +2597,30 @@ fn parse_boundary_recovery_command(
         }
         placement_roles.into_values().collect()
     };
-    let borrow_role_index = if max_early_placements == 0 {
-        borrow_role_index.unwrap_or(0)
-    } else {
-        borrow_role_index.ok_or_else(|| required("--borrow-role-position"))?
-    };
-    let borrow_placement_mask = if max_early_placements == 0 {
-        borrow_placement_mask.unwrap_or(Board256Mask::EMPTY)
-    } else if let Some(mask) = borrow_placement_mask {
-        mask
-    } else {
-        placement_role_masks
-            .get(borrow_role_index)
-            .copied()
-            .ok_or_else(|| required("--borrow-placement-mask or complete --role-mask set"))?
+    if usize::from(max_early_placements) > placement_horizon - stage_one_queue_len {
+        return Err(WebCommandError::new(
+            WebCommandErrorCode::InvalidValue,
+            "--max-early-placements exceeds the available second-stage roles",
+        ));
+    }
+    let early_placement = match (borrow_role_index, borrow_placement_mask) {
+        (None, None) => clearra_forward_search::EarlyPlacementPolicy::AnyStageTwoRole,
+        (None, Some(_)) => {
+            return Err(required(
+                "--borrow-role-position with --borrow-placement-mask",
+            ))
+        }
+        (Some(index), mask) => {
+            if max_early_placements > 1 {
+                return Err(WebCommandError::new(WebCommandErrorCode::InvalidValue,
+                    "a selected single early role cannot be combined with a maximum above one; omit both borrow options to search every role"));
+            }
+            let placement = mask
+                .or_else(|| placement_role_masks.get(index).copied())
+                .or_else(|| (max_early_placements == 0).then_some(Board256Mask::EMPTY))
+                .ok_or_else(|| required("--borrow-placement-mask or complete --role-mask set"))?;
+            clearra_forward_search::EarlyPlacementPolicy::SelectedRole { index, placement }
+        }
     };
     let query = BoundaryRecoveryQuery {
         initial_board: initial_board.ok_or_else(|| required("--initial-board-mask"))?,
@@ -2623,8 +2633,7 @@ fn parse_boundary_recovery_command(
         placement_role_masks,
         placement_role_pieces: Vec::new(),
         max_early_placements,
-        borrow_role_index,
-        borrow_placement_mask,
+        early_placement,
         hold_enabled,
         rule_profile,
         spin_profile,

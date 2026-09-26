@@ -46,12 +46,25 @@ pub(super) fn search(
     let mut recovery_states = 0_usize;
     // Never classify recovery from an early horizon before ruling out a
     // normal connection at every other horizon. Unknown stays unknown.
-    for borrowed in 0..=source.max_early_placements {
+    for borrowed in
+        [0, source.max_early_placements]
+            .into_iter()
+            .take(if source.max_early_placements == 0 {
+                1
+            } else {
+                2
+            })
+    {
         for &count in &horizons {
             if control.is_cancelled() {
                 return Err(BoundaryRecoveryError::Cancelled);
             }
-            if borrowed > 0 && source.borrow_role_index >= count {
+            if borrowed > 0
+                && source
+                    .early_placement
+                    .selected()
+                    .is_some_and(|(index, _)| index >= count)
+            {
                 continue;
             }
             let mut query = source.clone();
@@ -110,8 +123,7 @@ mod tests {
             placement_role_masks: Vec::new(),
             placement_role_pieces: Vec::new(),
             max_early_placements: 0,
-            borrow_role_index: 1,
-            borrow_placement_mask: Board256Mask::EMPTY,
+            early_placement: EarlyPlacementPolicy::AnyStageTwoRole,
             hold_enabled: false,
             rule_profile: RuleProfileId::SrsPlus,
             spin_profile: SpinProfileId::AllSpinPlus,

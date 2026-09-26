@@ -14,6 +14,7 @@ mod t_spin_acceleration;
 pub use boundary_recovery::{
     BoundaryRecoveryBagRoleError, BoundaryRecoveryBagRolePlan, BoundaryRecoveryError,
     BoundaryRecoveryQuery, BoundaryRecoveryReport, BoundaryRecoveryStatus, BoundaryRecoveryStep,
+    EarlyPlacementPolicy, MAX_BOUNDARY_QUEUE_PIECES,
 };
 pub use boundary_recovery_pattern::{BoundaryRecoveryPatternError, BoundaryRecoveryPatternQuery};
 pub use boundary_recovery_population::{

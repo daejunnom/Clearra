@@ -48,6 +48,7 @@ test('boundary recovery keeps one fixed queue and independent bag B2B choices ac
     borrowRolePosition: 2,
     borrowPlacementMask: 0x300c000n,
     holdEnabled: false,
+    preserveB2B: undefined, // explicit legacy per-bag request
     preserveB2BBags: [1]
   };
   assert.deepEqual(validateBoundaryRecoveryRequest(request), []);
@@ -150,7 +151,7 @@ test('recovery payload preserves distinct supply and placement-role identities',
       status: 'non-pc-recovery', knowledge_basis: 'full-fixed-queue',
       placement_role_scope: 'exact-lock-time', max_early_placements: 1,
       borrow_role_index: 1, borrow_placement_mask: step.placement_mask,
-      normal_states: 1, recovery_states: 1, steps: [step]
+      normal_states: 1, recovery_states: 1, borrowed_stage_two_count: 1, steps: [step]
     } }
   };
   assert.equal(validateBoundaryRecoveryPayload(payload), null);

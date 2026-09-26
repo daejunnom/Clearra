@@ -28,7 +28,42 @@ use crate::{
 
 // Five stage-one 7-bags plus the adjacent stage-two bag remain addressable.
 // An optional explicit state budget reports exhaustion as incomplete.
-const MAX_QUEUE_PIECES: usize = 42;
+pub const MAX_BOUNDARY_QUEUE_PIECES: usize = 42;
+const MAX_QUEUE_PIECES: usize = MAX_BOUNDARY_QUEUE_PIECES;
+
+/// Which second-stage diagram roles may precede the first-stage checkpoint.
+/// The amount is owned by `max_early_placements`, independently of selection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EarlyPlacementPolicy {
+    /// Explore every matching, unfulfilled second-stage role. Source token
+    /// identity never decides which diagram role that token must fill.
+    #[default]
+    AnyStageTwoRole,
+    /// Compatibility for callers that explicitly constrain one early role.
+    SelectedRole {
+        index: usize,
+        placement: Board256Mask,
+    },
+}
+
+impl EarlyPlacementPolicy {
+    pub const fn selected(self) -> Option<(usize, Board256Mask)> {
+        match self {
+            Self::AnyStageTwoRole => None,
+            Self::SelectedRole { index, placement } => Some((index, placement)),
+        }
+    }
+
+    fn allows(self, role_index: usize, placement: ForwardBoard) -> bool {
+        match self {
+            Self::AnyStageTwoRole => true,
+            Self::SelectedRole {
+                index,
+                placement: required,
+            } => role_index == index && placement.words() == required.words(),
+        }
+    }
+}
 #[path = "boundary_recovery_auto.rs"]
 mod automatic;
 
@@ -54,14 +89,10 @@ pub struct BoundaryRecoveryQuery {
     /// Empty uses the fixed reference queue as the role-piece catalog. Pattern
     /// adapters retain reference roles while permuting supply tokens.
     pub placement_role_pieces: Vec<PieceKind>,
-    /// Zero runs only the normal connection proof; one permits the selected
-    /// stage-two placement to be locked before stage-one cleanup.
+    /// Maximum cumulative second-stage locks before the first-stage checkpoint.
+    /// Cleared or compacted early cells still count. Zero proves normal paths only.
     pub max_early_placements: u8,
-    /// The selected stage-two role allowed before stage-one cleanup.
-    pub borrow_role_index: usize,
-    /// Exact lock-time geometry of that selected early placement. It may
-    /// compact to different cells after the stage-one line clear.
-    pub borrow_placement_mask: Board256Mask,
+    pub early_placement: EarlyPlacementPolicy,
     pub hold_enabled: bool,
     pub rule_profile: RuleProfileId,
     pub spin_profile: SpinProfileId,
@@ -338,8 +369,13 @@ impl BoundaryRecoveryQuery {
         {
             return Err(BoundaryRecoveryError::InvalidStageBoundary);
         }
-        if self.max_early_placements > 1 {
+        if usize::from(self.max_early_placements)
+            > self.placement_horizon() - self.stage_one_queue_len
+        {
             return Err(BoundaryRecoveryError::InvalidEarlyPlacementLimit);
+        }
+        if self.max_early_placements > 1 && self.early_placement.selected().is_some() {
+            return Err(BoundaryRecoveryError::InvalidBorrowRole);
         }
         if !self.placement_role_masks.is_empty()
             && (self.placement_role_masks.len() != self.placement_horizon()
@@ -372,22 +408,23 @@ impl BoundaryRecoveryQuery {
                 return Err(BoundaryRecoveryError::InvalidPlacementRoles);
             }
         }
-        if self.max_early_placements == 1
-            && (self.borrow_role_index < self.stage_one_queue_len
-                || self.borrow_role_index >= self.placement_horizon()
-                || self.borrow_placement_mask.fits_cell_count(cells) != Ok(true)
-                || self
-                    .borrow_placement_mask
-                    .words()
-                    .iter()
-                    .map(|word| word.count_ones())
-                    .sum::<u32>()
-                    != 4
-                || (!self.placement_role_masks.is_empty()
-                    && self.placement_role_masks[self.borrow_role_index].words()
-                        != self.borrow_placement_mask.words()))
-        {
-            return Err(BoundaryRecoveryError::InvalidBorrowRole);
+        if self.max_early_placements > 0 {
+            if let Some((index, placement)) = self.early_placement.selected() {
+                if index < self.stage_one_queue_len
+                    || index >= self.placement_horizon()
+                    || placement.fits_cell_count(cells) != Ok(true)
+                    || placement
+                        .words()
+                        .iter()
+                        .map(|word| word.count_ones())
+                        .sum::<u32>()
+                        != 4
+                    || (!self.placement_role_masks.is_empty()
+                        && self.placement_role_masks[index].words() != placement.words())
+                {
+                    return Err(BoundaryRecoveryError::InvalidBorrowRole);
+                }
+            }
         }
         if self.max_states == Some(0) {
             return Err(BoundaryRecoveryError::InvalidStateLimit);
@@ -427,7 +464,8 @@ impl BoundaryRecoveryQuery {
         }
         let mut recovery_query = self.clone();
         recovery_query.max_states = remaining_states;
-        let (recovery, recovery_states) = Pass::new(&recovery_query, control, 1)?.run()?;
+        let (recovery, recovery_states) =
+            Pass::new(&recovery_query, control, self.max_early_placements)?.run()?;
         Ok(report(recovery, normal_states, recovery_states, true))
     }
 }
@@ -597,11 +635,16 @@ impl<'a> Pass<'a> {
         for choice in choices {
             // The tail is lookahead for the one-slot hold, not another target
             // role that can replace one of the declared placement tokens.
-            if usize::from(choice.token.index) >= self.query.placement_horizon() {
+            if usize::from(choice.token.index) >= self.query.placement_horizon()
+                || state.placed_mask & (1_u64 << choice.token.index) != 0
+            {
                 continue;
             }
             let preserve_b2b = self.requires_b2b_for_lock(state, usize::from(choice.token.index));
-            let role_candidates: Vec<usize> = if self.query.placement_role_masks.is_empty() {
+            let role_candidates: Vec<usize> = if self.query.placement_role_masks.is_empty()
+                && self.query.early_placement.selected().is_some()
+            {
+                // Explicit legacy single-token diagrams retain their narrower contract.
                 vec![usize::from(choice.token.index)]
             } else {
                 (0..self.query.placement_horizon())
@@ -670,8 +713,7 @@ impl<'a> Pass<'a> {
                     if is_stage_two
                         && state.checkpoint_step.is_none()
                         && (state.borrowed_count >= self.max_borrowed
-                            || role_index != self.query.borrow_role_index
-                            || lock.mask.words() != self.query.borrow_placement_mask.words())
+                            || !self.query.early_placement.allows(role_index, lock.mask))
                     {
                         continue;
                     }
@@ -693,6 +735,7 @@ impl<'a> Pass<'a> {
                         compact_tag(stage_one_placed, cleared_rows, self.query.height);
                     let stage_two_board =
                         compact_tag(stage_two_placed, cleared_rows, self.query.height);
+                    debug_assert_eq!(state.placed_mask & (1_u64 << choice.token.index), 0);
                     let placed_mask = state.placed_mask | (1_u64 << choice.token.index);
                     let fulfilled_role_mask = state.fulfilled_role_mask | (1_u64 << role_index);
                     let stage_one_mask = (1_u64 << self.query.stage_one_queue_len) - 1;
@@ -819,3 +862,7 @@ fn compact_tag(board: ForwardBoard, cleared_rows: u32, height: u8) -> ForwardBoa
 #[cfg(test)]
 #[path = "boundary_recovery_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "boundary_recovery_multi_tests.rs"]
+mod multi_tests;

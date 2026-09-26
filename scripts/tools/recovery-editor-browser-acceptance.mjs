@@ -93,7 +93,7 @@ try {
       assert.equal(await page.locator('.recovery-field-editor .board').count(), 1);
       assert.equal((await state(page)).placements, null);
       assert.equal((await state(page)).maxStates, null);
-      assert.equal(await page.locator('input[type="number"]').count(), 2, 'only stage boundary and early role need numeric controls');
+      assert.equal(await page.locator('input[type="number"]').count(), 1, 'only the legacy stage boundary is a numeric input');
       const ruleLabel = spec.language === 'ko' ? '룰' : 'Rule';
       const spinLabel = spec.language === 'ko' ? '스핀 프로필' : 'Spin profile';
       const rules = page.getByRole('combobox', { name: ruleLabel, exact: true });
@@ -107,6 +107,36 @@ try {
       assert.equal(await page.locator('.pattern-help').getAttribute('open'), '');
       assert.equal(await page.locator('.pattern-help dl').isVisible(), true);
       await click(page, page.locator('.pattern-help summary'), spec.touch);
+      const earlyLabel = spec.language === 'ko' ? '최대 선행 배치 수' : 'Maximum early placements';
+      const early = page.getByRole('combobox', { name: earlyLabel, exact: true });
+      const source = page.locator('.workspace-control-section').first().getByRole('textbox');
+      await source.fill('OOOO');
+      await flush(page);
+      assert.deepEqual(await early.locator('option').evaluateAll(options => options.map(option => option.value)), ['0', '1', '2', '3']);
+      for (const count of ['2', '3']) {
+        await early.selectOption(count);
+        await flush(page);
+        const value = await state(page);
+        assert.equal(value.maxEarly, Number(count));
+        assert.equal(value.args[value.args.indexOf('--max-early-placements') + 1], count);
+        assert.ok(!value.args.includes('--borrow-role-position'));
+        assert.ok(!value.args.includes('--borrow-placement-mask'));
+      }
+      await source.fill('IO');
+      await flush(page);
+      assert.equal((await state(page)).maxEarly, 3, 'shorter drafts do not silently clamp a requested quota');
+      assert.equal(await early.getAttribute('aria-invalid'), 'true');
+      await early.selectOption('1');
+      await flush(page);
+      const b2b = page.getByRole('checkbox', { name: spec.language === 'ko' ? 'B2B 보존' : 'Preserve B2B', exact: true });
+      await b2b.check();
+      await flush(page);
+      assert.ok((await state(page)).args.includes('--preserve-b2b'));
+      assert.ok(!(await state(page)).args.includes('--preserve-b2b-stage-one'));
+      assert.ok(!(await state(page)).args.includes('--preserve-b2b-stage-two'));
+      await b2b.uncheck();
+      await flush(page);
+      assert.ok(!(await state(page)).args.includes('--preserve-b2b'));
       const colors = [];
       for (let i = 0; i < 3; i++) {
         await select(i);
@@ -133,7 +163,8 @@ try {
       assert.equal((await state(page)).hold, false);
       await page.getByRole('checkbox', { name: spec.exact, exact: true }).check();
       assert.equal((await state(page)).roles, 2);
-      await click(page, page.getByRole('button', { name: spec.normal, exact: true }), spec.touch);
+      await early.selectOption('0');
+      await flush(page);
       assert.equal((await state(page)).maxEarly, 0);
       // Exercise the same exact-name role selector before the expensive WASM
       // gate, and prove native changes reach the actual component event owner.

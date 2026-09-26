@@ -12,9 +12,9 @@ const SPIN_PROFILES = new Set([
 ]);
 const KEYS = new Set([
   "initial_board_mask", "target_board_mask", "height", "queue",
-  "stage_one_count", "placements", "role_masks", "max_early_placements",
+  "stage_one_count", "placements", "role_masks", "max_early_placements", "stage_one_board_mask",
   "borrow_role_position", "borrow_placement_mask", "hold", "rule",
-  "spin_profile", "initial_b2b", "preserve_b2b_stage_one",
+  "spin_profile", "initial_b2b", "preserve_b2b", "preserve_b2b_stage_one",
   "preserve_b2b_stage_two", "preserve_b2b_bags", "max_states",
   "queue_pattern", "max_pattern_evaluations", "max_total_states",
 ]);
@@ -81,31 +81,26 @@ export function boundaryRecoveryArguments(command, scenarioText) {
   if (queue === null) throw invalid("queue must contain 2 through 42 exact IOTSZJL pieces.");
   const placements = integer(scenario.placements, "placements", 2, queue.length);
   const stageOne = integer(scenario.stage_one_count, "stage_one_count", 1, placements - 1);
-  const early = integer(scenario.max_early_placements ?? 1, "max_early_placements", 0, 1);
+  const early = integer(scenario.max_early_placements ?? 1, "max_early_placements", 0, placements - stageOne);
   const maxStates = integer(scenario.max_states ?? 100_000, "max_states", 1, 1_000_000);
   const roleMasks = scenario.role_masks === undefined ? [] : scenario.role_masks;
   if (!Array.isArray(roleMasks) || roleMasks.length > 0 && roleMasks.length !== placements) {
     throw invalid("role_masks must specify every required placement role or be omitted.");
   }
   const roles = roleMasks.map((value, index) => mask(value, `role_masks[${index}]`, fieldLimit, true));
-  const borrowPosition = early === 1
-    ? integer(scenario.borrow_role_position, "borrow_role_position", stageOne + 1, placements)
-    : undefined;
-  if (early === 0 && scenario.borrow_role_position !== undefined) {
-    throw invalid("borrow_role_position requires max_early_placements=1.");
-  }
-  const borrowedMask = early === 1 && roles.length === 0
-    ? mask(scenario.borrow_placement_mask, "borrow_placement_mask", fieldLimit, true)
-    : undefined;
-  if (early === 0 && scenario.borrow_placement_mask !== undefined) {
-    throw invalid("borrow_placement_mask requires max_early_placements=1.");
-  }
-  if (scenario.borrow_placement_mask !== undefined && roles.length > 0 &&
+  const selected = scenario.borrow_role_position !== undefined || scenario.borrow_placement_mask !== undefined;
+  if (selected && early !== 1) throw invalid("a selected early role requires max_early_placements=1; omit borrow options for multiple roles.");
+  const borrowPosition = selected
+    ? integer(scenario.borrow_role_position, "borrow_role_position", stageOne + 1, placements) : undefined;
+  const borrowedMask = selected && roles.length === 0
+    ? mask(scenario.borrow_placement_mask, "borrow_placement_mask", fieldLimit, true) : undefined;
+  if (selected && scenario.borrow_placement_mask !== undefined && roles.length > 0 &&
       mask(scenario.borrow_placement_mask, "borrow_placement_mask", fieldLimit, true) !== roles[borrowPosition - 1]) {
     throw invalid("borrow_placement_mask must match the selected placement role.");
   }
   const hold = boolean(scenario.hold, "hold", true);
   const initialB2B = boolean(scenario.initial_b2b, "initial_b2b", true);
+  const preserveB2B = boolean(scenario.preserve_b2b, "preserve_b2b", false);
   const stageOneB2B = boolean(scenario.preserve_b2b_stage_one, "preserve_b2b_stage_one", false);
   const stageTwoB2B = boolean(scenario.preserve_b2b_stage_two, "preserve_b2b_stage_two", false);
   const rule = scenario.rule ?? "srs-plus";
@@ -136,6 +131,7 @@ export function boundaryRecoveryArguments(command, scenarioText) {
     ...command.argvPrefix,
     "--initial-board-mask", initial,
     "--target-board-mask", target,
+    ...(scenario.stage_one_board_mask === undefined ? [] : ["--stage-one-board-mask", mask(scenario.stage_one_board_mask, "stage_one_board_mask", fieldLimit)]),
     "--height", String(height),
     "--queue", queue,
     "--stage-one-count", String(stageOne),
@@ -150,6 +146,7 @@ export function boundaryRecoveryArguments(command, scenarioText) {
     "--max-states", String(maxStates),
   ];
   roles.forEach((value, index) => args.push("--role-mask", `${index + 1}:${value}`));
+  if (preserveB2B) args.push("--preserve-b2b");
   if (stageOneB2B) args.push("--preserve-b2b-stage-one");
   if (stageTwoB2B) args.push("--preserve-b2b-stage-two");
   b2bBags.forEach((bag) => args.push("--preserve-b2b-bag", String(bag)));

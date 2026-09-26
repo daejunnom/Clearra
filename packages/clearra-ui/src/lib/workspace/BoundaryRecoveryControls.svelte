@@ -7,7 +7,7 @@
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import QueueTextInput from '../components/QueueTextInput.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
-  import { boundaryRecoveryBagSlots, recoveryPlacementHorizon, updateRecoveryQueue, type BoundaryRecoveryRequest } from './boundaryRecoveryModel';
+  import { availableEarlyPlacementCount, recoveryPlacementHorizon, updateRecoveryQueue, type BoundaryRecoveryRequest } from './boundaryRecoveryModel';
   import { componentMessage, type ComponentMessageKey } from '../i18n/componentCatalog';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
@@ -20,17 +20,13 @@
   $: label = (key: ComponentMessageKey) => componentMessage(language, key);
   $: standard = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: horizon = recoveryPlacementHorizon(request);
-  $: bagSlots = boundaryRecoveryBagSlots(request.stageOneCount, horizon);
+  $: earlyLimit = availableEarlyPlacementCount(request);
+  $: earlyOptions = Array.from({ length: earlyLimit + 1 }, (_, count) => count);
   $: roleCount = Number.isInteger(horizon) && horizon >= 2 && horizon <= 42 ? horizon : 0;
   function patch(value: Partial<BoundaryRecoveryRequest>) { dispatch('change', { ...request, ...value }); }
   function exactRoles(enabled: boolean) {
     if (!enabled) savedRoles = request.placementRoleMasks;
     patch({ placementRoleMasks: enabled ? Array.from({ length: roleCount }, (_, i) => savedRoles[i] ?? 0n) : [] });
-  }
-  function bagB2b(position: number, enabled: boolean) {
-    const bags = new Set(request.preserveB2BBags);
-    if (enabled) bags.add(position); else bags.delete(position);
-    patch({ preserveB2BBags: [...bags].sort((a,b) => a-b) });
   }
 </script>
 
@@ -57,13 +53,18 @@
   </section>
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading"><Gauge size={16} strokeWidth={1.8} />{standard('search')}</h2>
-    <span class="workspace-field-label">{label('recoveryMaxEarlyPlacements')}</span>
-    <div class="workspace-segmented two" role="group" aria-label={label('recoveryMaxEarlyPlacements')}>
-      {#each [0, 1] as count}
-        <button type="button" class:active={request.maxEarlyPlacements === count} aria-pressed={request.maxEarlyPlacements === count}
-          on:click={() => patch({ maxEarlyPlacements: count as 0 | 1 })}>{label(count === 0 ? 'recoveryNoEarly' : 'recoveryOneEarly')}</button>
-      {/each}
-    </div>
+    <label class="workspace-field">
+      <span>{label('recoveryMaxEarlyPlacements')}</span>
+      <select value={request.maxEarlyPlacements} aria-invalid={!earlyOptions.includes(request.maxEarlyPlacements)}
+        disabled={earlyLimit === 0}
+        on:change={(event) => patch({ maxEarlyPlacements: Number(event.currentTarget.value) })}>
+        {#if !earlyOptions.includes(request.maxEarlyPlacements)}
+          <option value={request.maxEarlyPlacements} disabled>{request.maxEarlyPlacements}</option>
+        {/if}
+        {#each earlyOptions as count}<option value={count}>{count}</option>{/each}
+      </select>
+      <small class="workspace-field-help">{label('recoveryEarlyCountHelp')}</small>
+    </label>
     <div class="workspace-field-grid">
       <RuleProfileSelect value={request.rule} {language}
         on:change={(event) => patch({ rule: event.detail })} />
@@ -72,19 +73,9 @@
     </div>
   </section>
   <section class="workspace-control-section">
-    <h2 class="workspace-control-heading">{label('recoveryB2b')}</h2>
-    <div class="workspace-toggle-grid">
-      <label class="workspace-switch-label"><input type="checkbox" checked={request.initialB2B}
-        on:change={(event) => patch({ initialB2B: (event.currentTarget as HTMLInputElement).checked })} />
-        <span class="workspace-switch" aria-hidden="true"></span><span>{label('recoveryInitialB2b')}</span>
-      </label>
-      {#each bagSlots as bag}
-        <label class="workspace-switch-label"><input type="checkbox" checked={request.preserveB2BBags.includes(bag.position)}
-          on:change={(event) => bagB2b(bag.position, (event.currentTarget as HTMLInputElement).checked)} />
-          <span class="workspace-switch" aria-hidden="true"></span><span>{label(bag.stage === 1 ? 'recoveryPreserveStageOne' : 'recoveryPreserveStageTwo')} · {label('recoveryBagUnit')} {bag.stageBag}</span>
-        </label>
-      {/each}
-    </div>
+    <WorkspaceToggle label={standard('preserveB2B')} checked={request.preserveB2B ?? false}
+      on:change={(event) => patch({ preserveB2B: event.detail })} />
+    <p class="workspace-field-help">{label('recoveryB2bReplayHelp')}</p>
   </section>
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading">{label('recoveryAdvanced')}</h2>
@@ -100,12 +91,7 @@
           </select>
         </label>
       {/if}
-      {#if request.maxEarlyPlacements === 1}
-        <label class="workspace-field"><span>{label('recoveryBorrowPosition')}</span>
-          <input type="number" min={request.stageOneCount + 1} max={horizon} value={request.borrowRolePosition}
-            on:input={(event) => patch({ borrowRolePosition: (event.currentTarget as HTMLInputElement).valueAsNumber })} />
-        </label>
-      {/if}
+
     </div>
     <label class="workspace-field wide"><span>{label('recoveryQueuePattern')}</span>
       <QueueTextInput class="workspace-queue-input" value={request.queuePattern} placeholder="IJLOSTZP7" spellcheck="false"

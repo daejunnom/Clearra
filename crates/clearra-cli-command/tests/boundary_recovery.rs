@@ -14,9 +14,15 @@ fn fixed_queue_boundary_recovery_uses_one_continuous_app_request() {
     assert_eq!(command.query().queue.len(), 2);
     assert!(command.query().stage_one_target.is_empty());
     assert_eq!(command.query().stage_one_queue_len, 1);
-    assert_eq!(command.query().borrow_role_index, 1);
+    assert_eq!(command.query().early_placement.selected().unwrap().0, 1);
     assert_eq!(
-        command.query().borrow_placement_mask.words(),
+        command
+            .query()
+            .early_placement
+            .selected()
+            .unwrap()
+            .1
+            .words(),
         [0x300c000, 0, 0, 0]
     );
     assert_eq!(command.query().preserve_b2b_by_stage, [true, false]);
@@ -106,7 +112,13 @@ fn complete_diagram_roles_bind_each_source_token_to_its_lock_mask() {
         panic!("expected boundary recovery");
     };
     assert_eq!(
-        recovery.query().borrow_placement_mask.words(),
+        recovery
+            .query()
+            .early_placement
+            .selected()
+            .unwrap()
+            .1
+            .words(),
         [0x300c000, 0, 0, 0]
     );
 }
@@ -232,4 +244,61 @@ fn automatic_exact_roles_keep_pattern_contract_and_explicit_total_limits() {
     let response = AppContext::default().run(request);
     assert_eq!(response.status(), AppStatus::ValidationFailed);
     assert_eq!(response.error().unwrap().code(), AppErrorCode::InvalidInput);
+}
+
+#[test]
+fn multiple_early_roles_execute_through_the_public_cli_and_preserve_their_scope() {
+    use clearra_host_contract::ProductResultPayloadContent;
+    for early in [2_u32, 3] {
+        let top = 0xc03_u128 << (20 * early);
+        let all = (0..=early).fold(0_u128, |board, row| board | (0xc03_u128 << (20 * row)));
+        let mut base = format!("clearra recovery boundary --initial-board-mask 0 --stage-one-board-mask 0x{top:x} --target-board-mask 0x{all:x} --height {} --queue {} --stage-one-count 1 --no-hold --role-mask 1:0x{top:x}", 2 * (early + 1), "O".repeat((early + 1) as usize));
+        for index in 0..early {
+            base.push_str(&format!(
+                " --role-mask {}:0x{:x}",
+                index + 2,
+                0xc03_u128 << (20 * index)
+            ));
+        }
+        for cap in [early - 1, early] {
+            let request = CliCommandParser::parse(&format!(
+                "{base} --max-early-placements {cap} --preserve-b2b"
+            ))
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+            let AppCommand::BoundaryRecovery(command) = request.command() else {
+                panic!("typed recovery");
+            };
+            assert_eq!(command.query().early_placement.selected(), None);
+            assert_eq!(command.query().preserve_b2b_by_stage, [true, true]);
+            let response = AppContext::default().run(request);
+            assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+            let public = response.to_host_response();
+            let payload = public.product_result_payload().unwrap();
+            let ProductResultPayloadContent::BoundaryRecovery(report) = payload.content() else {
+                panic!("typed result");
+            };
+            assert_eq!(report.max_early_placements, cap as u8);
+            assert_eq!(report.borrow_role_index, None);
+            assert_eq!(report.borrow_placement_mask, None);
+            if cap == early {
+                assert_eq!(report.status, "non-pc-recovery");
+                assert_eq!(report.borrowed_stage_two_count, early as usize);
+                assert_eq!(report.steps.len(), (early + 1) as usize);
+                assert!(report.steps.iter().all(|step| step.b2b_active_after));
+            } else {
+                assert_eq!(report.status, "no-path-within-declared-scope");
+            }
+        }
+        for bad in ["-1", "1.5", "256", "42"] {
+            assert!(
+                CliCommandParser::parse(&format!("{base} --max-early-placements {bad}")).is_err()
+            );
+        }
+        assert!(CliCommandParser::parse(&format!(
+            "{base} --max-early-placements 2 --borrow-role-position 2"
+        ))
+        .is_err());
+    }
 }
