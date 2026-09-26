@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Verify native stack repair without publishing
+run-name: Verify native stack budgets before canonical release
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -13,18 +13,20 @@ concurrency:
 jobs:
   native-stack:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         os: [ubuntu-latest, windows-latest]
+        profile: [debug, release]
     env:
-      CLEARRA_SOURCE_COMMIT: 589493d4a9f70a126ddbdc312bbd1e211f803c68
-      CLEARRA_ENGINE_BUILD_ID: 589493d4a9f70a126ddbdc312bbd1e211f803c68
+      CLEARRA_SOURCE_COMMIT: 9f454c93c2c0eb83163445b4bc50aea724f53a8f
+      CLEARRA_ENGINE_BUILD_ID: 9f454c93c2c0eb83163445b4bc50aea724f53a8f
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 589493d4a9f70a126ddbdc312bbd1e211f803c68
+          ref: 9f454c93c2c0eb83163445b4bc50aea724f53a8f
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -35,21 +37,25 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CLEARRA_SOURCE_COMMIT"
-          test "$(git show -s --format=%P HEAD)" = 56d1d1830825eb1a09cde113e4e96675238da46a
+          test "$(git show -s --format=%P HEAD)" = 589493d4a9f70a126ddbdc312bbd1e211f803c68
           test "$(git diff --name-only 44c104ff242196f2f06be9bc5162c7d0a1f1b878 HEAD)" = crates/clearra-wasm/tests/wasm_host_contract.rs
           git diff --check 44c104ff242196f2f06be9bc5162c7d0a1f1b878 HEAD
           rustup toolchain install 1.98.1 --profile minimal --component rustfmt
           cargo fmt --all --check
-      - name: Execute real Build and PC contracts without a large inherited stack
+      - name: Execute real Build and PC contracts with test-owned native stack bounds
         shell: bash
+        env:
+          TEST_PROFILE: ${{ matrix.profile }}
         run: |
           set -euo pipefail
           unset RUST_MIN_STACK
-          echo "source=$CLEARRA_SOURCE_COMMIT inherited_stack=unset explicit_build_stack=2097152"
-          cargo test --locked -p clearra-wasm --test wasm_host_contract --test terminal_supply_public_contract --test pc_minimals_stack_contract -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/native-stack.log"
+          args=()
+          if [[ "$TEST_PROFILE" == release ]]; then args+=(--release); fi
+          echo "source=$CLEARRA_SOURCE_COMMIT profile=$TEST_PROFILE inherited_stack=unset build_debug_stack=16777216 build_optimized_stack=2097152 pc_stack=2097152"
+          cargo test --locked "${args[@]}" -p clearra-wasm --test wasm_host_contract --test terminal_supply_public_contract --test pc_minimals_stack_contract -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/native-stack.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/native-stack.log"
       - name: Execute the exact Windows canonical source-contract entrypoint
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.profile == 'debug'
         shell: pwsh
         env:
           CLEARRA_BUILD_PURPOSE: product
@@ -63,7 +69,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-stack-${{ matrix.os }}-${{ github.run_id }}
+          name: native-stack-${{ matrix.os }}-${{ matrix.profile }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/native-stack.log
             ${{ runner.temp }}/canonical-wasm-contracts.log
