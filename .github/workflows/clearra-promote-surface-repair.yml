@@ -1,5 +1,5 @@
 name: Start verified release gates
-run-name: Deploy recovery after corrected role-selector acceptance
+run-name: Deploy recovery after committed-view navigation acceptance
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 29c268e095f6a6f8ce66cdf57c8c451481b29873
+          ref: 246e1c5ee9a743ab9a24ba731af55ccc6b805ddd
           fetch-depth: 0
           persist-credentials: true
       - name: Require exact acceptance then fast-forward and start canonical gates
@@ -32,12 +32,12 @@ jobs:
 
           REPO = 'daejunnom/Clearra'
           BASE = '521fee125b478a5a39a90a808d6c471c430c8494'
-          SOURCE = '29c268e095f6a6f8ce66cdf57c8c451481b29873'
-          PARENT = '41e2f4a16920204ab495e0ff3f60cc668cbe2242'
-          TREE = '018b255c35e88f2019035ee200828cb26762df5d'
-          GATE_ID = 36247428986
-          GATE_CONTROL = 'aa43c193e9f94dda1f87635980b01c5e6d947c74'
-          GATE_WORKFLOW_BLOB = 'f84a41829d9162f1c71237146ce18913a2e2d289'
+          SOURCE = '246e1c5ee9a743ab9a24ba731af55ccc6b805ddd'
+          PARENT = '29c268e095f6a6f8ce66cdf57c8c451481b29873'
+          TREE = '1d40c2161033065fdb7036c2ae7b535e50a64691'
+          GATE_ID = 36250381491
+          GATE_CONTROL = '80a863782b5a1b29c303eeb7c5f6f5604dabb260'
+          GATE_WORKFLOW_BLOB = 'bf7b3e83db8907f7dfae470616a7b9f7672fcbaf'
           BRANCH = 'codex/recovery-gray-fields-20260926'
           EXPECTED = [
               'crates/clearra-cli-command/src/web_command_parser.rs',
