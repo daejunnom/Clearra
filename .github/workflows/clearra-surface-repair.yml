@@ -21,9 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 5dff608cd56de7d81a864115abb5355ca0c2cb05
+          ref: ce9d3f787d305f626337d51c7dbfe8f66c502958
           fetch-depth: 0
-      - name: Apply the reviewed Pages preparation after the semantic contract fix
+      - name: Apply the reviewed native control repair without changing main
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
@@ -33,48 +33,91 @@ jobs:
           def cmd(*args): return subprocess.check_output(args,text=True).strip()
           def git(*args): return cmd('git',*args)
           base='952280950aeb24528279cbff685fe8acec892223'
-          parent='dc1cf3c39983951b754d722ac5e71f9b7f823808'
+          parent='6c064c788bbd6cfb2f2fbcb7f28c9c5f6187e8e9'
           branch='codex/converge-surface-repair-20260926'
-          expected_tree='fddba95d91ba59b0c7ed0dc81e577e5cee6a26db'
-          patch=pathlib.Path('scripts/integration/pages-owned-sync-20260926.patch').read_bytes()
-          if hashlib.sha256(patch).hexdigest()!='3871803e683b9122d18b8c484a4f36cf85e725c3630546e253672b07fff6e3df':
+          tree='a03e5656e49cfeb45b81e3226f35ce035279a1a7'
+          patch=pathlib.Path('scripts/integration/workspace-control-hitarea-20260926.patch').read_bytes()
+          if hashlib.sha256(patch).hexdigest()!='0ede1bd06cf94b6428a449acb47ae7a8576318ed7dd5bec690e1b928de0a5d4c':
               raise RuntimeError('Reviewed patch checksum mismatch')
-          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,parent)]:
-              rows=git('ls-remote','origin',ref).splitlines()
-              if len(rows)!=1 or rows[0].split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before applying')
-          target=pathlib.Path(os.environ['RUNNER_TEMP'])/'pages-owned-sync.patch'
-          target.write_bytes(patch)
-          git('checkout','--detach',parent)
-          git('merge-base','--is-ancestor',base,parent)
-          git('apply','--check',str(target)); git('apply','--index',str(target))
-          git('diff','--cached','--check')
-          expected=['scripts/lib/wasm-release-gate.ps1','scripts/tools/build-clearra-frontend.test.mjs']
-          if git('diff','--cached','--name-only').splitlines()!=expected or git('write-tree')!=expected_tree:
-              raise RuntimeError('Reviewed source tree or changed scope mismatch')
-          git('config','user.name','github-actions[bot]')
-          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-          git('commit','-m','fix: prepare managed Svelte types before Pages frontend compilation')
-          candidate=git('rev-parse','HEAD')
-          if git('show','-s','--format=%P',candidate)!=parent: raise RuntimeError('Parent mismatch')
-          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':expected_tree,'changed_files':expected,'main_updated':False}
-          (pathlib.Path(os.environ['RUNNER_TEMP'])/'pages-sync-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          if git('ls-remote','origin','refs/heads/main').split()[0]!=base:
+              raise RuntimeError('main moved; reconcile before applying')
+          tip=git('ls-remote','origin','refs/heads/'+branch).split()[0]
+          expected=['packages/clearra-ui/src/lib/workspace/WorkspaceControlPanel.svelte',
+              'scripts/lib/wasm-release-gate.ps1','scripts/tools/surface-browser-acceptance.mjs',
+              'scripts/tools/workspace-controls-browser-acceptance.mjs']
+          if tip==parent:
+              target=pathlib.Path(os.environ['RUNNER_TEMP'])/'workspace-controls.patch'
+              target.write_bytes(patch)
+              git('checkout','--detach',parent)
+              git('merge-base','--is-ancestor',base,parent)
+              git('apply','--check',str(target)); git('apply','--index',str(target))
+              git('diff','--cached','--check')
+              if git('diff','--cached','--name-only').splitlines()!=expected or git('write-tree')!=tree:
+                  raise RuntimeError('Reviewed tree or changed scope mismatch')
+              git('config','user.name','github-actions[bot]')
+              git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+              git('commit','-m','fix: align native workspace switch hit areas and verify real Svelte controls before WASM')
+              candidate=git('rev-parse','HEAD')
+              git('push','origin',candidate+':refs/heads/'+branch)
+          else:
+              candidate=tip
+              if git('show','-s','--format=%P',candidate)!=parent or git('rev-parse',candidate+'^{tree}')!=tree:
+                  raise RuntimeError('Candidate moved; reconcile before running')
+          if git('show','-s','--format=%P',candidate)!=parent or git('diff','--name-only',parent,candidate).splitlines()!=expected:
+              raise RuntimeError('Parent or scope mismatch')
+          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate:
+              raise RuntimeError('Candidate readback mismatch')
+          receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'changed_files':expected,'main_updated':False}
+          (pathlib.Path(os.environ['RUNNER_TEMP'])/'control-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps(receipt),flush=True)
-          # Product source only, no workflow changes and no force push.
-          git('push','origin',candidate+':refs/heads/'+branch)
-          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate: raise RuntimeError('Candidate readback mismatch')
           subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True)
-          old=json.loads(cmd('gh','api','repos/daejunnom/Clearra/actions/runs/36181115800'))
-          if old['head_sha']!='ea8e4e9eac76f6f57f7c63b1d6bd0f5376377abd': raise RuntimeError('Superseded gate identity mismatch')
-          if old['status']!='completed':
-              subprocess.run(['gh','run','cancel','36181115800','--repo','daejunnom/Clearra'],check=True)
           with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pages-sync-preparation-${{ github.run_id }}
-          path: ${{ runner.temp }}/pages-sync-preparation.json
+          name: control-preparation-${{ github.run_id }}
+          path: ${{ runner.temp }}/control-preparation.json
           if-no-files-found: warn
           retention-days: 14
+  control-browser:
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_BROWSER_TOOLS_ROOT: ${{ github.workspace }}/build/tools/control-browser
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: 22.23.2}
+      - name: Install frozen source dependencies and pinned Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+          npm install --prefix "$CLEARRA_BROWSER_TOOLS_ROOT" --ignore-scripts --no-audit --no-fund playwright@1.56.1
+          node "$CLEARRA_BROWSER_TOOLS_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Exercise compiled Svelte native clicks touch keyboard and disabled controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/tools/workspace-controls-browser-acceptance.mjs 2>&1 | tee "$RUNNER_TEMP/control-browser.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: control-browser-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/control-browser.log
+            ${{ runner.temp }}/clearra-control-acceptance
+          retention-days: 14
+          if-no-files-found: warn
   verifier-contracts:
     needs: prepare
     runs-on: ${{ matrix.os }}
@@ -149,7 +192,7 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Test frontend preparation, GPU fallback, mandatory selection and Discord authority
+      - name: Test frontend preparation GPU fallback mandatory selection and Discord authority
         shell: bash
         run: |
           set -euo pipefail
@@ -168,7 +211,7 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
   acceptance:
-    needs: [prepare, verifier-contracts]
+    needs: [prepare, verifier-contracts, control-browser]
     runs-on: windows-latest
     timeout-minutes: 120
     strategy:
@@ -234,6 +277,7 @@ jobs:
           path: |
             ${{ runner.temp }}/surface-repair-leaf.log
             ${{ runner.temp }}/clearra-surface-acceptance
+            ${{ runner.temp }}/clearra-control-acceptance
           if-no-files-found: warn
           retention-days: 14
   rust-regressions:
@@ -269,7 +313,7 @@ jobs:
           retention-days: 14
   ready:
     if: always()
-    needs: [prepare, verifier-contracts, contracts, acceptance, rust-regressions]
+    needs: [prepare, verifier-contracts, control-browser, contracts, acceptance, rust-regressions]
     runs-on: ubuntu-latest
     steps:
       - name: Require complete exact-source acceptance
