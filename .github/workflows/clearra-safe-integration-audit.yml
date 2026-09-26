@@ -21,12 +21,12 @@ jobs:
       tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: 66bb3d3857d54803e7af6b7b646918e2dceaff9f, fetch-depth: 0}
+        with: {ref: 4a47ce90da87302f568863b853041104015dac34, fetch-depth: 0}
       - name: Install exact formatter
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-      - name: Apply reviewed automatic quota and pattern defaults without updating main
+      - name: Apply reviewed native index correction without updating main
         id: source
-        run: python scripts/integration/recovery-auto-20260927/prepare.py
+        run: python scripts/integration/recovery-auto-20260927/index-domain-fix.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
