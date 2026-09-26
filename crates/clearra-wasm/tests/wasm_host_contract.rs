@@ -120,6 +120,19 @@ fn selected_document(masks: &[u64]) -> String {
 
 #[test]
 fn build_mirror_source_and_pins_preserve_exact_sets_and_union_probability() {
+    // The native test must not depend on an enlarged CI RUST_MIN_STACK. Each
+    // response is inspected in its own frame and dropped before the next query.
+    // Match the existing native runtime contract even when CI supplies 16 MiB.
+    std::thread::Builder::new()
+        .name("build-mirror-and-pins-2mib".to_owned())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(assert_build_mirror_and_pins)
+        .expect("spawn the explicit two MiB Build contract thread")
+        .join()
+        .expect("Build mirror and pin contract must fit two MiB");
+}
+
+fn assert_build_mirror_and_pins() {
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
     for (target, mirror, expected) in [
@@ -127,99 +140,121 @@ fn build_mirror_source_and_pins_preserve_exact_sets_and_union_probability() {
         ("0xf", "--no-mirror", vec![LEFT_I]),
         ("0x78", "--include-mirror", vec![CENTER_I]),
     ] {
-        let source = runtime
-            .run_command_text(&format!(
-                "clearra build-probability --base-mask 0 --target-mask {target} --height 4 \
-                 --queue I --no-hold --aggregate buildability --result-mode all-solutions \
-                 {mirror} --backend cpu --no-backend-fallback --workers 1"
-            ))
-            .expect("complete Build source execution");
-        assert_eq!(source.app_response().status(), AppStatus::Success);
-        let report = source.search_report().expect("complete source report");
-        let mut keys = report.normalized_solution_keys.clone();
-        keys.sort();
-        let mut expected = expected;
-        expected.sort();
-        assert_eq!(keys, expected);
-        assert_eq!(report.unique_solution_count, keys.len());
-        assert!(report.count_complete && report.probability_complete);
-        assert!(report.solution_keys_complete && !report.resource_truncated);
-        assert_eq!(report.covered_pattern_count, 1);
-        assert_eq!(report.materialized_pattern_count, 1);
-        assert_eq!(report.coverage_probability, "1");
-
+        let digest = assert_build_source(&runtime, target, mirror, expected);
         if target != "0xf" || mirror != "--include-mirror" {
             continue;
         }
-        // Syntactically valid selections are never proof of membership. Keep
-        // exact-source and source-digest rejection at the real product boundary.
-        for (mask, digest) in [
-            (0x1e_u64, report.normalized_solution_set_hash.as_str()),
+        // Keep the same runtime for sequential jobs, but retain only the source
+        // digest rather than a large prior execution result across later calls.
+        for (mask, hash) in [
+            (0x1e_u64, digest.as_str()),
             (0x3c0_u64, "cts1:0000000000000000"),
         ] {
-            let document = selected_document(&[mask]);
-            let rejected = runtime
-                .run_command_text(&format!(
-                    "clearra build pinned-minimals --base-mask 0 --target-mask 0xf --height 4 \
-                     --queue I --no-hold --objective min-cover --queue-knowledge oracle \
-                     --required-format ctk3 --required-document {document} \
-                     --expected-source-set-hash {digest} --backend cpu --workers 1"
-                ))
-                .expect("valid selection syntax must reach exact-source validation");
-            // Cooperative source admission uses the typed Unsupported envelope;
-            // distinguish this precise rejection from unrelated runtime errors.
-            assert_eq!(rejected.app_response().status(), AppStatus::Unsupported);
-            assert!(rejected.app_response().diagnostics().iter().any(|item| {
-                item.code() == "E_PRODUCT_RUNTIME_UNSUPPORTED"
-                    && item.message().contains("build_minimum_source_rejected")
-            }));
-            assert!(rejected.app_response().product_result_payload().is_none());
-            assert!(rejected.product_page_source_owner().is_none());
+            assert_rejected_pin(&runtime, mask, hash);
         }
-        // Both candidates cover the same queue. A single mirrored pin must
-        // select that drawing; requiring both must increase the minimum to two.
         for (masks, expected_pins) in [
             (vec![0x3c0_u64], vec![RIGHT_I]),
             (vec![0xf_u64, 0x3c0_u64], vec![LEFT_I, RIGHT_I]),
         ] {
-            let document = selected_document(&masks);
-            let pinned = runtime
-                .run_command_text(&format!(
-                    "clearra build pinned-minimals --base-mask 0 --target-mask 0xf --height 4 \
-                     --queue I --no-hold --objective min-cover --queue-knowledge oracle \
-                     --required-format ctk3 --required-document {document} \
-                     --expected-source-set-hash {} --backend cpu --no-backend-fallback --workers 1",
-                    report.normalized_solution_set_hash
-                ))
-                .expect("selected drawings revalidated against the full source");
-            assert_eq!(pinned.app_response().status(), AppStatus::Success);
-            let payload = pinned
-                .app_response()
-                .product_result_payload()
-                .expect("typed minimum payload");
-            let ProductResultPayloadContent::BuildCoveragePortfolioV2(minimum) = payload.content()
-            else {
-                panic!("expected a Build minimum portfolio");
-            };
-            assert_eq!(minimum.source_candidate_count(), "2");
-            assert_eq!(
-                minimum.selected_candidate_count(),
-                expected_pins.len().to_string()
-            );
-            assert_eq!(minimum.union_probability(), "1");
-            assert!(minimum.completeness().complete());
-            let Some(ProductPageSourceOwner::CoveragePortfolio(owner)) =
-                pinned.product_page_source_owner()
-            else {
-                panic!("minimum must retain its real member page source");
-            };
-            let mut actual = owner
-                .canonical_candidate_keys_owned()
-                .expect("complete selected member keys");
-            actual.sort();
-            let mut expected_pins = expected_pins;
-            expected_pins.sort();
-            assert_eq!(actual, expected_pins);
+            assert_pinned_portfolio(&runtime, &masks, &digest, expected_pins);
         }
     }
+}
+
+// Keep debug-build response temporaries out of the orchestration frame. This
+// is test-fixture ownership, not a different production execution algorithm.
+#[inline(never)]
+fn assert_build_source(
+    runtime: &WasmCommandRuntime,
+    target: &str,
+    mirror: &str,
+    mut expected: Vec<&str>,
+) -> String {
+    let source = runtime
+        .run_command_text(&format!(
+            "clearra build-probability --base-mask 0 --target-mask {target} --height 4 \
+             --queue I --no-hold --aggregate buildability --result-mode all-solutions \
+             {mirror} --backend cpu --no-backend-fallback --workers 1"
+        ))
+        .expect("complete Build source execution");
+    assert_eq!(source.app_response().status(), AppStatus::Success);
+    let report = source.search_report().expect("complete source report");
+    let mut keys = report.normalized_solution_keys.clone();
+    keys.sort();
+    expected.sort();
+    assert_eq!(keys, expected);
+    assert_eq!(report.unique_solution_count, keys.len());
+    assert!(report.count_complete && report.probability_complete);
+    assert!(report.solution_keys_complete && !report.resource_truncated);
+    assert_eq!(report.covered_pattern_count, 1);
+    assert_eq!(report.materialized_pattern_count, 1);
+    assert_eq!(report.coverage_probability, "1");
+    report.normalized_solution_set_hash.clone()
+}
+
+#[inline(never)]
+fn assert_rejected_pin(runtime: &WasmCommandRuntime, mask: u64, digest: &str) {
+    let document = selected_document(&[mask]);
+    let rejected = runtime
+        .run_command_text(&format!(
+            "clearra build pinned-minimals --base-mask 0 --target-mask 0xf --height 4 \
+             --queue I --no-hold --objective min-cover --queue-knowledge oracle \
+             --required-format ctk3 --required-document {document} \
+             --expected-source-set-hash {digest} --backend cpu --workers 1"
+        ))
+        .expect("valid selection syntax must reach exact-source validation");
+    // Cooperative source admission uses the typed Unsupported envelope;
+    // distinguish this precise rejection from unrelated runtime errors.
+    assert_eq!(rejected.app_response().status(), AppStatus::Unsupported);
+    assert!(rejected.app_response().diagnostics().iter().any(|item| {
+        item.code() == "E_PRODUCT_RUNTIME_UNSUPPORTED"
+            && item.message().contains("build_minimum_source_rejected")
+    }));
+    assert!(rejected.app_response().product_result_payload().is_none());
+    assert!(rejected.product_page_source_owner().is_none());
+}
+
+#[inline(never)]
+fn assert_pinned_portfolio(
+    runtime: &WasmCommandRuntime,
+    masks: &[u64],
+    digest: &str,
+    mut expected_pins: Vec<&str>,
+) {
+    let document = selected_document(masks);
+    let pinned = runtime
+        .run_command_text(&format!(
+            "clearra build pinned-minimals --base-mask 0 --target-mask 0xf --height 4 \
+             --queue I --no-hold --objective min-cover --queue-knowledge oracle \
+             --required-format ctk3 --required-document {document} \
+             --expected-source-set-hash {digest} --backend cpu --no-backend-fallback --workers 1"
+        ))
+        .expect("selected drawings revalidated against the full source");
+    assert_eq!(pinned.app_response().status(), AppStatus::Success);
+    let payload = pinned
+        .app_response()
+        .product_result_payload()
+        .expect("typed minimum payload");
+    let ProductResultPayloadContent::BuildCoveragePortfolioV2(minimum) = payload.content()
+    else {
+        panic!("expected a Build minimum portfolio");
+    };
+    assert_eq!(minimum.source_candidate_count(), "2");
+    assert_eq!(
+        minimum.selected_candidate_count(),
+        expected_pins.len().to_string()
+    );
+    assert_eq!(minimum.union_probability(), "1");
+    assert!(minimum.completeness().complete());
+    let Some(ProductPageSourceOwner::CoveragePortfolio(owner)) =
+        pinned.product_page_source_owner()
+    else {
+        panic!("minimum must retain its real member page source");
+    };
+    let mut actual = owner
+        .canonical_candidate_keys_owned()
+        .expect("complete selected member keys");
+    actual.sort();
+    expected_pins.sort();
+    assert_eq!(actual, expected_pins);
 }
