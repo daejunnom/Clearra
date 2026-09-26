@@ -1,0 +1,182 @@
+diff --git a/crates/clearra-cli-command/src/web_command_parser.rs b/crates/clearra-cli-command/src/web_command_parser.rs
+index f23992a..a1ed1f5 100644
+--- a/crates/clearra-cli-command/src/web_command_parser.rs
++++ b/crates/clearra-cli-command/src/web_command_parser.rs
+@@ -2332,2 +2332,3 @@ fn parse_boundary_recovery_command(
+     let mut initial_board = None;
++    let mut stage_one_target = Board256Mask::EMPTY;
+     let mut final_board = None;
+@@ -2374,2 +2375,7 @@ fn parse_boundary_recovery_command(
+             }
++            "--stage-one-board-mask" => {
++                stage_one_target = Board256Mask::from_words(parse_board_words(
++                    next_value(tokens, &mut cursor, option)?, option,
++                )?);
++            }
+             "--target-board-mask" => {
+@@ -2589,2 +2595,3 @@ fn parse_boundary_recovery_command(
+         initial_board: initial_board.ok_or_else(|| required("--initial-board-mask"))?,
++        stage_one_target,
+         final_board: final_board.ok_or_else(|| required("--target-board-mask"))?,
+diff --git a/crates/clearra-cli/src/args/cli_parser.rs b/crates/clearra-cli/src/args/cli_parser.rs
+index 717d876..7c89a53 100644
+--- a/crates/clearra-cli/src/args/cli_parser.rs
++++ b/crates/clearra-cli/src/args/cli_parser.rs
+@@ -300,3 +300,3 @@ impl ProductHelpTopic {
+             Self::BoundaryRecovery => {
+-                "usage: clearra recovery boundary --initial-board-mask HEX --target-board-mask HEX --height 1..25 --queue REFERENCE --stage-one-count N --placements N [--role-mask POSITION:HEX ...] [--queue-pattern PATTERN --max-pattern-evaluations N --max-total-states N] [--max-early-placements 0|1] [--borrow-role-position N --borrow-placement-mask HEX] [--hold|--no-hold] [--rule RULE] [--spin-profile PROFILE] [--initial-b2b 0|1] [--preserve-b2b-bag N ...] [--preserve-b2b-stage-one] [--preserve-b2b-stage-two] [--max-states 1..1000000]\nThe queue is a continuous 2..42-piece source. Repeat --role-mask for every required placement role to require exact four-cell lock-time geometry. With one early placement, select a second-stage role; its mask supplies the borrow placement, or give --borrow-placement-mask when roles are omitted. --preserve-b2b-bag independently enables B2B preservation for a one-based supply bag position, counting bags within each stage; partial bags restart at the stage boundary. The whole-stage flags remain accepted for older commands. Optional --queue-pattern computes weighted normal, additional recovery, and unresolved probabilities over complete seven-piece bags. It requires every reference bag and stage to be complete, all placement roles specified, and at most 100000 pattern identities. Pattern permutations keep roles fixed while reordering supply tokens by bag. Both modes use full future queue knowledge, preserve supply/hold/B2B continuity, and report incomplete separately from no path. Neither mode proves see-n playability."
++                "usage: clearra recovery boundary --initial-board-mask HEX [--stage-one-board-mask HEX] --target-board-mask HEX --height 1..25 --queue REFERENCE --stage-one-count N --placements N [--role-mask POSITION:HEX ...] [--queue-pattern PATTERN --max-pattern-evaluations N --max-total-states N] [--max-early-placements 0|1] [--borrow-role-position N --borrow-placement-mask HEX] [--hold|--no-hold] [--rule RULE] [--spin-profile PROFILE] [--initial-b2b 0|1] [--preserve-b2b-bag N ...] [--preserve-b2b-stage-one] [--preserve-b2b-stage-two] [--max-states 1..1000000]\nThe optional --stage-one-board-mask is the exact post-clear residue of existing and stage-one cells, excluding early stage-two cells; omitted or zero retains the PC boundary. These three fields are independent snapshots, not masks to union. The queue is a continuous 2..42-piece source. Repeat --role-mask for every required placement role to require exact four-cell lock-time geometry. With one early placement, select a second-stage role; its mask supplies the borrow placement, or give --borrow-placement-mask when roles are omitted. --preserve-b2b-bag independently enables B2B preservation for a one-based supply bag position, counting bags within each stage; partial bags restart at the stage boundary. The whole-stage flags remain accepted for older commands. Optional --queue-pattern computes weighted normal, additional recovery, and unresolved probabilities over complete seven-piece bags. It requires every reference bag and stage to be complete, all placement roles specified, and at most 100000 pattern identities. Pattern permutations keep roles fixed while reordering supply tokens by bag. Both modes use full future queue knowledge, preserve supply/hold/B2B continuity, and report incomplete separately from no path. Neither mode proves see-n playability."
+             }
+diff --git a/crates/clearra-cli/src/args/japanese_help_draft.rs b/crates/clearra-cli/src/args/japanese_help_draft.rs
+index 88da5f9..2c315ae 100644
+--- a/crates/clearra-cli/src/args/japanese_help_draft.rs
++++ b/crates/clearra-cli/src/args/japanese_help_draft.rs
+@@ -85,3 +85,4 @@ pub(super) fn product_help_body(topic: ProductHelpTopic) -> &'static str {
+         ProductHelpTopic::BoundaryRecovery => {
+-            r#"使い方: clearra recovery boundary --initial-board-mask HEX --target-board-mask HEX --height 1..25 --queue REFERENCE --stage-one-count N --placements N [--role-mask POSITION:HEX ...] [--queue-pattern PATTERN --max-pattern-evaluations N --max-total-states N] [--max-early-placements 0|1] [--borrow-role-position N --borrow-placement-mask HEX] [--hold|--no-hold] [--rule RULE] [--spin-profile PROFILE] [--initial-b2b 0|1] [--preserve-b2b-bag N ...] [--preserve-b2b-stage-one] [--preserve-b2b-stage-two] [--max-states 1..1000000]
++            r#"使い方: clearra recovery boundary --initial-board-mask HEX [--stage-one-board-mask HEX] --target-board-mask HEX --height 1..25 --queue REFERENCE --stage-one-count N --placements N [--role-mask POSITION:HEX ...] [--queue-pattern PATTERN --max-pattern-evaluations N --max-total-states N] [--max-early-placements 0|1] [--borrow-role-position N --borrow-placement-mask HEX] [--hold|--no-hold] [--rule RULE] [--spin-profile PROFILE] [--initial-b2b 0|1] [--preserve-b2b-bag N ...] [--preserve-b2b-stage-one] [--preserve-b2b-stage-two] [--max-states 1..1000000]
++--stage-one-board-maskはライン消去後の既存・第1段階セルの残りを指定します。先行した第2段階セルは含めません。省略または0はPC境界を維持します。3フィールドは独立した状態であり、合成するマスクではありません。
+ 連続した2～42ミノの供給順を扱います。--role-maskで必要な各供給位置のロック時4マスを指定できます。先行配置を許す場合は第2段階の供給位置を選びます。--queue-patternでは完全な7ミノバッグ、全配置役割、最大100000の供給パターンを対象に通常成功・追加リカバリー・未確定の重み付き確率を計算します。順序が変わっても役割と先行配置はバッグとミノ種に結び付けます。どちらのモードも将来の全供給を知る場合の解析であり、観測制限下の実戦可能性は証明しません。"#
+diff --git a/crates/clearra-forward-search/src/boundary_recovery.rs b/crates/clearra-forward-search/src/boundary_recovery.rs
+index adc49c6..14289e5 100644
+--- a/crates/clearra-forward-search/src/boundary_recovery.rs
++++ b/crates/clearra-forward-search/src/boundary_recovery.rs
+@@ -36,2 +36,5 @@ pub struct BoundaryRecoveryQuery {
+     pub initial_board: Board256Mask,
++    /// Expected stage-one residue after actual line clears, excluding cells
++    /// belonging to an early stage-two placement. EMPTY preserves PC recovery.
++    pub stage_one_target: Board256Mask,
+     pub final_board: Board256Mask,
+@@ -305,2 +308,3 @@ impl BoundaryRecoveryQuery {
+         if self.initial_board.fits_cell_count(cells) != Ok(true)
++            || self.stage_one_target.fits_cell_count(cells) != Ok(true)
+             || self.final_board.fits_cell_count(cells) != Ok(true)
+@@ -380,4 +384,4 @@ impl BoundaryRecoveryQuery {
+ 
+-    /// A normal PC connection is proven first. A recovery is only classified
+-    /// as additional if that proof was complete and found no normal path.
++    /// Prove a normal connection through the declared intermediate field first.
++    /// A recovery is additional only after that proof completely found no path.
+     pub fn search(
+@@ -669,3 +673,3 @@ impl<'a> Pass<'a> {
+                         && fulfilled_role_mask & stage_one_mask == stage_one_mask
+-                        && stage_one_board.is_empty();
++                        && stage_one_board.words() == self.query.stage_one_target.words();
+                     let next_queue_index = choice.next_queue_index;
+diff --git a/crates/clearra-forward-search/src/boundary_recovery_pattern.rs b/crates/clearra-forward-search/src/boundary_recovery_pattern.rs
+index 3fc0bd6..460cb8a 100644
+--- a/crates/clearra-forward-search/src/boundary_recovery_pattern.rs
++++ b/crates/clearra-forward-search/src/boundary_recovery_pattern.rs
+@@ -84,2 +84,3 @@ mod tests {
+             initial_board: Board256Mask::EMPTY,
++            stage_one_target: Board256Mask::EMPTY,
+             final_board: Board256Mask::EMPTY,
+diff --git a/crates/clearra-forward-search/src/boundary_recovery_population.rs b/crates/clearra-forward-search/src/boundary_recovery_population.rs
+index 7431df2..52e81ab 100644
+--- a/crates/clearra-forward-search/src/boundary_recovery_population.rs
++++ b/crates/clearra-forward-search/src/boundary_recovery_population.rs
+@@ -322,2 +322,3 @@ mod tests {
+             initial_board: Board256Mask::from_words([0x3f0, 0, 0, 0]),
++            stage_one_target: Board256Mask::EMPTY,
+             final_board: Board256Mask::from_words([0xc030, 0, 0, 0]),
+diff --git a/crates/clearra-forward-search/src/boundary_recovery_tests.rs b/crates/clearra-forward-search/src/boundary_recovery_tests.rs
+index 200efae..b57a58c 100644
+--- a/crates/clearra-forward-search/src/boundary_recovery_tests.rs
++++ b/crates/clearra-forward-search/src/boundary_recovery_tests.rs
+@@ -11,2 +11,3 @@ fn two_stage_query() -> BoundaryRecoveryQuery {
+         initial_board: Board256Mask::from_words([0x3f0, 0, 0, 0]),
++        stage_one_target: Board256Mask::EMPTY,
+         final_board: Board256Mask::from_words([0xc030, 0, 0, 0]),
+@@ -340 +341,28 @@ fn exact_early_roles_can_prove_recovery_only_after_normal_failure() {
+ }
++
++#[test]
++fn intermediate_field_is_an_exact_checkpoint_not_a_cosmetic_preview() {
++    let mut query = two_stage_query();
++    query.initial_board = Board256Mask::EMPTY;
++    query.stage_one_target = Board256Mask::from_words([0xf, 0, 0, 0]);
++    query.final_board = Board256Mask::from_words([0xff, 0, 0, 0]);
++    query.queue = vec![PieceKind::I, PieceKind::I];
++    query.max_early_placements = 0;
++    let report = query.search(&control()).unwrap();
++    assert_eq!(report.status, BoundaryRecoveryStatus::Normal);
++    assert_eq!(report.stage_one_checkpoint_step, Some(1));
++    assert_eq!(report.checkpoint_is_pc, Some(false));
++    assert_eq!(report.steps[0].board_after, [0xf, 0, 0, 0]);
++    assert_eq!(report.steps[1].board_after, [0xff, 0, 0, 0]);
++    query.stage_one_target = Board256Mask::EMPTY;
++    assert_eq!(query.search(&control()).unwrap().status, BoundaryRecoveryStatus::NoPath);
++    query.stage_one_target = Board256Mask::from_words([1, 0, 0, 0]);
++    assert_eq!(query.search(&control()).unwrap().status, BoundaryRecoveryStatus::NoPath);
++}
++
++#[test]
++fn intermediate_field_uses_the_same_height_bound_as_initial_and_final() {
++    let mut query = two_stage_query();
++    query.stage_one_target = Board256Mask::from_words([1_u64 << 40, 0, 0, 0]);
++    assert_eq!(query.search(&control()).unwrap_err(), BoundaryRecoveryError::BoardOutsideField);
++}
+diff --git a/crates/clearra-wasm/tests/boundary_field_contract.rs b/crates/clearra-wasm/tests/boundary_field_contract.rs
+new file mode 100644
+index 0000000..fc66c5b
+--- /dev/null
++++ b/crates/clearra-wasm/tests/boundary_field_contract.rs
+@@ -0,0 +1,33 @@
++#![cfg(not(target_arch = "wasm32"))]
++use clearra_host_contract::{AppStatus, ProductResultPayloadContent};
++use clearra_wasm::{WasmCommandRuntime, WasmHostCapabilities};
++
++#[test]
++fn three_boundary_fields_reach_the_real_cli_app_and_wasm_runtime() {
++    std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
++        let runtime = WasmCommandRuntime::default()
++            .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
++        for (middle, status, checkpoint) in [
++            (" --stage-one-board-mask 0xf", "normal", Some(false)),
++            (" --stage-one-board-mask 0", "no-path-within-declared-scope", None),
++            ("", "no-path-within-declared-scope", None),
++        ] {
++            let result = runtime.run_command_text(&format!(
++                "clearra recovery boundary --initial-board-mask 0 --target-board-mask 0xff \
++                 --height 4 --queue II --stage-one-count 1 --placements 2 \
++                 --max-early-placements 0 --borrow-role-position 2 --no-hold{middle}"
++            )).unwrap();
++            assert_eq!(result.app_response().status(), AppStatus::Success);
++            let ProductResultPayloadContent::BoundaryRecovery(report) =
++                result.app_response().product_result_payload().unwrap().content() else {
++                panic!("typed recovery result required");
++            };
++            assert_eq!(report.status, status);
++            assert_eq!(report.checkpoint_is_pc, checkpoint);
++            if checkpoint.is_some() {
++                assert_eq!(report.steps.len(), 2);
++                assert_eq!(report.stage_one_checkpoint_step, Some(1));
++            }
++        }
++    }).unwrap().join().unwrap();
++}
+diff --git a/packages/clearra-ui/src/lib/i18n/componentCatalog.ts b/packages/clearra-ui/src/lib/i18n/componentCatalog.ts
+index 2b5a2a9..f977d04 100644
+--- a/packages/clearra-ui/src/lib/i18n/componentCatalog.ts
++++ b/packages/clearra-ui/src/lib/i18n/componentCatalog.ts
+@@ -47,4 +47,8 @@ export const COMPONENT_MESSAGES = {
+   boundaryRecovery: { en: 'Boundary recovery', ko: '경계 리커버리', ja: '境界リカバリー' },
+-  recoveryInitialField: { en: 'Stage-one starting field', ko: '1단계 시작 필드', ja: '第1段階の開始フィールド' },
+-  recoveryTargetField: { en: 'Stage-two target field', ko: '2단계 목표 필드', ja: '第2段階の目標フィールド' },
++  recoveryInitialField: { en: 'Existing field', ko: '기존 필드', ja: '既存フィールド' },
++  recoveryStageOneField: { en: 'Stage-one field', ko: '1단계 필드', ja: '第1段階のフィールド' },
++  recoveryTargetField: { en: 'Final field', ko: '최종 필드', ja: '最終フィールド' },
++  recoveryFieldLayers: { en: 'Field layers', ko: '필드 레이어', ja: 'フィールドのレイヤー' },
++  recoveryFieldLayersHelp: { en: 'Dark: existing field. Medium: stage-one residue after clears. Light: final field. Overlapping snapshots are striped; edit only the selected snapshot. An empty stage-one field requires a PC boundary. Early-placement residue is tracked separately.', ko: '진한 회색: 기존 필드. 중간 회색: 줄 삭제 후 1단계 필드. 연한 회색: 최종 필드. 겹치는 시점은 줄무늬로 표시되며 선택한 필드만 편집됩니다. 1단계 필드를 비우면 PC 경계를 요구합니다. 선행 배치의 잔여 칸은 별도로 추적합니다.', ja: '濃い灰色は既存、中間の灰色はライン消去後の第1段階、薄い灰色は最終フィールドです。重なる時点は縞模様で表示し、選択したフィールドだけを編集します。第1段階が空ならPC境界を要求します。先行配置の残りは別に追跡します。' },
++  recoveryPlacementConstraints: { en: 'Placement constraints', ko: '배치 제약', ja: '配置の制約' },
+   recoveryBorrowPlacement: { en: 'Selected early placement (four cells)', ko: '선행 허용 배치 (4칸)', ja: '先行設置する4マス' },
+@@ -61,3 +65,3 @@ export const COMPONENT_MESSAGES = {
+   recoveryPopulationIncomplete: { en: 'Weighted pattern search incomplete', ko: '가중 패턴 탐색 미완료', ja: '重み付きパターン探索未完了' },
+-  recoveryNormalProbability: { en: 'Normal PC probability', ko: '정상 PC 확률', ja: '通常PC確率' },
++  recoveryNormalProbability: { en: 'Normal connection probability', ko: '정상 연결 확률', ja: '通常接続の確率' },
+   recoveryAdditionalProbability: { en: 'Additional recovery probability', ko: '추가 리커버리 확률', ja: '追加リカバリー確率' },
+@@ -74,3 +78,3 @@ export const COMPONENT_MESSAGES = {
+   recoveryInvalid: { en: 'Enter a 2–42 piece queue, valid fields and four cells for each selected role. Pattern mode also requires complete seven-piece bags.', ko: '2~42개 큐와 올바른 필드를 입력하고 배치 역할마다 4칸을 지정하세요. 패턴 모드는 완전한 7미노 가방도 필요합니다.', ja: '2～42ミノの順序、有効なフィールド、各役割の4マスを入力してください。パターンモードには完全な7ミノバッグも必要です。' },
+-  recoveryNormal: { en: 'Normal PC connection', ko: '정상 PC 연결', ja: '通常のPC接続' },
++  recoveryNormal: { en: 'Normal boundary connection', ko: '정상 경계 연결', ja: '通常の境界接続' },
+   recoveryPcPreserving: { en: 'PC-preserving recovery', ko: 'PC 보존 리커버리', ja: 'PCを維持したリカバリー' },
