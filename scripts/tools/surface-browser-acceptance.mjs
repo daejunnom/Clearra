@@ -77,7 +77,9 @@ async function completeRun(page, action, label) {
   }
 }
 async function completedKeys(page, count, label) {
-  // Computation has finished. A wrong set is an assertion failure, not a timeout.
+  // Computation and lazy result-page loading have separate completion points.
+  // Wait for the real page loader, never for a particular expected key count.
+  await page.locator('.pager-loading').waitFor({ state: 'hidden', timeout: 60000 });
   const actual = await keys(page);
   assert.equal(actual.length, count, `${label}: unexpected complete solution set: ${JSON.stringify(actual)}`);
   assert.equal(new Set(actual).size, count, `${label}: duplicate solution keys`);
