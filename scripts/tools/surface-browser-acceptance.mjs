@@ -159,7 +159,8 @@ try {
         await paint(page, 0, 0xfn, 4); // retain the final O and add the first-stage I
         await page.getByRole('checkbox', { name: 'Require an exact placement for every role', exact: true }).check();
         await paint(page, 1, 0xfn, 4);
-        await page.getByLabel('Placement role to edit (1-based)', { exact: true }).selectOption('2');
+        // Label text includes nested options; the combobox accessible name does not.
+        await page.getByRole('combobox', { name: 'Placement role to edit (1-based)', exact: true }).selectOption('2');
         await paint(page, 1, 0xc030n, 4);
         await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), 'nonempty boundary goal');
         assert.equal(await page.locator('.recovery-result .outcome').innerText(), 'Normal connection');
