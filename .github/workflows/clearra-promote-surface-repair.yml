@@ -1,5 +1,5 @@
 name: Start verified release gates
-run-name: Deploy the validated recovery gray fields
+run-name: Deploy recovery after corrected role-selector acceptance
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4b29711a4b67d283bcf66d727156913f6107e2e5
+          ref: 29c268e095f6a6f8ce66cdf57c8c451481b29873
           fetch-depth: 0
           persist-credentials: true
       - name: Require exact acceptance then fast-forward and start canonical gates
@@ -32,12 +32,12 @@ jobs:
 
           REPO = 'daejunnom/Clearra'
           BASE = '521fee125b478a5a39a90a808d6c471c430c8494'
-          SOURCE = '4b29711a4b67d283bcf66d727156913f6107e2e5'
-          PARENT = 'eccfdbf5c6db5da76d71f69b75e27a3f80d4085f'
-          TREE = '1120697ba93984d5e1ad5fc882e747f402a579a9'
-          GATE_ID = 36243883647
-          GATE_CONTROL = '849ee8a6f42f345c7ec7717a2df790bb51f9edc8'
-          GATE_WORKFLOW_BLOB = 'c99bf9027600927e1e791472ca4051549cdee9bf'
+          SOURCE = '29c268e095f6a6f8ce66cdf57c8c451481b29873'
+          PARENT = '41e2f4a16920204ab495e0ff3f60cc668cbe2242'
+          TREE = '018b255c35e88f2019035ee200828cb26762df5d'
+          GATE_ID = 36247428986
+          GATE_CONTROL = 'aa43c193e9f94dda1f87635980b01c5e6d947c74'
+          GATE_WORKFLOW_BLOB = 'f84a41829d9162f1c71237146ce18913a2e2d289'
           BRANCH = 'codex/recovery-gray-fields-20260926'
           EXPECTED = [
               'crates/clearra-cli-command/src/web_command_parser.rs',
@@ -140,6 +140,33 @@ jobs:
           if git('rev-parse', GATE_CONTROL + ':.github/workflows/clearra-safe-integration-audit.yml') != GATE_WORKFLOW_BLOB:
               raise RuntimeError('Validation workflow definition mismatch')
           require_refs()
+
+          # This candidate branch is outside management-policy.yml's push
+          # filter. Start its real independent checks once, never copy an old
+          # commit's protection status onto the corrected source.
+          def policy_runs():
+              return [r for r in collection('actions/runs?head_sha=' + SOURCE + '&event=workflow_dispatch&per_page=100', 'workflow_runs')
+                      if r['head_branch'] == BRANCH and r['path'] == '.github/workflows/management-policy.yml']
+          policy = policy_runs()
+          if not policy:
+              receipt['dispatch_intent'] = 'management-policy.yml'
+              save()
+              subprocess.run(['gh', 'api', '--method', 'POST', 'repos/' + REPO + '/actions/workflows/management-policy.yml/dispatches', '--input', '-'],
+                             input=json.dumps({'ref': BRANCH}), text=True, check=True, timeout=120)
+              for _ in range(24):
+                  policy = policy_runs()
+                  if policy:
+                      break
+                  time.sleep(5)
+          if len(policy) != 1 or policy[0]['run_attempt'] != 1:
+              raise RuntimeError('Independent protection dispatch identity unresolved; inspect before retrying')
+          if policy[0]['status'] == 'completed' and policy[0]['conclusion'] != 'success':
+              raise RuntimeError('Independent protection failed: ' + str(policy[0]['id']))
+          require_refs()
+          receipt['management_policy_run_id'] = policy[0]['id']
+          receipt.pop('dispatch_intent', None)
+          save()
+          print('Independent protection run:', policy[0]['id'], flush=True)
 
           deadline = time.monotonic() + 9000
           while True:
