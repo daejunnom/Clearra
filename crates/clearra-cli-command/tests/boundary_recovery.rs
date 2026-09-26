@@ -1,4 +1,4 @@
-use clearra_app::{AppCommand, AppContext, AppStatus};
+use clearra_app::{AppCommand, AppContext, AppErrorCode, AppStatus};
 use clearra_cli_command::CliCommandParser;
 
 #[test]
@@ -222,7 +222,14 @@ fn automatic_exact_roles_keep_pattern_contract_and_explicit_total_limits() {
                 && field.value().as_text() == "population-incomplete"));
     }
     assert!(CliCommandParser::parse(&format!("{command} --max-total-states 0")).is_err());
-    assert!(CliCommandParser::parse(base)
-        .map(|parsed| parsed.to_app_request().is_err())
-        .unwrap_or(true));
+    // Syntax compilation does not own the exact bag-role plan validation.
+    // Exercise its real execution boundary and require an input rejection,
+    // never a successful no-path result or an unavailable-runtime response.
+    let request = CliCommandParser::parse(base)
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+    let response = AppContext::default().run(request);
+    assert_eq!(response.status(), AppStatus::ValidationFailed);
+    assert_eq!(response.error().unwrap().code(), AppErrorCode::InvalidInput);
 }

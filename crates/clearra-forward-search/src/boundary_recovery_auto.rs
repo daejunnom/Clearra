@@ -147,7 +147,7 @@ mod tests {
     fn automatic_mode_retains_all_feasible_horizons_and_respects_explicit_limits() {
         let query = query(&[PieceKind::I; 7], 0, 8);
         // No geometric claim: 2 and 7 locks have the same area residue.
-        assert_eq!(candidates(&query), vec![]); // one target cell has no compatible residue
+        assert!(candidates(&query).is_empty()); // one target cell has no compatible residue
         let mut valid = query.clone();
         valid.final_board = Board256Mask::from_words([0xff, 0, 0, 0]);
         assert_eq!(candidates(&valid), vec![2, 7]);
