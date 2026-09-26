@@ -14,41 +14,59 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write
       actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: dc379d89153270bcb7d959be7b11f080f849238a
+          ref: b7a5b7d568d605a9d053e34af1a7783740280380
           fetch-depth: 0
-          persist-credentials: false
-      - name: Bind the reviewed mirror regression fix without changing source or main
+      - name: Apply the reviewed pinned document boundary repair without changing main
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
         shell: python
         run: |
-          import json,os,pathlib,subprocess
+          import hashlib,json,os,pathlib,subprocess
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
           base='952280950aeb24528279cbff685fe8acec892223'
-          parent='54df724b04498aaec987d41483efe4d075172522'
-          candidate='dc379d89153270bcb7d959be7b11f080f849238a'
+          parent='dc379d89153270bcb7d959be7b11f080f849238a'
           branch='codex/converge-surface-repair-20260926'
-          tree='6fb9287d79c283819a3d0e675b3c67c9d2acc6ad'
-          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
-              rows=git('ls-remote','origin',ref).splitlines()
-              if len(rows)!=1 or rows[0].split()!=[sha,ref]:
-                  raise RuntimeError('Reviewed ref moved; reconcile before running')
-          expected=['crates/clearra-wasm/tests/wasm_host_contract.rs',
-              'packages/clearra-ui/test/buildProbabilityMirrorSelection.test.mjs',
-              'scripts/tools/surface-browser-acceptance.mjs']
-          if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
-              git('rev-parse','HEAD^{tree}')!=tree or git('diff','--name-only',parent,candidate).splitlines()!=expected):
-              raise RuntimeError('Reviewed source identity or scope mismatch')
-          git('merge-base','--is-ancestor',base,candidate)
-          git('diff','--check',parent,candidate)
+          tree='380f3be1269f502c0c92e035df54b2a817ca5403'
+          patch=pathlib.Path('scripts/integration/build-pinned-mirror-document-20260926.patch').read_bytes()
+          if hashlib.sha256(patch).hexdigest()!='a5b7ad0856e623de2a618802b5089ffb97bd8a9a9c1b8cb11667d0f2f01c7467':
+              raise RuntimeError('Reviewed patch bytes differ')
+          if git('ls-remote','origin','refs/heads/main').split()[0]!=base:
+              raise RuntimeError('main moved; reconcile before applying')
+          expected=['crates/clearra-app/src/build_colored_target_document.rs',
+              'crates/clearra-app/src/build_pinned_solution_document.rs','crates/clearra-app/src/lib.rs',
+              'crates/clearra-cli-command/src/web_build_v2_input.rs',
+              'crates/clearra-wasm/tests/wasm_host_contract.rs']
+          tip=git('ls-remote','origin','refs/heads/'+branch).split()[0]
+          if tip==parent:
+              target=pathlib.Path(os.environ['RUNNER_TEMP'])/'build-pinned-mirror.patch'
+              target.write_bytes(patch)
+              git('checkout','--detach',parent)
+              git('merge-base','--is-ancestor',base,parent)
+              git('apply','--check',str(target)); git('apply','--index',str(target))
+              git('diff','--cached','--check')
+              if git('diff','--cached','--name-only').splitlines()!=expected or git('write-tree')!=tree:
+                  raise RuntimeError('Reviewed source scope or tree mismatch')
+              git('config','user.name','github-actions[bot]')
+              git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+              git('commit','-m','fix: distinguish required mirrored drawings from a single Build target')
+              candidate=git('rev-parse','HEAD')
+              git('push','origin',candidate+':refs/heads/'+branch)
+          else:
+              candidate=tip
+          if (git('show','-s','--format=%P',candidate)!=parent or
+              git('rev-parse',candidate+'^{tree}')!=tree or
+              git('diff','--name-only',parent,candidate).splitlines()!=expected):
+              raise RuntimeError('Candidate identity changed; reconcile before running')
+          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate:
+              raise RuntimeError('Candidate readback mismatch')
           receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'changed_files':expected,'main_updated':False}
           (pathlib.Path(os.environ['RUNNER_TEMP'])/'mirror-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps(receipt),flush=True)
@@ -281,6 +299,12 @@ jobs:
           cargo fmt --all --check
           cargo test --locked --package clearra-wasm --test wasm_host_contract build_mirror_source_and_pins_preserve_exact_sets_and_union_probability -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/build-mirror.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/build-mirror.log"
+      - name: Test both document formats and keep single-target validation strict
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --package clearra-app --no-default-features --features bitmap-render --lib build_pinned_solution_document -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/pinned-document.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/pinned-document.log"
       - name: Test exact boundary and borrowed-state cleanup and require nonempty results
         shell: bash
         run: |
@@ -300,6 +324,7 @@ jobs:
           path: |
             ${{ runner.temp }}/repair-rust.log
             ${{ runner.temp }}/build-mirror.log
+            ${{ runner.temp }}/pinned-document.log
           if-no-files-found: warn
           retention-days: 14
   ready:
