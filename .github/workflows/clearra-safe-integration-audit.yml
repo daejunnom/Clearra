@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Verify native stack budgets before canonical release
+run-name: Verify the isolated eight-menu Pages correction
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -7,71 +7,118 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
-  group: clearra-native-stack-repair
+  group: clearra-pages-menu-repair
   cancel-in-progress: false
 jobs:
-  native-stack:
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        profile: [debug, release]
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: 357eb00dcd444390abff197038e4d1124aba6592, fetch-depth: 0, persist-credentials: false}
+      - name: Preserve the exact source and single-file correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 357eb00dcd444390abff197038e4d1124aba6592
+          test "$(git diff --name-only 9f454c93c2c0eb83163445b4bc50aea724f53a8f HEAD)" = apps/clearra-web/src/routes/+page.svelte
+          git diff --check 9f454c93c2c0eb83163445b4bc50aea724f53a8f HEAD
+          git archive --format=tar.gz -o "$RUNNER_TEMP/clearra-menu-source.tar.gz" HEAD AGENTS.md Cargo.toml Cargo.lock rust-toolchain.toml .cargo config .github scripts packages crates apps tests tools pnpm-lock.yaml pnpm-workspace.yaml package.json ':!**/.env*' ':!**/*credentials*' ':!**/*service-account*'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clearra-menu-reviewed-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/clearra-menu-source.tar.gz
+          retention-days: 7
+  menu:
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     env:
       CLEARRA_SOURCE_COMMIT: 9f454c93c2c0eb83163445b4bc50aea724f53a8f
       CLEARRA_ENGINE_BUILD_ID: 9f454c93c2c0eb83163445b4bc50aea724f53a8f
+      CLEARRA_WEB_BASE_PATH: /Clearra
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: 9f454c93c2c0eb83163445b4bc50aea724f53a8f
-          fetch-depth: 0
-          persist-credentials: false
+        with: {ref: 357eb00dcd444390abff197038e4d1124aba6592, fetch-depth: 0, persist-credentials: false}
       - uses: actions/setup-node@v4
+        with: {node-version: 22.23.2}
+      - name: Install locked frontend toolchain
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+          rustup toolchain install 1.98.1 --profile minimal
+      - uses: actions/download-artifact@v4
         with:
-          node-version: 22.23.2
-      - name: Check exact source and the test-only change
-        shell: bash
+          name: accepted-wasm-build-9f454c93c2c0eb83163445b4bc50aea724f53a8f-run-36233060652-attempt-1
+          run-id: 36233060652
+          github-token: ${{ github.token }}
+          path: build/menu-accepted-wasm
+      - name: Verify the original engine and compile only the corrected Svelte frontend
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$CLEARRA_SOURCE_COMMIT"
-          test "$(git show -s --format=%P HEAD)" = 589493d4a9f70a126ddbdc312bbd1e211f803c68
-          test "$(git diff --name-only 44c104ff242196f2f06be9bc5162c7d0a1f1b878 HEAD)" = crates/clearra-wasm/tests/wasm_host_contract.rs
-          git diff --check 44c104ff242196f2f06be9bc5162c7d0a1f1b878 HEAD
-          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-          cargo fmt --all --check
-      - name: Execute real Build and PC contracts with test-owned native stack bounds
-        shell: bash
-        env:
-          TEST_PROFILE: ${{ matrix.profile }}
+          node scripts/release/accepted-wasm-build.mjs --verify build/menu-accepted-wasm --expected-source-commit "$CLEARRA_SOURCE_COMMIT" --expected-run-id 36233060652 --expected-run-attempt 1
+          export CLEARRA_WEB_PUBLIC_DIR="$GITHUB_WORKSPACE/build/menu-public"
+          mkdir -p "$CLEARRA_WEB_PUBLIC_DIR/wasm"
+          cp -a apps/clearra-web/static/. "$CLEARRA_WEB_PUBLIC_DIR/"
+          cp -a build/menu-accepted-wasm/. "$CLEARRA_WEB_PUBLIC_DIR/wasm/"
+          pnpm --filter @clearra/ctk3 run build
+          pnpm --filter @clearra/web run sync
+          pnpm --filter @clearra/web exec vite build --configLoader runner
+          node apps/clearra-web/scripts/prepare-pages-fallback.mjs
+          echo "CLEARRA_WEB_PUBLIC_DIR=$CLEARRA_WEB_PUBLIC_DIR" >> "$GITHUB_ENV"
+      - name: Verify eight desktop links and eight mobile options in the real built page
         run: |
           set -euo pipefail
-          unset RUST_MIN_STACK
-          args=()
-          if [[ "$TEST_PROFILE" == release ]]; then args+=(--release); fi
-          echo "source=$CLEARRA_SOURCE_COMMIT profile=$TEST_PROFILE inherited_stack=unset build_debug_stack=16777216 build_optimized_stack=2097152 pc_stack=2097152"
-          cargo test --locked "${args[@]}" -p clearra-wasm --test wasm_host_contract --test terminal_supply_public_contract --test pc_minimals_stack_contract -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/native-stack.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/native-stack.log"
-      - name: Execute the exact Windows canonical source-contract entrypoint
-        if: runner.os == 'Windows' && matrix.profile == 'debug'
-        shell: pwsh
-        env:
-          CLEARRA_BUILD_PURPOSE: product
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $false
-          Remove-Item Env:\RUST_MIN_STACK -ErrorAction SilentlyContinue
-          $env:CARGO_BUILD_JOBS = [string][Math]::Max(1, [Environment]::ProcessorCount)
-          & powershell -NoProfile -File scripts/clearra.ps1 -Task WasmBuildContracts -ExecutionSurface Trusted -RuntimeEnvironment windows -VerboseLog 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'canonical-wasm-contracts.log')
-          exit $LASTEXITCODE
+          npm install --prefix build/menu-browser --ignore-scripts --no-audit --no-fund playwright@1.56.1
+          node build/menu-browser/node_modules/playwright/cli.js install --with-deps chromium
+          cat > build/menu-browser/check.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import { createServer } from 'node:http';
+          import { readFile, stat, writeFile } from 'node:fs/promises';
+          import { resolve, extname, sep } from 'node:path';
+          import assert from 'node:assert/strict';
+          const root=resolve('apps/clearra-web/build');
+          const expected=['pc','setup','build-probability','recovery','damage','spin-finder','ctk','player'];
+          const server=createServer(async(req,res)=>{
+            try {
+              const url=new URL(req.url,'http://localhost');
+              if(!url.pathname.startsWith('/Clearra/')) {res.writeHead(404).end();return;}
+              let p=resolve(root,'.'+decodeURIComponent(url.pathname.slice('/Clearra'.length)));
+              if(p!==root && !p.startsWith(root+sep)) {res.writeHead(403).end();return;}
+              if((await stat(p)).isDirectory()) p=resolve(p,'index.html');
+              const types={'.html':'text/html','.js':'text/javascript','.css':'text/css','.json':'application/json','.wasm':'application/wasm','.svg':'image/svg+xml'};
+              res.setHeader('Content-Type',types[extname(p)]??'application/octet-stream');res.end(await readFile(p));
+            } catch {res.writeHead(404).end();}
+          });
+          await new Promise(r=>server.listen(4194,'127.0.0.1',r));
+          const browser=await chromium.launch({headless:true});
+          try {
+            for(const width of [1440,390]) {
+              const page=await browser.newPage({viewport:{width,height:1000}});
+              const errors=[];page.on('pageerror',e=>errors.push(e.message));
+              await page.goto('http://127.0.0.1:4194/Clearra/?tool=recovery');
+              const nav=page.locator('nav.product-tabs');
+              await page.locator('select[aria-label]').first().waitFor();
+              assert.deepEqual(await nav.locator('a').evaluateAll(xs=>xs.map(x=>new URL(x.href).searchParams.get('tool'))),expected);
+              assert.deepEqual(await page.locator('.product-mode-select option').evaluateAll(xs=>xs.map(x=>new URL(x.value,'http://x').searchParams.get('tool'))),expected);
+              assert.equal(await nav.locator('a[aria-current="page"]').getAttribute('href'),'?tool=recovery');
+              assert.deepEqual(errors,[]);
+              await page.screenshot({path:`build/menu-browser/menu-${width}.png`,fullPage:true});
+              await page.close();
+            }
+            await writeFile('build/menu-browser/result.json',JSON.stringify({frontend_source:'357eb00dcd444390abff197038e4d1124aba6592',engine_source:process.env.CLEARRA_SOURCE_COMMIT,expected,passed:true,publication:false},null,2));
+          } finally {await browser.close();server.close();}
+          JS
+          node build/menu-browser/check.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-stack-${{ matrix.os }}-${{ matrix.profile }}-${{ github.run_id }}
+          name: clearra-menu-browser-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/native-stack.log
-            ${{ runner.temp }}/canonical-wasm-contracts.log
+            build/menu-browser/*.png
+            build/menu-browser/result.json
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 14
