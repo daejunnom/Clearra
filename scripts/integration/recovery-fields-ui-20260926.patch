@@ -1,0 +1,289 @@
+diff --git a/packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte b/packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte
+index 423db1b..23ea157 100644
+--- a/packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte
++++ b/packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte
+@@ -20,2 +20,4 @@
+   import WorkspaceBoardEditor from './WorkspaceBoardEditor.svelte';
++  import RecoveryFieldEditor from './RecoveryFieldEditor.svelte';
++  import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
+   import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
+@@ -89,2 +91,3 @@
+       initialBoardMask: trimForwardBoardMask(request.initialBoardMask, height),
++      stageOneBoardMask: trimForwardBoardMask(request.stageOneBoardMask, height),
+       targetBoardMask: trimForwardBoardMask(request.targetBoardMask, height),
+@@ -95,8 +98,6 @@
+ 
+-  function importBoard(mask: bigint, height: number, target: boolean) {
++  function updateField(field: 'initialBoardMask' | 'stageOneBoardMask' | 'targetBoardMask', mask: bigint, height: number) {
++    if (active) return;
+     const nextHeight = Math.max(request.height, Math.max(1, Math.min(24, height)));
+-    request = {
+-      ...request, height: nextHeight,
+-      [target ? 'targetBoardMask' : 'initialBoardMask']: trimForwardBoardMask(mask, nextHeight)
+-    };
++    request = { ...request, height: nextHeight, [field]: trimForwardBoardMask(mask, nextHeight) };
+   }
+@@ -214,16 +215,8 @@
+   <div slot="editor" class="recovery-fields">
+-    <WorkspaceBoardEditor
+-      mode="forward" height={request.height} existingMask={request.initialBoardMask}
+-      targetMask={0n} piecesNeeded={request.stageOneCount} {language}
+-      labelOverride={label('recoveryInitialField')} enableGlobalPaste={false}
+-      on:change={(event) => request = { ...request, initialBoardMask: event.detail.existingMask }}
+-      on:import={(event) => importBoard(event.detail.existingMask, event.detail.height, false)}
+-    />
+-    <WorkspaceBoardEditor
+-      mode="forward" height={request.height} existingMask={request.targetBoardMask}
+-      targetMask={0n} piecesNeeded={request.placements - request.stageOneCount} {language}
+-      labelOverride={label('recoveryTargetField')} enableGlobalPaste={false}
+-      on:change={(event) => request = { ...request, targetBoardMask: event.detail.existingMask }}
+-      on:import={(event) => importBoard(event.detail.existingMask, event.detail.height, true)}
+-    />
++    <RecoveryFieldEditor initialBoardMask={request.initialBoardMask} stageOneBoardMask={request.stageOneBoardMask}
++      targetBoardMask={request.targetBoardMask} height={request.height} {language} disabled={active}
++      on:change={(event) => updateField(event.detail.field, event.detail.mask, event.detail.height)} />
++    <details class="placement-constraints">
++      <summary>{label('recoveryPlacementConstraints')}</summary>
++      <fieldset disabled={active}>
+     {#if request.placementRoleMasks.length > 0}
+@@ -246,9 +239,13 @@
+     {/if}
++      </fieldset>
++    </details>
+   </div>
+-  <section slot="controls" class="recovery-controls" aria-label={label('boundaryRecovery')}>
+-    <p>{label('recoveryScope')}</p>
+-    <label class="check"><input type="checkbox" checked={request.placementRoleMasks.length > 0}
+-      on:change={(event) => setExactRoles((event.currentTarget as HTMLInputElement).checked)} />{label('recoveryExactRoles')}</label>
++  <div slot="controls" class="recovery-controls">
++  <WorkspaceControlPanel ariaLabel={label('boundaryRecovery')}>
++  <fieldset disabled={active} class="recovery-options">
++    <p class="workspace-field-help">{label('recoveryScope')}</p>
++    <label class="workspace-switch-label"><input type="checkbox" checked={request.placementRoleMasks.length > 0}
++      on:change={(event) => setExactRoles((event.currentTarget as HTMLInputElement).checked)} /><span class="workspace-switch" aria-hidden="true"></span><span>{label('recoveryExactRoles')}</span></label>
+     {#if request.placementRoleMasks.length > 0}
+-      <label><span>{label('recoveryRolePosition')}</span>
++      <label class="workspace-field"><span>{label('recoveryRolePosition')}</span>
+         <select value={selectedRolePosition} on:change={(event) => selectedRolePosition = Number((event.currentTarget as HTMLSelectElement).value)}>
+@@ -260,3 +257,3 @@
+     {/if}
+-    <label><span>{label('recoveryQueue')}</span>
++    <label class="workspace-field"><span>{label('recoveryQueue')}</span>
+       <input value={request.queue} placeholder="IOTSZJL" spellcheck="false"
+@@ -264,3 +261,3 @@
+     </label>
+-    <label><span>{label('recoveryQueuePattern')}</span>
++    <label class="workspace-field"><span>{label('recoveryQueuePattern')}</span>
+       <input value={request.queuePattern} placeholder="IJLOSTZP7" spellcheck="false"
+@@ -268,3 +265,3 @@
+     </label>
+-    <label><span>{label('recoveryStageOneCount')}</span>
++    <label class="workspace-field"><span>{label('recoveryStageOneCount')}</span>
+       <input type="number" min="1" max="41" value={request.stageOneCount}
+@@ -272,3 +269,3 @@
+     </label>
+-    <label><span>{label('recoveryPlacements')}</span>
++    <label class="workspace-field"><span>{label('recoveryPlacements')}</span>
+       <input type="number" min="2" max="42" value={request.placements}
+@@ -277,3 +274,3 @@
+     {#if request.maxEarlyPlacements === 1}
+-      <label><span>{label('recoveryBorrowPosition')}</span>
++      <label class="workspace-field"><span>{label('recoveryBorrowPosition')}</span>
+         <input type="number" min={request.stageOneCount + 1} max={request.placements} value={request.borrowRolePosition}
+@@ -282,3 +279,3 @@
+     {/if}
+-    <label><span>{label('recoveryMaxEarlyPlacements')}</span>
++    <label class="workspace-field"><span>{label('recoveryMaxEarlyPlacements')}</span>
+       <select value={request.maxEarlyPlacements} on:change={(event) => request = { ...request, maxEarlyPlacements: Number((event.currentTarget as HTMLSelectElement).value) as 0 | 1 }}>
+@@ -287,3 +284,3 @@
+     </label>
+-    <label><span>{label('rule')}</span>
++    <label class="workspace-field"><span>{label('rule')}</span>
+       <select value={request.rule} on:change={(event) => request = { ...request, rule: (event.currentTarget as HTMLSelectElement).value as RuleProfile }}>
+@@ -292,3 +289,3 @@
+     </label>
+-    <label><span>{standardLabel('spinProfile')}</span>
++    <label class="workspace-field"><span>{standardLabel('spinProfile')}</span>
+       <select value={request.spinProfile} on:change={(event) => request = { ...request, spinProfile: (event.currentTarget as HTMLSelectElement).value as SpinProfile }}>
+@@ -297,10 +294,10 @@
+     </label>
+-    <label class="check"><input type="checkbox" checked={request.holdEnabled} on:change={(event) => request = { ...request, holdEnabled: (event.currentTarget as HTMLInputElement).checked }} />{label('enableHold')}</label>
+-    <label class="check"><input type="checkbox" checked={request.initialB2B} on:change={(event) => request = { ...request, initialB2B: (event.currentTarget as HTMLInputElement).checked }} />{label('recoveryInitialB2b')}</label>
++    <label class="workspace-switch-label"><input type="checkbox" checked={request.holdEnabled} on:change={(event) => request = { ...request, holdEnabled: (event.currentTarget as HTMLInputElement).checked }} /><span class="workspace-switch" aria-hidden="true"></span><span>{label('enableHold')}</span></label>
++    <label class="workspace-switch-label"><input type="checkbox" checked={request.initialB2B} on:change={(event) => request = { ...request, initialB2B: (event.currentTarget as HTMLInputElement).checked }} /><span class="workspace-switch" aria-hidden="true"></span><span>{label('recoveryInitialB2b')}</span></label>
+     {#each bagSlots as bag}
+-      <label class="check"><input type="checkbox" checked={request.preserveB2BBags.includes(bag.position)}
++      <label class="workspace-switch-label"><input type="checkbox" checked={request.preserveB2BBags.includes(bag.position)}
+         on:change={(event) => setBagB2B(bag.position, (event.currentTarget as HTMLInputElement).checked)}
+-      />{bag.stage === 1 ? label('recoveryPreserveStageOne') : label('recoveryPreserveStageTwo')} · {label('recoveryBagUnit')} {bag.stageBag}</label>
++      /><span class="workspace-switch" aria-hidden="true"></span><span>{bag.stage === 1 ? label('recoveryPreserveStageOne') : label('recoveryPreserveStageTwo')} · {label('recoveryBagUnit')} {bag.stageBag}</span></label>
+     {/each}
+-    <label><span>{label('recoveryMaxStates')}</span>
++    <label class="workspace-field"><span>{label('recoveryMaxStates')}</span>
+       <input type="number" min="1" max="1000000" value={request.maxStates}
+@@ -309,3 +306,3 @@
+     {#if request.queuePattern.trim()}
+-      <label><span>{label('recoveryPatternEvaluations')}</span>
++      <label class="workspace-field"><span>{label('recoveryPatternEvaluations')}</span>
+         <input type="number" min="1" max="100000" value={request.maxPatternEvaluations}
+@@ -313,3 +310,3 @@
+       </label>
+-      <label><span>{label('recoveryTotalStates')}</span>
++      <label class="workspace-field"><span>{label('recoveryTotalStates')}</span>
+         <input type="number" min="1" max="100000000" value={request.maxTotalStates}
+@@ -318,4 +315,6 @@
+     {/if}
+-    {#if validation.length > 0}<p role="alert">{label('recoveryInvalid')}</p>{/if}
+-  </section>
++    {#if validation.length > 0}<p class="workspace-validation" role="alert">{label('recoveryInvalid')}</p>{/if}
++  </fieldset>
++  </WorkspaceControlPanel>
++  </div>
+   <section slot="result" class="recovery-result" aria-live="polite">
+@@ -354,7 +353,8 @@
+   .recovery-fields { display: grid; gap: 18px; min-width: 0; }
+-  .recovery-controls { display: grid; align-content: start; gap: 12px; padding: 18px; background: white; border-radius: 12px; }
+-  .recovery-controls > p { margin: 0 0 4px; line-height: 1.5; }
+-  .recovery-controls label:not(.check) { display: grid; gap: 5px; font-size: 13px; font-weight: 650; }
+-  .recovery-controls input:not([type='checkbox']), .recovery-controls select { width: 100%; padding: 8px; border: 1px solid #bac8be; border-radius: 6px; }
+-  .recovery-controls .check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
++  .recovery-controls { min-width: 0; }
++  .recovery-options { display: grid; gap: 14px; border: 0; min-width: 0; padding: 0; margin: 0; }
++  .recovery-options > p { margin: 0; line-height: 1.5; }
++  .placement-constraints { border-top: 1px solid #dfe4e1; padding-top: 12px; }
++  .placement-constraints summary { cursor: pointer; font-size: 13px; font-weight: 650; padding: 8px 0; }
++  .placement-constraints fieldset { border: 0; padding: 12px 0 0; margin: 0; min-width: 0; }
+   .recovery-result { max-width: 1460px; margin: 22px auto; padding: 18px 24px; background: white; border-radius: 12px; }
+diff --git a/packages/clearra-ui/src/lib/workspace/RecoveryFieldEditor.svelte b/packages/clearra-ui/src/lib/workspace/RecoveryFieldEditor.svelte
+new file mode 100644
+index 0000000..b4d7e0c
+--- /dev/null
++++ b/packages/clearra-ui/src/lib/workspace/RecoveryFieldEditor.svelte
+@@ -0,0 +1,60 @@
++<script lang="ts">
++  import { createEventDispatcher } from 'svelte';
++  import WorkspaceBoardEditor from './WorkspaceBoardEditor.svelte';
++  import { componentMessage } from '../i18n/componentCatalog';
++  import type { WorkspaceLanguage } from './workspaceI18n';
++  export let initialBoardMask: bigint;
++  export let stageOneBoardMask: bigint;
++  export let targetBoardMask: bigint;
++  export let height: number;
++  export let language: WorkspaceLanguage;
++  export let disabled = false;
++  type Field = 'initialBoardMask' | 'stageOneBoardMask' | 'targetBoardMask';
++  const fields = [
++    { key: 'initialBoardMask', label: 'recoveryInitialField', color: '#454545' },
++    { key: 'stageOneBoardMask', label: 'recoveryStageOneField', color: '#939393' },
++    { key: 'targetBoardMask', label: 'recoveryTargetField', color: '#d8d8d8' }
++  ] as const;
++  let selected: Field = 'initialBoardMask';
++  const dispatch = createEventDispatcher<{ change: { field: Field; mask: bigint; height: number } }>();
++  $: masks = { initialBoardMask, stageOneBoardMask, targetBoardMask };
++  $: selectedField = fields.find(field => field.key === selected)!;
++  $: previewLayers = fields.map(field => ({ mask: masks[field.key], color: field.color, label: componentMessage(language, field.label) }));
++  function change(mask: bigint, importedHeight = height) {
++    if (!disabled) dispatch('change', { field: selected, mask, height: importedHeight });
++  }
++</script>
++
++<fieldset class="recovery-layer-editor" {disabled}>
++  <legend>{componentMessage(language, 'recoveryFieldLayers')}</legend>
++  <div class="field-segments" role="group" aria-label={componentMessage(language, 'recoveryFieldLayers')}>
++    {#each fields as field}
++      <button type="button" aria-pressed={selected === field.key} class:active={selected === field.key}
++        data-recovery-field={field.key} on:click={() => selected = field.key}>
++        <span class="swatch" style:background={field.color} aria-hidden="true"></span>
++        {componentMessage(language, field.label)}
++      </button>
++    {/each}
++  </div>
++  <p>{componentMessage(language, 'recoveryFieldLayersHelp')}</p>
++  {#key selected}
++    <WorkspaceBoardEditor mode="forward" {height} existingMask={masks[selected]} targetMask={0n}
++      piecesNeeded={null} {language} {previewLayers} showStats={false} enableGlobalPaste={false}
++      labelOverride={componentMessage(language, selectedField.label)}
++      on:change={(event) => change(event.detail.existingMask)}
++      on:import={(event) => change(event.detail.existingMask, event.detail.height)} />
++  {/key}
++</fieldset>
++
++<style>
++  fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
++  legend { font-size: 13px; font-weight: 750; margin-bottom: 10px; }
++  .field-segments { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 3px; padding: 3px; border-radius: 6px; background: #e9eeeb; }
++  button { display: flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; min-height: 44px; border: 0; border-radius: 4px; padding: 8px; background: transparent; color: #34403c; font: inherit; font-size: 12px; cursor: pointer; word-break: keep-all; }
++  button.active { background: white; box-shadow: 0 1px 3px #17211e1c; font-weight: 750; }
++  button:focus-visible { outline: 2px solid #16877d; outline-offset: 1px; }
++  button:disabled { cursor: default; opacity: .5; }
++  .swatch { height: 14px; width: 14px; border: 1px solid #333; flex: 0 0 auto; }
++  p { color: #68736f; font-size: 11px; line-height: 1.6; margin: 10px 0 14px; }
++  @media (max-width: 380px) { .field-segments { grid-template-columns: 1fr; } }
++</style>
+diff --git a/packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte b/packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte
+index 0d02669..97e6335 100644
+--- a/packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte
++++ b/packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte
+@@ -48,2 +48,15 @@
+   export let enableGlobalPaste = true;
++  /** Read-only snapshots, used only for display. Editing still affects existingMask. */
++  export let previewLayers: ReadonlyArray<{ mask: bigint; color: string; label: string }> = [];
++
++  function previewStyle(x: number, y: number): string | undefined {
++    const colors = previewLayers.filter(layer => boardCellOccupied(layer.mask, x, y)).map(layer => layer.color);
++    if (!colors.length) return undefined;
++    if (colors.length === 1) return `background:${colors[0]}`;
++    return `background:linear-gradient(135deg,${colors.map((color, i) => `${color} ${100 * i / colors.length}% ${100 * (i + 1) / colors.length}%`).join(',')})`;
++  }
++
++  function previewLabel(x: number, y: number): string {
++    return previewLayers.filter(layer => boardCellOccupied(layer.mask, x, y)).map(layer => layer.label).join(', ');
++  }
+ 
+@@ -400,3 +413,5 @@
+             class:target={mode === 'build-probability' && boardCellOccupied(targetMask, x, y)}
+-            aria-label={`${label(mode === 'pc' ? 'field' : mode === 'forward' || activeLayer === 'existing' ? 'existingField' : 'targetBuild')} ${x + 1}, ${y + 1}`}
++            style={previewStyle(x, y)}
++            title={previewLabel(x, y) || undefined}
++            aria-label={`${labelOverride ?? label(mode === 'pc' ? 'field' : mode === 'forward' || activeLayer === 'existing' ? 'existingField' : 'targetBuild')} ${x + 1}, ${y + 1}${previewLayers.length ? ` · ${previewLabel(x, y)}` : ''}`}
+             aria-pressed={boardCellOccupied(activeLayer === 'existing' ? existingMask : targetMask, x, y)}
+diff --git a/packages/clearra-ui/src/lib/workspace/boundaryRecoveryModel.ts b/packages/clearra-ui/src/lib/workspace/boundaryRecoveryModel.ts
+index 693ab06..590415e 100644
+--- a/packages/clearra-ui/src/lib/workspace/boundaryRecoveryModel.ts
++++ b/packages/clearra-ui/src/lib/workspace/boundaryRecoveryModel.ts
+@@ -9,2 +9,3 @@ export type BoundaryRecoveryRequest = {
+   initialBoardMask: bigint;
++  stageOneBoardMask: bigint;
+   targetBoardMask: bigint;
+@@ -36,2 +37,3 @@ export function createBoundaryRecoveryRequest(): BoundaryRecoveryRequest {
+     initialBoardMask: 0n,
++    stageOneBoardMask: 0n,
+     targetBoardMask: 0n,
+@@ -96,3 +98,3 @@ export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest
+   const fieldLimit = 1n << BigInt(Math.max(1, Math.min(25, request.height)) * 10);
+-  if (request.initialBoardMask < 0n || request.initialBoardMask >= fieldLimit || request.targetBoardMask < 0n || request.targetBoardMask >= fieldLimit) errors.push('board');
++  if (request.initialBoardMask < 0n || request.initialBoardMask >= fieldLimit || request.stageOneBoardMask < 0n || request.stageOneBoardMask >= fieldLimit || request.targetBoardMask < 0n || request.targetBoardMask >= fieldLimit) errors.push('board');
+   if (request.maxEarlyPlacements === 1 && request.placementRoleMasks.length === 0 &&
+@@ -117,2 +119,3 @@ export function boundaryRecoveryArguments(request: BoundaryRecoveryRequest): str
+     '--initial-board-mask', boardMaskHex(request.initialBoardMask),
++    '--stage-one-board-mask', boardMaskHex(request.stageOneBoardMask),
+     '--target-board-mask', boardMaskHex(request.targetBoardMask),
+diff --git a/packages/clearra-ui/test/workspaceCommandSerialization.test.mjs b/packages/clearra-ui/test/workspaceCommandSerialization.test.mjs
+index f1d4c39..a4b78f3 100644
+--- a/packages/clearra-ui/test/workspaceCommandSerialization.test.mjs
++++ b/packages/clearra-ui/test/workspaceCommandSerialization.test.mjs
+@@ -416 +416,14 @@ test('Build Probability mandatory drawings use the same source-bound CLI command
+ });
++
++test('recovery passes three independent fields without unioning snapshots', () => {
++  const request = { ...createBoundaryRecoveryRequest(), queue: 'II', height: 4,
++    initialBoardMask: 0n, stageOneBoardMask: 0xfn, targetBoardMask: 0xffn,
++    maxEarlyPlacements: 0 };
++  assert.deepEqual(validateBoundaryRecoveryRequest(request), []);
++  const args = boundaryRecoveryArguments(request);
++  const get = flag => args[args.indexOf(flag) + 1];
++  assert.equal(BigInt(get('--initial-board-mask')), 0n);
++  assert.equal(BigInt(get('--stage-one-board-mask')), 0xfn);
++  assert.equal(BigInt(get('--target-board-mask')), 0xffn);
++  assert.deepEqual(validateBoundaryRecoveryRequest({ ...request, stageOneBoardMask: 1n << 40n }), ['board']);
++});
