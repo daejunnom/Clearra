@@ -96,14 +96,25 @@ jobs:
             node scripts/tools/workspace-controls-browser-acceptance.mjs
             pnpm --filter @clearra/ui run test
             pnpm --filter @clearra/web run test
-            node scripts/tools/run-release-regression-tests.mjs
           } 2>&1 | tee "$RUNNER_TEMP/recovery-frontend.log"
+      # Match release-cli.yml metadata: the complete deployment-regression
+      # selector runs on Linux. Windows keeps every UI/worker test above and
+      # the real seven native acceptance leaves below; no assertion is relaxed.
+      - name: Run the complete canonical Linux release regression selector
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse 'refs/tags/v0.7.4^{tag}')" = a95973dbc1c3c1919478328d12e4d25ddaedea71
+          test "$(git rev-parse 'refs/tags/v0.7.4^{commit}')" = 0438d85f90b47c4ce89835f6a6d665a0415aa25a
+          node scripts/tools/run-release-regression-tests.mjs 2>&1 | tee "$RUNNER_TEMP/recovery-release-regressions.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: recovery-frontend-${{ matrix.os }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/recovery-frontend.log
+            ${{ runner.temp }}/recovery-release-regressions.log
             ${{ runner.temp }}/clearra-recovery-editor-acceptance
             ${{ runner.temp }}/clearra-control-acceptance
           if-no-files-found: warn
