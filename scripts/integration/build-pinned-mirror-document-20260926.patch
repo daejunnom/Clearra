@@ -1,0 +1,305 @@
+diff --git a/crates/clearra-app/src/build_colored_target_document.rs b/crates/clearra-app/src/build_colored_target_document.rs
+index 8d4bf8a..360dd57 100644
+--- a/crates/clearra-app/src/build_colored_target_document.rs
++++ b/crates/clearra-app/src/build_colored_target_document.rs
+@@ -17,6 +17,7 @@ pub enum BuildColoredTargetDocumentError {
+     PendingGarbageUnsupported,
+     InitialBoardDiffers,
+     TargetMaskDiffers,
++    TargetAreaDiffers,
+     TargetEmpty,
+     InitialTargetOverlap,
+     ColoredAreaInvalid,
+@@ -35,10 +36,8 @@ impl BuildColoredTargetDocument {
+         format: FieldDocumentFormat,
+         source: &str,
+     ) -> Result<Self, BuildColoredTargetDocumentError> {
+-        let (page_count, visible_height, canonical, identities) = match format {
+-            FieldDocumentFormat::Ctk3 => decode_ctk3(source)?,
+-            FieldDocumentFormat::Fumen => decode_fumen(source)?,
+-        };
++        let (page_count, visible_height, canonical, identities) =
++            decode_colored_pages(format, source)?;
+         validate_and_build(page_count, visible_height, canonical, identities)
+     }
+ 
+@@ -59,7 +58,19 @@ impl BuildColoredTargetDocument {
+     }
+ }
+ 
+-type Decoded = (usize, u8, String, Vec<StandardBoard64ColoredTilingIdentity>);
++pub(crate) type Decoded = (usize, u8, String, Vec<StandardBoard64ColoredTilingIdentity>);
++
++// Wire decoding is shared; target documents and required selections deliberately
++// apply different cross-page contracts after these same per-page safety checks.
++pub(crate) fn decode_colored_pages(
++    format: FieldDocumentFormat,
++    source: &str,
++) -> Result<Decoded, BuildColoredTargetDocumentError> {
++    match format {
++        FieldDocumentFormat::Ctk3 => decode_ctk3(source),
++        FieldDocumentFormat::Fumen => decode_fumen(source),
++    }
++}
+ 
+ fn decode_ctk3(source: &str) -> Result<Decoded, BuildColoredTargetDocumentError> {
+     let document =
+ diff --git a/crates/clearra-app/src/build_pinned_solution_document.rs b/crates/clearra-app/src/build_pinned_solution_document.rs
+new file mode 100644
+index 0000000..bba0607
+--- /dev/null
++++ b/crates/clearra-app/src/build_pinned_solution_document.rs
+@@ -0,0 +1,137 @@
++//! Required drawings are constraints on a separately regenerated source, not a
++//! target document or a replacement candidate family. Mirrored drawings may
++//! occupy different cells; exact membership is still owned by BuildCoverV2.
++
++use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
++
++use crate::{
++    build_colored_target_document::decode_colored_pages, BuildColoredTargetDocumentError,
++    FieldDocumentFormat,
++};
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct BuildPinnedSolutionDocument {
++    identities: Vec<StandardBoard64ColoredTilingIdentity>,
++}
++
++impl BuildPinnedSolutionDocument {
++    pub fn decode(
++        format: FieldDocumentFormat,
++        source: &str,
++    ) -> Result<Self, BuildColoredTargetDocumentError> {
++        let (_, _, _, mut identities) = decode_colored_pages(format, source)?;
++        let first = identities
++            .first()
++            .ok_or(BuildColoredTargetDocumentError::EmptyDocument)?;
++        let initial = first.initial_board_mask();
++        let pieces = first.placement_count();
++        if pieces == 0 {
++            return Err(BuildColoredTargetDocumentError::TargetEmpty);
++        }
++        for identity in &identities {
++            if identity.initial_board_mask() != initial {
++                return Err(BuildColoredTargetDocumentError::InitialBoardDiffers);
++            }
++            if identity.placement_count() != pieces {
++                return Err(BuildColoredTargetDocumentError::TargetAreaDiffers);
++            }
++        }
++        // Decoder construction checked width, height, garbage, colored area and
++        // disjointness. Do not infer legal placements or coverage here: the full
++        // producer must resolve every drawing to exactly one accepted identity.
++        identities.sort_unstable();
++        identities.dedup();
++        Ok(Self { identities })
++    }
++
++    pub fn into_identities(self) -> Vec<StandardBoard64ColoredTilingIdentity> {
++        self.identities
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::BuildColoredTargetDocument;
++    use clearra_ctk3::{encode_ctk3, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece};
++    use fumen::{CellColor, Fumen, Page};
++
++    fn page(mask: u64, initial: u64) -> Ctk3Page {
++        Ctk3Page::new(
++            1,
++            (0..10)
++                .map(|x| {
++                    let bit = 1_u64 << x;
++                    if initial & bit != 0 {
++                        Ctk3Color::Gray
++                    } else if mask & bit != 0 {
++                        Ctk3Color::Piece(Ctk3Piece::I)
++                    } else {
++                        Ctk3Color::Empty
++                    }
++                })
++                .collect(),
++        )
++    }
++
++    #[test]
++    fn mirrored_pins_are_not_a_single_target_document() {
++        let source = encode_ctk3(&Ctk3Document::new(
++            10,
++            vec![page(0xf, 0), page(0x3c0, 0), page(0xf, 0)],
++        ))
++        .unwrap();
++        let identities = BuildPinnedSolutionDocument::decode(FieldDocumentFormat::Ctk3, &source)
++            .unwrap()
++            .into_identities();
++        assert_eq!(identities.len(), 2);
++        assert_eq!(identities[0].piece_masks()[0], 0xf);
++        assert_eq!(identities[1].piece_masks()[0], 0x3c0);
++        // Normal target-search semantics are not relaxed to admit these pages.
++        assert_eq!(
++            BuildColoredTargetDocument::decode(FieldDocumentFormat::Ctk3, &source),
++            Err(BuildColoredTargetDocumentError::TargetMaskDiffers)
++        );
++        let mut left = Page::default();
++        left.field[0][0..4].fill(CellColor::I);
++        let mut right = Page::default();
++        right.field[0][6..10].fill(CellColor::I);
++        let fumen = Fumen {
++            pages: vec![left, right],
++            guideline: true,
++        }
++        .encode();
++        assert_eq!(
++            BuildPinnedSolutionDocument::decode(FieldDocumentFormat::Fumen, &fumen)
++                .unwrap()
++                .into_identities(),
++            identities
++        );
++    }
++
++    #[test]
++    fn pins_keep_initial_board_area_and_wire_validation() {
++        for (pages, error) in [
++            (
++                vec![page(0xf, 0), page(0x3c0, 0x10)],
++                BuildColoredTargetDocumentError::InitialBoardDiffers,
++            ),
++            (
++                vec![page(0xf, 0), page(0xff, 0)],
++                BuildColoredTargetDocumentError::TargetAreaDiffers,
++            ),
++            (vec![page(0, 0)], BuildColoredTargetDocumentError::TargetEmpty),
++            (
++                vec![page(0x7, 0)],
++                BuildColoredTargetDocumentError::ColoredAreaInvalid,
++            ),
++        ] {
++            let source = encode_ctk3(&Ctk3Document::new(10, pages)).unwrap();
++            assert_eq!(
++                BuildPinnedSolutionDocument::decode(FieldDocumentFormat::Ctk3, &source),
++                Err(error)
++            );
++        }
++        assert!(BuildPinnedSolutionDocument::decode(FieldDocumentFormat::Ctk3, "ctk3_").is_err());
++    }
++}
+diff --git a/crates/clearra-app/src/lib.rs b/crates/clearra-app/src/lib.rs
+index fe713da..153dee1 100644
+--- a/crates/clearra-app/src/lib.rs
++++ b/crates/clearra-app/src/lib.rs
+@@ -7,6 +7,7 @@ pub mod app_request;
+ pub mod app_response;
+ pub mod app_services;
+ mod build_colored_target_document;
++mod build_pinned_solution_document;
+ mod build_probability_product_result;
+ mod build_setup_product_projection;
+ mod build_solution_probability_result;
+@@ -146,6 +147,7 @@ pub use app_services::{
+ pub use build_colored_target_document::{
+     BuildColoredTargetDocument, BuildColoredTargetDocumentError,
+ };
++pub use build_pinned_solution_document::BuildPinnedSolutionDocument;
+ pub use build_probability_product_result::{
+     BUILD_FIELD_AVERAGE_CAPABILITY, BUILD_FIELD_AVERAGE_RESULT_CONTRACT,
+     BUILD_FIXED_SCORE_CAPABILITY, BUILD_FIXED_SCORE_RESULT_CONTRACT,
+diff --git a/crates/clearra-cli-command/src/web_build_v2_input.rs b/crates/clearra-cli-command/src/web_build_v2_input.rs
+index c0c8d9d..0be72e0 100644
+--- a/crates/clearra-cli-command/src/web_build_v2_input.rs
++++ b/crates/clearra-cli-command/src/web_build_v2_input.rs
+@@ -303,9 +303,9 @@ impl WebBuildV2Input {
+         Ok(self)
+     }
+ 
+-    /// The second CLI input contains the solutions to keep in every minimum
+-    /// portfolio. Decode it through the same normalization as the first input
+-    /// so document order and command-line escaping never identify a solution.
++    /// Required drawings constrain the full source, which remains the only
++    /// coverage authority. Unlike a target document, a selection may contain
++    /// both original and mirrored masks; the producer resolves every identity.
+     pub fn with_pinned_solution_document(
+         self,
+         format: FieldDocumentFormat,
+@@ -319,6 +319,14 @@ impl WebBuildV2Input {
+                 "only build.evaluate.minimals and build.pinned-minimals accept a pinned solution document",
+             ));
+         }
++        if self.capability == WebBuildV2Capability::PinnedMinimals {
++            validate_document_size(document, "pinned solution")?;
++            let decoded = clearra_app::BuildPinnedSolutionDocument::decode(format, document)
++                .map_err(|error| invalid(format!("invalid pinned solution document: {error:?}")))?;
++            let mut selected = self;
++            selected.pinned_colored_identities = decoded.into_identities();
++            return Ok(selected);
++        }
+         let decoded = decode_document(format, document, "pinned solution")?;
+         let normalized = decoded.target();
+         let pins = BuildSuppliedSolutionSetV1::new(
+@@ -328,13 +336,7 @@ impl WebBuildV2Input {
+             normalized.identities().iter().copied(),
+         )
+         .map_err(|error| invalid(format!("invalid pinned solution document: {error:?}")))?;
+-        if self.capability == WebBuildV2Capability::PinnedMinimals {
+-            let mut selected = self;
+-            selected.pinned_colored_identities = pins.identities().to_vec();
+-            Ok(selected)
+-        } else {
+-            self.with_pinned_candidate_keys(pins.candidate_keys().to_vec())
+-        }
++        self.with_pinned_candidate_keys(pins.candidate_keys().to_vec())
+     }
+ 
+     pub fn with_expected_source_set_hash(
+@@ -584,13 +586,18 @@ fn decode_document(
+     document: &str,
+     role: &str,
+ ) -> Result<BuildColoredTargetDocument, WebCommandError> {
++    validate_document_size(document, role)?;
++    BuildColoredTargetDocument::decode(format, document)
++        .map_err(|error| invalid(format!("invalid Build v2 {role} document: {error:?}")))
++}
++
++fn validate_document_size(document: &str, role: &str) -> Result<(), WebCommandError> {
+     if document.len() > FIELD_DOCUMENT_MAX_INPUT_BYTES {
+         return Err(invalid(format!(
+             "Build v2 {role} document exceeds {FIELD_DOCUMENT_MAX_INPUT_BYTES} bytes"
+         )));
+     }
+-    BuildColoredTargetDocument::decode(format, document)
+-        .map_err(|error| invalid(format!("invalid Build v2 {role} document: {error:?}")))
++    Ok(())
+ }
+ 
+ fn document_query_input(
+diff --git a/crates/clearra-wasm/tests/wasm_host_contract.rs b/crates/clearra-wasm/tests/wasm_host_contract.rs
+index 51da5d4..645a371 100644
+--- a/crates/clearra-wasm/tests/wasm_host_contract.rs
++++ b/crates/clearra-wasm/tests/wasm_host_contract.rs
+@@ -151,6 +151,23 @@ fn build_mirror_source_and_pins_preserve_exact_sets_and_union_probability() {
+         if target != "0xf" || mirror != "--include-mirror" {
+             continue;
+         }
++        // Syntactically valid selections are never proof of membership. Keep
++        // exact-source and source-digest rejection at the real product boundary.
++        for (mask, digest) in [
++            (0x1e_u64, report.normalized_solution_set_hash.as_str()),
++            (0x3c0_u64, "cts1:0000000000000000"),
++        ] {
++            let document = selected_document(&[mask]);
++            let rejected = runtime
++                .run_command_text(&format!(
++                    "clearra build pinned-minimals --base-mask 0 --target-mask 0xf --height 4 \
++                     --queue I --no-hold --objective min-cover --queue-knowledge oracle \
++                     --required-format ctk3 --required-document {document} \
++                     --expected-source-set-hash {digest} --backend cpu --workers 1"
++                ))
++                .expect("valid selection syntax must reach exact-source validation");
++            assert_eq!(rejected.app_response().status(), AppStatus::ExecutionFailed);
++        }
+         // Both candidates cover the same queue. A single mirrored pin must
+         // select that drawing; requiring both must increase the minimum to two.
+         for (masks, expected_pins) in [
