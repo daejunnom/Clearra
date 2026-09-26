@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Resume menu protection and prepare isolated recovery UI review
+run-name: Validate isolated recovery fields and shared controls
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -7,47 +7,251 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: write
 concurrency:
-  group: clearra-recovery-source-review
+  group: clearra-recovery-fields-review
   cancel-in-progress: false
 jobs:
   prepare:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions: {contents: write, actions: write}
+    outputs:
+      candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 521fee125b478a5a39a90a808d6c471c430c8494
+          ref: 793415affc1d0d5a38170d7396bf82e290f60904
           fetch-depth: 0
-          persist-credentials: false
-      - name: Verify reviewed menu candidate and start missing independent protection
+      - name: Install the pinned formatter
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Apply the reviewed patch to an isolated branch, never main
+        id: prepare
         env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import json,os,pathlib,subprocess
+          import base64,hashlib,json,os,pathlib,subprocess,zlib
           repo='daejunnom/Clearra'
-          candidate='521fee125b478a5a39a90a808d6c471c430c8494'
-          branch='codex/pages-eight-menu-hotfix-20260926'
-          def cmd(*args): return subprocess.check_output(args,text=True,timeout=90).strip()
+          base='521fee125b478a5a39a90a808d6c471c430c8494'
+          base_tree='ba8f0617b2d2011fa80a9a808d141c9adc916278'
+          branch='codex/recovery-gray-fields-20260926'
+          expected={
+              'crates/clearra-cli-command/src/web_command_parser.rs':'c7be62b6e803d3fd39d720c4e6fb2f47f33ca37e',
+              'crates/clearra-cli-command/tests/boundary_recovery.rs':'06f120a7bdeb9a0c4d134c0c0cbb37570c15acb4',
+              'crates/clearra-forward-search/src/boundary_recovery.rs':'e5883bbdf9d4819dd1f318fbf4ab0ffbdf70c139',
+              'crates/clearra-forward-search/src/boundary_recovery_pattern.rs':'e3ed9e6b579b4d332be1453f404ef34fe0b43aca',
+              'crates/clearra-forward-search/src/boundary_recovery_population.rs':'60205da535bd2f27d97edb730b730ecab6cef2b0',
+              'crates/clearra-forward-search/src/boundary_recovery_tests.rs':'dea823d6e8fed5d0a4481c8164f0f1ff37c33656',
+              'packages/clearra-ui/src/lib/i18n/componentCatalog.ts':'34c2d4b8cd4119eb25b83ed4b147c5f98a4dcba4',
+              'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryControls.svelte':'ad688d7fb0f3dfafa339befeca7fd27c83568195',
+              'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryFields.svelte':'2e5c5db8066a6555527f7b13c9d5188d0140e391',
+              'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte':'82d2e0d7c30b3187972b244485ffe11e6058cf05',
+              'packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte':'a1939b315a0d1fdc8fdd6753708d65044806a833',
+              'packages/clearra-ui/src/lib/workspace/boundaryRecoveryModel.ts':'1039176d4aafe61865c5577fd4334b2dbde71c59',
+              'packages/clearra-ui/test/boundaryRecoveryFields.test.mjs':'00a5b884fcb4abbd9b9d3c34e8e3433182627ccf',
+              'scripts/desktop-ui-compile-check.mjs':'a4d4213b5b2bf23afd3686492da4e026c482174b',
+              'scripts/lib/wasm-release-gate.ps1':'8ad0356f6e2202b4b7606682729bd007aeba9c8d',
+              'scripts/tools/recovery-editor-browser-acceptance.mjs':'1debb830486f46297985b4ee458826b46c3771ac',
+              'scripts/tools/surface-browser-acceptance.mjs':'b74ffc105abd8eab856a9e67a679061e03ab6c2e'}
+          def cmd(*args): return subprocess.check_output(args,text=True,timeout=180).strip()
+          def git(*args): return cmd('git',*args)
           def api(path): return json.loads(cmd('gh','api','repos/'+repo+'/'+path))
-          assert cmd('git','rev-parse','HEAD')==candidate
-          assert api('git/ref/heads/'+branch)['object']['sha']==candidate
-          checks=api('commits/'+candidate+'/check-runs?per_page=100')['check_runs']
-          present={c['name'] for c in checks if c['app']['slug']=='github-actions'}
-          required={'Clearra management policy','Clearra management Windows runtime'}
-          runs=api('actions/workflows/management-policy.yml/runs?head_sha='+candidate+'&per_page=100')['workflow_runs']
-          if not required.issubset(present) and not any(r['status']!='completed' for r in runs):
-              subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True,timeout=90)
-          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'recovery-source'
+          # These three checked-in chunks transport one previously reviewed text
+          # patch. Bound decoding and verify its raw digest before applying it.
+          encoded=''.join(pathlib.Path('scripts/integration/recovery-fields-review-20260926.part'+str(i)).read_text().strip() for i in (1,2,3))
+          if len(encoded)!=23820: raise RuntimeError('Patch transport length changed')
+          packed=base64.b64decode(encoded,validate=True)
+          decoder=zlib.decompressobj()
+          patch=decoder.decompress(packed,71357)
+          if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail or len(patch)!=71356:
+              raise RuntimeError('Patch decoding exceeded its exact bound')
+          if hashlib.sha256(patch).hexdigest()!='836872d6bc76874863c98bc6a952f8a9b35b983ee6535ec59ac2d56bc46b9abe':
+              raise RuntimeError('Reviewed patch digest mismatch')
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'recovery-preparation'
           out.mkdir()
-          subprocess.run(['git','archive','--format=tar.gz','--output='+str(out/'source.tar.gz'),candidate],check=True)
-          (out/'source.json').write_text(json.dumps({'source':candidate,'tree':cmd('git','rev-parse','HEAD^{tree}'),'main_unchanged':True})+'\n')
-          print('Only independent candidate protection dispatched; no main, tag, release or Pages changes in this job.')
+          patch_path=out/'reviewed.patch'; patch_path.write_bytes(patch)
+          if git('ls-remote','origin','refs/heads/'+branch):
+              raise RuntimeError('Recovery branch already exists; inspect rather than overwrite')
+          if api('git/ref/heads/main')['object']['sha']!=base:
+              raise RuntimeError('Main moved; reconcile exact menu source first')
+          git('checkout','--detach',base)
+          if git('rev-parse','HEAD^{tree}')!=base_tree: raise RuntimeError('Base tree mismatch')
+          git('apply','--check',str(patch_path)); git('apply','--index',str(patch_path))
+          if git('diff','--cached','--name-only').splitlines()!=sorted(expected):
+              raise RuntimeError('Patch scope differs from review')
+          for path,blob in expected.items():
+              if git('hash-object',path)!=blob: raise RuntimeError('Reviewed file differs: '+path)
+          subprocess.run(['cargo','+1.98.1','fmt','--all'],check=True,timeout=120)
+          if git('diff','HEAD','--name-only').splitlines()!=sorted(expected):
+              raise RuntimeError('Formatter changed unrelated files')
+          git('add','--',*sorted(expected)); git('diff','--cached','--check')
+          subprocess.run(['cargo','+1.98.1','fmt','--all','--check'],check=True,timeout=120)
+          (out/'formatted.patch').write_text(git('diff','--cached','--binary')+'\n')
+          git('config','user.name','github-actions[bot]')
+          git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit','-m','feat: share recovery field editor and preserve explicit first-stage targets')
+          candidate=git('rev-parse','HEAD'); tree=git('rev-parse','HEAD^{tree}')
+          if git('show','-s','--format=%P',candidate)!=base: raise RuntimeError('Wrong parent')
+          if git('ls-remote','origin','refs/heads/'+branch): raise RuntimeError('Branch created concurrently')
+          git('push','origin',candidate+':refs/heads/'+branch)
+          if api('git/ref/heads/'+branch)['object']['sha']!=candidate: raise RuntimeError('Push readback mismatch')
+          receipt={'candidate':candidate,'parent':base,'tree':tree,'branch':branch,'changed_files':sorted(expected),
+              'formatted_blobs':{path:git('hash-object',path) for path in sorted(expected)},'main_updated':False,'publishing':False}
+          (out/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt),flush=True)
+          subprocess.run(['gh','workflow','run','management-policy.yml','--ref',branch],check=True,timeout=120)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\n')
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: recovery-ui-source-${{ github.run_id }}
-          path: ${{ runner.temp }}/recovery-source
-          if-no-files-found: error
-          retention-days: 14
+          name: recovery-preparation-${{ github.run_id }}
+          path: ${{ runner.temp }}/recovery-preparation
+          if-no-files-found: warn
+          retention-days: 30
+  frontend:
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: {os: [ubuntu-latest, windows-latest]}
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_BROWSER_TOOLS_ROOT: ${{ github.workspace }}/build/tools/recovery-browser
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: 22.23.2}
+      - name: Install frozen workspace and browser tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+          npm install --prefix "$CLEARRA_BROWSER_TOOLS_ROOT" --ignore-scripts --no-audit --no-fund playwright@1.56.1
+          node "$CLEARRA_BROWSER_TOOLS_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Test real shared Svelte editor and input-to-command contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            node --test packages/clearra-ui/test/boundaryRecoveryFields.test.mjs
+            pnpm --filter @clearra/ui run test
+            pnpm --filter @clearra/web run test
+            node scripts/desktop-ui-compile-check.mjs
+            node scripts/tools/recovery-editor-browser-acceptance.mjs
+            node scripts/tools/workspace-controls-browser-acceptance.mjs
+            node scripts/tools/run-release-regression-tests.mjs
+          } 2>&1 | tee "$RUNNER_TEMP/recovery-frontend.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-frontend-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/recovery-frontend.log
+            ${{ runner.temp }}/clearra-recovery-editor-acceptance
+            ${{ runner.temp }}/clearra-control-acceptance
+          if-no-files-found: warn
+          retention-days: 30
+  exact-recovery:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
+      RUST_MIN_STACK: '16777216'
+      CARGO_BUILD_JOBS: '4'
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
+      - name: Test exact checkpoints line-clear coordinates and legacy empty checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo test --locked -p clearra-forward-search --lib boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/recovery-core.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-core.log"
+          cargo test --locked -p clearra-cli-command --test boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/recovery-command.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-command.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-exact-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/recovery-core.log
+            ${{ runner.temp }}/recovery-command.log
+          if-no-files-found: warn
+          retention-days: 30
+  acceptance:
+    needs: [prepare, frontend, exact-recovery]
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        shard: [FoundationNoProductDebt, FoundationAdversarialCorrectness, FoundationDesktopHost, Sanitizer, RustExact, RustProduct, Pages]
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_WEB_BASE_PATH: /Clearra
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: 22.23.2}
+      - name: Prepare exact toolchains and frozen workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD).Trim() -ne $env:CLEARRA_SOURCE_COMMIT) { throw 'Candidate mismatch' }
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "CARGO_BUILD_JOBS=$([Math]::Max(1, [Environment]::ProcessorCount))" >> $env:GITHUB_ENV
+          if ('${{ matrix.shard }}' -eq 'Pages') {
+            rustup target add wasm32-unknown-unknown
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Run the existing nonpublishing acceptance leaf
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'recovery-acceptance.log')
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-acceptance-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/recovery-acceptance.log
+            ${{ runner.temp }}/clearra-surface-acceptance
+            ${{ runner.temp }}/clearra-recovery-editor-acceptance
+          if-no-files-found: warn
+          retention-days: 30
+  ready:
+    if: always()
+    needs: [prepare, frontend, exact-recovery, acceptance]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every independent check without publishing
+        env: {RESULTS: '${{ toJSON(needs) }}'}
+        shell: python
+        run: |
+          import json,os
+          results=json.loads(os.environ['RESULTS'])
+          failed={key:value['result'] for key,value in results.items() if value['result']!='success'}
+          if failed: raise RuntimeError(json.dumps(failed))
+          print('Recovery source accepted:',results['prepare']['outputs']['candidate'])
+          print('No main update, tag, release or Pages deployment is performed by this workflow.')
