@@ -12,27 +12,7 @@ concurrency:
   group: clearra-pages-menu-repair
   cancel-in-progress: true
 jobs:
-  source:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: 357eb00dcd444390abff197038e4d1124aba6592, fetch-depth: 0, persist-credentials: false}
-      - name: Preserve the exact source and single-file correction
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = 357eb00dcd444390abff197038e4d1124aba6592
-          test "$(git diff --name-only 9f454c93c2c0eb83163445b4bc50aea724f53a8f HEAD)" = apps/clearra-web/src/routes/+page.svelte
-          git diff --check 9f454c93c2c0eb83163445b4bc50aea724f53a8f HEAD
-          git archive --format=tar.gz -o "$RUNNER_TEMP/clearra-menu-source.tar.gz" HEAD AGENTS.md Cargo.toml Cargo.lock rust-toolchain.toml .cargo config .github scripts packages crates apps tests tools pnpm-lock.yaml pnpm-workspace.yaml package.json ':!**/.env*' ':!**/*credentials*' ':!**/*service-account*'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: clearra-menu-reviewed-source-${{ github.run_id }}
-          path: ${{ runner.temp }}/clearra-menu-source.tar.gz
-          retention-days: 7
   menu:
-    needs: source
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -42,6 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: 357eb00dcd444390abff197038e4d1124aba6592, fetch-depth: 0, persist-credentials: false}
+      - name: Verify the exact isolated menu change
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 357eb00dcd444390abff197038e4d1124aba6592
+          test "$(git diff --name-only 9f454c93c2c0eb83163445b4bc50aea724f53a8f HEAD)" = apps/clearra-web/src/routes/+page.svelte
+          git diff --check 9f454c93c2c0eb83163445b4bc50aea724f53a8f HEAD
       - uses: actions/setup-node@v4
         with: {node-version: 22.23.2}
       - name: Install locked frontend toolchain
@@ -65,10 +51,11 @@ jobs:
           cp -a apps/clearra-web/static/. "$CLEARRA_WEB_PUBLIC_DIR/"
           cp -a build/menu-accepted-wasm/. "$CLEARRA_WEB_PUBLIC_DIR/wasm/"
           pnpm --filter ctk3 run build
-          pnpm --filter @clearra/web run sync
-          pnpm --filter @clearra/web exec vite build --configLoader runner
-          node apps/clearra-web/scripts/prepare-pages-fallback.mjs
-          echo "CLEARRA_WEB_PUBLIC_DIR=$CLEARRA_WEB_PUBLIC_DIR" >> "$GITHUB_ENV"
+          node scripts/tools/invoke-clearra-build.mjs --source-root "$GITHUB_WORKSPACE" --purpose product -- bash -euo pipefail -c '
+            pnpm --filter @clearra/web run sync
+            pnpm --filter @clearra/web exec vite build --configLoader runner
+            node apps/clearra-web/scripts/prepare-pages-fallback.mjs
+          '
       - name: Verify eight desktop links and eight mobile options in the real built page
         run: |
           set -euo pipefail
@@ -99,12 +86,14 @@ jobs:
             for(const width of [1440,390]) {
               const page=await browser.newPage({viewport:{width,height:1000}});
               const errors=[];page.on('pageerror',e=>errors.push(e.message));
-              await page.goto('http://127.0.0.1:4194/Clearra/?tool=recovery');
-              const nav=page.locator('nav.product-tabs');
-              await page.locator('.product-mode-select option').first().waitFor({state:'attached'});
-              assert.deepEqual(await nav.locator('a').evaluateAll(xs=>xs.map(x=>new URL(x.href).searchParams.get('tool'))),expected);
-              assert.deepEqual(await page.locator('.product-mode-select option').evaluateAll(xs=>xs.map(x=>new URL(x.value,'http://x').searchParams.get('tool'))),expected);
-              assert.equal(await nav.locator('a[aria-current="page"]').getAttribute('href'),'?tool=recovery');
+              for(const tool of ['pc','build-probability','recovery']) {
+                await page.goto('http://127.0.0.1:4194/Clearra/?tool='+tool);
+                const nav=page.locator('nav.product-tabs');
+                await page.locator('.product-mode-select option').first().waitFor({state:'attached'});
+                assert.deepEqual(await nav.locator('a').evaluateAll(xs=>xs.map(x=>new URL(x.href).searchParams.get('tool'))),expected);
+                assert.deepEqual(await page.locator('.product-mode-select option').evaluateAll(xs=>xs.map(x=>new URL(x.value,'http://x').searchParams.get('tool'))),expected);
+                assert.equal(await nav.locator('a[aria-current="page"]').getAttribute('href'),'?tool='+tool);
+              }
               assert.deepEqual(errors,[]);
               await page.screenshot({path:`build/menu-browser/menu-${width}.png`,fullPage:true});
               await page.close();
