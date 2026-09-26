@@ -46,7 +46,7 @@ const compiled = await build({
   absWorkingDir: root,
   stdin: { contents: "import { mount } from 'svelte'; import Fixture from 'clearra-recovery-fixture'; mount(Fixture,{target:document.getElementById('app')});",
     resolveDir: root, sourcefile: 'control-acceptance-entry.js' },
-  bundle: true, write: false, format: 'iife', platform: 'browser', target: 'es2022',
+  bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022',
   conditions: ['browser'], mainFields: ['svelte', 'browser', 'module', 'main'],
   define: { 'process.env.NODE_ENV': '"production"' },
   plugins: [{ name: 'real-svelte-controls', setup(builder) {
@@ -63,7 +63,7 @@ const server = createServer((request, response) => {
     response.writeHead(200, { 'Content-Type': 'text/javascript' }).end(compiled.outputFiles[0].contents);
   } else if (path === '/') {
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(
-      '<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><div id="app"></div><script src="/controls.js"></script>');
+      '<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><div id="app"></div><script type="module" src="/controls.js"></script>');
   } else response.writeHead(404).end();
 });
 const cases = [

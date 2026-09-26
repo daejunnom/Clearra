@@ -50,14 +50,16 @@
   export let occupiedTone: 'dark' | 'medium' | 'light' | null = null;
   export let referenceLayers: Array<{ mask: bigint; tone: 'dark' | 'medium' | 'light'; label: string }> = [];
   const tones = { dark: '#606060', medium: '#a0a0a0', light: '#dedede' };
-  function cellTone(x: number, y: number): string | undefined {
-    if (mode !== 'forward' || occupiedTone === null) return undefined;
-    if (boardCellOccupied(existingMask, x, y)) return tones[occupiedTone];
-    const reference = referenceLayers.find((layer) => boardCellOccupied(layer.mask, x, y));
+  // Pass every changing value explicitly so legacy Svelte tracks painted cells.
+  function cellTone(x: number, y: number, currentMode: BoardEditorMode, mask: bigint,
+      tone: typeof occupiedTone, references: typeof referenceLayers): string | undefined {
+    if (currentMode !== 'forward' || tone === null) return undefined;
+    if (boardCellOccupied(mask, x, y)) return tones[tone];
+    const reference = references.find((layer) => boardCellOccupied(layer.mask, x, y));
     return reference ? tones[reference.tone] : undefined;
   }
-  function referenceLabel(x: number, y: number): string {
-    return referenceLayers.filter((layer) => boardCellOccupied(layer.mask, x, y)).map((layer) => layer.label).join(' · ');
+  function referenceLabel(x: number, y: number, references: typeof referenceLayers): string {
+    return references.filter((layer) => boardCellOccupied(layer.mask, x, y)).map((layer) => layer.label).join(' · ');
   }
 
   const dispatch = createEventDispatcher<{
@@ -410,9 +412,9 @@
           <button
             type="button"
             class:existing={boardCellOccupied(existingMask, x, y)}
-            class:reference={mode === 'forward' && !boardCellOccupied(existingMask, x, y) && Boolean(cellTone(x, y))}
-            style:background-color={cellTone(x, y)}
-            title={referenceLabel(x, y) || undefined}
+            class:reference={mode === 'forward' && !boardCellOccupied(existingMask, x, y) && Boolean(cellTone(x, y, mode, existingMask, occupiedTone, referenceLayers))}
+            style:background-color={cellTone(x, y, mode, existingMask, occupiedTone, referenceLayers)}
+            title={referenceLabel(x, y, referenceLayers) || undefined}
             class:target={mode === 'build-probability' && boardCellOccupied(targetMask, x, y)}
             aria-label={`${labelOverride ?? label(mode === 'pc' ? 'field' : mode === 'forward' || activeLayer === 'existing' ? 'existingField' : 'targetBuild')} ${x + 1}, ${y + 1}`}
             aria-pressed={boardCellOccupied(activeLayer === 'existing' ? existingMask : targetMask, x, y)}
