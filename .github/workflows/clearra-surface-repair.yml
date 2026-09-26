@@ -14,17 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write
       actions: write
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: c47a369cf7b606edae17df1d9a9d0d2500ae5f3f
+          ref: 5be0eb20932e00eb90e18ece0b77f80363a31955
           fetch-depth: 0
-          persist-credentials: false
-      - name: Bind the exact pinned-document repair without changing source or main
+      - name: Bind reviewed pin validation and restore the exact centered fixture
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
@@ -34,25 +33,44 @@ jobs:
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
           base='952280950aeb24528279cbff685fe8acec892223'
           before='54df724b04498aaec987d41483efe4d075172522'
-          parent='e339c26f9230c525d4c6757bd754aa11b1e0c3d1'
-          candidate='c47a369cf7b606edae17df1d9a9d0d2500ae5f3f'
+          parent='5be0eb20932e00eb90e18ece0b77f80363a31955'
           branch='codex/converge-surface-repair-20260926'
-          tree='74f555d5628705cb33bcc19f7d2d87d831179a89'
-          for ref,sha in [('refs/heads/main',base),('refs/heads/'+branch,candidate)]:
-              rows=git('ls-remote','origin',ref).splitlines()
-              if len(rows)!=1 or rows[0].split()!=[sha,ref]:
-                  raise RuntimeError('Reviewed ref moved; reconcile before running')
+          tree='6466b0a94008f30911fa01257de5a6faf09787d2'
+          if git('ls-remote','origin','refs/heads/main').split()[0]!=base:
+              raise RuntimeError('main moved; reconcile before running')
+          tip=git('ls-remote','origin','refs/heads/'+branch).split()[0]
+          if tip==parent:
+              git('checkout','--detach',parent)
+              p=pathlib.Path('crates/clearra-wasm/tests/wasm_host_contract.rs')
+              text=p.read_text()
+              old='const CENTER_I: &str = "ctk1|initial=0000000000000000|placements=I:0000000000000000078";'
+              new='const CENTER_I: &str = "ctk1|initial=0000000000000000|placements=I:'+format(0x78,'016x')+'";'
+              if text.count(old)!=1: raise RuntimeError('Reviewed fixture correction mismatch')
+              p.write_text(text.replace(old,new))
+              git('add',str(p))
+              git('diff','--cached','--check')
+              if git('write-tree')!=tree or git('diff','--cached','--name-only')!=str(p):
+                  raise RuntimeError('Reviewed tree or correction scope mismatch')
+              git('config','user.name','github-actions[bot]')
+              git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+              git('commit','-m','test: retain the fixed-width centered I fixture')
+              candidate=git('rev-parse','HEAD')
+              git('push','origin',candidate+':refs/heads/'+branch)
+          else:
+              candidate=tip
           expected=['crates/clearra-app/src/build_colored_target_document.rs',
               'crates/clearra-app/src/build_pinned_solution_document.rs','crates/clearra-app/src/lib.rs',
               'crates/clearra-cli-command/src/web_build_v2_input.rs',
               'crates/clearra-wasm/tests/wasm_host_contract.rs',
               'packages/clearra-ui/test/buildProbabilityMirrorSelection.test.mjs',
               'scripts/tools/surface-browser-acceptance.mjs']
-          if (git('rev-parse','HEAD')!=candidate or git('show','-s','--format=%P',candidate)!=parent or
-              git('rev-parse','HEAD^{tree}')!=tree or git('diff','--name-only',before,candidate).splitlines()!=expected):
+          if (git('show','-s','--format=%P',candidate)!=parent or
+              git('rev-parse',candidate+'^{tree}')!=tree or git('diff','--name-only',before,candidate).splitlines()!=expected):
               raise RuntimeError('Reviewed source identity or scope mismatch')
           git('merge-base','--is-ancestor',base,candidate)
           git('diff','--check',before,candidate)
+          if git('ls-remote','origin','refs/heads/'+branch).split()[0]!=candidate:
+              raise RuntimeError('Candidate readback mismatch')
           receipt={'candidate':candidate,'parent':parent,'base':base,'tree':tree,'changed_files':expected,'main_updated':False}
           (pathlib.Path(os.environ['RUNNER_TEMP'])/'mirror-preparation.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps(receipt),flush=True)
