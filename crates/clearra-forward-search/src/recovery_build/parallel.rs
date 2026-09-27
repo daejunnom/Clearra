@@ -1,14 +1,14 @@
-//! Exact, bounded pair partitioning shared by native threads and WASM workers.
-//! The coordinator alone owns probability aggregation and example selection.
+//! Bounded FIRST-source shards with symbolic second-stage continuations.
+//! Coordinator metrics count original pairs; neither worker enumerates pairs.
 use super::{
     population::{PopulationAccumulator, PreparedPopulation},
-    RecoveryBuildError, RecoveryBuildFixedReport, RecoveryBuildPopulation, RecoveryBuildQuery,
-    RecoveryBuildStatus,
+    staged::{Block, BlockResult, Geometry},
+    RecoveryBuildError, RecoveryBuildExample, RecoveryBuildFixedReport, RecoveryBuildPopulation,
+    RecoveryBuildQuery, RecoveryBuildStatus,
 };
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use std::collections::BTreeMap;
 mod wire;
-
 const MAX_BATCH: usize = 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,7 +21,7 @@ impl RecoveryBuildParallelError {
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::Search(RecoveryBuildError::Cancelled) => "recovery-build cancelled",
-            Self::Search(_) => "recovery-build pair search failed",
+            Self::Search(_) => "recovery-build stage search failed",
             Self::InvalidWire(reason) | Self::InvalidState(reason) => reason,
         }
     }
@@ -51,14 +51,9 @@ struct Task {
     count: usize,
     examples: u8,
 }
-struct Record {
-    status: RecoveryBuildStatus,
-    states: usize,
-    path: Option<RecoveryBuildFixedReport>,
-}
 struct ResultBatch {
     task: Task,
-    records: Vec<Record>,
+    block: BlockResult,
 }
 
 pub struct RecoveryBuildParallelCoordinator {
@@ -68,6 +63,7 @@ pub struct RecoveryBuildParallelCoordinator {
     issued: BTreeMap<u128, Task>,
     completed: BTreeMap<u128, ResultBatch>,
     next: u128,
+    merged: u128,
     finished_pairs: u128,
     finished_states: u128,
     capacity: usize,
@@ -85,11 +81,13 @@ impl RecoveryBuildParallelCoordinator {
         }
         let source = PreparedPopulation::new(query)?;
         let initialization = wire::encode_initialization(&source.query);
-        let desired = (workers as u128).saturating_mul(8).max(1);
-        let batch_size = source
-            .possible
-            .div_ceil(desired)
-            .clamp(1, MAX_BATCH as u128) as usize;
+        // Fixed partitioning makes all worker counts use identical arithmetic
+        // and search quotients. Parallelism does not change a probability space.
+        let batch_size = if source.first.pattern_count() <= 64 {
+            1
+        } else {
+            MAX_BATCH
+        };
         let accumulator = PopulationAccumulator::new(source.possible);
         Ok(Self {
             source,
@@ -98,6 +96,7 @@ impl RecoveryBuildParallelCoordinator {
             issued: BTreeMap::new(),
             completed: BTreeMap::new(),
             next: 0,
+            merged: 0,
             finished_pairs: 0,
             finished_states: 0,
             capacity: workers.saturating_mul(4).max(1),
@@ -110,21 +109,21 @@ impl RecoveryBuildParallelCoordinator {
     pub fn progress(&self) -> RecoveryBuildParallelProgress {
         RecoveryBuildParallelProgress {
             possible: self.source.possible,
-            issued: self.next,
+            issued: self.next * self.source.second.pattern_count() as u128,
             completed: self.finished_pairs,
             states: self.finished_states,
         }
     }
     pub fn produce(
         &mut self,
-        maximum_pairs: usize,
+        maximum_rows: usize,
         control: &ExecutionControl,
     ) -> Result<(RecoveryBuildParallelProduce, Vec<u8>), RecoveryBuildParallelError> {
         use RecoveryBuildParallelProduce::*;
         if control.is_cancelled() {
             return Ok((Cancelled, Vec::new()));
         }
-        if self.next == self.source.possible {
+        if self.next == self.source.first.pattern_count() as u128 {
             return Ok((
                 if self.issued.is_empty() {
                     Completed
@@ -134,15 +133,14 @@ impl RecoveryBuildParallelCoordinator {
                 Vec::new(),
             ));
         }
-        // Completed out-of-order batches count against the same window. A slow
-        // first batch cannot grow a product-sized reorder buffer.
+        // Out-of-order finished shards occupy the same bounded window.
         if self.issued.len() >= self.capacity {
             return Ok((Pending, Vec::new()));
         }
         let count = self
             .batch_size
-            .min(maximum_pairs.max(1))
-            .min((self.source.possible - self.next).min(MAX_BATCH as u128) as usize);
+            .min(maximum_rows.max(1))
+            .min((self.source.first.pattern_count() as u128 - self.next) as usize);
         let examples = u8::from(self.accumulator.report.normal_example.is_none())
             | (u8::from(self.accumulator.report.recovery_example.is_none()) << 1);
         let task = Task {
@@ -162,7 +160,7 @@ impl RecoveryBuildParallelCoordinator {
         if control.is_cancelled() {
             return Err(RecoveryBuildError::Cancelled.into());
         }
-        let batch = wire::decode_result(bytes, &self.initialization)?;
+        let mut batch = wire::decode_result(bytes, &self.initialization)?;
         let expected =
             self.issued
                 .get(&batch.task.start)
@@ -177,49 +175,93 @@ impl RecoveryBuildParallelCoordinator {
                 "duplicate or mismatched recovery result",
             ));
         }
-        let mut needed = expected.examples;
-        let mut states = 0_u128;
-        for record in &batch.records {
-            let bit = match record.status {
-                RecoveryBuildStatus::Normal => 1,
-                RecoveryBuildStatus::Recovery => 2,
-                RecoveryBuildStatus::NoPath => 0,
-            };
-            let requires_path = needed & bit != 0;
-            if requires_path != record.path.is_some() {
+        let represented = (batch.task.count as u128) * self.source.second.pattern_count() as u128;
+        let total = batch
+            .block
+            .counts
+            .iter()
+            .try_fold(0_u128, |sum, n| sum.checked_add(*n));
+        if total != Some(represented) {
+            return Err(RecoveryBuildParallelError::InvalidWire(
+                "stage counts do not partition the issued universe",
+            ));
+        }
+        let start =
+            usize::try_from(batch.task.start).map_err(|_| RecoveryBuildError::CounterOverflow)?;
+        let mass: f64 = (start..start + batch.task.count)
+            .map(|i| self.source.first.weight_at(i).get())
+            .sum();
+        if batch
+            .block
+            .probabilities
+            .iter()
+            .any(|p| !p.is_finite() || *p < 0.0 || *p > 1.0)
+            || (batch.block.probabilities.iter().sum::<f64>() - mass).abs() > 1e-10
+        {
+            return Err(RecoveryBuildParallelError::InvalidWire(
+                "invalid stage probability measure",
+            ));
+        }
+        for (category, slot) in [(0, &mut batch.block.normal), (1, &mut batch.block.recovery)] {
+            let needed =
+                expected.examples & (1 << category) != 0 && batch.block.counts[category] > 0;
+            if needed != slot.is_some() {
                 return Err(RecoveryBuildParallelError::InvalidWire(
-                    "missing or redundant recovery example",
+                    "missing or redundant stage example",
                 ));
             }
-            needed &= !bit;
-            if let Some(path) = &record.path {
-                if path.status != record.status || path.states != record.states {
+            if let Some(example) = slot {
+                let status = if category == 0 {
+                    RecoveryBuildStatus::Normal
+                } else {
+                    RecoveryBuildStatus::Recovery
+                };
+                if example.first_pattern < start
+                    || example.first_pattern >= start + batch.task.count
+                    || example.second_pattern >= self.source.second.pattern_count()
+                    || example.path.status != status
+                    || example.path.steps.is_empty()
+                {
                     return Err(RecoveryBuildParallelError::InvalidWire(
-                        "recovery example status differs",
+                        "stage example outside task",
+                    ));
+                }
+                example.first_queue = self
+                    .source
+                    .first
+                    .sequence_at(example.first_pattern)
+                    .to_vec();
+                example.second_queue = self
+                    .source
+                    .second
+                    .sequence_at(example.second_pattern)
+                    .to_vec();
+                let n = example.first_queue.len() + example.second_queue.len();
+                if example.path.steps.iter().any(|s| s.source_index >= n) {
+                    return Err(RecoveryBuildParallelError::InvalidWire(
+                        "stage example source outside supplies",
                     ));
                 }
             }
-            states = states
-                .checked_add(record.states as u128)
-                .ok_or(RecoveryBuildError::CounterOverflow)?;
         }
-        self.finished_pairs += batch.task.count as u128;
+        self.finished_pairs = self
+            .finished_pairs
+            .checked_add(represented)
+            .ok_or(RecoveryBuildError::CounterOverflow)?;
         self.finished_states = self
             .finished_states
-            .checked_add(states)
+            .checked_add(batch.block.states)
             .ok_or(RecoveryBuildError::CounterOverflow)?;
         self.completed.insert(batch.task.start, batch);
-        while let Some(batch) = self.completed.remove(&self.accumulator.report.evaluated) {
-            for (offset, record) in batch.records.into_iter().enumerate() {
-                self.accumulator.record(
-                    &self.source,
-                    batch.task.start + offset as u128,
-                    record.status,
-                    record.states,
-                    record.path,
-                )?;
-            }
-            self.issued.remove(&batch.task.start);
+        while let Some(batch) = self.completed.remove(&self.merged) {
+            self.accumulator.record_block(
+                &self.source,
+                self.merged as usize,
+                batch.task.count,
+                batch.block,
+            )?;
+            self.issued.remove(&self.merged);
+            self.merged += batch.task.count as u128;
         }
         self.source.progress(self.finished_pairs, control);
         Ok(())
@@ -242,15 +284,14 @@ impl RecoveryBuildParallelCoordinator {
         Ok(self.accumulator.finish())
     }
 }
-
 struct PendingBatch {
     task: Task,
-    records: Vec<Record>,
-    wanted: u8,
+    block: Block,
 }
 pub struct RecoveryBuildParallelWorker {
     source: PreparedPopulation,
     initialization: Vec<u8>,
+    geometry: Option<Geometry>,
     pending: Option<PendingBatch>,
     progress: RecoveryBuildParallelProgress,
 }
@@ -259,12 +300,12 @@ impl RecoveryBuildParallelWorker {
         bytes.starts_with(wire::INIT)
     }
     pub fn new(bytes: &[u8]) -> Result<Self, RecoveryBuildParallelError> {
-        let query = wire::decode_initialization(bytes)?;
-        let source = PreparedPopulation::new(query)?;
+        let source = PreparedPopulation::new(wire::decode_initialization(bytes)?)?;
         let possible = source.possible;
         Ok(Self {
             source,
             initialization: bytes.to_vec(),
+            geometry: None,
             pending: None,
             progress: RecoveryBuildParallelProgress {
                 possible,
@@ -276,13 +317,20 @@ impl RecoveryBuildParallelWorker {
         self.pending.is_some()
     }
     pub fn progress(&self) -> RecoveryBuildParallelProgress {
-        self.progress
+        let mut result = self.progress;
+        if let Some(pending) = &self.pending {
+            result.states = result.states.saturating_add(pending.block.states());
+        }
+        result
     }
     pub fn consume(
         &mut self,
         bytes: &[u8],
         control: &ExecutionControl,
     ) -> Result<Option<Vec<u8>>, RecoveryBuildParallelError> {
+        if control.is_cancelled() {
+            return Err(RecoveryBuildError::Cancelled.into());
+        }
         if self.pending.is_some() {
             return Err(RecoveryBuildParallelError::InvalidState(
                 "recovery worker busy",
@@ -292,21 +340,31 @@ impl RecoveryBuildParallelWorker {
         if task
             .start
             .checked_add(task.count as u128)
-            .is_none_or(|end| end > self.source.possible)
+            .is_none_or(|end| end > self.source.first.pattern_count() as u128)
         {
             return Err(RecoveryBuildParallelError::InvalidWire(
-                "recovery task outside product",
+                "recovery shard outside first source",
             ));
         }
-        self.pending = Some(PendingBatch {
-            task,
-            records: Vec::with_capacity(task.count),
-            wanted: task.examples,
-        });
-        self.advance(control)
+        let geometry = match self.geometry.take() {
+            Some(value) => value,
+            None => Geometry::new(&self.source.query, control)?,
+        };
+        let block = Block::new(
+            &self.source,
+            geometry,
+            task.start as usize,
+            task.count,
+            task.examples,
+            control,
+        )?;
+        self.progress.issued += task.count as u128 * self.source.second.pattern_count() as u128;
+        self.pending = Some(PendingBatch { task, block });
+        // Return to the host even for a one-row shard, before solver expansion.
+        Ok(None)
     }
-    /// One exact fixed-pair search per host quantum. Between pairs the existing
-    /// worker runtime can process cancellation and return its admitted memory.
+    /// Bounded diagram/state-machine work per host quantum, including while a
+    /// single first queue has a very large second-source continuation language.
     pub fn advance(
         &mut self,
         control: &ExecutionControl,
@@ -318,36 +376,59 @@ impl RecoveryBuildParallelWorker {
         let Some(pending) = &mut self.pending else {
             return Ok(None);
         };
-        let index = pending.task.start + pending.records.len() as u128;
-        let path = self.source.evaluate(index, control)?;
-        self.progress.completed += 1;
+        if !pending.block.advance(control)? {
+            return Ok(None);
+        }
+        let PendingBatch { task, block } =
+            self.pending
+                .take()
+                .ok_or(RecoveryBuildParallelError::InvalidState(
+                    "missing stage shard",
+                ))?;
+        let (block, geometry) = block.finish(&self.source, control)?;
+        self.geometry = Some(geometry);
+        self.progress.completed += task.count as u128 * self.source.second.pattern_count() as u128;
         self.progress.states = self
             .progress
             .states
-            .checked_add(path.states as u128)
+            .checked_add(block.states)
             .ok_or(RecoveryBuildError::CounterOverflow)?;
-        let bit = match path.status {
-            RecoveryBuildStatus::Normal => 1,
-            RecoveryBuildStatus::Recovery => 2,
-            RecoveryBuildStatus::NoPath => 0,
-        };
-        let keep = pending.wanted & bit != 0;
-        pending.wanted &= !bit;
-        pending.records.push(Record {
-            status: path.status,
-            states: path.states,
-            path: keep.then_some(path),
-        });
-        if pending.records.len() != pending.task.count {
-            return Ok(None);
-        }
-        let pending = self.pending.take().expect("completed batch retained");
         Ok(Some(wire::encode_result(
             &self.initialization,
-            &ResultBatch {
-                task: pending.task,
-                records: pending.records,
-            },
+            &ResultBatch { task, block },
         )))
+    }
+}
+pub(super) fn search_serial(
+    query: RecoveryBuildQuery,
+    control: &ExecutionControl,
+) -> Result<RecoveryBuildPopulation, RecoveryBuildParallelError> {
+    let mut c = RecoveryBuildParallelCoordinator::new(query, 1)?;
+    let mut w = RecoveryBuildParallelWorker::new(&c.worker_initialization())?;
+    loop {
+        let (status, bytes) = c.produce(MAX_BATCH, control)?;
+        match status {
+            RecoveryBuildParallelProduce::Completed => return c.finish(control),
+            RecoveryBuildParallelProduce::Cancelled => {
+                return Err(RecoveryBuildError::Cancelled.into())
+            }
+            RecoveryBuildParallelProduce::Pending => {
+                return Err(RecoveryBuildParallelError::InvalidState(
+                    "serial stage without work",
+                ))
+            }
+            RecoveryBuildParallelProduce::Batch => {
+                let mut result = w.consume(&bytes, control)?;
+                while result.is_none() {
+                    result = w.advance(control)?;
+                }
+                c.absorb(
+                    &result.ok_or(RecoveryBuildParallelError::InvalidState(
+                        "stage did not return",
+                    ))?,
+                    control,
+                )?;
+            }
+        }
     }
 }

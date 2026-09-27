@@ -6,6 +6,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+clearra-core-executor = { path = "../clearra-core-executor" }
+clearra-problem = { path = "../clearra-problem" }
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-piece-registry = { path = "../clearra-piece-registry" }
 clearra-replay = { path = "../clearra-replay" }

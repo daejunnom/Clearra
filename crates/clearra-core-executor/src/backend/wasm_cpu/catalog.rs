@@ -248,6 +248,14 @@ impl GeometryCatalog {
         Self::compile_with_clear_row_domain(width, height, initial_board, required_cells, false)
     }
 
+    pub(super) fn compile_build_stage(
+        height: u8,
+        base: u64,
+        target: u64,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::compile_with_clear_row_domain(10, height, base, target, true)
+    }
+
     fn compile_with_clear_row_domain(
         width: u8,
         height: u8,

@@ -127,3 +127,5 @@ pub use wasm_setup_search_backend::{
 
 #[cfg(all(test, feature = "experimental-native-gpu"))]
 mod hybrid_scheduler_contract_tests;
+
+pub use wasm_cpu::{BuildStageDomain, BuildStageDomainError};

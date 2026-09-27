@@ -1,10 +1,9 @@
-//! Paired Build targets with canonical queue-pattern input. Target geometry is
-//! generated lazily by lifting exact reachable locks into two logical Build
-//! regions. This is the Build/Verify product, not a fixed-role approximation.
-//! No isolated-stage B2B or reachability failure is used as a joint prune.
+//! Stage-factorized paired Build coverage with demand-driven boundary repair.
+//! The original weighted supply universe is preserved without pair expansion.
 mod field;
 mod parallel;
 mod population;
+mod staged;
 pub use parallel::{
     RecoveryBuildParallelCoordinator, RecoveryBuildParallelError, RecoveryBuildParallelProduce,
     RecoveryBuildParallelProgress, RecoveryBuildParallelWorker,
