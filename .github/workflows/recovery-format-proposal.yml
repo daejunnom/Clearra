@@ -1,0 +1,66 @@
+name: Prepare exact recovery formatting proposal
+
+# Tooling only: propose the pinned workspace formatter's output for review.
+# This workflow cannot promote main or publish any product artifact.
+on:
+  push:
+    branches: [codex/recovery-format-helper-20260928]
+
+permissions:
+  contents: write
+
+jobs:
+  format-proposal:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom' && github.ref == 'refs/heads/codex/recovery-format-helper-20260928'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SOURCE: 71dc202f20037089178e1d65813a2df1d1b86c2e
+      PROPOSAL: codex/recovery-format-proposal-20260928
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 71dc202f20037089178e1d65813a2df1d1b86c2e
+          fetch-depth: 0
+      - name: Propose workspace-edition formatting only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          test -z "$(git status --porcelain)"
+          test -z "$(git ls-remote --heads origin "refs/heads/$PROPOSAL")"
+          rustup show
+          cargo fmt --all
+          cargo fmt --all --check
+          mkdir -p build/recovery-format-proposal
+          git diff --binary > build/recovery-format-proposal/workspace-format.patch
+          git diff --name-only > build/recovery-format-proposal/changed-files.txt
+          python3 - <<'PY'
+          import subprocess
+          expected = set(subprocess.check_output(['git','diff','--name-only','c2dd8509914846ed81119cd7094e7f70ac3d979c','71dc202f20037089178e1d65813a2df1d1b86c2e','--','*.rs'],text=True).splitlines())
+          actual = set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          if not actual or not actual <= expected:
+              raise SystemExit(f'Formatter changed unexpected files: {sorted(actual - expected)}')
+          PY
+          git add -- crates/clearra-app crates/clearra-cli-command crates/clearra-forward-search crates/clearra-wasm
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'style(recovery): align integration with pinned workspace formatter'
+          git rev-parse HEAD > build/recovery-format-proposal/proposal-sha.txt
+          git rev-parse HEAD^{tree} > build/recovery-format-proposal/proposal-tree.txt
+          test "$(git rev-parse HEAD^)" = "$SOURCE"
+          git diff --exit-code
+          git push origin "HEAD:refs/heads/$PROPOSAL"
+          {
+            echo '## Formatting-only proposal; not acceptance evidence'
+            cat build/recovery-format-proposal/proposal-sha.txt
+            cat build/recovery-format-proposal/changed-files.txt
+            echo 'The integration branch and main were not updated. The canonical gate was not started.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-format-proposal
+          path: build/recovery-format-proposal
+          retention-days: 3
