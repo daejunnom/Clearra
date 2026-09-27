@@ -65,6 +65,16 @@ const specs = [
   { language: 'ko', width: 390, touch: true },
   { language: 'ja', width: 390, touch: true },
 ];
+// Independent expected public names: control order is not an interaction
+// contract. Each localized label must resolve to exactly one real checkbox.
+const switchNames = {
+  en: { hold: 'Hold', useAll: 'Use every logical processor',
+    exchange: 'Allow different-piece repayment', b2b: 'Preserve B2B' },
+  ko: { hold: '홀드', useAll: '모든 논리 프로세서 사용',
+    exchange: '다른 종류의 미노로 반환 허용', b2b: 'B2B 보존' },
+  ja: { hold: 'ホールド', useAll: 'すべての論理プロセッサを使用',
+    exchange: '異なる種類のミノで補完', b2b: 'B2Bを維持' },
+};
 const results = [];
 let browser;
 try {
@@ -123,11 +133,24 @@ try {
         assert.deepEqual(errors, []);
       }
       for (const offset of [30,31,20,21]) await board.locator('button').nth(offset).click();
-      const switches = page.locator('.workspace-controls input[type="checkbox"]');
-      assert.equal(await switches.count(), 3, 'hold, different-piece repayment and one global B2B toggle');
-      for (const toggle of await switches.all()) {
-        const initial = await toggle.isChecked();
-        await toggle.setChecked(!initial); await toggle.setChecked(initial);
+      const controls = page.locator('.workspace-controls');
+      assert.equal(await controls.getByRole('checkbox').count(), 4,
+        'hold, all-processor opt-in, different-piece repayment and one global B2B toggle');
+      const switches = Object.fromEntries(Object.entries(switchNames[spec.language]).map(
+        ([key, name]) => [key, controls.getByRole('checkbox', { name, exact: true })]));
+      for (const [key, toggle] of Object.entries(switches)) {
+        assert.equal(await toggle.count(), 1, `exactly one ${key} checkbox`);
+      }
+      const switchState = async () => Object.fromEntries(await Promise.all(
+        Object.entries(switches).map(async ([key, toggle]) => [key, await toggle.isChecked()])));
+      const initialSwitches = await switchState();
+      assert.deepEqual(initialSwitches, { hold: true, useAll: false, exchange: false, b2b: false });
+      for (const [key, toggle] of Object.entries(switches)) {
+        await toggle.setChecked(!initialSwitches[key]); await flush();
+        assert.deepEqual(await switchState(), { ...initialSwitches, [key]: !initialSwitches[key] },
+          `${key} must change independently without altering another option`);
+        await toggle.setChecked(initialSwitches[key]); await flush();
+        assert.deepEqual(await switchState(), initialSwitches, `${key} must restore its own setting`);
       }
       // Paint each independent snapshot, then exercise real dimension changes.
       for (let field = 0; field < 3; field++) {
@@ -147,7 +170,10 @@ try {
       }
       // Public Build inputs never expose the legacy role editor, even after
       // toggling different-piece repayment or changing the display height.
-      await page.locator('.workspace-controls input[type="checkbox"]').nth(1).check();
+      await switches.exchange.check();
+      assert.equal(await switches.exchange.isChecked(), true);
+      assert.equal(await switches.useAll.isChecked(), false,
+        'enabling repayment must not enable every logical processor');
       await height.fill('4'); await flush();
       assert.equal(await page.locator('.board-tool .board').count(), 1);
       assert.equal(await gridSize(), 40);
@@ -171,7 +197,7 @@ try {
       assert.equal(await page.locator('.board-stats').count(), 0);
       assert.deepEqual(errors, []);
       await page.screenshot({ path: resolve(reportRoot, `${spec.language}-${spec.width}.png`), fullPage: true });
-      results.push({ ...spec, status: 'passed', heightTransition: [8, 4, 6, 4, 8], quotas: ['auto', 1, 0], supplies: ['P7','P7'], removedLegacyControls: true });
+      results.push({ ...spec, status: 'passed', heightTransition: [8, 4, 6, 4, 8], quotas: ['auto', 1, 0], supplies: ['P7','P7'], namedSwitches: Object.keys(switches), independentSwitches: true, removedLegacyControls: true });
     } catch (error) {
       await writeFile(resolve(reportRoot, `failed-${spec.language}-${spec.width}.txt`),
         [String(error.stack || error), ...errors, await page.locator('body').innerText()].join('\n'));

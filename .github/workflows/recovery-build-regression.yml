@@ -106,11 +106,14 @@ jobs:
           node --test packages/clearra-ui/test/recoveryBuild*.test.mjs packages/clearra-ui/test/boundaryRecoverySurface.test.mjs 2>&1 | tee build/recovery-regression/ui-unit.log || result=1
           pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee build/recovery-regression/ui-types.log || result=1
           node scripts/tools/recovery-build-browser-regression.mjs 2>&1 | tee build/recovery-regression/browser.log || result=1
+          node scripts/tools/recovery-workspace-browser-acceptance.mjs 2>&1 | tee build/recovery-regression/workspace-browser.log || result=1
           exit "$result"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: recovery-build-regression-results
-          path: build/recovery-regression
+          path: |
+            build/recovery-regression
+            ${{ runner.temp }}/clearra-recovery-workspace-acceptance
           if-no-files-found: ignore
           retention-days: 7
