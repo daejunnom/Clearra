@@ -106,6 +106,8 @@ const CENTER_I = 'ctk1|initial=0000000000000000|placements=I:0000000000000078';
 
 async function paint(page, index, mask, height) {
   const board = page.locator('.board-tool .board').nth(index);
+  assert.equal(await board.locator('button').count(), height * 10,
+    'paint coordinates must match the actual committed field height');
   for (let y = 0; y < height; y++) for (let x = 0; x < 10; x++) {
     if ((mask & (1n << BigInt(y * 10 + x))) !== 0n) await board.locator('button').nth((height - 1 - y) * 10 + x).click();
   }
@@ -118,7 +120,7 @@ try {
     const ctx = await context(mode);
     const page = await ctx.newPage();
     const errors = [];
-    page.on('pageerror', error => errors.push(String(error)));
+    page.on('pageerror', error => errors.push(error.stack || String(error)));
     try {
       await page.goto(`http://127.0.0.1:4194${base}/?tool=pc`);
       await page.locator('.product-tabs').waitFor();
@@ -154,6 +156,9 @@ try {
         const recovery = await navigateWorkspace(page, 'recovery');
         await recovery.locator('.recovery-field-editor').waitFor();
         await page.locator('.dimension-field input').fill('4');
+        await page.evaluate(() => new Promise(requestAnimationFrame));
+        assert.deepEqual(errors, [], 'recovery height editing must not throw before search');
+        assert.equal(await recovery.locator('.recovery-field-editor .board button').count(), 40);
         await page.getByLabel('Known queue across both stages', { exact: true }).fill('IOT');
         await page.getByLabel('Stage-one supply tokens', { exact: true }).fill('1');
         assert.equal(await recovery.getByLabel('Required placements', { exact: true }).count(), 0);

@@ -17,6 +17,7 @@
     createBoundaryRecoveryRequest, recoveryPlacementHorizon, validateBoundaryRecoveryRequest
   } from './boundaryRecoveryModel';
   import { trimForwardBoardMask } from './forwardSearchModel';
+  import { isRecoveryEditorHeight, resizeBoundaryRecoveryFields } from './boundaryRecoveryFieldEditing';
   import WorkspaceBoardEditor from './WorkspaceBoardEditor.svelte';
   import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
   import WorkspaceShell from './WorkspaceShell.svelte';
@@ -35,6 +36,7 @@
   let selectedRolePosition = 1;
   let language: WorkspaceLanguage = 'en';
   let disposed = false;
+  let invalidHeightDraft = false;
 
   $: workerController.setWorkerFactory(workerFactory);
   $: runtimeView = runtime === 'web' ? workspaceViewFromWasm($wasmWorkerState) : workspaceViewFromDesktop($desktopJobState);
@@ -43,7 +45,7 @@
   $: displaySteps = payload?.population ? (example?.steps ?? []) : (payload?.steps ?? []);
   $: displayCheckpoint = payload?.population ? example?.stage_one_checkpoint_step : payload?.stage_one_checkpoint_step;
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
-  $: validation = validateBoundaryRecoveryRequest(request);
+  $: validation = [...validateBoundaryRecoveryRequest(request), ...(invalidHeightDraft ? ['height'] : [])];
   $: placementHorizon = recoveryPlacementHorizon(request);
   $: if (Number.isInteger(placementHorizon) && placementHorizon >= 2 && placementHorizon <= 42) {
     selectedRolePosition = Math.min(selectedRolePosition, placementHorizon);
@@ -85,20 +87,8 @@
   }
 
   function setHeight(value: number) {
-    const height = Math.max(1, Math.min(24, Math.trunc(value || 1)));
-    request = {
-      ...request, height,
-      initialBoardMask: trimForwardBoardMask(request.initialBoardMask, height),
-      stageOneBoardMask: trimForwardBoardMask(request.stageOneBoardMask, height),
-      targetBoardMask: trimForwardBoardMask(request.targetBoardMask, height),
-      borrowPlacementMask: trimForwardBoardMask(request.borrowPlacementMask, height),
-      placementRoleMasks: request.placementRoleMasks.map((mask) => trimForwardBoardMask(mask, height))
-    };
-  }
-
-  function importBorrowPlacement(mask: bigint, height: number) {
-    const nextHeight = Math.max(request.height, Math.max(1, Math.min(24, height)));
-    request = { ...request, height: nextHeight, borrowPlacementMask: trimForwardBoardMask(mask, nextHeight) };
+    invalidHeightDraft = !isRecoveryEditorHeight(value);
+    request = resizeBoundaryRecoveryFields(request, value);
   }
 
   function setRoleMask(position: number, mask: bigint) {
@@ -182,7 +172,10 @@
   on:run={run}
 >
   <div slot="editor" class="recovery-fields">
-    <BoundaryRecoveryFields {request} {language} on:change={(event) => request = event.detail} />
+    <BoundaryRecoveryFields {request} {language} on:change={(event) => {
+      if (event.detail.height !== request.height) invalidHeightDraft = false;
+      request = event.detail;
+    }} />
     <details class="placement-constraints" open={request.placementRoleMasks.length > 0}>
       <summary>{label('recoveryAdvanced')}</summary>
     {#if request.placementRoleMasks.length > 0}
