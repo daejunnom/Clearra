@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { acquireBuildOwner } from './clearra-build-owner.mjs';
+import { assertDefaultBenchmarkRustEnvironment } from './benchmark-rust-environment.mjs';
 import { assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, canonicalBuildRoot, nativeBuildPath } from './clearra-build-policy.mjs';
 
 function cleanBuildEnvironment() {
@@ -72,6 +73,22 @@ test('outside target and compiler overrides fail before directory creation', asy
     await assert.rejects(acquireBuildOwner({ ...options, environment: { ...options.environment, [key]: join(options.temporary, 'outside') } }), /override|wrapper/iu);
   }
   await assert.rejects(stat(options.environment.LOCALAPPDATA), { code: 'ENOENT' });
+});
+
+test('benchmark accepts only its active managed Rust guard and rejects performance overrides', async t => {
+  const options = await fixture(t);
+  const owner = await acquireBuildOwner(options);
+  const keys = ['RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTFLAGS'];
+  try {
+    assert.doesNotThrow(() => assertDefaultBenchmarkRustEnvironment(keys, options.sourceRoot, owner.environment));
+    assert.throws(() => assertDefaultBenchmarkRustEnvironment(keys, options.sourceRoot,
+      { ...owner.environment, RUSTC_WRAPPER: join(options.temporary, 'other-wrapper') }), /unset RUSTC_WRAPPER/u);
+    assert.throws(() => assertDefaultBenchmarkRustEnvironment(keys, options.sourceRoot,
+      { ...owner.environment, RUSTFLAGS: '-C target-cpu=native' }), /unset RUSTFLAGS/u);
+    assert.throws(() => assertDefaultBenchmarkRustEnvironment(keys, options.sourceRoot,
+      { ...owner.environment, RUSTC_WORKSPACE_WRAPPER: 'another-wrapper' }), /RUSTC_WORKSPACE_WRAPPER/u);
+  } finally { await owner.finish(false); }
+  assert.throws(() => assertDefaultBenchmarkRustEnvironment(keys, options.sourceRoot, owner.environment));
 });
 
 test('experimental source purpose reuses only a complete compiler cache with provenance', async t => {

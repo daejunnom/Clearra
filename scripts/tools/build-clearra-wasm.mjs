@@ -16,6 +16,7 @@ import {
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 import { finesseSourceSnapshot } from '../benchmark/finesse-source-snapshot.mjs';
 import { enterManagedBuildOrRelaunch } from './clearra-build-policy.mjs';
+import { assertDefaultBenchmarkRustEnvironment } from './benchmark-rust-environment.mjs';
 import { clearraManageExecutable } from '../management/clearra-manage-path.mjs';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
@@ -362,14 +363,7 @@ async function benchmarkToolchainIdentity() {
 }
 
 async function assertDefaultRustBuildEnvironment() {
-  const configured = PERFORMANCE_RUST_ENV_KEYS.filter(
-    (key) => String(process.env[key] ?? '').length > 0
-  );
-  if (configured.length > 0) {
-    throw new Error(
-      `benchmark Rust build environment must be default; unset ${configured.join(', ')}`
-    );
-  }
+  assertDefaultBenchmarkRustEnvironment(PERFORMANCE_RUST_ENV_KEYS, root);
 }
 
 function stableJson(value) {
