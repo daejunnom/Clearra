@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import type { AcceleratorCatalogPlan } from '../src/workers/clearraWasmRuntime.ts';
 import {
   acceleratorLocalStatus,
+  currentQualifiedAcceleratorIdentity,
+  readQualifiedAccelerator,
   removeLocalAccelerator,
   storeQualifiedAccelerator
 } from '../src/workers/acceleratorLocalStore.ts';
+import { repairableLocalAssetError } from '../src/workers/acceleratorLocalAssetErrors.ts';
 
 // An in-memory OPFS substitute exercises the product store's authority and
 // recovery contract without using a real browser profile or remote asset.
@@ -98,6 +101,33 @@ assert.equal((await acceleratorLocalStatus(plan.product, plan.profile, plan))?.c
 await assert.rejects(acceleratorLocalStatus(plan.product, plan.profile, plan), /digest_mismatch/);
 await removeLocalAccelerator(plan.product, plan.profile);
 assert.equal(await acceleratorLocalStatus(plan.product, plan.profile, plan), null);
+
+// Valid JSON is not necessarily a pointer object. Every such damaged marker
+// must use the repairable store error rather than leaking a TypeError that
+// prevents the worker from offering the signed download plan.
+for (const value of [null, false, true, 0, 1, '', 'pointer', [], ['pointer']]) {
+  const invalidHandle = await local.getFileHandle('active.json', { create: true });
+  const invalidWrite = await invalidHandle.createWritable();
+  await invalidWrite.write(JSON.stringify(value));
+  await invalidWrite.close();
+  await assert.rejects(acceleratorLocalStatus(plan.product, plan.profile, plan), error => {
+    assert.equal((error as Error).message, 'accelerator_store_pointer_invalid');
+    assert.equal(repairableLocalAssetError(error), true, 'worker must keep the signed repair plan visible');
+    return true;
+  });
+  await assert.rejects(readQualifiedAccelerator(plan), { message: 'accelerator_store_pointer_invalid' });
+  await assert.rejects(currentQualifiedAcceleratorIdentity(plan), { message: 'accelerator_store_pointer_invalid' });
+  await storeQualifiedAccelerator(plan, bytes);
+  assert.equal((await acceleratorLocalStatus(plan.product, plan.profile, plan))?.current, true);
+  await removeLocalAccelerator(plan.product, plan.profile);
+  assert.equal(await acceleratorLocalStatus(plan.product, plan.profile, plan), null);
+}
+assert.equal(repairableLocalAssetError(new SyntaxError('corrupt JSON')), true);
+assert.equal(repairableLocalAssetError(new DOMException('missing payload', 'NotFoundError')), true);
+assert.equal(repairableLocalAssetError(new DOMException('unreadable payload', 'NotReadableError')), true);
+assert.equal(repairableLocalAssetError(new Error('accelerator_store_busy')), false);
+assert.equal(repairableLocalAssetError(new DOMException('quota exceeded', 'QuotaExceededError')), false);
+assert.equal(repairableLocalAssetError(new TypeError('unexpected implementation failure')), false);
 
 // Cancellation while creating the first pointer must leave no invalid empty
 // marker or candidate file behind.

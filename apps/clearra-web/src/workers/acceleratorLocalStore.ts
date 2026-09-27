@@ -52,7 +52,14 @@ async function activeFrom(root: FileSystemDirectoryHandle): Promise<Active | nul
   try {
     const file = await (await root.getFileHandle('active.json')).getFile();
     if (file.size > 2048) throw new Error('accelerator_store_pointer_invalid');
-    const active: Active = JSON.parse(await file.text());
+    const parsed: unknown = JSON.parse(await file.text());
+    // A syntactically valid JSON primitive is still a corrupt pointer. Keep
+    // this in the repairable error family instead of leaking a null access
+    // TypeError that hides the signed plan and repair controls in the worker.
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('accelerator_store_pointer_invalid');
+    }
+    const active = parsed as Active;
     if (active.schema !== 'clearra.exact-accelerator.local.v1' ||
         !identity(active.generation) || !identity(active.catalog_identity) ||
         !identity(active.payload_identity) || !Number.isSafeInteger(active.payload_bytes) ||

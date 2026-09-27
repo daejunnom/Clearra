@@ -6,6 +6,7 @@ import { loadClearraWasmModule, type AcceleratorCatalogPlan } from './clearraWas
 import { acceleratorLocalStatus, removeLocalAccelerator, storeQualifiedAccelerator } from './acceleratorLocalStore';
 import { acceleratorAssetLocation } from './acceleratorAssetLocation';
 import { readAcceleratorDownloadResponse } from './acceleratorDownloadStream';
+import { repairableLocalAssetError } from './acceleratorLocalAssetErrors';
 
 type Request = { action: 'status' | 'download' | 'remove' | 'cancel'; kind: number; profile: number; base: string };
 const PROFILES = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
@@ -23,16 +24,6 @@ function selection(request: Request) {
   if (!Number.isInteger(request.kind) || !Number.isInteger(request.profile) ||
       !PRODUCTS[request.kind] || !PROFILES[request.profile]) throw new Error('accelerator_selection_invalid');
   return { product: PRODUCTS[request.kind], profile: PROFILES[request.profile] };
-}
-
-function repairableLocalAssetError(error: unknown) {
-  if (error instanceof SyntaxError) return true;
-  if (error instanceof DOMException) return error.name === 'NotFoundError' || error.name === 'NotReadableError';
-  return error instanceof Error && [
-    'accelerator_store_pointer_invalid',
-    'accelerator_store_size_mismatch',
-    'accelerator_store_digest_mismatch'
-  ].includes(error.message);
 }
 
 async function planFor(request: Request) {
