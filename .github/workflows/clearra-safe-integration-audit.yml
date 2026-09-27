@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Verify automatic recovery field editing and exact execution
+run-name: Verify cross-stage candidate join and exact replay
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -8,181 +8,142 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: clearra-recovery-auto-review
+  group: clearra-cross-stage-catalog-review
   cancel-in-progress: true
 jobs:
   prepare:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions: {contents: write}
     outputs:
       candidate: ${{ steps.source.outputs.candidate }}
       tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: 47556af7d178c004c4f4bbbbc2cf7bfdf1f8b8e2, fetch-depth: 0}
-      - name: Apply only the reviewed field-owner repair without changing main
+        with: {ref: 9b8f045c067cec05f43248705f613b55deee880d, fetch-depth: 0}
+      - name: Install the exact formatter
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Apply reviewed catalog module without changing main or public routes
         id: source
         shell: python
         run: |
-          import hashlib,json,os,pathlib,subprocess
+          import json,os,pathlib,subprocess
           BASE='51084c78c3a06f355a352b4c013314c151c47709'
-          PARENT='493c8250bc5ab4798bd119b0ab9e627c5c6b5264'
-          TREE='e72072403bdaae8035c5be44b9bc82632c3744f8'
-          BRANCH='codex/converge-recovery-auto-20260927'
+          PARENT='c0a31d064dc776f9dedc7524f5a0e7fe330b4574'
+          BRANCH='codex/converge-cross-stage-catalog-20260927'
+          ROOT='crates/clearra-forward-search/src/'
+          BLOBS={
+              'cross_stage_catalog.rs':'3cdf0c0af628bf82fd49e1f8a239970bf12ead7c',
+              'cross_stage_catalog_tests.rs':'2018c5f00201a6659749aaeee90a8d273cc3c628',
+              'cross_stage_recovery.rs':'2da290c46a5500506b1375646b72675f6f98c3c0',
+              'cross_stage_recovery_tests.rs':'45e8a56ac2cc472900212dcbe4020180f7c65315',
+          }
+          EXPECTED=sorted([ROOT+'boundary_recovery.rs',ROOT+'lib.rs',*(ROOT+name for name in BLOBS)])
           def git(*args): return subprocess.check_output(['git',*args],text=True,timeout=120).strip()
           def refs():
               for ref,sha in [('refs/heads/main',BASE),('refs/heads/'+BRANCH,PARENT)]:
-                  if git('ls-remote','origin',ref).split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile first')
-          patch=pathlib.Path('scripts/integration/recovery-resume-20260927/field-editing.patch').read_bytes()
-          if hashlib.sha256(patch).hexdigest()!='c79cbc2273b73f83f0fb4a64135df01ea3ee24fe3d60f7c6f46f6fa3e65ee790':
-              raise RuntimeError('Reviewed patch checksum mismatch')
+                  if git('ls-remote','origin',ref).split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile instead of overwriting')
+          sources={}
+          for name,sha in BLOBS.items():
+              path=pathlib.Path('scripts/integration/cross-stage-catalog-20260927')/name
+              if git('hash-object',str(path))!=sha: raise RuntimeError('Reviewed source blob differs: '+name)
+              sources[name]=path.read_bytes()
           refs()
           git('checkout','--detach',PARENT)
-          if git('rev-parse','HEAD^{tree}')!='95743be7492eb8a3b7103311c59ad5a76aa7df8c': raise RuntimeError('Parent tree mismatch')
-          temporary=pathlib.Path(os.environ['RUNNER_TEMP'])/'field-editing.patch'
-          temporary.write_bytes(patch)
-          git('apply','--check',str(temporary)); git('apply','--index',str(temporary)); git('diff','--cached','--check')
-          if git('write-tree')!=TREE: raise RuntimeError('Resulting source tree differs from reviewed code')
-          changed=git('diff','--cached','--name-only').splitlines()
+          if git('rev-parse','HEAD^{tree}')!='e72072403bdaae8035c5be44b9bc82632c3744f8': raise RuntimeError('Parent tree mismatch')
+          for name,data in sources.items():
+              path=pathlib.Path(ROOT+name)
+              if path.exists(): raise RuntimeError('New module already exists: '+name)
+              path.write_bytes(data)
+          def replace(path,old,new):
+              target=pathlib.Path(path);text=target.read_text()
+              if text.count(old)!=1: raise RuntimeError('Unexpected edit context: '+path)
+              target.write_text(text.replace(old,new))
+          replace(ROOT+'boundary_recovery.rs','fn compact_tag(','pub(crate) fn compact_tag(')
+          replace(ROOT+'lib.rs','mod parallel;','mod cross_stage_recovery;\nmod cross_stage_catalog;\nmod parallel;')
+          replace(ROOT+'lib.rs','pub use parallel::{',
+              'pub use cross_stage_recovery::{\n    CrossStageEarlyLimit, CrossStagePairReport, CrossStagePairStatus, CrossStageRecoveryQuery,\n    CrossStageRole, CrossStageSearchError,\n};\npub use cross_stage_catalog::{\n    CrossStageCatalog, CrossStageCatalogCompletion, CrossStageCatalogError,\n    CrossStageCatalogQuery, CrossStageCatalogReport, CrossStageCatalogStatus,\n    CrossStageCatalogWitness, CrossStageExecution,\n};\npub use parallel::{')
+          git('add','--',*EXPECTED)
+          if git('write-tree')!='cdd13ee4dc7eaa1d4e8f458f4ad5b04aecf170f3': raise RuntimeError('Reviewed unformatted tree mismatch')
+          subprocess.run(['cargo','+1.98.1','fmt','--all'],check=True,timeout=120)
+          if git('diff','HEAD','--name-only').splitlines()!=EXPECTED: raise RuntimeError('Unexpected formatter scope')
+          git('add','--',*EXPECTED);git('diff','--cached','--check')
+          subprocess.run(['cargo','+1.98.1','fmt','--all','--check'],check=True,timeout=120)
+          tree=git('write-tree')
           git('config','user.name','github-actions[bot]')
           git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-          git('commit','-m','fix: preserve optional recovery geometry when editing the actual workspace')
+          git('commit','-m','feat: join cross-stage role catalogs with global normal-path precedence')
           candidate=git('rev-parse','HEAD')
-          refs(); git('push','origin',candidate+':refs/heads/'+BRANCH)
+          refs();git('push','origin',candidate+':refs/heads/'+BRANCH)
           if git('ls-remote','origin','refs/heads/'+BRANCH).split()!=[candidate,'refs/heads/'+BRANCH]: raise RuntimeError('Candidate readback mismatch')
-          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'automatic-recovery-source';out.mkdir()
-          (out/'change.patch').write_bytes(patch)
-          receipt={'source_commit':candidate,'parent':PARENT,'base':BASE,'tree':TREE,'files':changed,'main_written':False,'published':False,
-              'scope':'declared-role Auto recovery; two-Build-catalog cross-stage integration is not claimed'}
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'cross-stage-source';out.mkdir()
+          (out/'change.patch').write_text(git('diff','--binary',PARENT,candidate)+'\n')
+          subprocess.run(['git','archive','--format=tar.gz','--output='+str(out/'source.tar.gz'),candidate],check=True,timeout=120)
+          receipt={'source_commit':candidate,'parent':PARENT,'base':BASE,'tree':tree,'files':EXPECTED,'main_written':False,'published':False,
+              'scope':'two exact lock-time catalogs; Build Probability producer and new two-supply GUI not yet wired'}
           (out/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(json.dumps(receipt),flush=True)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\ntree='+TREE+'\n')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidate='+candidate+'\ntree='+tree+'\n')
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: automatic-recovery-source-${{ github.run_id }}
-          path: ${{ runner.temp }}/automatic-recovery-source
+          name: cross-stage-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/cross-stage-source
           if-no-files-found: warn
           retention-days: 14
-  frontend:
+  native:
     needs: prepare
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: {os: [ubuntu-latest, windows-latest]}
     env:
       CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
       CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
-      CLEARRA_BROWSER_TOOLS_ROOT: ${{ github.workspace }}/build/tools/ui-browser
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
-      - uses: actions/setup-node@v4
-        with: {node-version: 22.23.2}
-      - name: Install frozen dependencies and pinned Chromium
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install 1.98.1 --profile minimal
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          pnpm install --frozen-lockfile --ignore-scripts
-          npm install --prefix "$CLEARRA_BROWSER_TOOLS_ROOT" --ignore-scripts --no-audit --no-fund playwright@1.56.1
-          node "$CLEARRA_BROWSER_TOOLS_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
-      - name: Exercise actual workspace height owner dropdown and preserved cards
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            status=0
-            for source in recovery-workspace-browser-acceptance recovery-editor-browser-acceptance solution-toolbar-browser-acceptance workspace-controls-browser-acceptance; do
-              node "scripts/tools/$source.mjs" || status=1
-            done
-            exit "$status"
-          } 2>&1 | tee "$RUNNER_TEMP/automatic-browser.log"
-      - name: Test full UI worker and Discord request contracts
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            node scripts/desktop-ui-compile-check.mjs
-            pnpm --filter @clearra/ui run test
-            pnpm --filter @clearra/web run test
-            pnpm --filter ctk3 run build
-            node --test apps/clearra-discord-bot/test/boundary-recovery-input.test.mjs
-          } 2>&1 | tee "$RUNNER_TEMP/automatic-contracts.log"
-      - name: Run canonical release regressions on Linux
-        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          node scripts/tools/run-release-regression-tests.mjs 2>&1 | tee "$RUNNER_TEMP/automatic-release-regressions.log"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: automatic-recovery-frontend-${{ matrix.os }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/automatic-browser.log
-            ${{ runner.temp }}/automatic-contracts.log
-            ${{ runner.temp }}/automatic-release-regressions.log
-            ${{ runner.temp }}/clearra-recovery-workspace-acceptance
-            ${{ runner.temp }}/clearra-recovery-editor-acceptance
-            ${{ runner.temp }}/clearra-solution-toolbar-acceptance
-            ${{ runner.temp }}/clearra-control-acceptance
-          if-no-files-found: warn
-          retention-days: 14
-  native:
-    needs: prepare
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
-      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
-      RUST_MIN_STACK: '16777216'
       CARGO_BUILD_JOBS: '4'
     steps:
       - uses: actions/checkout@v4
         with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
-      - name: Compare Auto with explicit quota union and exercise unlimited identities
+      - name: Install exact native toolchain
         shell: bash
         run: |
           set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
           cargo fmt --all --check
-          cargo test --locked -p clearra-forward-search --lib boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/automatic-core.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/automatic-core.log"
-      - name: Test public CLI and exact legacy selected-role compatibility
+      - name: Test real cross-stage witnesses and global candidate precedence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p clearra-forward-search --lib cross_stage -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/cross-stage-debug.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/cross-stage-debug.log"
+      - name: Verify the unchanged public recovery path
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p clearra-cli-command --test boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/automatic-cli.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/automatic-cli.log"
-      - name: Match automatic mode JSON with typed payload and real WASM host execution
+          cargo test --locked -p clearra-forward-search --lib boundary_recovery -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/legacy-recovery.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/legacy-recovery.log"
+      - name: Verify optimized cross-stage execution without enlarged thread stacks
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p clearra-wasm --lib weighted_boundary_recovery_payload_is_lossless_json -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/automatic-json.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/automatic-json.log"
-          cargo test --locked -p clearra-wasm --test boundary_recovery_auto_wire -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/automatic-wire.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/automatic-wire.log"
+          cargo test --locked --release -p clearra-forward-search --lib cross_stage -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/cross-stage-release.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/cross-stage-release.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: automatic-recovery-native-${{ github.run_id }}
+          name: cross-stage-native-${{ matrix.os }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/automatic-core.log
-            ${{ runner.temp }}/automatic-cli.log
-            ${{ runner.temp }}/automatic-json.log
-            ${{ runner.temp }}/automatic-wire.log
+            ${{ runner.temp }}/cross-stage-debug.log
+            ${{ runner.temp }}/cross-stage-release.log
+            ${{ runner.temp }}/legacy-recovery.log
           if-no-files-found: warn
           retention-days: 14
   acceptance:
-    needs: [prepare, frontend, native]
+    needs: [prepare, native]
     runs-on: windows-latest
     timeout-minutes: 120
     strategy:
@@ -223,25 +184,24 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'automatic-acceptance.log')
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'cross-stage-acceptance.log')
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: automatic-recovery-acceptance-${{ matrix.shard }}-${{ github.run_id }}
+          name: cross-stage-acceptance-${{ matrix.shard }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/automatic-acceptance.log
+            ${{ runner.temp }}/cross-stage-acceptance.log
             ${{ runner.temp }}/clearra-surface-acceptance
             ${{ runner.temp }}/clearra-recovery-workspace-acceptance
-            ${{ runner.temp }}/clearra-recovery-editor-acceptance
           if-no-files-found: warn
           retention-days: 14
   ready:
     if: always()
-    needs: [prepare, frontend, native, acceptance]
+    needs: [prepare, native, acceptance]
     runs-on: ubuntu-latest
     steps:
-      - name: Require every independent check without promoting or deploying
+      - name: Require all exact-source checks without publishing an unfinished product
         env: {RESULTS: '${{ toJSON(needs) }}'}
         shell: python
         run: |
@@ -249,5 +209,5 @@ jobs:
           results=json.loads(os.environ['RESULTS'])
           failed={key:value['result'] for key,value in results.items() if value['result']!='success'}
           if failed: raise RuntimeError(json.dumps(failed))
-          print('Automatic declared-role recovery accepted:',results['prepare']['outputs']['candidate'])
-          print('No main update or deployment. Two-Build-catalog cross-stage integration remains a separate requirement.')
+          print('Cross-stage candidate join accepted:',results['prepare']['outputs']['candidate'])
+          print('No main update or deployment. Build candidate production, lock-coordinate expansion, and the new two-supply UI remain separate integration work.')
