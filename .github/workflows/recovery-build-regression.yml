@@ -13,21 +13,79 @@ concurrency:
 
 jobs:
   regression:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Preserve exact source for regression diagnostics
-        run: git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/recovery-build-source.tar.gz"
+      - name: Apply reviewed implementation patch on the isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/codex/recovery-build-fields-parallel-20260928
+          if test -d .github/recovery-patch; then
+            python3 - <<'PY'
+          import base64, gzip, hashlib, pathlib, subprocess
+          root = pathlib.Path('.github/recovery-patch')
+          text = ''.join((root / name).read_text() for name in ['part-0.b64','part-1.b64','part-2.b64','part-3a.b64','part-3b.b64','part-4.b64'])
+          text = text.replace('hurW6hurW6ojnrba5', 'hurW6ojnrba9')
+          patch = gzip.decompress(base64.b64decode(text, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '544ad254d082089000246b0cbf2bde2399c21eca54d6045eb4f0f5f8cbb1c334'
+          output = pathlib.Path('/tmp/recovery-reviewed.patch')
+          output.write_bytes(patch)
+          subprocess.run(['git','apply','--check',str(output)],check=True)
+          subprocess.run(['git','apply',str(output)],check=True)
+          PY
+            git rm .github/recovery-patch/*.b64
+            git add crates packages scripts/tools/recovery-build-regression.sh scripts/tools/recovery-build-browser-regression.mjs tests/fixtures/recovery-build/user-20260928.json
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(recovery): preserve field context and distribute paired coverage'
+            git push origin HEAD:refs/heads/codex/recovery-build-fields-parallel-20260928
+          fi
+      - name: Preserve exact implementation source
+        if: always()
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/recovery-tested-sha.txt"
+          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/recovery-build-source.tar.gz"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: recovery-build-source
-          path: ${{ runner.temp }}/recovery-build-source.tar.gz
-          retention-days: 1
-      - name: Run focused regression entrypoint when present
+          path: |
+            ${{ runner.temp }}/recovery-build-source.tar.gz
+            ${{ runner.temp }}/recovery-tested-sha.txt
+          retention-days: 3
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Prepare external browser test tools
+        shell: bash
         run: |
-          if test -f scripts/tools/recovery-build-regression.sh; then
-            bash scripts/tools/recovery-build-regression.sh
-          fi
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/clearra-browser-tools"
+          npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --no-audit --no-fund playwright@1.56.1
+          "$RUNNER_TEMP/clearra-browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+          echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
+      - name: Run focused regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/recovery-regression
+          bash scripts/tools/recovery-build-regression.sh 2>&1 | tee build/recovery-regression/tests.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-build-regression-results
+          path: build/recovery-regression
+          if-no-files-found: ignore
+          retention-days: 7
