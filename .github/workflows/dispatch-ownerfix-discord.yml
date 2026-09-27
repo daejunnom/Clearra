@@ -1,0 +1,65 @@
+name: Dispatch accepted recovery Discord candidate
+
+# Operator-only bridge for the explicitly approved main deployment. It calls
+# the existing production workflow; protected approvals and recovery debt remain.
+on:
+  push:
+    branches: [codex/dispatch-ownerfix-discord-20260928]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: dispatch-discord-7915a7eb68f0531732684c7f4f3ff9372ca324ad
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom' && github.ref == 'refs/heads/codex/dispatch-ownerfix-discord-20260928'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPECTED_SOURCE: 7915a7eb68f0531732684c7f4f3ff9372ca324ad
+      ACCEPTED_RUN: '36344210686'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7915a7eb68f0531732684c7f4f3ff9372ca324ad
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Verify exact accepted main and avoid duplicate production runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$EXPECTED_SOURCE"
+          node scripts/release/canonical-acceptance-run.mjs --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$EXPECTED_SOURCE" --require one \
+            --expected-run-id "$ACCEPTED_RUN" --expected-run-attempt 1
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$EXPECTED_SOURCE&per_page=100" > "$RUNNER_TEMP/ownerfix-discord-prior-runs.json"
+          count="$(jq '[.[] | .workflow_runs[] | select(.path == ".github/workflows/discord-deploy.yml")] | length' "$RUNNER_TEMP/ownerfix-discord-prior-runs.json")"
+          test "$count" = 0 || { echo 'A production run already exists; do not start another attempt.' >&2; exit 2; }
+      - name: Dispatch the unchanged production workflow exactly once
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$EXPECTED_SOURCE"
+          jq -cn --arg sha "$EXPECTED_SOURCE" --arg run "$ACCEPTED_RUN" \
+            '{ref:"main",inputs:{accepted_sha:$sha,accepted_run_id:$run,accepted_run_attempt:"1"}}' > "$RUNNER_TEMP/ownerfix-discord-input.json"
+          gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/discord-deploy.yml/dispatches" \
+            --input "$RUNNER_TEMP/ownerfix-discord-input.json" > "$RUNNER_TEMP/ownerfix-discord-dispatch.json"
+          id="$(jq -er '.workflow_run_id | tostring | select(test("^[1-9][0-9]*$"))' "$RUNNER_TEMP/ownerfix-discord-dispatch.json")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" > "$RUNNER_TEMP/ownerfix-discord-run.json"
+          jq -e --arg sha "$EXPECTED_SOURCE" '.head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and .path == ".github/workflows/discord-deploy.yml" and .run_attempt == 1 and .head_repository.full_name == env.GITHUB_REPOSITORY' "$RUNNER_TEMP/ownerfix-discord-run.json" > /dev/null
+          echo "discord_run_id=$id"
+          {
+            echo '## Existing Discord production workflow requested'
+            echo "https://github.com/$GITHUB_REPOSITORY/actions/runs/$id"
+            echo 'This is not deployment success or environment approval. Recovery-debt checks, candidate validation, path confirmation, promotion, and observation remain owned by the unchanged production workflow.'
+          } >> "$GITHUB_STEP_SUMMARY"
