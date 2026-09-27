@@ -1,5 +1,5 @@
 use crate::commands::{
-    BoundaryRecoveryAppCommand, BuildProbabilityAppCommand, BuildV2AppCommand, ContinueAppCommand,
+    BoundaryRecoveryAppCommand, RecoveryBuildAppCommand, BuildProbabilityAppCommand, BuildV2AppCommand, ContinueAppCommand,
     ConvertAppCommand, CoverAppCommand, DamageAppCommand, FieldDocumentTransformAppCommand,
     FumenAppCommand, InspectUnsupportedAppCommand, OperationSequenceAppCommand, ParityAppCommand,
     PathAppCommand, PcAppCommand, PercentAppCommand, RenAppCommand, RenderAppCommand,
@@ -50,6 +50,7 @@ pub enum AppCommand {
     SpinFinder(SpinFinderAppCommand),
     Ren(RenAppCommand),
     BoundaryRecovery(BoundaryRecoveryAppCommand),
+    RecoveryBuild(RecoveryBuildAppCommand),
     SpinStructure(SpinStructureAppCommand),
     Cover(CoverAppCommand),
     Rules(RulesAppCommand),
@@ -80,7 +81,7 @@ impl AppCommand {
             Self::Damage(_) => AppCommandKind::Damage,
             Self::SpinFinder(_) => AppCommandKind::SpinFinder,
             Self::Ren(_) => AppCommandKind::Ren,
-            Self::BoundaryRecovery(_) => AppCommandKind::BoundaryRecovery,
+            Self::BoundaryRecovery(_) | Self::RecoveryBuild(_) => AppCommandKind::BoundaryRecovery,
             Self::SpinStructure(_) => AppCommandKind::SpinStructure,
             Self::Cover(_) => AppCommandKind::Cover,
             Self::Rules(_) => AppCommandKind::Rules,
@@ -119,7 +120,7 @@ impl AppCommand {
             Self::Damage(_) => QueryEnvelope::Damage,
             Self::SpinFinder(_) => QueryEnvelope::SpinFinder,
             Self::Ren(_) => QueryEnvelope::Ren,
-            Self::BoundaryRecovery(_) => QueryEnvelope::BoundaryRecovery,
+            Self::BoundaryRecovery(_) | Self::RecoveryBuild(_) => QueryEnvelope::BoundaryRecovery,
             Self::SpinStructure(_) => QueryEnvelope::SpinStructure,
             Self::Cover(_) => QueryEnvelope::BuildCoverage,
             Self::Rules(_) => QueryEnvelope::Rules,
@@ -186,6 +187,7 @@ impl AppCommand {
             | Self::SpinFinder(_)
             | Self::Ren(_)
             | Self::BoundaryRecovery(_)
+            | Self::RecoveryBuild(_)
             | Self::SpinStructure(_) => BackendPolicy::new("cpu", false),
             Self::Path(command) => BackendPolicy::new(
                 command
@@ -256,6 +258,7 @@ impl AppCommand {
             | Self::SpinFinder(_)
             | Self::Ren(_)
             | Self::BoundaryRecovery(_)
+            | Self::RecoveryBuild(_)
             | Self::SpinStructure(_) => false,
             _ => false,
         }
@@ -277,6 +280,7 @@ impl RunnableAppCommand for AppCommand {
             | Self::SpinFinder(_)
             | Self::Ren(_)
             | Self::BoundaryRecovery(_)
+            | Self::RecoveryBuild(_)
             | Self::SpinStructure(_) => DiagnosticReport::new(),
             Self::Cover(command) => validate_build_coverage_query(command.query()),
             Self::Rules(command) => command.validate(),
@@ -317,6 +321,7 @@ impl RunnableAppCommand for AppCommand {
             Self::SpinFinder(command) => command.run(context),
             Self::Ren(command) => command.run(context),
             Self::BoundaryRecovery(command) => command.run(context),
+            Self::RecoveryBuild(command) => command.run(context),
             Self::SpinStructure(command) => command.run(context),
             Self::Cover(command) => command.run(context),
             Self::Rules(command) => command.run(context),

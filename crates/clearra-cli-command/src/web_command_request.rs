@@ -1,6 +1,6 @@
 // SRP rationale: this module has one change reason: lowering canonical CLI commands into typed application requests.
 use clearra_app::{
-    AppCommand, AppRequest, BoundaryRecoveryAppCommand, BuildProbabilityAppCommand,
+    AppCommand, AppRequest, BoundaryRecoveryAppCommand, RecoveryBuildAppCommand, BuildProbabilityAppCommand,
     DamageAppCommand, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
     FumenAppCommand, OperationDocumentProblem, OperationSequenceAppCommand, ParityAppCommand,
     PcAppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin,
@@ -65,6 +65,7 @@ pub struct WebCommandRequest {
     setup_score: Option<WebSetupScoreInput>,
     forward_search: Option<ForwardSearchQuery>,
     boundary_recovery: Option<BoundaryRecoveryQuery>,
+    recovery_build: Option<clearra_forward_search::RecoveryBuildQuery>,
     boundary_recovery_pattern: Option<(String, Option<usize>, Option<usize>)>,
     spin_structure: Option<SpinStructureQuery>,
     spin_structure_product_mode: SpinStructureProductMode,
@@ -133,6 +134,7 @@ impl WebCommandRequest {
             setup_score: None,
             forward_search: None,
             boundary_recovery: None,
+            recovery_build: None,
             boundary_recovery_pattern: None,
             spin_structure: None,
             spin_structure_product_mode: SpinStructureProductMode::Search,
@@ -202,6 +204,7 @@ impl WebCommandRequest {
             setup_score: None,
             forward_search: None,
             boundary_recovery: None,
+            recovery_build: None,
             boundary_recovery_pattern: None,
             spin_structure: None,
             spin_structure_product_mode: SpinStructureProductMode::Search,
@@ -402,6 +405,14 @@ impl WebCommandRequest {
     }
 }
 impl WebCommandRequest {
+    pub fn recovery_build(query: clearra_forward_search::RecoveryBuildQuery) -> Self {
+        let mut request = Self::pc(query.fields.height, RequestedSearchBackend::Cpu);
+        request.command_kind = "recovery-build".to_owned();
+        request.allow_backend_fallback = false;
+        request.recovery_build = Some(query);
+        request
+    }
+
     pub fn boundary_recovery(query: BoundaryRecoveryQuery) -> Self {
         let mut request = Self::pc(query.height, RequestedSearchBackend::Cpu);
         request.command_kind = "boundary-recovery".to_owned();
@@ -1471,6 +1482,10 @@ impl WebCommandRequest {
                 ))),
             };
             return self.attach_product_capability_contract(request);
+        }
+        if self.command_kind == "recovery-build" {
+            let query = self.recovery_build.clone().ok_or_else(|| WebCommandError::new(WebCommandErrorCode::InvalidValue, "missing typed recovery-build query"))?;
+            return self.attach_product_capability_contract(AppRequest::new(AppCommand::RecoveryBuild(RecoveryBuildAppCommand::new(query))));
         }
         if self.command_kind == "boundary-recovery" {
             let query = self.boundary_recovery.clone().ok_or_else(|| {

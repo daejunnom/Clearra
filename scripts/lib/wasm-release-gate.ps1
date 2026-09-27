@@ -277,6 +277,9 @@ function Invoke-WasmBuildTestGate {
             (Join-Path $Root 'scripts/tools/recovery-workspace-browser-acceptance.mjs')
         ) 'clearra-browser recovery request owner acceptance'
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
+            (Join-Path $Root 'scripts/tools/recovery-result-browser-acceptance.mjs')
+        ) 'clearra-browser paired recovery result acceptance'
+        Invoke-WasmReleaseCommand $nodeCommand.Source @(
             (Join-Path $Root 'scripts/tools/solution-toolbar-browser-acceptance.mjs')
         ) 'clearra-browser solution toolbar acceptance'
         if (Test-Path -LiteralPath $webPublicDir) {

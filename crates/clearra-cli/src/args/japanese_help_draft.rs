@@ -82,6 +82,10 @@ Clearraのpath/setup/coverは従来のClearraでの意味を維持します。�
 
 pub(super) fn product_help_body(topic: ProductHelpTopic) -> &'static str {
     match topic {
+        ProductHelpTopic::RecoveryBuild => {
+            "使い方: clearra recovery build --start-mask HEX --middle-mask HEX --result-mask HEX --height 1..24 --first-supply EXPR --second-supply EXPR [--max-early auto|N] [--allow-piece-exchange|--no-piece-exchange] [--hold|--no-hold] [--preserve-b2b|--no-preserve-b2b] [--rule RULE] [--spin-profile PROFILE]
+二つの供給は共通キュー文法を使います。開始は既存ブロック、中間は追加領域、結果は中間の完成行が消えた後の追加領域です。自動は可能な先行個数をすべて許可します。種類を交換しても実際のミノ形状と合計使用数は変わりません。B2Bは遅れた中間配置も含め実行時に検証します。確率は供給組の値であり、例は全解法の列挙ではありません。"
+        }
         ProductHelpTopic::BoundaryRecovery => {
             r#"使い方: clearra recovery boundary --initial-board-mask HEX --target-board-mask HEX --height 1..25 --queue REFERENCE --stage-one-count N [--placements N|auto] [--stage-one-board-mask HEX] [--role-mask POSITION:HEX ...] [--queue-pattern PATTERN --max-pattern-evaluations N|unlimited --max-total-states N|unlimited] [--max-early-placements N|auto] [--borrow-role-position N --borrow-placement-mask HEX] [--hold|--no-hold] [--rule RULE] [--spin-profile PROFILE] [--initial-b2b 0|1] [--preserve-b2b] [--preserve-b2b-bag N ...] [--preserve-b2b-stage-one] [--preserve-b2b-stage-two] [--max-states N|unlimited]
 先行配置数 N は0から第2段階の役割数まで指定でき、消去された配置も数えます。borrow指定を省略するとすべての適合する第2段階役割が対象です。--preserve-b2b は遅れて完成する第1段階配置も含む実行全体を検証します。配置数の省略または auto は、ライン消去とセル数保存に整合するすべての供給 prefix を探索し、残りを先読みとして保持します。正確な配置役割は個数を確定します。状態数制限の省略または unlimited はアルゴリズム上の打ち切りなしを意味し、キャンセルとホストのリソース保護は維持されます。

@@ -5,7 +5,7 @@ import type {
 import type { WorkspaceMessageKey } from './workspaceI18n';
 import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
 
-export type WorkspaceProgressProfile = 'pc' | 'tiling' | 'setup' | 'build' | 'damage' | 'spin' | 'ren';
+export type WorkspaceProgressProfile = 'pc' | 'tiling' | 'setup' | 'build' | 'damage' | 'spin' | 'ren' | 'recovery-build';
 export type WorkspaceProgressMode =
   | 'default'
   | 'pc-all'
@@ -82,6 +82,7 @@ function profileStages(
   profile: WorkspaceProgressProfile,
   mode: WorkspaceProgressMode
 ): StageDefinition[] {
+  if (profile === 'recovery-build') return [COMMON_PREPARE, VERIFY_STAGE, COMMON_AGGREGATE];
   if (profile === 'tiling') return [COMMON_PREPARE, GEOMETRY_STAGE, COMMON_AGGREGATE];
   if (profile === 'pc') {
     const labelKey: WorkspaceMessageKey =
@@ -163,7 +164,18 @@ export function buildWorkspaceProgressModel(
 
   if (input.status === 'idle') return summarize(stages);
 
-  if (input.profile === 'damage' || input.profile === 'spin' || input.profile === 'ren') {
+  if (input.profile === 'recovery-build') {
+    // Joint candidate construction and replay do not have separate Geometry
+    // and verification phases. Counts are completed supply pairs only.
+    if (input.status === 'validating') stages[0].status = 'running';
+    else {
+      stages[0].status = 'complete';
+      const finalizing = input.progressLabel === 'postprocess';
+      stages[1].status = finalizing ? 'complete' : 'running';
+      stages[2].status = finalizing ? 'running' : 'pending';
+      applyMetric(stages[1], input.progressDone, input.progressTotal > 0 ? input.progressTotal : null);
+    }
+  } else if (input.profile === 'damage' || input.profile === 'spin' || input.profile === 'ren') {
     applyForwardProgress(stages, input);
   } else if (input.profile === 'setup') {
     applySetupProgress(stages, input);

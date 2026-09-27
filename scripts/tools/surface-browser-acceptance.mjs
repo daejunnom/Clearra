@@ -159,41 +159,51 @@ try {
         await page.evaluate(() => new Promise(requestAnimationFrame));
         assert.deepEqual(errors, [], 'recovery height editing must not throw before search');
         assert.equal(await recovery.locator('.recovery-field-editor .board button').count(), 40);
-        await page.getByLabel('Known queue across both stages', { exact: true }).fill('IOT');
-        await page.getByLabel('Stage-one supply tokens', { exact: true }).fill('1');
-        assert.equal(await recovery.getByLabel('Required placements', { exact: true }).count(), 0);
-        assert.equal(await recovery.getByLabel('Maximum search states', { exact: true }).count(), 0);
-        assert.match(await recovery.locator('.recovery-required-pieces').innerText(), /Automatic/);
-        assert.equal(await recovery.getByRole('combobox', { name: 'Maximum early placements', exact: true }).inputValue(), 'auto');
-        assert.equal(await recovery.getByLabel('Maximum pattern evaluations', { exact: true }).count(), 0);
-        assert.equal(await page.getByLabel('Selected early placement role (1-based)', { exact: true }).count(), 0);
-        await page.getByRole('checkbox', { name: 'Hold', exact: true }).uncheck();
+        const supplies = recovery.locator('.recovery-supplies .workspace-queue-input');
+        assert.equal(await supplies.count(), 2);
+        await supplies.nth(0).fill('I'); await supplies.nth(1).fill('O');
+        assert.equal(await recovery.locator('.placement-constraints,.recovery-required-pieces,.board-stats').count(), 0);
+        assert.equal(await recovery.locator('input[type="number"]').count(), 1);
+        const early = recovery.getByRole('combobox', { name: 'Maximum early placements', exact: true });
+        assert.equal(await early.inputValue(), 'auto');
+        await recovery.getByRole('checkbox', { name: 'Hold', exact: true }).uncheck();
+        const fields = recovery.locator('.field-palette button');
+        await fields.filter({ hasText: /^Start$/ }).click();
         await paint(page, 0, 0x3f0n, 4);
-        await page.getByRole('button', { name: 'Final field', exact: true }).click();
-        await paint(page, 0, 0xc030n, 4);
-        await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), 'boundary recovery');
-        await page.locator('.recovery-result .outcome').waitFor({ timeout: 60000 });
-        assert.equal(await page.locator('.recovery-result .outcome').innerText(), 'Normal connection');
-        assert.equal(await page.locator('.recovery-result ol li').count(), 2);
-        assert.match(await recovery.locator('.recovery-resolved-pieces').innerText(), /2/);
-        await page.getByLabel('Known queue across both stages', { exact: true }).fill('IO');
-        await page.getByRole('combobox', { name: 'Maximum early placements', exact: true }).selectOption('0');
-        await page.getByRole('button', { name: 'Existing field', exact: true }).click();
-        await paint(page, 0, 0x3f0n, 4); // erase only the original snapshot
-        await page.getByRole('button', { name: 'First-stage field', exact: true }).click();
+        await fields.filter({ hasText: /^Middle$/ }).click();
         await paint(page, 0, 0xfn, 4);
-        await page.getByRole('button', { name: 'Final field', exact: true }).click();
-        await paint(page, 0, 0xfn, 4); // retain the final O and add the first-stage I
-        await page.getByRole('checkbox', { name: 'Require an exact placement for every role', exact: true }).check();
-        await paint(page, 1, 0xfn, 4);
-        // Label text includes nested options; the combobox accessible name does not.
-        await page.getByRole('combobox', { name: 'Placement role to edit (1-based)', exact: true }).selectOption('2');
-        await paint(page, 1, 0xc030n, 4);
-        await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), 'nonempty boundary goal');
-        assert.equal(await page.locator('.recovery-result .outcome').innerText(), 'Normal connection');
-        assert.equal(await page.locator('.recovery-result ol li').count(), 2);
-        assert.match(await page.locator('.recovery-result ol li').first().innerText(), /0x0*f\b/);
-        console.log('surface_recovery_checkpoints=passed empty=true nonempty=true');
+        await fields.filter({ hasText: /^Result$/ }).click();
+        await paint(page, 0, 0xc030n, 4);
+        const runRecovery = label => completeRun(page,
+          () => page.getByRole('button', { name: 'Run search', exact: true }).click(), label);
+        const paths = recovery.locator('.recovery-path-gallery');
+        await runRecovery('paired Build normal, with an actual line clear');
+        await paths.locator('[data-recovery-path="normal"]').waitFor();
+        assert.equal(await paths.locator('ol>li').count(), 2);
+        assert.equal(await recovery.locator('.invalid-evidence,.invalid-replay').count(), 0);
+        assert.equal(await recovery.locator('.solution-toolbar .copy-format').count(), 1);
+
+        // Empty base, middle I and result O: supplies O then I need different-
+        // kind repayment. This exercises the actual new parser, solver and wire.
+        await fields.filter({ hasText: /^Start$/ }).click();
+        await paint(page, 0, 0x3f0n, 4);
+        await supplies.nth(0).fill('O'); await supplies.nth(1).fill('I');
+        const exchange = recovery.getByRole('checkbox', { name: 'Allow different-piece repayment', exact: true });
+        assert.equal(await exchange.isChecked(), false);
+        await runRecovery('different-piece repayment disabled');
+        assert.equal(await recovery.locator('.recovery-path-gallery>li').count(), 0);
+        assert.equal(await recovery.locator('.invalid-evidence').count(), 0);
+        await exchange.check();
+        await runRecovery('different-piece repayment enabled');
+        await paths.locator('[data-recovery-path="recovery"]').waitFor();
+        assert.equal(await paths.locator('ol>li').count(), 2);
+        assert.match(await paths.locator('code').innerText(), /O.*I/);
+        assert.equal(await recovery.locator('.invalid-evidence,.invalid-replay').count(), 0);
+        await early.selectOption('0');
+        await runRecovery('zero early placements disables the same exchange route');
+        assert.equal(await recovery.locator('.recovery-path-gallery>li').count(), 0);
+        assert.equal(await recovery.locator('.invalid-evidence').count(), 0);
+        console.log('surface_recovery_build=passed normal=true exchange=true quota=true');
 
         const build = await navigateWorkspace(page, 'build-probability');
         await page.locator('.recovery-field-editor').waitFor({ state: 'detached' });

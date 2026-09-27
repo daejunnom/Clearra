@@ -45,6 +45,7 @@ use clearra_host_contract::{
 use crate::{WasmHostCapabilities, WebGpuBackendOutcomeState, WebGpuBackendReport};
 
 mod build_coverage_projection;
+mod recovery_build_projection;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WasmExecutionResult {
@@ -2216,6 +2217,7 @@ fn try_clone_public_product_result_payload(
     let contract = try_owned_string(source.contract(), ledger)?;
     let result_kind = try_owned_string(source.result_kind(), ledger)?;
     let content = match source.content() {
+        ProductResultPayloadContent::RecoveryBuild(payload) => ProductResultPayloadContent::RecoveryBuild(recovery_build_projection::copy_payload(payload, ledger)?),
         ProductResultPayloadContent::BuildCoveragePortfolioV2(payload) => {
             ProductResultPayloadContent::BuildCoveragePortfolioV2(
                 build_coverage_projection::copy_payload(payload, ledger)?,

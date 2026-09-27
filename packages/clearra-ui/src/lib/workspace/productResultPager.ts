@@ -10,6 +10,7 @@ import type {
   ClearraSolutionSetArtifactPayload
 } from '../wasm/wasmCommandClient';
 import { validatePcReplayPage } from './pcReplayPager';
+import { validateRecoveryBuildPayload } from './recoveryBuildPresentation';
 import { validateBoundaryRecoveryPayload } from './boundaryRecoveryPayloadValidation';
 
 export const PRODUCT_MEMBER_PAGE_SIZE = 100;
@@ -688,6 +689,7 @@ function pagerErrorMessage(value: unknown): string {
 
 export function productResultIdentity(payload: ClearraProductResultPayload | null | undefined) {
   if (!payload) return '';
+  if (payload.content.payload_kind === 'recovery-build') return `recovery-build:${payload.content.payload.input_identity}`;
   if (payload.content.payload_kind === 'build-v2') {
     const build = payload.content.payload;
     return [
@@ -942,6 +944,9 @@ function validArtifactIdentity(value: string): boolean {
 export function validateProductResultPayload(
   payload: ClearraProductResultPayload
 ): string | null {
+  if (payload.content.payload_kind === 'recovery-build') {
+    return payload.contract === 'recovery-build.v2' && payload.result_kind === 'recovery-build' && validateRecoveryBuildPayload(payload.content.payload) ? null : 'invalid recovery-build payload';
+  }
   if (payload.content.payload_kind === 'build-v2') {
     return validateBuildV2(payload.contract, payload.result_kind, payload.content.payload);
   }

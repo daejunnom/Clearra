@@ -4,11 +4,11 @@
   import { AlertTriangle } from '@lucide/svelte';
   import { onDestroy, onMount } from 'svelte';
 
-  import type { ClearraPcPathWitnessPayload } from '../wasm/wasmCommandClient';
+  import type { PathReplayGeometryWitness } from './pcPathReplayPresentation';
   import { encodePcPathReplayGif } from './pcPathReplayGif';
   import { buildPcPathReplayFrames } from './pcPathReplayPresentation';
 
-  export let witness: ClearraPcPathWitnessPayload;
+  export let witness: PathReplayGeometryWitness;
   export let language: WorkspaceLanguage = 'en';
   export let targetLines: number;
   export let expectedTerminalBoardMask: string | null = null;
@@ -26,6 +26,7 @@
     witness.pattern_id,
     witness.normalized_trace_key,
     targetLines,
+    witness.maskHexDigits ?? 16,
     expectedTerminalBoardMask ?? 'pc-empty'
   ].join(':');
   $: if (mounted && replayIdentity !== renderedIdentity) renderReplay(replayIdentity);

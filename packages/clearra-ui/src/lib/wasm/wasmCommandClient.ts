@@ -507,6 +507,9 @@ export type ClearraBoundaryRecoveryPopulationPayload = {
 };
 
 export type ClearraProductResultPayload =
+  | { contract: 'recovery-build.v2'; result_kind: 'recovery-build';
+      content: { payload_kind: 'recovery-build'; payload: import('../workspace/recoveryBuildPayloadTypes').RecoveryBuildPayload } }
+
   | {
       contract: 'boundary-recovery.v1';
       result_kind: 'boundary-recovery';

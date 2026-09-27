@@ -1,3 +1,4 @@
+mod recovery_build;
 use clearra_app::{
     BuildObjective, BuildProbabilityResultMode, BuildQueueKnowledge, BuildScoreProfile,
     FieldDocumentFormat, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
@@ -355,6 +356,7 @@ impl WebCommandParser {
             "ren" => {
                 parse_forward_command(&tokens[cursor..], false, true, worker_hardware_limit.max(1))
             }
+            "recovery" if tokens.get(cursor).map(String::as_str) == Some("build") => recovery_build::parse(&tokens[cursor + 1..]),
             "recovery" if tokens.get(cursor).map(String::as_str) == Some("boundary") => {
                 parse_boundary_recovery_command(&tokens[cursor + 1..])
             }

@@ -64,6 +64,12 @@ pub(crate) fn parse_command(
         "spin-structure" if has_help(command_args) => {
             Ok(ParsedCliCommand::Help(CliHelpTopic::SpinStructure))
         }
+        "recovery" if command_args.first().map(String::as_str) == Some("build") && has_help(command_args) => {
+            Ok(ParsedCliCommand::Help(CliHelpTopic::Product(super::ProductHelpTopic::RecoveryBuild)))
+        }
+        "recovery" if command_args.first().map(String::as_str) == Some("build") => Ok(
+            ParsedCliCommand::Product(product_tokens(command, command_args)),
+        ),
         "recovery"
             if command_args.first().map(String::as_str) == Some("boundary")
                 && has_help(command_args) =>
@@ -181,4 +187,18 @@ fn product_tokens(command: &str, command_args: &[String]) -> Vec<String> {
     tokens.push(command.to_owned());
     tokens.extend_from_slice(command_args);
     tokens
+}
+
+
+#[cfg(test)]
+mod recovery_build_dispatch_tests {
+    use super::*;
+    #[test]
+    fn paired_recovery_is_routed_without_reinterpreting_its_supply_tokens() {
+        let args = ["build", "--first-supply", "P7", "--second-supply", "P7"]
+            .into_iter().map(str::to_owned).collect::<Vec<_>>();
+        assert!(matches!(parse_command("recovery", &args).unwrap(), ParsedCliCommand::Product(_)));
+        assert!(matches!(parse_command("recovery", &["build".into(), "--help".into()]).unwrap(),
+            ParsedCliCommand::Help(CliHelpTopic::Product(super::super::ProductHelpTopic::RecoveryBuild))));
+    }
 }

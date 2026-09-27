@@ -12,7 +12,7 @@
     type BuildProbabilityRequest,
     type BuildProbabilityValidationCode
   } from './buildProbabilityModel';
-  import QueueTextInput from '../components/QueueTextInput.svelte';
+  import WorkspaceSupplyInput from './WorkspaceSupplyInput.svelte';
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
   import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
@@ -47,17 +47,8 @@
 <WorkspaceControlPanel ariaLabel={label('buildProbability')}>
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading"><Database size={16} strokeWidth={1.8} />{label('source')}</h2>
-    <label class="workspace-field">
-      <span>{label('queuePattern')}</span>
-      <QueueTextInput
-        class="workspace-queue-input"
-        value={request.queue}
-        maxlength="64"
-        placeholder={label('queuePlaceholder')}
-        spellcheck="false"
-        on:value={(event) => patch({ queue: event.detail })}
-      />
-    </label>
+    <WorkspaceSupplyInput value={request.queue} {language} maximumLength={64}
+      on:value={(event) => patch({ queue: event.detail })} />
     <QueuePatternHelp {language} />
 
     <label class="workspace-field">

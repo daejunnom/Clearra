@@ -1,0 +1,44 @@
+{
+  "source": "user screenshots image(5).png, image(6).png, image(7).png, solution 19 in image(4).png",
+  "height": 8,
+  "start_mask": "0xc0383f3fc7",
+  "middle_mask": "0x3ff3fc7c0c038",
+  "result_mask": "0x30483f07f3f8f",
+  "first_supply": "P7",
+  "second_supply": "P7",
+  "middle_colored_masks": {
+    "I": "0x3c0003c00000",
+    "T": "0x401804000000",
+    "O": "0x300c0000000",
+    "L": "0x3802000000000",
+    "S": "0x40000c020",
+    "Z": "0x300000018"
+  },
+  "result_colored_masks": {
+    "J": "0x3c0f",
+    "T": "0x40300400000",
+    "O": "0xc0300000",
+    "L": "0x3008020000000",
+    "S": "0x100c0200",
+    "Z": "0x30180"
+  },
+  "middle_histogram": {
+    "I": 2,
+    "J": 0,
+    "L": 1,
+    "O": 1,
+    "S": 1,
+    "T": 1,
+    "Z": 1
+  },
+  "result_histogram": {
+    "I": 0,
+    "J": 2,
+    "L": 1,
+    "O": 1,
+    "S": 1,
+    "T": 1,
+    "Z": 1
+  },
+  "interpretation": "Additional Build regions. Result coordinates are after the five completed middle rows clear. Colors sampled from cell centers and checked visually; no OCR."
+}

@@ -64,6 +64,7 @@ impl ProductResultPayload {
 )]
 pub enum ProductResultPayloadContent {
     BoundaryRecovery(crate::BoundaryRecoveryPayload),
+    RecoveryBuild(crate::RecoveryBuildPayload),
     CoveragePortfolio(CoveragePortfolioPagePayload),
     BuildCoveragePortfolioV2(BuildCoveragePortfolioV2Payload),
     BuildSetupFamilyV1(BuildSetupFamilyV1Payload),
@@ -86,6 +87,7 @@ pub enum ProductResultPayloadContent {
 impl ProductResultPayloadContent {
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
         match self {
+            Self::RecoveryBuild(payload) => payload.checked_retained_capacity_bytes(),
             Self::BoundaryRecovery(payload) => payload.checked_retained_capacity_bytes(),
             Self::CoveragePortfolio(payload) => payload.checked_retained_capacity_bytes(),
             Self::BuildCoveragePortfolioV2(payload) => payload.checked_retained_capacity_bytes(),

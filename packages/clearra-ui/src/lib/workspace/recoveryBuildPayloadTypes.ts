@@ -1,0 +1,58 @@
+// Public paired-Build payload. Numeric identities/counts remain canonical decimal strings.
+export type RecoveryBuildStepPayload = {
+  source_index: string;
+  result_target: boolean;
+  piece: string;
+  rotation: number;
+  x: number;
+  y: number;
+  hold_decision: string;
+  board_before_mask: string;
+  placement_mask: string;
+  board_after_mask: string;
+  cleared_rows: number;
+  cleared_lines: number;
+  recognized_spin: boolean;
+  b2b_active: boolean;
+  middle_complete: boolean;
+};
+export type RecoveryBuildExamplePayload = {
+  first_pattern: string;
+  second_pattern: string;
+  first_queue: string;
+  second_queue: string;
+  status: string;
+  terminal_board_mask: string;
+  effective_max_early: string;
+  actual_early: string;
+  exchange_balance: number[];
+  steps: RecoveryBuildStepPayload[];
+};
+export type RecoveryBuildPayload = {
+  input_identity: string;
+  height: number;
+  start_board_mask: string;
+  middle_target_mask: string;
+  result_target_mask: string;
+  first_supply: string;
+  second_supply: string;
+  early_limit: string | null;
+  allow_piece_exchange: boolean;
+  hold_enabled: boolean;
+  preserve_b2b: boolean;
+  initial_b2b: boolean;
+  rule_profile: string;
+  spin_profile: string;
+  complete: boolean;
+  pattern_count: string;
+  evaluated_pattern_count: string;
+  normal_count: string;
+  recovery_count: string;
+  no_path_count: string;
+  state_count: string;
+  normal_probability: string;
+  recovery_probability: string;
+  no_path_probability: string;
+  all_paths_enumerated: boolean;
+  examples: RecoveryBuildExamplePayload[];
+};

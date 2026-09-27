@@ -1,4 +1,6 @@
 pub mod boundary_recovery_app_command;
+pub mod recovery_build_app_command;
+pub use recovery_build_app_command::RecoveryBuildAppCommand;
 pub mod build_probability_app_command;
 pub mod build_v2_app_command;
 pub mod continue_app_command;

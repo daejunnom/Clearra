@@ -4,6 +4,12 @@ import type {
 } from '../wasm/wasmCommandClient';
 import type { SolutionExportPage, SolutionPiece } from './solutionExport';
 
+export type PathReplayGeometryStep = Pick<ClearraPcPathStepPayload,
+  'step_index' | 'active_piece' | 'placement_mask' | 'board_before_mask' |
+  'board_after_placement_mask' | 'board_after_line_clear_mask' | 'cleared_row_mask' | 'cleared_lines'>;
+export type PathReplayGeometryWitness = Pick<ClearraPcPathWitnessPayload,
+  'candidate_id' | 'pattern_id' | 'normalized_trace_key'> & { steps: PathReplayGeometryStep[]; maskHexDigits?: 16 | 64 };
+
 export const PC_PATH_REPLAY_FRAME_DELAY_MS = 500;
 export const PC_PATH_REPLAY_WIDTH = 10;
 
@@ -105,7 +111,7 @@ export function pcPathCandidateGroupExportPages(
  * clipboard boundary.
  */
 export function pcPathWitnessExportPage(
-  witness: ClearraPcPathWitnessPayload,
+  witness: PathReplayGeometryWitness,
   requestedRows: number,
   expectedTerminalBoardMask: string | null = null
 ): SolutionExportPage | null {
@@ -118,14 +124,14 @@ export function pcPathWitnessExportPage(
     );
     const logicalHeight = frames[0].height;
     const cellCount = logicalHeight * PC_PATH_REPLAY_WIDTH;
-    const initialMask = parseMask(witness.steps[0].board_before_mask, cellCount);
+    const initialMask = parseMask(witness.steps[0].board_before_mask, cellCount, witness.maskHexDigits ?? 16);
     const logicalToDisplay = Array.from({ length: logicalHeight }, (_, row) => row);
     const placements: SolutionExportPage['placements'] = [];
     let nextDisplayRow = logicalHeight;
     let displayOccupied = initialMask;
 
     for (const step of witness.steps) {
-      const logicalPlacement = parseMask(step.placement_mask, cellCount);
+      const logicalPlacement = parseMask(step.placement_mask, cellCount, witness.maskHexDigits ?? 16);
       let displayPlacement = 0n;
       forEachSetBit(logicalPlacement, cellCount, (cellIndex) => {
         const x = cellIndex % PC_PATH_REPLAY_WIDTH;
@@ -145,7 +151,7 @@ export function pcPathWitnessExportPage(
         mask: displayPlacement
       });
 
-      const clearedRows = parseMask(step.cleared_row_mask, logicalHeight);
+      const clearedRows = parseMask(step.cleared_row_mask, logicalHeight, witness.maskHexDigits ?? 16);
       let clearedRowCount = 0;
       for (let row = logicalHeight - 1; row >= 0; row -= 1) {
         if ((clearedRows & (1n << BigInt(row))) === 0n) continue;
@@ -173,16 +179,16 @@ export function pcPathWitnessExportPage(
 
 /** Builds the exact visible event sequence: initial, every lock, and only real clears. */
 export function buildPcPathReplayFrames(
-  witness: ClearraPcPathWitnessPayload,
+  witness: PathReplayGeometryWitness,
   requestedRows: number,
   expectedTerminalBoardMask: string | null = null
 ): PcPathReplayFrame[] {
   if (!Array.isArray(witness.steps) || witness.steps.length === 0) {
     throw new Error('The PC path replay has no placement steps.');
   }
-  const height = replayHeight(witness.steps, requestedRows);
+  const height = replayHeight(witness.steps, requestedRows, witness.maskHexDigits ?? 16);
   const cellCount = PC_PATH_REPLAY_WIDTH * height;
-  const firstBefore = parseMask(witness.steps[0].board_before_mask, cellCount);
+  const firstBefore = parseMask(witness.steps[0].board_before_mask, cellCount, witness.maskHexDigits ?? 16);
   let cells = maskCells(firstBefore, cellCount, 'G');
   let occupied = firstBefore;
   const frames: PcPathReplayFrame[] = [frame('initial', null, height, cells)];
@@ -192,11 +198,11 @@ export function buildPcPathReplayFrames(
     if (step.step_index !== String(index)) {
       throw new Error('The PC path replay step order is invalid.');
     }
-    const before = parseMask(step.board_before_mask, cellCount);
-    const placement = parseMask(step.placement_mask, cellCount);
-    const afterPlacement = parseMask(step.board_after_placement_mask, cellCount);
-    const afterClear = parseMask(step.board_after_line_clear_mask, cellCount);
-    const clearedRows = parseMask(step.cleared_row_mask, height);
+    const before = parseMask(step.board_before_mask, cellCount, witness.maskHexDigits ?? 16);
+    const placement = parseMask(step.placement_mask, cellCount, witness.maskHexDigits ?? 16);
+    const afterPlacement = parseMask(step.board_after_placement_mask, cellCount, witness.maskHexDigits ?? 16);
+    const afterClear = parseMask(step.board_after_line_clear_mask, cellCount, witness.maskHexDigits ?? 16);
+    const clearedRows = parseMask(step.cleared_row_mask, height, witness.maskHexDigits ?? 16);
     const piece = replayPiece(step.active_piece);
     if (
       before !== occupied ||
@@ -233,7 +239,7 @@ export function buildPcPathReplayFrames(
 
   const expectedTerminal = expectedTerminalBoardMask === null
     ? 0n
-    : parseMask(expectedTerminalBoardMask, cellCount);
+    : parseMask(expectedTerminalBoardMask, cellCount, witness.maskHexDigits ?? 16);
   if (occupied !== expectedTerminal) {
     throw new Error(
       expectedTerminalBoardMask === null
@@ -244,7 +250,7 @@ export function buildPcPathReplayFrames(
   return frames;
 }
 
-function replayHeight(steps: readonly ClearraPcPathStepPayload[], requestedRows: number): number {
+function replayHeight(steps: readonly PathReplayGeometryStep[], requestedRows: number, maskHexDigits: 16 | 64): number {
   const normalizedRows = Number.isFinite(requestedRows)
     ? Math.trunc(requestedRows)
     : MIN_VIEW_ROWS;
@@ -256,7 +262,7 @@ function replayHeight(steps: readonly ClearraPcPathStepPayload[], requestedRows:
       step.board_after_placement_mask,
       step.board_after_line_clear_mask
     ]) {
-      const mask = parseCanonicalHexMask(value);
+      const mask = parseCanonicalHexMask(value, maskHexDigits);
       if (mask !== 0n) {
         occupiedRows = Math.max(
           occupiedRows,
@@ -331,16 +337,16 @@ function clearedRowsAreFull(board: bigint, height: number, clearedRows: bigint):
   return true;
 }
 
-function parseMask(value: string, bitLimit: number): bigint {
-  const mask = parseCanonicalHexMask(value);
+function parseMask(value: string, bitLimit: number, maskHexDigits: 16 | 64 = 16): bigint {
+  const mask = parseCanonicalHexMask(value, maskHexDigits);
   if ((mask >> BigInt(bitLimit)) !== 0n) {
     throw new Error('The PC path replay mask exceeds its board.');
   }
   return mask;
 }
 
-function parseCanonicalHexMask(value: string): bigint {
-  if (!/^0x[0-9a-f]{16}$/u.test(value)) {
+function parseCanonicalHexMask(value: string, maskHexDigits: 16 | 64): bigint {
+  if (!(maskHexDigits === 64 ? /^0x[0-9a-f]{64}$/u : /^0x[0-9a-f]{16}$/u).test(value)) {
     throw new Error('The PC path replay mask is not canonical.');
   }
   return BigInt(value);
