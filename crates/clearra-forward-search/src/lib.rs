@@ -7,9 +7,9 @@ mod boundary_recovery_population;
 mod cross_stage_catalog;
 mod cross_stage_recovery;
 mod parallel;
-mod recovery_build;
 mod query;
 mod reachability;
+mod recovery_build;
 mod result;
 mod search;
 mod t_spin_acceleration;
@@ -47,4 +47,8 @@ pub use search::{ForwardSearchAdvance, ForwardSearchError, ForwardSearchSession}
 /// The public fixed-queue REN boundary. Larger inputs fail closed before search starts.
 pub const MAX_REN_QUEUE_PIECES: usize = 22;
 
-pub use recovery_build::{RecoveryBuildFields, RecoveryBuildError, RecoveryBuildQuery, RecoveryBuildPopulation, RecoveryBuildExample, RecoveryBuildFixedQuery, RecoveryBuildFixedReport, RecoveryBuildStatus, RecoveryBuildStep};
+pub use recovery_build::{
+    RecoveryBuildError, RecoveryBuildExample, RecoveryBuildFields, RecoveryBuildFixedQuery,
+    RecoveryBuildFixedReport, RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildStatus,
+    RecoveryBuildStep,
+};

@@ -1097,7 +1097,12 @@ fn write_product_result_payload(object: &mut JsonObject<'_>, payload: &ProductRe
     object.string("contract", payload.contract());
     object.string("result_kind", payload.result_kind());
     object.object("content", |nested| match payload.content() {
-        ProductResultPayloadContent::RecoveryBuild(report) => { nested.string("payload_kind", "recovery-build"); nested.object("payload", |result| recovery_build_json::write_payload(result,report)); }
+        ProductResultPayloadContent::RecoveryBuild(report) => {
+            nested.string("payload_kind", "recovery-build");
+            nested.object("payload", |result| {
+                recovery_build_json::write_payload(result, report)
+            });
+        }
         ProductResultPayloadContent::BoundaryRecovery(report) => {
             nested.string("payload_kind", "boundary-recovery");
             nested.object("payload", |result| {

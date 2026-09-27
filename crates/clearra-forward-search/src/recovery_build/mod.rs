@@ -3,12 +3,15 @@
 //! regions. This is the Build/Verify product, not a fixed-role approximation.
 //! No isolated-stage B2B or reachability failure is used as a joint prune.
 mod field;
-mod search;
 mod population;
-#[cfg(test)] mod tests;
+mod search;
+#[cfg(test)]
+mod tests;
 pub use field::RecoveryBuildFields;
 pub use population::{RecoveryBuildExample, RecoveryBuildPopulation, RecoveryBuildQuery};
-pub use search::{RecoveryBuildFixedQuery, RecoveryBuildFixedReport, RecoveryBuildStatus, RecoveryBuildStep};
+pub use search::{
+    RecoveryBuildFixedQuery, RecoveryBuildFixedReport, RecoveryBuildStatus, RecoveryBuildStep,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryBuildError {

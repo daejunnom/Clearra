@@ -206,15 +206,16 @@ pub use clearra_output::{
     Ctk3PageFlags, Ctk3Piece, Ctk3Rotation,
 };
 pub use commands::{
-    BoundaryRecoveryAppCommand, RecoveryBuildAppCommand, BuildProbabilityAppCommand, BuildProbabilityResultMode,
+    BoundaryRecoveryAppCommand, BuildProbabilityAppCommand, BuildProbabilityResultMode,
     BuildV2AppCommand, BuildV2AppRequest, ContinueAppCommand, ConvertAppCommand, CoverAppCommand,
     DamageAppCommand, FieldDocumentTransformAppCommand, FieldDocumentTransformAppCommandError,
     FieldDocumentTransformKind, FumenAppCommand, FumenAppCommandError, FumenTransformKind,
     InspectUnsupportedAppCommand, OperationSequenceAppCommand, ParityAppCommand, PathAppCommand,
-    PcAppCommand, PercentAppCommand, RenAppCommand, RenderAppCommand, RenderAppCommandError,
-    RenderArtifactFormat, RulesAppCommand, ScenarioAppCommand, ScenarioAppExpected,
-    ScenarioAppRenderContract, ScoringAppCommand, SequenceDependenciesAppCommand, SetupAppCommand,
-    SetupScoreAppCommand, SetupScoreAppCommandError, SpinFinderAppCommand, SpinStructureAppCommand,
+    PcAppCommand, PercentAppCommand, RecoveryBuildAppCommand, RenAppCommand, RenderAppCommand,
+    RenderAppCommandError, RenderArtifactFormat, RulesAppCommand, ScenarioAppCommand,
+    ScenarioAppExpected, ScenarioAppRenderContract, ScoringAppCommand,
+    SequenceDependenciesAppCommand, SetupAppCommand, SetupScoreAppCommand,
+    SetupScoreAppCommandError, SpinFinderAppCommand, SpinStructureAppCommand,
     SpinStructureProductMode, VerifyAppCommand, SETUP_SCORE_INPUT_CONTRACT,
     SETUP_SCORE_PROBLEM_CONTRACT, SETUP_SCORE_RESULT_CONTRACT,
 };

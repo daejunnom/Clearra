@@ -1,8 +1,8 @@
 //! Build targets keep their logical rows after physical line clears. A lock is
 //! lifted through the ACTUAL deletion history, never through one sample replay.
-use clearra_core_domain::board::standard_pc_board::Board256Mask;
-use crate::board::{place_and_clear, ForwardBoard};
 use super::RecoveryBuildError;
+use crate::board::{place_and_clear, ForwardBoard};
+use clearra_core_domain::board::standard_pc_board::Board256Mask;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryBuildFields {
@@ -40,7 +40,9 @@ fn board(rows: &[u16], height: u8) -> ForwardBoard {
     let mut result = ForwardBoard::EMPTY;
     for (y, &row) in rows.iter().take(usize::from(height)).enumerate() {
         for x in 0..10 {
-            if row & (1 << x) != 0 { result.insert((y * 10 + x) as u16); }
+            if row & (1 << x) != 0 {
+                result.insert((y * 10 + x) as u16);
+            }
         }
     }
     result
@@ -48,9 +50,13 @@ fn board(rows: &[u16], height: u8) -> ForwardBoard {
 
 impl RecoveryBuildFields {
     pub(super) fn prepare(&self) -> Result<PreparedFields, RecoveryBuildError> {
-        if !(1..=24).contains(&self.height) { return Err(RecoveryBuildError::InvalidHeight); }
-        if [self.initial, self.middle, self.result].iter()
-            .any(|mask| mask.fits_cell_count(u16::from(self.height) * 10) != Ok(true)) {
+        if !(1..=24).contains(&self.height) {
+            return Err(RecoveryBuildError::InvalidHeight);
+        }
+        if [self.initial, self.middle, self.result]
+            .iter()
+            .any(|mask| mask.fits_cell_count(u16::from(self.height) * 10) != Ok(true))
+        {
             return Err(RecoveryBuildError::BoardOutsideField);
         }
         let initial = rows(self.initial, self.height);
@@ -75,19 +81,37 @@ impl RecoveryBuildFields {
         let mut input_row = 0;
         let mut logical_row = 0;
         while input_row < target.len() {
-            if first.get(logical_row) == Some(&1023) { lifted.push(0); }
-            else { lifted.push(target[input_row]); input_row += 1; }
+            if first.get(logical_row) == Some(&1023) {
+                lifted.push(0);
+            } else {
+                lifted.push(target[input_row]);
+                input_row += 1;
+            }
             logical_row += 1;
         }
         let logical_height = middle.len().max(lifted.len());
         middle.resize(logical_height, 0);
         lifted.resize(logical_height, 0);
-        let initially_deleted = (0..logical_height).map(|row| initial.get(row) == Some(&1023)).collect();
-        let (initial, _, _) = place_and_clear(10, self.height, ForwardBoard::from_mask(self.initial));
-        let final_rows: Vec<_> = after_first.iter().zip(&target).map(|(a, b)| a | b).collect();
-        Ok(PreparedFields { height: self.height, initial, middle, result: lifted,
-            initially_deleted, terminal: board(&compact(&final_rows), self.height),
-            middle_pieces: middle_area / 4, result_pieces: result_area / 4 })
+        let initially_deleted = (0..logical_height)
+            .map(|row| initial.get(row) == Some(&1023))
+            .collect();
+        let (initial, _, _) =
+            place_and_clear(10, self.height, ForwardBoard::from_mask(self.initial));
+        let final_rows: Vec<_> = after_first
+            .iter()
+            .zip(&target)
+            .map(|(a, b)| a | b)
+            .collect();
+        Ok(PreparedFields {
+            height: self.height,
+            initial,
+            middle,
+            result: lifted,
+            initially_deleted,
+            terminal: board(&compact(&final_rows), self.height),
+            middle_pieces: middle_area / 4,
+            result_pieces: result_area / 4,
+        })
     }
 }
 
@@ -96,10 +120,16 @@ impl PreparedFields {
     /// Failure means the lock lies outside both declared target regions.
     pub fn lift(&self, lock: ForwardBoard, deleted: &[bool]) -> Option<Vec<u16>> {
         let mut logical = vec![0_u16; self.middle.len()];
-        let map: Vec<_> = deleted.iter().enumerate().filter_map(|(row, gone)| (!gone).then_some(row)).collect();
+        let map: Vec<_> = deleted
+            .iter()
+            .enumerate()
+            .filter_map(|(row, gone)| (!gone).then_some(row))
+            .collect();
         for y in 0..self.height {
             let bits = lock.row_bits(10, y);
-            if bits == 0 { continue; }
+            if bits == 0 {
+                continue;
+            }
             let row = *map.get(usize::from(y))?;
             logical[row] = bits;
         }
@@ -107,15 +137,25 @@ impl PreparedFields {
     }
     pub fn delete_rows(&self, physical_rows: u32, deleted: &[bool]) -> Vec<bool> {
         let mut next = deleted.to_vec();
-        for (physical, logical) in deleted.iter().enumerate().filter_map(|(row, gone)| (!gone).then_some(row)).enumerate() {
-            if physical < 32 && physical_rows & (1_u32 << physical) != 0 { next[logical] = true; }
+        for (physical, logical) in deleted
+            .iter()
+            .enumerate()
+            .filter_map(|(row, gone)| (!gone).then_some(row))
+            .enumerate()
+        {
+            if physical < 32 && physical_rows & (1_u32 << physical) != 0 {
+                next[logical] = true;
+            }
         }
         next
     }
 }
 
 pub(super) fn available(lock: &[u16], target: &[u16], used: &[u16]) -> bool {
-    lock.iter().zip(target).zip(used).all(|((&cells, &required), &filled)| cells & !required == 0 && cells & filled == 0)
+    lock.iter()
+        .zip(target)
+        .zip(used)
+        .all(|((&cells, &required), &filled)| cells & !required == 0 && cells & filled == 0)
 }
 pub(super) fn joined(left: &[u16], right: &[u16]) -> Vec<u16> {
     left.iter().zip(right).map(|(a, b)| a | b).collect()

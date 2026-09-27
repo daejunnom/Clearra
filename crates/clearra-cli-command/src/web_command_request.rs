@@ -1,15 +1,16 @@
 // SRP rationale: this module has one change reason: lowering canonical CLI commands into typed application requests.
 use clearra_app::{
-    AppCommand, AppRequest, BoundaryRecoveryAppCommand, RecoveryBuildAppCommand, BuildProbabilityAppCommand,
+    AppCommand, AppRequest, BoundaryRecoveryAppCommand, BuildProbabilityAppCommand,
     DamageAppCommand, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
     FumenAppCommand, OperationDocumentProblem, OperationSequenceAppCommand, ParityAppCommand,
     PcAppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin,
     PcPathIngressOrigin, PcResultProjection, PcSaveIngressOrigin, PcScoreIngressOrigin,
     PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, PercentAppCommand,
-    ProductCapabilityContract, RenAppCommand, RenderAppCommand, RequestStructuralProfiles,
-    ResourceBudget, ScenarioAppCommand, SequenceDependenciesAppCommand, SetupAppCommand,
-    SpinFinderAppCommand, SpinStructureAppCommand, SpinStructureProductMode, VerifyAppCommand,
-    PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_SOURCE_PIECES,
+    ProductCapabilityContract, RecoveryBuildAppCommand, RenAppCommand, RenderAppCommand,
+    RequestStructuralProfiles, ResourceBudget, ScenarioAppCommand, SequenceDependenciesAppCommand,
+    SetupAppCommand, SpinFinderAppCommand, SpinStructureAppCommand, SpinStructureProductMode,
+    VerifyAppCommand, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
+    PC_SCORE_MAX_SOURCE_PIECES,
 };
 use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_core_domain::piece::piece_kind::PieceKind;
@@ -1484,8 +1485,15 @@ impl WebCommandRequest {
             return self.attach_product_capability_contract(request);
         }
         if self.command_kind == "recovery-build" {
-            let query = self.recovery_build.clone().ok_or_else(|| WebCommandError::new(WebCommandErrorCode::InvalidValue, "missing typed recovery-build query"))?;
-            return self.attach_product_capability_contract(AppRequest::new(AppCommand::RecoveryBuild(RecoveryBuildAppCommand::new(query))));
+            let query = self.recovery_build.clone().ok_or_else(|| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "missing typed recovery-build query",
+                )
+            })?;
+            return self.attach_product_capability_contract(AppRequest::new(
+                AppCommand::RecoveryBuild(RecoveryBuildAppCommand::new(query)),
+            ));
         }
         if self.command_kind == "boundary-recovery" {
             let query = self.boundary_recovery.clone().ok_or_else(|| {

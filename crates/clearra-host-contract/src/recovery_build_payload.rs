@@ -57,9 +57,17 @@ impl RecoveryBuildExamplePayload {
         bytes = bytes.checked_add(self.terminal_board_mask.capacity() as u128)?;
         bytes = bytes.checked_add(self.effective_max_early.capacity() as u128)?;
         bytes = bytes.checked_add(self.actual_early.capacity() as u128)?;
-        bytes = bytes.checked_add((self.exchange_balance.capacity() as u128).checked_mul(core::mem::size_of::<i16>() as u128)?)?;
-        bytes = bytes.checked_add((self.steps.capacity() as u128).checked_mul(core::mem::size_of::<RecoveryBuildStepPayload>() as u128)?)?;
-        for value in &self.steps { bytes = bytes.checked_add(value.checked_retained_capacity_bytes()?)?; }
+        bytes = bytes.checked_add(
+            (self.exchange_balance.capacity() as u128)
+                .checked_mul(core::mem::size_of::<i16>() as u128)?,
+        )?;
+        bytes = bytes.checked_add(
+            (self.steps.capacity() as u128)
+                .checked_mul(core::mem::size_of::<RecoveryBuildStepPayload>() as u128)?,
+        )?;
+        for value in &self.steps {
+            bytes = bytes.checked_add(value.checked_retained_capacity_bytes()?)?;
+        }
         Some(bytes)
     }
 }
@@ -103,7 +111,11 @@ impl RecoveryBuildPayload {
         bytes = bytes.checked_add(self.result_target_mask.capacity() as u128)?;
         bytes = bytes.checked_add(self.first_supply.capacity() as u128)?;
         bytes = bytes.checked_add(self.second_supply.capacity() as u128)?;
-        bytes = bytes.checked_add(self.early_limit.as_ref().map_or(0, |value| value.capacity()) as u128)?;
+        bytes = bytes.checked_add(
+            self.early_limit
+                .as_ref()
+                .map_or(0, |value| value.capacity()) as u128,
+        )?;
         bytes = bytes.checked_add(self.rule_profile.capacity() as u128)?;
         bytes = bytes.checked_add(self.spin_profile.capacity() as u128)?;
         bytes = bytes.checked_add(self.pattern_count.capacity() as u128)?;
@@ -115,8 +127,13 @@ impl RecoveryBuildPayload {
         bytes = bytes.checked_add(self.normal_probability.capacity() as u128)?;
         bytes = bytes.checked_add(self.recovery_probability.capacity() as u128)?;
         bytes = bytes.checked_add(self.no_path_probability.capacity() as u128)?;
-        bytes = bytes.checked_add((self.examples.capacity() as u128).checked_mul(core::mem::size_of::<RecoveryBuildExamplePayload>() as u128)?)?;
-        for value in &self.examples { bytes = bytes.checked_add(value.checked_retained_capacity_bytes()?)?; }
+        bytes = bytes.checked_add(
+            (self.examples.capacity() as u128)
+                .checked_mul(core::mem::size_of::<RecoveryBuildExamplePayload>() as u128)?,
+        )?;
+        for value in &self.examples {
+            bytes = bytes.checked_add(value.checked_retained_capacity_bytes()?)?;
+        }
         Some(bytes)
     }
 }

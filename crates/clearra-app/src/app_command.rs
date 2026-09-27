@@ -1,11 +1,11 @@
 use crate::commands::{
-    BoundaryRecoveryAppCommand, RecoveryBuildAppCommand, BuildProbabilityAppCommand, BuildV2AppCommand, ContinueAppCommand,
+    BoundaryRecoveryAppCommand, BuildProbabilityAppCommand, BuildV2AppCommand, ContinueAppCommand,
     ConvertAppCommand, CoverAppCommand, DamageAppCommand, FieldDocumentTransformAppCommand,
     FumenAppCommand, InspectUnsupportedAppCommand, OperationSequenceAppCommand, ParityAppCommand,
-    PathAppCommand, PcAppCommand, PercentAppCommand, RenAppCommand, RenderAppCommand,
-    RulesAppCommand, ScenarioAppCommand, ScoringAppCommand, SequenceDependenciesAppCommand,
-    SetupAppCommand, SetupScoreAppCommand, SpinFinderAppCommand, SpinStructureAppCommand,
-    VerifyAppCommand,
+    PathAppCommand, PcAppCommand, PercentAppCommand, RecoveryBuildAppCommand, RenAppCommand,
+    RenderAppCommand, RulesAppCommand, ScenarioAppCommand, ScoringAppCommand,
+    SequenceDependenciesAppCommand, SetupAppCommand, SetupScoreAppCommand, SpinFinderAppCommand,
+    SpinStructureAppCommand, VerifyAppCommand,
 };
 use crate::{app_context::AppExecutionContext, app_response::AppResponse};
 use clearra_core_domain::objective::objective_kind::ObjectiveKind;

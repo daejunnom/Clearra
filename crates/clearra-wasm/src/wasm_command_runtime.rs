@@ -2217,7 +2217,11 @@ fn try_clone_public_product_result_payload(
     let contract = try_owned_string(source.contract(), ledger)?;
     let result_kind = try_owned_string(source.result_kind(), ledger)?;
     let content = match source.content() {
-        ProductResultPayloadContent::RecoveryBuild(payload) => ProductResultPayloadContent::RecoveryBuild(recovery_build_projection::copy_payload(payload, ledger)?),
+        ProductResultPayloadContent::RecoveryBuild(payload) => {
+            ProductResultPayloadContent::RecoveryBuild(recovery_build_projection::copy_payload(
+                payload, ledger,
+            )?)
+        }
         ProductResultPayloadContent::BuildCoveragePortfolioV2(payload) => {
             ProductResultPayloadContent::BuildCoveragePortfolioV2(
                 build_coverage_projection::copy_payload(payload, ledger)?,

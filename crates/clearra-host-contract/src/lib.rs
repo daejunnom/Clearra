@@ -10,7 +10,6 @@ mod app_result;
 mod backend_policy;
 mod backend_report;
 mod boundary_recovery_payload;
-mod recovery_build_payload;
 mod build_v2_product_payload;
 mod capability_report;
 mod continuation_report;
@@ -23,6 +22,7 @@ mod output_policy;
 mod product_build_identity;
 mod product_result_payload;
 mod query_envelope;
+mod recovery_build_payload;
 mod render_capability_report;
 mod resource_budget;
 mod resource_report;
@@ -84,4 +84,6 @@ pub use solution_set_artifact_payload::{
     HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES, SOLUTION_SET_ARTIFACT_CONTRACT,
 };
 
-pub use recovery_build_payload::{RecoveryBuildPayload, RecoveryBuildExamplePayload, RecoveryBuildStepPayload};
+pub use recovery_build_payload::{
+    RecoveryBuildExamplePayload, RecoveryBuildPayload, RecoveryBuildStepPayload,
+};
