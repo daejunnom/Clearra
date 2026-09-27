@@ -86,3 +86,10 @@ production UI 소비자에서 실행했다. 이전 v1 파일은 덮어쓰지 않
 이는 실제 CI-produced 자료와 공통 UI 함수의 로컬 기능 증거다. 수정된 소비자의
 새 exact-source CI 통과, 실제 browser clipboard/Tauri IPC 및 앱 릴리스는
 별도 Open이다. 실패한 기존 CI를 성공으로 바꾸거나 출처를 재명명하지 않는다.
+
+후속 exact `6f01d446`의 [run 36350733063](https://github.com/daejunnom/Clearra/actions/runs/36350733063)에서
+실제 producer와 UI 소비자가 같은 source/run/attempt로 통과했다. 네 정책 모두
+rendered 100, exported 246, pages 3이며 consumer는 1 passed, 0 failed, 0 skipped다.
+이는 CI의 실제 자료/공통 UI 함수 기능 경계를 닫지만 browser clipboard 또는
+Tauri IPC readback은 아니다. 전체 CI는 별도 Discord fixture 오류로 실패했으므로
+이 좁은 UI 성공을 전체 acceptance로 확대하지 않는다.

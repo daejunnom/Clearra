@@ -37,7 +37,7 @@ function installedSnapshot() {
   }));
 }
 
-test('real CLI minimum, score, replay and Build results survive production Discord hops', {
+test('real CLI minimum, score, replay, Setup-score and Build results survive production Discord hops', {
   skip: !executable && !assetRoot && !sourceCommit,
   timeout: 1_200_000,
 }, async t => {
@@ -66,6 +66,7 @@ test('real CLI minimum, score, replay and Build results survive production Disco
   });
   let completed = 0;
   for (const profile of profiles) {
+    let setupBaseline;
     for (const input of realCliProductProjectionRequests(profile)) {
       const arguments_ = input.arguments;
       const prepared = prepareClearraArguments(arguments_, { workers: 1,
@@ -75,6 +76,30 @@ test('real CLI minimum, score, replay and Build results survive production Disco
       assert.equal(raw.kind, input.kind);
       assert.equal(raw.runtime_identity?.source_commit, sourceCommit);
       assert.equal(raw.runtime_identity?.engine_build_id, sourceCommit);
+      if (input.name === 'setup-score') {
+        const summary = raw.summary;
+        assert.equal(summary.complete, true);
+        assert.equal(summary.rule_profile, profile);
+        assert.equal(summary.source_page_count, '3');
+        assert.equal(summary.candidate_count, '2');
+        assert.equal(summary.setup_pattern_count, '1');
+        assert.equal(summary.candidates.length, 2);
+        assert.deepEqual(summary.candidates.map(row => row.rank), ['1', '2']);
+        assert.deepEqual(summary.candidates.map(row => row.completed_board_mask),
+          ['0x000000000000000f', '0x00000000000003c0']);
+        const score = Number(summary.average_priority_score);
+        assert.ok(Number.isFinite(score) && score > 0);
+        for (const row of summary.candidates) {
+          assert.equal(row.setup_covered_pattern_count, '1');
+          assert.equal(Number(row.setup_covered_probability), 1);
+          assert.equal(Number(row.continuation_probability), 1);
+          assert.equal(Number(row.unconditional_expected_score), score);
+        }
+        assert.ok(summary.candidates[0].candidate_id < summary.candidates[1].candidate_id);
+        if (setupBaseline === undefined) setupBaseline = summary;
+        else assert.deepEqual(summary, setupBaseline,
+          `${profile}/${input.policy}: Setup coverage/continuation/reduction drift`);
+      }
       const directProjection = assertDiscordCanonicalOnlyResult({
         exitCode: 0, signal: null, stderr: '', stdout,
       });
@@ -88,8 +113,8 @@ test('real CLI minimum, score, replay and Build results survive production Disco
         'canonical projection must remain stable across runner/direct/client hops');
       completed += 1;
     }
-    t.diagnostic(`${profile}: PC three products/four policies, Build default, actual CLI/Discord parity`);
+    t.diagnostic(`${profile}: PC three products and Setup-score/four policies, Build default, actual CLI/Discord parity`);
   }
-  assert.equal(completed, 65);
+  assert.equal(completed, 85);
   assert.deepEqual(installedSnapshot(), before, 'result projection must not replace asset generations');
 });

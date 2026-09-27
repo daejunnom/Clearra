@@ -5,8 +5,9 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { build } from 'esbuild';
 import { prepareClearraArguments } from '../../apps/clearra-discord-bot/src/clearra/command.mjs';
-import { realCliProductProjectionRequests, realCliProjectionProfiles }
+import { realCliProductProjectionRequests, realCliProjectionProfiles, realSetupScoreDocument }
   from '../../apps/clearra-discord-bot/test/support/realCliProductProjectionRequests.mjs';
 
 const workflow = readFileSync(new URL('../../.github/workflows/v081-selective-source-ci.yml', import.meta.url), 'utf8').replace(/\r\n/gu, '\n');
@@ -334,13 +335,28 @@ test('every actual Discord product fixture obeys the existing closed command reg
   let count = 0;
   for (const profile of realCliProjectionProfiles) {
     const requests = realCliProductProjectionRequests(profile);
-    assert.equal(requests.length, 13);
+    assert.equal(requests.length, 17);
     for (const request of requests) {
       const prepared = prepareClearraArguments(request.arguments, { workers: 1,
         logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true });
       assert.ok(prepared.includes('--include-solution-data'));
       assert.deepEqual(prepared.slice(-3), ['--format', 'json', '--include-solution-data']);
       count += 1;
+    }
+    const scoreRequests = requests.filter(request => request.name === 'score-minimum');
+    assert.equal(scoreRequests.length, 4);
+    for (const request of scoreRequests) {
+      for (const forbidden of ['--backend', '--no-backend-fallback', '--count', '--objective', '--max-patterns'])
+        assert.ok(!request.arguments.includes(forbidden), 'score product owns its execution controls');
+    }
+    const setupRequests = requests.filter(request => request.name === 'setup-score');
+    assert.equal(setupRequests.length, 4);
+    assert.deepEqual(setupRequests.map(request => request.policy),
+      ['false:false', 'true:false', 'false:true', 'true:true']);
+    for (const request of setupRequests) {
+      assert.equal(request.arguments[request.arguments.indexOf('--document') + 1], realSetupScoreDocument);
+      assert.ok(!request.arguments.includes('--backend'));
+      assert.ok(!request.arguments.includes('--max-patterns'));
     }
     const build = requests.find(request => request.name === 'build-cover');
     assert.equal(build.policy, 'default');
@@ -350,6 +366,25 @@ test('every actual Discord product fixture obeys the existing closed command reg
       assert.throws(() => prepareClearraArguments([...build.arguments, flag]), /does not expose/u);
     }
   }
-  assert.equal(count, 65);
+  assert.equal(count, 85);
   assert.throws(() => realCliProductProjectionRequests('unknown-profile'), /unknown/u);
+});
+
+test('the shared Setup-score fixture encodes two actual I targets and one duplicate page', async () => {
+  const bundled = await build({
+    entryPoints: [fileURLToPath(new URL('../../packages/ctk3/src/codec.ts', import.meta.url))],
+    bundle: true, format: 'esm', platform: 'node', target: 'node22', write: false, logLevel: 'silent',
+  });
+  const codec = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].contents).toString('base64')}`);
+  const document = codec.decodeCtk3Exact(realSetupScoreDocument);
+  assert.equal(document.width, 10);
+  assert.equal(document.pages.length, 3);
+  const masks = document.pages.map(page => {
+    assert.equal(page.height, 1);
+    assert.equal(page.cells.length, 10);
+    assert.equal(page.cells.filter(cell => cell === 'I').length, 4);
+    assert.ok(page.cells.every(cell => cell === null || cell === 'I'));
+    return page.cells.reduce((mask, cell, index) => cell === 'I' ? mask | 1 << index : mask, 0);
+  });
+  assert.deepEqual(masks, [0xf, 0x3c0, 0xf]);
 });

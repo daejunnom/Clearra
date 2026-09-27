@@ -61,3 +61,18 @@ generation과 설치 bytes가 유지되는지도 검사한다. 이 단계는 1-w
 
 이전 CI의 UI 실패와 실제 246-member copy 재검증은
 [다중 member 기록](v081-multi-member-copy-source-bound-2026-09-28.md)에 별도로 남긴다.
+
+## 후속 실제 CI와 Setup 확장
+
+exact `6f01d446`의 [run 36350733063](https://github.com/daejunnom/Clearra/actions/runs/36350733063)에서
+새 실제 소비자는 `pc score-minimals` fixture의 명시 `--backend cpu` 거절로
+실패했다. CPU-only/no-fallback 제품 계약은 유지하고 fixture override만 없앤다.
+다른 독립 검사는 계속되어 Desktop 및 read-only 단계가 통과했고, 여섯 job 중
+다섯 job은 성공했다. 실제 소비자의 실패를 source 계약 성공으로 덮지 않는다.
+
+후속 소비자는 실제 Setup-score coverage/continuation/ranking을 네 정책·다섯
+profile에서 확인하는 20개 요청을 추가해 총 85개를 실행한다. CTK3 실제 입력
+decode, 요청 admission 및 제품-owned 실행 옵션 부재도 source 계약에 포함한다.
+[Setup 실제 실행 기록](v081-setup-score-functional-parity-2026-09-28.md)의 로컬
+증거와 후속 exact-source CI 증거를 구분하며 accepted image/Gateway 또는
+전체 candidate universe 완료를 주장하지 않는다.

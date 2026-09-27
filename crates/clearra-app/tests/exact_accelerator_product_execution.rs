@@ -5,9 +5,9 @@
 use clearra_app::{
     AppCommand, AppContext, AppCoreExecutorService, AppRequest, AppResponse, AppServices,
     AppStatus, BuildCoverV2Request, BuildObjective, BuildV2AppCommand,
-    CoveragePortfolioAlternativeSet, PcChanceIngressOrigin, PcMinimalsIngressOrigin,
-    PcPathIngressOrigin, PcResultProjection, ProductCapabilityContract, ScenarioAppCommand,
-    PC_SCORE_MAX_PATTERNS,
+    CoveragePortfolioAlternativeSet, FieldDocumentFormat, PcChanceIngressOrigin,
+    PcMinimalsIngressOrigin, PcPathIngressOrigin, PcResultProjection, ProductCapabilityContract,
+    ScenarioAppCommand, SetupScoreAppCommand, SetupScoreDocumentV1, PC_SCORE_MAX_PATTERNS,
 };
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
@@ -21,6 +21,7 @@ use clearra_pc_graph::request::{
 use clearra_problem::{
     BuildProbabilityField, BuildProbabilityQuery, BuildSolutionProbabilityPolicy,
 };
+use clearra_rules::profile::rule_profile::{RuleProfile, RuleProfileId};
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 fn policy(legal: bool, conditioned: bool, workers: usize) -> PcExecutionPolicy {
@@ -131,6 +132,78 @@ fn one_piece_report_request(legal: bool, conditioned: bool, replay: bool) -> App
     ))
     .with_product_capability_contract(contract)
     .unwrap()
+}
+
+fn setup_score_request(legal: bool, conditioned: bool, workers: usize) -> AppRequest {
+    let document =
+        SetupScoreDocumentV1::decode(FieldDocumentFormat::Ctk3, "ctk3_w0kGEPVAACzgA2A9EAAw3A")
+            .expect("three source pages, two distinct horizontal I targets");
+    let command = SetupScoreAppCommand::new(
+        document,
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+        None,
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::O,
+            PieceKind::I,
+        ])),
+        None,
+        2,
+        false,
+        ScoreProfileSelection::Tetrio,
+        0,
+        RuleProfile::new(RuleProfileId::SrsPlus),
+        policy(legal, conditioned, workers),
+    )
+    .expect("Setup coverage and PC score continuation request");
+    AppRequest::new(AppCommand::SetupScore(command))
+}
+
+#[cfg(feature = "parallel")]
+fn register_setup_system_host() {
+    use clearra_app::{
+        register_native_build_probability_host, NativeBuildProbabilityHostRegistration,
+        SystemNativeBuildProbabilityAdmissionProvider,
+    };
+    use std::{
+        path::PathBuf,
+        sync::Once,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    static REGISTER: Once = Once::new();
+    REGISTER.call_once(|| {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        // Same production provider as CLI startup; only durable test output
+        // is isolated under the existing managed Desktop functional root.
+        let journal = repository.join("_local/artifacts/v081-desktop-native-smoke/app-journals");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let uuid = format!(
+            "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
+            std::process::id(),
+            (nonce >> 48) & 0xffff,
+            (nonce >> 36) & 0xfff,
+            (nonce >> 24) & 0xfff,
+            nonce & 0xffffffffffff
+        );
+        register_native_build_probability_host(
+            NativeBuildProbabilityHostRegistration::new(
+                SystemNativeBuildProbabilityAdmissionProvider,
+                journal,
+                uuid,
+            )
+            .expect("private durable host registration"),
+        )
+        .expect("real source-bound native Build admission provider");
+    });
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -370,6 +443,46 @@ fn compare_products(installed: bool) {
         assert_eq!(report.witnesses(), expected.witnesses());
         assert_eq!(report.canonical_witness(), expected.canonical_witness());
         assert_eq!(report.ordering(), expected.ordering());
+    }
+    #[cfg(feature = "parallel")]
+    register_setup_system_host();
+    let baseline = success(&context, setup_score_request(false, false, 1));
+    let expected = baseline.public_result_payload().unwrap();
+    let clearra_host_contract::ProductResultPayloadContent::SetupScoreRanking(ranking) =
+        expected.content()
+    else {
+        panic!("actual Setup-score ranked payload required");
+    };
+    assert!(ranking.complete());
+    assert_eq!(ranking.source_page_count(), "3");
+    assert_eq!(ranking.candidate_count(), "2");
+    assert_eq!(ranking.setup_pattern_count(), "1");
+    assert_eq!(ranking.candidates().len(), 2);
+    let score: f64 = ranking.average_priority_score().parse().unwrap();
+    assert!(score.is_finite() && score > 0.0);
+    for (index, candidate) in ranking.candidates().iter().enumerate() {
+        assert_eq!(candidate.rank(), (index + 1).to_string());
+        assert_eq!(candidate.setup_covered_pattern_count(), "1");
+        assert_eq!(
+            candidate.setup_covered_probability().parse::<f64>(),
+            Ok(1.0)
+        );
+        assert_eq!(candidate.continuation_probability().parse::<f64>(), Ok(1.0));
+        assert_eq!(
+            candidate.unconditional_expected_score().parse::<f64>(),
+            Ok(score)
+        );
+    }
+    assert!(ranking.candidates()[0].candidate_id() < ranking.candidates()[1].candidate_id());
+    for workers in [1, 2, 11] {
+        for (legal, conditioned) in [(false, false), (false, true), (true, false), (true, true)] {
+            let actual = success(&context, setup_score_request(legal, conditioned, workers));
+            assert_eq!(
+                actual.public_result_payload(),
+                Some(expected),
+                "Setup coverage/continuation/reduction workers={workers} legal={legal} conditioned={conditioned}"
+            );
+        }
     }
 }
 
