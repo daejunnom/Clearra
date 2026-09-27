@@ -1,5 +1,7 @@
 use super::{
-    parse_option_value::{option_value, parse_usize_option, unknown_option},
+    parse_option_value::{
+        option_value, parse_usize_option, select_exact_accelerator_once, unknown_option,
+    },
     CliHelpTopic, CliParseError, ParsedCliCommand, SetupArgs,
 };
 use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
@@ -126,19 +128,35 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
                 index += 1;
             }
             "--legal-board" => {
-                exact_legal_board_enabled = Some(true);
+                select_exact_accelerator_once(
+                    &mut exact_legal_board_enabled,
+                    true,
+                    "--legal-board",
+                )?;
                 index += 1;
             }
             "--no-legal-board" => {
-                exact_legal_board_enabled = Some(false);
+                select_exact_accelerator_once(
+                    &mut exact_legal_board_enabled,
+                    false,
+                    "--no-legal-board",
+                )?;
                 index += 1;
             }
             "--conditioned-reachability" => {
-                conditioned_reachability_enabled = Some(true);
+                select_exact_accelerator_once(
+                    &mut conditioned_reachability_enabled,
+                    true,
+                    "--conditioned-reachability",
+                )?;
                 index += 1;
             }
             "--no-conditioned-reachability" => {
-                conditioned_reachability_enabled = Some(false);
+                select_exact_accelerator_once(
+                    &mut conditioned_reachability_enabled,
+                    false,
+                    "--no-conditioned-reachability",
+                )?;
                 index += 1;
             }
             "--workers" => {

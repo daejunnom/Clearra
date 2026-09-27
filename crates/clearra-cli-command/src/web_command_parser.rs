@@ -45,10 +45,10 @@ use clearra_supply::{
 };
 
 use crate::{
-    ctk3_mask_input::parse_ctk3_board_mask, web_virtual_file::reject_native_path_semantics,
-    WebBuildProbabilityInput, WebBuildV2Capability, WebBuildV2Input, WebCommandError,
-    WebCommandErrorCode, WebCommandRequest, WebPcScenarioInput, WebSetupScoreInput,
-    WebSetupScoreQueueInput, WebVirtualFileHandle,
+    ctk3_mask_input::parse_ctk3_board_mask, exact_accelerator_options::ExactAcceleratorSelections,
+    web_virtual_file::reject_native_path_semantics, WebBuildProbabilityInput, WebBuildV2Capability,
+    WebBuildV2Input, WebCommandError, WebCommandErrorCode, WebCommandRequest, WebPcScenarioInput,
+    WebSetupScoreInput, WebSetupScoreQueueInput, WebVirtualFileHandle,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -2043,6 +2043,7 @@ fn parse_setup_command(
     let mut tablebase_requested = false;
     let mut exact_legal_board_enabled = true;
     let mut conditioned_reachability_enabled = true;
+    let mut exact_accelerator_selections = ExactAcceleratorSelections::default();
     let mut cursor = 0_usize;
     while cursor < tokens.len() {
         match tokens[cursor].as_str() {
@@ -2167,19 +2168,21 @@ fn parse_setup_command(
                 cursor += 1;
             }
             "--legal-board" => {
-                exact_legal_board_enabled = true;
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(true)?;
                 cursor += 1;
             }
             "--no-legal-board" => {
-                exact_legal_board_enabled = false;
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(false)?;
                 cursor += 1;
             }
             "--conditioned-reachability" => {
-                conditioned_reachability_enabled = true;
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(true)?;
                 cursor += 1;
             }
             "--no-conditioned-reachability" => {
-                conditioned_reachability_enabled = false;
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(false)?;
                 cursor += 1;
             }
             flag if flag.starts_with("--") => {
@@ -3710,6 +3713,7 @@ fn parse_build_probability_command(
     let mut build_dependency_option_requested = false;
     let mut exact_legal_board_enabled = true;
     let mut conditioned_reachability_enabled = true;
+    let mut exact_accelerator_selections = ExactAcceleratorSelections::default();
     let mut solution_probabilities = false;
     let mut queue_knowledge = None;
     let mut finesse_metric = FinesseMetric::Off;
@@ -3970,19 +3974,21 @@ fn parse_build_probability_command(
                 cursor += 1;
             }
             "--legal-board" => {
-                exact_legal_board_enabled = true;
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(true)?;
                 cursor += 1;
             }
             "--no-legal-board" => {
-                exact_legal_board_enabled = false;
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(false)?;
                 cursor += 1;
             }
             "--conditioned-reachability" => {
-                conditioned_reachability_enabled = true;
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(true)?;
                 cursor += 1;
             }
             "--no-conditioned-reachability" => {
-                conditioned_reachability_enabled = false;
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(false)?;
                 cursor += 1;
             }
             "--solution-probabilities" => {
@@ -4066,6 +4072,14 @@ fn parse_build_probability_command(
     }
     let aggregation_kind = aggregation.resolve();
     let tiling_only = aggregation_kind == BuildAggregationKind::Tiling;
+    if tiling_only {
+        if let Some(option) = exact_accelerator_selections.explicitly_enabled_option() {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("{option} is not available with tiling-only Build semantics"),
+            ));
+        }
+    }
     let result_mode = result_mode.unwrap_or_default();
     let queue_knowledge = queue_knowledge.unwrap_or_default();
     if tiling_only && queue_knowledge == QueueObservationPolicy::VisibleSeven {
@@ -4976,6 +4990,7 @@ fn parse_pc_command(
     let mut conditioned_reachability_enabled = true;
     let mut exact_legal_board_option_requested = false;
     let mut conditioned_reachability_option_requested = false;
+    let mut exact_accelerator_selections = ExactAcceleratorSelections::default();
     let mut solution_probabilities = false;
     let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut virtual_files = Vec::new();
@@ -5159,22 +5174,24 @@ fn parse_pc_command(
                 cursor += 1;
             }
             "--legal-board" => {
-                exact_legal_board_enabled = true;
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(true)?;
                 exact_legal_board_option_requested = true;
                 cursor += 1;
             }
             "--no-legal-board" => {
-                exact_legal_board_enabled = false;
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(false)?;
                 exact_legal_board_option_requested = true;
                 cursor += 1;
             }
             "--conditioned-reachability" => {
-                conditioned_reachability_enabled = true;
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(true)?;
                 conditioned_reachability_option_requested = true;
                 cursor += 1;
             }
             "--no-conditioned-reachability" => {
-                conditioned_reachability_enabled = false;
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(false)?;
                 conditioned_reachability_option_requested = true;
                 cursor += 1;
             }

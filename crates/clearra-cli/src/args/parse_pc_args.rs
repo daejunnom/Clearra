@@ -3,7 +3,8 @@ use super::{
     execution_backend_aliases::resolve_cpu_execution_aliases,
     has_help,
     parse_option_value::{
-        option_value, parse_u16_option, parse_u8_option, parse_usize_option, unknown_option,
+        option_value, parse_u16_option, parse_u8_option, parse_usize_option,
+        select_exact_accelerator_once, unknown_option,
     },
     CliHelpTopic, CliParseError, ParsedCliCommand, PcArgs,
 };
@@ -162,19 +163,35 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
                 index += 1;
             }
             "--legal-board" => {
-                exact_legal_board_enabled = Some(true);
+                select_exact_accelerator_once(
+                    &mut exact_legal_board_enabled,
+                    true,
+                    "--legal-board",
+                )?;
                 index += 1;
             }
             "--no-legal-board" => {
-                exact_legal_board_enabled = Some(false);
+                select_exact_accelerator_once(
+                    &mut exact_legal_board_enabled,
+                    false,
+                    "--no-legal-board",
+                )?;
                 index += 1;
             }
             "--conditioned-reachability" => {
-                conditioned_reachability_enabled = Some(true);
+                select_exact_accelerator_once(
+                    &mut conditioned_reachability_enabled,
+                    true,
+                    "--conditioned-reachability",
+                )?;
                 index += 1;
             }
             "--no-conditioned-reachability" => {
-                conditioned_reachability_enabled = Some(false);
+                select_exact_accelerator_once(
+                    &mut conditioned_reachability_enabled,
+                    false,
+                    "--no-conditioned-reachability",
+                )?;
                 index += 1;
             }
             "--no-gpu" => {

@@ -75,6 +75,7 @@ jobs:
           cargo test --locked -p clearra-cli-command --lib shared_parser_preserves_all_accelerator -- --test-threads=1
           cargo test --locked -p clearra-gui-host --lib gui_exact_accelerators --no-default-features -- --test-threads=1
           cargo test --locked -p clearra-gui-host --lib gui_setup_request_preserves_independent --no-default-features -- --test-threads=1
+          cargo test --locked -p clearra-gui-host --test exact_accelerator_surface_parity --no-default-features -- --test-threads=1
           cargo test --locked -p clearra-app --test exact_accelerator_policy --no-default-features -- --test-threads=1
           cargo test --locked -p clearra-accelerator-activation --lib -- --test-threads=1
           cargo test --locked -p clearra-accelerator-product-host --lib -- --test-threads=1
@@ -147,7 +148,7 @@ jobs:
         run: |
           node --test scripts/benchmark/v081-accelerator-abba-core.test.mjs scripts/benchmark/v081-worker-memory-accounting.test.mjs scripts/benchmark/v081-product-memo-abba-core.test.mjs
           node --test apps/clearra-web/test/acceleratorDownloadStream.test.mjs apps/clearra-desktop/test/acceleratorLifecycleClient.test.mjs
-          node --test apps/clearra-discord-bot/test/accelerator-image.test.mjs
+          node --test apps/clearra-discord-bot/test/accelerator-image.test.mjs apps/clearra-discord-bot/test/exact-accelerator-command.test.mjs
           node --test scripts/tools/build-clearra-frontend.test.mjs scripts/release/accepted-pages-build.test.mjs
           pnpm --filter @clearra/ui test
       - name: Verify Web worker types, heartbeats, and proof handoffs without a WASM build

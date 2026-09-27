@@ -56,3 +56,10 @@ test('an asset-test failure remains failure without suppressing independent proo
   const proofStep = workflow.slice(workflow.indexOf('- name: Test bounded generation and parser proofs'));
   assert.ok(proofStep.startsWith("- name: Test bounded generation and parser proofs, not full profile regeneration\n        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}\n"));
 });
+
+test('CI exercises the authoritative CLI ingress and real Desktop/Discord accelerator paths', () => {
+  assert.ok(workflow.includes('cargo test --locked -p clearra-cli-command --lib exact_accelerator --'));
+  assert.ok(workflow.includes('exact_accelerator_flags \\\n'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-gui-host --test exact_accelerator_surface_parity --no-default-features --'));
+  assert.ok(workflow.includes('apps/clearra-discord-bot/test/exact-accelerator-command.test.mjs'));
+});
