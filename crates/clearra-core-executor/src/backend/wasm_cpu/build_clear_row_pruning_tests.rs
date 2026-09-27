@@ -112,20 +112,23 @@ fn build_clear_row_pruning_impossible_color_target_completes_in_every_aggregatio
 
 #[test]
 fn build_clear_row_pruning_extended_impossible_target_completes_with_zero_probability() {
-    let query = PcScenarioQuery::new(
-        PcScenarioBoard::standard_10(8, 0),
-        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
-        PieceWindow::new(1),
-    )
-    .with_exact_pieces(Some(1))
-    .with_allow_hold(false);
-    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    // Build fields drop empty top rows; use the normalized height for the
+    // scenario while retaining the extended (7+ row) execution path.
     let field = BuildProbabilityField::from_words(
         8,
         [0; 4],
         [1 | (1 << 20) | (1 << 40) | (1 << 60), 0, 0, 0],
     )
     .unwrap();
+    assert_eq!(field.height(), 7);
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(u16::from(field.height()), 0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+        PieceWindow::new(1),
+    )
+    .with_exact_pieces(Some(1))
+    .with_allow_hold(false);
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
     for aggregation in [
         BuildProbabilityAggregation::Buildability,
         BuildProbabilityAggregation::TilingOnly,
