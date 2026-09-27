@@ -1,5 +1,5 @@
 name: Start verified release gates
-run-name: Retry UI publication with eligible push-based management checks
+run-name: Start accepted Auto recovery and catalog release gates
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -14,187 +14,197 @@ jobs:
   start-gates:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 35
     permissions:
       contents: write
       actions: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 51084c78c3a06f355a352b4c013314c151c47709
+          ref: 7d7fc390b2f65d52ebf8362dff65dcbfcb6d481b
           fetch-depth: 0
           persist-credentials: true
-      - name: Require exact UI and eligible policy acceptance then start canonical gates
+      - name: Require exact candidate and push policy before main and release gates
         env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import hashlib, json, os, pathlib, subprocess, time, zipfile
-
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import time
+          import zipfile
+          
           REPO = 'daejunnom/Clearra'
-          BASE = '521fee125b478a5a39a90a808d6c471c430c8494'
-          SOURCE = '51084c78c3a06f355a352b4c013314c151c47709'
-          PARENT = '6d1d5ca38f6019b62a640eb2976f5d38cc8ddd56'
-          TREE = '1de6091e27351282dc4a4fe9e4aacc455beecef0'
-          GATE_ID = 36258323208
-          GATE_CONTROL = '7fb9c4e63b4cd58c121cc851bb13bab6db33b701'
-          GATE_WORKFLOW_BLOB = '786a391a16387af768ad12050fe857844e870863'
-          BRANCH = 'codex/recovery-gray-fields-20260926'
-          # Created through the user's GitHub connection at the unchanged
-          # source SHA. A GITHUB_TOKEN push would suppress this new push run;
-          # workflow_dispatch is deliberately not a substitute for it.
-          POLICY_BRANCH = 'codex/converge-ui-polish-20260927'
-          POLICY_RUN_ID = 36262224114
-          SOURCE_ARTIFACT_ID = 10911930346
-          SOURCE_ARTIFACT_DIGEST = 'e866611d14b38636ce755fd9a611c0f5c57ba11b7c9f44bf86bc3dcaf1f3ab4a'
-          EXPECTED = [
-              'crates/clearra-app/src/commands/boundary_recovery_app_command.rs',
-              'crates/clearra-cli-command/src/web_command_parser.rs',
-              'crates/clearra-cli-command/src/web_command_request.rs',
-              'crates/clearra-cli-command/tests/boundary_recovery.rs',
-              'crates/clearra-cli/src/args/cli_parser.rs',
-              'crates/clearra-cli/src/args/japanese_help_draft.rs',
-              'crates/clearra-forward-search/src/boundary_recovery.rs',
-              'crates/clearra-forward-search/src/boundary_recovery_auto.rs',
-              'crates/clearra-forward-search/src/boundary_recovery_pattern.rs',
-              'crates/clearra-forward-search/src/boundary_recovery_population.rs',
-              'crates/clearra-forward-search/src/boundary_recovery_tests.rs',
-              'packages/clearra-ui/src/lib/i18n/componentCatalog.ts',
-              'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryControls.svelte',
-              'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryFields.svelte',
-              'packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte',
-              'packages/clearra-ui/src/lib/workspace/BuildProbabilityControls.svelte',
-              'packages/clearra-ui/src/lib/workspace/BuildProbabilityResult.svelte',
-              'packages/clearra-ui/src/lib/workspace/BuildProbabilityWorkspace.svelte',
-              'packages/clearra-ui/src/lib/workspace/MandatorySelectionSummary.svelte',
-              'packages/clearra-ui/src/lib/workspace/PcSolverResult.svelte',
-              'packages/clearra-ui/src/lib/workspace/PcSolverStandalone.svelte',
-              'packages/clearra-ui/src/lib/workspace/ProductResultPager.svelte',
-              'packages/clearra-ui/src/lib/workspace/ResultWorkspace.svelte',
-              'packages/clearra-ui/src/lib/workspace/RuleProfileSelect.svelte',
-              'packages/clearra-ui/src/lib/workspace/SearchControls.svelte',
-              'packages/clearra-ui/src/lib/workspace/SolutionGallery.svelte',
-              'packages/clearra-ui/src/lib/workspace/SolutionSubsetPage.svelte',
-              'packages/clearra-ui/src/lib/workspace/SolutionToolbar.svelte',
-              'packages/clearra-ui/src/lib/workspace/SolverWorkspace.svelte',
-              'packages/clearra-ui/src/lib/workspace/SpinProfileSelect.svelte',
-              'packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte',
-              'packages/clearra-ui/src/lib/workspace/WorkspaceToggle.svelte',
-              'packages/clearra-ui/src/lib/workspace/boundaryRecoveryModel.ts',
-              'packages/clearra-ui/test/boundaryRecoveryAutomatic.test.mjs',
-              'packages/clearra-ui/test/boundaryRecoveryFields.test.mjs',
-              'scripts/desktop-ui-compile-check.mjs',
-              'scripts/lib/wasm-release-gate.ps1',
-              'scripts/tools/recovery-editor-browser-acceptance.mjs',
-              'scripts/tools/solution-toolbar-browser-acceptance.mjs',
-              'scripts/tools/surface-browser-acceptance.mjs',
-          ]
+          BASE = '51084c78c3a06f355a352b4c013314c151c47709'
+          SOURCE = '7d7fc390b2f65d52ebf8362dff65dcbfcb6d481b'
+          PARENT = 'c0a31d064dc776f9dedc7524f5a0e7fe330b4574'
+          TREE = 'decc00271a61fb3c30408d451777aa7acbf17b6f'
+          BRANCH = 'codex/converge-cross-stage-catalog-20260927'
+          POLICY_BRANCH = 'codex/converge-cross-stage-release-20260927'
+          POLICY_RUN = 36293049757
+          GATE_RUN = 36290944080
+          GATE_CONTROL = '75750fb819605e1d88d2c0cc11f00c6d3a9cc89b'
+          GATE_BLOB = 'e9ab8bff1ea968712387ebc36870c577f4531b2a'
+          ARTIFACT = 10922182230
+          ARTIFACT_DIGEST = '038aeed3dda6eeec25dd7237e655e8cdd635778270c307514418930f9c801cc2'
+          FILES = ['crates/clearra-forward-search/src/' + name for name in [
+              'boundary_recovery.rs', 'cross_stage_catalog.rs', 'cross_stage_catalog_tests.rs',
+              'cross_stage_recovery.rs', 'cross_stage_recovery_tests.rs', 'lib.rs']]
           SHARDS = ['FoundationNoProductDebt', 'FoundationAdversarialCorrectness',
                     'FoundationDesktopHost', 'Sanitizer', 'RustExact', 'RustProduct', 'Pages']
-          EXPECTED_JOBS = {'prepare', 'frontend (ubuntu-latest)', 'frontend (windows-latest)',
-                           'exact-recovery', 'ready', *(f'acceptance ({s})' for s in SHARDS)}
-          receipt_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'ui-polish-publication.json'
+          JOBS = {'prepare', 'native (ubuntu-latest)', 'native (windows-latest)', 'ready',
+                  *(f'acceptance ({name})' for name in SHARDS)}
+          receipt_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'cross-stage-publication.json'
           receipt = {'source_commit': SOURCE, 'source_tree': TREE, 'base': BASE,
-                     'validation_run_id': GATE_ID, 'validation_control_sha': GATE_CONTROL,
-                     'main_written': False, 'tag_written': False, 'stage': 'validating'}
-
+                     'validation_run_id': GATE_RUN, 'management_policy_run_id': POLICY_RUN,
+                     'main_written': False, 'tag_written': False, 'stage': 'validating',
+                     'scope': 'existing public Auto recovery plus isolated cross-stage catalog API',
+                     'not_claimed': 'Build Probability catalog generation and new two-supply GUI are not connected'}
+          
           def save():
               receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
-
+          
           def cmd(*args):
               return subprocess.check_output(args, text=True, timeout=120).strip()
-
+          
           def git(*args):
               return cmd('git', *args)
-
+          
           def api(path):
               return json.loads(cmd('gh', 'api', 'repos/' + REPO + '/' + path))
-
+          
           def collection(path, key):
               pages = json.loads(cmd('gh', 'api', '--paginate', '--slurp', 'repos/' + REPO + '/' + path))
-              rows = [r for p in pages for r in p[key]]
-              if len({r['id'] for r in rows}) != len(rows):
-                  raise RuntimeError('Duplicate API identity: ' + path)
+              rows = [row for page in pages for row in page[key]]
+              if len({row['id'] for row in rows}) != len(rows):
+                  raise RuntimeError('Duplicate collection identity: ' + path)
               if pages and pages[0].get('total_count', len(rows)) != len(rows):
-                  raise RuntimeError('Incomplete API collection: ' + path)
+                  raise RuntimeError('Incomplete collection: ' + path)
               return rows
-
-          def require_refs(allow_promoted=True):
+          
+          def require_refs(promoted=False):
               main = api('git/ref/heads/main')['object']['sha']
-              if main not in ({BASE, SOURCE} if allow_promoted else {SOURCE}):
-                  raise RuntimeError('Main moved; reconcile instead of overwriting it')
+              if main not in ({SOURCE} if promoted else {BASE, SOURCE}):
+                  raise RuntimeError('Main moved; reconcile instead of overwriting')
               for branch in [BRANCH, POLICY_BRANCH]:
                   if api('git/ref/heads/' + branch)['object']['sha'] != SOURCE:
-                      raise RuntimeError('Reviewed source or policy branch moved: ' + branch)
+                      raise RuntimeError('Reviewed candidate or policy branch moved')
               return main
-
-          def require_policy_identity(policy):
-              expected = {
-                  'id': POLICY_RUN_ID, 'workflow_id': 362749959,
-                  'event': 'push', 'head_sha': SOURCE, 'head_branch': POLICY_BRANCH,
-                  'path': '.github/workflows/management-policy.yml', 'run_attempt': 1,
-              }
-              for key, value in expected.items():
-                  if policy.get(key) != value:
-                      raise RuntimeError('Required-check origin mismatch: ' + key)
-              if (policy.get('repository', {}).get('full_name') != REPO
-                      or policy.get('head_repository', {}).get('full_name') != REPO):
-                  raise RuntimeError('Required-check repository mismatch')
-
-          def require_policy_success():
-              # workflow_dispatch success is not an eligible ruleset check. Bind the
-              # actual push run and its job/check identities, not only a matching name.
-              deadline = time.monotonic() + 1200
-              while True:
-                  require_refs()
-                  policy = api('actions/runs/' + str(POLICY_RUN_ID))
-                  require_policy_identity(policy)
-                  if policy['status'] == 'completed':
-                      if policy['conclusion'] != 'success':
-                          raise RuntimeError('Push-based management policy failed')
-                      break
-                  if policy['status'] not in ('queued', 'in_progress', 'pending', 'waiting', 'requested'):
-                      raise RuntimeError('Unexpected required-check lifecycle state')
-                  if time.monotonic() >= deadline:
-                      raise RuntimeError('Push-based management policy wait expired')
-                  time.sleep(15)
-              jobs = collection('actions/runs/' + str(POLICY_RUN_ID) + '/attempts/1/jobs?per_page=100', 'jobs')
-              expected_names = {'Clearra management policy', 'Clearra management Windows runtime'}
-              if len(jobs) != 2 or {job['name'] for job in jobs} != expected_names:
-                  raise RuntimeError('Required-check job inventory mismatch')
-              checks = collection('commits/' + SOURCE + '/check-runs?filter=all&per_page=100', 'check_runs')
-              for job in jobs:
-                  if (job['run_id'] != POLICY_RUN_ID or job['run_attempt'] != 1
-                          or job['head_sha'] != SOURCE or job['status'] != 'completed'
-                          or job['conclusion'] != 'success'):
-                      raise RuntimeError('Required-check job did not succeed on exact source')
-                  matching = [check for check in checks if check['id'] == job['id']]
-                  if len(matching) != 1:
-                      raise RuntimeError('Required-check job/check binding is missing or ambiguous')
-                  check = matching[0]
-                  if (check['name'] != job['name'] or check['head_sha'] != SOURCE
-                          or check['check_suite']['id'] != policy['check_suite_id']
-                          or check['app']['id'] != 15368 or check['app']['slug'] != 'github-actions'
-                          or check['status'] != 'completed' or check['conclusion'] != 'success'):
-                      raise RuntimeError('Required-check evidence mismatch')
-              receipt['management_policy_run_id'] = POLICY_RUN_ID
-              receipt['management_policy_event'] = 'push'
-              receipt['management_policy_branch'] = POLICY_BRANCH
-              save()
-
+          
+          def run_identity(run, run_id, sha, branch, workflow, workflow_id):
+              expected = {'id': run_id, 'head_sha': sha, 'head_branch': branch, 'event': 'push',
+                          'path': '.github/workflows/' + workflow, 'workflow_id': workflow_id, 'run_attempt': 1}
+              if any(run.get(key) != value for key, value in expected.items()):
+                  raise RuntimeError('Run identity differs: ' + str(run_id))
+              if any(run.get(key, {}).get('full_name') != REPO for key in ['repository', 'head_repository']):
+                  raise RuntimeError('Run repository differs')
+          
+          save()
+          if git('rev-parse', 'HEAD') != SOURCE or git('rev-parse', 'HEAD^{tree}') != TREE:
+              raise RuntimeError('Source/tree differs from accepted candidate')
+          if git('show', '-s', '--format=%P', SOURCE) != PARENT:
+              raise RuntimeError('Candidate parent differs')
+          if git('diff', '--name-only', PARENT, SOURCE).splitlines() != FILES:
+              raise RuntimeError('Catalog change scope differs')
+          git('merge-base', '--is-ancestor', BASE, SOURCE)
+          git('diff', '--check', BASE, SOURCE)
+          if git('rev-parse', GATE_CONTROL + ':.github/workflows/clearra-safe-integration-audit.yml') != GATE_BLOB:
+              raise RuntimeError('Acceptance workflow definition differs')
+          require_refs()
+          
+          # Bind the actual generated product commit to its successful control run.
+          # Artifact content is data only; never execute or extract its source archive.
+          gate = api('actions/runs/' + str(GATE_RUN))
+          run_identity(gate, GATE_RUN, GATE_CONTROL, 'codex/clearra-safe-integration-20260925',
+                       'clearra-safe-integration-audit.yml', 366898635)
+          if (gate['status'], gate['conclusion']) != ('completed', 'success'):
+              raise RuntimeError('Full candidate acceptance is not successful')
+          jobs = collection(f'actions/runs/{GATE_RUN}/attempts/1/jobs?per_page=100', 'jobs')
+          if len(jobs) != len(JOBS) or {job['name'] for job in jobs} != JOBS:
+              raise RuntimeError('Full acceptance job inventory differs')
+          if any(job['status'] != 'completed' or job['conclusion'] != 'success' or
+                 job['head_sha'] != GATE_CONTROL or job['run_attempt'] != 1 for job in jobs):
+              raise RuntimeError('An acceptance job was not successful on the exact run')
+          metadata = api('actions/artifacts/' + str(ARTIFACT))
+          if (metadata['name'] != 'cross-stage-source-' + str(GATE_RUN) or metadata['expired'] or
+              metadata['workflow_run']['id'] != GATE_RUN or metadata['workflow_run']['head_sha'] != GATE_CONTROL or
+              metadata['digest'] != 'sha256:' + ARTIFACT_DIGEST or metadata['size_in_bytes'] > 16 * 1024 * 1024):
+              raise RuntimeError('Source artifact authority differs')
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'cross-stage-source.zip'
+          with archive.open('xb') as output:
+              subprocess.run(['gh', 'api', 'repos/' + REPO + f'/actions/artifacts/{ARTIFACT}/zip'],
+                             stdout=output, check=True, timeout=120)
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != ARTIFACT_DIGEST:
+              raise RuntimeError('Source artifact checksum differs')
+          with zipfile.ZipFile(archive) as bundle:
+              if bundle.namelist().count('receipt.json') != 1 or bundle.getinfo('receipt.json').file_size > 65536:
+                  raise RuntimeError('Source receipt missing, ambiguous, or oversized')
+              prepared = json.loads(bundle.read('receipt.json'))
+          for key, value in {'source_commit': SOURCE, 'parent': PARENT, 'base': BASE, 'tree': TREE, 'files': FILES}.items():
+              if prepared.get(key) != value:
+                  raise RuntimeError('Source receipt differs: ' + key)
+          if prepared.get('main_written') is not False or prepared.get('published') is not False:
+              raise RuntimeError('Preparation unexpectedly published')
+          receipt['source_artifact_id'] = ARTIFACT
+          receipt['validated_jobs'] = sorted(JOBS)
+          save()
+          
+          # Use this actual push-run, not a same-named workflow_dispatch check.
+          deadline = time.monotonic() + 1500
+          while True:
+              require_refs()
+              policy = api('actions/runs/' + str(POLICY_RUN))
+              run_identity(policy, POLICY_RUN, SOURCE, POLICY_BRANCH, 'management-policy.yml', 362749959)
+              if policy['status'] == 'completed':
+                  if policy['conclusion'] != 'success':
+                      raise RuntimeError('Independent policy failed')
+                  break
+              if policy['status'] not in ['queued', 'in_progress', 'pending', 'waiting', 'requested'] or time.monotonic() >= deadline:
+                  raise RuntimeError('Independent policy wait expired or lifecycle invalid')
+              print('Waiting for exact push-origin policy', POLICY_RUN, flush=True)
+              time.sleep(15)
+          policy_jobs = collection(f'actions/runs/{POLICY_RUN}/attempts/1/jobs?per_page=100', 'jobs')
+          if len(policy_jobs) != 2 or {job['name'] for job in policy_jobs} != {'Clearra management policy', 'Clearra management Windows runtime'}:
+              raise RuntimeError('Policy job inventory differs')
+          checks = collection('commits/' + SOURCE + '/check-runs?filter=all&per_page=100', 'check_runs')
+          for job in policy_jobs:
+              if (job['run_id'] != POLICY_RUN or job['run_attempt'] != 1 or job['head_sha'] != SOURCE or
+                  job['status'] != 'completed' or job['conclusion'] != 'success'):
+                  raise RuntimeError('Policy job was not successful on exact source')
+              matching = [check for check in checks if check['id'] == job['id']]
+              if len(matching) != 1:
+                  raise RuntimeError('Policy check/job binding ambiguous')
+              check = matching[0]
+              if (check['name'] != job['name'] or check['head_sha'] != SOURCE or
+                  check['check_suite']['id'] != policy['check_suite_id'] or
+                  check['app']['id'] != 15368 or check['app']['slug'] != 'github-actions' or
+                  check['status'] != 'completed' or check['conclusion'] != 'success'):
+                  raise RuntimeError('Policy evidence differs')
+          receipt['stage'] = 'validated'
+          save()
+          if require_refs() == BASE:
+              # Normal fast-forward only. Repository rules remain the final authority.
+              subprocess.run(['git', 'push', 'origin', SOURCE + ':refs/heads/main'], check=True, timeout=120)
+              receipt['main_written'] = True
+          require_refs(promoted=True)
+          receipt['stage'] = 'promoted'
+          save()
+          
           def runs_for(path):
-              return [r for r in collection('actions/runs?head_sha=' + SOURCE + '&event=workflow_dispatch&per_page=100', 'workflow_runs')
-                      if r['head_branch'] == 'main' and r['path'] == '.github/workflows/' + path]
-
+              return [run for run in collection('actions/runs?head_sha=' + SOURCE + '&event=workflow_dispatch&per_page=100', 'workflow_runs')
+                      if run['head_branch'] == 'main' and run['path'] == '.github/workflows/' + path]
+          
           def dispatch_once(path, inputs=None):
-              require_refs(False)
-              existing = runs_for(path)
-              if len(existing) > 1:
-                  raise RuntimeError('Ambiguous existing runs: ' + path)
-              if existing:
-                  run = existing[0]
-                  if run['status'] == 'completed' and run['conclusion'] != 'success':
-                      raise RuntimeError('Existing execution failed; inspect before retry: ' + str(run['id']))
-                  return run
+              require_refs(promoted=True)
+              runs = runs_for(path)
+              if len(runs) > 1:
+                  raise RuntimeError('Ambiguous previous dispatch: ' + path)
+              if runs:
+                  if runs[0]['run_attempt'] != 1 or (runs[0]['status'] == 'completed' and runs[0]['conclusion'] != 'success'):
+                      raise RuntimeError('Prior execution failed; inspect before retry')
+                  return runs[0]
               receipt['dispatch_intent'] = path
               save()
               body = {'ref': 'main'}
@@ -203,109 +213,32 @@ jobs:
               subprocess.run(['gh', 'api', '--method', 'POST', 'repos/' + REPO + '/actions/workflows/' + path + '/dispatches', '--input', '-'],
                              input=json.dumps(body), text=True, check=True, timeout=120)
               for _ in range(24):
-                  existing = runs_for(path)
-                  if existing:
+                  runs = runs_for(path)
+                  if runs:
                       break
                   time.sleep(5)
-              if len(existing) != 1:
-                  raise RuntimeError('Dispatch readback unresolved; inspect before retrying')
+              if len(runs) != 1 or runs[0]['run_attempt'] != 1:
+                  raise RuntimeError('Dispatch readback unresolved; inspect before retry')
               receipt.pop('dispatch_intent', None)
-              return existing[0]
-
-          save()
-          if git('rev-parse', 'HEAD') != SOURCE or git('rev-parse', 'HEAD^{tree}') != TREE:
-              raise RuntimeError('Reviewed source/tree mismatch')
-          if git('show', '-s', '--format=%P', SOURCE) != PARENT:
-              raise RuntimeError('Reviewed parent mismatch')
-          if git('diff', '--name-only', BASE, SOURCE).splitlines() != EXPECTED:
-              raise RuntimeError('Reviewed change scope mismatch')
-          git('merge-base', '--is-ancestor', BASE, SOURCE)
-          git('diff', '--check', BASE, SOURCE)
-          if git('rev-parse', GATE_CONTROL + ':.github/workflows/clearra-safe-integration-audit.yml') != GATE_WORKFLOW_BLOB:
-              raise RuntimeError('Validation workflow definition mismatch')
-          require_refs()
-          require_policy_identity(api('actions/runs/' + str(POLICY_RUN_ID)))
-
-          # The gate's prepare job generated a commit. Bind its exact receipt,
-          # not the control branch SHA, and never execute downloaded artifacts.
-          metadata = api('actions/artifacts/' + str(SOURCE_ARTIFACT_ID))
-          if (metadata['name'] != 'ui-polish-source-' + str(GATE_ID) or metadata['expired']
-                  or metadata['workflow_run']['id'] != GATE_ID
-                  or metadata['workflow_run']['head_sha'] != GATE_CONTROL
-                  or metadata['digest'] != 'sha256:' + SOURCE_ARTIFACT_DIGEST):
-              raise RuntimeError('Source preparation artifact identity mismatch')
-          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'ui-polish-source.zip'
-          with archive.open('xb') as output:
-              subprocess.run(['gh', 'api', 'repos/' + REPO + '/actions/artifacts/' + str(SOURCE_ARTIFACT_ID) + '/zip'],
-                             stdout=output, check=True, timeout=120)
-          if hashlib.sha256(archive.read_bytes()).hexdigest() != SOURCE_ARTIFACT_DIGEST:
-              raise RuntimeError('Source preparation artifact checksum mismatch')
-          with zipfile.ZipFile(archive) as bundle:
-              if bundle.namelist().count('receipt.json') != 1 or bundle.getinfo('receipt.json').file_size > 65536:
-                  raise RuntimeError('Ambiguous or oversized source receipt')
-              prepared = json.loads(bundle.read('receipt.json'))
-          for field, expected in [('source_commit', SOURCE), ('parent', PARENT), ('base', BASE), ('tree', TREE)]:
-              if prepared.get(field) != expected:
-                  raise RuntimeError('Prepared source mismatch: ' + field)
-          if prepared.get('main_written') is not False:
-              raise RuntimeError('Source preparation unexpectedly promoted main')
-          receipt['source_artifact_id'] = SOURCE_ARTIFACT_ID
-          save()
-
-          deadline = time.monotonic() + 9000
-          while True:
-              gate = api('actions/runs/' + str(GATE_ID))
-              if (gate['head_sha'] != GATE_CONTROL or gate['head_branch'] != 'codex/clearra-safe-integration-20260925'
-                      or gate['path'] != '.github/workflows/clearra-safe-integration-audit.yml'
-                      or gate['run_attempt'] != 1 or gate['repository']['full_name'] != REPO
-                      or gate['head_repository']['full_name'] != REPO):
-                  raise RuntimeError('Pinned validation identity mismatch')
-              if gate['status'] == 'completed':
-                  if gate['conclusion'] != 'success':
-                      raise RuntimeError('Validation did not pass: ' + str(gate['conclusion']))
-                  break
-              if time.monotonic() >= deadline:
-                  raise RuntimeError('Validation wait exceeded its finite deadline')
-              require_refs()
-              print('Waiting for exact UI acceptance', GATE_ID, gate['status'], flush=True)
-              time.sleep(30)
-
-          jobs = collection('actions/runs/' + str(GATE_ID) + '/attempts/1/jobs?per_page=100', 'jobs')
-          if len(jobs) != len(EXPECTED_JOBS) or {j['name'] for j in jobs} != EXPECTED_JOBS:
-              raise RuntimeError('Expected full independent acceptance inventory')
-          if any(j['status'] != 'completed' or j['conclusion'] != 'success' for j in jobs):
-              raise RuntimeError('An acceptance job was not successful')
-          require_policy_success()
-          receipt['stage'] = 'validated'
-          receipt['validated_jobs'] = sorted(EXPECTED_JOBS)
-          save()
-          if require_refs() == BASE:
-              # Subject to repository protection. A rejection stops here; never
-              # force, forge a status, or modify a repository rule to promote.
-              subprocess.run(['git', 'push', 'origin', SOURCE + ':refs/heads/main'], check=True, timeout=120)
-              receipt['main_written'] = True
-          require_refs(False)
-          receipt['stage'] = 'promoted'
-          save()
+              return runs[0]
+          
           release = dispatch_once('release-cli.yml')
           receipt['canonical_release_run_id'] = release['id']
           save()
-          queue = dispatch_once('queue-pages-publication.yml', {
-              'acceptance_run_id': str(release['id']), 'snapshot_sha': BASE,
-          })
+          queue = dispatch_once('queue-pages-publication.yml', {'acceptance_run_id': str(release['id']), 'snapshot_sha': BASE})
           receipt['pages_queue_run_id'] = queue['id']
+          receipt['discord'] = 'existing exact-source release-success workflow; approvals and recovery checks preserved'
           receipt['stage'] = 'gates-started'
-          receipt['discord'] = 'existing exact-source workflow_run after canonical release success'
           save()
           print(json.dumps(receipt, indent=2), flush=True)
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
-              f.write('## Exact UI release gates started\n\n')
-              f.write(f'Source: `{SOURCE}`\n\nPush-based policy: `{POLICY_RUN_ID}`\n\nRelease/Tauri: `{release["id"]}`\n\nPages queue: `{queue["id"]}`\n\n')
-              f.write('Pages waits for canonical acceptance and rollback capture. Discord follows the existing exact-source release-success path. No tag or final GitHub Release is created here.\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f'## Release gates started\n\nSource: `{SOURCE}`\n\nRelease/Tauri: `{release["id"]}`\n\nPages queue: `{queue["id"]}`\n\n')
+              summary.write('No tag or final GitHub Release was created. Pages requires canonical success and verified rollback capture; Discord follows existing authority/approval steps.\n\n')
+              summary.write('The public declared-role Auto improvements are included. Automatic Build Probability catalog production and the new two-supply GUI remain unconnected; this run does not claim their completion.\n')
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ui-polish-publication-${{ github.run_id }}
-          path: ${{ runner.temp }}/ui-polish-publication.json
+          name: cross-stage-publication-${{ github.run_id }}
+          path: ${{ runner.temp }}/cross-stage-publication.json
           if-no-files-found: warn
           retention-days: 30
