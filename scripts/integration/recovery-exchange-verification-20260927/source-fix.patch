@@ -1,0 +1,125 @@
+diff --git a/crates/clearra-cli-command/src/web_command_parser/recovery_build.rs b/crates/clearra-cli-command/src/web_command_parser/recovery_build.rs
+index d93c68b..29b2b07 100644
+--- a/crates/clearra-cli-command/src/web_command_parser/recovery_build.rs
++++ b/crates/clearra-cli-command/src/web_command_parser/recovery_build.rs
+@@ -21,7 +21,8 @@ pub(super) fn parse(tokens:&[String])->Result<WebCommandRequest,WebCommandError>
+     let mut seen=std::collections::BTreeSet::new();
+     let mut cursor=0;
+     while cursor<tokens.len() {
+-        let option=tokens[cursor].as_str();
++        let option_cursor = cursor;
++        let option=tokens[option_cursor].as_str();
+         let identity=match option {"--no-hold"=>"--hold","--no-piece-exchange"=>"--allow-piece-exchange","--no-preserve-b2b"=>"--preserve-b2b",other=>other};
+         if !seen.insert(identity) {return Err(fail("recovery-build option occurs more than once"));}
+         match option {
+@@ -49,7 +50,9 @@ pub(super) fn parse(tokens:&[String])->Result<WebCommandRequest,WebCommandError>
+             "--spin-profile"=>spin=SpinProfileId::parse(next_value(tokens,&mut cursor,option)?).ok_or_else(||fail("invalid recovery-build spin profile"))?,
+             _=>return Err(fail(&format!("unsupported recovery-build option {option}"))),
+         }
+-        cursor+=1;
++        // next_value owns both tokens of valued options. Only switches leave
++        // the cursor unchanged and require advancing past their single token.
++        if cursor == option_cursor { cursor += 1; }
+     }
+     let query=RecoveryBuildQuery { fields:RecoveryBuildFields {height,initial,
+             middle:middle.ok_or_else(||fail("missing --middle-mask"))?,result:result.ok_or_else(||fail("missing --result-mask"))?},
+diff --git a/crates/clearra-cli-command/tests/recovery_build.rs b/crates/clearra-cli-command/tests/recovery_build.rs
+index e383e32..28da582 100644
+--- a/crates/clearra-cli-command/tests/recovery_build.rs
++++ b/crates/clearra-cli-command/tests/recovery_build.rs
+@@ -35,3 +35,42 @@ fn recovery_build_exchange_and_limits_cannot_be_silently_ignored() {
+         assert_eq!(payload.recovery_count,expected);
+     }
+ }
++
++#[test]
++fn recovery_build_cursor_consumes_every_value_and_switch_once() {
++    // Move every value-bearing option through the beginning and end of the
++    // command. Interleave switches to cover both token-consumption contracts.
++    let options=[
++        ("--start-mask","0"),("--middle-mask","0xf"),("--result-mask","0xc030"),
++        ("--height","8"),("--first-supply","O"),("--second-supply","I"),
++        ("--max-early","1"),("--initial-b2b","1"),("--rule","srs-plus"),
++        ("--spin-profile","all-spin-plus"),
++    ];
++    for offset in 0..options.len() {
++        let mut parts=vec!["clearra","recovery","build","--no-hold"];
++        for index in 0..options.len() {
++            let (option,value)=options[(index+offset)%options.len()];
++            parts.extend([option,value]);
++            if index==3 {parts.push("--allow-piece-exchange");}
++            if index==6 {parts.push("--preserve-b2b");}
++        }
++        let command=parts.join(" ");
++        let request=CliCommandParser::parse(&command).unwrap().to_app_request().unwrap();
++        let AppCommand::RecoveryBuild(recovery)=request.command() else {panic!("typed new route")};
++        assert_eq!(recovery.query().first_supply,"O");
++        assert_eq!(recovery.query().second_supply,"I");
++        assert_eq!(recovery.query().early_limit,clearra_forward_search::CrossStageEarlyLimit::AtMost(1));
++        assert!(!recovery.query().hold_enabled);
++        assert!(recovery.query().allow_piece_exchange);
++        assert!(recovery.query().preserve_b2b);
++        let response=AppContext::default().run(request);
++        assert_eq!(response.status(),AppStatus::Success);
++        let host=response.to_host_response();
++        let ProductResultPayloadContent::RecoveryBuild(payload)=host.product_result_payload().unwrap().content() else {panic!("typed output")};
++        assert_eq!(payload.recovery_count,"1");
++    }
++    for (option,_) in options {
++        assert!(CliCommandParser::parse(&format!("{BASE} {option}")).is_err());
++    }
++    assert!(CliCommandParser::parse(&format!("{BASE} --hold --no-hold")).is_err());
++}
+diff --git a/crates/clearra-forward-search/src/recovery_build/tests.rs b/crates/clearra-forward-search/src/recovery_build/tests.rs
+index 50c09a3..4d159ed 100644
+--- a/crates/clearra-forward-search/src/recovery_build/tests.rs
++++ b/crates/clearra-forward-search/src/recovery_build/tests.rs
+@@ -112,16 +112,41 @@ fn recovery_build_invalid_geometry_is_not_no_path() {
+ fn recovery_build_auto_covers_two_and_three_early_pieces_without_a_one_piece_filter() {
+     for count in [2_usize,3] {
+         let mut q=query();
+-        q.fields.middle=mask(if count==2 {0xff}else{0x3cff});
++        // Spaced one-column shafts require I pieces. Unlike the former
++        // 0x3cff region, they contain no 2x2 square an early O could fill.
++        let columns = (0..count).fold(0_u64, |bits, column| bits | (1_u64 << (2 * column)));
++        q.fields.middle=mask((0..4).fold(0_u64, |bits, row| bits | (columns << (10 * row))));
+         let result=(0..count*2).fold(0_u64,|m,y|m|(0x300_u64<<(10*y)));
+         q.fields.result=mask(result);
+         q.first_supply=vec![PieceKind::O;count];q.second_supply=vec![PieceKind::I;count];
+         q.hold_enabled=false;q.allow_piece_exchange=true;
+-        q.early_limit=CrossStageEarlyLimit::AtMost(count-1);
+-        assert_eq!(q.search(&ExecutionControl::default()).unwrap().status,RecoveryBuildStatus::NoPath);
+-        q.early_limit=CrossStageEarlyLimit::Auto;
+-        let found=q.search(&ExecutionControl::default()).unwrap();
+-        assert_eq!(found.status,RecoveryBuildStatus::Recovery);
+-        assert_eq!(found.actual_early,count);
++        for limit in 0..count {
++            q.early_limit=CrossStageEarlyLimit::AtMost(limit);
++            assert_eq!(q.search(&ExecutionControl::default()).unwrap().status,RecoveryBuildStatus::NoPath);
++        }
++        for limit in [CrossStageEarlyLimit::Auto, CrossStageEarlyLimit::AtMost(count)] {
++            q.early_limit=limit;
++            let found=q.search(&ExecutionControl::default()).unwrap();
++            assert_eq!(found.status,RecoveryBuildStatus::Recovery);
++            assert_eq!(found.actual_early,count);
++            assert!(found.steps[..count].iter().all(|step| step.result_target && step.piece == PieceKind::O));
++            assert!(found.steps[count..].iter().all(|step| !step.result_target && step.piece == PieceKind::I));
++        }
+     }
+ }
++
++#[test]
++fn recovery_build_unconstrained_middle_may_use_an_o_instead_of_an_i() {
++    // The old three-early fixture admitted a legal O in the middle. Keep
++    // that positive behavior: occupancy goals must not silently fix a tiling.
++    let mut q=query();
++    q.fields.middle=mask(0x3cff);
++    q.fields.result=mask((0..6).fold(0_u64, |bits, row| bits | (0x300_u64 << (10 * row))));
++    q.first_supply=vec![PieceKind::O;3];q.second_supply=vec![PieceKind::I;3];
++    q.hold_enabled=false;q.allow_piece_exchange=true;
++    q.early_limit=CrossStageEarlyLimit::AtMost(2);
++    let found=q.search(&ExecutionControl::default()).unwrap();
++    assert_eq!(found.status,RecoveryBuildStatus::Recovery);
++    assert!(found.actual_early <= 2);
++    assert!(found.steps.iter().any(|step| !step.result_target && step.piece == PieceKind::O));
++}
