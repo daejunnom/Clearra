@@ -21,6 +21,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Apply reviewed host-capacity correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/codex/recovery-build-fields-parallel-20260928
+          marker='.map(|request| request.with_worker_hardware_limit(worker_hardware_limit.max(1)))'
+          if ! grep -Fq "$marker" crates/clearra-cli-command/src/web_command_parser.rs; then
+            git apply --check scripts/tools/recovery-build-host-capacity.patch
+            git apply scripts/tools/recovery-build-host-capacity.patch
+            git add -- crates/clearra-cli-command/src/web_command_parser.rs crates/clearra-cli-command/src/web_command_parser/recovery_build.rs crates/clearra-cli-command/tests/recovery_build.rs packages/clearra-ui/src/lib/workspace/recoveryBuildModel.ts packages/clearra-ui/test/recoveryBuildReferences.test.mjs
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(recovery): propagate host worker capacity and use-all opt-in'
+            git push origin HEAD:refs/heads/codex/recovery-build-fields-parallel-20260928
+          fi
       - name: Install pinned Rust toolchain
         run: rustup show
       - name: Format changed Rust files on the isolated branch

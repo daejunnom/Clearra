@@ -29,7 +29,7 @@ $: window.recoverySnapshot = {start:request.startMask.toString(), middle:request
 </script><Fields {request} language="ko" on:change={event => request=event.detail}/>`;
 await build({
  stdin: { contents: "import {mount} from 'svelte'; import Harness from 'recovery-harness'; mount(Harness,{target:document.body});", resolveDir: root },
- bundle: true, format: 'iife', platform: 'browser', conditions: ['browser'], mainFields: ['svelte', 'browser', 'module', 'main'],
+ bundle: true, format: 'esm', platform: 'browser', conditions: ['browser'], mainFields: ['svelte', 'browser', 'module', 'main'],
  outfile: resolve(out, 'fields.js'),
  plugins: [{ name: 'svelte-regression', setup(bundler) {
   bundler.onResolve({ filter: /^recovery-harness$/ }, () => ({ path: 'recovery-harness.svelte', namespace: 'harness' }));
@@ -51,19 +51,20 @@ const server = createServer(async (req, res) => {
    res.end(await readFile(resolve(out, 'fields.js')));
   } else {
    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-   res.end('<!doctype html><meta charset="utf-8"><style>body{max-width:660px;margin:16px auto;font-family:sans-serif}</style><script src="/fields.js"></script>');
+   res.end('<!doctype html><meta charset="utf-8"><style>body{max-width:660px;margin:16px auto;font-family:sans-serif}</style><body><script type="module" src="/fields.js"></script></body>');
   }
  } catch { res.writeHead(500).end(); }
 });
 await new Promise((ok, fail) => { server.once('error', fail); server.listen(4194, '127.0.0.1', ok); });
 let browser;
+let page;
+const errors = [];
 try {
  browser = await chromium.launch({ headless: true });
- const page = await browser.newPage({ viewport: { width: 900, height: 1250 } });
- const errors = [];
- page.on('pageerror', error => errors.push(error.message));
+ page = await browser.newPage({ viewport: { width: 900, height: 1250 } });
+ page.on('pageerror', error => { errors.push(error.message); console.error('browser page error:', error.message); });
  await page.goto('http://127.0.0.1:4194');
- await page.locator('.board button').last().waitFor();
+ await page.locator('.board button').last().waitFor({ timeout: 10000 });
  const snapshot = () => page.evaluate(() => window.recoverySnapshot);
  const expected = { start: BigInt(fixture.start_mask).toString(), middle: BigInt(fixture.middle_mask).toString(), result: BigInt(fixture.result_mask).toString() };
  assert.deepEqual(await snapshot(), expected);
@@ -96,6 +97,10 @@ try {
   initial_cells: 22, middle_cells: 28, result_cells: 28, reference_cells_on_result: 50,
   search_executed: false }, null, 2));
  console.log('recovery field browser regression: passed (real Svelte/pointer events; no full population search)');
+} catch (error) {
+ await writeFile(resolve(out, 'browser-failure.json'), JSON.stringify({ errors, error: String(error), html: page ? await page.content().catch(() => '') : '' }, null, 2));
+ await page?.screenshot({ path: resolve(out, 'browser-failure.png'), fullPage: true }).catch(() => {});
+ throw error;
 } finally {
  await browser?.close();
  await new Promise(ok => server.close(ok));
