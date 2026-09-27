@@ -91,3 +91,9 @@ native job의 Desktop/read-only 검사는 기록 시점에 진행 중이며, 상
 완료 상태는 종료 후 별도로 확인한다. `surfaces`의 빠른 소스 검사 실패는
 별도 실패로 유지한다. actual Gateway/attachment, accepted Bookworm image,
 Cloud Run readback·shared peak·성능·release는 여전히 Open이다.
+
+같은 native job 종료 후 상세 로그에서도 실제 소비자 `passed=1`, `failed=0`,
+`skipped=0` 및 SRS/SRS+/SRS-X/Jstris 180/no-kick의 다섯 진단 행을 확인했다.
+Desktop 실제 테스트와 read-only 검증도 통과해 native job은 success다. 전체
+CI는 빠른 source 검사 하나의 실패로 failure이며, 수정 후 exact-source CI와
+accepted image/Gateway의 권위는 별도로 유지한다.

@@ -116,3 +116,24 @@ lint 및 App의 큰 enum·복잡한 타입 등 15개 지점에서 실패했다. 
 기록하거나 광범위한 boxing/lint 허용으로 메모리·결과 계약을 바꾸지 않는다.
 strict lint 전체, 실제 browser/OPFS·Tauri IPC, accepted image, peak·성능 및
 acceptance/release는 별도 Open이다. 벤치마크와 v0.9.0 업그레이드는 하지 않는다.
+
+## 같은 CI의 완료 로그 확인
+
+위 `e1db5ba8` CI는 여섯 job 중 다섯 success, `surfaces` 하나 failure로 종료됐다.
+완료된 `native-products` 로그에서 다음 실제 실행을 확인했다.
+
+- 일반 App의 `unavailable_optional_assets_preserve_real_pc_score_and_build_reducers`
+  통과. 이때 signed test는 의도적으로 ignored이며 다음 별도 step에서 실행한다.
+- SRS+ signed pair의 `installed_signed_assets_preserve_real_pc_score_and_build_reducers`
+  통과(`passed=1`, `failed=0`, `ignored=0`). 같은 target을 재사용했다.
+- Setup-score를 포함한 다섯 profile/85개 실제 CLI→production Discord 요청 통과,
+  Node test `passed=1`, `failed=0`, `skipped=0` 및 다섯 profile diagnostic 확인.
+- 실제 Desktop signed job integration 통과, 마지막 network-none/read-only/nobody
+  검증에서 `cloud_accelerators=qualified_immutable profiles=5` 확인.
+
+따라서 이전 Windows 실행 차단 때문에 Open이었던 위 source의 좁은 App Setup 및
+실제 CLI→Discord 실행은 Linux CI 기능 증거를 얻었다. 새 Rust decoder 테스트,
+빠른 검사 수정 및 이후 확대된 minimum/score-minimals 요청 worker 행렬은 이
+CI에 없으므로 새 exact-source 검증을 따로 받는다. 실제 browser/Tauri IPC,
+accepted Bookworm/Cloud Run·Gateway readback, 전체 domain/peak·성능·strict lint
+및 acceptance/release는 여전히 Open이며 실패한 source step도 보존한다.
