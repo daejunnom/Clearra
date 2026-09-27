@@ -1,0 +1,77 @@
+name: Prepare Recovery Stage Proposal
+on:
+  push:
+    branches: [codex/recovery-stage-helper-20260928]
+permissions:
+  contents: write
+concurrency:
+  group: recovery-stage-helper-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  proposal:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      SOURCE: 7915a7eb68f0531732684c7f4f3ff9372ca324ad
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore exact reviewed patch and propose pinned formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/codex/recovery-stage-helper-20260928
+          mkdir -p build/recovery-stage
+          for n in 0 1 2 3 4; do git show "$GITHUB_SHA:scripts/tools/stage-transfer/part-$n.txt"; done > build/recovery-stage/source.b64
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib
+          root = Path('build/recovery-stage')
+          text = (root/'source.b64').read_text()
+          # Correct the single transport transcription; the exact compressed
+          # content hash, not this normalization, is the source authority.
+          assert text.count('um79bNs') == 1
+          text = text.replace('um79bNs', 'um79Ns')
+          raw = base64.b64decode(text, validate=True)
+          assert hashlib.sha256(raw).hexdigest() == '712bbdcaa91d21ca27fd23693ed5900888787e3d1b03db5555513f866d79e5d8'
+          data = gzip.decompress(raw)
+          assert len(data) == 110482
+          (root/'source.patch').write_bytes(data)
+          PY
+          git checkout --detach "$SOURCE"
+          git apply --check build/recovery-stage/source.patch
+          git apply build/recovery-stage/source.patch
+          cargo fmt --all
+          cargo fmt --all --check
+          git add -- Cargo.lock crates/clearra-core-executor crates/clearra-forward-search .github/workflows/recovery-stage-regression.yml
+          git diff --cached --name-only > build/recovery-stage/changed-files.txt
+          git diff --cached --binary > build/recovery-stage/formatted.patch
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'perf(recovery): factor stage geometry and conditional supply languages'
+          proposal="codex/recovery-stage-proposal-$GITHUB_RUN_ID"
+          test -z "$(git ls-remote --heads origin "refs/heads/$proposal")"
+          git push origin "HEAD:refs/heads/$proposal"
+          git rev-parse HEAD > build/recovery-stage/proposal-sha.txt
+          git rev-parse HEAD^{tree} > build/recovery-stage/proposal-tree.txt
+          git archive --format=tar HEAD | gzip > build/recovery-stage/proposal-source.tar.gz
+      - name: Compile and check exact stage contracts
+        shell: bash
+        run: |
+          set -uo pipefail
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture --test-threads=1 2>&1 | tee build/recovery-stage/core.log || result=1
+          cargo test --locked -p clearra-core-executor build_clear_row_pruning -- --nocapture --test-threads=1 2>&1 | tee build/recovery-stage/build.log || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee build/recovery-stage/cli.log || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee build/recovery-stage/wire.log || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee build/recovery-stage/wasm.log || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-stage-proposal
+          path: build/recovery-stage
+          retention-days: 3
