@@ -5,6 +5,7 @@ use clearra_piece_registry::{
 use clearra_problem::BuildProbabilityField;
 
 use super::{
+    build_clear_rows::ClearRowDomain,
     extended_board::{logical_row_for_physical, lower_row_mask, ExtendedBoard},
     extended_geometry_domain::ExtendedArmPairIndex,
     geometry_projection::ProjectionCatalog,
@@ -141,6 +142,20 @@ impl DenseExtendedGeometryCatalog {
 
 impl ExtendedInverseCatalog {
     pub fn compile(field: BuildProbabilityField) -> Result<Self, WasmExactSearchError> {
+        Self::compile_with_clear_row_pruning(field, true)
+    }
+
+    #[cfg(test)]
+    pub(super) fn compile_unpruned(
+        field: BuildProbabilityField,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::compile_with_clear_row_pruning(field, false)
+    }
+
+    fn compile_with_clear_row_pruning(
+        field: BuildProbabilityField,
+        prune: bool,
+    ) -> Result<Self, WasmExactSearchError> {
         let width = field.width();
         let height = field.height();
         if !(7..=24).contains(&height) || width != 10 {
@@ -161,6 +176,14 @@ impl ExtendedInverseCatalog {
             ));
         }
 
+        let clear_rows = if prune {
+            let completed = initial_board.union(required_cells);
+            ClearRowDomain::for_completed_target(width, height, |row| {
+                u64::from(completed.row_bits(width, row))
+            })
+        } else {
+            ClearRowDomain::unrestricted()
+        };
         let registry = standard_tetromino_registry();
         let inverse_policy = inverse_projection_policy();
         let mut realizations = Vec::new();
@@ -214,6 +237,7 @@ impl ExtendedInverseCatalog {
                         0,
                         x as i8,
                         row_filter.as_ref(),
+                        clear_rows,
                         &mut realizations,
                     );
                 }
@@ -462,6 +486,7 @@ fn enumerate_row_projections(
     row_index: usize,
     x: i8,
     row_filter: Option<&ProjectionRowFilter>,
+    clear_rows: ClearRowDomain,
     output: &mut Vec<ExtendedRealization>,
 ) {
     if row_index == local_rows.len() {
@@ -488,6 +513,9 @@ fn enumerate_row_projections(
                 required_deleted_rows |= 1_u32 << row;
             }
         }
+        if !clear_rows.allows_required_rows(required_deleted_rows) {
+            return;
+        }
         output.push(ExtendedRealization {
             piece,
             cells: mask,
@@ -510,8 +538,15 @@ fn enumerate_row_projections(
     if remaining_span >= height {
         return;
     }
-    let maximum = height - 1 - remaining_span;
+    let maximum = if row_index != 0 && clear_rows.is_empty() {
+        minimum.min(height - 1 - remaining_span)
+    } else {
+        height - 1 - remaining_span
+    };
     for target_row in minimum..=maximum {
+        if row_index != 0 && !clear_rows.allows_gap(minimum, target_row) {
+            continue;
+        }
         if row_filter.is_some_and(|filter| !filter.row_allowed(row_index, target_row)) {
             continue;
         }
@@ -529,6 +564,7 @@ fn enumerate_row_projections(
             row_index + 1,
             x,
             row_filter,
+            clear_rows,
             output,
         );
     }

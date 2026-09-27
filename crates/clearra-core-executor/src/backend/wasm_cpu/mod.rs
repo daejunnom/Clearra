@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod build_clear_row_pruning_tests;
+mod build_clear_rows;
 mod build_probability;
 mod build_probability_distributed;
 mod buildup;

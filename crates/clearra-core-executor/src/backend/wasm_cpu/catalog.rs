@@ -4,6 +4,7 @@ use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_reg
 use clearra_problem::SearchProblem;
 
 use super::{
+    build_clear_rows::ClearRowDomain,
     geometry_apdp::ExactArmPairIndex,
     geometry_projection::ProjectionCatalog,
     geometry_separator::SeparatorCatalog,
@@ -220,6 +221,19 @@ impl GeometryCatalog {
         Self::compile_for_required_cells_on_dimensions(width, height, initial_board, required_cells)
     }
 
+    pub fn compile_for_build_probability_on_board(
+        problem: &SearchProblem,
+        initial_board: u64,
+        required_cells: u64,
+    ) -> Result<Self, WasmExactSearchError> {
+        let width = u8::try_from(problem.initial_board().width())
+            .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_board_width_overflow"))?;
+        let height = u8::try_from(problem.visible_height()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_target_frame_height_overflow")
+        })?;
+        Self::compile_with_clear_row_domain(width, height, initial_board, required_cells, true)
+    }
+
     /// Compile the same inverse lock-clear catalog for an already qualified
     /// compact target frame. This keeps PC4 graph-edge materialization on the
     /// exact ILC implementation without manufacturing a product search
@@ -230,6 +244,16 @@ impl GeometryCatalog {
         height: u8,
         initial_board: u64,
         required_cells: u64,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::compile_with_clear_row_domain(width, height, initial_board, required_cells, false)
+    }
+
+    fn compile_with_clear_row_domain(
+        width: u8,
+        height: u8,
+        initial_board: u64,
+        required_cells: u64,
+        build_target: bool,
     ) -> Result<Self, WasmExactSearchError> {
         let cell_count = usize::from(width) * usize::from(height);
         if width == 0 || height == 0 || cell_count > u64::BITS as usize || height > 16 {
@@ -263,6 +287,18 @@ impl GeometryCatalog {
             ));
         }
 
+        let clear_rows = if build_target {
+            let full_row = if width == 64 {
+                u64::MAX
+            } else {
+                (1_u64 << width) - 1
+            };
+            ClearRowDomain::for_completed_target(width, height, |row| {
+                ((initial_board | required_cells) >> (u32::from(row) * u32::from(width))) & full_row
+            })
+        } else {
+            ClearRowDomain::unrestricted()
+        };
         let registry = standard_tetromino_registry();
         let inverse_policy = inverse_projection_policy();
         let realization_capacity = checked_realization_count_upper_bound(width, height)
@@ -336,6 +372,7 @@ impl GeometryCatalog {
                         0,
                         x as i8,
                         row_filter.as_ref(),
+                        clear_rows,
                         &mut realizations,
                     );
                 }
@@ -931,6 +968,7 @@ fn enumerate_row_projections(
     row_index: usize,
     x: i8,
     row_filter: Option<&ProjectionRowFilter>,
+    clear_rows: ClearRowDomain,
     output: &mut Vec<Realization>,
 ) {
     if row_index == local_rows.len() {
@@ -957,6 +995,9 @@ fn enumerate_row_projections(
                 required_deleted_rows |= 1_u16 << row;
             }
         }
+        if !clear_rows.allows_required_rows(u32::from(required_deleted_rows)) {
+            return;
+        }
         output.push(Realization {
             piece,
             cells: mask,
@@ -979,8 +1020,15 @@ fn enumerate_row_projections(
     if remaining_span >= height {
         return;
     }
-    let maximum = height - 1 - remaining_span;
+    let maximum = if row_index != 0 && clear_rows.is_empty() {
+        minimum.min(height - 1 - remaining_span)
+    } else {
+        height - 1 - remaining_span
+    };
     for target_row in minimum..=maximum {
+        if row_index != 0 && !clear_rows.allows_gap(minimum, target_row) {
+            continue;
+        }
         if row_filter.is_some_and(|filter| !filter.row_allowed(row_index, target_row)) {
             continue;
         }
@@ -998,6 +1046,7 @@ fn enumerate_row_projections(
             row_index + 1,
             x,
             row_filter,
+            clear_rows,
             output,
         );
     }

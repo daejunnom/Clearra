@@ -896,7 +896,7 @@ impl WasmExactSearchSession {
         Self::new_with_external_geometry(problem, true)
     }
 
-    pub(super) fn new_external_geometry_for_required_cells_on_board(
+    pub(super) fn new_external_geometry_for_build_probability_on_board(
         problem: &SearchProblem,
         initial_board: u64,
         required_cells: u64,
@@ -905,7 +905,7 @@ impl WasmExactSearchSession {
         let execution_admission = preflight_and_acquire_execution_resources(problem)?;
         let dense_pattern_preflight = execution_admission.dense_preflight;
         let catalog_span = SearchStageSpan::begin(ExecutorSearchStage::WasmSessionCatalogCompile);
-        let catalog = Arc::new(GeometryCatalog::compile_for_required_cells_on_board(
+        let catalog = Arc::new(GeometryCatalog::compile_for_build_probability_on_board(
             problem,
             initial_board,
             required_cells,

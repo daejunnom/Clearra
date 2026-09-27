@@ -2378,7 +2378,7 @@ impl CompactBuildProbabilitySession {
                 .ok_or(WasmExactSearchError::InvalidProblem(
                     "wasm_build_probability_compact_base_missing",
                 ))?;
-        let catalog = GeometryCatalog::compile_for_required_cells_on_board(
+        let catalog = GeometryCatalog::compile_for_build_probability_on_board(
             problem,
             initial_board,
             target_cells,

@@ -383,7 +383,7 @@ impl WasmTilingRootProducer {
         let required_cells = field
             .compact_target_mask()
             .ok_or("wasm_tiling_root_compact_target_missing")?;
-        WasmExactSearchSession::new_external_geometry_for_required_cells_on_board(
+        WasmExactSearchSession::new_external_geometry_for_build_probability_on_board(
             problem,
             initial_board,
             required_cells,
@@ -1143,7 +1143,7 @@ impl WasmTilingRootWorker {
                 .compact_target_mask()
                 .ok_or("wasm_tiling_root_compact_target_missing")?;
             catalogs.push(
-                GeometryCatalog::compile_for_required_cells_on_board(
+                GeometryCatalog::compile_for_build_probability_on_board(
                     problem,
                     initial_board,
                     required_cells,
