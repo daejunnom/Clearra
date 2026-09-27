@@ -149,22 +149,25 @@ fn recovery_build_worker_budget_is_explicit_and_parallel_payload_matches_serial(
         "--first-supply I --second-supply O",
         "--first-supply [IO] --second-supply [IO]",
     );
-    let mut expected = None;
-    for workers in [1, 2, 4] {
-        let request = CliCommandParser::parse(&format!(
-            "{command} --workers {workers} --allow-piece-exchange --no-hold"
-        ))
-        .unwrap()
-        .to_app_request()
-        .unwrap();
-        assert_eq!(request.resource_budget().workers(), workers);
-        let response = AppContext::default().run(request);
-        assert_eq!(response.status(), AppStatus::Success);
-        let public = response.product_result_payload().unwrap().clone();
-        if let Some(expected) = &expected {
-            assert_eq!(&public, expected);
-        } else {
-            expected = Some(public);
+    for hold in ["--no-hold", "--hold"] {
+        let mut expected = None;
+        for workers in [1, 2, 4, 11] {
+            let request = CliCommandParser::parse(&format!(
+                "{command} --workers {workers} --allow-piece-exchange {hold}"
+            ))
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+            assert_eq!(request.resource_budget().workers(), workers);
+            let response = AppContext::default().run(request);
+            assert_eq!(response.status(), AppStatus::Success);
+            let host = response.to_host_response();
+            let public = host.product_result_payload().unwrap().clone();
+            if let Some(expected) = &expected {
+                assert_eq!(&public, expected);
+            } else {
+                expected = Some(public);
+            }
         }
     }
     for invalid in ["0", "-1", "65536", "NaN", "1.5"] {

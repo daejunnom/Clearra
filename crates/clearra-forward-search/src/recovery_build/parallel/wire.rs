@@ -264,6 +264,9 @@ fn read_path(r: &mut Reader<'_>) -> Result<RecoveryBuildFixedReport, Error> {
             "none" => "none",
             "swap" => "swap",
             "store" => "store",
+            // The exact serial search can consume the last held token after
+            // exhausting the input. Preserve that action across worker wires.
+            "release-held-at-terminal" => "release-held-at-terminal",
             _ => return Err(bad()),
         };
         let board_before = r.words()?;
