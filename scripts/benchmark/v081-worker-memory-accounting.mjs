@@ -1,6 +1,7 @@
-// Logical exit snapshots are not an allocator/OS peak. Keep the one immutable
-// request owner and nested memo payload separate from summed private workers.
-export const PRIVATE_WORKER_MEMORY_SCOPE = 'native-worker-exit-private-retained-payload-sum';
+// Logical exit snapshots are not an allocator/OS peak. Keep immutable request
+// owners and nested memo payload separate from summed private workers.
+export const PRIVATE_WORKER_MEMORY_SCOPE = 'native-worker-exit-private-retained-payload-sum.v2';
+export const SHARED_WORKER_MEMORY_SCOPE = 'one-request-owned-immutable-supply-and-reachability-not-worker-multiplied.v2';
 export const PRIVATE_WORKER_COMPONENTS = [
   'worker_piece_language_retained_bytes',
   'worker_standard_bag_retained_bytes',
@@ -55,7 +56,9 @@ export function readWorkerMemoryAccounting(summary) {
   if (productEntries > productCapacity || unionEntries > unionCapacity || activeRows > allocatedRows || allocatedRows > rowSlots) {
     throw new Error('invalid memo entry capacity or row directory accounting');
   }
-  const sharedBytes = bytes('shared_standard_bag_request_retained_bytes');
+  const sharedSupplyBytes = bytes('shared_standard_bag_request_retained_bytes');
+  const sharedReachabilityBytes = bytes('shared_reachability_template_retained_bytes');
+  const sharedBytes = sharedSupplyBytes + sharedReachabilityBytes;
   if (!Number.isSafeInteger(privateBytes + sharedBytes)) {
     throw new Error('private plus shared payload exceeds exact receipt integer range');
   }
@@ -63,8 +66,10 @@ export function readWorkerMemoryAccounting(summary) {
     private_scope: PRIVATE_WORKER_MEMORY_SCOPE,
     private_components: privateComponents,
     private_worker_retained_bytes: privateBytes,
-    shared_scope: 'one-request-owned-immutable-standard-bag-tables-not-worker-multiplied',
-    shared_standard_bag_request_retained_bytes: sharedBytes,
+    shared_scope: SHARED_WORKER_MEMORY_SCOPE,
+    shared_standard_bag_request_retained_bytes: sharedSupplyBytes,
+    shared_reachability_template_retained_bytes: sharedReachabilityBytes,
+    shared_request_retained_bytes: sharedBytes,
     nested_standard_bag_memo_payload_bytes: memoBytes,
     nested_standard_bag_memo: {
       product_retained_payload_bytes: productBytes, union_retained_payload_bytes: unionBytes,

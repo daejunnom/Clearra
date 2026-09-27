@@ -1789,6 +1789,11 @@ impl WasmExactSearchSession {
                         .worker_memory_components
                         .shared_standard_bag_request_bytes,
                 )
+                .saturating_add(
+                    outcome
+                        .worker_memory_components
+                        .shared_reachability_template_bytes,
+                )
                 .saturating_add(self.solution_identity_retained_bytes()),
         );
         if let Some(reason) = outcome.truncated_reason {
@@ -5229,12 +5234,16 @@ impl WasmExactSearchSession {
             let memory_fields = [
                 field(
                     "worker_retained_accounting_scope",
-                    "native-worker-exit-private-retained-payload-sum",
+                    "native-worker-exit-private-retained-payload-sum.v2",
                 ),
                 field("worker_retained_bytes", self.parallel_worker_retained_bytes),
                 field(
                     "shared_standard_bag_request_retained_bytes",
                     memory.shared_standard_bag_request_bytes,
+                ),
+                field(
+                    "shared_reachability_template_retained_bytes",
+                    memory.shared_reachability_template_bytes,
                 ),
                 field(
                     "worker_piece_language_retained_bytes",

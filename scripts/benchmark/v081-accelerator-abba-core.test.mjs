@@ -263,7 +263,7 @@ test('batch merge rejects mixed generation and keeps release gate unclaimed', ()
         legal: { generation_identity: 'different' } } },
   }]));
   const withOwnership = { ...receipt, manifest: { ...receipt.manifest,
-    worker_memory_accounting: { scope: 'native-worker-exit-private-retained-payload-sum' } } };
+    worker_memory_accounting: { scope: 'native-worker-exit-private-retained-payload-sum.v2' } } };
   assert.throws(() => mergeBatchReceipts([receipt, withOwnership]), /mixed/);
   assert.throws(() => compareWorkerReceipts([receipt, withOwnership]), /mixed/);
   const memoReference = { ...receipt, manifest: { ...receipt.manifest, memo_selection: { storage: 'reference', layout: 'flat' } } };

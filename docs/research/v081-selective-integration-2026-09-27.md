@@ -267,3 +267,13 @@ identity도 `unverified-local-build`다. 정상 root 종료 뒤 finite drain 검
 동적 전환과 메모리 방향을 검증한 상태이며 release, main fast-forward, 4194 갱신이나
 v0.9.0 TB 재개를 의미하지 않는다. 후속 우선순위는 worker/epoch-private union memo의
 크기 비용과 conditioned miss/exit composition 비용을 분리해 개선하는 것이다.
+
+## 후속 native template·sky-entry owner
+
+사용자가 벤치마크를 다음 단계로 미룸에 따라 native 소유권의 남은 Open 경계를
+구현하고 집중 검증했다. branch worker와 대표 해법 재검증의 불변 도달성 template·
+sky-entry는 요청별 공용 owner로 이동했고 변하는 cache/scratch와 memo는 독립 유지한다.
+새 private/shared memory scope v2는 과거 영수증과 혼합하지 않는다.
+[구현·검증 기록](v081-native-reachability-request-owner-2026-09-27.md)을 현재 좁은
+권위로 추가하며 위 ABBA와 과거 CI는 해당 exact source의 증거로 보존한다.
+Web의 모든 verifier 공유, 전체 reducer/surface parity 및 release 상태는 계속 Open이다.

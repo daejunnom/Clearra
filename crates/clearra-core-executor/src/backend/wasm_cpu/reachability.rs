@@ -2,7 +2,7 @@ use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState}
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_replay::{RotationRequest, ScoringLockEvidence};
 use clearra_rules::kicks::{KickTableProfile, KickTableProfileId, KickTransition};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::conditioned_local_product::{
     qualified_local_relation_snapshot, LocalRelationProductLookup,
@@ -469,7 +469,8 @@ pub(super) struct ReachabilityMetrics {
 pub(super) struct ReachabilityWorkspace {
     cache: ReachabilityCache,
     scratch: ReachabilityScratch,
-    templates: [Option<ReachabilityTemplate>; 7],
+    templates: [Option<Arc<ReachabilityTemplate>>; 7],
+    shared_templates: Option<Arc<SharedReachabilityTemplates>>,
     template_dimensions: Option<(u8, u8)>,
     kick_profile_id: KickTableProfileId,
     conditioned: Option<Arc<QualifiedLocalRelationPack>>,
@@ -501,6 +502,7 @@ impl Default for ReachabilityWorkspace {
             cache: ReachabilityCache::default(),
             scratch: ReachabilityScratch::default(),
             templates: std::array::from_fn(|_| None),
+            shared_templates: None,
             template_dimensions: None,
             kick_profile_id: KickTableProfileId::SrsPlus,
             conditioned: None,
@@ -516,6 +518,23 @@ impl Default for ReachabilityWorkspace {
 }
 
 impl ReachabilityWorkspace {
+    #[cfg(any(feature = "parallel", test))]
+    pub fn set_shared_templates(
+        &mut self,
+        templates: Arc<SharedReachabilityTemplates>,
+    ) -> Result<(), &'static str> {
+        if self.shared_templates.is_some() || self.template_dimensions.is_some() {
+            return Err("wasm_shared_reachability_request_already_initialized");
+        }
+        self.shared_templates = Some(templates);
+        Ok(())
+    }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub fn private_retained_bytes(&self) -> usize {
+        self.retained_bytes_with_shared(false)
+    }
+
     pub fn lock_harddrop_reachable_instantiated(
         &mut self,
         width: u8,
@@ -665,12 +684,11 @@ impl ReachabilityWorkspace {
         if let (Some(conditioned), Some(frame), Some(template)) = (
             self.conditioned.as_ref(),
             frame,
-            self.templates[piece_index(piece)].as_mut(),
+            self.templates[piece_index(piece)].as_ref(),
         ) {
-            template.sky_entry_poses.get_or_insert_with(|| {
+            let entries = template.sky_entry_poses.get_or_init(|| {
                 canonical_sky_entry_poses(template.width, template.ceiling, &template.sky_seeds)
             });
-            let entries = template.sky_entry_poses.as_deref().unwrap_or(&[]);
             if !entries.is_empty() {
                 // Profile, frame, window and actual sky entries do not vary
                 // with board occupancy. Resolve them once per session rather
@@ -984,12 +1002,24 @@ impl ReachabilityWorkspace {
     }
 
     pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes_with_shared(true)
+    }
+
+    fn retained_bytes_with_shared(&self, include_shared: bool) -> usize {
         self.cache.retained_bytes()
             + self
                 .templates
                 .iter()
-                .flatten()
-                .map(ReachabilityTemplate::retained_bytes)
+                .enumerate()
+                .filter_map(|(index, template)| {
+                    let template = template.as_ref()?;
+                    let shared = self
+                        .shared_templates
+                        .as_ref()
+                        .and_then(|owner| owner.templates[index].get())
+                        .is_some_and(|owned| Arc::ptr_eq(owned, template));
+                    (include_shared || !shared).then(|| template.retained_bytes())
+                })
                 .sum::<usize>()
             + self.scratch.retained_bytes()
             + self
@@ -1014,7 +1044,19 @@ impl ReachabilityWorkspace {
         let index = piece_index(piece);
         let profile_id = self.kick_profile_id;
         self.templates[index].get_or_insert_with(|| {
-            ReachabilityTemplate::compile(catalog.width(), catalog.height(), piece, profile_id)
+            if let Some(shared) = &self.shared_templates {
+                if shared.matches(catalog.width(), catalog.height(), profile_id) {
+                    return shared.template(piece);
+                }
+            }
+            // A reused workspace may change dimensions/profile. Never borrow
+            // a stale compiled rule; preserve the exact local path instead.
+            Arc::new(ReachabilityTemplate::compile(
+                catalog.width(),
+                catalog.height(),
+                piece,
+                profile_id,
+            ))
         })
     }
 
@@ -1114,6 +1156,59 @@ fn anchors_contain(anchors: [u64; 4], width: u8, rotation: RotationState, x: i8,
 
 const INVALID_STATE_MASK: u64 = u64::MAX;
 
+/// One execution-request owner, not a process-global/profile-only cache.
+/// First-success kick transitions and sky entries are immutable; board-dependent
+/// occupancy, visited/frontier and mutable result caches remain worker-private.
+pub(super) struct SharedReachabilityTemplates {
+    width: u8,
+    height: u8,
+    profile: KickTableProfileId,
+    templates: [OnceLock<Arc<ReachabilityTemplate>>; 7],
+}
+
+impl SharedReachabilityTemplates {
+    #[cfg(any(feature = "parallel", test))]
+    pub fn new(width: u8, height: u8, profile: KickTableProfileId) -> Self {
+        Self {
+            width,
+            height,
+            profile,
+            templates: std::array::from_fn(|_| OnceLock::new()),
+        }
+    }
+
+    fn matches(&self, width: u8, height: u8, profile: KickTableProfileId) -> bool {
+        self.width == width && self.height == height && self.profile == profile
+    }
+
+    fn template(&self, piece: PieceKind) -> Arc<ReachabilityTemplate> {
+        Arc::clone(self.templates[piece_index(piece)].get_or_init(|| {
+            Arc::new(ReachabilityTemplate::compile(
+                self.width,
+                self.height,
+                piece,
+                self.profile,
+            ))
+        }))
+    }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub fn retained_bytes(&self) -> usize {
+        core::mem::size_of::<Self>()
+            + 2 * core::mem::size_of::<usize>()
+            + self
+                .templates
+                .iter()
+                .filter_map(OnceLock::get)
+                .map(|template| {
+                    core::mem::size_of::<ReachabilityTemplate>()
+                        + 2 * core::mem::size_of::<usize>()
+                        + template.retained_bytes()
+                })
+                .sum::<usize>()
+    }
+}
+
 pub(super) struct ReachabilityTemplate {
     width: u8,
     height: u8,
@@ -1123,7 +1218,7 @@ pub(super) struct ReachabilityTemplate {
     translation_targets: Vec<[u16; 3]>,
     reverse_translation_sources: Vec<[u16; 3]>,
     sky_seeds: Vec<u16>,
-    sky_entry_poses: Option<Vec<ConditionedReachabilityEntryPose>>,
+    sky_entry_poses: OnceLock<Vec<ConditionedReachabilityEntryPose>>,
     sky_seed_words: Vec<u64>,
     rotation_target_offsets: Vec<u32>,
     rotation_targets: Vec<u16>,
@@ -1223,7 +1318,7 @@ impl ReachabilityTemplate {
             translation_targets,
             reverse_translation_sources,
             sky_seeds,
-            sky_entry_poses: None,
+            sky_entry_poses: OnceLock::new(),
             sky_seed_words,
             rotation_target_offsets,
             rotation_targets,
@@ -1238,7 +1333,7 @@ impl ReachabilityTemplate {
             + self.translation_targets.capacity() * core::mem::size_of::<[u16; 3]>()
             + self.reverse_translation_sources.capacity() * core::mem::size_of::<[u16; 3]>()
             + self.sky_seeds.capacity() * core::mem::size_of::<u16>()
-            + self.sky_entry_poses.as_ref().map_or(0, |entries| {
+            + self.sky_entry_poses.get().map_or(0, |entries| {
                 entries.capacity() * core::mem::size_of::<ConditionedReachabilityEntryPose>()
             })
             + self.sky_seed_words.capacity() * core::mem::size_of::<u64>()
@@ -2190,6 +2285,217 @@ mod tests {
     use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
     use clearra_rules::kicks::{KickTableProfileId, KickTransition};
+
+    #[test]
+    fn v081_shared_reachability_templates_and_sky_entries_have_one_request_owner() {
+        use std::sync::{Arc, Barrier};
+        let owner = Arc::new(super::SharedReachabilityTemplates::new(
+            10,
+            4,
+            KickTableProfileId::SrsPlus,
+        ));
+        let empty_bytes = owner.retained_bytes();
+        let barrier = Barrier::new(11);
+        let workers = std::thread::scope(|scope| {
+            let handles = (0..11)
+                .map(|_| {
+                    let owner = Arc::clone(&owner);
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let template = owner.template(PieceKind::T);
+                        template.sky_entry_poses.get_or_init(|| {
+                            super::canonical_sky_entry_poses(
+                                10,
+                                template.ceiling,
+                                &template.sky_seeds,
+                            )
+                        });
+                        template
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            owner
+                .templates
+                .iter()
+                .filter(|slot| slot.get().is_some())
+                .count(),
+            1
+        );
+        assert!(owner.retained_bytes() > empty_bytes);
+        for worker in &workers {
+            assert!(Arc::ptr_eq(worker, &workers[0]));
+            assert_eq!(
+                worker.sky_entry_poses.get().unwrap().as_ptr(),
+                workers[0].sky_entry_poses.get().unwrap().as_ptr()
+            );
+        }
+        assert_eq!(
+            owner.retained_bytes(),
+            empty_bytes
+                + core::mem::size_of::<ReachabilityTemplate>()
+                + 2 * core::mem::size_of::<usize>()
+                + workers[0].retained_bytes()
+        );
+        let next_request =
+            super::SharedReachabilityTemplates::new(10, 4, KickTableProfileId::SrsPlus);
+        assert!(!Arc::ptr_eq(
+            &next_request.template(PieceKind::T),
+            &workers[0]
+        ));
+    }
+
+    #[test]
+    fn v081_shared_reachability_keeps_mutable_cache_and_scratch_private() {
+        use std::sync::Arc;
+        let owner = Arc::new(super::SharedReachabilityTemplates::new(
+            10,
+            4,
+            KickTableProfileId::SrsPlus,
+        ));
+        let catalog =
+            super::GeometryCatalog::compile_for_required_cells_on_dimensions(10, 4, 0, 0).unwrap();
+        let mut first = ReachabilityWorkspace::default();
+        let mut second = ReachabilityWorkspace::default();
+        first.set_shared_templates(Arc::clone(&owner)).unwrap();
+        second.set_shared_templates(Arc::clone(&owner)).unwrap();
+        first.prepare_template(&catalog, PieceKind::T);
+        second.prepare_template(&catalog, PieceKind::T);
+        assert_eq!(first.private_retained_bytes(), 0);
+        assert_eq!(second.private_retained_bytes(), 0);
+        first.lock_reachable_after_harddrop_miss_in_frame(
+            &catalog,
+            0,
+            PieceKind::T,
+            RotationState::Zero,
+            4,
+            0,
+            None,
+        );
+        assert!(first.private_retained_bytes() > 0);
+        assert_eq!(second.private_retained_bytes(), 0);
+        assert!(second.cache.keys.is_empty());
+        assert!(second.scratch.visited_generations.is_empty());
+        let first_private_bytes = first.private_retained_bytes();
+        let template = owner.template(PieceKind::T);
+        template.sky_entry_poses.get_or_init(|| {
+            super::canonical_sky_entry_poses(10, template.ceiling, &template.sky_seeds)
+        });
+        assert_eq!(first.private_retained_bytes(), first_private_bytes);
+        assert_eq!(
+            first.retained_bytes(),
+            first_private_bytes + template.retained_bytes()
+        );
+        assert_eq!(second.retained_bytes(), template.retained_bytes());
+        second.lock_reachable_after_harddrop_miss_in_frame(
+            &catalog,
+            0,
+            PieceKind::T,
+            RotationState::Zero,
+            4,
+            0,
+            None,
+        );
+        assert_ne!(first.cache.keys.as_ptr(), second.cache.keys.as_ptr());
+        assert_ne!(
+            first.scratch.visited_generations.as_ptr(),
+            second.scratch.visited_generations.as_ptr()
+        );
+    }
+
+    #[test]
+    fn v081_shared_reachability_identity_mismatch_uses_exact_private_template() {
+        use std::sync::Arc;
+        let owner = Arc::new(super::SharedReachabilityTemplates::new(
+            10,
+            4,
+            KickTableProfileId::SrsPlus,
+        ));
+        let mut workspace = ReachabilityWorkspace::default();
+        workspace.set_shared_templates(Arc::clone(&owner)).unwrap();
+        assert!(workspace.set_shared_templates(Arc::clone(&owner)).is_err());
+        for (width, height, profile, shared) in [
+            (10, 4, KickTableProfileId::SrsPlus, true),
+            (10, 4, KickTableProfileId::SrsX, false),
+            (10, 6, KickTableProfileId::SrsPlus, false),
+            (8, 4, KickTableProfileId::SrsPlus, false),
+            (10, 4, KickTableProfileId::SrsPlus, true),
+        ] {
+            workspace.configure_kick_profile(profile, false);
+            let catalog = super::GeometryCatalog::compile_for_required_cells_on_dimensions(
+                width, height, 0, 0,
+            )
+            .unwrap();
+            workspace.prepare_template(&catalog, PieceKind::J);
+            let actual = workspace.templates[super::piece_index(PieceKind::J)]
+                .as_ref()
+                .unwrap();
+            assert_eq!(Arc::ptr_eq(actual, &owner.template(PieceKind::J)), shared);
+            assert_eq!(actual.width, width);
+            assert_eq!(actual.height, height);
+            let reference = ReachabilityTemplate::compile(width, height, PieceKind::J, profile);
+            assert_eq!(actual.allow_180, reference.allow_180);
+            assert_eq!(actual.rotation_targets, reference.rotation_targets);
+            assert_eq!(
+                actual.reverse_rotation_sources,
+                reference.reverse_rotation_sources
+            );
+            assert_eq!(
+                workspace.private_retained_bytes(),
+                if shared { 0 } else { actual.retained_bytes() }
+            );
+        }
+        let mut used = ReachabilityWorkspace::default();
+        let catalog =
+            super::GeometryCatalog::compile_for_required_cells_on_dimensions(10, 4, 0, 0).unwrap();
+        used.prepare_template(&catalog, PieceKind::T);
+        assert!(used.set_shared_templates(owner).is_err());
+    }
+
+    #[test]
+    fn v081_shared_templates_preserve_exact_reachability_for_every_profile() {
+        for profile in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
+            KickTableProfileId::Jstris180,
+            KickTableProfileId::NoKick,
+        ] {
+            for height in 1..=6 {
+                let owner = super::SharedReachabilityTemplates::new(10, height, profile);
+                for piece in PieceKind::STANDARD_TETROMINOES {
+                    let shared = owner.template(piece);
+                    let private = ReachabilityTemplate::compile(10, height, piece, profile);
+                    for board in [0, 0b1110010011, 0b1001100010] {
+                        let shared_result = super::search_reachable_locks(
+                            &shared,
+                            board,
+                            &mut ReachabilityScratch::default(),
+                            None,
+                        );
+                        let private_result = super::search_reachable_locks(
+                            &private,
+                            board,
+                            &mut ReachabilityScratch::default(),
+                            None,
+                        );
+                        assert_eq!(shared_result.locks.anchors, private_result.locks.anchors);
+                        assert_eq!(
+                            shared_result.visited_state_count,
+                            private_result.visited_state_count
+                        );
+                        assert_eq!(shared_result.exhaustive, private_result.exhaustive);
+                    }
+                }
+            }
+        }
+    }
 
     /// Compose explicit request-on, policy-on and pinned-snapshot test inputs
     /// without mutating the process-wide A/B policy or asset registry. Policy

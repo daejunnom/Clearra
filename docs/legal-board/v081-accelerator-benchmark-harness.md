@@ -189,3 +189,17 @@ OS peak는 Windows Job Object의 aggregate commit bytes, private/shared 표는 �
 논리 retained bytes다. 둘을 working set 또는 active asset peak로 바꿔 부르지 않는다.
 작은 입력의 supervisor-start-through-exit wall time은 시작/종료 비용을 포함하므로
 순수 solver 시간이나 p95 회귀 5% gate를 단독으로 증명하지 않는다.
+
+## native 도달성 템플릿 공유 이후의 회계 계약
+
+후속 코드의 private memory scope는 `native-worker-exit-private-retained-payload-sum.v2`다.
+불변 StandardBag owner와 새 reachability template/sky-entry owner를 각각 요청당
+한 번 기록한다. `shared_reachability_template_retained_bytes` 누락은 0으로 보충하지
+않고 거절한다. 실제 같은 Arc가 공유되는 템플릿은 private 항목에서 제외하지만
+프로필·크기 mismatch fallback의 private 템플릿은 계속 포함한다.
+메모 하네스 schema는 v5이며 가속기 하네스도 같은 v2 회계 계약을 사용한다.
+v4 이하 메모 영수증 또는 이전 private scope와의 혼합 집계는 허용하지 않는다.
+
+코드와 순수 계약 테스트만 갱신했으며 새 benchmark는 실행하지 않았다. 기존
+ABBA는 그 당시 binary의 자료로 보존한다. 새 논리 shared/private 합계도 OS peak,
+모든 Web verifier의 shared ownership 또는 asset peak 128MiB를 증명하지 않는다.

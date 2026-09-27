@@ -13,7 +13,7 @@ import {
   assertWorkerExecution, commandArgs, semanticIdentity,
   summarizeSamples, validateCases, sampleFitsRemainingLease,
 } from './v081-accelerator-abba-core.mjs';
-import { PRIVATE_WORKER_MEMORY_SCOPE, readWorkerMemoryAccounting } from './v081-worker-memory-accounting.mjs';
+import { PRIVATE_WORKER_MEMORY_SCOPE, SHARED_WORKER_MEMORY_SCOPE, readWorkerMemoryAccounting } from './v081-worker-memory-accounting.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const fixturePath = resolve(repository, 'scripts/benchmark/fixtures/v081-accelerator-cases.json');
@@ -101,7 +101,7 @@ async function main(argv) {
     memo_selection: { storage: 'reference', layout: 'flat' },
     worker_memory_accounting: {
       scope: PRIVATE_WORKER_MEMORY_SCOPE,
-      shared_owner: 'one-request-immutable-standard-bag-owner',
+      shared_owner: SHARED_WORKER_MEMORY_SCOPE,
       nested_memo: 'included-in-private-standard-bag-bytes',
       absence: 'no-native-parallel-worker-exit-snapshot-not-zero-memory',
     },

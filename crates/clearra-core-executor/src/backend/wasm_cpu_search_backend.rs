@@ -1340,7 +1340,7 @@ mod coverage_summary_tests {
 
     #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     #[test]
-    fn parent_authorized_native_score_workers_preserve_the_canonical_payload() {
+    fn v081_parent_authorized_native_score_workers_preserve_the_canonical_payload() {
         let _resource_guard = score_resource_test_guard();
         let base = PcExecutionPolicy::mvp_default()
             .with_requested_backend(RequestedSearchBackend::Cpu)
@@ -1393,6 +1393,13 @@ mod coverage_summary_tests {
                     result.field("cpu_parallel_decision_reason"),
                     Some("parallel-immutable-family-queue")
                 );
+                assert_eq!(
+                    result.field("worker_retained_accounting_scope"),
+                    Some("native-worker-exit-private-retained-payload-sum.v2")
+                );
+                assert!(result
+                    .usize_field("shared_reachability_template_retained_bytes")
+                    .is_some_and(|bytes| bytes > 0));
             }
         }
     }

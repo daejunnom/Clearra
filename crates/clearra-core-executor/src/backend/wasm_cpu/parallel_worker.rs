@@ -22,7 +22,7 @@ use super::{
     coverage_product::CoverageProductEvaluator,
     geometry::{GeometryAdvance, GeometryCandidate, GeometrySearch, TargetGroup},
     parallel_coverage::SharedCoverage,
-    reachability::ReachabilityMetrics,
+    reachability::{ReachabilityMetrics, SharedReachabilityTemplates},
     result::retains_buildable_identity_evidence,
     standard_bag_coverage::{SharedStandardBagRequest, StandardBagMemoAccounting},
     WasmExactSearchError,
@@ -177,6 +177,8 @@ pub(super) struct WorkerMemoryComponents {
     /// One request-owned cursor/suffix payload, max-folded rather than summed.
     /// Excluded from buildup.standard_bag_bytes and total_bytes().
     pub shared_standard_bag_request_bytes: usize,
+    /// Request-owned immutable transitions and lazy sky entries, never summed.
+    pub shared_reachability_template_bytes: usize,
 }
 
 impl WorkerMemoryComponents {
@@ -231,6 +233,9 @@ impl WorkerMemoryComponents {
         self.shared_standard_bag_request_bytes = self
             .shared_standard_bag_request_bytes
             .max(other.shared_standard_bag_request_bytes);
+        self.shared_reachability_template_bytes = self
+            .shared_reachability_template_bytes
+            .max(other.shared_reachability_template_bytes);
     }
 }
 
@@ -508,6 +513,12 @@ pub(super) struct ParallelWorkerResult {
     pub candidate_count: usize,
 }
 
+#[derive(Clone)]
+pub(super) struct SharedWorkerRequest {
+    pub standard_bag: Option<Arc<SharedStandardBagRequest>>,
+    pub reachability: Arc<SharedReachabilityTemplates>,
+}
+
 pub(super) fn run_branch_worker(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
@@ -515,11 +526,12 @@ pub(super) fn run_branch_worker(
     control: &ExecutionControl,
     queue: &ParallelBranchQueue,
     shared_coverage: &SharedCoverage,
-    shared_standard_bag: Option<Arc<SharedStandardBagRequest>>,
+    shared_request: SharedWorkerRequest,
 ) -> Result<ParallelWorkerResult, WasmExactSearchError> {
     let mut workspace = BuildUpWorkspace::default();
-    if let Some(shared_request) = shared_standard_bag {
-        workspace.set_shared_standard_bag_request(shared_request)?;
+    workspace.set_shared_reachability_templates(Arc::clone(&shared_request.reachability))?;
+    if let Some(shared_standard_bag) = shared_request.standard_bag {
+        workspace.set_shared_standard_bag_request(shared_standard_bag)?;
     }
     let mut evaluator = CoverageProductEvaluator::default();
     let mut aggregate = WorkerAggregate {
@@ -581,6 +593,7 @@ pub(super) fn run_branch_worker(
         standard_bag_memo_payload_bytes: workspace.standard_bag_memo_retained_payload_bytes(),
         standard_bag_memo: workspace.standard_bag_memo_accounting(),
         shared_standard_bag_request_bytes,
+        shared_reachability_template_bytes: shared_request.reachability.retained_bytes(),
     };
     aggregate.worker_retained_bytes = aggregate.worker_memory_components.total_bytes();
     aggregate.standard_bag_memo_storage = workspace.standard_bag_memo_storage_label();
@@ -910,6 +923,7 @@ mod tests {
             },
             // Eleven workers share this exact request owner once.
             shared_standard_bag_request_bytes: 64,
+            shared_reachability_template_bytes: 128,
         };
         assert_eq!(component.total_bytes(), 4500);
         let mut total = WorkerAggregate::default();
@@ -925,6 +939,12 @@ mod tests {
         }
         assert_eq!(total.worker_retained_bytes, 49_500);
         assert_eq!(total.worker_memory_components.total_bytes(), 49_500);
+        assert_eq!(
+            total
+                .worker_memory_components
+                .shared_reachability_template_bytes,
+            128,
+        );
         assert_eq!(
             total
                 .worker_memory_components

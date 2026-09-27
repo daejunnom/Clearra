@@ -20,9 +20,10 @@ use super::{
     parallel_coverage::SharedCoverage,
     parallel_worker::{
         run_branch_worker, BranchSearchOutcome, ParallelBranchQueue, ParallelBranchTask,
-        ParallelWorkerResult, RepresentativeCandidate, WorkerAggregate, WorkerMemoryComponents,
+        ParallelWorkerResult, RepresentativeCandidate, SharedWorkerRequest, WorkerAggregate,
+        WorkerMemoryComponents,
     },
-    reachability::ReachabilityMetrics,
+    reachability::{ReachabilityMetrics, SharedReachabilityTemplates},
     standard_bag_coverage::SharedStandardBagRequest,
     WasmExactSearchError,
 };
@@ -184,6 +185,14 @@ fn execute_plan(
     let shared_standard_bag = (problem.objective().kind()
         != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling)
         .then(|| Arc::new(SharedStandardBagRequest::default()));
+    let shared_request = SharedWorkerRequest {
+        standard_bag: shared_standard_bag.clone(),
+        reachability: Arc::new(SharedReachabilityTemplates::new(
+            catalog.width(),
+            catalog.height(),
+            problem.kick_profile().profile_id(),
+        )),
+    };
     let branch_count = plan.searches.len();
     let queue = Arc::new(ParallelBranchQueue::new(branch_tasks(plan.searches)));
     let (sender, receiver) = mpsc::channel();
@@ -195,7 +204,7 @@ fn execute_plan(
         let worker_control = control.clone();
         let worker_queue = Arc::clone(&queue);
         let worker_coverage = Arc::clone(&shared_coverage);
-        let worker_standard_bag = shared_standard_bag.as_ref().map(Arc::clone);
+        let worker_request = shared_request.clone();
         let worker_sender = sender.clone();
         cpu_worker_pool::submit_cpu_job(move || {
             let result = catch_unwind(AssertUnwindSafe(|| {
@@ -206,7 +215,7 @@ fn execute_plan(
                     &worker_control,
                     &worker_queue,
                     &worker_coverage,
-                    worker_standard_bag,
+                    worker_request,
                 )
             }))
             .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_parallel_worker_panicked"))
@@ -227,7 +236,7 @@ fn execute_plan(
         &control,
         &queue,
         &shared_coverage,
-        shared_standard_bag.as_ref().map(Arc::clone),
+        shared_request.clone(),
     );
     if caller_result.is_err() {
         queue.abort();
@@ -250,6 +259,7 @@ fn execute_plan(
         &plan.targets,
         &control,
         &shared_coverage,
+        &shared_request,
         worker_results,
         plan.group_pattern_index_bytes,
         plan.shared_family_bytes,
@@ -263,6 +273,9 @@ fn execute_plan(
         .shared_standard_bag_request_bytes = shared_standard_bag
         .as_ref()
         .map_or(0, |request| request.retained_bytes());
+    outcome
+        .worker_memory_components
+        .shared_reachability_template_bytes = shared_request.reachability.retained_bytes();
     Ok(outcome)
 }
 
@@ -285,6 +298,7 @@ fn merge_results(
     targets: &[TargetGroup],
     control: &ExecutionControl,
     shared_coverage: &SharedCoverage,
+    shared_request: &SharedWorkerRequest,
     worker_results: Vec<ParallelWorkerResult>,
     group_pattern_index_bytes: usize,
     shared_family_bytes: usize,
@@ -348,9 +362,14 @@ fn merge_results(
         {
             (Vec::new(), None)
         }
-        Some(representative) => {
-            reverify_representative(problem, catalog, targets, representative, control)?
-        }
+        Some(representative) => reverify_representative(
+            problem,
+            catalog,
+            targets,
+            representative,
+            control,
+            shared_request,
+        )?,
         None => (Vec::new(), None),
     };
     let searches = branch_outcomes
@@ -430,12 +449,17 @@ fn reverify_representative(
     targets: &[TargetGroup],
     representative: RepresentativeCandidate,
     control: &ExecutionControl,
+    shared_request: &SharedWorkerRequest,
 ) -> Result<(Vec<CorePathStep>, Option<u32>), WasmExactSearchError> {
     let candidate = representative.candidate;
     let target = targets.get(candidate.target_index as usize).ok_or(
         WasmExactSearchError::InvalidProblem("wasm_geometry_candidate_target_out_of_range"),
     )?;
     let mut workspace = BuildUpWorkspace::default();
+    workspace.set_shared_reachability_templates(Arc::clone(&shared_request.reachability))?;
+    if let Some(supply) = &shared_request.standard_bag {
+        workspace.set_shared_standard_bag_request(Arc::clone(supply))?;
+    }
     let mut evaluator = CoverageProductEvaluator::default();
     let result = verify_candidate(
         problem,

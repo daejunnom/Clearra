@@ -51,7 +51,7 @@ const-generic 분리로 proven-exit 판정을 수행하지 않는다. hit는 완
 | geometry frontier, stack, projection/graph mutable arrays | worker별 유지 | 변경 가능한 실행 상태를 전역 lock memo로 이동하지 않음 |
 | StandardBag decision nodes, language ID/interner, coverage masks/queues | worker별 유지 | ID/recycle epoch와 소유 workspace에 종속; 공유 시 의미·경합 검증이 별도로 필요 |
 | Reachability cache, visited, BFS/reverse scratch | worker별 유지 | cache 논리 payload 약 5,505,024바이트/worker; mutable cache의 전역 공유는 채택하지 않음 |
-| Reachability template·sky entry의 immutable 부분 | Open | 현재 lazy mutable Option을 요청-bound owner로 바꾸는 추가 설계 필요 |
+| Reachability template·sky entry의 immutable 부분 | 당시 Open; 아래 후속 native 구현 참조 | 이 스냅샷 시점에는 lazy mutable Option을 요청-bound owner로 바꾸는 추가 설계 필요 |
 
 공유한 supply table은 P7/P7P4에서 수십 KiB 수준이다. 이것만으로 큰 private memo의
 worker 수에 비례하는 전체 RSS를 해결했다고 주장하지 않는다. duplicate coverage
@@ -211,3 +211,12 @@ package-wide CLI formatting check의 차이는 동결한
 7. exact app SHA acceptance, 실제 배포와 rollback/readback 전까지 v0.8.1 앱은 No-Go다.
 
 이 문서는 소스 수정과 로컬 검증의 좁은 상태를 기록하며 전체 v0.8.1 완료 선언이 아니다.
+
+## 후속 native 도달성 owner 구현
+
+위 표의 immutable template·sky-entry는 native branch worker와 representative
+재검증에 공통 request owner를 연결했다. 변하는 cache/scratch는 worker별 유지하며
+공유 payload를 private 합계에 중복 포함하지 않는 v2 accounting을 추가했다.
+구현·집중 테스트의 정확한 범위와 남은 Web/메모리/제품 gate는
+[후속 기록](v081-native-reachability-request-owner-2026-09-27.md)을 따른다.
+이전 ABBA를 새 코드의 성능 증거로 재사용하지 않는다.

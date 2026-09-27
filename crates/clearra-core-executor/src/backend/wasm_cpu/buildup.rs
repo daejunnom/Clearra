@@ -42,7 +42,9 @@ use crate::{
 };
 
 #[cfg(any(feature = "parallel", test))]
-use super::standard_bag_coverage::StandardBagMemoAccounting;
+use super::{
+    reachability::SharedReachabilityTemplates, standard_bag_coverage::StandardBagMemoAccounting,
+};
 
 use super::{
     catalog::GeometryCatalog,
@@ -548,6 +550,16 @@ pub(super) struct BuildUpWorkspace {
 
 impl BuildUpWorkspace {
     #[cfg(any(feature = "parallel", test))]
+    pub fn set_shared_reachability_templates(
+        &mut self,
+        templates: Arc<SharedReachabilityTemplates>,
+    ) -> Result<(), WasmExactSearchError> {
+        self.reachability
+            .set_shared_templates(templates)
+            .map_err(WasmExactSearchError::InvalidProblem)
+    }
+
+    #[cfg(any(feature = "parallel", test))]
     pub fn set_shared_standard_bag_request(
         &mut self,
         request: Arc<SharedStandardBagRequest>,
@@ -579,9 +591,19 @@ impl BuildUpWorkspace {
             .standard_bag_coverage
             .as_ref()
             .map_or(0, StandardBagCoverage::retained_bytes);
-        let reachability_bytes = self.reachability.retained_bytes();
-        let graph_projection_bytes = self.graph_nodes.capacity()
-            * core::mem::size_of::<BuildNode>()
+        let reachability_bytes = self.reachability.private_retained_bytes();
+        let graph_projection_bytes = self.graph_projection_retained_bytes();
+        BuildUpMemoryComponents {
+            piece_language_bytes,
+            standard_bag_bytes,
+            reachability_bytes,
+            graph_projection_bytes,
+            other_bytes: self.other_retained_bytes(),
+        }
+    }
+
+    fn graph_projection_retained_bytes(&self) -> usize {
+        self.graph_nodes.capacity() * core::mem::size_of::<BuildNode>()
             + (self.graph_edges.capacity()
                 + self.graph_piece_edges.capacity()
                 + self.graph_edge_scratch.capacity())
@@ -591,17 +613,15 @@ impl BuildUpWorkspace {
             + self.projection_state_generations.capacity() * core::mem::size_of::<u32>()
             + self.graph_reachable_generations.capacity() * core::mem::size_of::<u32>()
             + self.graph_subset_node_ids.capacity() * core::mem::size_of::<u32>()
-            + self.graph_subset_queue.capacity() * core::mem::size_of::<u16>();
-        let other_bytes = self.retained_bytes().saturating_sub(
-            piece_language_bytes + standard_bag_bytes + reachability_bytes + graph_projection_bytes,
-        );
-        BuildUpMemoryComponents {
-            piece_language_bytes,
-            standard_bag_bytes,
-            reachability_bytes,
-            graph_projection_bytes,
-            other_bytes,
-        }
+            + self.graph_subset_queue.capacity() * core::mem::size_of::<u16>()
+    }
+
+    fn other_retained_bytes(&self) -> usize {
+        // Count private components directly, never subtract two snapshots of
+        // a shared OnceLock which another worker may initialize in between.
+        self.realization_feasibility.retained_bytes()
+            + self.observation_language_roots.capacity() * core::mem::size_of::<u32>()
+            + self.legal_board_query_cache.retained_bytes()
     }
 
     #[cfg(any(feature = "parallel", test))]
@@ -651,26 +671,14 @@ impl BuildUpWorkspace {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.realization_feasibility.retained_bytes()
+        self.other_retained_bytes()
             + self.piece_order_languages.retained_bytes()
             + self
                 .standard_bag_coverage
                 .as_ref()
                 .map_or(0, StandardBagCoverage::retained_bytes)
             + self.reachability.retained_bytes()
-            + self.graph_nodes.capacity() * core::mem::size_of::<BuildNode>()
-            + (self.graph_edges.capacity()
-                + self.graph_piece_edges.capacity()
-                + self.graph_edge_scratch.capacity())
-                * core::mem::size_of::<BuildEdge>()
-            + self.projection_physical_boards.capacity() * core::mem::size_of::<u64>()
-            + self.projection_deleted_rows.capacity() * core::mem::size_of::<u16>()
-            + self.projection_state_generations.capacity() * core::mem::size_of::<u32>()
-            + self.graph_reachable_generations.capacity() * core::mem::size_of::<u32>()
-            + self.graph_subset_node_ids.capacity() * core::mem::size_of::<u32>()
-            + self.graph_subset_queue.capacity() * core::mem::size_of::<u16>()
-            + self.observation_language_roots.capacity() * core::mem::size_of::<u32>()
-            + self.legal_board_query_cache.retained_bytes()
+            + self.graph_projection_retained_bytes()
     }
 
     pub const fn piece_language_coverage_hits(&self) -> usize {

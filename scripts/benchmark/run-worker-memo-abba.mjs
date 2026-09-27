@@ -8,7 +8,7 @@ import os from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { abbaSchedule, assertWorkerExecution, semanticIdentity, sampleFitsRemainingLease } from './v081-accelerator-abba-core.mjs';
-import { PRIVATE_WORKER_MEMORY_SCOPE, readWorkerMemoryAccounting } from './v081-worker-memory-accounting.mjs';
+import { PRIVATE_WORKER_MEMORY_SCOPE, SHARED_WORKER_MEMORY_SCOPE, readWorkerMemoryAccounting } from './v081-worker-memory-accounting.mjs';
 import { assertProductMemoCaseSelection, productMemoAbbaEnvironment, productMemoAbbaSelection, workerMemoBenchmarkCase } from './v081-product-memo-abba-core.mjs';
 
 const BYTE_LIMIT = 8 * 1024 * 1024;
@@ -56,7 +56,7 @@ async function main(argv) {
   if (fs.existsSync(output)) throw new Error('output directory must be new; never overwrite an earlier receipt');
   fs.mkdirSync(output, { recursive: true });
   const manifest = {
-    schema: 'clearra.worker-memo-abba.v4', authority: 'local-only-comparison-not-release',
+    schema: 'clearra.worker-memo-abba.v5', authority: 'local-only-comparison-not-release',
     source_revision: checkedCommand('git', ['rev-parse', 'HEAD'], source).trim(),
     tracked_patch_sha256: sha(checkedCommand('git', ['diff', '--no-ext-diff', '--binary', '--', 'crates', 'tools/clearra-pc4-qualifier'], source)),
     untracked_source: checkedCommand('git', ['ls-files', '--others', '--exclude-standard', '--', 'crates', 'tools/clearra-pc4-qualifier'], source)
@@ -72,7 +72,7 @@ async function main(argv) {
     timing_scope: 'supervisor-start-through-solver-exit',
     peak_metric: process.platform === 'win32' ? 'job-object-aggregate-commit-bytes' : 'supervisor-owned-tree-memory-bytes',
     component_scope: PRIVATE_WORKER_MEMORY_SCOPE,
-    shared_component_scope: 'one-request-owned-immutable-standard-bag-tables-not-worker-multiplied',
+    shared_component_scope: SHARED_WORKER_MEMORY_SCOPE,
     nested_component_scope: 'memo-payload-is-included-in-private-standard-bag-owner',
     orchestrator_profile: 'local-service', outer_lease_ms: 7_200_000,
     accelerators: 'both-disabled', tablebase: 'disabled', release_gate: 'not-evaluated',
