@@ -273,6 +273,7 @@ name = "clearra-core-executor"
 version = "0.8.1"
 dependencies = [
  "clearra-accelerator-activation",
+ "clearra-accelerator-product-host",
  "clearra-build-coverage",
  "clearra-core-domain",
  "clearra-core-ffi",

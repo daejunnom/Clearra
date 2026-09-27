@@ -63,3 +63,18 @@ test('CI exercises the authoritative CLI ingress and real Desktop/Discord accele
   assert.ok(workflow.includes('cargo test --locked -p clearra-gui-host --test exact_accelerator_surface_parity --no-default-features --'));
   assert.ok(workflow.includes('apps/clearra-discord-bot/test/exact-accelerator-command.test.mjs'));
 });
+
+test('real signed-pack smoke reuses the compiled Core tests without generating or requalifying assets', () => {
+  const smoke = workflow.slice(workflow.indexOf('- name: Fetch existing immutable qualified packs'),
+    workflow.indexOf('\n  native-products:'));
+  assert.ok(smoke.includes('gh release download conditioned-data-v081-20260924-rc1 --repo daejunnom/Clearra'));
+  for (const profile of ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']) {
+    assert.ok(smoke.includes(`--pattern 'conditioned-${profile}.cllr'`));
+  }
+  assert.ok(!smoke.includes('conditioned-*.cllr'));
+  assert.ok(smoke.includes('CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-peer-signed-smoke'));
+  assert.ok(smoke.includes('v081_signed_conditioned_pack_owner_peer_solver_smoke --features parallel,local-search-ab,qualification-reference -- --ignored --test-threads=1'));
+  assert.ok(!smoke.includes('cargo build'));
+  assert.ok(!smoke.includes('qualifier'));
+  assert.ok(!smoke.includes('qualification-receipt'));
+});

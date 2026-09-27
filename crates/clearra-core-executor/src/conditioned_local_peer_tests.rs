@@ -376,3 +376,80 @@ fn conditioned_peer_structural_validation_is_not_only_a_checksum_check() {
         Err(ProviderStatus::InvalidAsset)
     ));
 }
+
+#[test]
+fn v081_conditioned_peer_deleted_frame_keeps_virtual_empty_dependency_cells() {
+    use crate::conditioned_local_relation::derive_exact_conditioned_local_relation_with_frame;
+    use sha2::{Digest, Sha256};
+
+    let profile = KickTableProfileId::SrsPlus;
+    let height = 2;
+    let frame = LocalRelationRowFrame::new(height, 1).unwrap();
+    let (ceiling, entries) =
+        solver_local_relation_spawn_entries(height, PieceKind::T, profile).unwrap();
+    let window = ConditionedPoseWindow {
+        min_x: 0,
+        max_x: 9,
+        min_y: 0,
+        max_y: ceiling,
+    };
+    let record = derive_exact_conditioned_local_relation_with_frame(
+        10,
+        height,
+        0,
+        frame,
+        PieceKind::T,
+        profile,
+        window,
+        &entries,
+    )
+    .unwrap();
+    // The compacted occupancy has one row, but collision dependencies still
+    // include known-empty cells above it inside the original target frame.
+    assert!(record.dependency_mask >> (10 * frame.surviving_rows()) != 0);
+    let binding = built_in_local_relation_binding(profile).unwrap();
+    let bytes = encode_local_relation_candidate_pack(binding, &[record]).unwrap();
+    let candidate = load_local_relation_candidate_pack(&bytes, binding, None).unwrap();
+    let authority = signed_authority(
+        &candidate,
+        LOCAL_RELATION_COMPLETENESS_SCOPE,
+        candidate.encoded_identity(),
+    );
+    let owner = QualifiedLocalRelationPack::qualify(candidate, &authority).unwrap();
+    let seed = wire::encode_seed(&owner).unwrap();
+    let peer = QualifiedRelationPeer::from_trusted_seed(
+        &seed,
+        &authority,
+        MIN_RELATION_PEER_RESERVED_BYTES,
+    )
+    .expect("original-height dependencies are valid after row compaction");
+    let prepared = peer
+        .prepare_context(10, height, frame, PieceKind::T, profile, window, &entries)
+        .unwrap();
+    assert_eq!(
+        peer.lookup(0, prepared).unwrap().grounded_lock_anchors(),
+        crate::backend::exact_entry_lock_anchors(10, height, 0, PieceKind::T, profile, &entries)
+            .unwrap()
+    );
+    // Occupancy in the virtual rows remains invalid. Accepting the dependency
+    // mask must NEVER widen the physical-board query domain.
+    assert!(matches!(
+        peer.lookup(1 << 10, prepared),
+        Err(ProviderStatus::OutOfScope)
+    ));
+    // Dependencies outside the full target grid must still fail even with
+    // a repaired transport checksum.
+    let mut invalid = seed;
+    invalid[192..200].copy_from_slice(&(1_u64 << 20).to_le_bytes());
+    let end = invalid.len() - 32;
+    let checksum = Sha256::digest(&invalid[..end]);
+    invalid[end..].copy_from_slice(&checksum);
+    assert!(matches!(
+        QualifiedRelationPeer::from_trusted_seed(
+            &invalid,
+            &authority,
+            MIN_RELATION_PEER_RESERVED_BYTES,
+        ),
+        Err(LocalRelationPeerError::InvalidWire)
+    ));
+}

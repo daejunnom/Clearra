@@ -49,6 +49,7 @@ sha2 = "0.10.9"
 wasm-bindgen = { version = "0.2.126" }
 
 [dev-dependencies]
+clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
 clearra-core-ffi = { path = "../clearra-core-ffi", features = ["test-support"] }
 clearra-fumen = { path = "../clearra-fumen" }
 clearra-scoring = { path = "../clearra-scoring" }

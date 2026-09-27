@@ -13,6 +13,10 @@ use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
 mod local_relation;
 pub(crate) use local_relation::exact_local_relation;
 
+#[cfg(test)]
+#[path = "reachability_peer_tests.rs"]
+mod peer_tests;
+
 use super::{
     catalog::{GeometryCatalog, InstantiatedRealization},
     kick_profiles::builtin_kick_profile,

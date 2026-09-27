@@ -12,8 +12,9 @@ concurrency:
   group: v081-selective-source-${{ github.ref }}
   cancel-in-progress: true
 
-# Source feedback only: no acceptance receipts, asset generation/download,
-# release tags, main promotion, or Pages/Discord/Cloud traffic changes.
+# Source feedback only: no acceptance receipts, asset generation, release
+# tags, main promotion, or Pages/Discord/Cloud traffic changes. The core smoke
+# explicitly downloads ONLY the five unchanged qualified relation packs.
 env:
   CLEARRA_BUILD_PURPOSE: experiment
   RUST_MIN_STACK: "16777216"
@@ -43,6 +44,19 @@ jobs:
           cargo test --locked -p clearra-core-executor --lib row_frame::tests --features parallel,local-search-ab,qualification-reference -- --test-threads=1
           cargo test --locked -p clearra-core-executor --lib legal_board::tests --features parallel,local-search-ab,qualification-reference -- --test-threads=1
           cargo test --locked -p clearra-core-executor --lib conditioned_ --features parallel,local-search-ab,qualification-reference -- --test-threads=1
+      - name: Fetch existing immutable qualified packs for solver smoke, not generation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/_local/artifacts/v081-peer-signed-smoke"
+          gh release download conditioned-data-v081-20260924-rc1 --repo daejunnom/Clearra \
+            --pattern 'conditioned-srs.cllr' --pattern 'conditioned-srs-plus.cllr' \
+            --pattern 'conditioned-srs-x.cllr' --pattern 'conditioned-jstris-180.cllr' \
+            --pattern 'conditioned-no-kick.cllr' --dir "$GITHUB_WORKSPACE/_local/artifacts/v081-peer-signed-smoke"
+      - name: Verify signed full-owner and bounded-peer composition in the real solver
+        env:
+          CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-peer-signed-smoke
+        run: cargo test --locked -p clearra-core-executor --lib v081_signed_conditioned_pack_owner_peer_solver_smoke --features parallel,local-search-ab,qualification-reference -- --ignored --test-threads=1
 
   native-products:
     if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'

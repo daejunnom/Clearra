@@ -216,7 +216,11 @@ pub(crate) fn decode_seed(
         let record = decode_record(bytes, &mut cursor, identity.profile)
             .map_err(|_| LocalRelationPeerError::InvalidWire)?;
         if !record_is_canonical(&record)
-            || mask >> (record.width * record.row_frame.surviving_rows()) != 0
+            // Dependency cells use the complete target coordinate frame,
+            // including known-empty cells above the compacted physical board.
+            // Query occupancy is separately restricted to surviving rows by
+            // PreparedLocalRelationContext::accepts_board/record_is_canonical.
+            || mask >> (record.width * record.height) != 0
             || record.dependency_mask & !mask != 0
             || records
                 .last()

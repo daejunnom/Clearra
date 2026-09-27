@@ -470,3 +470,7 @@ pub(crate) fn installed_peer_bytes(
 #[cfg(test)]
 #[path = "conditioned_local_peer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "conditioned_local_peer_solver_support.rs"]
+pub(crate) mod solver_test_support;
