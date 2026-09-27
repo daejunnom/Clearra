@@ -152,3 +152,19 @@ dependency parser 수정 후 실제 resolved Ubuntu fixture를 사용했으며 D
 자료로 로컬 통과했고 [다중 member 기록](v081-multi-member-copy-source-bound-2026-09-28.md)에
 분리했다. 새 source CI, accepted Bookworm/Cloud Run image, 실제 browser/IPC,
 shared peak·성능 및 release 권위는 여전히 별도 Open이다.
+
+## 후속 동일 기능 경계 관측: `e1db5ba8`
+
+[run 36352731057](https://github.com/daejunnom/Clearra/actions/runs/36352731057)의
+exact `e1db5ba87b86df98fb6e8ca39b246c0596d58e5f`에서 `wasm-realms`는 success다.
+ordinary WASM 하나로 실제 relation owner/두 peer realm과 다섯 legal-board
+owner/synopsis peer 테스트 두 개가 통과했다(`failed=0`, `skipped=0`). 같은
+WASM을 소비한 생산 Web pool/worker도 다섯 profile·두 입력·네 정책에서 complete
+결과를 보존했고 정상 41건·취소 1건·relation 교환 190건을 기록했다.
+
+교환 수가 이전 189건과 다른 것은 기능 실행의 관측값이며 처리량·속도 이득 또는
+실제 공유 peak로 해석하지 않는다. 같은 CI의 `surfaces`는 의존성 설치 전 새
+소스 테스트의 `esbuild` import 때문에 실패했다. 독립 작업의 성공으로 이 실패나
+Web pointer 복구의 실제 browser readback을 닫지 않는다. 후속 수정은 실제
+CTK3 검사를 기존 Rust target으로 옮겨 빠른 Node 검사의 외부 의존성을 없앤다.
+현재 native 작업과 다음 exact-source CI 및 release는 별도 상태로 유지한다.

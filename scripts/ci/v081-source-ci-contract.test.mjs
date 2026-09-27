@@ -5,7 +5,6 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { build } from 'esbuild';
 import { prepareClearraArguments } from '../../apps/clearra-discord-bot/src/clearra/command.mjs';
 import { realCliProductProjectionRequests, realCliProjectionProfiles, realSetupScoreDocument }
   from '../../apps/clearra-discord-bot/test/support/realCliProductProjectionRequests.mjs';
@@ -370,21 +369,12 @@ test('every actual Discord product fixture obeys the existing closed command reg
   assert.throws(() => realCliProductProjectionRequests('unknown-profile'), /unknown/u);
 });
 
-test('the shared Setup-score fixture encodes two actual I targets and one duplicate page', async () => {
-  const bundled = await build({
-    entryPoints: [fileURLToPath(new URL('../../packages/ctk3/src/codec.ts', import.meta.url))],
-    bundle: true, format: 'esm', platform: 'node', target: 'node22', write: false, logLevel: 'silent',
-  });
-  const codec = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].contents).toString('base64')}`);
-  const document = codec.decodeCtk3Exact(realSetupScoreDocument);
-  assert.equal(document.width, 10);
-  assert.equal(document.pages.length, 3);
-  const masks = document.pages.map(page => {
-    assert.equal(page.height, 1);
-    assert.equal(page.cells.length, 10);
-    assert.equal(page.cells.filter(cell => cell === 'I').length, 4);
-    assert.ok(page.cells.every(cell => cell === null || cell === 'I'));
-    return page.cells.reduce((mask, cell, index) => cell === 'I' ? mask | 1 << index : mask, 0);
-  });
-  assert.deepEqual(masks, [0xf, 0x3c0, 0xf]);
+test('the shared Setup-score fixture is bound to an actual Rust decoder proof without JS dependencies', () => {
+  const source = readFileSync(new URL('../../crates/clearra-app/tests/exact_accelerator_product_execution.rs', import.meta.url), 'utf8');
+  assert.ok(source.includes(`const SETUP_SCORE_DOCUMENT: &str = "${realSetupScoreDocument}";`));
+  assert.ok(source.includes('fn actual_setup_score_fixture_has_two_i_targets_and_one_duplicate_page()'));
+  assert.ok(source.includes('clearra_ctk3::decode_ctk3_exact(SETUP_SCORE_DOCUMENT)'));
+  assert.ok(source.includes('assert_eq!(masks, [0xf, 0x3c0, 0xf])'));
+  assert.ok(workflow.indexOf('- name: Verify focused CI path and failure contracts') <
+    workflow.indexOf('- name: Install locked UI dependencies without scripts'));
 });

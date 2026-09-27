@@ -75,3 +75,44 @@ lint, shared peak, 성능 gate와 release도 별도 Open이다.
 무손실 State-major 전환, 전환 실패/범위 밖 보존, 요청·epoch 격리 테스트가
 통과했다. 기존 제품 adaptive 기본값은 유지하며 속도나 OS peak 이득으로
 확대하지 않는다.
+
+## 후속 소스 검사 경계 수정과 기능 관측: `e1db5ba8`
+
+[비게시 CI 36352731057](https://github.com/daejunnom/Clearra/actions/runs/36352731057)의
+exact source는 `e1db5ba87b86df98fb6e8ca39b246c0596d58e5f`다. `surfaces`의
+의존성 설치 전 검사에서 새 CTK3 검증용 top-level `esbuild` import가
+`ERR_MODULE_NOT_FOUND`로 실패했다. 제품 탐색 실패가 아니라 빠른 소스 검사의
+실행 순서 계약을 어긴 테스트 의존성 문제다. 설치 단계를 앞당기거나 실패를
+무시하지 않는다.
+
+후속 수정은 실제 CTK3 decode·셀 색상·폭/높이·점유 `0xf, 0x3c0, 0xf` 검사를
+기존 Rust integration target의 일반 테스트로 옮긴다. 빠른 Node 검사는 외부
+패키지 없이 공용 fixture와 그 Rust 실행 검사의 source binding 및 기존 설치
+순서만 확인한다. 새 Cargo target이나 별도 binary producer를 추가하지 않는다.
+
+수정 후 로컬 Node source/read-only 검사 19개가 통과했고, 기존 App integration
+target은 렌더 미포함 `parallel` 및 렌더 포함 `parallel` 구성에서 모두 타입 검사를
+통과했다. 두 감독 실행은 각각 정상 return 0이며 다음 receipt를 남겼다.
+
+- `1790546079305814300-42908-runtime.json`
+- `1790546155746643400-24280-runtime.json`
+
+이는 수정된 decoder 테스트의 로컬 실행 증거나 새 exact-source CI 통과가 아니다.
+Windows 정책 차단을 반복 시도하지 않고 실제 Rust 실행은 후속 Linux CI에서
+확인한다. 로컬 working tree의 타입 검사도 이전 clean SHA의 산출물 권위로
+재명명하지 않는다.
+
+같은 기존 CI의 독립 `core`, `wasm-abi`, `product-wire-ui`, `wasm-realms` 작업은
+성공했다. 네 정책의 실제 UI 복사는 각 100개 렌더·246개 전체 export·3페이지로
+통과했다. 생산 Web pool 검사는 정상 41건·취소 1건·relation 교환 190건으로
+통과했다. `native-products`는 이 기록 시점에 진행 중이며, Setup actual App 실행과
+85개 CLI→Discord 실행의 최종 증거는 완료 로그 확인 전까지 Open으로 남긴다.
+실패한 `surfaces`는 계속 failure다.
+
+no-render에서 쓰이지 않는 base64 encoder와 error type에는 render/test feature
+경계를 명시했다. 실제 renderer와 자체 unit test의 코드는 유지하고 SHA-256
+encoder는 항상 남긴다. 별도 `-D warnings` 검사는 dependency의 새로운 Clippy
+lint 및 App의 큰 enum·복잡한 타입 등 15개 지점에서 실패했다. 이 검사를 통과로
+기록하거나 광범위한 boxing/lint 허용으로 메모리·결과 계약을 바꾸지 않는다.
+strict lint 전체, 실제 browser/OPFS·Tauri IPC, accepted image, peak·성능 및
+acceptance/release는 별도 Open이다. 벤치마크와 v0.9.0 업그레이드는 하지 않는다.

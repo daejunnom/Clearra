@@ -24,6 +24,46 @@ use clearra_problem::{
 use clearra_rules::profile::rule_profile::{RuleProfile, RuleProfileId};
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
+const SETUP_SCORE_DOCUMENT: &str = "ctk3_w0kGEPVAACzgA2A9EAAw3A";
+
+#[test]
+fn actual_setup_score_fixture_has_two_i_targets_and_one_duplicate_page() {
+    use clearra_ctk3::{Ctk3Color, Ctk3Piece};
+    let document = clearra_ctk3::decode_ctk3_exact(SETUP_SCORE_DOCUMENT).unwrap();
+    assert_eq!(document.width, 10);
+    assert_eq!(document.pages.len(), 3);
+    let masks: Vec<u64> = document
+        .pages
+        .iter()
+        .map(|page| {
+            assert_eq!(page.height, 1);
+            assert_eq!(page.cells.len(), 10);
+            assert_eq!(
+                page.cells
+                    .iter()
+                    .filter(|&&color| color == Ctk3Color::Piece(Ctk3Piece::I))
+                    .count(),
+                4
+            );
+            page.cells
+                .iter()
+                .enumerate()
+                .fold(0, |mask, (index, color)| {
+                    assert!(matches!(
+                        color,
+                        Ctk3Color::Empty | Ctk3Color::Piece(Ctk3Piece::I)
+                    ));
+                    if *color == Ctk3Color::Empty {
+                        mask
+                    } else {
+                        mask | (1_u64 << index)
+                    }
+                })
+        })
+        .collect();
+    assert_eq!(masks, [0xf, 0x3c0, 0xf]);
+}
+
 fn policy(legal: bool, conditioned: bool, workers: usize) -> PcExecutionPolicy {
     PcExecutionPolicy::mvp_default()
         .with_requested_backend(RequestedSearchBackend::Cpu)
@@ -135,9 +175,8 @@ fn one_piece_report_request(legal: bool, conditioned: bool, replay: bool) -> App
 }
 
 fn setup_score_request(legal: bool, conditioned: bool, workers: usize) -> AppRequest {
-    let document =
-        SetupScoreDocumentV1::decode(FieldDocumentFormat::Ctk3, "ctk3_w0kGEPVAACzgA2A9EAAw3A")
-            .expect("three source pages, two distinct horizontal I targets");
+    let document = SetupScoreDocumentV1::decode(FieldDocumentFormat::Ctk3, SETUP_SCORE_DOCUMENT)
+        .expect("three source pages, two distinct horizontal I targets");
     let command = SetupScoreAppCommand::new(
         document,
         PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
