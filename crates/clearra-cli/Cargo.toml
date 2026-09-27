@@ -42,6 +42,11 @@ name = "canonical_witness_contract"
 path = "tests/canonical_witness_contract.rs"
 required-features = ["wasm-cpu-runtime"]
 
+[[test]]
+name = "desktop_signed_accelerator_execution"
+path = "tests/desktop_signed_accelerator_execution.rs"
+required-features = ["wasm-cpu-runtime"]
+
 [dependencies]
 clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
 clearra-accelerator-runtime = { path = "../clearra-accelerator-runtime" }
@@ -72,3 +77,4 @@ curl = { version = "0.4.50", optional = true, features = ["http2"] }
 
 [dev-dependencies]
 clearra-problem = { path = "../clearra-problem" }
+clearra-gui-host = { path = "../clearra-gui-host", default-features = false }

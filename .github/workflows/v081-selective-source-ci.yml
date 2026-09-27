@@ -153,6 +153,7 @@ jobs:
         if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
         run: cargo build --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime
       - name: Provision unchanged signed compute data and verify real CLI policy parity, not a container
+        id: compute-assets
         if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' }}
         env:
           CLEARRA_REAL_COMPUTE_CLI: ${{ github.workspace }}/build/cargo/default/debug/clearra
@@ -164,6 +165,17 @@ jobs:
           test "$CLEARRA_REAL_COMPUTE_ASSET_ROOT" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke"
           test -x "$CLEARRA_REAL_COMPUTE_CLI"
           node --test apps/clearra-discord-bot/test/realComputeAccelerators.test.mjs
+      - name: Verify real Desktop native jobs with the same installed signed assets
+        if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' && steps.compute-assets.outcome == 'success' }}
+        env:
+          CLEARRA_REAL_DESKTOP_SOURCE_COMMIT: ${{ github.sha }}
+          CLEARRA_LEGAL_BOARD_DIRECTORY: ${{ github.workspace }}/_local/artifacts/v081-compute-data-smoke/legal-board
+          CLEARRA_CONDITIONED_REACHABILITY_DIRECTORY: ${{ github.workspace }}/_local/artifacts/v081-compute-data-smoke/conditioned-reachability
+        run: |
+          test "$CLEARRA_LEGAL_BOARD_DIRECTORY" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke/legal-board"
+          test "$CLEARRA_CONDITIONED_REACHABILITY_DIRECTORY" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke/conditioned-reachability"
+          mkdir -p "$GITHUB_WORKSPACE/_local/artifacts/v081-desktop-native-smoke"
+          cargo test --locked -p clearra-cli --test desktop_signed_accelerator_execution --no-default-features --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1
       - name: Recheck the same native data layer read-only as an unprivileged user, not an accepted image
         if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' }}
         env:
@@ -173,12 +185,32 @@ jobs:
           test "$CLEARRA_REAL_COMPUTE_ASSET_ROOT" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke"
           test -d "$CLEARRA_REAL_COMPUTE_ASSET_ROOT/legal-board"
           test -d "$CLEARRA_REAL_COMPUTE_ASSET_ROOT/conditioned-reachability"
-          chmod -R a-w "$CLEARRA_REAL_COMPUTE_ASSET_ROOT"
-          sudo --user=nobody -- test ! -w "$CLEARRA_REAL_COMPUTE_ASSET_ROOT"
+          # The runner checkout can be inaccessible to nobody. Stage only
+          # public adapter code, this exact CLI and these signed data bytes;
+          # never widen permissions on the runner home or whole checkout.
+          cargo build --locked --release -p clearra-manage
+          manager="$GITHUB_WORKSPACE/build/cargo/default/release/clearra-manage"
+          readonly_root="/tmp/Clearra/v081-compute-readonly-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          "$manager" storage verify --path "$readonly_root"
+          test ! -e "$readonly_root"
+          mkdir -p "$readonly_root"
+          cp "$CLEARRA_REAL_COMPUTE_CLI" "$readonly_root/clearra"
+          cp "$GITHUB_WORKSPACE/apps/clearra-discord-bot/scripts/provision-v081-accelerators.mjs" "$readonly_root/provision-v081-accelerators.mjs"
+          cp -a "$CLEARRA_REAL_COMPUTE_ASSET_ROOT" "$readonly_root/data"
+          cmp -s "$CLEARRA_REAL_COMPUTE_CLI" "$readonly_root/clearra"
+          cmp -s "$GITHUB_WORKSPACE/apps/clearra-discord-bot/scripts/provision-v081-accelerators.mjs" "$readonly_root/provision-v081-accelerators.mjs"
+          chmod a+x /tmp/Clearra
+          chmod -R a+rX,a-w "$readonly_root"
+          sudo --user=nobody -- test -r "$readonly_root/provision-v081-accelerators.mjs"
+          sudo --user=nobody -- test -x "$readonly_root/clearra"
+          sudo --user=nobody -- test ! -w "$readonly_root/data"
+          sudo --user=nobody -- test ! -w "$readonly_root/data/legal-board"
+          sudo --user=nobody -- test ! -w "$readonly_root/data/conditioned-reachability"
           node_binary="$(command -v node)"
+          cd "$readonly_root"
           sudo --user=nobody -- "$node_binary" \
-            "$GITHUB_WORKSPACE/apps/clearra-discord-bot/scripts/provision-v081-accelerators.mjs" \
-            verify 0.8.1 "$CLEARRA_REAL_COMPUTE_CLI" "$CLEARRA_REAL_COMPUTE_ASSET_ROOT"
+            "$readonly_root/provision-v081-accelerators.mjs" \
+            verify 0.8.1 "$readonly_root/clearra" "$readonly_root/data"
 
   wasm-abi:
     if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'

@@ -227,6 +227,7 @@ dependencies = [
  "clearra-core-domain",
  "clearra-coverage",
  "clearra-fumen",
+ "clearra-gui-host",
  "clearra-host-contract",
  "clearra-i18n",
  "clearra-objectives",

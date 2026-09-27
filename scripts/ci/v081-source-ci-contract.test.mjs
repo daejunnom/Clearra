@@ -160,10 +160,18 @@ test('native compute smoke uses a real current-source CLI without image or relea
   assert.ok(smoke.includes('node --test apps/clearra-discord-bot/test/realComputeAccelerators.test.mjs'));
   const readonly = smoke.slice(smoke.indexOf('- name: Recheck the same native data layer read-only'));
   assert.ok(readonly.includes('test "$CLEARRA_REAL_COMPUTE_ASSET_ROOT" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke"'));
-  assert.ok(readonly.includes('chmod -R a-w "$CLEARRA_REAL_COMPUTE_ASSET_ROOT"'));
-  assert.ok(readonly.includes('sudo --user=nobody -- test ! -w "$CLEARRA_REAL_COMPUTE_ASSET_ROOT"'));
+  assert.ok(readonly.includes('readonly_root="/tmp/Clearra/v081-compute-readonly-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'));
+  assert.ok(readonly.includes('storage verify --path "$readonly_root"'));
+  assert.ok(readonly.includes('test ! -e "$readonly_root"'));
+  assert.ok(readonly.includes('cmp -s "$CLEARRA_REAL_COMPUTE_CLI" "$readonly_root/clearra"'));
+  assert.ok(readonly.includes('chmod -R a+rX,a-w "$readonly_root"'));
+  assert.ok(readonly.includes('sudo --user=nobody -- test -r "$readonly_root/provision-v081-accelerators.mjs"'));
+  assert.ok(readonly.includes('sudo --user=nobody -- test -x "$readonly_root/clearra"'));
+  for (const directory of ['data', 'data/legal-board', 'data/conditioned-reachability'])
+    assert.ok(readonly.includes(`sudo --user=nobody -- test ! -w "$readonly_root/${directory}"`));
   assert.ok(readonly.includes('sudo --user=nobody -- "$node_binary"'));
-  assert.ok(readonly.includes('verify 0.8.1 "$CLEARRA_REAL_COMPUTE_CLI" "$CLEARRA_REAL_COMPUTE_ASSET_ROOT"'));
+  assert.ok(readonly.includes('verify 0.8.1 "$readonly_root/clearra" "$readonly_root/data"'));
+  assert.ok(!readonly.includes('chmod -R a+rX,a-w "$GITHUB_WORKSPACE"'));
   assert.ok(!readonly.includes(' provision '));
   assert.ok(!smoke.includes('local-search-ab'));
   assert.ok(!smoke.includes('docker '));
@@ -191,4 +199,29 @@ test('native compute smoke uses a real current-source CLI without image or relea
   assert.equal(incomplete.error, undefined);
   assert.equal(incomplete.status, 1, 'an incomplete explicit setup must fail, not silently skip');
   assert.match(incomplete.stdout, /# skipped 0/u);
+});
+
+test('Desktop native proof reuses installed data before read-only admission and uses real jobs', () => {
+  const job = workflow.slice(workflow.indexOf('\n  native-products:'), workflow.indexOf('\n  wasm-abi:'));
+  const desktop = job.slice(job.indexOf('- name: Verify real Desktop native jobs'),
+    job.indexOf('- name: Recheck the same native data layer read-only'));
+  assert.ok(desktop.startsWith('- name: Verify real Desktop native jobs'));
+  assert.ok(job.includes('id: compute-assets'));
+  assert.ok(desktop.includes("steps.compute-assets.outcome == 'success'"));
+  assert.ok(desktop.includes('CLEARRA_REAL_DESKTOP_SOURCE_COMMIT: ${{ github.sha }}'));
+  assert.ok(desktop.includes('cargo test --locked -p clearra-cli --test desktop_signed_accelerator_execution --no-default-features --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1'));
+  assert.ok(!desktop.includes('gh release download'));
+  assert.ok(!desktop.includes('local-search-ab'));
+  assert.ok(!desktop.includes('benchmark'));
+  const source = readFileSync(new URL('../../crates/clearra-cli/tests/desktop_signed_accelerator_execution.rs', import.meta.url), 'utf8');
+  for (const productionCall of ['activate_native_accelerators_for_request(&request)',
+    'bridge.start_job(&wire)', 'bridge.get_job_events(job)', 'bridge.cancel_job(job)',
+    'bridge.product_page_get("2", "1")', 'SystemNativeBuildProbabilityAdmissionProvider'])
+    assert.ok(source.includes(productionCall), productionCall);
+  assert.match(source, /assert_eq!\(\s*installed\(\),\s*before,/u);
+  assert.ok(source.includes('only the selected qualified profile may remain resident'));
+  assert.ok(source.includes('cancelled download must not use transport'));
+  assert.ok(source.includes('assert_eq!(cancelled["event"], "cancelled"'));
+  assert.ok(!source.includes('Fake'));
+  assert.ok(!source.includes('with_core_executor'));
 });
