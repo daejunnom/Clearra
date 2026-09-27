@@ -21,8 +21,8 @@ pub use boundary_recovery::{
 };
 pub use boundary_recovery_pattern::{BoundaryRecoveryPatternError, BoundaryRecoveryPatternQuery};
 pub use boundary_recovery_population::{
-    BoundaryRecoveryPopulationError, BoundaryRecoveryPopulationLimits,
-    BoundaryRecoveryPopulationReport, search_boundary_recovery_population,
+    search_boundary_recovery_population, BoundaryRecoveryPopulationError,
+    BoundaryRecoveryPopulationLimits, BoundaryRecoveryPopulationReport,
 };
 pub use cross_stage_catalog::{
     CrossStageCatalog, CrossStageCatalogCompletion, CrossStageCatalogError, CrossStageCatalogQuery,

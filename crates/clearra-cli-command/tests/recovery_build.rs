@@ -198,10 +198,8 @@ fn recovery_build_preserves_injected_hardware_limit_and_ui_reserve() {
         .unwrap();
         assert_eq!(request.resource_budget().workers(), expected);
     }
-    assert!(
-        CliCommandParser::parse(&format!(
-            "{BASE} --use-all-cpu-threads --use-all-logical-processors"
-        ))
-        .is_err()
-    );
+    assert!(CliCommandParser::parse(&format!(
+        "{BASE} --use-all-cpu-threads --use-all-logical-processors"
+    ))
+    .is_err());
 }

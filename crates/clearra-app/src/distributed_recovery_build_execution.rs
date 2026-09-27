@@ -3,13 +3,13 @@ use clearra_host_contract::AppCommandKind;
 use clearra_validation::diagnostic::diagnostic_report::DiagnosticReport;
 
 use crate::{
-    AppCommand,
     app_command::RunnableAppCommand,
     app_context::AppContext,
     app_request::{AppOutputPolicy, AppRequest},
     app_response::AppResponse,
     commands::recovery_build_app_command::recovery_build_response,
     product_capability_contract::ValidatedProductCapabilityContract,
+    AppCommand,
 };
 
 // Preparation is a one-shot ownership transfer and its public variants are part

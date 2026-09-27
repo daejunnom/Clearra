@@ -1,7 +1,7 @@
 use clearra_host_contract::{AppStatus, ProductResultPayloadContent};
 use clearra_wasm::{
-    WasmCommandRuntime, WasmHostCapabilities, WasmWorkerJobRuntime,
-    serialize_distributed_final_events,
+    serialize_distributed_final_events, WasmCommandRuntime, WasmHostCapabilities,
+    WasmWorkerJobRuntime,
 };
 #[test]
 fn recovery_build_public_route_matches_typed_and_browser_json() {

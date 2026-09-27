@@ -139,16 +139,16 @@ pub use app_context::{AppContext, AppExecutionContext};
 pub use app_error::{AppError, AppErrorCode};
 pub use app_request::{AppOutputPolicy, AppRequest};
 pub use app_response::{AppEffect, AppResponse, AppStatus, ExitCodeHint, GovernedAppResponse};
-pub use app_services::{
-    AppClock, AppCoreExecutorService, AppDiagnosticSink, AppLanguageResolverService, AppServices,
-};
 #[cfg(all(not(target_family = "wasm"), feature = "parallel"))]
 pub use app_services::{
+    register_native_build_probability_host, register_system_native_build_probability_host,
     NativeBuildProbabilityAdmissionProvider, NativeBuildProbabilityAdmissionRequest,
     NativeBuildProbabilityHostProviderError, NativeBuildProbabilityHostRegistration,
     NativeBuildProbabilityHostRegistrationError, NativeBuildProbabilityProviderMeasurement,
-    SystemNativeBuildProbabilityAdmissionProvider, register_native_build_probability_host,
-    register_system_native_build_probability_host,
+    SystemNativeBuildProbabilityAdmissionProvider,
+};
+pub use app_services::{
+    AppClock, AppCoreExecutorService, AppDiagnosticSink, AppLanguageResolverService, AppServices,
 };
 pub use build_colored_target_document::{
     BuildColoredTargetDocument, BuildColoredTargetDocumentError,
@@ -160,7 +160,7 @@ pub use build_probability_product_result::{
     BUILD_FIXED_SCORE_WINNER_CONTRACT, BUILD_PATH_CANONICAL_SELECTION,
 };
 pub use build_setup_product_projection::{
-    BuildSetupProductProjectionError, project_build_setup_v1,
+    project_build_setup_v1, BuildSetupProductProjectionError,
 };
 pub use build_solution_probability_result::build_v2_facade::{
     BuildColoredTargetCandidateCoverageV1, BuildColoredTargetCompleteness,
@@ -181,11 +181,11 @@ pub use build_solution_probability_result::build_v2_facade::{
     BuildSuppliedSolutionSetError, BuildSuppliedSolutionSetV1,
 };
 pub use build_v2_product_projection::{
-    BuildV2ProductProjectionError, ProjectedBuildV2Product, project_build_congruent_cover_v1,
-    project_build_congruent_v1, project_build_setup_cover_percent_v1,
-    project_build_setup_cover_score_v1, project_build_setup_cover_v1,
-    project_build_supplied_cover_percent_v1, project_build_supplied_coverage_v1,
-    project_build_supplied_minimum_cover_v1, project_build_supplied_score_v1,
+    project_build_congruent_cover_v1, project_build_congruent_v1,
+    project_build_setup_cover_percent_v1, project_build_setup_cover_score_v1,
+    project_build_setup_cover_v1, project_build_supplied_cover_percent_v1,
+    project_build_supplied_coverage_v1, project_build_supplied_minimum_cover_v1,
+    project_build_supplied_score_v1, BuildV2ProductProjectionError, ProjectedBuildV2Product,
 };
 pub use clearra_core_domain::execution_cancellation::{
     CancellationHandle, CancellationToken, ExecutionCancellationHandle, ExecutionCancellationToken,
@@ -208,8 +208,8 @@ pub use clearra_host_contract::{
     ResourceBudget, ResourceReport,
 };
 pub use clearra_output::{
-    Ctk3Color, Ctk3Document, Ctk3Operation, Ctk3Page, Ctk3PageFlags, Ctk3Piece, Ctk3Rotation,
-    decode_ctk3_exact, encode_ctk3_compact,
+    decode_ctk3_exact, encode_ctk3_compact, Ctk3Color, Ctk3Document, Ctk3Operation, Ctk3Page,
+    Ctk3PageFlags, Ctk3Piece, Ctk3Rotation,
 };
 pub use commands::{
     BoundaryRecoveryAppCommand, BuildProbabilityAppCommand, BuildProbabilityResultMode,
@@ -218,12 +218,12 @@ pub use commands::{
     FieldDocumentTransformKind, FumenAppCommand, FumenAppCommandError, FumenTransformKind,
     InspectUnsupportedAppCommand, OperationSequenceAppCommand, ParityAppCommand, PathAppCommand,
     PcAppCommand, PercentAppCommand, RecoveryBuildAppCommand, RenAppCommand, RenderAppCommand,
-    RenderAppCommandError, RenderArtifactFormat, RulesAppCommand, SETUP_SCORE_INPUT_CONTRACT,
-    SETUP_SCORE_PROBLEM_CONTRACT, SETUP_SCORE_RESULT_CONTRACT, ScenarioAppCommand,
+    RenderAppCommandError, RenderArtifactFormat, RulesAppCommand, ScenarioAppCommand,
     ScenarioAppExpected, ScenarioAppRenderContract, ScoringAppCommand,
     SequenceDependenciesAppCommand, SetupAppCommand, SetupScoreAppCommand,
     SetupScoreAppCommandError, SpinFinderAppCommand, SpinStructureAppCommand,
-    SpinStructureProductMode, VerifyAppCommand,
+    SpinStructureProductMode, VerifyAppCommand, SETUP_SCORE_INPUT_CONTRACT,
+    SETUP_SCORE_PROBLEM_CONTRACT, SETUP_SCORE_RESULT_CONTRACT,
 };
 pub use cooperative_execution::{
     CooperativeAppAdvance, CooperativeAppExecution, FiniteCooperativeCallerMemory,
@@ -273,98 +273,20 @@ pub use online_pc4_observation_candidate_request::{
     AppOnlinePc4ObservationCandidateRequest, AppOnlinePc4ObservationCandidateRequestError,
 };
 pub use parity_page_store::{ParityReportPageSource, ParityReportPageStore};
-pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
-#[cfg(feature = "online-pc4-tablebase")]
-pub use pc_candidate_execution_bridge::{
-    PcCandidateExecutionError, ValidatedPcCandidateExecutionEvidence,
-    execute_validated_pc_candidate_input,
-};
-#[cfg(feature = "online-pc4-tablebase")]
-pub use pc_candidate_page_boundary::graph_candidate_adapter::{
-    Pc4GraphCandidateAdapterBudgets, Pc4GraphCandidateBudgetExceeded, Pc4GraphCandidateBudgetKind,
-};
-#[cfg(feature = "online-pc4-tablebase")]
-pub use pc_candidate_page_boundary::{
-    PC_CANDIDATE_PAGE_CONTRACT, PC_CANDIDATE_REQUEST_IDENTITY_ALGORITHM,
-    PC_CANDIDATE_SET_DIGEST_ALGORITHM, PcCandidateBoundaryError, PcCandidateCollection,
-    PcCandidateCollectionCompleteness, PcCandidateCompletenessEvidence, PcCandidatePageCollector,
-    PcCandidatePageCursor, PcCandidatePageGuard, PcCandidateProviderKind, PcCandidateReducerInput,
-    PcCandidateRequestIdentity, PcCandidateRequestIdentityError, PcCandidateSessionId,
-    PcCandidateSetDigest, PcCandidateSourceBinding, PcCandidateSourceBindingError,
-    PcCandidateSourceIdentity, PcCandidateUniverseIdentity, PcConcreteCandidatePage,
-};
-pub use pc_chance_probability_result::{
-    PcChanceIngressOrigin, PcChanceProblemPreset, PcChanceQuerySnapshot,
-    PcProbabilityCompletenessEvidence, PcProbabilityV2Result,
-};
-pub use pc_failed_queue_result::{
-    PcFailedQueueIngressOrigin, PcFailedQueueProblemPreset, PcFailedQueueQuerySnapshot,
-    PcFailedQueueV2Example, PcFailedQueueV2MemoryEvidence, PcFailedQueueV2Result,
-};
-pub use pc_minimum_cover_result::{
-    PC_MINIMUM_COVER_CANONICAL_SELECTION, PC_MINIMUM_COVER_INPUT_CONTRACT,
-    PC_MINIMUM_COVER_PROBLEM_CONTRACT, PC_MINIMUM_COVER_RESULT_CONTRACT, PcMinimalsIngressOrigin,
-    PcMinimumCoverCompletenessEvidence, PcMinimumCoverProblemPreset, PcMinimumCoverQuerySnapshot,
-    PcMinimumCoverV2Result,
-};
-pub use pc_path_result::{
-    PC_PATH_CANONICAL_SELECTION, PC_PATH_FAMILY_RESULT_CONTRACT, PC_PATH_ORDERING,
-    PC_PATH_WITNESS_CONTRACT, PcPathCompletenessEvidence, PcPathFamilyV2Result,
-    PcPathIngressOrigin, PcPathProblemPreset, PcPathQuerySnapshot, PcPathStepV2, PcPathWitnessV2,
-};
-pub use pc_replay_page_error::PcReplayPageError;
-pub use pc_replay_page_source::{
-    PC_REPLAY_MEMBER_PAGE_CONTRACT, PC_REPLAY_MEMBER_PAGE_SIZE, PcReplayPageAdvance,
-    PcReplayPageSource, PcReplayPageStore, PcReplaySourceBuildSession,
-};
-pub use pc_result_projection::{
-    PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_SOURCE_PIECES,
-    PcResultProjection,
-};
-pub use pc_save_result::{
-    PC_BEST_SAVE_CANONICAL_SELECTION, PC_BEST_SAVE_RESULT_CONTRACT, PC_BEST_SAVE_SCHEMA,
-    PC_SAVE_GROUPS_RESULT_CONTRACT, PcBestSaveV2Result, PcBestSaveWinnerV2,
-    PcSaveCompletenessEvidence, PcSaveExactProbability, PcSaveGroupV2, PcSaveGroupsV2Result,
-    PcSaveIngressOrigin, PcSavePieceMultiset, PcSaveProblemPreset, PcSaveQuerySnapshot,
-    PcSaveResultMode, PcSaveWitness,
-};
-pub use pc_score_field_result::{
-    PC_SCORE_OVERALL_SCORE_BASIS, PC_SCORE_SOLUTION_FIELD_AVERAGE_BASIS,
-    PC_SCORE_SOLUTION_FIELD_CONTRACT, PC_SCORE_SOLUTION_FIELD_ORDERING,
-    PcScoreSolutionFieldAverageV1,
-};
-pub use pc_score_minimum_cover_result::{
-    PC_SCORE_PORTFOLIO_RESULT_CONTRACT, PcScoreEligibleCandidateV2, PcScoreEligiblePatternV2,
-    PcScoreMinimalsIngressOrigin, PcScorePortfolioCompletenessEvidence, PcScorePortfolioV2Result,
-    PcScorePortfolioValidationError,
-};
-pub use pc_score_summary_result::{
-    PcScoreCompletenessEvidence, PcScoreIngressOrigin, PcScoreProblemPreset, PcScoreQuerySnapshot,
-    PcScoreSummaryV2Result,
-};
-pub use pc_score_winner_result::{
-    PC_SCORE_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
-    PC_SCORE_PATTERN_WINNER_CONTRACT, PcScorePatternWinnerV1,
-};
-pub use pc_tiling_family_result::{
-    PC_TILING_FAMILY_RESULT_CONTRACT, PC_TILING_INITIAL_PAGE_LIMIT, PC_TILING_INPUT_CONTRACT,
-    PcTilingCompletenessEvidence, PcTilingFamilyV1Result, PcTilingIngressOrigin,
-    PcTilingProblemPreset, PcTilingQuerySnapshot,
-};
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc4_compiled_pattern_source::{
-    PC4_COMPILED_PATTERN_SOURCE_CONTRACT, Pc4CompiledPatternError, Pc4CompiledPatternIdentity,
-    Pc4CompiledPatternLimits, Pc4CompiledPatternPreparation, Pc4CompiledPatternQueue,
-    Pc4CompiledPatternSource,
+    Pc4CompiledPatternError, Pc4CompiledPatternIdentity, Pc4CompiledPatternLimits,
+    Pc4CompiledPatternPreparation, Pc4CompiledPatternQueue, Pc4CompiledPatternSource,
+    PC4_COMPILED_PATTERN_SOURCE_CONTRACT,
 };
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc4_input_disclosure_policy::{
-    Pc4BagDisclosure, Pc4BagDisclosureField, Pc4BagDisclosureRequirement, Pc4HiddenQueueDisclosure,
-    Pc4HiddenQueueSource, Pc4HiddenRevealScope, Pc4HiddenRevealScopeError,
-    Pc4InputDisclosureDecision, Pc4InputDisclosureRejection, Pc4InputDisclosureRequest,
-    Pc4InputDisclosureStop, Pc4InputDisclosureStopReason, Pc4InputSurface, Pc4PartialBagRemainder,
-    Pc4PreparedOnlineInput, Pc4PreparedQueueInput, Pc4QueueDisclosure,
-    prepare_pc4_input_disclosure,
+    prepare_pc4_input_disclosure, Pc4BagDisclosure, Pc4BagDisclosureField,
+    Pc4BagDisclosureRequirement, Pc4HiddenQueueDisclosure, Pc4HiddenQueueSource,
+    Pc4HiddenRevealScope, Pc4HiddenRevealScopeError, Pc4InputDisclosureDecision,
+    Pc4InputDisclosureRejection, Pc4InputDisclosureRequest, Pc4InputDisclosureStop,
+    Pc4InputDisclosureStopReason, Pc4InputSurface, Pc4PartialBagRemainder, Pc4PreparedOnlineInput,
+    Pc4PreparedQueueInput, Pc4QueueDisclosure,
 };
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc4_lookup_graph_runtime_adapter::{
@@ -375,7 +297,7 @@ pub use pc4_lookup_graph_runtime_adapter::{
 };
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc4_observation_candidate_adapter::{
-    ManifestQualifiedPc4ObservationTerminal, PC4_OBSERVATION_CANDIDATE_FAMILY_CONTRACT,
+    prepare_pc4_observation_candidate_session, ManifestQualifiedPc4ObservationTerminal,
     Pc4CompleteObservationCandidateFamily, Pc4ObservationCandidateAdapterRequest,
     Pc4ObservationCandidateAdvance, Pc4ObservationCandidateAdvanceStatus,
     Pc4ObservationCandidateBindingError, Pc4ObservationCandidateBudgetExceeded,
@@ -384,27 +306,106 @@ pub use pc4_observation_candidate_adapter::{
     Pc4ObservationCandidateProvenance, Pc4ObservationCandidateSemanticError,
     Pc4ObservationCandidateSession, Pc4ObservationCandidateSessionError,
     Pc4ObservationCanonicalCandidate, Pc4ObservationRevealEvidence,
-    QualifiedPc4ObservationCandidateTerminalPredicate, prepare_pc4_observation_candidate_session,
+    QualifiedPc4ObservationCandidateTerminalPredicate, PC4_OBSERVATION_CANDIDATE_FAMILY_CONTRACT,
 };
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc4_profile_capability_projection::{
-    Pc4ProfileCapabilityProjection, Pc4ProfileCapabilitySlot, Pc4ProfileCapabilityStatus,
-    Pc4TargetCapabilitySlot, Pc4TargetCapabilityStatus, project_pc4_profile_capabilities,
+    project_pc4_profile_capabilities, Pc4ProfileCapabilityProjection, Pc4ProfileCapabilitySlot,
+    Pc4ProfileCapabilityStatus, Pc4TargetCapabilitySlot, Pc4TargetCapabilityStatus,
 };
 #[cfg(feature = "online-pc4-tablebase")]
 pub use pc4_search_problem_compatibility::{
-    Pc4SearchProblemCompatibility, Pc4SearchProblemCompatibilityError,
-    validate_pc4_search_problem_compatibility,
+    validate_pc4_search_problem_compatibility, Pc4SearchProblemCompatibility,
+    Pc4SearchProblemCompatibilityError,
+};
+pub use pc_allspin_result::{PcAllSpinResultReport, PcAllSpinWitness};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc_candidate_execution_bridge::{
+    execute_validated_pc_candidate_input, PcCandidateExecutionError,
+    ValidatedPcCandidateExecutionEvidence,
+};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc_candidate_page_boundary::graph_candidate_adapter::{
+    Pc4GraphCandidateAdapterBudgets, Pc4GraphCandidateBudgetExceeded, Pc4GraphCandidateBudgetKind,
+};
+#[cfg(feature = "online-pc4-tablebase")]
+pub use pc_candidate_page_boundary::{
+    PcCandidateBoundaryError, PcCandidateCollection, PcCandidateCollectionCompleteness,
+    PcCandidateCompletenessEvidence, PcCandidatePageCollector, PcCandidatePageCursor,
+    PcCandidatePageGuard, PcCandidateProviderKind, PcCandidateReducerInput,
+    PcCandidateRequestIdentity, PcCandidateRequestIdentityError, PcCandidateSessionId,
+    PcCandidateSetDigest, PcCandidateSourceBinding, PcCandidateSourceBindingError,
+    PcCandidateSourceIdentity, PcCandidateUniverseIdentity, PcConcreteCandidatePage,
+    PC_CANDIDATE_PAGE_CONTRACT, PC_CANDIDATE_REQUEST_IDENTITY_ALGORITHM,
+    PC_CANDIDATE_SET_DIGEST_ALGORITHM,
+};
+pub use pc_chance_probability_result::{
+    PcChanceIngressOrigin, PcChanceProblemPreset, PcChanceQuerySnapshot,
+    PcProbabilityCompletenessEvidence, PcProbabilityV2Result,
+};
+pub use pc_failed_queue_result::{
+    PcFailedQueueIngressOrigin, PcFailedQueueProblemPreset, PcFailedQueueQuerySnapshot,
+    PcFailedQueueV2Example, PcFailedQueueV2MemoryEvidence, PcFailedQueueV2Result,
+};
+pub use pc_minimum_cover_result::{
+    PcMinimalsIngressOrigin, PcMinimumCoverCompletenessEvidence, PcMinimumCoverProblemPreset,
+    PcMinimumCoverQuerySnapshot, PcMinimumCoverV2Result, PC_MINIMUM_COVER_CANONICAL_SELECTION,
+    PC_MINIMUM_COVER_INPUT_CONTRACT, PC_MINIMUM_COVER_PROBLEM_CONTRACT,
+    PC_MINIMUM_COVER_RESULT_CONTRACT,
+};
+pub use pc_path_result::{
+    PcPathCompletenessEvidence, PcPathFamilyV2Result, PcPathIngressOrigin, PcPathProblemPreset,
+    PcPathQuerySnapshot, PcPathStepV2, PcPathWitnessV2, PC_PATH_CANONICAL_SELECTION,
+    PC_PATH_FAMILY_RESULT_CONTRACT, PC_PATH_ORDERING, PC_PATH_WITNESS_CONTRACT,
+};
+pub use pc_replay_page_error::PcReplayPageError;
+pub use pc_replay_page_source::{
+    PcReplayPageAdvance, PcReplayPageSource, PcReplayPageStore, PcReplaySourceBuildSession,
+    PC_REPLAY_MEMBER_PAGE_CONTRACT, PC_REPLAY_MEMBER_PAGE_SIZE,
+};
+pub use pc_result_projection::{
+    PcResultProjection, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
+    PC_SCORE_MAX_SOURCE_PIECES,
+};
+pub use pc_save_result::{
+    PcBestSaveV2Result, PcBestSaveWinnerV2, PcSaveCompletenessEvidence, PcSaveExactProbability,
+    PcSaveGroupV2, PcSaveGroupsV2Result, PcSaveIngressOrigin, PcSavePieceMultiset,
+    PcSaveProblemPreset, PcSaveQuerySnapshot, PcSaveResultMode, PcSaveWitness,
+    PC_BEST_SAVE_CANONICAL_SELECTION, PC_BEST_SAVE_RESULT_CONTRACT, PC_BEST_SAVE_SCHEMA,
+    PC_SAVE_GROUPS_RESULT_CONTRACT,
+};
+pub use pc_score_field_result::{
+    PcScoreSolutionFieldAverageV1, PC_SCORE_OVERALL_SCORE_BASIS,
+    PC_SCORE_SOLUTION_FIELD_AVERAGE_BASIS, PC_SCORE_SOLUTION_FIELD_CONTRACT,
+    PC_SCORE_SOLUTION_FIELD_ORDERING,
+};
+pub use pc_score_minimum_cover_result::{
+    PcScoreEligibleCandidateV2, PcScoreEligiblePatternV2, PcScoreMinimalsIngressOrigin,
+    PcScorePortfolioCompletenessEvidence, PcScorePortfolioV2Result,
+    PcScorePortfolioValidationError, PC_SCORE_PORTFOLIO_RESULT_CONTRACT,
+};
+pub use pc_score_summary_result::{
+    PcScoreCompletenessEvidence, PcScoreIngressOrigin, PcScoreProblemPreset, PcScoreQuerySnapshot,
+    PcScoreSummaryV2Result,
+};
+pub use pc_score_winner_result::{
+    PcScorePatternWinnerV1, PC_SCORE_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+    PC_SCORE_PATTERN_WINNER_CONTRACT,
+};
+pub use pc_tiling_family_result::{
+    PcTilingCompletenessEvidence, PcTilingFamilyV1Result, PcTilingIngressOrigin,
+    PcTilingProblemPreset, PcTilingQuerySnapshot, PC_TILING_FAMILY_RESULT_CONTRACT,
+    PC_TILING_INITIAL_PAGE_LIMIT, PC_TILING_INPUT_CONTRACT,
 };
 pub use portfolio_alternative_store::{
     CoveragePortfolioAlternativeSet, CoveragePortfolioAlternativeStore, CoveragePortfolioPageStore,
+    PortfolioAlternative, PortfolioAlternativeAdvance, PortfolioAlternativeCheckpoint,
+    PortfolioAlternativeError, PortfolioAlternativePage, PortfolioAlternativeSetIdentity,
+    PortfolioCandidate, PortfolioEnumerationStop, PortfolioMember, PortfolioMemberPage,
+    PortfolioPageLoadAdvance, PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore,
     PORTFOLIO_ALTERNATIVE_PAGE_CONTRACT, PORTFOLIO_ALTERNATIVE_SET_CONTRACT,
     PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
-    PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT, PORTFOLIO_SNAPSHOT_CONTRACT, PortfolioAlternative,
-    PortfolioAlternativeAdvance, PortfolioAlternativeCheckpoint, PortfolioAlternativeError,
-    PortfolioAlternativePage, PortfolioAlternativeSetIdentity, PortfolioCandidate,
-    PortfolioEnumerationStop, PortfolioMember, PortfolioMemberPage, PortfolioPageLoadAdvance,
-    PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore,
+    PORTFOLIO_RETAINED_OUTER_PAGE_LIMIT, PORTFOLIO_SNAPSHOT_CONTRACT,
 };
 pub use product_capability_contract::{ProductCapabilityContract, ProductCapabilityContractError};
 pub use product_capability_result::{
@@ -415,22 +416,23 @@ pub use render::{AppMessage, AppRenderModel, AppResultKind, SetupRenderModel};
 pub use request_profile_selection::{
     RequestProfileSelection, RequestProfileSelectionError, RequestStructuralProfiles,
 };
-pub use search_backend_warmup::{GpuSearchWarmupReport, prewarm_search_backend};
+pub use search_backend_warmup::{prewarm_search_backend, GpuSearchWarmupReport};
 #[cfg(feature = "online-pc4-tablebase")]
 pub use setup_pc_candidate_acceleration::{
-    PreparedSetupPcCandidateInput, SETUP_PC_CANDIDATE_ACCELERATION_CONTRACT,
+    admit_setup_pc_candidate_input, PreparedSetupPcCandidateInput,
     SetupPcAccelerationCompatibilityProof, SetupPcAccelerationDisposition,
     SetupPcAccelerationObjective, SetupPcAccelerationRequestBinding, SetupPcCandidateAvailability,
-    SetupPcCandidateProviderFailure, SetupPcNoAccelerationReason, admit_setup_pc_candidate_input,
+    SetupPcCandidateProviderFailure, SetupPcNoAccelerationReason,
+    SETUP_PC_CANDIDATE_ACCELERATION_CONTRACT,
 };
 #[cfg(feature = "online-pc4-tablebase")]
 pub use setup_pc_candidate_execution::{
-    SetupPcCandidateExecutionError, ValidatedSetupPcCandidateExecutionEvidence,
-    execute_prepared_setup_pc_candidate_input,
+    execute_prepared_setup_pc_candidate_input, SetupPcCandidateExecutionError,
+    ValidatedSetupPcCandidateExecutionEvidence,
 };
 pub use setup_ranked_family_result::{
-    SetupRankedCandidateIdentity, SetupRankedFamilyResult, SetupRankedFamilyResultError,
-    SetupRankedFamilySnapshot, setup_ranked_candidate_id,
+    setup_ranked_candidate_id, SetupRankedCandidateIdentity, SetupRankedFamilyResult,
+    SetupRankedFamilyResultError, SetupRankedFamilySnapshot,
 };
 pub use setup_ranking_contract::{
     SetupRankingContract, SetupRankingContractError, SetupRankingIdentities, SetupRankingKind,
@@ -440,12 +442,12 @@ pub use setup_score_document::{
     SetupScoreDocumentCandidateV1, SetupScoreDocumentError, SetupScoreDocumentV1,
 };
 pub use spin_structure_search_result::{
-    SpinStructureSearchCandidateIdentity, SpinStructureSearchIdentities, SpinStructureSearchResult,
-    SpinStructureSearchResultError, spin_structure_search_candidate_id,
+    spin_structure_search_candidate_id, SpinStructureSearchCandidateIdentity,
+    SpinStructureSearchIdentities, SpinStructureSearchResult, SpinStructureSearchResultError,
 };
 pub use typed_document_utility::{
-    FIELD_DOCUMENT_MAX_INPUT_BYTES, FIELD_DOCUMENT_MAX_PAGES, TypedFieldDocument,
-    TypedFieldDocumentError,
+    TypedFieldDocument, TypedFieldDocumentError, FIELD_DOCUMENT_MAX_INPUT_BYTES,
+    FIELD_DOCUMENT_MAX_PAGES,
 };
 
 #[cfg(test)]

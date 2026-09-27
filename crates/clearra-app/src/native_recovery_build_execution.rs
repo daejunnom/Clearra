@@ -8,7 +8,7 @@ use clearra_forward_search::{
     RecoveryBuildParallelWorker as Worker, RecoveryBuildPopulation, RecoveryBuildQuery,
 };
 use std::{
-    panic::{AssertUnwindSafe, catch_unwind},
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::mpsc,
     thread,
 };

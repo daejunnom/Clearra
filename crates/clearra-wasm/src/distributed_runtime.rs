@@ -10,9 +10,9 @@ use clearra_app::{
     PreparedDistributedSearch, PreparedDistributedSearchCompletion, PreparedDistributedSetupSearch,
     ProductCapabilityContract,
 };
+use clearra_core_executor::performance::CooperativeWorkQuantum;
 #[cfg(feature = "webgpu-search")]
 use clearra_core_executor::WasmWebGpuCandidateProducer;
-use clearra_core_executor::performance::CooperativeWorkQuantum;
 use clearra_core_executor::{
     CoreExecutionError, WasmBuildProbabilityCandidateProducer,
     WasmBuildProbabilityDistributedResultMerger, WasmBuildProbabilityDistributedVerifier,
@@ -32,18 +32,19 @@ use clearra_pc_graph::request::RequestedSearchBackend;
 use clearra_problem::BuildSolutionProbabilityPolicy;
 
 use crate::{
-    BackendStatus, GovernedWasmExecutionResult, GovernedWasmJson, GovernedWasmWorkerEvents,
-    JobProgress, WasmCommandRuntime, WasmCommandRuntimeError, WasmExecutionResult,
-    WasmWorkerJobEvent, WasmWorkerJobId,
     distributed_wire::{
-        GuardedDistributedWireError, checked_candidate_vec_retained_bytes,
+        checked_candidate_vec_retained_bytes,
         decode_build_probability_candidate_batch_with_memory_guard,
         decode_build_probability_partial_results_with_memory_guard, decode_candidate_batch,
         decode_partial_results_with_memory_guard, decode_tiling_root_chunk, encode_candidate_batch,
         encode_candidate_batch_with_memory_guard, encode_partial_results,
         encode_partial_results_with_memory_guard, encode_tiling_root_chunk, is_tiling_root_chunk,
+        GuardedDistributedWireError,
     },
     json_event_envelope::{serialize_governed_worker_events, serialize_worker_events},
+    BackendStatus, GovernedWasmExecutionResult, GovernedWasmJson, GovernedWasmWorkerEvents,
+    JobProgress, WasmCommandRuntime, WasmCommandRuntimeError, WasmExecutionResult,
+    WasmWorkerJobEvent, WasmWorkerJobId,
 };
 
 const PC_GEOMETRY_STEPS_PER_PRODUCE: usize = 2_048;
@@ -4546,12 +4547,10 @@ mod build_probability_partial_ingress_tests {
     #[test]
     fn governed_terminal_events_accept_exact_peak_and_reject_peak_minus_one() {
         let measured_result = serial_governed_result();
-        assert!(
-            measured_result
-                .result()
-                .tiling_solution_page_store()
-                .is_none()
-        );
+        assert!(measured_result
+            .result()
+            .tiling_solution_page_store()
+            .is_none());
         let source_actual = measured_result.authority().actual_retained_bytes();
         let transport_heap = measured_result
             .result()
@@ -4637,11 +4636,9 @@ mod build_probability_partial_ingress_tests {
         let source_actual = measured_events.actual_retained_bytes();
         let measured_json = serialize_governed_worker_events(measured_events)
             .expect("measure governed JSON transition");
-        assert!(
-            measured_json
-                .completed_tiling_solution_page_store()
-                .is_none()
-        );
+        assert!(measured_json
+            .completed_tiling_solution_page_store()
+            .is_none());
         let source_wrapper_inline = core::mem::size_of::<GovernedWasmWorkerEvents>() as u128;
         let source_payload_heap = source_actual
             .checked_sub(source_wrapper_inline)

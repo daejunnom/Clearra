@@ -62,7 +62,11 @@ impl<'a> Reader<'a> {
     }
     fn count(&mut self, max: usize) -> Result<usize, Error> {
         let n = usize::try_from(self.number()?).map_err(|_| bad())?;
-        if n > max { Err(bad()) } else { Ok(n) }
+        if n > max {
+            Err(bad())
+        } else {
+            Ok(n)
+        }
     }
     fn bytes(&mut self) -> Result<&'a [u8], Error> {
         let n = self.count(self.0.len())?;

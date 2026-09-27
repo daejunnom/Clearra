@@ -1,9 +1,9 @@
 //! Exact, bounded pair partitioning shared by native threads and WASM workers.
 //! The coordinator alone owns probability aggregation and example selection.
 use super::{
+    population::{PopulationAccumulator, PreparedPopulation},
     RecoveryBuildError, RecoveryBuildFixedReport, RecoveryBuildPopulation, RecoveryBuildQuery,
     RecoveryBuildStatus,
-    population::{PopulationAccumulator, PreparedPopulation},
 };
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use std::collections::BTreeMap;
