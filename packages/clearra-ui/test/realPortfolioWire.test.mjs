@@ -24,9 +24,9 @@ test('real Rust portfolios validate, backtrack and copy the whole selected set i
   assert.equal(fixture.schema_id, 'clearra.v081.real-portfolio-wire-smoke.v2');
   assert.equal(fixture.cases.length, 8);
   assert.equal(fixture.multi_member_cases.length, 4);
-  const identity = fixture.runtime_identity;
-  assert.equal(identity?.source_commit, expectedSource, 'stale Rust fixture cannot be reused');
-  assert.equal(identity?.engine_build_id, expectedSource);
+  const compiledIdentity = fixture.runtime_identity;
+  assert.equal(compiledIdentity?.source_commit, expectedSource, 'stale Rust fixture cannot be reused');
+  assert.equal(compiledIdentity?.engine_build_id, expectedSource);
 
   const bundle = await build({
     bundle: true, format: 'esm', platform: 'node', logLevel: 'silent', write: false,
@@ -46,13 +46,13 @@ test('real Rust portfolios validate, backtrack and copy the whole selected set i
   const api = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
   const seen = new Set();
   for (const value of fixture.cases) {
-    const identity = `${value.build}:${value.legal}:${value.conditioned}`;
-    assert.equal(seen.has(identity), false);
-    seen.add(identity);
+    const caseIdentity = `${value.build}:${value.legal}:${value.conditioned}`;
+    assert.equal(seen.has(caseIdentity), false);
+    seen.add(caseIdentity);
     const response = value.final_response;
-    assert.deepEqual(response.runtime_identity, identity, 'one compiled generation across all requests');
+    assert.deepEqual(response.runtime_identity, compiledIdentity, 'one compiled generation across all requests');
     assert.equal(response.status, 'success');
-    assert.equal(api.validateProductResultPayload(response.product_result_payload), null, identity);
+    assert.equal(api.validateProductResultPayload(response.product_result_payload), null, caseIdentity);
     const pages = value.pages;
     assert.equal(pages.length, value.build ? 1 : 4);
     const first = pages[0].wire.page;
@@ -72,7 +72,7 @@ test('real Rust portfolios validate, backtrack and copy the whole selected set i
         setIdentitySha256: first.set_identity_sha256,
         candidateMapSha256: first.candidate_map_sha256,
         alternativeIndex: (index + 1).toString(), memberPageNumber: '1'
-      }), null, `${identity} page ${index + 1}`);
+      }), null, `${caseIdentity} page ${index + 1}`);
       const keys = page.members.map(member => member.normalized_solution_key);
       assert.equal(alternatives.has(JSON.stringify(keys)), false, 'ties cannot duplicate one exact set');
       alternatives.add(JSON.stringify(keys));
@@ -113,7 +113,7 @@ test('real Rust portfolios validate, backtrack and copy the whole selected set i
     }
     assert.deepEqual(value.restored, pages[0], 'native eviction/backtrack preserves page and copy bytes');
   }
-  await verifyRealMultiMemberPortfolios(api, fixture.multi_member_cases, identity);
+  await verifyRealMultiMemberPortfolios(api, fixture.multi_member_cases, compiledIdentity);
 });
 
 async function verifyRealMultiMemberPortfolios(api, cases, identity) {

@@ -136,3 +136,19 @@ read-only 자산 검증의 성공 또는 실패는 아직 관측하지 못했다
 CI 연결 계약 13개가 로컬에서 모두 통과했다. 새 Linux read-only 기능 실행은
 후속 CI에서 검증할 Open 항목이다. accepted Cloud Run image, 실제 browser/
 OPFS/IndexedDB, Tauri IPC, active-session peak와 릴리스 권위로 확대하지 않는다.
+
+## 후속 read-only 실제 CI 통과: `26630d24`
+
+[run 36349394915](https://github.com/daejunnom/Clearra/actions/runs/36349394915)은
+exact `26630d246e54642875c3486a5d95bccb1cd53e3d`에서 다섯 job이 성공했다.
+`native-products`도 success이며 동일 signed data의 native adapter, 실제
+Desktop job과 마지막 Linux read-only 비특권 `verify` step 모두 통과했다.
+dependency parser 수정 후 실제 resolved Ubuntu fixture를 사용했으며 Docker
+실행의 network-none/read-only/nobody/capability 제거 경계를 유지했다.
+
+여섯 번째 `product-wire-ui` job은 compiled identity와 입력 이름의 동명 변수로
+잘못 비교한 새 소비자 오류로 실패했다. 이 실패는 그대로 failure이며 read-only
+통과를 전체 CI 성공으로 바꾸지 않는다. 수정 소비자는 동일 CI의 실제 source-bound
+자료로 로컬 통과했고 [다중 member 기록](v081-multi-member-copy-source-bound-2026-09-28.md)에
+분리했다. 새 source CI, accepted Bookworm/Cloud Run image, 실제 browser/IPC,
+shared peak·성능 및 release 권위는 여전히 별도 Open이다.

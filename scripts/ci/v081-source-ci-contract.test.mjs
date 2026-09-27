@@ -5,6 +5,9 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { prepareClearraArguments } from '../../apps/clearra-discord-bot/src/clearra/command.mjs';
+import { realCliProductProjectionRequests, realCliProjectionProfiles }
+  from '../../apps/clearra-discord-bot/test/support/realCliProductProjectionRequests.mjs';
 
 const workflow = readFileSync(new URL('../../.github/workflows/v081-selective-source-ci.yml', import.meta.url), 'utf8').replace(/\r\n/gu, '\n');
 const fixture = readFileSync(new URL('../../crates/clearra-cli/src/accelerator_asset_store_repair_tests.rs', import.meta.url), 'utf8').replace(/\r\n/gu, '\n');
@@ -160,7 +163,8 @@ test('actual multi-page portfolio copy is source-bound and cannot silently skip 
   assert.ok(consumer.includes('fixture.multi_member_cases.length, 4'));
   assert.ok(consumer.includes('actual.pages.length, 246'));
   assert.ok(consumer.includes('!configuredRoot && !expectedSource'));
-  assert.ok(consumer.includes('identity?.source_commit, expectedSource'));
+  assert.ok(consumer.includes('compiledIdentity?.source_commit, expectedSource'));
+  assert.ok(consumer.includes('response.runtime_identity, compiledIdentity'));
   const environment = { ...process.env, CLEARRA_REAL_PORTFOLIO_SMOKE_DIR: '',
     CLEARRA_REAL_PORTFOLIO_SOURCE_COMMIT: 'f'.repeat(40) };
   delete environment.NODE_TEST_CONTEXT;
@@ -294,4 +298,58 @@ test('Desktop native proof reuses installed data before read-only admission and 
   assert.ok(source.includes('assert_eq!(cancelled["event"], "cancelled"'));
   assert.ok(!source.includes('Fake'));
   assert.ok(!source.includes('with_core_executor'));
+});
+
+test('real Discord result proof uses the existing CLI and production runner with no fake executor', () => {
+  const job = workflow.slice(workflow.indexOf('\n  native-products:'), workflow.indexOf('\n  wasm-abi:'));
+  const proof = job.slice(job.indexOf('- name: Verify real CLI products'),
+    job.indexOf('- name: Verify real Desktop native jobs'));
+  assert.ok(proof.startsWith('- name: Verify real CLI products'));
+  assert.ok(proof.includes("steps.compute-assets.outcome == 'success'"));
+  assert.ok(proof.includes('CLEARRA_REAL_COMPUTE_SOURCE_COMMIT: ${{ github.sha }}'));
+  assert.ok(proof.includes('CLEARRA_REAL_COMPUTE_CLI: ${{ github.workspace }}/build/cargo/default/debug/clearra'));
+  assert.ok(proof.includes('CLEARRA_REAL_COMPUTE_ASSET_ROOT: ${{ github.workspace }}/_local/artifacts/v081-compute-data-smoke'));
+  assert.ok(proof.includes('node --test apps/clearra-discord-bot/test/realCliProductProjection.test.mjs'));
+  for (const forbidden of ['cargo ', 'pnpm ', 'gcloud ', 'gh release download', 'benchmark'])
+    assert.ok(!proof.includes(forbidden));
+  const source = readFileSync(new URL('../../apps/clearra-discord-bot/test/realCliProductProjection.test.mjs', import.meta.url), 'utf8');
+  assert.ok(source.includes('new ClearraDirectExecutor({'));
+  assert.ok(source.includes('await executor.execute(arguments_)'));
+  assert.ok(source.includes('assertDiscordCanonicalOnlyResult(actual).stdout, actual.stdout'));
+  assert.ok(!source.includes('runner:'));
+  assert.ok(!source.includes('options.spawn'));
+  const environment = { ...process.env, CLEARRA_REAL_COMPUTE_CLI: '',
+    CLEARRA_REAL_COMPUTE_ASSET_ROOT: '', CLEARRA_REAL_COMPUTE_SOURCE_COMMIT: 'f'.repeat(40) };
+  delete environment.NODE_TEST_CONTEXT;
+  const incomplete = spawnSync(process.execPath, ['--test',
+    fileURLToPath(new URL('../../apps/clearra-discord-bot/test/realCliProductProjection.test.mjs', import.meta.url))], {
+    env: environment, encoding: 'utf8', timeout: 10_000, windowsHide: true,
+  });
+  assert.equal(incomplete.error, undefined);
+  assert.equal(incomplete.status, 1);
+  assert.match(incomplete.stdout, /# skipped 0/u);
+});
+
+test('every actual Discord product fixture obeys the existing closed command registry', () => {
+  let count = 0;
+  for (const profile of realCliProjectionProfiles) {
+    const requests = realCliProductProjectionRequests(profile);
+    assert.equal(requests.length, 13);
+    for (const request of requests) {
+      const prepared = prepareClearraArguments(request.arguments, { workers: 1,
+        logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true });
+      assert.ok(prepared.includes('--include-solution-data'));
+      assert.deepEqual(prepared.slice(-3), ['--format', 'json', '--include-solution-data']);
+      count += 1;
+    }
+    const build = requests.find(request => request.name === 'build-cover');
+    assert.equal(build.policy, 'default');
+    for (const flag of ['--legal-board', '--no-legal-board', '--conditioned-reachability',
+      '--no-conditioned-reachability', '--no-tablebase']) {
+      assert.ok(!build.arguments.includes(flag));
+      assert.throws(() => prepareClearraArguments([...build.arguments, flag]), /does not expose/u);
+    }
+  }
+  assert.equal(count, 65);
+  assert.throws(() => realCliProductProjectionRequests('unknown-profile'), /unknown/u);
 });

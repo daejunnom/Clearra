@@ -165,6 +165,15 @@ jobs:
           test "$CLEARRA_REAL_COMPUTE_ASSET_ROOT" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke"
           test -x "$CLEARRA_REAL_COMPUTE_CLI"
           node --test apps/clearra-discord-bot/test/realComputeAccelerators.test.mjs
+      - name: Verify real CLI products through the production Discord runner without publishing
+        if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' && steps.compute-assets.outcome == 'success' }}
+        env:
+          CLEARRA_REAL_COMPUTE_CLI: ${{ github.workspace }}/build/cargo/default/debug/clearra
+          CLEARRA_REAL_COMPUTE_ASSET_ROOT: ${{ github.workspace }}/_local/artifacts/v081-compute-data-smoke
+          CLEARRA_REAL_COMPUTE_SOURCE_COMMIT: ${{ github.sha }}
+          CLEARRA_LEGAL_BOARD_DIRECTORY: ${{ github.workspace }}/_local/artifacts/v081-compute-data-smoke/legal-board
+          CLEARRA_CONDITIONED_REACHABILITY_DIRECTORY: ${{ github.workspace }}/_local/artifacts/v081-compute-data-smoke/conditioned-reachability
+        run: node --test apps/clearra-discord-bot/test/realCliProductProjection.test.mjs
       - name: Verify real Desktop native jobs with the same installed signed assets
         if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' && steps.compute-assets.outcome == 'success' }}
         env:
