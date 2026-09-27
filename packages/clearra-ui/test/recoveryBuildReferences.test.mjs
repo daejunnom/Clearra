@@ -47,3 +47,12 @@ test('modified recovery components compile without warnings',async()=>{
   assert.deepEqual(compile(processed.code,{filename,generate:'client'}).warnings,[],name);
  }
 });
+
+test('all-processor opt-in reaches both browser and desktop command paths',()=>{
+ const full={...request,useAllLogicalProcessors:true};
+ const args=api.recoveryBuildArguments(full,12);
+ assert.ok(args.includes('--use-all-cpu-threads'));
+ assert.equal(args[args.indexOf('--workers')+1],'12');
+ assert.deepEqual(api.recoveryBuildDesktopRequest(full,'ko',12).arguments,args);
+ assert.ok(!api.recoveryBuildArguments(request,11).includes('--use-all-cpu-threads'));
+});

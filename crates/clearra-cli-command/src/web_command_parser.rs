@@ -358,6 +358,7 @@ impl WebCommandParser {
             }
             "recovery" if tokens.get(cursor).map(String::as_str) == Some("build") => {
                 recovery_build::parse(&tokens[cursor + 1..])
+                    .map(|request| request.with_worker_hardware_limit(worker_hardware_limit.max(1)))
             }
             "recovery" if tokens.get(cursor).map(String::as_str) == Some("boundary") => {
                 parse_boundary_recovery_command(&tokens[cursor + 1..])

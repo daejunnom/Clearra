@@ -63,6 +63,7 @@ export function recoveryBuildArguments(request: RecoveryBuildRequest, workers?: 
     request.allowPieceExchange ? '--allow-piece-exchange' : '--no-piece-exchange',
     request.holdEnabled ? '--hold' : '--no-hold', request.preserveB2B ? '--preserve-b2b' : '--no-preserve-b2b',
     '--initial-b2b', '1', '--rule', request.rule, '--spin-profile', request.spinProfile,
+    ...(request.useAllLogicalProcessors ? ['--use-all-cpu-threads'] : []),
     ...(workers === undefined ? [] : ['--workers', String(workers)])];
 }
 export const recoveryBuildCommand = (request: RecoveryBuildRequest, workers?: number): string => serializeCliCommandArguments(recoveryBuildArguments(request, workers));
