@@ -128,8 +128,7 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
     query
         .validate()
         .map_err(|error| fail(&format!("invalid recovery-build input: {error:?}")))?;
-    let request = WebCommandRequest::recovery_build(query)
-        .with_use_all_logical_processors(use_all);
+    let request = WebCommandRequest::recovery_build(query).with_use_all_logical_processors(use_all);
     Ok(match workers {
         Some(workers) => request.with_workers(workers),
         None => request,

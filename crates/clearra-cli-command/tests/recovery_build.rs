@@ -154,9 +154,10 @@ fn recovery_build_worker_budget_is_explicit_and_parallel_payload_matches_serial(
         for workers in [1, 2, 4, 11] {
             // Explicit host capacity makes the contract test independent of
             // how many processors this CI runner happens to provide.
-            let request = CliCommandParser::parse_with_worker_limit(&format!(
-                "{command} --workers {workers} --allow-piece-exchange {hold}"
-            ), 12)
+            let request = CliCommandParser::parse_with_worker_limit(
+                &format!("{command} --workers {workers} --allow-piece-exchange {hold}"),
+                12,
+            )
             .unwrap()
             .to_app_request()
             .unwrap();
@@ -189,11 +190,18 @@ fn recovery_build_preserves_injected_hardware_limit_and_ui_reserve() {
     ] {
         let all = if use_all { "--use-all-cpu-threads" } else { "" };
         let request = CliCommandParser::parse_with_worker_limit(
-            &format!("{BASE} --workers {requested} {all}"), logical,
-        ).unwrap().to_app_request().unwrap();
+            &format!("{BASE} --workers {requested} {all}"),
+            logical,
+        )
+        .unwrap()
+        .to_app_request()
+        .unwrap();
         assert_eq!(request.resource_budget().workers(), expected);
     }
-    assert!(CliCommandParser::parse(&format!(
-        "{BASE} --use-all-cpu-threads --use-all-logical-processors"
-    )).is_err());
+    assert!(
+        CliCommandParser::parse(&format!(
+            "{BASE} --use-all-cpu-threads --use-all-logical-processors"
+        ))
+        .is_err()
+    );
 }
