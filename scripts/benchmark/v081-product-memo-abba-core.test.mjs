@@ -25,3 +25,29 @@ test('selection must be echoed by the actual solver before its timing can be acc
   assert.throws(() => assertProductMemoSelection({}, selected), /not applied/);
   assert.throws(() => productMemoAbbaSelection('unknown', 'baseline'));
 });
+
+test('adaptive receipts distinguish policy from actual per-worker layout and prove large-case promotion', () => {
+  const selection = productMemoAbbaSelection('adaptive', 'treatment');
+  assert.deepEqual(selection, { storage: 'reference', layout: 'adaptive', label: 'adaptive' });
+  assert.deepEqual(productMemoAbbaSelection('adaptive', 'baseline'), { storage: 'reference', layout: 'flat', label: 'reference' });
+  const small = { standard_bag_product_memo_policy: 'adaptive',
+    standard_bag_product_memo_layout: 'flat', standard_bag_memo_storage: 'reference',
+    standard_bag_product_memo_storage: 'reference', standard_bag_union_memo_storage: 'reference',
+    standard_bag_product_memo_promotion_attempts: 0, standard_bag_product_memo_promotions: 0 };
+  assert.doesNotThrow(() => assertProductMemoSelection(small, selection));
+  assert.throws(() => assertProductMemoSelection(small, selection, { requirePromotion: true }), /promotion/);
+  for (const layout of ['state-major', 'mixed']) {
+    const large = { ...small, standard_bag_product_memo_layout: layout,
+      standard_bag_product_memo_storage: layout, standard_bag_memo_storage: layout,
+      standard_bag_product_memo_promotion_attempts: 2, standard_bag_product_memo_promotions: 1 };
+    assert.doesNotThrow(() => assertProductMemoSelection(large, selection, { requirePromotion: true }));
+    assert.throws(() => assertProductMemoSelection({ ...large, standard_bag_product_memo_promotions: 0 }, selection), /promotion/);
+    assert.throws(() => assertProductMemoSelection({ ...large, standard_bag_product_memo_promotion_attempts: 0 }, selection), /promotion/);
+  }
+  assert.throws(() => assertProductMemoSelection({ ...small, standard_bag_product_memo_policy: undefined }, selection), /policy/);
+  assert.throws(() => assertProductMemoSelection({ ...small, standard_bag_union_memo_storage: 'compact' }, selection), /union/);
+  assert.throws(() => assertProductMemoSelection({ ...small, standard_bag_product_memo_promotions: 1 }, selection), /promotion/);
+  for (const value of [undefined, null, true, '', ' ', NaN, Infinity, -1, 0.5]) {
+    assert.throws(() => assertProductMemoSelection({ ...small, standard_bag_product_memo_promotions: value }, selection), /promotion/);
+  }
+});

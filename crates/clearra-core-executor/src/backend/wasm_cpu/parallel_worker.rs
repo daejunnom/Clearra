@@ -891,6 +891,7 @@ mod tests {
             // Nested memo payload must not be added to the total again.
             standard_bag_memo_payload_bytes: 144,
             standard_bag_memo: StandardBagMemoAccounting {
+                product_policy: "adaptive",
                 product_layout: "state-major",
                 product_storage: "state-major",
                 union_storage: "reference",
@@ -904,6 +905,8 @@ mod tests {
                 product_active_rows: 2,
                 product_allocated_rows: 3,
                 product_row_slots: 1024,
+                product_promotion_attempts: 2,
+                product_promotions: 1,
             },
             // Eleven workers share this exact request owner once.
             shared_standard_bag_request_bytes: 64,
@@ -944,8 +947,23 @@ mod tests {
         assert_eq!(memo.product_allocated_rows, 33);
         assert_eq!(memo.product_row_slots, 11 * 1024);
         assert_eq!(memo.product_layout, "state-major");
+        assert_eq!(memo.product_policy, "adaptive");
+        assert_eq!(memo.product_promotion_attempts, 22);
+        assert_eq!(memo.product_promotions, 11);
         assert_eq!(memo.product_storage, "state-major");
         assert_eq!(memo.union_storage, "reference");
+        let mut mixed = memo;
+        mixed.merge(StandardBagMemoAccounting {
+            product_policy: "adaptive",
+            product_layout: "flat",
+            product_storage: "reference",
+            union_storage: "reference",
+            ..Default::default()
+        });
+        assert_eq!(mixed.product_policy, "adaptive");
+        assert_eq!(mixed.product_layout, "mixed");
+        assert_eq!(mixed.product_storage, "mixed");
+        assert_eq!(mixed.product_promotions, 11);
         assert_eq!(
             total
                 .worker_memory_components

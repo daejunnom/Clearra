@@ -92,6 +92,11 @@ async function main(argv) {
     const value = JSON.parse(checked.stdout.split(/(?:^|\r?\n)clearra_runtime_receipt=/)[0].trim());
     assert.equal(value.summary.backend_selected, 'wasm-cpu');
     assertProductMemoSelection(value.summary, selected);
+    if (candidate === 'adaptive' && arm === 'treatment') {
+      assert.equal(value.summary.standard_bag_product_memo_layout, 'flat');
+      assert.equal(Number(value.summary.standard_bag_product_memo_directory_bytes), 0);
+      assert.equal(Number(value.summary.standard_bag_product_memo_promotions), 0);
+    }
   }
   const samples = [];
   let identity, runtimeIdentity, failure;
@@ -131,7 +136,7 @@ async function main(argv) {
       sample.parallel_active_workers = Number(summary.parallel_active_workers);
       sample.cpu_parallel_execution = summary.cpu_parallel_execution === true || summary.cpu_parallel_execution === 'true';
       assertWorkerExecution(sample, workers, true);
-      assertProductMemoSelection(summary, selection);
+      assertProductMemoSelection(summary, selection, { requirePromotion: candidate === 'adaptive' && slot.arm === 'treatment' });
       assert.equal(Number(summary.candidate_digest_retained_bytes), 0);
       assert.equal(Number(summary.legal_board_verified_negative_prunes), 0);
       assert.equal(Number(summary.reachability_conditioned_complete_hits), 0);

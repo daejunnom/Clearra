@@ -156,3 +156,60 @@ LF 정규형의 catalog digest는 기존 qualified 자산의 identity와 정확�
 public key, catalog 내용, asset generation은 변경하지 않는다. 기존 두 CI 계약과
 새 두 계약은 로컬에서 4/4 통과했다. 수정된 executable의 native status와 가속기
 ABBA는 별도 후속 검증이며, 기존 Linux CI success를 이 수정의 success로 재사용하지 않는다.
+
+## State-major 동적 제품 정책 후보
+
+사용자의 후속 지시에 따라 제품 정책을 `adaptive`로 변경한다. 작은 입력의
+디렉터리 비용을 피하기 위해 새 요청/워커의 product memo는 항상 flat으로 시작한다.
+피스 수나 요청 워커 수만으로 State-major를 선택하지 않는다.
+
+- 실제 live entry 수가 예상 directory 비용의 두 배를 상쇄할 수 있을 때 첫 cost
+  probe를 수행한다. 첫 probe와 이후 probe는 2의 거듭제곱/기하급수적 간격으로 제한한다.
+- flat의 전체 `(language, depth, bag, hold) → root`를 정확히 복사한다. row별 실제
+  population으로 한 번씩 예약하고, entry capacity payload와 directory를 합친 값이
+  flat payload보다 12.5% 이상 작을 때만 기존 owner를 원자적으로 교체한다.
+- 이는 logical retained payload의 기준이다. allocator/control bytes, migration 중
+  peak, 사용자 wall time의 개선을 증명하는 수치로 표현하지 않는다.
+- allocation 또는 key-domain 불일치가 발생하면 이미 삽입된 새 root까지 포함한 flat
+  source를 보존하며 그 요청의 promotion을 재시도하지 않는다. resource cap이나 worker
+  수를 바꾸지 않는다. 비용만 불리한 probe는 entry 수가 두 배가 될 때 다시 평가한다.
+- 큰 요청 안의 epoch recycle은 전환된 capacity를 유지한다. 새로운 작은 요청은 그
+  capacity/worker-local node ID를 상속하지 않는다. union memo와 immutable request
+  table의 공유/개인 소유 경계는 변경하지 않는다.
+
+영수증에는 `standard_bag_product_memo_policy`, 실제 layout/storage,
+promotion attempts 및 promotions를 별도로 남긴다. 다른 크기의 작업을 맡은 워커가
+flat/State-major로 나뉘면 실제 layout은 `mixed`, 정책은 `adaptive`로 집계한다.
+로컬 A/B의 강제 flat/State-major/compact 제어는 유지하며, 하네스에 `--candidate
+adaptive`를 추가했다. 작은 P7 preflight는 flat/zero directory를 요구하고 큰 P7P4
+treatment는 실제 promotion 증거를 요구한다. 선택을 무시한 이전 binary는 거절한다.
+
+로컬 증거:
+
+| 검사 | 관측 | 한계 |
+| --- | --- | --- |
+| 기본 Core 및 parallel typecheck | 경고 없이 통과 | runtime benchmark 아님 |
+| `v081_` 집중 Rust | 27/27 통과 | 감독 post-exit 경고는 별도 실패로 보존 |
+| A/B feature 없는 제품 정책 테스트 | 5/5 통과, native 명령 exit 0 | 작은 bounded unit test이며 P7P4 whole-product 완주 증거 아님 |
+| 하네스/회계/CI 순수 Node 계약 | 27/27 통과 | 실제 새 binary의 ABBA 아님 |
+| strict Clippy | 차단: dependency codec 및 `--no-deps` Core의 기존 lint 25개 | 새 memo 변경 위치의 lint는 없었지만 전체 Clippy 통과로 기록하지 않음 |
+| Windows WASM typecheck | `curve25519-dalek` build-script 실행 전 OS error 4551로 차단 | 비게시 Linux CI의 현재 source 결과 필요 |
+
+두 감독 영수증 `1790504677533664500-27992-runtime.json` 및
+`1790504878348159600-34428-runtime.json`은 pressure 0, root 테스트 성공 후
+`descendant_processes_at_exit=1`, `reason=tree-not-stopped`, return 125다.
+cleanup 이후 `process_tree_stopped=true`이며 이를 정상 감독 종료 또는 OOM으로
+다시 분류하지 않는다. 감독기는 정상 root 종료 시 configured grace를 사용하지 않고
+collector join 뒤 남은 tree를 바로 강제 정리한다. 정확한 descendant 원인과 finite
+post-exit drain은 별도 미완료 항목으로 유지하며 이번 memo 수정에서 완화하지 않는다.
+
+기존 conditioned context 준비 캐시는 이미 frame/piece 단위로 존재한다. 후속 비용
+분리는 이 준비를 반복하는 것으로 가정하지 않고 board별 prepared-record 조회와
+miss 통과, hit의 exit composition을 구분해야 한다. union memo의 두 node ID는
+worker/epoch-local namespace이므로 동일 numeric key만으로 전역 공유하지 않는다.
+
+다음 검증은 새 binary에서 flat/adaptive 11-worker P7P4 및 작은 P7을 같은 실행
+조건으로 비교하고 migration peak와 실제 전환 수를 함께 확인하는 것이다. 이미
+완료한 강제 State-major 및 두 accelerator의 이전 ABBA는 재실행하거나 새 정책의
+성능 증거로 재명명하지 않는다. v0.8.1의 p95/shared-memory/surface/release gate는
+여전히 Open이며 main, Pages, 4194, v0.9.0 TB는 이 변경으로 갱신하지 않는다.

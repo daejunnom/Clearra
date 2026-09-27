@@ -481,6 +481,7 @@ impl SharedStandardBagRequest {
 #[derive(Clone, Copy, Debug)]
 #[cfg(any(feature = "parallel", test))]
 pub(super) struct StandardBagMemoAccounting {
+    pub product_policy: &'static str,
     pub product_layout: &'static str,
     pub product_storage: &'static str,
     pub union_storage: &'static str,
@@ -494,12 +495,15 @@ pub(super) struct StandardBagMemoAccounting {
     pub product_active_rows: usize,
     pub product_allocated_rows: usize,
     pub product_row_slots: usize,
+    pub product_promotion_attempts: usize,
+    pub product_promotions: usize,
 }
 
 #[cfg(any(feature = "parallel", test))]
 impl Default for StandardBagMemoAccounting {
     fn default() -> Self {
         Self {
+            product_policy: "not-used",
             product_layout: "not-used",
             product_storage: "not-used",
             union_storage: "not-used",
@@ -513,6 +517,8 @@ impl Default for StandardBagMemoAccounting {
             product_active_rows: 0,
             product_allocated_rows: 0,
             product_row_slots: 0,
+            product_promotion_attempts: 0,
+            product_promotions: 0,
         }
     }
 }
@@ -529,6 +535,7 @@ impl StandardBagMemoAccounting {
                 _ => "mixed",
             }
         }
+        self.product_policy = labels(self.product_policy, other.product_policy);
         self.product_layout = labels(self.product_layout, other.product_layout);
         self.product_storage = labels(self.product_storage, other.product_storage);
         self.union_storage = labels(self.union_storage, other.union_storage);
@@ -554,6 +561,12 @@ impl StandardBagMemoAccounting {
         self.product_row_slots = self
             .product_row_slots
             .saturating_add(other.product_row_slots);
+        self.product_promotion_attempts = self
+            .product_promotion_attempts
+            .saturating_add(other.product_promotion_attempts);
+        self.product_promotions = self
+            .product_promotions
+            .saturating_add(other.product_promotions);
     }
 }
 
@@ -653,8 +666,8 @@ impl StandardBagCoverage {
         projects_unplaced_lookahead: bool,
         tables: Arc<StandardBagRequestTables>,
     ) -> Result<Self, WasmExactSearchError> {
-        // A local A/B build selects storage once, outside language hot loops.
-        // Release builds always retain the accepted reference representation.
+        // Product builds adapt their layout to live per-worker memo cost. Only
+        // local A/B builds may force a layout or change union slot storage.
         let memo_storage = ExactU64MemoStorage::from_environment()
             .map_err(WasmExactSearchError::InvalidProblem)?;
         let product_layout = StandardBagProductMemoLayout::from_environment()
@@ -839,7 +852,9 @@ impl StandardBagCoverage {
 
     #[cfg(any(feature = "parallel", test))]
     pub fn memo_accounting(&self) -> StandardBagMemoAccounting {
+        let (product_promotion_attempts, product_promotions) = self.product_memo.promotion_counts();
         StandardBagMemoAccounting {
+            product_policy: self.product_memo.policy().label(),
             product_layout: self.product_memo.layout().label(),
             product_storage: self.product_memo.storage_label(),
             union_storage: self.union_memo.storage().label(),
@@ -853,6 +868,8 @@ impl StandardBagCoverage {
             product_active_rows: self.product_memo.active_rows(),
             product_allocated_rows: self.product_memo.allocated_rows(),
             product_row_slots: self.product_memo.row_slots(),
+            product_promotion_attempts,
+            product_promotions,
         }
     }
 

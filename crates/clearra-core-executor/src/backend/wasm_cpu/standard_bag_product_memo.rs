@@ -1,6 +1,5 @@
 use super::compact_exact_u64_map::{ExactU64MemoMap, ExactU64MemoStorage};
 
-#[cfg(any(feature = "local-search-ab", test))]
 use std::{
     collections::HashMap,
     hash::{BuildHasher, Hasher},
@@ -11,10 +10,13 @@ const _: () = assert!(core::mem::size_of::<(u32, u32)>() == 8);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum StandardBagProductMemoLayout {
-    /// The accepted product representation and its existing compact A/B arm.
+    /// Start flat; promote only after the worker's live memo amortizes row costs.
     #[default]
+    Adaptive,
+    /// Explicit reference and compact A/B controls, never inferred from workers.
+    #[cfg(any(feature = "parallel", feature = "local-search-ab", test))]
     Flat,
-    #[cfg(any(feature = "local-search-ab", test))]
+    #[cfg(any(feature = "parallel", feature = "local-search-ab", test))]
     StateMajor,
 }
 
@@ -26,7 +28,7 @@ impl StandardBagProductMemoLayout {
         }
         #[cfg(not(feature = "local-search-ab"))]
         {
-            Ok(Self::Flat)
+            Ok(Self::Adaptive)
         }
     }
 
@@ -46,7 +48,8 @@ impl StandardBagProductMemoLayout {
     #[cfg(any(feature = "local-search-ab", test))]
     fn from_label(label: Option<&str>) -> Result<Self, &'static str> {
         match label {
-            None | Some("flat") => Ok(Self::Flat),
+            None | Some("adaptive") => Ok(Self::Adaptive),
+            Some("flat") => Ok(Self::Flat),
             Some("state-major") => Ok(Self::StateMajor),
             Some(_) => Err("wasm_standard_bag_product_memo_layout_invalid"),
         }
@@ -55,8 +58,8 @@ impl StandardBagProductMemoLayout {
     #[cfg(any(feature = "parallel", test))]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Adaptive => "adaptive",
             Self::Flat => "flat",
-            #[cfg(any(feature = "local-search-ab", test))]
             Self::StateMajor => "state-major",
         }
     }
@@ -93,24 +96,44 @@ impl StandardBagProductMemoKey {
             | (self.bag_remainder as u64) << 40
             | (self.hold_code as u64) << 48
     }
+
+    fn from_packed(value: u64) -> Option<Self> {
+        let key = Self::new(
+            value as u32,
+            (value >> 32) as u8,
+            (value >> 40) as u8,
+            (value >> 48) as u8,
+        );
+        // Never truncate unknown high bits or silently renormalize a stored key.
+        (key.packed() == value).then_some(key)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ProductMemoAdmissionError {
     Capacity,
-    #[cfg(any(feature = "local-search-ab", test))]
     OutOfScope,
 }
 
 pub(super) struct StandardBagProductMemo {
     storage: ProductMemoStorage,
+    policy: StandardBagProductMemoLayout,
+    adaptive: Option<AdaptiveProductMemo>,
     #[cfg(test)]
     failed_admissions_remaining: usize,
+    #[cfg(test)]
+    fail_promotion: bool,
+}
+
+struct AdaptiveProductMemo {
+    max_source_depth: u8,
+    next_check_len: usize,
+    promotion_attempts: usize,
+    promotions: usize,
 }
 
 enum ProductMemoStorage {
     Flat(ExactU64MemoMap),
-    #[cfg(any(feature = "local-search-ab", test))]
     StateMajor(StateMajorProductMemo),
 }
 
@@ -120,24 +143,33 @@ impl StandardBagProductMemo {
         flat_storage: ExactU64MemoStorage,
         max_source_depth: u8,
     ) -> Self {
-        #[cfg(not(any(feature = "local-search-ab", test)))]
-        let _ = max_source_depth;
         Self {
             storage: match layout {
+                StandardBagProductMemoLayout::Adaptive => {
+                    ProductMemoStorage::Flat(ExactU64MemoMap::new(flat_storage))
+                }
+                #[cfg(any(feature = "parallel", feature = "local-search-ab", test))]
                 StandardBagProductMemoLayout::Flat => {
                     ProductMemoStorage::Flat(ExactU64MemoMap::new(flat_storage))
                 }
-                #[cfg(any(feature = "local-search-ab", test))]
+                #[cfg(any(feature = "parallel", feature = "local-search-ab", test))]
                 StandardBagProductMemoLayout::StateMajor => {
-                    ProductMemoStorage::StateMajor(StateMajorProductMemo {
-                        max_source_depth,
-                        rows: Vec::new(),
-                        entry_count: 0,
-                    })
+                    ProductMemoStorage::StateMajor(StateMajorProductMemo::new(max_source_depth))
                 }
             },
+            policy: layout,
+            adaptive: (layout == StandardBagProductMemoLayout::Adaptive).then(|| {
+                AdaptiveProductMemo {
+                    max_source_depth,
+                    next_check_len: adaptive_first_check_len(max_source_depth, flat_storage),
+                    promotion_attempts: 0,
+                    promotions: 0,
+                }
+            }),
             #[cfg(test)]
             failed_admissions_remaining: 0,
+            #[cfg(test)]
+            fail_promotion: false,
         }
     }
 
@@ -145,7 +177,6 @@ impl StandardBagProductMemo {
     pub const fn layout(&self) -> StandardBagProductMemoLayout {
         match &self.storage {
             ProductMemoStorage::Flat(_) => StandardBagProductMemoLayout::Flat,
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(_) => StandardBagProductMemoLayout::StateMajor,
         }
     }
@@ -154,7 +185,6 @@ impl StandardBagProductMemo {
     pub const fn storage_label(&self) -> &'static str {
         match &self.storage {
             ProductMemoStorage::Flat(memo) => memo.storage().label(),
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(_) => "state-major",
         }
     }
@@ -163,7 +193,6 @@ impl StandardBagProductMemo {
     pub fn get(&self, key: &StandardBagProductMemoKey) -> Option<&u32> {
         match &self.storage {
             ProductMemoStorage::Flat(memo) => memo.get(&key.packed()),
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(memo) => {
                 let row_index = memo.row_index(*key)?;
                 memo.rows.get(row_index)?.as_ref()?.get(&key.language_node)
@@ -175,7 +204,6 @@ impl StandardBagProductMemo {
     pub fn contains_key(&self, key: &StandardBagProductMemoKey) -> bool {
         match &self.storage {
             ProductMemoStorage::Flat(memo) => memo.contains_key(&key.packed()),
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(_) => self.get(key).is_some(),
         }
     }
@@ -194,9 +222,8 @@ impl StandardBagProductMemo {
             return Err(ProductMemoAdmissionError::Capacity);
         }
         self.try_reserve_for(key, 1)?;
-        match &mut self.storage {
+        let previous = match &mut self.storage {
             ProductMemoStorage::Flat(memo) => Ok(memo.insert(key.packed(), value)),
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(memo) => {
                 let row_index = memo
                     .row_index(key)
@@ -210,7 +237,11 @@ impl StandardBagProductMemo {
                 }
                 Ok(previous)
             }
+        }?;
+        if previous.is_none() {
+            self.maybe_promote();
         }
+        Ok(previous)
     }
 
     /// Deterministic admission-failure fixture, absent from every product and
@@ -225,22 +256,16 @@ impl StandardBagProductMemo {
         key: StandardBagProductMemoKey,
         additional: usize,
     ) -> Result<(), ProductMemoAdmissionError> {
-        #[cfg(not(any(feature = "local-search-ab", test)))]
-        let _ = key;
         match &mut self.storage {
             ProductMemoStorage::Flat(memo) => memo
                 .try_reserve(additional)
                 .map_err(|_| ProductMemoAdmissionError::Capacity),
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(memo) => {
                 let row_index = memo
                     .row_index(key)
                     .ok_or(ProductMemoAdmissionError::OutOfScope)?;
                 if memo.rows.is_empty() {
-                    let row_count = usize::from(memo.max_source_depth)
-                        .checked_add(1)
-                        .and_then(|depths| depths.checked_mul(128 * 8))
-                        .ok_or(ProductMemoAdmissionError::Capacity)?;
+                    let row_count = memo.row_count();
                     memo.rows
                         .try_reserve_exact(row_count)
                         .map_err(|_| ProductMemoAdmissionError::Capacity)?;
@@ -261,7 +286,6 @@ impl StandardBagProductMemo {
     pub fn clear(&mut self) {
         match &mut self.storage {
             ProductMemoStorage::Flat(memo) => memo.clear(),
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(memo) => {
                 for row in memo.rows.iter_mut().flatten() {
                     row.clear();
@@ -274,7 +298,6 @@ impl StandardBagProductMemo {
     pub fn len(&self) -> usize {
         match &self.storage {
             ProductMemoStorage::Flat(memo) => memo.len(),
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(memo) => memo.entry_count,
         }
     }
@@ -284,18 +307,15 @@ impl StandardBagProductMemo {
     pub fn retained_payload_bytes(&self) -> usize {
         match &self.storage {
             ProductMemoStorage::Flat(memo) => memo.retained_payload_bytes(),
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(_) => self
                 .capacity()
                 .saturating_mul(core::mem::size_of::<(u32, u32)>()),
         }
     }
 
-    #[cfg(any(feature = "parallel", feature = "local-search-ab", test))]
     pub fn capacity(&self) -> usize {
         match &self.storage {
             ProductMemoStorage::Flat(memo) => memo.capacity(),
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(memo) => memo
                 .rows
                 .iter()
@@ -307,7 +327,6 @@ impl StandardBagProductMemo {
     pub fn directory_retained_bytes(&self) -> usize {
         match &self.storage {
             ProductMemoStorage::Flat(_) => 0,
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(memo) => memo
                 .rows
                 .capacity()
@@ -319,7 +338,6 @@ impl StandardBagProductMemo {
     pub fn active_rows(&self) -> usize {
         match &self.storage {
             ProductMemoStorage::Flat(_) => 0,
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(memo) => memo
                 .rows
                 .iter()
@@ -333,7 +351,6 @@ impl StandardBagProductMemo {
     pub fn allocated_rows(&self) -> usize {
         match &self.storage {
             ProductMemoStorage::Flat(_) => 0,
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(memo) => memo
                 .rows
                 .iter()
@@ -347,24 +364,173 @@ impl StandardBagProductMemo {
     pub fn row_slots(&self) -> usize {
         match &self.storage {
             ProductMemoStorage::Flat(_) => 0,
-            #[cfg(any(feature = "local-search-ab", test))]
             ProductMemoStorage::StateMajor(memo) => memo.rows.capacity(),
         }
     }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub const fn policy(&self) -> StandardBagProductMemoLayout {
+        self.policy
+    }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub fn promotion_counts(&self) -> (usize, usize) {
+        self.adaptive.as_ref().map_or((0, 0), |policy| {
+            (policy.promotion_attempts, policy.promotions)
+        })
+    }
+
+    /// Geometric checks keep failed cost probes amortized, not per-insert scans.
+    /// Copy first, then atomically replace: even a late allocation failure keeps
+    /// every exact entry and the newly computed root in the flat source.
+    #[inline]
+    fn maybe_promote(&mut self) {
+        if self.policy != StandardBagProductMemoLayout::Adaptive {
+            return;
+        }
+        if let (Some(policy), ProductMemoStorage::Flat(source)) = (&self.adaptive, &self.storage) {
+            if source.len() >= policy.next_check_len {
+                self.promote_flat();
+            }
+        }
+    }
+
+    #[cold]
+    fn promote_flat(&mut self) {
+        let Some(policy) = &mut self.adaptive else {
+            return;
+        };
+        let ProductMemoStorage::Flat(source) = &self.storage else {
+            return;
+        };
+        policy.next_check_len = source.len().saturating_mul(2);
+        policy.promotion_attempts = policy.promotion_attempts.saturating_add(1);
+        #[cfg(test)]
+        if self.fail_promotion {
+            policy.next_check_len = usize::MAX;
+            return;
+        }
+        let candidate = match StateMajorProductMemo::copy_from(source, policy.max_source_depth) {
+            Ok(candidate) => candidate,
+            Err(_) => {
+                // No allocation retry or changed resources after admission failure.
+                policy.next_check_len = usize::MAX;
+                return;
+            }
+        };
+        let target_bytes = candidate
+            .retained_payload_bytes()
+            .saturating_add(candidate.directory_retained_bytes());
+        // Require >=12.5% retained logical payload savings, including directory.
+        // This is not a claim about allocator overhead or OS peak memory.
+        let cost_limit = source
+            .retained_payload_bytes()
+            .saturating_sub(source.retained_payload_bytes() / 8);
+        if target_bytes > cost_limit {
+            return;
+        }
+        policy.promotions = policy.promotions.saturating_add(1);
+        self.storage = ProductMemoStorage::StateMajor(candidate);
+    }
 }
 
-#[cfg(any(feature = "local-search-ab", test))]
 type StateMajorRow = HashMap<u32, u32, StateMajorRowHasher>;
 
-#[cfg(any(feature = "local-search-ab", test))]
 struct StateMajorProductMemo {
     max_source_depth: u8,
     rows: Vec<Option<StateMajorRow>>,
     entry_count: usize,
 }
 
-#[cfg(any(feature = "local-search-ab", test))]
 impl StateMajorProductMemo {
+    const fn new(max_source_depth: u8) -> Self {
+        Self {
+            max_source_depth,
+            rows: Vec::new(),
+            entry_count: 0,
+        }
+    }
+
+    fn row_count(&self) -> usize {
+        (usize::from(self.max_source_depth) + 1) * 128 * 8
+    }
+
+    fn retained_payload_bytes(&self) -> usize {
+        self.rows
+            .iter()
+            .flatten()
+            .map(|row| {
+                row.capacity()
+                    .saturating_mul(core::mem::size_of::<(u32, u32)>())
+            })
+            .fold(0, usize::saturating_add)
+    }
+
+    fn directory_retained_bytes(&self) -> usize {
+        self.rows
+            .capacity()
+            .saturating_mul(core::mem::size_of::<Option<StateMajorRow>>())
+    }
+
+    fn copy_from(
+        source: &ExactU64MemoMap,
+        max_source_depth: u8,
+    ) -> Result<Self, ProductMemoAdmissionError> {
+        let mut target = Self::new(max_source_depth);
+        let row_count = target.row_count();
+        let mut counts = Vec::new();
+        counts
+            .try_reserve_exact(row_count)
+            .map_err(|_| ProductMemoAdmissionError::Capacity)?;
+        counts.resize(row_count, 0_usize);
+        source.try_visit_entries(|packed, _| {
+            let key = StandardBagProductMemoKey::from_packed(packed)
+                .ok_or(ProductMemoAdmissionError::OutOfScope)?;
+            let index = target
+                .row_index(key)
+                .ok_or(ProductMemoAdmissionError::OutOfScope)?;
+            counts[index] += 1;
+            Ok(())
+        })?;
+        target
+            .rows
+            .try_reserve_exact(row_count)
+            .map_err(|_| ProductMemoAdmissionError::Capacity)?;
+        target.rows.resize_with(row_count, || None);
+        // Reserve each row once from its exact population, avoiding per-key
+        // rehashing and insertion-order-dependent capacity during migration.
+        for (index, count) in counts
+            .into_iter()
+            .enumerate()
+            .filter(|(_, count)| *count != 0)
+        {
+            let hold = index % 8;
+            let bag = (index / 8) % 128;
+            let depth = index / (128 * 8);
+            let prefix = (depth as u64) << 32 | (bag as u64) << 40 | (hold as u64) << 48;
+            let mut row = StateMajorRow::with_hasher(StateMajorRowHasher {
+                source_prefix: prefix,
+            });
+            row.try_reserve(count)
+                .map_err(|_| ProductMemoAdmissionError::Capacity)?;
+            target.rows[index] = Some(row);
+        }
+        source.try_visit_entries(|packed, value| {
+            let key = StandardBagProductMemoKey::from_packed(packed)
+                .ok_or(ProductMemoAdmissionError::OutOfScope)?;
+            let index = target
+                .row_index(key)
+                .ok_or(ProductMemoAdmissionError::OutOfScope)?;
+            let row = target.rows[index]
+                .as_mut()
+                .ok_or(ProductMemoAdmissionError::Capacity)?;
+            row.insert(key.language_node, value);
+            Ok(())
+        })?;
+        target.entry_count = source.len();
+        Ok(target)
+    }
+
     #[inline]
     fn row_index(&self, key: StandardBagProductMemoKey) -> Option<usize> {
         if key.depth > self.max_source_depth
@@ -380,16 +546,35 @@ impl StateMajorProductMemo {
     }
 }
 
+fn adaptive_first_check_len(max_source_depth: u8, storage: ExactU64MemoStorage) -> usize {
+    let directory_bytes = (usize::from(max_source_depth) + 1)
+        * 128
+        * 8
+        * core::mem::size_of::<Option<StateMajorRow>>();
+    let flat_slot_bytes = match storage {
+        ExactU64MemoStorage::Reference => core::mem::size_of::<(u64, u32)>(),
+        #[cfg(any(feature = "local-search-ab", test))]
+        ExactU64MemoStorage::Compact => 12,
+    };
+    let savings_per_entry = flat_slot_bytes.saturating_sub(core::mem::size_of::<(u32, u32)>());
+    // Do not even allocate a row directory until twice its cost can amortize.
+    // Works with pointer-width-dependent row sizes on native and WASM alike.
+    directory_bytes
+        .saturating_mul(2)
+        .div_ceil(savings_per_entry.max(1))
+        .max(1)
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX)
+}
+
 /// Match the accepted flat hasher's full packed-key SplitMix64 input, although
 /// only a u32 language reference is resident in each entry. The source prefix
 /// lives once per row and its bytes belong to the directory payload.
-#[cfg(any(feature = "local-search-ab", test))]
 #[derive(Clone, Copy)]
 struct StateMajorRowHasher {
     source_prefix: u64,
 }
 
-#[cfg(any(feature = "local-search-ab", test))]
 impl BuildHasher for StateMajorRowHasher {
     type Hasher = LanguageNodeHasher;
 
@@ -401,13 +586,11 @@ impl BuildHasher for StateMajorRowHasher {
     }
 }
 
-#[cfg(any(feature = "local-search-ab", test))]
 struct LanguageNodeHasher {
     source_prefix: u64,
     hash: u64,
 }
 
-#[cfg(any(feature = "local-search-ab", test))]
 impl Hasher for LanguageNodeHasher {
     fn finish(&self) -> u64 {
         self.hash
@@ -427,7 +610,6 @@ impl Hasher for LanguageNodeHasher {
     }
 }
 
-#[cfg(any(feature = "local-search-ab", test))]
 fn mix_language_node(mut value: u64) -> u64 {
     value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -555,10 +737,14 @@ mod tests {
     }
 
     #[test]
-    fn v081_state_major_product_memo_selector_preserves_reference_and_compact_defaults() {
+    fn v081_state_major_product_memo_selector_defaults_to_adaptive_with_explicit_controls() {
         assert_eq!(
             StandardBagProductMemoLayout::from_label(None),
-            Ok(StandardBagProductMemoLayout::Flat)
+            Ok(StandardBagProductMemoLayout::Adaptive)
+        );
+        assert_eq!(
+            StandardBagProductMemoLayout::from_label(Some("adaptive")),
+            Ok(StandardBagProductMemoLayout::Adaptive)
         );
         assert_eq!(
             StandardBagProductMemoLayout::from_label(Some("flat")),
@@ -601,5 +787,150 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn adaptive(max_source_depth: u8) -> StandardBagProductMemo {
+        StandardBagProductMemo::new(
+            StandardBagProductMemoLayout::Adaptive,
+            ExactU64MemoStorage::Reference,
+            max_source_depth,
+        )
+    }
+
+    #[test]
+    fn v081_adaptive_product_memo_small_requests_have_no_directory_or_promotion() {
+        let mut memo = adaptive(10);
+        let threshold = memo.adaptive.as_ref().unwrap().next_check_len;
+        assert_eq!(
+            threshold,
+            adaptive_first_check_len(10, ExactU64MemoStorage::Reference)
+        );
+        for language in 0..1024 {
+            let key = StandardBagProductMemoKey::new(language, 2, 3, 4);
+            assert_eq!(memo.try_insert(key, u32::MAX - language), Ok(None));
+            assert_eq!(memo.get(&key), Some(&(u32::MAX - language)));
+        }
+        assert_eq!(memo.policy(), StandardBagProductMemoLayout::Adaptive);
+        assert_eq!(memo.layout(), StandardBagProductMemoLayout::Flat);
+        assert_eq!(memo.promotion_counts(), (0, 0));
+        assert_eq!(memo.directory_retained_bytes(), 0);
+        assert_eq!(memo.row_slots(), 0);
+        memo.clear();
+        assert_eq!(memo.layout(), StandardBagProductMemoLayout::Flat);
+    }
+
+    #[test]
+    fn v081_adaptive_product_memo_migrates_all_exact_keys_then_recycles_without_oscillation() {
+        for storage in [ExactU64MemoStorage::Reference, ExactU64MemoStorage::Compact] {
+            let mut memo =
+                StandardBagProductMemo::new(StandardBagProductMemoLayout::Adaptive, storage, 1);
+            let mut reference =
+                StandardBagProductMemo::new(StandardBagProductMemoLayout::Flat, storage, 1);
+            let threshold = memo.adaptive.as_ref().unwrap().next_check_len;
+            let key_for = |index: usize| {
+                StandardBagProductMemoKey::new(
+                    (index as u32).wrapping_add(u32::MAX / 2),
+                    (index % 2) as u8,
+                    if index % 3 == 0 {
+                        0
+                    } else {
+                        FULL_STANDARD_BAG - 1
+                    },
+                    (index % 8) as u8,
+                )
+            };
+            for index in 0..threshold {
+                let key = key_for(index);
+                assert_eq!(
+                    memo.try_insert(key, index as u32),
+                    reference.try_insert(key, index as u32)
+                );
+                if index + 1 < threshold {
+                    assert_eq!(memo.layout(), StandardBagProductMemoLayout::Flat);
+                }
+            }
+            assert_eq!(memo.layout(), StandardBagProductMemoLayout::StateMajor);
+            assert_eq!(memo.promotion_counts(), (1, 1));
+            assert_eq!(memo.len(), reference.len());
+            assert!(
+                memo.retained_payload_bytes() + memo.directory_retained_bytes()
+                    <= reference.retained_payload_bytes() - reference.retained_payload_bytes() / 8
+            );
+            for index in 0..threshold {
+                let key = key_for(index);
+                assert_eq!(memo.get(&key), reference.get(&key));
+                assert_eq!(
+                    memo.try_insert(key, u32::MAX),
+                    reference.try_insert(key, u32::MAX)
+                );
+            }
+            assert_eq!(memo.promotion_counts(), (1, 1));
+            let retained = (memo.capacity(), memo.directory_retained_bytes());
+            memo.clear();
+            assert_eq!(memo.len(), 0);
+            assert_eq!(memo.get(&key_for(0)), None);
+            assert_eq!(memo.layout(), StandardBagProductMemoLayout::StateMajor);
+            assert_eq!((memo.capacity(), memo.directory_retained_bytes()), retained);
+            assert_eq!(memo.try_insert(key_for(0), 7), Ok(None));
+            assert_eq!(memo.get(&key_for(0)), Some(&7));
+            // An epoch in a large request retains its proven layout; a NEW small
+            // request does not inherit either its directory or worker-local roots.
+            assert_eq!(adaptive(1).layout(), StandardBagProductMemoLayout::Flat);
+        }
+    }
+
+    #[test]
+    fn v081_adaptive_product_memo_cost_probe_is_geometric_and_failed_copy_keeps_flat() {
+        let key = StandardBagProductMemoKey::new(0, 0, 0, 0);
+        let mut cost_rejected = adaptive(0);
+        cost_rejected.adaptive.as_mut().unwrap().next_check_len = 1;
+        assert_eq!(cost_rejected.try_insert(key, 9), Ok(None));
+        assert_eq!(cost_rejected.layout(), StandardBagProductMemoLayout::Flat);
+        assert_eq!(cost_rejected.promotion_counts(), (1, 0));
+        assert_eq!(cost_rejected.adaptive.as_ref().unwrap().next_check_len, 2);
+        assert_eq!(cost_rejected.directory_retained_bytes(), 0);
+        assert_eq!(cost_rejected.try_insert(key, 10), Ok(Some(9)));
+        assert_eq!(cost_rejected.promotion_counts(), (1, 0));
+
+        let mut failed = adaptive(0);
+        failed.adaptive.as_mut().unwrap().next_check_len = 1;
+        failed.fail_promotion = true;
+        assert_eq!(failed.try_insert(key, u32::MAX), Ok(None));
+        assert_eq!(failed.get(&key), Some(&u32::MAX));
+        assert_eq!(failed.layout(), StandardBagProductMemoLayout::Flat);
+        failed.fail_promotion = false;
+        assert_eq!(
+            failed.try_insert(StandardBagProductMemoKey::new(1, 0, 0, 0), 3),
+            Ok(None)
+        );
+        assert_eq!(failed.promotion_counts(), (1, 0));
+        assert_eq!(failed.directory_retained_bytes(), 0);
+    }
+
+    #[test]
+    fn v081_adaptive_product_memo_out_of_scope_copy_preserves_full_flat_keys() {
+        let mut memo = adaptive(0);
+        memo.adaptive.as_mut().unwrap().next_check_len = 1;
+        let outside = StandardBagProductMemoKey::new(u32::MAX, 1, 128, 8);
+        assert_eq!(memo.try_insert(outside, u32::MAX), Ok(None));
+        assert_eq!(memo.get(&outside), Some(&u32::MAX));
+        assert_eq!(memo.layout(), StandardBagProductMemoLayout::Flat);
+        assert_eq!(memo.promotion_counts(), (1, 0));
+        let mut source = ExactU64MemoMap::new(ExactU64MemoStorage::Reference);
+        source.insert(u64::MAX, u32::MAX);
+        assert!(matches!(
+            StateMajorProductMemo::copy_from(&source, u8::MAX),
+            Err(ProductMemoAdmissionError::OutOfScope)
+        ));
+        assert_eq!(source.get(&u64::MAX), Some(&u32::MAX));
+    }
+
+    #[cfg(not(feature = "local-search-ab"))]
+    #[test]
+    fn v081_adaptive_product_memo_is_the_product_default_without_ab_selectors() {
+        assert_eq!(
+            StandardBagProductMemoLayout::from_environment(),
+            Ok(StandardBagProductMemoLayout::Adaptive)
+        );
     }
 }

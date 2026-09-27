@@ -5282,6 +5282,10 @@ impl WasmExactSearchSession {
                 // Directory bytes are another disjoint subset of StandardBag,
                 // not an allocation to add again to worker_retained_bytes.
                 field(
+                    "standard_bag_product_memo_policy",
+                    memory.standard_bag_memo.product_policy,
+                ),
+                field(
                     "standard_bag_product_memo_layout",
                     memory.standard_bag_memo.product_layout,
                 ),
@@ -5332,6 +5336,14 @@ impl WasmExactSearchSession {
                 field(
                     "standard_bag_product_memo_row_slots",
                     memory.standard_bag_memo.product_row_slots,
+                ),
+                field(
+                    "standard_bag_product_memo_promotion_attempts",
+                    memory.standard_bag_memo.product_promotion_attempts,
+                ),
+                field(
+                    "standard_bag_product_memo_promotions",
+                    memory.standard_bag_memo.product_promotions,
                 ),
             ];
             fields.try_reserve_exact(memory_fields.len()).map_err(|_| {

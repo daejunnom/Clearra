@@ -138,7 +138,8 @@ impl ExactU64MemoStorage {
 
 /// Lossless storage-only candidate for worker-local product/union memo tables.
 /// Both variants retain SwissTable growth/load semantics and useful cache
-/// entries. No iterator is exposed: table placement cannot affect solution order.
+/// entries. Unordered traversal is restricted to lossless representation copies;
+/// table placement must never define candidate or solution order.
 pub(super) struct ExactU64MemoMap {
     storage: MemoStorage,
 }
@@ -228,6 +229,28 @@ impl ExactU64MemoMap {
         }
     }
 
+    /// Copy complete keys/values without exposing a solver-facing iteration order.
+    /// A failed visitor leaves this source intact for exact cache fallback.
+    pub fn try_visit_entries<E>(
+        &self,
+        mut visit: impl FnMut(u64, u32) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match &self.storage {
+            MemoStorage::Reference(entries) => {
+                for (&key, &value) in entries {
+                    visit(key, value)?;
+                }
+            }
+            #[cfg(any(feature = "local-search-ab", test))]
+            MemoStorage::Compact(entries) => {
+                for entry in entries {
+                    visit(entry.key(), entry.value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Logical capacity payload only, not allocator/SIMD control bytes or OS
     /// peak memory. Explicitly account for the reference tuple's padding.
     pub fn retained_payload_bytes(&self) -> usize {
@@ -307,6 +330,33 @@ mod tests {
             memo.insert(u64::MAX, u32::MAX);
             assert!(memo.try_reserve(usize::MAX).is_err());
             assert_eq!(memo.get(&u64::MAX), Some(&u32::MAX));
+        }
+    }
+
+    #[test]
+    fn v081_memo_copy_visits_exact_entries_and_failure_never_consumes_source() {
+        for storage in [ExactU64MemoStorage::Reference, ExactU64MemoStorage::Compact] {
+            let mut source = ExactU64MemoMap::new(storage);
+            for (key, value) in [(0, 0), (1_u64 << 32, 7), (u64::MAX, u32::MAX)] {
+                source.insert(key, value);
+            }
+            let mut copy = HashMap::new();
+            source
+                .try_visit_entries(|key, value| {
+                    copy.insert(key, value);
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+            assert_eq!(copy.len(), source.len());
+            for (key, value) in copy {
+                assert_eq!(source.get(&key), Some(&value));
+            }
+            assert_eq!(
+                source.try_visit_entries(|_, _| Err::<(), _>("refused")),
+                Err("refused")
+            );
+            assert_eq!(source.len(), 3);
+            assert_eq!(source.get(&u64::MAX), Some(&u32::MAX));
         }
     }
 
