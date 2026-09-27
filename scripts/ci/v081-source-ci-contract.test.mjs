@@ -116,3 +116,30 @@ test('real portfolio UI proof consumes a current-run fixture without delaying in
   assert.ok(!consumer.includes('cargo '));
   assert.ok(!workflow.slice(workflow.indexOf('\n  surfaces:')).includes('needs:'));
 });
+
+test('real WASM realms use one ordinary build and unchanged packs independently of native jobs', () => {
+  const job = workflow.slice(workflow.indexOf('\n  wasm-realms:'));
+  assert.ok(job.startsWith('\n  wasm-realms:\n'));
+  assert.ok(!job.includes('needs:'));
+  assert.ok(!job.includes('continue-on-error:'));
+  assert.ok(job.includes('CLEARRA_SOURCE_COMMIT: ${{ github.sha }}'));
+  assert.ok(job.includes('CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}'));
+  assert.equal(job.split('node scripts/tools/build-clearra-wasm.mjs --destination').length - 1, 1);
+  assert.ok(!job.includes('--stage-profiling'));
+  assert.ok(!job.includes('--benchmark-provenance'));
+  assert.ok(job.includes('storage verify --path "$CLEARRA_REAL_ACCELERATOR_WASM_DIR"'));
+  assert.ok(job.includes('storage verify --path "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR"'));
+  assert.ok(job.includes('test -s "$CLEARRA_REAL_ACCELERATOR_WASM_DIR/clearra_wasm.manifest.json"'));
+  assert.ok(job.includes('gh release download conditioned-data-v081-20260924-rc1 --repo daejunnom/Clearra'));
+  for (const profile of ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']) {
+    assert.ok(job.includes(`--pattern 'conditioned-${profile}.cllr'`));
+  }
+  assert.ok(job.includes('node --test apps/clearra-web/test/realAcceleratorRealms.test.mjs'));
+  const testSource = readFileSync(new URL('../../apps/clearra-web/test/realAcceleratorRealms.test.mjs', import.meta.url), 'utf8');
+  assert.ok(testSource.includes('WebAssembly.compile(wasm)'));
+  assert.ok(testSource.includes('new Worker(new URL(import.meta.url)'));
+  assert.ok(testSource.includes('clearraWasmBuildContractsEqual'));
+  assert.ok(testSource.includes('clearra_wasm_accelerator_peer_answer'));
+  assert.ok(testSource.includes('clearra_wasm_start_job'));
+  assert.ok(testSource.includes('totalBatches > 0'));
+});

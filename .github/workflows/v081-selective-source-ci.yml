@@ -14,7 +14,7 @@ concurrency:
 
 # Source feedback only: no acceptance receipts, asset generation, release
 # tags, main promotion, or Pages/Discord/Cloud traffic changes. The smokes
-# explicitly download only unchanged qualified packs: five relations in Core,
+# explicitly download only unchanged qualified packs: five relations in Core/real WASM,
 # and the selected SRS+ legal-board/relation pair in the native App job.
 env:
   CLEARRA_BUILD_PURPOSE: experiment
@@ -241,3 +241,51 @@ jobs:
         run: |
           pnpm exec tsc --noEmit -p tsconfig.contract.json
           node ../../scripts/tools/run-typescript-contracts.mjs ./test
+
+  wasm-realms:
+    if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+      CLEARRA_REAL_ACCELERATOR_WASM_DIR: ${{ github.workspace }}/_local/artifacts/v081-browser-peer-smoke/wasm
+      CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-peer-signed-smoke
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Install pinned Rust and WASM target
+        run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
+      - name: Prepare the Rust manager and explicit functional output roots
+        run: |
+          cargo build --locked --release -p clearra-manage
+          manager="$GITHUB_WORKSPACE/build/cargo/default/release/clearra-manage"
+          echo "CLEARRA_MANAGE_BIN=$manager" >> "$GITHUB_ENV"
+          "$manager" storage verify --path "$CLEARRA_REAL_ACCELERATOR_WASM_DIR"
+          "$manager" storage verify --path "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR"
+      - name: Install the pinned managed ABI binding tool
+        shell: pwsh
+        run: |
+          & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build ordinary product WASM once, without profiling or benchmark features
+        run: node scripts/tools/build-clearra-wasm.mjs --destination "$CLEARRA_REAL_ACCELERATOR_WASM_DIR"
+      - name: Fetch only unchanged qualified relation packs for real WASM execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR"
+          gh release download conditioned-data-v081-20260924-rc1 --repo daejunnom/Clearra \
+            --pattern 'conditioned-srs.cllr' --pattern 'conditioned-srs-plus.cllr' \
+            --pattern 'conditioned-srs-x.cllr' --pattern 'conditioned-jstris-180.cllr' \
+            --pattern 'conditioned-no-kick.cllr' --dir "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR"
+      - name: Execute actual WASM owner and two isolated peer realms without browser claims
+        run: |
+          test "$CLEARRA_REAL_ACCELERATOR_WASM_DIR" = "$GITHUB_WORKSPACE/_local/artifacts/v081-browser-peer-smoke/wasm"
+          test -s "$CLEARRA_REAL_ACCELERATOR_WASM_DIR/clearra_wasm.manifest.json"
+          test "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR" = "$GITHUB_WORKSPACE/_local/artifacts/v081-peer-signed-smoke"
+          node --test apps/clearra-web/test/realAcceleratorRealms.test.mjs
