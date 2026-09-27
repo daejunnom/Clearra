@@ -4,7 +4,8 @@
 use clearra_app::{
     AppCommand, AppCoreExecutorService, AppRequest, BuildV2AppRequest, CooperativeAppAdvance,
     CooperativeAppExecution, DistributedForwardPreparation, DistributedSearchPreparation,
-    DistributedSetupPreparation, ExecutionControl, PreparedDistributedBuildMinimumCompletion,
+    DistributedSetupPreparation, DistributedRecoveryBuildPreparation, PreparedDistributedRecoveryBuildSearch,
+    ExecutionControl, PreparedDistributedBuildMinimumCompletion,
     PreparedDistributedForwardSearch, PreparedDistributedPcScoreCompletion,
     PreparedDistributedSearch, PreparedDistributedSearchCompletion, PreparedDistributedSetupSearch,
     ProductCapabilityContract,
@@ -25,6 +26,7 @@ use clearra_core_executor::{
 };
 use clearra_forward_search::{
     ForwardParallelCoordinator, ForwardParallelProduce, ForwardParallelWorker,
+    RecoveryBuildParallelCoordinator, RecoveryBuildParallelProduce, RecoveryBuildParallelWorker,
 };
 use clearra_pc_graph::request::RequestedSearchBackend;
 use clearra_problem::BuildSolutionProbabilityPolicy;
@@ -1246,6 +1248,7 @@ enum DistributedCandidateProducer {
     BuildProbability(WasmBuildProbabilityCandidateProducer),
     Forward(ForwardParallelCoordinator),
     Setup(WasmSetupParallelCoordinator),
+    Recovery(RecoveryBuildParallelCoordinator),
     #[cfg(feature = "webgpu-search")]
     WebGpu(WasmWebGpuCandidateProducer),
 }
@@ -1270,6 +1273,7 @@ enum DistributedVerifier {
     BuildProbability(WasmBuildProbabilityDistributedVerifier),
     Forward(ForwardParallelWorker),
     Setup(WasmSetupParallelWorker),
+    Recovery(RecoveryBuildParallelWorker),
 }
 
 // A coordinator owns one merger for the whole job; keeping it inline avoids a
@@ -1290,6 +1294,7 @@ enum DistributedPreparedSearch {
     Core(PreparedDistributedSearch),
     Forward(PreparedDistributedForwardSearch),
     Setup(PreparedDistributedSetupSearch),
+    Recovery(PreparedDistributedRecoveryBuildSearch),
 }
 
 pub struct WasmDistributedVerifierConsume {
@@ -1315,6 +1320,27 @@ impl WasmDistributedCoordinator {
     ) -> Result<WasmDistributedPreparation, WasmCommandRuntimeError> {
         let prepared = runtime.prepare_command_text(command_text)?;
         let (request, webgpu_requested) = prepared.into_parts();
+        if matches!(request.command(), AppCommand::RecoveryBuild(_)) {
+            let workers = usize::from(request.resource_budget().workers()).max(1);
+            if workers < 2 { return Ok(WasmDistributedPreparation::Serial); }
+            let prepared = match runtime.app_context().prepare_distributed_recovery_build_search(request) {
+                DistributedRecoveryBuildPreparation::Ready(response) => return Ok(
+                    WasmDistributedPreparation::Ready(WasmExecutionResult::from_app_response(response, false))),
+                DistributedRecoveryBuildPreparation::Search(prepared) => prepared,
+            };
+            let producer = RecoveryBuildParallelCoordinator::new(prepared.query().clone(), workers)
+                .map_err(|error| distributed_error("E_WASM_RECOVERY_START", error.reason()))?;
+            return Ok(WasmDistributedPreparation::Coordinator(Self {
+                prepared: Some(DistributedPreparedSearch::Recovery(prepared)),
+                producer: Some(DistributedCandidateProducer::Recovery(producer)), merger: None,
+                pending_build_completion_summary: None, summary: None,
+                completed_progress: WasmDistributedProgress::default(), forward_completed: false,
+                worker_count: workers, verification_required: true, webgpu_requested: false,
+                mode: WasmDistributedMode::CpuMulti, requested_backend: WasmDistributedRequestedBackend::Cpu,
+                preparation_fallback_reason: WasmDistributedFallbackReason::None,
+                backend_execution_override: None, control: ExecutionControl::default(),
+            }));
+        }
         if matches!(request.command(), AppCommand::Setup(_)) {
             let requested_workers = usize::from(request.resource_budget().workers()).max(1);
             if requested_workers < 2 {
@@ -1790,6 +1816,11 @@ impl WasmDistributedCoordinator {
                 });
             }
         }
+        if let Some(DistributedCandidateProducer::Recovery(producer)) = self.producer.as_ref() {
+            let mut worker = WasmDistributedVerifierRuntime::prepare_forward(runtime, &producer.worker_initialization())?;
+            worker.control = self.control.clone();
+            return Ok(worker);
+        }
         WasmDistributedVerifierRuntime::prepare(runtime, command_text)
     }
 
@@ -1831,6 +1862,7 @@ impl WasmDistributedCoordinator {
             Some(DistributedCandidateProducer::Forward(producer)) => {
                 Some(producer.worker_initialization())
             }
+            Some(DistributedCandidateProducer::Recovery(producer)) => Some(producer.worker_initialization()),
             _ => None,
         }
     }
@@ -1879,6 +1911,19 @@ impl WasmDistributedCoordinator {
         }
         if self.summary.is_some() || self.forward_completed {
             return Ok(WasmDistributedProducerAdvance::Completed);
+        }
+        if let Some(DistributedCandidateProducer::Recovery(producer)) = self.producer.as_mut() {
+            let (status, bytes) = producer.produce(batch_capacity, &self.control)
+                .map_err(|error| distributed_error("E_WASM_RECOVERY_PRODUCE", error.reason()))?;
+            return match status {
+                RecoveryBuildParallelProduce::Pending => Ok(WasmDistributedProducerAdvance::Pending),
+                RecoveryBuildParallelProduce::Batch => Ok(WasmDistributedProducerAdvance::Batch(bytes)),
+                RecoveryBuildParallelProduce::Cancelled => Ok(WasmDistributedProducerAdvance::Cancelled),
+                RecoveryBuildParallelProduce::Completed => {
+                    self.forward_completed = true;
+                    Ok(WasmDistributedProducerAdvance::Completed)
+                }
+            };
         }
         if matches!(self.producer, Some(DistributedCandidateProducer::Setup(_))) {
             let status = match self.producer.as_mut() {
@@ -2174,6 +2219,10 @@ impl WasmDistributedCoordinator {
                 .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_TILING_MERGE", reason))?;
             return Ok(());
         }
+        if let Some(DistributedCandidateProducer::Recovery(producer)) = self.producer.as_mut() {
+            return producer.absorb(input, &self.control)
+                .map_err(|error| distributed_error("E_WASM_RECOVERY_MERGE", error.reason()));
+        }
         if let Some(DistributedCandidateProducer::Setup(producer)) = self.producer.as_mut() {
             producer.absorb(input).map_err(|error| {
                 distributed_error("E_WASM_DISTRIBUTED_SETUP_MERGE", error.reason())
@@ -2372,6 +2421,15 @@ impl WasmDistributedCoordinator {
         mut self,
         workers_used: usize,
     ) -> Result<WasmExecutionResult, WasmCommandRuntimeError> {
+        if matches!(self.producer, Some(DistributedCandidateProducer::Recovery(_))) {
+            let Some(DistributedCandidateProducer::Recovery(producer)) = self.producer.take() else { unreachable!() };
+            let result = producer.finish(&self.control)
+                .map_err(|error| distributed_error("E_WASM_RECOVERY_FINISH", error.reason()))?;
+            let Some(DistributedPreparedSearch::Recovery(prepared)) = self.prepared.take() else {
+                return Err(distributed_error("E_WASM_RECOVERY_STATE", "recovery app preparation missing"));
+            };
+            return Ok(WasmExecutionResult::from_app_response(prepared.complete(result), false));
+        }
         if matches!(self.producer, Some(DistributedCandidateProducer::Setup(_))) {
             let producer = match self.producer.take() {
                 Some(DistributedCandidateProducer::Setup(producer)) => producer,
@@ -2914,7 +2972,7 @@ impl DistributedCandidateProducer {
             Self::PcRoots(producer) => (Some(producer.root_count() as u128), false),
             Self::Tiling(producer) => (Some(producer.root_count() as u128), false),
             Self::BuildProbability(producer) => (producer.progress().candidate_family_count, true),
-            Self::Forward(_) | Self::Setup(_) => (None, true),
+            Self::Forward(_) | Self::Setup(_) | Self::Recovery(_) => (None, true),
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => (producer.progress().candidate_family_count, true),
         };
@@ -2935,7 +2993,7 @@ impl DistributedCandidateProducer {
         match self {
             Self::Cpu(producer) => producer.verification_required(),
             Self::PcRoots(_) | Self::Tiling(_) => true,
-            Self::BuildProbability(_) | Self::Forward(_) | Self::Setup(_) => true,
+            Self::BuildProbability(_) | Self::Forward(_) | Self::Setup(_) | Self::Recovery(_) => true,
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.verification_required(),
         }
@@ -2959,6 +3017,7 @@ impl DistributedCandidateProducer {
             Self::Setup(_) => Err(invalid_search_error(
                 "setup_producer_requires_task_batch_advance",
             )),
+            Self::Recovery(_) => Err(invalid_search_error("recovery_producer_requires_pair_batch_advance")),
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.advance(control),
         }
@@ -2986,6 +3045,7 @@ impl DistributedCandidateProducer {
             Self::Setup(_) => Err(invalid_search_error(
                 "setup_producer_owns_its_result_merger",
             )),
+            Self::Recovery(_) => Err(invalid_search_error("recovery_producer_owns_its_result_merger")),
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.into_merger().map(DistributedResultMerger::Pc),
         }
@@ -3011,6 +3071,7 @@ impl DistributedCandidateProducer {
                     ..WasmDistributedProgress::default()
                 }
             }
+            Self::Recovery(producer) => recovery_progress(producer.progress(), true),
             Self::Setup(producer) => {
                 let (pass_index, pass_count, layer_index, layer_count, layer_done, layer_total) =
                     producer.build_progress();
@@ -3049,6 +3110,9 @@ impl DistributedVerifier {
             Self::BuildProbability(verifier) => verifier.finish(),
             Self::Forward(_) => Ok(Vec::new()),
             Self::Setup(_) => Ok(Vec::new()),
+            Self::Recovery(worker) => if worker.has_pending_work() {
+                Err("recovery_worker_finish_pending")
+            } else { Ok(Vec::new()) },
         }
     }
 
@@ -3078,6 +3142,7 @@ impl DistributedVerifier {
                 }
             }
             Self::Setup(_) => WasmDistributedProgress::default(),
+            Self::Recovery(worker) => recovery_progress(worker.progress(), false),
         }
     }
 }
@@ -3253,7 +3318,10 @@ impl WasmDistributedVerifierRuntime {
         runtime: &WasmCommandRuntime,
         initialization: &[u8],
     ) -> Result<Self, WasmCommandRuntimeError> {
-        let verifier = if WasmSetupParallelWorker::accepts_initialization(initialization) {
+        let verifier = if RecoveryBuildParallelWorker::is_initialization(initialization) {
+            DistributedVerifier::Recovery(RecoveryBuildParallelWorker::new(initialization)
+                .map_err(|error| distributed_error("E_WASM_RECOVERY_WORKER_START", error.reason()))?)
+        } else if WasmSetupParallelWorker::accepts_initialization(initialization) {
             DistributedVerifier::Setup(WasmSetupParallelWorker::new(initialization).map_err(
                 |error| {
                     distributed_error("E_WASM_DISTRIBUTED_SETUP_VERIFIER_START", error.reason())
@@ -3353,6 +3421,15 @@ impl WasmDistributedVerifierRuntime {
                 candidate_count,
                 partial: Some(partial),
                 has_pending_work: false,
+            });
+        }
+        if let DistributedVerifier::Recovery(verifier) = &mut self.verifier {
+            let before = verifier.progress().completed;
+            let partial = verifier.consume(input, &self.control)
+                .map_err(|error| distributed_error("E_WASM_RECOVERY_VERIFY", error.reason()))?;
+            return Ok(WasmDistributedVerifierConsume {
+                candidate_count: (verifier.progress().completed - before) as usize,
+                partial, has_pending_work: verifier.has_pending_work(),
             });
         }
         if let DistributedVerifier::Setup(verifier) = &mut self.verifier {
@@ -3474,7 +3551,8 @@ impl WasmDistributedVerifierRuntime {
             DistributedVerifier::PcRoots(_)
             | DistributedVerifier::Tiling(_)
             | DistributedVerifier::Forward(_)
-            | DistributedVerifier::Setup(_) => {
+            | DistributedVerifier::Setup(_)
+            | DistributedVerifier::Recovery(_) => {
                 return Err(distributed_error(
                     "E_WASM_DISTRIBUTED_STATE",
                     "distributed verifier has no pending candidate cursor",
@@ -3502,6 +3580,15 @@ impl WasmDistributedVerifierRuntime {
             return self.advance_pending_candidate();
         }
         match &mut self.verifier {
+            DistributedVerifier::Recovery(verifier) if verifier.has_pending_work() => {
+                let before = verifier.progress().completed;
+                let partial = verifier.advance(&self.control)
+                    .map_err(|error| distributed_error("E_WASM_RECOVERY_VERIFY", error.reason()))?;
+                Ok(WasmDistributedVerifierConsume {
+                    candidate_count: (verifier.progress().completed - before) as usize,
+                    partial, has_pending_work: verifier.has_pending_work(),
+                })
+            }
             DistributedVerifier::Setup(verifier) if verifier.has_pending_work() => {
                 advance_setup_worker(verifier, &self.control)
             }
@@ -3545,6 +3632,12 @@ impl WasmDistributedVerifierRuntime {
             self.verifier
                 .finish()
                 .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY_FINISH", reason))?;
+            return Ok(Vec::new());
+        }
+        if let DistributedVerifier::Recovery(verifier) = &self.verifier {
+            if verifier.has_pending_work() {
+                return Err(distributed_error("E_WASM_RECOVERY_STATE", "recovery worker has pending pairs"));
+            }
             return Ok(Vec::new());
         }
         if matches!(
@@ -3735,6 +3828,18 @@ fn build_worker_memory_projection_error(
     verifier
         .validate_external_result_memory(u128::MAX)
         .expect_err("overflow-sized build worker terminal storage is unavailable")
+}
+
+fn recovery_progress(value: clearra_forward_search::RecoveryBuildParallelProgress, producer: bool)
+    -> WasmDistributedProgress {
+    let size = |value| usize::try_from(value).unwrap_or(usize::MAX);
+    WasmDistributedProgress {
+        candidates: size(if producer { value.issued } else { value.completed }),
+        build_nodes: size(value.states), coverage_checks: size(value.completed),
+        pass_count: 1, layer_count: 1,
+        layer_done: size(value.completed), layer_total: size(value.possible),
+        ..WasmDistributedProgress::default()
+    }
 }
 
 fn advance_setup_worker(

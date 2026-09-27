@@ -24,6 +24,7 @@
   let language: WorkspaceLanguage = 'en';
   let disposed = false;
   let invalidHeightDraft = false;
+  let workerCount = 1;
   let elapsedMs = 0;
   let startedAt = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -36,10 +37,11 @@
   $: if (!active && timer !== null && ['completed','failed','cancelled','terminated'].includes(runtimeView.status)) stopTimer();
   onMount(() => {
     language = readWorkspaceLanguage();
+    workerCount = automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors).workersEffective;
     if (runtime === 'web') {
       clearWasmTerminalResult();
-      workerController.prewarm(1, false, CPU_ONLY_RUNTIME_WARMUP_POLICY,
-        automaticWorkerAuthority(hostCapabilitySnapshot, false));
+      workerController.prewarm(workerCount, false, CPU_ONLY_RUNTIME_WARMUP_POLICY,
+        automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors));
     } else {
       clearDesktopTerminalResult();
       resumeDesktopJobPolling();
@@ -76,9 +78,12 @@
   }
   async function run() {
     if(active || validation.length) return;
+    workerCount = automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors).workersEffective;
+    if (runtime === 'web') workerController.prewarm(workerCount, false, CPU_ONLY_RUNTIME_WARMUP_POLICY,
+      automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors));
     stopTimer();elapsedMs=0;startedAt=performance.now();timer=setInterval(()=>elapsedMs=performance.now()-startedAt,100);
-    if(runtime==='web') { updateWasmCommandText(recoveryBuildCommand(request));workerController.run(); }
-    else { updateDesktopRequest(recoveryBuildDesktopRequest(request,language));await startDesktopJob(); }
+    if(runtime==='web') { updateWasmCommandText(recoveryBuildCommand(request, workerCount));workerController.run(); }
+    else { updateDesktopRequest(recoveryBuildDesktopRequest(request,language,workerCount));await startDesktopJob(); }
   }
   async function cancel() { if(runtime==='web') workerController.cancel();else await cancelDesktopJob(); }
 </script>

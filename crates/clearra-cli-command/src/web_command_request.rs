@@ -1491,9 +1491,12 @@ impl WebCommandRequest {
                     "missing typed recovery-build query",
                 )
             })?;
+            let workers = u16::try_from(self.resolved_worker_budget()).map_err(|_| {
+                WebCommandError::new(WebCommandErrorCode::InvalidValue, "recovery worker budget exceeds u16")
+            })?;
             return self.attach_product_capability_contract(AppRequest::new(
                 AppCommand::RecoveryBuild(RecoveryBuildAppCommand::new(query)),
-            ));
+            ).with_resource_budget(ResourceBudget::new(workers, None, None)));
         }
         if self.command_kind == "boundary-recovery" {
             let query = self.boundary_recovery.clone().ok_or_else(|| {

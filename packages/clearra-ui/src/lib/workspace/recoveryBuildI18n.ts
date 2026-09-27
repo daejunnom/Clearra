@@ -7,7 +7,7 @@ const text = {
   second: ['Middle → Result', '중간 → 결과', '中間 → 結果'],
   firstHelp: ['The first supply. Some pieces may build the result early; the following supply can complete what remains in the middle.', '먼저 나오는 공급입니다. 일부 미노로 결과를 먼저 구축하고, 뒤의 공급으로 중간의 빈 배치를 완성할 수 있습니다.', '先に出るミノです。結果を先行して作り、残った中間の配置を後の供給で完成できます。'],
   secondHelp: ['Continues after the first supply, without resetting hold. Fixed queues and patterns use the same grammar.', '앞의 공급에 이어서 나옵니다. 홀드는 초기화되지 않으며, 고정 큐와 패턴은 같은 문법을 사용합니다.', '前の供給に続き、ホールドはリセットしません。固定キューとパターンは同じ文法です。'],
-  fieldsHelp: ['Start is existing material. Middle is what to add to it. Result is what to add after the completed middle rows clear. Gray references do not change the selected field.', '시작은 기존 블록, 중간은 그 위에 추가할 영역입니다. 결과는 중간의 완성 줄이 지워진 뒤 추가할 영역입니다. 참고 색상은 선택한 필드의 입력을 바꾸지 않습니다.', '開始は既存ブロック、中間は追加領域です。結果は中間の完成行が消えた後の追加領域です。参照色は入力を変更しません。'],
+  fieldsHelp: ['Start is existing material. Middle is what to add to it. Result is what to add after the completed middle rows clear. Gray references preserve the original Start/Middle coordinates; they are not the after-clear board and do not change the selected field.', '시작은 기존 블록, 중간은 그 위에 추가할 영역입니다. 결과는 중간의 완성 줄이 지워진 뒤 추가할 영역입니다. 참고 색상은 시작·중간의 원래 좌표를 보존하며, 줄 삭제 후 보드가 아닙니다. 선택한 필드의 입력을 바꾸지 않습니다.', '開始は既存ブロック、中間は追加領域です。結果は中間の完成行が消えた後の追加領域です。参照色は開始・中間の元の座標を保持し、消去後の盤面ではありません。入力は変更しません。'],
   context: ['Show field context', '다른 필드 함께 보기', '他のフィールドを表示'],
   early: ['Maximum early placements', '최대 선행 배치', '先行配置の最大数'],
   auto: ['Auto — all feasible counts', '자동 — 가능한 모든 개수', '自動 — 可能な全個数'],

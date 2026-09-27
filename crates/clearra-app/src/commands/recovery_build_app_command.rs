@@ -8,7 +8,7 @@ use crate::{
 };
 use clearra_forward_search::{
     CrossStageEarlyLimit, RecoveryBuildError, RecoveryBuildExample, RecoveryBuildQuery,
-    RecoveryBuildStatus,
+    RecoveryBuildStatus, RecoveryBuildPopulation, RecoveryBuildParallelError,
 };
 use clearra_host_contract::{
     ProductResultPayload, ProductResultPayloadContent, RecoveryBuildExamplePayload,
@@ -31,20 +31,19 @@ impl RecoveryBuildAppCommand {
 }
 impl RunnableAppCommand for RecoveryBuildAppCommand {
     fn run(self, context: &AppExecutionContext<'_>) -> AppResponse {
-        let report = match self.query.search(context.execution_control) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let searched = crate::native_recovery_build_execution::run_native_recovery_build(
+            self.query.clone(), usize::from(context.resource_budget().workers()), context.execution_control);
+        #[cfg(target_arch = "wasm32")]
+        let searched = self.query.search(context.execution_control).map_err(RecoveryBuildParallelError::from);
+        let report = match searched {
             Ok(report) => report,
             Err(error) => {
-                let input = matches!(
-                    error,
-                    RecoveryBuildError::InvalidHeight
-                        | RecoveryBuildError::BoardOutsideField
-                        | RecoveryBuildError::MiddleOverlapsStart
-                        | RecoveryBuildError::ResultOverlapsRetainedMiddle
-                        | RecoveryBuildError::TargetAreaNotTetrominoes
-                        | RecoveryBuildError::EmptySupply
-                        | RecoveryBuildError::InvalidSupplyPattern
-                        | RecoveryBuildError::UnsupportedRuleProfile
-                );
+                let input = matches!(&error, RecoveryBuildParallelError::Search(
+                    RecoveryBuildError::InvalidHeight | RecoveryBuildError::BoardOutsideField
+                    | RecoveryBuildError::MiddleOverlapsStart | RecoveryBuildError::ResultOverlapsRetainedMiddle
+                    | RecoveryBuildError::TargetAreaNotTetrominoes | RecoveryBuildError::EmptySupply
+                    | RecoveryBuildError::InvalidSupplyPattern | RecoveryBuildError::UnsupportedRuleProfile));
                 return AppResponse::failed(
                     if input {
                         AppStatus::ValidationFailed
@@ -62,7 +61,11 @@ impl RunnableAppCommand for RecoveryBuildAppCommand {
                 );
             }
         };
-        let query = &self.query;
+        recovery_build_response(&self.query, report)
+    }
+}
+
+pub(crate) fn recovery_build_response(query: &RecoveryBuildQuery, report: RecoveryBuildPopulation) -> AppResponse {
         let identity = format!(
             "{:x}",
             Sha256::digest(format!("recovery-build.v2:{query:?}").as_bytes())
@@ -124,7 +127,6 @@ impl RunnableAppCommand for RecoveryBuildAppCommand {
             ),
             None,
         )
-    }
 }
 fn mask(words: [u64; 4]) -> String {
     format!(

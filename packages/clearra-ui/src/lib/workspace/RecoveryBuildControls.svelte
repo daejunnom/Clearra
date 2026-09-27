@@ -43,6 +43,8 @@
       </select>
     </label>
     <p class="workspace-field-help">{label('earlyHelp')}</p>
+    <WorkspaceToggle label={standard('useAllThreads')} checked={request.useAllLogicalProcessors}
+      on:change={(event) => patch({ useAllLogicalProcessors: event.detail })} />
     <WorkspaceToggle label={label('exchange')} checked={request.allowPieceExchange}
       on:change={(event) => patch({ allowPieceExchange: event.detail })} />
     <p class="workspace-field-help">{label('exchangeHelp')}</p>

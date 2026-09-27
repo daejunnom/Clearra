@@ -6,11 +6,12 @@ export type RecoveryBuildRequest = {
   firstSupply: string; secondSupply: string;
   maxEarly: 'auto' | number; allowPieceExchange: boolean; holdEnabled: boolean;
   preserveB2B: boolean; rule: RuleProfile; spinProfile: SpinProfile;
+  useAllLogicalProcessors: boolean;
 };
 export function createRecoveryBuildRequest(): RecoveryBuildRequest {
   return { startMask: 0n, middleMask: 0n, resultMask: 0n, height: 8,
     firstSupply: '', secondSupply: '', maxEarly: 'auto', allowPieceExchange: false,
-    holdEnabled: true, preserveB2B: false, rule: 'srs-plus', spinProfile: 'all-spin-plus' };
+    holdEnabled: true, preserveB2B: false, useAllLogicalProcessors: false, rule: 'srs-plus', spinProfile: 'all-spin-plus' };
 }
 export function countRecoveryCells(value: bigint): number {
   let count = 0;
@@ -51,14 +52,18 @@ export function validateRecoveryBuildRequest(request: RecoveryBuildRequest): str
   if (request.maxEarly !== 'auto' && (!Number.isSafeInteger(request.maxEarly) || request.maxEarly < 0)) errors.push('early');
   return errors;
 }
-export function recoveryBuildArguments(request: RecoveryBuildRequest): string[] {
+export function recoveryBuildArguments(request: RecoveryBuildRequest, workers?: number): string[] {
+  if (workers !== undefined && (!Number.isSafeInteger(workers) || workers < 1 || workers > 65535)) {
+    throw new RangeError('recovery worker count must be an integer in 1..65535');
+  }
   return ['clearra', 'recovery', 'build', '--start-mask', boardMaskHex(request.startMask),
     '--middle-mask', boardMaskHex(request.middleMask), '--result-mask', boardMaskHex(request.resultMask),
     '--height', String(request.height), '--first-supply', request.firstSupply.trim(),
     '--second-supply', request.secondSupply.trim(), '--max-early', String(request.maxEarly),
     request.allowPieceExchange ? '--allow-piece-exchange' : '--no-piece-exchange',
     request.holdEnabled ? '--hold' : '--no-hold', request.preserveB2B ? '--preserve-b2b' : '--no-preserve-b2b',
-    '--initial-b2b', '1', '--rule', request.rule, '--spin-profile', request.spinProfile];
+    '--initial-b2b', '1', '--rule', request.rule, '--spin-profile', request.spinProfile,
+    ...(workers === undefined ? [] : ['--workers', String(workers)])];
 }
-export const recoveryBuildCommand = (request: RecoveryBuildRequest): string => serializeCliCommandArguments(recoveryBuildArguments(request));
-export const recoveryBuildDesktopRequest = (request: RecoveryBuildRequest, language: WorkspaceLanguage) => cliCommandRequestForDesktop(recoveryBuildArguments(request), language);
+export const recoveryBuildCommand = (request: RecoveryBuildRequest, workers?: number): string => serializeCliCommandArguments(recoveryBuildArguments(request, workers));
+export const recoveryBuildDesktopRequest = (request: RecoveryBuildRequest, language: WorkspaceLanguage, workers?: number) => cliCommandRequestForDesktop(recoveryBuildArguments(request, workers), language);

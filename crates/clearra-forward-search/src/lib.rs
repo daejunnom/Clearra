@@ -48,6 +48,8 @@ pub use search::{ForwardSearchAdvance, ForwardSearchError, ForwardSearchSession}
 pub const MAX_REN_QUEUE_PIECES: usize = 22;
 
 pub use recovery_build::{
+    RecoveryBuildParallelCoordinator, RecoveryBuildParallelWorker, RecoveryBuildParallelError,
+    RecoveryBuildParallelProduce, RecoveryBuildParallelProgress,
     RecoveryBuildError, RecoveryBuildExample, RecoveryBuildFields, RecoveryBuildFixedQuery,
     RecoveryBuildFixedReport, RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildStatus,
     RecoveryBuildStep,

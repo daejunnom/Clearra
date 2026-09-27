@@ -17,6 +17,8 @@ pub mod commands;
 mod cooperative_execution;
 pub mod diagnostics;
 mod distributed_forward_execution;
+mod distributed_recovery_build_execution;
+pub use distributed_recovery_build_execution::{DistributedRecoveryBuildPreparation, PreparedDistributedRecoveryBuildSearch};
 mod distributed_search_execution;
 mod distributed_setup_execution;
 mod document_utility_encoding;
@@ -31,6 +33,8 @@ pub mod language;
 mod native_build_probability_execution;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_forward_execution;
+#[cfg(not(target_arch = "wasm32"))]
+mod native_recovery_build_execution;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_spin_structure_execution;
 mod objective_contract;
