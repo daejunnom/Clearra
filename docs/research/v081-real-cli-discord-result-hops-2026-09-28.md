@@ -76,3 +76,18 @@ decode, 요청 admission 및 제품-owned 실행 옵션 부재도 source 계약�
 [Setup 실제 실행 기록](v081-setup-score-functional-parity-2026-09-28.md)의 로컬
 증거와 후속 exact-source CI 증거를 구분하며 accepted image/Gateway 또는
 전체 candidate universe 완료를 주장하지 않는다.
+
+## 후속 실제 CLI→Discord step 관측: `e1db5ba8`
+
+[run 36352731057](https://github.com/daejunnom/Clearra/actions/runs/36352731057)의
+exact `e1db5ba87b86df98fb6e8ca39b246c0596d58e5f`에서 actual CLI→production
+Discord runner step이 success로 종료됐음을 GitHub job API로 확인했다. 이
+source의 소비자는 ordinary CLI compiled identity, 다섯 profile의 85개 요청,
+Setup-score의 실제 두 candidate/동률 점수 및 열 signed slot의 실행 전후
+generation 보존을 필수 assert로 검사한다. fixture의 불필요한 score backend
+override 제거 후 실제 실행 step이 통과한 좁은 기능 증거다.
+
+native job의 Desktop/read-only 검사는 기록 시점에 진행 중이며, 상세 TAP와
+완료 상태는 종료 후 별도로 확인한다. `surfaces`의 빠른 소스 검사 실패는
+별도 실패로 유지한다. actual Gateway/attachment, accepted Bookworm image,
+Cloud Run readback·shared peak·성능·release는 여전히 Open이다.

@@ -73,7 +73,13 @@ fn policy(legal: bool, conditioned: bool, workers: usize) -> PcExecutionPolicy {
         .with_conditioned_reachability_enabled(conditioned)
 }
 
-fn minimum_request(height: u8, legal: bool, conditioned: bool, score: bool) -> AppRequest {
+fn minimum_request(
+    height: u8,
+    legal: bool,
+    conditioned: bool,
+    score: bool,
+    workers: usize,
+) -> AppRequest {
     let board = (0..height).fold(0, |board, row| board | (0x3f0_u64 << (row * 10)));
     let objective = if score {
         ObjectivePolicy::minimum_cover().with_score_profile(ScoreProfileSelection::Tetrio)
@@ -81,9 +87,9 @@ fn minimum_request(height: u8, legal: bool, conditioned: bool, score: bool) -> A
         ObjectivePolicy::minimum_cover()
     };
     let execution = if score {
-        policy(legal, conditioned, 1).with_max_patterns(PC_SCORE_MAX_PATTERNS)
+        policy(legal, conditioned, workers).with_max_patterns(PC_SCORE_MAX_PATTERNS)
     } else {
-        policy(legal, conditioned, 1)
+        policy(legal, conditioned, workers)
     };
     let query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(u16::from(height), board),
@@ -309,7 +315,7 @@ fn compare_products(installed: bool) {
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     );
     for height in 1..=6 {
-        let baseline = success(&context, minimum_request(height, false, false, false));
+        let baseline = success(&context, minimum_request(height, false, false, false, 1));
         assert_relation_snapshot(&baseline, false, installed);
         let expected = baseline
             .product_capability_result()
@@ -321,70 +327,89 @@ fn compare_products(installed: bool) {
         assert_eq!(expected.selected_solution_count(), 1);
         let meaning = portfolio_meaning(expected.portfolio_alternatives());
         assert!(!meaning.candidates.is_empty());
-        for (legal, conditioned) in [(false, true), (true, false), (true, true)] {
-            let actual = success(&context, minimum_request(height, legal, conditioned, false));
-            assert_relation_snapshot(&actual, conditioned, installed);
-            let report = actual
-                .product_capability_result()
-                .unwrap()
-                .pc_minimum_cover_v2()
-                .unwrap();
-            assert!(report.completeness().complete());
-            assert_eq!(
-                report.normalized_solution_set_hash(),
-                expected.normalized_solution_set_hash()
-            );
-            assert_eq!(
-                report.selected_solution_keys(),
-                expected.selected_solution_keys()
-            );
-            assert_eq!(
-                report.required_pattern_count(),
-                expected.required_pattern_count()
-            );
-            assert_eq!(
-                report.source_solution_count(),
-                expected.source_solution_count()
-            );
-            assert_eq!(
-                portfolio_meaning(report.portfolio_alternatives()),
-                meaning,
-                "{height}L legal={legal} conditioned={conditioned}"
-            );
+        for workers in [1, 2, 11] {
+            for (legal, conditioned) in [(false, false), (false, true), (true, false), (true, true)]
+            {
+                if workers == 1 && !legal && !conditioned {
+                    continue; // The exact baseline request has already executed above.
+                }
+                let actual = success(
+                    &context,
+                    minimum_request(height, legal, conditioned, false, workers),
+                );
+                assert_relation_snapshot(&actual, conditioned, installed);
+                let report = actual
+                    .product_capability_result()
+                    .unwrap()
+                    .pc_minimum_cover_v2()
+                    .unwrap();
+                assert!(report.completeness().complete());
+                assert_eq!(
+                    report.normalized_solution_set_hash(),
+                    expected.normalized_solution_set_hash()
+                );
+                assert_eq!(
+                    report.selected_solution_keys(),
+                    expected.selected_solution_keys()
+                );
+                assert_eq!(
+                    report.required_pattern_count(),
+                    expected.required_pattern_count()
+                );
+                assert_eq!(
+                    report.source_solution_count(),
+                    expected.source_solution_count()
+                );
+                assert_eq!(
+                    portfolio_meaning(report.portfolio_alternatives()),
+                    meaning,
+                    "{height}L workers={workers} legal={legal} conditioned={conditioned}"
+                );
+            }
         }
     }
-    let baseline = success(&context, minimum_request(1, false, false, true));
+    let baseline = success(&context, minimum_request(1, false, false, true, 1));
     let expected = baseline
         .product_capability_result()
         .unwrap()
         .pc_score_portfolio_v2()
         .unwrap();
     assert!(expected.completeness().complete());
-    for (legal, conditioned) in [(false, true), (true, false), (true, true)] {
-        let actual = success(&context, minimum_request(1, legal, conditioned, true));
-        let report = actual
-            .product_capability_result()
-            .unwrap()
-            .pc_score_portfolio_v2()
-            .unwrap();
-        assert!(report.completeness().complete());
-        assert_eq!(report.pattern_best_scores(), expected.pattern_best_scores());
-        assert_eq!(
-            report.eligible_candidate_map_sha256(),
-            expected.eligible_candidate_map_sha256()
-        );
-        assert_eq!(
-            report.score_eligibility_sha256(),
-            expected.score_eligibility_sha256()
-        );
-        assert_eq!(
-            report.selected_solution_keys(),
-            expected.selected_solution_keys()
-        );
-        assert_eq!(
-            portfolio_meaning(report.portfolio_alternatives()),
-            portfolio_meaning(expected.portfolio_alternatives())
-        );
+    for workers in [1, 2, 11] {
+        for (legal, conditioned) in [(false, false), (false, true), (true, false), (true, true)] {
+            if workers == 1 && !legal && !conditioned {
+                continue;
+            }
+            let actual = success(
+                &context,
+                minimum_request(1, legal, conditioned, true, workers),
+            );
+            assert_relation_snapshot(&actual, conditioned, installed);
+            let report = actual
+                .product_capability_result()
+                .unwrap()
+                .pc_score_portfolio_v2()
+                .unwrap();
+            assert!(report.completeness().complete());
+            assert_eq!(report.pattern_best_scores(), expected.pattern_best_scores());
+            assert_eq!(
+                report.eligible_candidate_map_sha256(),
+                expected.eligible_candidate_map_sha256()
+            );
+            assert_eq!(
+                report.score_eligibility_sha256(),
+                expected.score_eligibility_sha256()
+            );
+            assert_eq!(
+                report.selected_solution_keys(),
+                expected.selected_solution_keys()
+            );
+            assert_eq!(
+                portfolio_meaning(report.portfolio_alternatives()),
+                portfolio_meaning(expected.portfolio_alternatives()),
+                "score-minimals workers={workers} legal={legal} conditioned={conditioned}"
+            );
+        }
     }
     let baseline = success(&context, build_request(false, false));
     let expected = baseline

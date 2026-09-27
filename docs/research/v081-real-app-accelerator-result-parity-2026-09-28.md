@@ -95,3 +95,33 @@ typed/native check를 통과하면 독립 집중 검증을 계속하되 실패�
 전체 의미, strict-lint, 공유 peak/성능 gate, exact-SHA acceptance와 배포·rollback은
 계속 Open이다. 1~6L의 작은 실제 App 실행을 모든 초기 필드·queue·profile·worker의
 전체 parity로 승격하지 않는다. 벤치마크는 다음 단계, v0.9.0 업그레이드는 동결한다.
+
+## 후속 실제 CI와 요청 워커 대조 확대
+
+exact `e1db5ba87b86df98fb6e8ca39b246c0596d58e5f`의
+[run 36352731057](https://github.com/daejunnom/Clearra/actions/runs/36352731057)에서
+일반 App 실행 step과 SRS+ signed pair 설치 후 실행 step의 success를 확인했다.
+이 source에는 Setup-score의 실제 Build coverage·PC continuation·ranking 및
+요청 worker 1·2·11의 public payload 비교도 포함된다. 완료된 step의 상태와
+아직 진행 중인 전체 native job의 상태를 구분하며, 상세 TAP는 job 완료 후
+별도로 대조한다. 같은 실행의 `surfaces` 실패는 유지한다.
+
+현재 source를 다시 확인한 결과 최소 해법의 작은 입력은 이미 `1..=6`으로
+실행하고 있었지만 요청 worker는 1로 고정되어 있었다. 후속 수정은 이 기존
+줄 수 범위를 유지하며 최소 해법과 score-minimals에 요청 worker 1·2·11 및
+두 가속기의 네 on/off 조합을 모두 전달한다. 자산 없음/서명 pair 설치를 검증하는
+기존 단일 integration target의 두 테스트와 exact pipeline을 그대로 사용한다.
+
+- minimum: 기존 필드가 있는 각 1~6L에서 요청 worker·가속 정책 12개 조합
+- score-minimals: 기존 1L 입력에서 같은 12개 조합
+- 기존 1-worker/off-off baseline은 재실행하지 않고 기준 결과를 재사용
+- source solution 집합, candidate map, coverage universe, 최소 개수, canonical
+  선택 순서 및 score eligibility를 기존 실제 typed result로 비교
+- 요청 worker와 실제 사용 worker를 동일시하지 않으며 parallel 성능·전체
+  profile/domain 또는 128MiB 공유 peak를 이 검사로 증명하지 않음
+
+확대한 target은 렌더 미포함 `parallel` 타입 검사 및 formatting/diff 검사를
+통과했다. 감독 receipt `1790546717418435200-43044-runtime.json`은 정상 return 0,
+pressure 0, descendant 0, tree stopped를 확인했다. 실제 확대 행렬의 실행은
+후속 exact-source Linux CI에서 확인할 Open 항목이다. Windows 실행 정책 우회,
+benchmark/ABBA, 자료 재생성 및 v0.9.0 변경은 하지 않는다.
