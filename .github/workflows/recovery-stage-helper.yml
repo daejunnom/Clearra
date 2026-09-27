@@ -31,8 +31,6 @@ jobs:
           import base64, gzip, hashlib
           root = Path('build/recovery-stage')
           text = (root/'source.b64').read_text()
-          # Correct the single transport transcription; the exact compressed
-          # content hash, not this normalization, is the source authority.
           assert text.count('um79bNs') == 1
           text = text.replace('um79bNs', 'um79Ns')
           raw = base64.b64decode(text, validate=True)
@@ -44,20 +42,21 @@ jobs:
           git checkout --detach "$SOURCE"
           git apply --check build/recovery-stage/source.patch
           git apply build/recovery-stage/source.patch
+          mv .github/workflows/recovery-stage-regression.yml build/recovery-stage/recovery-stage-regression.yml
           cargo fmt --all
           cargo fmt --all --check
-          git add -- Cargo.lock crates/clearra-core-executor crates/clearra-forward-search .github/workflows/recovery-stage-regression.yml
+          git add -- Cargo.lock crates/clearra-core-executor crates/clearra-forward-search
           git diff --cached --name-only > build/recovery-stage/changed-files.txt
           git diff --cached --binary > build/recovery-stage/formatted.patch
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'perf(recovery): factor stage geometry and conditional supply languages'
-          proposal="codex/recovery-stage-proposal-$GITHUB_RUN_ID"
-          test -z "$(git ls-remote --heads origin "refs/heads/$proposal")"
-          git push origin "HEAD:refs/heads/$proposal"
           git rev-parse HEAD > build/recovery-stage/proposal-sha.txt
           git rev-parse HEAD^{tree} > build/recovery-stage/proposal-tree.txt
           git archive --format=tar HEAD | gzip > build/recovery-stage/proposal-source.tar.gz
+          proposal="codex/recovery-stage-proposal-$GITHUB_RUN_ID"
+          test -z "$(git ls-remote --heads origin "refs/heads/$proposal")"
+          git push origin "HEAD:refs/heads/$proposal"
       - name: Compile and check exact stage contracts
         shell: bash
         run: |
