@@ -1,0 +1,118 @@
+name: Dispatch verified recovery owner fix
+
+# Branch-only operator bridge for the user's approved repair-and-deploy request.
+# The canonical gate and Pages queue retain all acceptance and rollback checks.
+on:
+  push:
+    branches: [codex/dispatch-recovery-ownerfix-gate-20260928]
+
+permissions:
+  contents: read
+  actions: write
+  pages: read
+  deployments: read
+
+concurrency:
+  group: dispatch-ownerfix-7915a7eb68f0531732684c7f4f3ff9372ca324ad
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom' && github.ref == 'refs/heads/codex/dispatch-recovery-ownerfix-gate-20260928'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPECTED_MAIN: 7915a7eb68f0531732684c7f4f3ff9372ca324ad
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7915a7eb68f0531732684c7f4f3ff9372ca324ad
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Verify exact main and both successful focused CI runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = "$EXPECTED_MAIN"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$EXPECTED_MAIN"
+          for item in '36343682672:recovery-build-regression.yml' '36343682521:management-policy.yml'; do
+            run="${item%%:*}"
+            workflow="${item#*:}"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" > "$RUNNER_TEMP/checked-run-$run.json"
+            jq -e --arg sha "$EXPECTED_MAIN" --arg path ".github/workflows/$workflow" \
+              '.head_sha == $sha and .path == $path and .event == "push" and
+               .head_branch == "codex/converge-recovery-build-release-20260928" and
+               .head_repository.full_name == env.GITHUB_REPOSITORY and
+               .run_attempt == 1 and .status == "completed" and .conclusion == "success"' \
+              "$RUNNER_TEMP/checked-run-$run.json" > /dev/null
+          done
+          node scripts/release/canonical-acceptance-run.mjs --repository "$GITHUB_REPOSITORY" --source-commit "$EXPECTED_MAIN" --require zero
+      - name: Dispatch canonical gate once and record its exact run identity
+        id: acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$EXPECTED_MAIN"
+          gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/release-cli.yml/dispatches" \
+            -f ref=main > "$RUNNER_TEMP/ownerfix-acceptance-dispatch.json"
+          id="$(jq -er '.workflow_run_id | tostring | select(test("^[1-9][0-9]*$"))' "$RUNNER_TEMP/ownerfix-acceptance-dispatch.json")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" > "$RUNNER_TEMP/ownerfix-acceptance-run.json"
+          jq -e --arg sha "$EXPECTED_MAIN" '.head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and .path == ".github/workflows/release-cli.yml" and .run_attempt == 1 and .head_repository.full_name == env.GITHUB_REPOSITORY' "$RUNNER_TEMP/ownerfix-acceptance-run.json" > /dev/null
+          echo "run_id=$id" >> "$GITHUB_OUTPUT"
+          echo "Canonical gate dispatched: https://github.com/$GITHUB_REPOSITORY/actions/runs/$id" >> "$GITHUB_STEP_SUMMARY"
+          echo "canonical_run_id=$id"
+      - name: Read the currently served Pages source without inferring it from main
+        id: snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/pages" > "$RUNNER_TEMP/ownerfix-pages.json"
+          node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          import { resolve } from 'node:path';
+          import { validateLivePagesIdentity } from './scripts/release/pages-rollback-authority.mjs';
+          const pages = JSON.parse(readFileSync(resolve(process.env.RUNNER_TEMP, 'ownerfix-pages.json'), 'utf8'));
+          const base = new URL(pages.html_url);
+          if (base.protocol !== 'https:' || base.username || base.password) throw new Error('Invalid Pages public URL');
+          if (!base.pathname.endsWith('/')) base.pathname += '/';
+          const get = async (path) => {
+            const url = new URL(path, base);
+            url.searchParams.set('authority', `ownerfix-${process.env.GITHUB_RUN_ID}-${Date.now()}`);
+            const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(30000) });
+            if (!response.ok) throw new Error(`Cannot verify current Pages identity: ${response.status}`);
+            return response.json();
+          };
+          const [identity, manifest] = await Promise.all([get('clearra-build-identity.json'), get('wasm/clearra_wasm.manifest.json')]);
+          const sha = identity.sourceCommit;
+          if (!/^[0-9a-f]{40}$/.test(sha ?? '')) throw new Error('Invalid active Pages source');
+          validateLivePagesIdentity(identity, manifest, sha);
+          appendFileSync(process.env.GITHUB_OUTPUT, `source_commit=${sha}\n`);
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Verified current Pages snapshot: \`${sha}\`\n\n`);
+          console.log(`pages_snapshot_sha=${sha}`);
+          JS
+      - name: Queue the unchanged rollback-capture and Pages publication workflow once
+        env:
+          ACCEPTANCE_RUN: ${{ steps.acceptance.outputs.run_id }}
+          SNAPSHOT_SHA: ${{ steps.snapshot.outputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$EXPECTED_MAIN"
+          jq -cn --arg run "$ACCEPTANCE_RUN" --arg snapshot "$SNAPSHOT_SHA" \
+            '{ref:"main",inputs:{acceptance_run_id:$run,snapshot_sha:$snapshot}}' > "$RUNNER_TEMP/ownerfix-pages-input.json"
+          gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/queue-pages-publication.yml/dispatches" \
+            --input "$RUNNER_TEMP/ownerfix-pages-input.json" > "$RUNNER_TEMP/ownerfix-pages-dispatch.json"
+          id="$(jq -er '.workflow_run_id | tostring | select(test("^[1-9][0-9]*$"))' "$RUNNER_TEMP/ownerfix-pages-dispatch.json")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" > "$RUNNER_TEMP/ownerfix-pages-run.json"
+          jq -e --arg sha "$EXPECTED_MAIN" '.head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and .path == ".github/workflows/queue-pages-publication.yml" and .run_attempt == 1 and .head_repository.full_name == env.GITHUB_REPOSITORY' "$RUNNER_TEMP/ownerfix-pages-run.json" > /dev/null
+          echo "pages_queue_run_id=$id"
+          {
+            echo "Pages queue: https://github.com/$GITHUB_REPOSITORY/actions/runs/$id"
+            echo 'The queue waits for exact canonical success, preserves the live rollback artifact, and invokes the existing Pages workflow. No source refs, release tags, gate conditions, or Discord approvals are changed by this operator bridge.'
+          } >> "$GITHUB_STEP_SUMMARY"
