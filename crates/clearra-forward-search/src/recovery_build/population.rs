@@ -119,16 +119,28 @@ impl PreparedPopulation {
         let possible = (first.pattern_count() as u128)
             .checked_mul(second.pattern_count() as u128)
             .ok_or(RecoveryBuildError::CounterOverflow)?;
-        Ok(Self { query, first, second, possible })
+        Ok(Self {
+            query,
+            first,
+            second,
+            possible,
+        })
     }
     pub fn indices(&self, index: u128) -> Result<(usize, usize), RecoveryBuildError> {
-        if index >= self.possible { return Err(RecoveryBuildError::PatternDomainUnavailable); }
+        if index >= self.possible {
+            return Err(RecoveryBuildError::PatternDomainUnavailable);
+        }
         let width = self.second.pattern_count() as u128;
         Ok(((index / width) as usize, (index % width) as usize))
     }
-    pub fn evaluate(&self, index: u128, control: &ExecutionControl)
-        -> Result<RecoveryBuildFixedReport, RecoveryBuildError> {
-        if control.is_cancelled() { return Err(RecoveryBuildError::Cancelled); }
+    pub fn evaluate(
+        &self,
+        index: u128,
+        control: &ExecutionControl,
+    ) -> Result<RecoveryBuildFixedReport, RecoveryBuildError> {
+        if control.is_cancelled() {
+            return Err(RecoveryBuildError::Cancelled);
+        }
         let (i, j) = self.indices(index)?;
         RecoveryBuildFixedQuery {
             fields: self.query.fields.clone(),
@@ -141,13 +153,17 @@ impl PreparedPopulation {
             initial_b2b: self.query.initial_b2b,
             rule_profile: self.query.rule_profile,
             spin_profile: self.query.spin_profile,
-        }.search(control)
+        }
+        .search(control)
     }
     pub fn progress(&self, completed: u128, control: &ExecutionControl) {
         const MAX_EXACT: u128 = 9_007_199_254_740_991;
         if completed <= MAX_EXACT {
-            control.report_progress("recovery-build", completed as u64,
-                (self.possible <= MAX_EXACT).then_some(self.possible as u64));
+            control.report_progress(
+                "recovery-build",
+                completed as u64,
+                (self.possible <= MAX_EXACT).then_some(self.possible as u64),
+            );
         }
     }
 }
@@ -160,42 +176,61 @@ impl PopulationAccumulator {
     pub fn new(possible: u128) -> Self {
         Self {
             report: RecoveryBuildPopulation {
-                possible, evaluated: 0, normal_count: 0, recovery_count: 0,
-                no_path_count: 0, states: 0, normal_probability: 0.0,
-                recovery_probability: 0.0, no_path_probability: 0.0,
-                normal_example: None, recovery_example: None,
+                possible,
+                evaluated: 0,
+                normal_count: 0,
+                recovery_count: 0,
+                no_path_count: 0,
+                states: 0,
+                normal_probability: 0.0,
+                recovery_probability: 0.0,
+                no_path_probability: 0.0,
+                normal_example: None,
+                recovery_example: None,
             },
             probabilities: [Sum::default(), Sum::default(), Sum::default()],
         }
     }
     /// Must be called in global row-major pair order, regardless of completion
     /// order. This preserves both compensated sums and canonical examples.
-    pub fn record(&mut self, source: &PreparedPopulation, index: u128,
-        status: RecoveryBuildStatus, states: usize, path: Option<RecoveryBuildFixedReport>)
-        -> Result<(), RecoveryBuildError> {
+    pub fn record(
+        &mut self,
+        source: &PreparedPopulation,
+        index: u128,
+        status: RecoveryBuildStatus,
+        states: usize,
+        path: Option<RecoveryBuildFixedReport>,
+    ) -> Result<(), RecoveryBuildError> {
         if index != self.report.evaluated {
             return Err(RecoveryBuildError::PatternDomainUnavailable);
         }
-        let (i,j) = source.indices(index)?;
+        let (i, j) = source.indices(index)?;
         let category = match status {
             RecoveryBuildStatus::Normal => 0,
             RecoveryBuildStatus::Recovery => 1,
             RecoveryBuildStatus::NoPath => 2,
         };
-        self.probabilities[category].add(source.first.weight_at(i).get() * source.second.weight_at(j).get());
-        self.report.states = self.report.states.checked_add(states as u128)
+        self.probabilities[category]
+            .add(source.first.weight_at(i).get() * source.second.weight_at(j).get());
+        self.report.states = self
+            .report
+            .states
+            .checked_add(states as u128)
             .ok_or(RecoveryBuildError::CounterOverflow)?;
         self.report.evaluated += 1;
         let example = match status {
             RecoveryBuildStatus::Normal => {
                 self.report.normal_count += 1;
                 Some(&mut self.report.normal_example)
-            },
+            }
             RecoveryBuildStatus::Recovery => {
                 self.report.recovery_count += 1;
                 Some(&mut self.report.recovery_example)
-            },
-            RecoveryBuildStatus::NoPath => { self.report.no_path_count += 1; None },
+            }
+            RecoveryBuildStatus::NoPath => {
+                self.report.no_path_count += 1;
+                None
+            }
         };
         if let Some(slot) = example {
             if slot.is_none() {
@@ -204,18 +239,20 @@ impl PopulationAccumulator {
                     return Err(RecoveryBuildError::PatternDomainUnavailable);
                 }
                 *slot = Some(RecoveryBuildExample {
-                    first_pattern: i, second_pattern: j,
+                    first_pattern: i,
+                    second_pattern: j,
                     first_queue: source.first.sequence_at(i).to_vec(),
-                    second_queue: source.second.sequence_at(j).to_vec(), path,
+                    second_queue: source.second.sequence_at(j).to_vec(),
+                    path,
                 });
             }
         }
         Ok(())
     }
     pub fn finish(mut self) -> RecoveryBuildPopulation {
-        self.report.normal_probability = self.probabilities[0].value.clamp(0.0,1.0);
-        self.report.recovery_probability = self.probabilities[1].value.clamp(0.0,1.0);
-        self.report.no_path_probability = self.probabilities[2].value.clamp(0.0,1.0);
+        self.report.normal_probability = self.probabilities[0].value.clamp(0.0, 1.0);
+        self.report.recovery_probability = self.probabilities[1].value.clamp(0.0, 1.0);
+        self.report.no_path_probability = self.probabilities[2].value.clamp(0.0, 1.0);
         self.report
     }
 }

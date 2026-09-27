@@ -21,8 +21,8 @@ pub use boundary_recovery::{
 };
 pub use boundary_recovery_pattern::{BoundaryRecoveryPatternError, BoundaryRecoveryPatternQuery};
 pub use boundary_recovery_population::{
-    search_boundary_recovery_population, BoundaryRecoveryPopulationError,
-    BoundaryRecoveryPopulationLimits, BoundaryRecoveryPopulationReport,
+    BoundaryRecoveryPopulationError, BoundaryRecoveryPopulationLimits,
+    BoundaryRecoveryPopulationReport, search_boundary_recovery_population,
 };
 pub use cross_stage_catalog::{
     CrossStageCatalog, CrossStageCatalogCompletion, CrossStageCatalogError, CrossStageCatalogQuery,
@@ -48,9 +48,8 @@ pub use search::{ForwardSearchAdvance, ForwardSearchError, ForwardSearchSession}
 pub const MAX_REN_QUEUE_PIECES: usize = 22;
 
 pub use recovery_build::{
-    RecoveryBuildParallelCoordinator, RecoveryBuildParallelWorker, RecoveryBuildParallelError,
-    RecoveryBuildParallelProduce, RecoveryBuildParallelProgress,
     RecoveryBuildError, RecoveryBuildExample, RecoveryBuildFields, RecoveryBuildFixedQuery,
-    RecoveryBuildFixedReport, RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildStatus,
-    RecoveryBuildStep,
+    RecoveryBuildFixedReport, RecoveryBuildParallelCoordinator, RecoveryBuildParallelError,
+    RecoveryBuildParallelProduce, RecoveryBuildParallelProgress, RecoveryBuildParallelWorker,
+    RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildStatus, RecoveryBuildStep,
 };
