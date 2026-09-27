@@ -2,9 +2,7 @@
 //! count their product without traversing all pairs or counting paths twice.
 #[cfg(test)]
 use super::RecoveryBuildFixedQuery;
-use super::{
-    RecoveryBuildError, RecoveryBuildFields, RecoveryBuildFixedReport, RecoveryBuildStatus,
-};
+use super::{RecoveryBuildError, RecoveryBuildFields, RecoveryBuildFixedReport};
 use crate::CrossStageEarlyLimit;
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_rules::profile::rule_profile::RuleProfileId;

@@ -142,7 +142,7 @@ struct Entry {
     position: Position,
     edges: [Option<Arc<[Edge]>>; 7],
 }
-pub(super) struct Geometry {
+pub(in crate::recovery_build) struct Geometry {
     pub stages: Vec<Stage>,
     pub roots: Vec<u32>,
     entries: Vec<Entry>,
