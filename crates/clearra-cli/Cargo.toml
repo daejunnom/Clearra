@@ -13,6 +13,7 @@ workspace = true
 default = ["online-pc4-tablebase"]
 native-c-core = ["clearra-app/native-c-core"]
 wasm-cpu-runtime = ["clearra-app/parallel"]
+local-search-ab = ["clearra-app/local-search-ab"]
 webgpu-search = ["clearra-app/webgpu-search"]
 online-pc4-tablebase = ["clearra-app/online-pc4-tablebase"]
 native-pc4-libcurl = ["online-pc4-tablebase", "dep:curl"]
@@ -42,6 +43,8 @@ path = "tests/canonical_witness_contract.rs"
 required-features = ["wasm-cpu-runtime"]
 
 [dependencies]
+clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
+clearra-accelerator-runtime = { path = "../clearra-accelerator-runtime" }
 clearra-app = { path = "../clearra-app" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
@@ -60,6 +63,7 @@ clearra-spin-structure-search = { path = "../clearra-spin-structure-search" }
 clearra-supply = { path = "../clearra-supply" }
 clearra-validation = { path = "../clearra-validation" }
 clearra-cli-command = { path = "../clearra-cli-command" }
+clearra-pc4-qualifier = { path = "../../tools/clearra-pc4-qualifier", default-features = false, features = ["legal-board-assets"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 getrandom = "0.4.3"

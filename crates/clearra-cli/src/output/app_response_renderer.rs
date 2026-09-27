@@ -3124,6 +3124,14 @@ fn cli_error_for_app_error(code: AppErrorCode, default_error: CliErrorCode) -> C
         AppErrorCode::TraceUnavailable => CliErrorCode::PathTraceUnavailable,
         AppErrorCode::NoSolution => CliErrorCode::PathNoSolution,
         AppErrorCode::Unsupported => CliErrorCode::ProductRuntimeUnsupported,
+        // Product commands use Unsupported as their assembly fallback, not as
+        // evidence that an attempted execution failed for lack of support.
+        // Keep explicit Unsupported and specific backend refusals unchanged.
+        AppErrorCode::ExecutionFailed
+            if default_error == CliErrorCode::ProductRuntimeUnsupported =>
+        {
+            CliErrorCode::ProductExecutionFailed
+        }
         AppErrorCode::NativeCoreUnavailable => CliErrorCode::NativeCoreUnavailable,
         AppErrorCode::BackendGpuUnavailable => CliErrorCode::BackendGpuUnavailable,
         AppErrorCode::CliCommandUnsupported => CliErrorCode::CliCommandUnsupported,

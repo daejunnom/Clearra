@@ -23,6 +23,7 @@ import {
 } from '../src/workers/clearraWasmRuntime.ts';
 
 const completedProgress: ClearraVerifierPoolProgress = {
+  geometryNodes: 23,
   candidatesVerified: 12,
   buildNodes: 34,
   coverageChecks: 56,
@@ -34,6 +35,7 @@ const completedProgress: ClearraVerifierPoolProgress = {
   oldestBatchMs: 78
 };
 const emptyProgress: ClearraVerifierPoolProgress = {
+  geometryNodes: 0,
   candidatesVerified: 0,
   buildNodes: 0,
   coverageChecks: 0,
@@ -217,7 +219,11 @@ assert.deepEqual(
     (event) => rootEvents.push(event)
   );
   assert.deepEqual(initializedWorkerCounts, [2]);
-  assert.deepEqual(rootBatchSizes, [18], '140 roots use four dispatch waves per compute worker');
+  assert.deepEqual(
+    rootBatchSizes,
+    [5],
+    'large root families retain the measured five-root work-stealing ceiling'
+  );
   assert.equal(rootWorkersUsed, 2);
   const rootSearching = rootEvents.find((event) => event.event === 'progress' &&
     event.progress.telemetry?.phase === 'searching' &&
@@ -455,6 +461,7 @@ const U32_MAX = normalizeWasmU32(-1);
 assert.equal(U32_MAX, 0xffff_ffff);
 let saturatedPoolFinished = false;
 const saturatedProgress: ClearraVerifierPoolProgress = {
+  geometryNodes: U32_MAX,
   candidatesVerified: U32_MAX,
   buildNodes: U32_MAX,
   coverageChecks: U32_MAX,
@@ -698,6 +705,8 @@ incumbentProductOwner.release();
 const serialAuthority = new SharedExecutionResourceAuthority(sharedCapacity);
 let serialResetCount = 0;
 let serialDrainCount = 0;
+let serialConditionedAdmission = 0;
+let serialConditionedIdentity = '';
 const serialPlan: ClearraDistributedPlan = {
   ...plan,
   mode: 'serial',
@@ -712,6 +721,11 @@ const serialWasm = {
   },
   distributed_reset() {
     serialResetCount += 1;
+  },
+  accelerator_admit(kind: number, profile: number, bytes: ArrayBuffer, activate: boolean) {
+    assert.equal(serialResetCount, 1, 'the coordinator releases its owner before serial admission');
+    assert.deepEqual([kind, profile, bytes.byteLength, activate], [1, 3, 3, true]);
+    serialConditionedAdmission += 1;
   },
   start_job() {
     assert.deepEqual(
@@ -760,10 +774,16 @@ const serialTerminal = await new ClearraProductJobRunner(
     transferByteCap: 32 * 1024 * 1024
   },
   serialAuthority,
-  100
+  100,
+  null,
+  { profile: 3, bytes: Uint8Array.of(1, 2, 3).buffer,
+    identity: 'signed-condition-generation', activeSessionSharedBytes: 1024 },
+  (_profile, identity) => { serialConditionedIdentity = identity; }
 ).run('clearra pc --lines 1', (event) => serialEvents.push(event));
 assert.equal(serialTerminal.event, 'failed');
 assert.equal(serialResetCount, 1, 'preparation coordinator resets exactly once');
+assert.equal(serialConditionedAdmission, 1);
+assert.equal(serialConditionedIdentity, 'signed-condition-generation');
 assert.deepEqual(
   serialEvents
     .filter((event) => event.event === 'progress')
@@ -1661,6 +1681,7 @@ for (const sample of [
 
 function verifierFlags(value: boolean) {
   return {
+    geometryNodes: value,
     candidatesVerified: value,
     buildNodes: value,
     coverageChecks: value

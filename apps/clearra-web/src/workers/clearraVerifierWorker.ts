@@ -18,6 +18,8 @@ import {
 } from './DurableDelegationJournal';
 
 type VerifierRequest =
+  | { type: 'accelerator-pack'; profile: number | null; bytes: ArrayBuffer | null }
+  | { type: 'accelerator-synopsis'; profile: number | null; wire: ArrayBuffer | null }
   | { type: 'delegation-offer'; offer: DelegationOffer }
   | {
       type: 'delegation-run';
@@ -51,6 +53,8 @@ type VerifierRequest =
 
 type VerifierResponse =
   | { type: 'prewarmed' }
+  | { type: 'accelerator-pack-ready'; applied: boolean }
+  | { type: 'accelerator-synopsis-ready'; applied: boolean }
   | { type: 'delegation-accepted'; acceptance: DelegationAcceptance }
   | {
       type: 'delegation-started';
@@ -96,6 +100,8 @@ type ExecutableVerifierRequest = Extract<
 >;
 const stagedExecutables = new Map<string, ExecutableVerifierRequest>();
 let workerId = '';
+let activeConditionedProfile: number | null = null;
+let activeSynopsisProfile: number | null = null;
 const VERIFIER_HOST_QUANTUM_MS = 8;
 const yieldToHost = createWorkerHostYield();
 
@@ -130,6 +136,58 @@ async function handleRequest(request: VerifierRequest) {
     }
     if (request.type === 'dispose') {
       disposeVerifierRuntime();
+      return;
+    }
+    if (request.type === 'accelerator-pack') {
+      wasm ??= await loadClearraWasmModule();
+      if (activeConditionedProfile !== null) {
+        if (!wasm.accelerator_remove) throw new Error('installed relation has no removal export');
+        wasm.accelerator_remove(1, activeConditionedProfile);
+        activeConditionedProfile = null;
+      }
+      let applied = false;
+      if (request.profile !== null && request.bytes &&
+          wasm.accelerator_admit && wasm.accelerator_remove &&
+          Number.isInteger(request.profile) && request.profile >= 0 && request.profile < 5 &&
+          request.bytes.byteLength <= 16 * 1024 * 1024) {
+        try {
+          // This verifier is the only owner of the complete condition pack.
+          // Admission rechecks the embedded signed catalog, payload digest,
+          // generation, parser and resident bound before any BuildUp lookup.
+          wasm.accelerator_admit(1, request.profile, request.bytes, true);
+          activeConditionedProfile = request.profile;
+          applied = true;
+        } catch {
+          // Invalid or missing optional data cannot reject an exact search.
+        }
+      }
+      post({ type: 'accelerator-pack-ready', applied });
+      return;
+    }
+    if (request.type === 'accelerator-synopsis') {
+      wasm ??= await loadClearraWasmModule();
+      if (activeSynopsisProfile !== null) {
+        if (!wasm.accelerator_remove) {
+          throw new Error('installed synopsis has no removal export');
+        }
+        wasm.accelerator_remove(0, activeSynopsisProfile);
+        activeSynopsisProfile = null;
+      }
+      let applied = false;
+      if (request.profile !== null && request.wire &&
+          wasm.accelerator_admit_negative_synopsis && wasm.accelerator_remove &&
+          Number.isInteger(request.profile) && request.profile >= 0 && request.profile < 5 &&
+          request.wire.byteLength <= 4 * 1024 * 1024) {
+        try {
+          wasm.accelerator_admit_negative_synopsis(request.profile, request.wire);
+          activeSynopsisProfile = request.profile;
+          applied = true;
+        } catch {
+          // A missing or invalid derivative cannot reject an exact search.
+          // The previous generation was already removed before this attempt.
+        }
+      }
+      post({ type: 'accelerator-synopsis-ready', applied });
       return;
     }
     if (request.type === 'prewarm') {
@@ -419,9 +477,13 @@ function postHeartbeat(
 
 function exactTaskProgress(): ClearraDistributedVerifierProgress {
   return {
-    candidateCount: 0, buildNodes: 0, coverageChecks: 0,
-    availability: { candidateCount: false, buildNodes: false, coverageChecks: false },
-    exactness: { candidateCount: false, buildNodes: false, coverageChecks: false }
+    geometryNodes: 0, candidateCount: 0, buildNodes: 0, coverageChecks: 0,
+    availability: {
+      geometryNodes: false, candidateCount: false, buildNodes: false, coverageChecks: false
+    },
+    exactness: {
+      geometryNodes: false, candidateCount: false, buildNodes: false, coverageChecks: false
+    }
   };
 }
 
@@ -436,6 +498,8 @@ function bindLifecycleOwner(ownerId: string) {
 
 function disposeVerifierRuntime() {
   initialized = false;
+  activeConditionedProfile = null;
+  activeSynopsisProfile = null;
   try {
     wasm?.distributed_reset();
   } catch {

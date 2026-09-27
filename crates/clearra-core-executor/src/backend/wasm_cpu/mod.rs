@@ -2,6 +2,7 @@ mod build_probability;
 mod build_probability_distributed;
 mod buildup;
 mod catalog;
+mod compact_exact_u64_map;
 mod coverage_product;
 mod distributed;
 mod exact_collections;
@@ -50,6 +51,7 @@ mod setup_partial_build;
 mod setup_representative;
 mod setup_suffix_coverage;
 mod standard_bag_coverage;
+mod standard_bag_product_memo;
 mod terminal_hold_projection;
 mod tiling_parallel;
 #[cfg(feature = "webgpu-search")]
@@ -69,9 +71,17 @@ pub use distributed::{
     WasmDistributedResultMerger, WasmDistributedVerifier,
 };
 pub use pc4_graph_materializer::{
-    materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
+    any_pc4_ilc_target_field, enumerate_pc4_ilc_geometric_predecessor_fields,
+    enumerate_pc4_ilc_predecessor_fields, enumerate_pc4_ilc_target_fields,
+    materialize_pc4_ilc_transition, Pc4IlcForwardMembershipWorkspace, Pc4IlcMaterializationError,
+    Pc4IlcPlacement,
 };
-pub(crate) use reachability::{DocumentLockReachability, DocumentReachabilityEngine};
+#[cfg(any(test, feature = "qualification-reference"))]
+pub(crate) use reachability::exact_solver_local_relation_spawn_entries;
+pub(crate) use reachability::{
+    exact_entry_lock_anchors, exact_local_relation, exact_spawn_lock_anchors,
+    DocumentLockReachability, DocumentReachabilityEngine,
+};
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
 pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
 #[cfg(not(target_family = "wasm"))]

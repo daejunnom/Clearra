@@ -1,0 +1,138 @@
+name: v0.8.1 Selective Source (Non-publishing)
+
+on:
+  push:
+    branches: ["codex/v081-selective-source-ci-20260927"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v081-selective-source-${{ github.ref }}
+  cancel-in-progress: true
+
+# Source feedback only: no acceptance receipts, asset generation/download,
+# release tags, main promotion, or Pages/Discord/Cloud traffic changes.
+env:
+  CLEARRA_BUILD_PURPOSE: experiment
+  RUST_MIN_STACK: "16777216"
+  CARGO_BUILD_JOBS: "2"
+
+jobs:
+  core:
+    if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --target wasm32-unknown-unknown
+      - name: Verify product and local-only feature boundaries
+        run: |
+          cargo fmt -p clearra-core-executor --check
+          cargo check --locked -p clearra-core-executor
+          cargo check --locked -p clearra-core-executor --features parallel
+          cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown
+      - name: Test changed worker ownership and accelerator paths
+        run: |
+          cargo test --locked -p clearra-core-executor --lib v081_ --features parallel,local-search-ab,qualification-reference -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --lib backend::wasm_cpu::reachability --features parallel,local-search-ab,qualification-reference -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --lib row_frame::tests --features parallel,local-search-ab,qualification-reference -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --lib legal_board::tests --features parallel,local-search-ab,qualification-reference -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --lib conditioned_ --features parallel,local-search-ab,qualification-reference -- --test-threads=1
+
+  native-products:
+    if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CLEARRA_FOCUSED_TEST_OUTPUT_ROOT: ${{ github.workspace }}/_local/artifacts/v081-selective-store-tests
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Typecheck integrated native products and benchmark facade
+        run: |
+          cargo check --locked -p clearra-cli -p clearra-gui-host --tests --no-default-features --features clearra-cli/wasm-cpu-runtime
+          cargo check --locked -p clearra-cli --features wasm-cpu-runtime
+          cargo check --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime,local-search-ab
+          cargo check --locked -p clearra-pc4-qualifier --all-targets
+      - name: Test typed policy parity without the monolithic App test binary
+        run: |
+          cargo test --locked -p clearra-pc-graph --lib pc_execution_policy -- --test-threads=1
+          cargo test --locked -p clearra-cli-command --lib exact_accelerator -- --test-threads=1
+          cargo test --locked -p clearra-cli-command --lib shared_parser_preserves_all_accelerator -- --test-threads=1
+          cargo test --locked -p clearra-gui-host --lib gui_exact_accelerators --no-default-features -- --test-threads=1
+          cargo test --locked -p clearra-gui-host --lib gui_setup_request_preserves_independent --no-default-features -- --test-threads=1
+          cargo test --locked -p clearra-app --test exact_accelerator_policy --no-default-features -- --test-threads=1
+          cargo test --locked -p clearra-accelerator-activation --lib -- --test-threads=1
+          cargo test --locked -p clearra-accelerator-product-host --lib -- --test-threads=1
+          cargo test --locked -p clearra-accelerator-product-host --bin clearra-accelerator-release-gate -- --test-threads=1
+          cargo test --locked -p clearra-accelerator-runtime --lib -- --test-threads=1
+      - name: Test explicit asset lifecycle and repair
+        run: |
+          mkdir -p "$CLEARRA_FOCUSED_TEST_OUTPUT_ROOT"
+          cargo test --locked -p clearra-cli --lib accelerator_asset_store::repair_tests --no-default-features -- --test-threads=1
+          cargo test --locked -p clearra-cli --lib accelerator_gui_bridge --no-default-features -- --test-threads=1
+          cargo test --locked -p clearra-cli --lib conditioned_reachability_assets --no-default-features -- --test-threads=1
+          cargo test --locked -p clearra-cli --lib lifecycle_routes --no-default-features -- --test-threads=1
+          cargo test --locked -p clearra-cli --lib exact_accelerators --no-default-features -- --test-threads=1
+          cargo test --locked -p clearra-cli --lib exact_accelerator_flags --no-default-features -- --test-threads=1
+          cargo test --locked -p clearra-cli --lib product_execution_failure_does_not_reclassify_explicit_runtime_refusals --no-default-features -- --test-threads=1
+      - name: Test bounded generation and parser proofs, not full profile regeneration
+        run: |
+          cargo test --locked -p clearra-pc4-qualifier --lib conditioned_local_candidate_validation::tests -- --test-threads=1
+          cargo test --locked -p clearra-pc4-qualifier --lib conditioned_local_relation_generation::tests -- --test-threads=1
+          cargo test --locked -p clearra-pc4-qualifier --lib reverse_domain_membership_matches_complete_forward_enumeration -- --test-threads=1
+          cargo test --locked -p clearra-pc4-qualifier --lib final_bundle_and_catalog_are_bound_without_granting_product_authority -- --test-threads=1
+
+  wasm-abi:
+    if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust and WASM target
+        run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
+      - name: Preserve fail-operational reset and typed accelerator admission
+        run: |
+          cargo check --locked -p clearra-wasm-abi --target wasm32-unknown-unknown
+          cargo test --locked -p clearra-wasm-abi --lib reset_rejects_a_borrowed_runtime_without_a_second_panic -- --test-threads=1
+          cargo test --locked -p clearra-wasm-abi --lib accelerator_ -- --test-threads=1
+
+  surfaces:
+    if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Install locked UI dependencies without scripts
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          test "$(pnpm --version)" = "11.5.0"
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Test exact harness, lifecycle, and immutable compute packaging
+        run: |
+          node --test scripts/benchmark/v081-accelerator-abba-core.test.mjs scripts/benchmark/v081-worker-memory-accounting.test.mjs scripts/benchmark/v081-product-memo-abba-core.test.mjs
+          node --test apps/clearra-web/test/acceleratorDownloadStream.test.mjs apps/clearra-desktop/test/acceleratorLifecycleClient.test.mjs
+          node --test apps/clearra-discord-bot/test/accelerator-image.test.mjs
+          node --test scripts/tools/build-clearra-frontend.test.mjs scripts/release/accepted-pages-build.test.mjs
+          pnpm --filter @clearra/ui test
+      - name: Verify Web worker types, heartbeats, and proof handoffs without a WASM build
+        working-directory: apps/clearra-web
+        run: |
+          pnpm exec tsc --noEmit -p tsconfig.contract.json
+          node ../../scripts/tools/run-typescript-contracts.mjs ./test

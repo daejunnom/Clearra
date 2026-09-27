@@ -210,6 +210,20 @@ struct DistributedWorkerScalarEvidence {
     reachability_cache_reachable_hits: usize,
     reachability_cache_unreachable_hits: usize,
     reachability_cache_key_misses: usize,
+    reachability_conditioned_complete_hits: usize,
+    reachability_conditioned_misses: usize,
+    reachability_conditioned_lookup_attempts: usize,
+    reachability_conditioned_empty_entry_sets: usize,
+    reachability_conditioned_no_query_context: usize,
+    reachability_conditioned_cache_short_circuits: usize,
+    reachability_conditioned_out_of_scope: usize,
+    reachability_conditioned_unknown: usize,
+    reachability_conditioned_snapshot_mismatch: usize,
+    reachability_conditioned_invalid_asset: usize,
+    conditioned_reachability_requested: bool,
+    conditioned_reachability_policy_enabled: bool,
+    conditioned_reachability_snapshot_active: bool,
+    legal_board_verified_negative_prunes: usize,
     reachability_partial_searches: usize,
     reachability_exhaustive_searches: usize,
     representative_candidate_ordinal: Option<u64>,
@@ -295,6 +309,62 @@ fn exact_distributed_worker_scalar_evidence(
         reachability_cache_key_misses: exact_canonical_usize_field(
             result,
             "reachability_cache_key_misses",
+        )?,
+        reachability_conditioned_complete_hits: exact_canonical_usize_field(
+            result,
+            "reachability_conditioned_complete_hits",
+        )?,
+        reachability_conditioned_misses: exact_canonical_usize_field(
+            result,
+            "reachability_conditioned_misses",
+        )?,
+        reachability_conditioned_lookup_attempts: exact_canonical_usize_field(
+            result,
+            "reachability_conditioned_lookup_attempts",
+        )?,
+        reachability_conditioned_empty_entry_sets: exact_canonical_usize_field(
+            result,
+            "reachability_conditioned_empty_entry_sets",
+        )?,
+        reachability_conditioned_no_query_context: exact_canonical_usize_field(
+            result,
+            "reachability_conditioned_no_query_context",
+        )?,
+        reachability_conditioned_cache_short_circuits: exact_canonical_usize_field(
+            result,
+            "reachability_conditioned_cache_short_circuits",
+        )?,
+        reachability_conditioned_out_of_scope: exact_canonical_usize_field(
+            result,
+            "reachability_conditioned_out_of_scope",
+        )?,
+        reachability_conditioned_unknown: exact_canonical_usize_field(
+            result,
+            "reachability_conditioned_unknown",
+        )?,
+        reachability_conditioned_snapshot_mismatch: exact_canonical_usize_field(
+            result,
+            "reachability_conditioned_snapshot_mismatch",
+        )?,
+        reachability_conditioned_invalid_asset: exact_canonical_usize_field(
+            result,
+            "reachability_conditioned_invalid_asset",
+        )?,
+        conditioned_reachability_requested: exact_canonical_bool_field(
+            result,
+            "conditioned_reachability_requested",
+        )?,
+        conditioned_reachability_policy_enabled: exact_canonical_bool_field(
+            result,
+            "conditioned_reachability_policy_enabled",
+        )?,
+        conditioned_reachability_snapshot_active: exact_canonical_bool_field(
+            result,
+            "conditioned_reachability_snapshot_active",
+        )?,
+        legal_board_verified_negative_prunes: exact_canonical_usize_field(
+            result,
+            "legal_board_verified_negative_prunes",
         )?,
         reachability_partial_searches: exact_canonical_usize_field(
             result,
@@ -703,11 +773,18 @@ pub(crate) struct WasmExactSearchSession {
     total_reachability_states: usize,
     peak_cpu_bytes: usize,
     parallel_worker_retained_bytes: usize,
+    #[cfg(feature = "parallel")]
+    parallel_worker_memory_components: Option<super::parallel_worker::WorkerMemoryComponents>,
+    #[cfg(feature = "parallel")]
+    parallel_standard_bag_memo_storage: &'static str,
+    #[cfg(feature = "parallel")]
+    parallel_candidate_digest_retained_bytes: usize,
     parallel_piece_language_cache_hits: usize,
     parallel_piece_language_cache_misses: usize,
     parallel_standard_bag_cache_hits: usize,
     parallel_standard_bag_cache_misses: usize,
     parallel_reachability_metrics: ReachabilityMetrics,
+    parallel_legal_board_verified_negative_prunes: usize,
     workers_used: usize,
     parallel_active_workers: usize,
     parallel_minimum_worker_candidates: usize,
@@ -1457,11 +1534,18 @@ impl WasmExactSearchSession {
             total_reachability_states: 0,
             peak_cpu_bytes,
             parallel_worker_retained_bytes: 0,
+            #[cfg(feature = "parallel")]
+            parallel_worker_memory_components: None,
+            #[cfg(feature = "parallel")]
+            parallel_standard_bag_memo_storage: "not-measured",
+            #[cfg(feature = "parallel")]
+            parallel_candidate_digest_retained_bytes: 0,
             parallel_piece_language_cache_hits: 0,
             parallel_piece_language_cache_misses: 0,
             parallel_standard_bag_cache_hits: 0,
             parallel_standard_bag_cache_misses: 0,
             parallel_reachability_metrics: ReachabilityMetrics::default(),
+            parallel_legal_board_verified_negative_prunes: 0,
             workers_used: 1,
             parallel_active_workers: 1,
             parallel_minimum_worker_candidates: 0,
@@ -1680,11 +1764,16 @@ impl WasmExactSearchSession {
         self.peak_reachability_states = outcome.peak_reachability_states;
         self.total_reachability_states = outcome.total_reachability_states;
         self.parallel_worker_retained_bytes = outcome.worker_retained_bytes;
+        self.parallel_worker_memory_components = Some(outcome.worker_memory_components);
+        self.parallel_standard_bag_memo_storage = outcome.standard_bag_memo_storage;
+        self.parallel_candidate_digest_retained_bytes = outcome.candidate_digest_retained_bytes;
         self.parallel_piece_language_cache_hits = outcome.piece_language_cache_hits;
         self.parallel_piece_language_cache_misses = outcome.piece_language_cache_misses;
         self.parallel_standard_bag_cache_hits = outcome.standard_bag_cache_hits;
         self.parallel_standard_bag_cache_misses = outcome.standard_bag_cache_misses;
         self.parallel_reachability_metrics = outcome.reachability_metrics;
+        self.parallel_legal_board_verified_negative_prunes =
+            outcome.legal_board_verified_negative_prunes;
         self.workers_used = outcome.workers_used;
         self.parallel_active_workers = outcome.active_workers;
         self.parallel_minimum_worker_candidates = outcome.minimum_worker_candidates;
@@ -1695,6 +1784,11 @@ impl WasmExactSearchSession {
                 .saturating_add(self.geometry.retained_bytes())
                 .saturating_add(self.tablebase_retained_bytes)
                 .saturating_add(self.parallel_worker_retained_bytes)
+                .saturating_add(
+                    outcome
+                        .worker_memory_components
+                        .shared_standard_bag_request_bytes,
+                )
                 .saturating_add(self.solution_identity_retained_bytes()),
         );
         if let Some(reason) = outcome.truncated_reason {
@@ -3131,15 +3225,15 @@ impl WasmExactSearchSession {
             map.try_reserve(1).map_err(|_| {
                 WasmExactSearchError::InvalidProblem("wasm_solution_coverage_storage_unavailable")
             })?;
-            let empty = if parent_authorized {
-                try_empty_pattern_bitset(
-                    coverage.pattern_count(),
-                    "wasm_solution_coverage_storage_unavailable",
-                )?
-            } else {
-                PatternBitSet::new(coverage.pattern_count())
-            };
-            map.insert(identity, empty);
+            // PatternBitSet owns immutable Arc backing. Keep that backing for
+            // a first row instead of allocating a zeroed dense universe and
+            // copying into it. Sparse rows stay sparse; duplicate union below
+            // remains copy-on-write and cannot mutate the source evidence.
+            self.solution_coverage_bytes = self
+                .solution_coverage_bytes
+                .saturating_add(coverage.retained_bytes());
+            map.insert(identity, coverage.clone());
+            return Ok(());
         }
         let entry = map
             .get_mut(&identity)
@@ -3367,6 +3461,60 @@ impl WasmExactSearchSession {
             .parallel_reachability_metrics
             .cache_key_misses
             .saturating_add(scalar.reachability_cache_key_misses);
+        self.parallel_reachability_metrics.conditioned_complete_hits = self
+            .parallel_reachability_metrics
+            .conditioned_complete_hits
+            .saturating_add(scalar.reachability_conditioned_complete_hits);
+        self.parallel_reachability_metrics.conditioned_misses = self
+            .parallel_reachability_metrics
+            .conditioned_misses
+            .saturating_add(scalar.reachability_conditioned_misses);
+        self.parallel_reachability_metrics
+            .conditioned_lookup_attempts = self
+            .parallel_reachability_metrics
+            .conditioned_lookup_attempts
+            .saturating_add(scalar.reachability_conditioned_lookup_attempts);
+        self.parallel_reachability_metrics
+            .conditioned_empty_entry_sets = self
+            .parallel_reachability_metrics
+            .conditioned_empty_entry_sets
+            .saturating_add(scalar.reachability_conditioned_empty_entry_sets);
+        self.parallel_reachability_metrics
+            .conditioned_no_query_context = self
+            .parallel_reachability_metrics
+            .conditioned_no_query_context
+            .saturating_add(scalar.reachability_conditioned_no_query_context);
+        self.parallel_reachability_metrics
+            .conditioned_cache_short_circuits = self
+            .parallel_reachability_metrics
+            .conditioned_cache_short_circuits
+            .saturating_add(scalar.reachability_conditioned_cache_short_circuits);
+        self.parallel_reachability_metrics.conditioned_out_of_scope = self
+            .parallel_reachability_metrics
+            .conditioned_out_of_scope
+            .saturating_add(scalar.reachability_conditioned_out_of_scope);
+        self.parallel_reachability_metrics.conditioned_unknown = self
+            .parallel_reachability_metrics
+            .conditioned_unknown
+            .saturating_add(scalar.reachability_conditioned_unknown);
+        self.parallel_reachability_metrics
+            .conditioned_snapshot_mismatch = self
+            .parallel_reachability_metrics
+            .conditioned_snapshot_mismatch
+            .saturating_add(scalar.reachability_conditioned_snapshot_mismatch);
+        self.parallel_reachability_metrics.conditioned_invalid_asset = self
+            .parallel_reachability_metrics
+            .conditioned_invalid_asset
+            .saturating_add(scalar.reachability_conditioned_invalid_asset);
+        self.parallel_reachability_metrics.conditioned_requested |=
+            scalar.conditioned_reachability_requested;
+        self.parallel_reachability_metrics
+            .conditioned_policy_enabled |= scalar.conditioned_reachability_policy_enabled;
+        self.parallel_reachability_metrics
+            .conditioned_snapshot_active |= scalar.conditioned_reachability_snapshot_active;
+        self.parallel_legal_board_verified_negative_prunes = self
+            .parallel_legal_board_verified_negative_prunes
+            .saturating_add(scalar.legal_board_verified_negative_prunes);
         self.parallel_reachability_metrics.partial_searches = self
             .parallel_reachability_metrics
             .partial_searches
@@ -4922,6 +5070,64 @@ impl WasmExactSearchSession {
                 reachability_metrics.cache_key_misses,
             ),
             field(
+                "reachability_conditioned_complete_hits",
+                reachability_metrics.conditioned_complete_hits,
+            ),
+            field(
+                "reachability_conditioned_misses",
+                reachability_metrics.conditioned_misses,
+            ),
+            field(
+                "conditioned_reachability_requested",
+                reachability_metrics.conditioned_requested,
+            ),
+            field(
+                "conditioned_reachability_policy_enabled",
+                reachability_metrics.conditioned_policy_enabled,
+            ),
+            field(
+                "conditioned_reachability_snapshot_active",
+                reachability_metrics.conditioned_snapshot_active,
+            ),
+            field(
+                "reachability_conditioned_lookup_attempts",
+                reachability_metrics.conditioned_lookup_attempts,
+            ),
+            field(
+                "reachability_conditioned_empty_entry_sets",
+                reachability_metrics.conditioned_empty_entry_sets,
+            ),
+            field(
+                "reachability_conditioned_no_query_context",
+                reachability_metrics.conditioned_no_query_context,
+            ),
+            field(
+                "reachability_conditioned_cache_short_circuits",
+                reachability_metrics.conditioned_cache_short_circuits,
+            ),
+            field(
+                "reachability_conditioned_out_of_scope",
+                reachability_metrics.conditioned_out_of_scope,
+            ),
+            field(
+                "reachability_conditioned_unknown",
+                reachability_metrics.conditioned_unknown,
+            ),
+            field(
+                "reachability_conditioned_snapshot_mismatch",
+                reachability_metrics.conditioned_snapshot_mismatch,
+            ),
+            field(
+                "reachability_conditioned_invalid_asset",
+                reachability_metrics.conditioned_invalid_asset,
+            ),
+            field(
+                "legal_board_verified_negative_prunes",
+                self.buildup_workspace
+                    .legal_board_verified_negative_prunes()
+                    .saturating_add(self.parallel_legal_board_verified_negative_prunes),
+            ),
+            field(
                 "reachability_partial_searches",
                 reachability_metrics.partial_searches,
             ),
@@ -5015,6 +5221,124 @@ impl WasmExactSearchSession {
             WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
         })?;
         fields.extend(field_values);
+        // This snapshot exists only for the native parallel worker path. Do not
+        // label distributed peak estimates or the shared asset owner as worker
+        // allocations. Sampling occurs at worker exit, never in a hot loop.
+        #[cfg(feature = "parallel")]
+        if let Some(memory) = self.parallel_worker_memory_components {
+            let memory_fields = [
+                field(
+                    "worker_retained_accounting_scope",
+                    "native-worker-exit-private-retained-payload-sum",
+                ),
+                field("worker_retained_bytes", self.parallel_worker_retained_bytes),
+                field(
+                    "shared_standard_bag_request_retained_bytes",
+                    memory.shared_standard_bag_request_bytes,
+                ),
+                field(
+                    "worker_piece_language_retained_bytes",
+                    memory.buildup.piece_language_bytes,
+                ),
+                field(
+                    "worker_standard_bag_retained_bytes",
+                    memory.buildup.standard_bag_bytes,
+                ),
+                field(
+                    "worker_reachability_retained_bytes",
+                    memory.buildup.reachability_bytes,
+                ),
+                field(
+                    "worker_graph_projection_retained_bytes",
+                    memory.buildup.graph_projection_bytes,
+                ),
+                field(
+                    "worker_other_buildup_retained_bytes",
+                    memory.buildup.other_bytes,
+                ),
+                field("worker_evaluator_retained_bytes", memory.evaluator_bytes),
+                field(
+                    "worker_solution_identity_retained_bytes",
+                    memory.solution_identity_bytes,
+                ),
+                field(
+                    "worker_solution_coverage_retained_bytes",
+                    memory.solution_coverage_bytes,
+                ),
+                field(
+                    "candidate_digest_retained_bytes",
+                    self.parallel_candidate_digest_retained_bytes,
+                ),
+                // This is already included in worker_standard_bag_retained_bytes.
+                field(
+                    "standard_bag_memo_payload_bytes",
+                    memory.standard_bag_memo_payload_bytes,
+                ),
+                field(
+                    "standard_bag_memo_storage",
+                    self.parallel_standard_bag_memo_storage,
+                ),
+                // Split entry payloads sum to the legacy nested memo field.
+                // Directory bytes are another disjoint subset of StandardBag,
+                // not an allocation to add again to worker_retained_bytes.
+                field(
+                    "standard_bag_product_memo_layout",
+                    memory.standard_bag_memo.product_layout,
+                ),
+                field(
+                    "standard_bag_product_memo_storage",
+                    memory.standard_bag_memo.product_storage,
+                ),
+                field(
+                    "standard_bag_union_memo_storage",
+                    memory.standard_bag_memo.union_storage,
+                ),
+                field(
+                    "standard_bag_product_memo_entries",
+                    memory.standard_bag_memo.product_entries,
+                ),
+                field(
+                    "standard_bag_union_memo_entries",
+                    memory.standard_bag_memo.union_entries,
+                ),
+                field(
+                    "standard_bag_product_memo_capacity",
+                    memory.standard_bag_memo.product_capacity,
+                ),
+                field(
+                    "standard_bag_union_memo_capacity",
+                    memory.standard_bag_memo.union_capacity,
+                ),
+                field(
+                    "standard_bag_product_memo_retained_payload_bytes",
+                    memory.standard_bag_memo.product_payload_bytes,
+                ),
+                field(
+                    "standard_bag_union_memo_retained_payload_bytes",
+                    memory.standard_bag_memo.union_payload_bytes,
+                ),
+                field(
+                    "standard_bag_product_memo_directory_bytes",
+                    memory.standard_bag_memo.product_directory_bytes,
+                ),
+                field(
+                    "standard_bag_product_memo_active_rows",
+                    memory.standard_bag_memo.product_active_rows,
+                ),
+                field(
+                    "standard_bag_product_memo_allocated_rows",
+                    memory.standard_bag_memo.product_allocated_rows,
+                ),
+                field(
+                    "standard_bag_product_memo_row_slots",
+                    memory.standard_bag_memo.product_row_slots,
+                ),
+            ];
+            fields.try_reserve_exact(memory_fields.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
+            })?;
+            fields.extend(memory_fields);
+        }
         if save_execution_requested {
             fields.try_reserve_exact(4).map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
@@ -5218,6 +5542,39 @@ fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityM
         .cache_unreachable_hits
         .saturating_add(next.cache_unreachable_hits);
     total.cache_key_misses = total.cache_key_misses.saturating_add(next.cache_key_misses);
+    total.conditioned_complete_hits = total
+        .conditioned_complete_hits
+        .saturating_add(next.conditioned_complete_hits);
+    total.conditioned_misses = total
+        .conditioned_misses
+        .saturating_add(next.conditioned_misses);
+    total.conditioned_lookup_attempts = total
+        .conditioned_lookup_attempts
+        .saturating_add(next.conditioned_lookup_attempts);
+    total.conditioned_empty_entry_sets = total
+        .conditioned_empty_entry_sets
+        .saturating_add(next.conditioned_empty_entry_sets);
+    total.conditioned_no_query_context = total
+        .conditioned_no_query_context
+        .saturating_add(next.conditioned_no_query_context);
+    total.conditioned_cache_short_circuits = total
+        .conditioned_cache_short_circuits
+        .saturating_add(next.conditioned_cache_short_circuits);
+    total.conditioned_out_of_scope = total
+        .conditioned_out_of_scope
+        .saturating_add(next.conditioned_out_of_scope);
+    total.conditioned_unknown = total
+        .conditioned_unknown
+        .saturating_add(next.conditioned_unknown);
+    total.conditioned_snapshot_mismatch = total
+        .conditioned_snapshot_mismatch
+        .saturating_add(next.conditioned_snapshot_mismatch);
+    total.conditioned_invalid_asset = total
+        .conditioned_invalid_asset
+        .saturating_add(next.conditioned_invalid_asset);
+    total.conditioned_requested |= next.conditioned_requested;
+    total.conditioned_policy_enabled |= next.conditioned_policy_enabled;
+    total.conditioned_snapshot_active |= next.conditioned_snapshot_active;
     total.partial_searches = total.partial_searches.saturating_add(next.partial_searches);
     total.exhaustive_searches = total
         .exhaustive_searches
@@ -5273,6 +5630,78 @@ mod tests {
         queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
         QueueObservationPolicy,
     };
+
+    #[test]
+    fn v081_first_solution_row_preserves_shared_sparse_storage_and_duplicate_union_is_private() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::minimum_cover());
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("one-piece problem");
+        let mut session = WasmExactSearchSession::new(&problem).expect("session");
+        let identity = StandardBoard64TilingIdentity::from_placements(0, std::iter::empty())
+            .expect("test row identity");
+        let original =
+            PatternBitSet::from_pattern_indices(100_000, vec![3, 999]).expect("sparse exact row");
+        let before_bytes = original.retained_bytes();
+        session
+            .merge_solution_coverage(identity, &original)
+            .expect("first row");
+        let rows = session.solution_coverage.as_ref().expect("minimum row map");
+        assert!(rows[&identity].shares_storage_with(&original));
+        assert_eq!(session.solution_coverage_bytes, before_bytes);
+        let duplicate =
+            PatternBitSet::from_pattern_indices(100_000, vec![7, 999]).expect("duplicate coverage");
+        let expected = original.union(&duplicate).expect("reference union");
+        session
+            .merge_solution_coverage(identity, &duplicate)
+            .expect("duplicate row");
+        let rows = session.solution_coverage.as_ref().expect("minimum row map");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[&identity], expected);
+        assert_eq!(original.count_ones(), 2, "source evidence was not mutated");
+        assert!(!rows[&identity].shares_storage_with(&original));
+        assert!(session
+            .merge_solution_coverage(identity, &PatternBitSet::new(1))
+            .is_err());
+        assert_eq!(
+            session.solution_coverage.as_ref().expect("row map")[&identity],
+            expected
+        );
+    }
+
+    #[test]
+    fn conditioned_reachability_counters_survive_result_aggregation() {
+        let mut total = super::ReachabilityMetrics {
+            conditioned_complete_hits: 2,
+            conditioned_misses: 3,
+            conditioned_lookup_attempts: 4,
+            conditioned_requested: true,
+            conditioned_policy_enabled: true,
+            ..Default::default()
+        };
+        super::add_reachability_metrics(
+            &mut total,
+            super::ReachabilityMetrics {
+                conditioned_complete_hits: 5,
+                conditioned_misses: 7,
+                conditioned_lookup_attempts: 9,
+                conditioned_snapshot_active: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(total.conditioned_complete_hits, 7);
+        assert_eq!(total.conditioned_misses, 10);
+        assert_eq!(total.conditioned_lookup_attempts, 13);
+        assert!(total.conditioned_requested);
+        assert!(total.conditioned_policy_enabled);
+        assert!(total.conditioned_snapshot_active);
+    }
 
     #[test]
     fn generic_minimum_cover_uses_original_row_lex_first_identity_after_proof_reduction() {
@@ -5755,6 +6184,29 @@ mod tests {
             ("reachability_cache_reachable_hits", "0".to_owned()),
             ("reachability_cache_unreachable_hits", "0".to_owned()),
             ("reachability_cache_key_misses", "0".to_owned()),
+            ("reachability_conditioned_complete_hits", "0".to_owned()),
+            ("reachability_conditioned_misses", "0".to_owned()),
+            ("reachability_conditioned_lookup_attempts", "0".to_owned()),
+            ("reachability_conditioned_empty_entry_sets", "0".to_owned()),
+            ("reachability_conditioned_no_query_context", "0".to_owned()),
+            (
+                "reachability_conditioned_cache_short_circuits",
+                "0".to_owned(),
+            ),
+            ("reachability_conditioned_out_of_scope", "0".to_owned()),
+            ("reachability_conditioned_unknown", "0".to_owned()),
+            ("reachability_conditioned_snapshot_mismatch", "0".to_owned()),
+            ("reachability_conditioned_invalid_asset", "0".to_owned()),
+            ("conditioned_reachability_requested", "false".to_owned()),
+            (
+                "conditioned_reachability_policy_enabled",
+                "false".to_owned(),
+            ),
+            (
+                "conditioned_reachability_snapshot_active",
+                "false".to_owned(),
+            ),
+            ("legal_board_verified_negative_prunes", "0".to_owned()),
             ("reachability_partial_searches", "0".to_owned()),
             ("reachability_exhaustive_searches", "0".to_owned()),
             ("representative_candidate_ordinal", String::new()),

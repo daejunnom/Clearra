@@ -12,7 +12,9 @@
   import { installWasmArtifactHotUpdate } from '../lib/wasmArtifactHotUpdate';
   import { isLocalSearchProfileMode, localSearchProfileText } from '../lib/localSearchProfile';
   import Pc4DownloadPanel from '../lib/Pc4DownloadPanel.svelte';
+  import AcceleratorDownloadPanel from '../lib/AcceleratorDownloadPanel.svelte';
   setContext('clearra.pc4-download-control.v1', Pc4DownloadPanel);
+  setContext('clearra.accelerator-download-control.v1', AcceleratorDownloadPanel);
 
   // Pages publishes this product menu, not every tool implemented by the shared
   // library. Keep direct tool links and the desktop menu independent of it.

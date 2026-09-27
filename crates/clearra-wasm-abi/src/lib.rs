@@ -8,6 +8,7 @@ use std::{
 };
 
 use clearra_pc_graph::request::GpuDeviceSelection;
+mod accelerator_exports;
 mod online_pc4_exports;
 #[cfg(target_arch = "wasm32")]
 use clearra_wasm::prewarm_gpu_search_async;
@@ -820,6 +821,39 @@ fn clear_panic_diagnostics() {
 #[no_mangle]
 pub extern "C" fn clearra_wasm_abi_version() -> u32 {
     ABI_VERSION
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_catalog(kind: u32, profile: u32) -> i32 {
+    accelerator_exports::catalog(kind, profile)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_request_policy() -> i32 {
+    accelerator_exports::request_policy()
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_admit(kind: u32, profile: u32, activate: u32) -> i32 {
+    accelerator_exports::admit(kind, profile, activate)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_remove(kind: u32, profile: u32) -> i32 {
+    accelerator_exports::remove(kind, profile)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_export_negative_synopsis(
+    profile: u32,
+    maximum_bytes: u32,
+) -> i32 {
+    accelerator_exports::export_negative_synopsis(profile, maximum_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_admit_negative_synopsis(profile: u32) -> i32 {
+    accelerator_exports::admit_negative_synopsis(profile)
 }
 
 #[no_mangle]
@@ -3162,8 +3196,23 @@ pub extern "C" fn clearra_wasm_distributed_verifier_progress_candidate_count() -
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_progress_geometry_nodes() -> u32 {
+    AbiU32Count::legacy_or(
+        verifier_progress_count(|value| value.progress().geometry_nodes),
+        0,
+    )
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_verifier_progress_available() -> u32 {
     ABI_STATE.with(|state| state.borrow().distributed_verifier.is_some().into())
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_verifier_progress_geometry_nodes_exact() -> u32 {
+    AbiU32Count::exact_or_false(verifier_progress_count(|value| {
+        value.progress().geometry_nodes
+    }))
 }
 
 #[no_mangle]
@@ -3650,6 +3699,61 @@ mod tests {
 
     fn reset_abi_state_for_test() {
         ABI_STATE.with(|state| *state.borrow_mut() = WasmAbiState::default());
+    }
+
+    #[test]
+    fn accelerator_request_policy_uses_the_typed_default_and_opt_outs() {
+        reset_abi_state_for_test();
+        let policy = |command: &str| {
+            ABI_STATE.with(|state| state.borrow_mut().input = command.as_bytes().to_vec());
+            assert_eq!(clearra_wasm_accelerator_request_policy(), ABI_OK);
+            let value = ABI_STATE.with(|state| {
+                serde_json::from_slice::<serde_json::Value>(&state.borrow().output).unwrap()
+            });
+            assert_eq!(clearra_wasm_output_release(), ABI_OK);
+            value
+        };
+        let default = policy(MULTI_ALTERNATIVE_PC_MINIMALS_COMMAND);
+        assert_eq!(default["profile"], 1);
+        assert_eq!(default["legal_board"], true);
+        assert_eq!(default["conditioned_reachability"], true);
+
+        let disabled = policy(&format!(
+            "{TYPED_PC_MINIMALS_COMMAND} --no-legal-board --no-conditioned-reachability"
+        ));
+        assert_eq!(disabled["profile"], 1);
+        assert_eq!(disabled["legal_board"], false);
+        assert_eq!(disabled["conditioned_reachability"], false);
+
+        let utility = policy(TYPED_PARITY_COMMAND);
+        assert_eq!(utility["legal_board"], false);
+        assert_eq!(utility["conditioned_reachability"], false);
+        reset_abi_state_for_test();
+    }
+
+    #[test]
+    fn accelerator_admission_consumes_staged_transfer_without_a_false_worker_conflict() {
+        reset_abi_state_for_test();
+        assert_eq!(clearra_wasm_transfer_resize(1), ABI_OK);
+        assert_eq!(clearra_wasm_accelerator_admit(1, 4, 1), ABI_ERROR);
+        let error = ABI_STATE
+            .with(|state| String::from_utf8(state.borrow().output.clone()).expect("ASCII error"));
+        assert!(
+            error.starts_with("accelerator_payload_size_mismatch:"),
+            "{error}"
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+
+        assert_eq!(clearra_wasm_transfer_resize(1), ABI_OK);
+        assert_eq!(
+            clearra_wasm_accelerator_admit_negative_synopsis(4),
+            ABI_ERROR
+        );
+        let error = ABI_STATE
+            .with(|state| String::from_utf8(state.borrow().output.clone()).expect("ASCII error"));
+        assert!(!error.starts_with("accelerator_session_in_use:"), "{error}");
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        reset_abi_state_for_test();
     }
 
     #[test]

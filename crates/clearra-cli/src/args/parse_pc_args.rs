@@ -38,6 +38,8 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
     let mut gpu_warmup = None;
     let mut tablebase_requested = None;
     let mut precompute_build_dependencies = None;
+    let mut exact_legal_board_enabled = None;
+    let mut conditioned_reachability_enabled = None;
     let mut cpu_threads = None;
     let mut no_gpu = false;
     let mut deterministic = None;
@@ -159,6 +161,22 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
                 precompute_build_dependencies = Some(false);
                 index += 1;
             }
+            "--legal-board" => {
+                exact_legal_board_enabled = Some(true);
+                index += 1;
+            }
+            "--no-legal-board" => {
+                exact_legal_board_enabled = Some(false);
+                index += 1;
+            }
+            "--conditioned-reachability" => {
+                conditioned_reachability_enabled = Some(true);
+                index += 1;
+            }
+            "--no-conditioned-reachability" => {
+                conditioned_reachability_enabled = Some(false);
+                index += 1;
+            }
             "--no-gpu" => {
                 no_gpu = true;
                 index += 1;
@@ -272,6 +290,11 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
                 precompute_build_dependencies == Some(true),
                 "--build-dependency-dag",
             ),
+            (exact_legal_board_enabled == Some(true), "--legal-board"),
+            (
+                conditioned_reachability_enabled == Some(true),
+                "--conditioned-reachability",
+            ),
             (solution_probabilities, "--solution-probabilities"),
             (
                 queue_observation_policy.requires_observation_policy(),
@@ -305,6 +328,8 @@ pub(crate) fn parse_pc_args(args: &[String]) -> Result<PcArgs, CliParseError> {
         .with_gpu_warmup(gpu_warmup)
         .with_tablebase_requested(tablebase_requested)
         .with_precompute_build_dependencies(precompute_build_dependencies)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled)
         .with_deterministic(deterministic)
         .with_max_frontier_states(max_frontier_states)
         .with_max_candidates(max_candidates)

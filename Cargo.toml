@@ -16,6 +16,9 @@ members = [
     "crates/clearra-supply",
     "crates/clearra-pc-graph",
     "crates/clearra-pc4-tablebase",
+    "crates/clearra-accelerator-activation",
+    "crates/clearra-accelerator-product-host",
+    "crates/clearra-accelerator-runtime",
     "crates/clearra-pc-next-probability",
     "crates/clearra-two-line",
     "crates/clearra-exact-cover",
@@ -46,6 +49,7 @@ members = [
     "crates/clearra-invariant-tests",
     "tools/clearra-manage",
     "tools/clearra-pc-artifact",
+    "tools/clearra-pc4-qualifier",
 ]
 exclude = ["apps/clearra-desktop/src-tauri"]
 
@@ -55,6 +59,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+ed25519-dalek = { version = "=2.2.0", default-features = false }
 libc = "=0.2.186"
 serde_json = "=1.0.145"
 windows-sys = { version = "=0.61.2", default-features = false }

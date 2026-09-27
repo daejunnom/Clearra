@@ -32,6 +32,9 @@ async function bounded<T>(label: string, operation: Promise<T>): Promise<T> {
 
 type WorkerMessage = {
   type: string;
+  profile?: number | null;
+  wire?: ArrayBuffer | null;
+  bytes?: ArrayBuffer | null;
   requestId?: number;
   batch?: ArrayBuffer;
   offer?: {
@@ -84,6 +87,14 @@ class FakeVerifierWorker {
     }
     if (message.type === 'prewarm') {
       this.emit({ type: 'prewarmed' });
+      return;
+    }
+    if (message.type === 'accelerator-synopsis') {
+      this.emit({ type: 'accelerator-synopsis-ready', applied: Boolean(message.wire) });
+      return;
+    }
+    if (message.type === 'accelerator-pack') {
+      this.emit({ type: 'accelerator-pack-ready', applied: Boolean(message.bytes) });
       return;
     }
     if (message.type === 'delegation-run') {
@@ -173,6 +184,92 @@ await assert.rejects(
 assert.equal(workers.length, 1);
 assert.equal(workers[0].terminated, true);
 
+class SynopsisVerifierWorker extends FakeVerifierWorker {
+  readonly controls: { profile: number | null; bytes: number }[] = [];
+  constructor() { super(false); }
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'accelerator-synopsis') {
+      this.controls.push({ profile: message.profile ?? null, bytes: message.wire?.byteLength ?? 0 });
+    }
+    super.postMessage(message);
+  }
+}
+const synopsisWorkers: SynopsisVerifierWorker[] = [];
+const synopsisPool = new ClearraVerifierPool(() => {
+  const worker = new SynopsisVerifierWorker();
+  synopsisWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+const synopsisWire = Uint8Array.of(1, 2, 3).buffer;
+await bounded('summary before job', synopsisPool.initialize(
+  'clearra pc --lines 4', 2, undefined, 'synopsis-owner', 'atomic-task',
+  undefined, 'geometry-verifier', { profile: 3, wire: synopsisWire, maximumPeers: 2 }
+));
+assert.deepEqual(synopsisWorkers.map(worker => worker.controls[0]), [
+  { profile: 3, bytes: 3 }, { profile: 3, bytes: 3 }
+]);
+await bounded('summary job drain', synopsisPool.finish(() => undefined));
+await bounded('disabled summary clears peer state', synopsisPool.initialize(
+  'clearra pc --lines 4', 2, undefined, 'synopsis-owner'
+));
+assert.ok(synopsisWorkers.every(worker => worker.controls.at(-1)?.profile === null));
+synopsisPool.cancel();
+
+class ConditionedVerifierWorker extends FakeVerifierWorker {
+  readonly controls: { profile: number | null; bytes: number }[] = [];
+  constructor() { super(false); }
+  override postMessage(message: WorkerMessage, transfer?: Transferable[]) {
+    const delivered = transfer?.length
+      ? structuredClone(message, { transfer }) as WorkerMessage : message;
+    if (delivered.type === 'accelerator-pack') {
+      this.controls.push({ profile: delivered.profile ?? null, bytes: delivered.bytes?.byteLength ?? 0 });
+    }
+    super.postMessage(delivered);
+  }
+}
+const conditionedWorkers: ConditionedVerifierWorker[] = [];
+const conditionedPool = new ClearraVerifierPool(() => {
+  const worker = new ConditionedVerifierWorker();
+  conditionedWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+const conditionedBytes = Uint8Array.of(7, 8, 9).buffer;
+await bounded('one designated relation owner', conditionedPool.initialize(
+  'clearra pc --lines 4', 2, undefined, 'conditioned-owner', 'atomic-task',
+  undefined, 'geometry-verifier', null,
+  { profile: 1, bytes: conditionedBytes,
+    identity: 'qualified-generation', activeSessionSharedBytes: 1024 }
+));
+assert.equal(conditionedBytes.byteLength, 0, 'full pack ownership transfers to one verifier');
+assert.deepEqual(conditionedWorkers.map(worker => worker.controls.length), [1, 0]);
+assert.deepEqual(conditionedWorkers[0].controls[0], { profile: 1, bytes: 3 });
+await bounded('conditioned job drain', conditionedPool.finish(() => undefined));
+await bounded('conditioned owner cleared before exact job', conditionedPool.initialize(
+  'clearra pc --lines 4', 2, undefined, 'conditioned-owner'
+));
+assert.deepEqual(conditionedWorkers[0].controls.at(-1), { profile: null, bytes: 0 });
+assert.equal(conditionedWorkers[1].controls.length, 0);
+conditionedPool.cancel();
+
+class StalledSynopsisWorker extends FakeVerifierWorker {
+  constructor() { super(false); }
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'accelerator-synopsis') return;
+    super.postMessage(message);
+  }
+}
+const stalledSynopsisPool = new ClearraVerifierPool(
+  () => new StalledSynopsisWorker() as unknown as Worker
+);
+const stalledSetup = stalledSynopsisPool.initialize(
+  'clearra pc --lines 4', 1, undefined, '', 'atomic-task', undefined,
+  'geometry-verifier', { profile: 3, wire: synopsisWire, maximumPeers: 1 }
+);
+await new Promise(resolve => setTimeout(resolve, 0));
+stalledSynopsisPool.cancel();
+await bounded('cancelled synopsis setup settles', stalledSetup);
+assert.equal(stalledSynopsisPool.progressSnapshot().workerCount, 0);
+
 class StreamingVerifierWorker {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
@@ -209,6 +306,10 @@ class StreamingVerifierWorker {
     }
     if (message.type === 'prewarm') {
       this.emit({ type: 'prewarmed' });
+      return;
+    }
+    if (message.type === 'accelerator-synopsis') {
+      this.emit({ type: 'accelerator-synopsis-ready', applied: false });
       return;
     }
     if (message.type === 'delegation-run') {
@@ -270,15 +371,18 @@ class StreamingVerifierWorker {
 
 function exactVerifierProgress(candidateCount: number) {
   return {
+    geometryNodes: 0,
     candidateCount,
     buildNodes: 0,
     coverageChecks: 0,
     availability: {
+      geometryNodes: true,
       candidateCount: true,
       buildNodes: true,
       coverageChecks: true
     },
     exactness: {
+      geometryNodes: true,
       candidateCount: true,
       buildNodes: true,
       coverageChecks: true
@@ -724,8 +828,10 @@ class HeartbeatVerifierWorker extends FakeVerifierWorker {
 
   constructor() { super(false); }
 
-  override postMessage(message: WorkerMessage) {
-    if (message.type !== 'consume') { super.postMessage(message); return; }
+  protected override handleExecutable(message: WorkerMessage) {
+    if (message.type !== 'consume') { super.handleExecutable(message); return; }
+    // Hold the executable only after the durable run grant. A posted packet
+    // waiting for its start ACK is not active WASM computation.
     this.pendingConsume = message;
     this.consumeStarted.resolve();
   }
@@ -743,7 +849,7 @@ class HeartbeatVerifierWorker extends FakeVerifierWorker {
     assert.ok(this.pendingConsume);
     const message = this.pendingConsume;
     this.pendingConsume = null;
-    if (!this.terminated) super.postMessage(message);
+    if (!this.terminated) super.handleExecutable(message);
   }
 }
 
@@ -786,9 +892,9 @@ for (const stopHeartbeats of [false, true]) {
         await bounded('heartbeat idle', pool.waitForIdle());
         assert.equal(workers.length, 1);
         assert.deepEqual(pool.progressSnapshot(), {
-          candidatesVerified: 1, buildNodes: 0, coverageChecks: 0,
-          availability: { candidatesVerified: true, buildNodes: true, coverageChecks: true },
-          exactness: { candidatesVerified: true, buildNodes: true, coverageChecks: true },
+          geometryNodes: 0, candidatesVerified: 1, buildNodes: 0, coverageChecks: 0,
+          availability: { geometryNodes: true, candidatesVerified: true, buildNodes: true, coverageChecks: true },
+          exactness: { geometryNodes: true, candidatesVerified: true, buildNodes: true, coverageChecks: true },
           readyWorkers: 1, activeWorkers: 0, workerCount: 1, oldestBatchMs: 0
         });
         await bounded('heartbeat finish', pool.finish(() => undefined));
@@ -800,6 +906,7 @@ for (const stopHeartbeats of [false, true]) {
 }
 
 class FinishGateVerifierWorker extends FakeVerifierWorker {
+  readonly finishOffered = signal();
   private pendingFinish: WorkerMessage | null = null;
 
   constructor() {
@@ -809,6 +916,7 @@ class FinishGateVerifierWorker extends FakeVerifierWorker {
   override postMessage(message: WorkerMessage) {
     if (message.type === 'finish') {
       this.pendingFinish = message;
+      this.finishOffered.resolve();
       return;
     }
     super.postMessage(message);
@@ -836,15 +944,12 @@ await bounded(
   )
 );
 const gatedFinish = finishGatePool.finish(() => undefined);
-await bounded(
-  'finish gate becomes active',
-  (async () => {
-    while (finishGatePool.progressSnapshot().activeWorkers !== 1) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-  })()
+await bounded('finish offer reaches worker', finishGateWorker.finishOffered.promise);
+assert.equal(
+  finishGatePool.progressSnapshot().activeWorkers,
+  0,
+  'a staged durable request is not active CPU work before its execution grant'
 );
-assert.equal(finishGatePool.progressSnapshot().activeWorkers, 1);
 finishGateWorker.releaseFinish();
 await bounded('finish gate release', gatedFinish);
 
@@ -1240,15 +1345,18 @@ class SaturatedTelemetryVerifierWorker extends FakeVerifierWorker {
       candidateCountExact: false,
       partial: null,
       progress: {
+        geometryNodes: 0xffff_ffff,
         candidateCount: 0xffff_ffff,
         buildNodes: 0xffff_ffff,
         coverageChecks: 0xffff_ffff,
         availability: {
+          geometryNodes: false,
           candidateCount: false,
           buildNodes: false,
           coverageChecks: false
         },
         exactness: {
+          geometryNodes: false,
           candidateCount: false,
           buildNodes: false,
           coverageChecks: false
@@ -1288,15 +1396,18 @@ await Promise.all([
 ]);
 await bounded('saturated telemetry idle', saturatedTelemetryPool.waitForIdle());
 const saturatedTelemetrySnapshot = saturatedTelemetryPool.progressSnapshot();
+assert.equal(saturatedTelemetrySnapshot.geometryNodes, 0xffff_ffff);
 assert.equal(saturatedTelemetrySnapshot.candidatesVerified, 0x1_0000_0000);
 assert.equal(saturatedTelemetrySnapshot.buildNodes, 0xffff_ffff);
 assert.equal(saturatedTelemetrySnapshot.coverageChecks, 0xffff_ffff);
 assert.deepEqual(saturatedTelemetrySnapshot.availability, {
+  geometryNodes: false,
   candidatesVerified: false,
   buildNodes: false,
   coverageChecks: false
 });
 assert.deepEqual(saturatedTelemetrySnapshot.exactness, {
+  geometryNodes: false,
   candidatesVerified: false,
   buildNodes: false,
   coverageChecks: false

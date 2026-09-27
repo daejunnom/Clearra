@@ -17,7 +17,40 @@ export type Pc4PendingRange = Pc4RangeRequest & {
   batch?: Pc4RangeRequest[];
   can_advance?: boolean;
 };
+export type AcceleratorCatalogPlan = {
+  product: 'exact-legal-board' | 'board-conditioned-reachability';
+  profile: string;
+  state: 'qualified' | 'not_qualified';
+  payload_bytes: number | null;
+  generation: string | null;
+  payload_identity: string | null;
+  url: string | null;
+  catalog_identity: string;
+  active_session_shared_bytes: number | null;
+};
+export type AcceleratorRequestPolicy = {
+  profile: number | null;
+  legal_board: boolean;
+  conditioned_reachability: boolean;
+};
+export type AcceleratorWorkerSynopsis = {
+  profile: number;
+  wire: ArrayBuffer;
+  maximumPeers: number;
+};
+export type AcceleratorWorkerPack = {
+  profile: number;
+  bytes: ArrayBuffer;
+  identity: string;
+  activeSessionSharedBytes: number;
+};
 export type ClearraWasmModule = {
+  accelerator_catalog?: (kind: number, profile: number) => AcceleratorCatalogPlan;
+  accelerator_request_policy?: (commandText: string) => AcceleratorRequestPolicy;
+  accelerator_admit?: (kind: number, profile: number, bytes: ArrayBuffer, activate: boolean) => void;
+  accelerator_remove?: (kind: number, profile: number) => void;
+  accelerator_export_negative_synopsis?: (profile: number, maximumBytes: number) => ArrayBuffer;
+  accelerator_admit_negative_synopsis?: (profile: number, wire: ArrayBuffer) => void;
   configure_online_pc4?: (generation: unknown) => void;
   online_pc4_pending?: (jobId: number) => Pc4PendingRange | null;
   online_pc4_admit?: (jobId: number, response: unknown) => void;
@@ -146,6 +179,7 @@ export type ClearraDistributedCoreProgressFlags = {
 };
 
 export type ClearraDistributedVerifierProgress = {
+  geometryNodes: number;
   candidateCount: number;
   buildNodes: number;
   coverageChecks: number;
@@ -154,6 +188,7 @@ export type ClearraDistributedVerifierProgress = {
 };
 
 export type ClearraDistributedVerifierProgressFlags = {
+  geometryNodes: boolean;
   candidateCount: boolean;
   buildNodes: boolean;
   coverageChecks: boolean;
@@ -181,6 +216,12 @@ const ARTIFACT_MODULE_TIMEOUT_MS = 60_000;
 const ABI_OUTPUT_NOT_RELEASED = -2;
 
 type ClearraRawWasmExports = {
+  clearra_wasm_accelerator_catalog?: (kind: number, profile: number) => number;
+  clearra_wasm_accelerator_request_policy?: () => number;
+  clearra_wasm_accelerator_admit?: (kind: number, profile: number, activate: number) => number;
+  clearra_wasm_accelerator_remove?: (kind: number, profile: number) => number;
+  clearra_wasm_accelerator_export_negative_synopsis?: (profile: number, maximumBytes: number) => number;
+  clearra_wasm_accelerator_admit_negative_synopsis?: (profile: number) => number;
   clearra_wasm_online_pc4_configure?: () => number;
   clearra_wasm_online_pc4_pending?: (jobId: number) => number;
   clearra_wasm_online_pc4_admit?: (jobId: number) => number;
@@ -276,6 +317,8 @@ type ClearraRawWasmExports = {
   clearra_wasm_distributed_verifier_last_candidate_count_available: () => number;
   clearra_wasm_distributed_verifier_last_candidate_count_exact: () => number;
   clearra_wasm_distributed_verifier_continue: () => number;
+  clearra_wasm_distributed_verifier_progress_geometry_nodes: () => number;
+  clearra_wasm_distributed_verifier_progress_geometry_nodes_exact: () => number;
   clearra_wasm_distributed_verifier_progress_candidate_count: () => number;
   clearra_wasm_distributed_verifier_progress_available: () => number;
   clearra_wasm_distributed_verifier_progress_candidate_count_exact: () => number;
@@ -326,6 +369,7 @@ export const CLEARRA_WASM_AVAILABILITY_EXACTNESS_EXPORTS = Object.freeze([
   'clearra_wasm_distributed_verifier_last_candidate_count_available',
   'clearra_wasm_distributed_verifier_last_candidate_count_exact',
   'clearra_wasm_distributed_verifier_progress_available',
+  'clearra_wasm_distributed_verifier_progress_geometry_nodes_exact',
   'clearra_wasm_distributed_verifier_progress_candidate_count_exact',
   'clearra_wasm_distributed_verifier_progress_build_nodes_exact',
   'clearra_wasm_distributed_verifier_progress_coverage_checks_exact',
@@ -990,6 +1034,39 @@ function wrapRawModule(
   let gpuWarmupGeneration = 0;
 
   const module: ClearraWasmModule = {
+    ...(raw.clearra_wasm_accelerator_catalog && raw.clearra_wasm_accelerator_request_policy &&
+      raw.clearra_wasm_accelerator_admit && raw.clearra_wasm_accelerator_remove ? {
+      accelerator_catalog(kind: number, profile: number): AcceleratorCatalogPlan {
+        requireOk(raw.clearra_wasm_accelerator_catalog!(kind, profile));
+        return JSON.parse(outputText()) as AcceleratorCatalogPlan;
+      },
+      accelerator_request_policy(commandText: string): AcceleratorRequestPolicy {
+        setCommand(commandText);
+        requireOk(raw.clearra_wasm_accelerator_request_policy!());
+        return JSON.parse(outputText()) as AcceleratorRequestPolicy;
+      },
+      accelerator_admit(kind: number, profile: number, bytes: ArrayBuffer, activate: boolean) {
+        setTransfer(bytes);
+        requireOk(raw.clearra_wasm_accelerator_admit!(kind, profile, activate ? 1 : 0));
+        outputText();
+      },
+      accelerator_remove(kind: number, profile: number) {
+        requireOk(raw.clearra_wasm_accelerator_remove!(kind, profile));
+        outputText();
+      }
+    } : {}),
+    ...(raw.clearra_wasm_accelerator_export_negative_synopsis &&
+      raw.clearra_wasm_accelerator_admit_negative_synopsis ? {
+      accelerator_export_negative_synopsis(profile: number, maximumBytes: number) {
+        requireOk(raw.clearra_wasm_accelerator_export_negative_synopsis!(profile, maximumBytes));
+        return outputBytes();
+      },
+      accelerator_admit_negative_synopsis(profile: number, wire: ArrayBuffer) {
+        setTransfer(wire);
+        requireOk(raw.clearra_wasm_accelerator_admit_negative_synopsis!(profile));
+        outputText();
+      }
+    } : {}),
     ...(raw.clearra_wasm_online_pc4_configure && raw.clearra_wasm_online_pc4_pending && raw.clearra_wasm_online_pc4_admit ? {
       configure_online_pc4(generation: unknown) {
         setCommand(JSON.stringify(generation));
@@ -1454,6 +1531,9 @@ function wrapRawModule(
       const available =
         raw.clearra_wasm_distributed_verifier_progress_available() !== 0;
       return {
+        geometryNodes: normalizeWasmU32(
+          raw.clearra_wasm_distributed_verifier_progress_geometry_nodes()
+        ),
         candidateCount: normalizeWasmU32(
           raw.clearra_wasm_distributed_verifier_progress_candidate_count()
         ),
@@ -1464,11 +1544,15 @@ function wrapRawModule(
           raw.clearra_wasm_distributed_verifier_progress_coverage_checks()
         ),
         availability: {
+          geometryNodes: available,
           candidateCount: available,
           buildNodes: available,
           coverageChecks: available
         },
         exactness: {
+          geometryNodes:
+            available &&
+            raw.clearra_wasm_distributed_verifier_progress_geometry_nodes_exact() !== 0,
           candidateCount:
             available &&
             raw.clearra_wasm_distributed_verifier_progress_candidate_count_exact() !== 0,

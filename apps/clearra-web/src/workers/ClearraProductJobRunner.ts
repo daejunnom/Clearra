@@ -10,6 +10,8 @@ import type { SharedExecutionResourceAuthority } from './SharedExecutionResource
 import { WasmJobRunner } from './WasmJobRunner';
 import type { Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 import type {
+  AcceleratorWorkerPack,
+  AcceleratorWorkerSynopsis,
   ClearraWasmHostCapabilities,
   ClearraWasmModule
 } from './clearraWasmRuntime';
@@ -23,7 +25,10 @@ export class ClearraProductJobRunner {
     private readonly lifecycleOwnerId: string,
     private readonly hostCapabilities: ClearraWasmHostCapabilities,
     private readonly resourceAuthority?: SharedExecutionResourceAuthority,
-    private readonly resourceWaitTimeoutMs?: number
+    private readonly resourceWaitTimeoutMs?: number,
+    private readonly legalBoardSynopsis?: AcceleratorWorkerSynopsis | null,
+    private readonly conditionedPack?: AcceleratorWorkerPack | null,
+    private readonly onSerialConditionedInstalled?: (profile: number, identity: string) => void
   ) {}
 
   async run(
@@ -42,13 +47,17 @@ export class ClearraProductJobRunner {
       this.hostCapabilities,
       undefined,
       this.resourceAuthority,
-      this.resourceWaitTimeoutMs
+      this.resourceWaitTimeoutMs,
+      'auto',
+      this.legalBoardSynopsis,
+      this.conditionedPack
     );
     this.activeRunner = distributed;
     try {
       onEvent(preparationProgressEvent(this.jobId));
       await distributed.acquire();
       if (options.tablebaseRequested) {
+        this.admitSerialConditioned();
         if (!options.onlinePc4 || !this.wasm.configure_online_pc4) throw new Error('pc4_online_generation_unavailable');
         this.wasm.configure_online_pc4(options.onlinePc4);
         const online = new WasmJobRunner(this.wasm, options.onlinePc4);
@@ -65,6 +74,7 @@ export class ClearraProductJobRunner {
         return await distributed.run(commandText, plan, emit, options);
       }
       distributed.resetPreparedCoordinatorForSerial();
+      this.admitSerialConditioned();
       const serialProgress = new SerialSearchProgress(serialExecutionProgressEvent(this.jobId));
       onEvent(serialProgress.initialEvent);
       const serial = new WasmJobRunner(this.wasm);
@@ -91,6 +101,19 @@ export class ClearraProductJobRunner {
   dispose() {
     this.activeRunner?.dispose();
     this.activeRunner = null;
+  }
+
+  private admitSerialConditioned() {
+    if (!this.conditionedPack || !this.wasm.accelerator_admit) return;
+    try {
+      this.wasm.accelerator_admit(1, this.conditionedPack.profile,
+        this.conditionedPack.bytes, true);
+      this.onSerialConditionedInstalled?.(
+        this.conditionedPack.profile, this.conditionedPack.identity);
+    } catch {
+      // Admission failure has no negative authority; exact search remains
+      // available without this optional accelerator.
+    }
   }
 }
 

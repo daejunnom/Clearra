@@ -125,6 +125,8 @@ pub struct SetupSearchQuery {
     next_cycle_remaining_pieces: Option<Vec<PieceKind>>,
     path_detail: Option<SetupPathDetail>,
     tablebase_requested: bool,
+    exact_legal_board_enabled: bool,
+    conditioned_reachability_enabled: bool,
 }
 
 impl SetupSearchQuery {
@@ -159,6 +161,8 @@ impl SetupSearchQuery {
             next_cycle_remaining_pieces: None,
             path_detail: None,
             tablebase_requested: false,
+            exact_legal_board_enabled: true,
+            conditioned_reachability_enabled: true,
         }
     }
 }
@@ -246,6 +250,14 @@ impl SetupSearchQuery {
 
     pub const fn tablebase_requested(&self) -> bool {
         self.tablebase_requested
+    }
+
+    pub const fn exact_legal_board_enabled(&self) -> bool {
+        self.exact_legal_board_enabled
+    }
+
+    pub const fn conditioned_reachability_enabled(&self) -> bool {
+        self.conditioned_reachability_enabled
     }
 }
 impl SetupSearchQuery {
@@ -344,6 +356,16 @@ impl SetupSearchQuery {
         self
     }
 
+    pub fn with_exact_legal_board_enabled(mut self, enabled: bool) -> Self {
+        self.exact_legal_board_enabled = enabled;
+        self
+    }
+
+    pub fn with_conditioned_reachability_enabled(mut self, enabled: bool) -> Self {
+        self.conditioned_reachability_enabled = enabled;
+        self
+    }
+
     pub fn with_next_cycle_remaining_pieces(mut self, pieces: Vec<PieceKind>) -> Self {
         self.next_cycle_remaining_pieces = Some(pieces);
         self
@@ -387,6 +409,8 @@ impl Default for SetupSearchQuery {
             next_cycle_remaining_pieces: None,
             path_detail: None,
             tablebase_requested: false,
+            exact_legal_board_enabled: true,
+            conditioned_reachability_enabled: true,
         }
     }
 }
