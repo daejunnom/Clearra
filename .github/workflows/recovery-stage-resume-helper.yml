@@ -1,0 +1,72 @@
+name: Repair and verify staged recovery proposal
+on:
+  push:
+    branches: [codex/recovery-stage-resume-helper-20260928]
+permissions:
+  contents: write
+concurrency:
+  group: recovery-stage-resume-helper
+  cancel-in-progress: false
+jobs:
+  proposal:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SOURCE: c7006782ebc5205ba3fcf7dd6f56e57cd96d0c9c
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c7006782ebc5205ba3fcf7dd6f56e57cd96d0c9c
+          fetch-depth: 0
+      - name: Apply exact scoped visibility correction and pinned formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          test -z "$(git status --porcelain)"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/clearra-forward-search/src/recovery_build/staged/geometry.rs')
+          text = p.read_text()
+          old = 'pub(super) struct Geometry {'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, 'pub(in crate::recovery_build) struct Geometry {'))
+          p = Path('crates/clearra-forward-search/src/recovery_build/population.rs')
+          text = p.read_text()
+          old = 'RecoveryBuildError, RecoveryBuildFields, RecoveryBuildFixedReport, RecoveryBuildStatus,'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, 'RecoveryBuildError, RecoveryBuildFields, RecoveryBuildFixedReport,'))
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          mkdir -p build/recovery-stage-resume
+          git diff --binary > build/recovery-stage-resume/correction.patch
+          git add -- crates/clearra-forward-search/src/recovery_build/staged/geometry.rs crates/clearra-forward-search/src/recovery_build/population.rs
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(recovery): expose staged geometry only to its recovery owner'
+          git rev-parse HEAD > build/recovery-stage-resume/tested-sha.txt
+          git rev-parse HEAD^{tree} > build/recovery-stage-resume/tested-tree.txt
+          proposal="codex/recovery-stage-resumed-$GITHUB_RUN_ID"
+          test -z "$(git ls-remote --heads origin "refs/heads/$proposal")"
+          git push origin "HEAD:refs/heads/$proposal"
+          git archive --format=tar HEAD | gzip > build/recovery-stage-resume/source.tar.gz
+      - name: Execute independent source, stage and host regressions
+        shell: bash
+        run: |
+          set -uo pipefail
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture --test-threads=1 2>&1 | tee build/recovery-stage-resume/core.log || result=1
+          cargo test --locked -p clearra-core-executor build_clear_row_pruning -- --nocapture --test-threads=1 2>&1 | tee build/recovery-stage-resume/build.log || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee build/recovery-stage-resume/cli.log || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee build/recovery-stage-resume/wire.log || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee build/recovery-stage-resume/wasm.log || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-stage-resume
+          path: build/recovery-stage-resume
+          retention-days: 7
