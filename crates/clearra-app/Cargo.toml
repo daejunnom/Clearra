@@ -51,4 +51,6 @@ serde_json = { workspace = true, optional = true }
 getrandom = "0.4.3"
 
 [dev-dependencies]
+clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
+clearra-accelerator-runtime = { path = "../clearra-accelerator-runtime" }
 fumen = "0.1.2"

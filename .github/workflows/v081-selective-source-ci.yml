@@ -13,8 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 # Source feedback only: no acceptance receipts, asset generation, release
-# tags, main promotion, or Pages/Discord/Cloud traffic changes. The core smoke
-# explicitly downloads ONLY the five unchanged qualified relation packs.
+# tags, main promotion, or Pages/Discord/Cloud traffic changes. The smokes
+# explicitly download only unchanged qualified packs: five relations in Core,
+# and the selected SRS+ legal-board/relation pair in the native App job.
 env:
   CLEARRA_BUILD_PURPOSE: experiment
   RUST_MIN_STACK: "16777216"
@@ -95,6 +96,25 @@ jobs:
           cargo test --locked -p clearra-accelerator-product-host --lib -- --test-threads=1
           cargo test --locked -p clearra-accelerator-product-host --bin clearra-accelerator-release-gate -- --test-threads=1
           cargo test --locked -p clearra-accelerator-runtime --lib -- --test-threads=1
+      - name: Test real PC and Build reducer results with independent accelerators
+        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
+        run: cargo test --locked -p clearra-app --test exact_accelerator_product_execution --no-default-features --features parallel -- --test-threads=1
+      - name: Fetch the unchanged SRS+ signed pair for App result smoke
+        id: app-assets
+        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/_local/artifacts/v081-peer-signed-smoke"
+          gh release download legal-board-data-v081-20260924-rc1 --repo daejunnom/Clearra \
+            --pattern 'legal-board-srs-plus-v2.cllb' --dir "$GITHUB_WORKSPACE/_local/artifacts/v081-peer-signed-smoke"
+          gh release download conditioned-data-v081-20260924-rc1 --repo daejunnom/Clearra \
+            --pattern 'conditioned-srs-plus.cllr' --dir "$GITHUB_WORKSPACE/_local/artifacts/v081-peer-signed-smoke"
+      - name: Verify signed admission and real App result parity without an alternate solver
+        if: ${{ !cancelled() && steps.native-check.outcome == 'success' && steps.app-assets.outcome == 'success' }}
+        env:
+          CLEARRA_SIGNED_APP_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-peer-signed-smoke
+        run: cargo test --locked -p clearra-app --test exact_accelerator_product_execution --no-default-features --features parallel -- --ignored --test-threads=1
       - name: Test explicit asset lifecycle and repair
         if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
         run: |

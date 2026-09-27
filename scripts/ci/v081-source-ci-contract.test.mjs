@@ -78,3 +78,22 @@ test('real signed-pack smoke reuses the compiled Core tests without generating o
   assert.ok(!smoke.includes('qualifier'));
   assert.ok(!smoke.includes('qualification-receipt'));
 });
+
+test('real App parity reuses one product-policy test binary and only the qualified SRS+ pair', () => {
+  const smoke = workflow.slice(workflow.indexOf('- name: Test real PC and Build reducer results'),
+    workflow.indexOf('- name: Test explicit asset lifecycle'));
+  const command = 'cargo test --locked -p clearra-app --test exact_accelerator_product_execution --no-default-features --features parallel --';
+  assert.equal(smoke.split(command).length - 1, 2);
+  assert.ok(smoke.includes(`${command} --test-threads=1`));
+  assert.ok(smoke.includes(`${command} --ignored --test-threads=1`));
+  assert.ok(smoke.includes('CLEARRA_SIGNED_APP_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-peer-signed-smoke'));
+  assert.ok(smoke.includes('gh release download legal-board-data-v081-20260924-rc1 --repo daejunnom/Clearra'));
+  assert.ok(smoke.includes("--pattern 'legal-board-srs-plus-v2.cllb'"));
+  assert.ok(smoke.includes('gh release download conditioned-data-v081-20260924-rc1 --repo daejunnom/Clearra'));
+  assert.ok(smoke.includes("--pattern 'conditioned-srs-plus.cllr'"));
+  assert.ok(!smoke.includes('--pattern \'*'));
+  assert.ok(!smoke.includes('local-search-ab'));
+  assert.ok(!smoke.includes('cargo build'));
+  assert.ok(!smoke.includes('qualification-receipt'));
+  assert.ok(!smoke.includes('continue-on-error:'));
+});
