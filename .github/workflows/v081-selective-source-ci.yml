@@ -62,7 +62,7 @@ jobs:
 
   native-products:
     if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
       CLEARRA_FOCUSED_TEST_OUTPUT_ROOT: ${{ github.workspace }}/_local/artifacts/accelerator-store-tests
@@ -178,6 +178,7 @@ jobs:
           cargo test --locked -p clearra-cli --test desktop_signed_accelerator_execution --no-default-features --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1
       - name: Recheck the same native data layer read-only as an unprivileged user, not an accepted image
         if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' }}
+        shell: bash
         env:
           CLEARRA_REAL_COMPUTE_CLI: ${{ github.workspace }}/build/cargo/default/debug/clearra
           CLEARRA_REAL_COMPUTE_ASSET_ROOT: ${{ github.workspace }}/_local/artifacts/v081-compute-data-smoke
@@ -190,7 +191,7 @@ jobs:
           # never widen permissions on the runner home or whole checkout.
           cargo build --locked --release -p clearra-manage
           manager="$GITHUB_WORKSPACE/build/cargo/default/release/clearra-manage"
-          readonly_root="/tmp/Clearra/v081-compute-readonly-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          readonly_root="$GITHUB_WORKSPACE/_local/artifacts/v081-compute-readonly-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           "$manager" storage verify --path "$readonly_root"
           test ! -e "$readonly_root"
           mkdir -p "$readonly_root"
@@ -199,18 +200,37 @@ jobs:
           cp -a "$CLEARRA_REAL_COMPUTE_ASSET_ROOT" "$readonly_root/data"
           cmp -s "$CLEARRA_REAL_COMPUTE_CLI" "$readonly_root/clearra"
           cmp -s "$GITHUB_WORKSPACE/apps/clearra-discord-bot/scripts/provision-v081-accelerators.mjs" "$readonly_root/provision-v081-accelerators.mjs"
-          chmod a+x /tmp/Clearra
-          chmod -R a+rX,a-w "$readonly_root"
-          sudo --user=nobody -- test -r "$readonly_root/provision-v081-accelerators.mjs"
-          sudo --user=nobody -- test -x "$readonly_root/clearra"
-          sudo --user=nobody -- test ! -w "$readonly_root/data"
-          sudo --user=nobody -- test ! -w "$readonly_root/data/legal-board"
-          sudo --user=nobody -- test ! -w "$readonly_root/data/conditioned-reachability"
+          # Carry the exact already-used Node runtime and its host libraries.
+          # Ubuntu 24.04 matches this job's CLI ABI; no image is built/accepted.
           node_binary="$(command -v node)"
-          cd "$readonly_root"
-          sudo --user=nobody -- "$node_binary" \
-            "$readonly_root/provision-v081-accelerators.mjs" \
-            verify 0.8.1 "$readonly_root/clearra" "$readonly_root/data"
+          cp -L "$node_binary" "$readonly_root/node"
+          cmp -s "$node_binary" "$readonly_root/node"
+          mkdir "$readonly_root/lib"
+          ldd "$readonly_root/node" "$readonly_root/clearra" > "$readonly_root/dynamic-libraries.txt"
+          awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}' "$readonly_root/dynamic-libraries.txt" | sort -u | while IFS= read -r library; do
+            case "$library" in /lib/*|/lib64/*|/usr/lib/*|/usr/lib64/*) ;; *) exit 1 ;; esac
+            destination="$readonly_root/lib/$(basename "$library")"
+            if test -e "$destination"; then cmp -s "$library" "$destination"; else cp -L "$library" "$destination"; fi
+          done
+          chmod -R a+rX,a-w "$readonly_root"
+          docker pull ubuntu:24.04
+          readonly_image="$(docker image inspect --format '{{.Id}}' ubuntu:24.04)"
+          case "$readonly_image" in sha256:*) ;; *) exit 1 ;; esac
+          printf 'readonly_fixture_image=%s\n' "$readonly_image"
+          readonly_container="v081-compute-readonly-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if docker container inspect "$readonly_container" >/dev/null 2>&1; then exit 1; fi
+          trap 'docker container rm --force "$readonly_container" >/dev/null 2>&1 || true' EXIT
+          docker run --rm --name "$readonly_container" --read-only --network none --user 65534:65534 \
+            --cap-drop ALL --security-opt no-new-privileges --memory 4g --pids-limit 64 \
+            --mount "type=bind,src=$readonly_root,dst=/proof,readonly" \
+            --env LD_LIBRARY_PATH=/proof/lib "$readonly_image" /bin/sh -ec '
+              test -r /proof/provision-v081-accelerators.mjs
+              test -x /proof/clearra
+              test ! -w /proof/data
+              test ! -w /proof/data/legal-board
+              test ! -w /proof/data/conditioned-reachability
+              exec /proof/node /proof/provision-v081-accelerators.mjs verify 0.8.1 /proof/clearra /proof/data
+            '
 
   wasm-abi:
     if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'
@@ -366,3 +386,11 @@ jobs:
           test -s "$CLEARRA_REAL_ACCELERATOR_WASM_DIR/clearra_wasm.manifest.json"
           test "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR" = "$GITHUB_WORKSPACE/_local/artifacts/v081-peer-signed-smoke"
           node --test apps/clearra-web/test/realAcceleratorRealms.test.mjs
+      - name: Install locked dependencies for the actual production Web verifier consumer
+        if: ${{ !cancelled() }}
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Execute the production Web pool and verifier worker with the same WASM and signed packs
+        if: ${{ !cancelled() }}
+        run: node scripts/tools/run-real-web-verifier-pool-smoke.mjs

@@ -14,6 +14,32 @@ const signedMetadata = [
   'config/conditioned-reachability-product-catalog.v1.json',
 ];
 
+test('the production Web pool smoke consumes one real WASM build and unchanged signed packs', () => {
+  const realmJob = workflow.slice(workflow.indexOf('\n  wasm-realms:'));
+  assert.equal(realmJob.split('node scripts/tools/build-clearra-wasm.mjs').length - 1, 1);
+  assert.ok(realmJob.includes('pnpm install --frozen-lockfile --ignore-scripts'));
+  assert.ok(realmJob.includes('node scripts/tools/run-real-web-verifier-pool-smoke.mjs'));
+  assert.ok(realmJob.indexOf('node scripts/tools/run-real-web-verifier-pool-smoke.mjs') >
+    realmJob.indexOf('node --test apps/clearra-web/test/realAcceleratorRealms.test.mjs'));
+  assert.ok(!realmJob.includes('--benchmark-provenance'));
+  assert.ok(!realmJob.includes('--stage-profiling'));
+  const consumer = readFileSync(new URL('../../apps/clearra-web/test/realVerifierPool.smoke.mjs', import.meta.url), 'utf8');
+  assert.ok(consumer.includes("from '../src/workers/ClearraVerifierPool.ts'"));
+  assert.ok(consumer.includes("from '../src/workers/DistributedWasmJobRunner.ts'"));
+  assert.ok(consumer.includes("assert.equal(plan.mode, 'cpu-multi'"));
+  assert.ok(consumer.includes('assert.equal(plan.workerCount, 3)'));
+  assert.ok(consumer.includes('assert.ok(exchanges > 0'));
+  assert.ok(consumer.includes('await assert.rejects(execution, /distributed.*(?:cancelled|disposed|terminated)/u)'));
+  assert.ok(!consumer.includes("assert.equal(terminal.event, 'cancelled'"));
+  const boot = readFileSync(new URL('../../apps/clearra-web/test/helpers/nodeVerifierRealm.mjs', import.meta.url), 'utf8');
+  assert.ok(boot.includes("await import('../../src/workers/clearraVerifierWorker.ts')"));
+  assert.ok(boot.includes("assert.equal(url.protocol, 'file:'"));
+  const launcher = readFileSync(new URL('../../scripts/tools/run-real-web-verifier-pool-smoke.mjs', import.meta.url), 'utf8');
+  assert.ok(launcher.indexOf('assert.ok(clearraWasmBuildContractsEqual') <
+    launcher.indexOf('const owner = enterManagedBuildOrRelaunch'));
+  assert.ok(launcher.includes("outExtension: { '.js': '.mjs' }"));
+});
+
 test('embedded signed metadata retains canonical LF bytes without parser normalization', () => {
   for (const path of signedMetadata) {
     const bytes = readFileSync(new URL(`../../${path}`, import.meta.url));
@@ -159,22 +185,32 @@ test('native compute smoke uses a real current-source CLI without image or relea
   assert.ok(smoke.includes('test "$CLEARRA_REAL_COMPUTE_ASSET_ROOT" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke"'));
   assert.ok(smoke.includes('node --test apps/clearra-discord-bot/test/realComputeAccelerators.test.mjs'));
   const readonly = smoke.slice(smoke.indexOf('- name: Recheck the same native data layer read-only'));
+  assert.ok(readonly.includes('shell: bash'));
   assert.ok(readonly.includes('test "$CLEARRA_REAL_COMPUTE_ASSET_ROOT" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke"'));
-  assert.ok(readonly.includes('readonly_root="/tmp/Clearra/v081-compute-readonly-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'));
+  assert.ok(readonly.includes('readonly_root="$GITHUB_WORKSPACE/_local/artifacts/v081-compute-readonly-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'));
   assert.ok(readonly.includes('storage verify --path "$readonly_root"'));
   assert.ok(readonly.includes('test ! -e "$readonly_root"'));
   assert.ok(readonly.includes('cmp -s "$CLEARRA_REAL_COMPUTE_CLI" "$readonly_root/clearra"'));
   assert.ok(readonly.includes('chmod -R a+rX,a-w "$readonly_root"'));
-  assert.ok(readonly.includes('sudo --user=nobody -- test -r "$readonly_root/provision-v081-accelerators.mjs"'));
-  assert.ok(readonly.includes('sudo --user=nobody -- test -x "$readonly_root/clearra"'));
+  assert.ok(readonly.includes('test -r /proof/provision-v081-accelerators.mjs'));
+  assert.ok(readonly.includes('test -x /proof/clearra'));
   for (const directory of ['data', 'data/legal-board', 'data/conditioned-reachability'])
-    assert.ok(readonly.includes(`sudo --user=nobody -- test ! -w "$readonly_root/${directory}"`));
-  assert.ok(readonly.includes('sudo --user=nobody -- "$node_binary"'));
-  assert.ok(readonly.includes('verify 0.8.1 "$readonly_root/clearra" "$readonly_root/data"'));
+    assert.ok(readonly.includes(`test ! -w /proof/${directory}`));
+  assert.ok(readonly.includes('cmp -s "$node_binary" "$readonly_root/node"'));
+  assert.ok(readonly.includes('docker run --rm --name "$readonly_container" --read-only --network none --user 65534:65534'));
+  assert.ok(readonly.includes('if docker container inspect "$readonly_container" >/dev/null 2>&1; then exit 1; fi'));
+  assert.ok(readonly.includes('trap \'docker container rm --force "$readonly_container"'));
+  assert.ok(readonly.includes('--mount "type=bind,src=$readonly_root,dst=/proof,readonly"'));
+  assert.ok(readonly.includes('--cap-drop ALL --security-opt no-new-privileges --memory 4g --pids-limit 64'));
+  assert.ok(readonly.includes('verify 0.8.1 /proof/clearra /proof/data'));
+  assert.ok(!readonly.includes('docker build'));
+  assert.ok(!readonly.includes('docker push'));
+  assert.ok(!readonly.includes('--force-unmanaged-output'));
+  assert.ok(!readonly.includes('chmod a+x /tmp'));
   assert.ok(!readonly.includes('chmod -R a+rX,a-w "$GITHUB_WORKSPACE"'));
   assert.ok(!readonly.includes(' provision '));
   assert.ok(!smoke.includes('local-search-ab'));
-  assert.ok(!smoke.includes('docker '));
+  assert.ok(!smoke.slice(0, smoke.indexOf('- name: Recheck the same native data layer read-only')).includes('docker '));
   assert.ok(!smoke.includes('gcloud '));
   assert.ok(!smoke.includes('qualification-receipt'));
   const testSource = readFileSync(new URL('../../apps/clearra-discord-bot/test/realComputeAccelerators.test.mjs', import.meta.url), 'utf8');

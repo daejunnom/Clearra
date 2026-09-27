@@ -106,3 +106,17 @@ CI source 계약 11개, 새 Rust test formatting과 diff 검사는 통과했다.
 Linux read-only 재검증, 성공 build supervision, strict lint, shared peak/성능,
 최종 exact-SHA acceptance와 배포/readback. 이번 기능 증거는 기존 자산의
 Qualified 상태를 확대하거나 release를 완료 처리하지 않는다.
+
+## 후속 exact-source CI 관측
+
+위 `/tmp/Clearra` 방식은 역사적인 시도이며 현재 적용된 경로가 아니다.
+exact `ebe1bb24c938ac3955975f35bee044130710adbf`의
+[run 36345097318](https://github.com/daejunnom/Clearra/actions/runs/36345097318)에서
+실제 Desktop native step은 성공했고 native-products의 read-only step만
+저장 정책의 `/tmp/Clearra` 경로 거절로 실패했다. 자산 검사는 시작되지 않았다.
+
+후속 수정은 허용된 repository `_local/artifacts`의 run/attempt 전용 root에
+동일 CLI·Node·public adapter·자료만 준비하고 finite read-only unprivileged
+container에서 production verify를 실행한다. 자세한 분리와 새 검증의 Open
+상태는 [production Web pool 후속 기록](v081-production-web-pool-functional-2026-09-28.md)을
+따른다. 성공했던 Desktop 검증이나 기존 자료를 다시 생성·재자격하지 않았다.
