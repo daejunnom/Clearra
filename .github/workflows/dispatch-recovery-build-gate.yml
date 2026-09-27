@@ -1,0 +1,72 @@
+name: Dispatch exact recovery-build release gate
+
+# One-shot operator bridge. Invoke the unchanged canonical workflow on an
+# already-promoted exact main SHA; never publish or update a source ref.
+on:
+  push:
+    branches: [codex/dispatch-recovery-build-gate-20260928]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: dispatch-release-gate-4a959159438a2f7530353a4472a132e486fdc2bf
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom' && github.ref == 'refs/heads/codex/dispatch-recovery-build-gate-20260928'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPECTED_MAIN: 4a959159438a2f7530353a4472a132e486fdc2bf
+    steps:
+      - name: Require exact promoted source and both successful integration checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$EXPECTED_MAIN"
+          for item in '36341072470:recovery-build-regression.yml' '36341072495:management-policy.yml'; do
+            run="${item%%:*}"
+            workflow="${item#*:}"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" > "$RUNNER_TEMP/checked-run-$run.json"
+            jq -e --arg sha "$EXPECTED_MAIN" --arg path ".github/workflows/$workflow" \
+              '.head_sha == $sha and .path == $path and .event == "push" and
+               .head_branch == "codex/converge-recovery-build-release-20260928" and
+               .head_repository.full_name == env.GITHUB_REPOSITORY and
+               .run_attempt == 1 and .status == "completed" and .conclusion == "success"' \
+              "$RUNNER_TEMP/checked-run-$run.json" > /dev/null
+          done
+      - name: Dispatch the unchanged canonical gate once and read back its identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          endpoint="repos/$GITHUB_REPOSITORY/actions/workflows/release-cli.yml/runs?head_sha=$EXPECTED_MAIN&event=workflow_dispatch&per_page=100"
+          gh api --paginate --slurp "$endpoint" > "$RUNNER_TEMP/exact-gate-runs-before.json"
+          count="$(jq --arg sha "$EXPECTED_MAIN" '[.[] | .workflow_runs[] | select(.head_sha == $sha)] | length' "$RUNNER_TEMP/exact-gate-runs-before.json")"
+          test "$count" = 0 || { echo 'Exact source already has a gate run; do not dispatch or rerun it.' >&2; exit 2; }
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$EXPECTED_MAIN"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/release-cli.yml/dispatches" -f ref=main
+          for attempt in $(seq 1 60); do
+            gh api --paginate --slurp "$endpoint" > "$RUNNER_TEMP/exact-gate-runs-after.json"
+            count="$(jq --arg sha "$EXPECTED_MAIN" '[.[] | .workflow_runs[] | select(.head_sha == $sha)] | length' "$RUNNER_TEMP/exact-gate-runs-after.json")"
+            if [[ "$count" == 1 ]]; then
+              jq --arg sha "$EXPECTED_MAIN" '[.[] | .workflow_runs[] | select(.head_sha == $sha)][0]' "$RUNNER_TEMP/exact-gate-runs-after.json" > "$RUNNER_TEMP/exact-gate-run.json"
+              jq -e --arg sha "$EXPECTED_MAIN" '.head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and .path == ".github/workflows/release-cli.yml" and .run_attempt == 1 and .head_repository.full_name == env.GITHUB_REPOSITORY' "$RUNNER_TEMP/exact-gate-run.json" > /dev/null
+              jq '{id, head_sha, head_branch, event, path, run_attempt, status, conclusion, html_url}' "$RUNNER_TEMP/exact-gate-run.json"
+              {
+                echo '## Canonical release gate dispatched'
+                echo "Source: \`$EXPECTED_MAIN\`"
+                jq -r '"Run: " + .html_url' "$RUNNER_TEMP/exact-gate-run.json"
+                echo 'This records gate start, not acceptance or deployment. No tag, Release, Pages, or production workflow was requested.'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            test "$count" = 0 || { echo 'Ambiguous exact-source gate identity.' >&2; exit 2; }
+            sleep 2
+          done
+          echo 'Dispatch was sent once but readback did not resolve; do not retry dispatch automatically.' >&2
+          exit 2
