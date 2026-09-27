@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Upload two-supply recovery review source (no tests or deployment)
+run-name: Verify two-supply exchange implementation before publication
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -8,26 +8,154 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: clearra-recovery-review-upload
-  cancel-in-progress: false
+  group: clearra-two-supply-exchange-validation
+  cancel-in-progress: true
+env:
+  CLEARRA_SOURCE_COMMIT: 59142804a827e6c533bb2ab3243b4eeb67d3cdaa
+  CLEARRA_ENGINE_BUILD_ID: 59142804a827e6c533bb2ab3243b4eeb67d3cdaa
 jobs:
-  upload-review:
+  native:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: '4'
+      RUST_MIN_STACK: '16777216'
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-      - name: Import byte-identical reviewed files into an isolated review branch
-        run: python scripts/integration/recovery-review-upload-20260927/import_review.py
+        with: {ref: 59142804a827e6c533bb2ab3243b4eeb67d3cdaa, fetch-depth: 0, persist-credentials: false}
+      - name: Bind exact source and install pinned Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CLEARRA_SOURCE_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = 7a1ac7441aa830577ff015043d15f20201c5ab62
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Check formatting without modifying the tested source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check 2>&1 | tee "$RUNNER_TEMP/exchange-format.log"
+      - name: Execute actual core exchange and image regressions
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p clearra-forward-search --lib recovery_build -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-core.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-core.log"
+      - name: Execute public CLI and application boundary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-cli.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-cli.log"
+          cargo test --locked -p clearra-cli recovery_build_dispatch_tests -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-cli-dispatch.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-cli-dispatch.log"
+      - name: Execute exact memory and repeated browser wire completion
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p clearra-wasm --lib recovery_build_exact_memory_boundary -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-memory.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-memory.log"
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-wire.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-wire.log"
+      - name: Record formatter diff for review only after all source tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain --untracked-files=no)"
+          cargo fmt --all
+          git diff --binary > "$RUNNER_TEMP/exchange-format.patch"
+          git diff --check
+          mkdir -p "$RUNNER_TEMP/formatted-source"
+          git diff --name-only -z | xargs -0 -r cp --parents --target-directory="$RUNNER_TEMP/formatted-source"
+          printf '%s\n' 'Formatting output is not a new verified commit. No source ref, main or deployment was changed.' > "$RUNNER_TEMP/formatted-source/REVIEW_ONLY.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: recovery-review-upload-${{ github.run_id }}
-          path: ${{ runner.temp }}/recovery-review-upload.json
+          name: exchange-native-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/exchange-*.log
+            ${{ runner.temp }}/exchange-format.patch
+            ${{ runner.temp }}/formatted-source
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 14
+  frontend:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix: {os: [ubuntu-latest, windows-latest]}
+    env:
+      CLEARRA_BROWSER_TOOLS_ROOT: ${{ github.workspace }}/build/tools/ui-browser
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: 59142804a827e6c533bb2ab3243b4eeb67d3cdaa, fetch-depth: 0, persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: 22.23.2}
+      - name: Install exact Rust Node dependencies and Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+          npm install --prefix "$CLEARRA_BROWSER_TOOLS_ROOT" --ignore-scripts --no-audit --no-fund playwright@1.56.1
+          node "$CLEARRA_BROWSER_TOOLS_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Compile actual input result and shared controls in browsers
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            status=0
+            for source in recovery-workspace-browser-acceptance recovery-result-browser-acceptance recovery-editor-browser-acceptance solution-toolbar-browser-acceptance workspace-controls-browser-acceptance; do
+              node "scripts/tools/$source.mjs" || status=1
+            done
+            exit "$status"
+          } 2>&1 | tee "$RUNNER_TEMP/exchange-browser.log"
+      - name: Test complete UI worker and Desktop source contracts
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            node scripts/desktop-ui-compile-check.mjs
+            pnpm --filter @clearra/ui run test
+            pnpm --filter @clearra/web run test
+          } 2>&1 | tee "$RUNNER_TEMP/exchange-frontend.log"
+      - name: Run canonical release regression selection on Linux
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/tools/run-release-regression-tests.mjs 2>&1 | tee "$RUNNER_TEMP/exchange-release-regressions.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exchange-frontend-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/exchange-*.log
+            ${{ runner.temp }}/clearra-recovery-workspace-acceptance
+            ${{ runner.temp }}/clearra-recovery-result-acceptance
+            ${{ runner.temp }}/clearra-recovery-editor-acceptance
+            ${{ runner.temp }}/clearra-solution-toolbar-acceptance
+            ${{ runner.temp }}/clearra-control-acceptance
+          if-no-files-found: warn
+          retention-days: 14
+  ready:
+    if: always()
+    needs: [native, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require real verification without promoting an unverified source
+        env: {RESULTS: '${{ toJSON(needs) }}'}
+        shell: python
+        run: |
+          import json,os
+          failed={k:v['result'] for k,v in json.loads(os.environ['RESULTS']).items() if v['result']!='success'}
+          if failed: raise RuntimeError(json.dumps(failed))
+          print('Source preflight passed. Full exact-source acceptance and repository protection are still required. No main update or deployment.')
