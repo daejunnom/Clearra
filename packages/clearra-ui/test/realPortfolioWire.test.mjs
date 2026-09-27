@@ -9,16 +9,24 @@ import test from 'node:test';
 import { build } from 'esbuild';
 
 const configuredRoot = process.env.CLEARRA_REAL_PORTFOLIO_SMOKE_DIR;
+const expectedSource = process.env.CLEARRA_REAL_PORTFOLIO_SOURCE_COMMIT;
 
 test('real Rust portfolios validate, backtrack and copy the whole selected set in UI', {
-  skip: configuredRoot ? false : 'requires the explicit Rust-produced managed fixture'
+  skip: !configuredRoot && !expectedSource
+    ? 'requires the explicit source-bound Rust-produced managed fixture' : false
 }, async () => {
+  assert.ok(configuredRoot, 'explicit managed fixture root is required');
+  assert.match(expectedSource ?? '', /^[a-f0-9]{40}$/u, 'exact source commit is required');
   const repository = realpathSync(fileURLToPath(new URL('../../../', import.meta.url)));
   const root = realpathSync(configuredRoot);
   assert.equal(root, join(repository, '_local', 'artifacts', 'v081-product-page-smoke'));
   const fixture = JSON.parse(readFileSync(join(root, 'portfolio-wire-smoke.json'), 'utf8'));
-  assert.equal(fixture.schema_id, 'clearra.v081.real-portfolio-wire-smoke.v1');
+  assert.equal(fixture.schema_id, 'clearra.v081.real-portfolio-wire-smoke.v2');
   assert.equal(fixture.cases.length, 8);
+  assert.equal(fixture.multi_member_cases.length, 4);
+  const identity = fixture.runtime_identity;
+  assert.equal(identity?.source_commit, expectedSource, 'stale Rust fixture cannot be reused');
+  assert.equal(identity?.engine_build_id, expectedSource);
 
   const bundle = await build({
     bundle: true, format: 'esm', platform: 'node', logLevel: 'silent', write: false,
@@ -42,6 +50,7 @@ test('real Rust portfolios validate, backtrack and copy the whole selected set i
     assert.equal(seen.has(identity), false);
     seen.add(identity);
     const response = value.final_response;
+    assert.deepEqual(response.runtime_identity, identity, 'one compiled generation across all requests');
     assert.equal(response.status, 'success');
     assert.equal(api.validateProductResultPayload(response.product_result_payload), null, identity);
     const pages = value.pages;
@@ -104,7 +113,87 @@ test('real Rust portfolios validate, backtrack and copy the whole selected set i
     }
     assert.deepEqual(value.restored, pages[0], 'native eviction/backtrack preserves page and copy bytes');
   }
+  await verifyRealMultiMemberPortfolios(api, fixture.multi_member_cases, identity);
 });
+
+async function verifyRealMultiMemberPortfolios(api, cases, identity) {
+  const policies = new Set();
+  for (const value of cases) {
+    const policy = `${value.legal}:${value.conditioned}`;
+    assert.equal(policies.has(policy), false);
+    policies.add(policy);
+    assert.equal(value.final_response.status, 'success');
+    assert.deepEqual(value.final_response.runtime_identity, identity);
+    assert.equal(api.validateProductResultPayload(value.final_response.product_result_payload), null);
+    assert.equal(api.validateSolutionSetArtifactPayload(value.artifact), null);
+    const pages = value.member_pages;
+    assert.equal(pages.length, 3);
+    const first = pages[0].page;
+    assert.equal(first.optimal_cardinality, '246');
+    assert.equal(first.total_member_pages, '3');
+    const keys = [];
+    for (const [index, wire] of pages.entries()) {
+      assert.equal(wire.state, 'page');
+      assert.equal(wire.product_page_kind, 'coverage-portfolio');
+      assert.equal(api.validateCoveragePortfolioRuntimePage(wire.page, {
+        setIdentitySha256: first.set_identity_sha256,
+        candidateMapSha256: first.candidate_map_sha256,
+        alternativeIndex: '1', memberPageNumber: (index + 1).toString()
+      }), null);
+      assert.equal(wire.page.members.length, index === 2 ? 46 : 100);
+      keys.push(...wire.page.members.map(member => member.normalized_solution_key));
+    }
+    assert.deepEqual(keys, value.candidate_keys);
+    assert.equal(new Set(keys).size, 246);
+    assert.equal(value.artifact.solution_count, 246);
+    assert.equal(value.artifact.selection_id, '1');
+    assert.equal(value.artifact.page_source_identity_sha256, first.set_identity_sha256);
+
+    // Render member page 2 (100 members), but keep the selected outer set's
+    // export source on page 1. The real native page payloads supply pages 2/3.
+    const renderedKeys = pages[1].page.members.map(member => member.normalized_solution_key);
+    assert.equal(renderedKeys.length, 100);
+    const requests = [];
+    let current = true;
+    const source = api.createCoveragePortfolioExportKeySource({
+      initialPage: first, isCurrent: () => current,
+      async loadMemberPage(alternativeIndex, memberPageNumber, signal) {
+        assert.equal(signal?.aborted ?? false, false);
+        requests.push([alternativeIndex, memberPageNumber]);
+        assert.equal(alternativeIndex, '1');
+        return pages[Number(memberPageNumber) - 1];
+      }
+    });
+    assert.ok(source);
+    assert.equal(source.keyCount, 246);
+    const document = await api.encodeSolutionKeySourceForClipboard(source, 'ctk');
+    assert.deepEqual(requests, [['1', '2'], ['1', '3']]);
+    const actual = api.decodeCtk3(document);
+    const native = value.artifact.formats.find(format => format.format === 'ctk3');
+    assert.equal(actual.pages.length, 246, 'copy cannot truncate to the rendered 100 members');
+    assert.deepEqual(fieldMeaning(actual), fieldMeaning(api.decodeCtk3(native.document)));
+    assert.deepEqual(await source.readKeys(95, 110), keys.slice(95, 205));
+    assert.equal(requests.length, 2, 'validated complete selection is reused');
+
+    current = false;
+    await assert.rejects(source.readKeys(0, source.keyCount), /replaced by another result/u);
+    const controller = new AbortController();
+    const cancelledSource = api.createCoveragePortfolioExportKeySource({
+      initialPage: first, isCurrent: () => true,
+      async loadMemberPage(alternativeIndex, memberPageNumber) {
+        assert.equal(alternativeIndex, '1');
+        assert.equal(memberPageNumber, '2');
+        controller.abort();
+        return pages[1];
+      }
+    });
+    await assert.rejects(api.encodeSolutionKeySourceForClipboard(cancelledSource, 'ctk', {
+      signal: controller.signal
+    }), error => error.name === 'AbortError');
+    console.log(`real_portfolio_copy=passed policy=${policy} rendered=100 exported=246 pages=3`);
+  }
+  assert.equal(policies.size, 4);
+}
 
 function fieldMeaning(document) {
   return {

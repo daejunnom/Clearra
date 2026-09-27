@@ -10,6 +10,9 @@ use clearra_wasm::{
 };
 use serde_json::{json, Value};
 
+#[path = "support/multi_member_portfolio.rs"]
+mod multi_member_portfolio;
+
 const FIXTURE_LEAF: &str = "v081-product-page-smoke";
 const FIXTURE_FILE: &str = "portfolio-wire-smoke.json";
 const SLICE_LIMIT: usize = 128;
@@ -228,7 +231,10 @@ fn capture() -> Value {
             cases.push(case);
         }
     }
-    json!({ "schema_id": "clearra.v081.real-portfolio-wire-smoke.v1", "cases": cases })
+    let runtime_identity = cases[0]["final_response"]["runtime_identity"].clone();
+    json!({ "schema_id": "clearra.v081.real-portfolio-wire-smoke.v2",
+        "runtime_identity": runtime_identity, "cases": cases,
+        "multi_member_cases": multi_member_portfolio::capture_multi_member_cases() })
 }
 
 #[test]
@@ -258,6 +264,15 @@ fn write_real_portfolio_wire_for_ui() {
             .join(FIXTURE_LEAF)
     );
     let fixture = capture();
+    // Identity is emitted by the compiled product, never supplied by this
+    // writer. A local unverified binary cannot produce an exact-source fixture.
+    let identity = &fixture["runtime_identity"];
+    let source = identity["source_commit"].as_str().unwrap();
+    assert_eq!(source.len(), 40);
+    assert!(source
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    assert_eq!(identity["engine_build_id"], source);
     std::fs::write(
         root.join(FIXTURE_FILE),
         serde_json::to_vec_pretty(&fixture).unwrap(),

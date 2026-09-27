@@ -6,7 +6,8 @@
 verifier worker를 연결하는 작은 기능 소비자를 추가했다. 기존 realm 검증은 실제
 WASM ABI와 독립 메모리를 사용했지만 Web pool의 준비, durable delegation,
 consume/finish 및 취소 순서를 직접 실행하지 않았다. 이번 소비자는 그 경계를
-검사한다. 아직 실제 WASM을 이용한 새 소비자 실행 결과는 없다.
+검사한다. 추가 당시 실제 실행은 미완이었고, 아래 후속 CI 관측에서 실제 WASM
+소비자 통과를 확인했다. 브라우저 자체의 증거와는 계속 구분한다.
 
 새 검증 코드는 다음 production 경로를 그대로 사용한다.
 
@@ -24,7 +25,7 @@ Node worker threads는 격리된 메시지 운송만 제공한다. 가짜 solver
 
 다섯 qualified profile의 변경 없는 signed 자료를 재사용한다. 자료 생성·전수
 재자격은 하지 않는다. 다음 수치는 기존 기능 증거에서 가져온 검증 예상값이며,
-새 Web pool 소비자의 완료 결과가 아니다.
+처음 작성한 새 Web pool 소비자의 예상값이었다. 후속 CI에서 모두 확인했다.
 
 | Profile | 초기 필드 4L / P7 / 6 pieces | empty 4L / IIOOOIIOOO / no-hold |
 | --- | ---: | ---: |
@@ -50,7 +51,7 @@ root와 별도로 세 compute verifier를 사용하므로 두 자산의 peer 허
 재시작한다. production runner의 취소는 Promise 거절이며, public cancelled
 이벤트는 `clearraWorker`가 소유한다. 테스트에서 그 이벤트를 만들어 내거나
 runner의 성공 terminal로 오인하지 않는다. 예상 총량은 baseline 10개와 분산
-요청 42개(정상 41개, 취소 1개)이며 현재는 **미실행**이다.
+요청 42개(정상 41개, 취소 1개)이며, 최초 작성 시 미실행이었다.
 
 ## 소스·빌드·실행 정체성
 
@@ -113,3 +114,25 @@ read-only root, network none, no-new-privileges, capability 제거와 finite 4Gi
   accepted compute image, aggregate shared peak와 release/readback: 계속 Open.
 
 벤치마크/ABBA, 자산 재생성, v0.9.0 업그레이드, main 병합과 배포는 하지 않았다.
+
+## 후속 실제 CI 관측: `bff8ebac`
+
+[run 36347628083](https://github.com/daejunnom/Clearra/actions/runs/36347628083)은
+exact `bff8ebacf01cfc04d64bf2a28427255613b6c721`에서 여섯 job 중 다섯 성공했다.
+`wasm-realms`의 한 ordinary WASM으로 독립 realm 검사와 실제 production Web
+pool/worker 소비자가 모두 통과했다. 소비자는 정상 41건, 취소 1건, 실제 relation
+교환 189건을 기록했다. serial baseline 10건과 다섯 profile·두 입력·네 정책의
+complete identity/coverage/probability parity 및 취소 후 재시작 검사가 통과했다.
+
+native-products의 실제 CLI/compute adapter 및 Desktop native job 검사도 통과했다.
+단, 마지막 read-only 단계가 library staging 중 실패했으므로 전체 CI는 failure다.
+두 바이너리를 함께 전달한 `ldd` 출력의 절 제목을 기존 awk의 절대경로 규칙이
+library로 오인하는 소스 경로를 확인했다. Docker 실행 이전에 중단됐으며 실제
+read-only 자산 검증의 성공 또는 실패는 아직 관측하지 못했다.
+
+새 source는 별도 dependency parser에서 바이너리 제목과 vDSO를 제외하고,
+실제 해석된 host library 경로만 정렬·중복 제거한다. 미해결 의존성·허용 범위 밖
+경로·traversal·알 수 없는 출력은 실패를 유지한다. 정확한 parser 테스트 3개와
+CI 연결 계약 13개가 로컬에서 모두 통과했다. 새 Linux read-only 기능 실행은
+후속 CI에서 검증할 Open 항목이다. accepted Cloud Run image, 실제 browser/
+OPFS/IndexedDB, Tauri IPC, active-session peak와 릴리스 권위로 확대하지 않는다.

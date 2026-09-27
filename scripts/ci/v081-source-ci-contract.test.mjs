@@ -141,6 +141,36 @@ test('real portfolio UI proof consumes a current-run fixture without delaying in
   assert.ok(consumer.includes('node --test packages/clearra-ui/test/realPortfolioWire.test.mjs'));
   assert.ok(!consumer.includes('cargo '));
   assert.ok(!workflow.slice(workflow.indexOf('\n  surfaces:')).includes('needs:'));
+  const producerJob = workflow.slice(workflow.indexOf('\n  wasm-abi:'), workflow.indexOf('\n  product-wire-ui:'));
+  assert.ok(producerJob.includes('CLEARRA_SOURCE_COMMIT: ${{ github.sha }}'));
+  assert.ok(producerJob.includes('CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}'));
+  assert.ok(consumer.includes('CLEARRA_REAL_PORTFOLIO_SOURCE_COMMIT: ${{ github.sha }}'));
+});
+
+test('actual multi-page portfolio copy is source-bound and cannot silently skip incomplete setup', () => {
+  const producer = readFileSync(new URL('../../crates/clearra-wasm/tests/support/multi_member_portfolio.rs', import.meta.url), 'utf8');
+  assert.ok(producer.includes('const EXPECTED_MEMBERS: usize = 246;'));
+  assert.ok(producer.includes('clearra pc pinned-minimals {QUERY}'));
+  assert.ok(producer.includes('--required-document {document} --expected-source-set-hash {source_hash}'));
+  assert.ok(producer.includes('CoveragePortfolioPageStore::new(set.clone())'));
+  assert.ok(producer.includes('serialize_coverage_portfolio_page(&store, 1, page_number)'));
+  assert.ok(!producer.includes('fn fake'));
+  const consumer = readFileSync(new URL('../../packages/clearra-ui/test/realPortfolioWire.test.mjs', import.meta.url), 'utf8');
+  assert.ok(consumer.includes('clearra.v081.real-portfolio-wire-smoke.v2'));
+  assert.ok(consumer.includes('fixture.multi_member_cases.length, 4'));
+  assert.ok(consumer.includes('actual.pages.length, 246'));
+  assert.ok(consumer.includes('!configuredRoot && !expectedSource'));
+  assert.ok(consumer.includes('identity?.source_commit, expectedSource'));
+  const environment = { ...process.env, CLEARRA_REAL_PORTFOLIO_SMOKE_DIR: '',
+    CLEARRA_REAL_PORTFOLIO_SOURCE_COMMIT: 'f'.repeat(40) };
+  delete environment.NODE_TEST_CONTEXT;
+  const incomplete = spawnSync(process.execPath, ['--test',
+    fileURLToPath(new URL('../../packages/clearra-ui/test/realPortfolioWire.test.mjs', import.meta.url))], {
+    env: environment, encoding: 'utf8', timeout: 10_000, windowsHide: true,
+  });
+  assert.equal(incomplete.error, undefined);
+  assert.equal(incomplete.status, 1, 'incomplete explicit source setup must fail, not skip');
+  assert.match(incomplete.stdout, /# skipped 0/u);
 });
 
 test('real WASM realms use one ordinary build and unchanged packs independently of native jobs', () => {
@@ -197,6 +227,10 @@ test('native compute smoke uses a real current-source CLI without image or relea
   for (const directory of ['data', 'data/legal-board', 'data/conditioned-reachability'])
     assert.ok(readonly.includes(`test ! -w /proof/${directory}`));
   assert.ok(readonly.includes('cmp -s "$node_binary" "$readonly_root/node"'));
+  assert.ok(readonly.includes('node scripts/ci/readonly-runtime-libraries.mjs "$readonly_root/dynamic-libraries.txt"'));
+  assert.ok(readonly.includes('done < "$readonly_root/runtime-libraries.txt"'));
+  assert.ok(!readonly.includes("awk '/=>"));
+  assert.ok(workflow.includes('node --test scripts/ci/v081-source-ci-contract.test.mjs scripts/ci/readonly-runtime-libraries.test.mjs'));
   assert.ok(readonly.includes('docker run --rm --name "$readonly_container" --read-only --network none --user 65534:65534'));
   assert.ok(readonly.includes('if docker container inspect "$readonly_container" >/dev/null 2>&1; then exit 1; fi'));
   assert.ok(readonly.includes('trap \'docker container rm --force "$readonly_container"'));
