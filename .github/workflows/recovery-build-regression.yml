@@ -1,0 +1,33 @@
+name: Recovery Build Regression
+
+on:
+  push:
+    branches: [codex/recovery-build-fields-parallel-20260928]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recovery-build-regression-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Preserve exact source for regression diagnostics
+        run: git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/recovery-build-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recovery-build-source
+          path: ${{ runner.temp }}/recovery-build-source.tar.gz
+          retention-days: 1
+      - name: Run focused regression entrypoint when present
+        run: |
+          if test -f scripts/tools/recovery-build-regression.sh; then
+            bash scripts/tools/recovery-build-regression.sh
+          fi
