@@ -19,30 +19,25 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - name: Apply reviewed implementation patch on the isolated branch
+        with:
+          fetch-depth: 0
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Format changed Rust files on the isolated branch
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/codex/recovery-build-fields-parallel-20260928
-          if test -d .github/recovery-patch; then
-            python3 - <<'PY'
-          import base64, gzip, hashlib, pathlib, subprocess
-          root = pathlib.Path('.github/recovery-patch')
-          text = ''.join((root / name).read_text() for name in ['part-0.b64','part-1.b64','part-2.b64','part-3a.b64','part-3b.b64','part-4.b64'])
-          text = text.replace('hurW6hurW6ojnrba5', 'hurW6ojnrba9')
-          patch = gzip.decompress(base64.b64decode(text, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == '544ad254d082089000246b0cbf2bde2399c21eca54d6045eb4f0f5f8cbb1c334'
-          output = pathlib.Path('/tmp/recovery-reviewed.patch')
-          output.write_bytes(patch)
-          subprocess.run(['git','apply','--check',str(output)],check=True)
-          subprocess.run(['git','apply',str(output)],check=True)
-          PY
-            git rm .github/recovery-patch/*.b64
-            git add crates packages scripts/tools/recovery-build-regression.sh scripts/tools/recovery-build-browser-regression.mjs tests/fixtures/recovery-build/user-20260928.json
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'fix(recovery): preserve field context and distribute paired coverage'
-            git push origin HEAD:refs/heads/codex/recovery-build-fields-parallel-20260928
+          mapfile -t files < <(git diff --name-only --diff-filter=ACM 13376dee8638cb5de5437ade910f07f5eab20629 HEAD -- '*.rs')
+          if ((${#files[@]})); then
+            rustfmt --edition 2024 --config skip_children=true "${files[@]}"
+            git add -- "${files[@]}"
+            if ! git diff --cached --quiet; then
+              git config user.name 'github-actions[bot]'
+              git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+              git commit -m 'style(recovery): format focused parallel implementation'
+              git push origin HEAD:refs/heads/codex/recovery-build-fields-parallel-20260928
+            fi
           fi
       - name: Preserve exact implementation source
         if: always()
@@ -57,8 +52,6 @@ jobs:
             ${{ runner.temp }}/recovery-build-source.tar.gz
             ${{ runner.temp }}/recovery-tested-sha.txt
           retention-days: 3
-      - name: Install pinned Rust toolchain
-        run: rustup show
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
@@ -67,21 +60,39 @@ jobs:
           version: 11.5.0
           run_install: false
       - name: Install locked frontend dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Prepare external browser test tools
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/clearra-browser-tools"
-          npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --no-audit --no-fund playwright@1.56.1
+          npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
           "$RUNNER_TEMP/clearra-browser-tools/node_modules/.bin/playwright" install --with-deps chromium
           echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
-      - name: Run focused regression tests
+      - name: Native and WASM paired-coverage regressions
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           mkdir -p build/recovery-regression
-          bash scripts/tools/recovery-build-regression.sh 2>&1 | tee build/recovery-regression/tests.log
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee build/recovery-regression/core.log || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee build/recovery-regression/cli.log || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee build/recovery-regression/wasm-runtime.log || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee build/recovery-regression/wasm-target.log || result=1
+          exit "$result"
+      - name: UI contracts and real browser field regression
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p build/recovery-regression
+          result=0
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs 2>&1 | tee build/recovery-regression/ui-prepare.log || result=1
+          node --test packages/clearra-ui/test/recoveryBuild*.test.mjs packages/clearra-ui/test/boundaryRecoverySurface.test.mjs 2>&1 | tee build/recovery-regression/ui-unit.log || result=1
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee build/recovery-regression/ui-types.log || result=1
+          node scripts/tools/recovery-build-browser-regression.mjs 2>&1 | tee build/recovery-regression/browser.log || result=1
+          exit "$result"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
