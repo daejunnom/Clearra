@@ -857,7 +857,7 @@ fn supply_choices(query: &BoundaryRecoveryQuery, state: State, output: &mut Vec<
     }
 }
 
-fn compact_tag(board: ForwardBoard, cleared_rows: u32, height: u8) -> ForwardBoard {
+pub(crate) fn compact_tag(board: ForwardBoard, cleared_rows: u32, height: u8) -> ForwardBoard {
     if cleared_rows == 0 {
         return board;
     }

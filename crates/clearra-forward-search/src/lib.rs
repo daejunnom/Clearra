@@ -4,6 +4,8 @@ mod board;
 mod boundary_recovery;
 mod boundary_recovery_pattern;
 mod boundary_recovery_population;
+mod cross_stage_catalog;
+mod cross_stage_recovery;
 mod parallel;
 mod query;
 mod reachability;
@@ -20,6 +22,15 @@ pub use boundary_recovery_pattern::{BoundaryRecoveryPatternError, BoundaryRecove
 pub use boundary_recovery_population::{
     search_boundary_recovery_population, BoundaryRecoveryPopulationError,
     BoundaryRecoveryPopulationLimits, BoundaryRecoveryPopulationReport,
+};
+pub use cross_stage_catalog::{
+    CrossStageCatalog, CrossStageCatalogCompletion, CrossStageCatalogError, CrossStageCatalogQuery,
+    CrossStageCatalogReport, CrossStageCatalogStatus, CrossStageCatalogWitness,
+    CrossStageExecution,
+};
+pub use cross_stage_recovery::{
+    CrossStageEarlyLimit, CrossStagePairReport, CrossStagePairStatus, CrossStageRecoveryQuery,
+    CrossStageRole, CrossStageSearchError,
 };
 pub use parallel::{
     ForwardParallelBatchPolicy, ForwardParallelCoordinator, ForwardParallelError,
