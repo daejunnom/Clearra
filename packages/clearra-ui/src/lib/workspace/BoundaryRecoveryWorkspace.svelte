@@ -38,8 +38,8 @@
     language = readWorkspaceLanguage();
     if (runtime === 'web') {
       clearWasmTerminalResult();
-      workerController.prewarm(1, false, CPU_ONLY_RUNTIME_WARMUP_POLICY,
-        automaticWorkerAuthority(hostCapabilitySnapshot, false));
+      const authority = automaticWorkerAuthority(hostCapabilitySnapshot, false);
+      workerController.prewarm(authority.workersRequested, false, CPU_ONLY_RUNTIME_WARMUP_POLICY, authority);
     } else {
       clearDesktopTerminalResult();
       resumeDesktopJobPolling();

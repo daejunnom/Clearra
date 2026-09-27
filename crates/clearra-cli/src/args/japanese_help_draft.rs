@@ -83,7 +83,7 @@ Clearraのpath/setup/coverは従来のClearraでの意味を維持します。�
 pub(super) fn product_help_body(topic: ProductHelpTopic) -> &'static str {
     match topic {
         ProductHelpTopic::RecoveryBuild => {
-            "使い方: clearra recovery build --start-mask HEX --middle-mask HEX --result-mask HEX --height 1..24 --first-supply EXPR --second-supply EXPR [--max-early auto|N] [--allow-piece-exchange|--no-piece-exchange] [--hold|--no-hold] [--preserve-b2b|--no-preserve-b2b] [--rule RULE] [--spin-profile PROFILE]
+            "使い方: clearra recovery build --start-mask HEX --middle-mask HEX --result-mask HEX --height 1..24 --first-supply EXPR --second-supply EXPR [--max-early auto|N] [--workers N] [--allow-piece-exchange|--no-piece-exchange] [--hold|--no-hold] [--preserve-b2b|--no-preserve-b2b] [--rule RULE] [--spin-profile PROFILE]
 二つの供給は共通キュー文法を使います。開始は既存ブロック、中間は追加領域、結果は中間の完成行が消えた後の追加領域です。自動は可能な先行個数をすべて許可します。種類を交換しても実際のミノ形状と合計使用数は変わりません。B2Bは遅れた中間配置も含め実行時に検証します。確率は供給組の値であり、例は全解法の列挙ではありません。"
         }
         ProductHelpTopic::BoundaryRecovery => {

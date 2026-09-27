@@ -9,6 +9,7 @@ use clearra_app::{
     PreparedDistributedSearch, PreparedDistributedSearchCompletion, PreparedDistributedSetupSearch,
     ProductCapabilityContract,
 };
+use clearra_app::{DistributedRecoveryBuildPreparation, PreparedDistributedRecoveryBuildSearch};
 use clearra_core_executor::performance::CooperativeWorkQuantum;
 #[cfg(feature = "webgpu-search")]
 use clearra_core_executor::WasmWebGpuCandidateProducer;
@@ -22,6 +23,10 @@ use clearra_core_executor::{
     WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
     WasmTilingRootAdvance, WasmTilingRootProducer, WasmTilingRootResultMerger,
     WasmTilingRootWorker,
+};
+use clearra_forward_search::recovery_build::{
+    RecoveryBuildCoordinator, RecoveryBuildParallelProgress, RecoveryBuildProduce,
+    RecoveryBuildWorker,
 };
 use clearra_forward_search::{
     ForwardParallelCoordinator, ForwardParallelProduce, ForwardParallelWorker,
@@ -1245,6 +1250,7 @@ enum DistributedCandidateProducer {
     Tiling(WasmTilingRootProducer),
     BuildProbability(WasmBuildProbabilityCandidateProducer),
     Forward(ForwardParallelCoordinator),
+    RecoveryBuild(RecoveryBuildCoordinator),
     Setup(WasmSetupParallelCoordinator),
     #[cfg(feature = "webgpu-search")]
     WebGpu(WasmWebGpuCandidateProducer),
@@ -1269,6 +1275,7 @@ enum DistributedVerifier {
     Tiling(WasmTilingRootWorker),
     BuildProbability(WasmBuildProbabilityDistributedVerifier),
     Forward(ForwardParallelWorker),
+    RecoveryBuild(RecoveryBuildWorker),
     Setup(WasmSetupParallelWorker),
 }
 
@@ -1288,6 +1295,7 @@ enum DistributedResultMerger {
 #[allow(clippy::large_enum_variant)]
 enum DistributedPreparedSearch {
     Core(PreparedDistributedSearch),
+    RecoveryBuild(PreparedDistributedRecoveryBuildSearch),
     Forward(PreparedDistributedForwardSearch),
     Setup(PreparedDistributedSetupSearch),
 }
@@ -1315,6 +1323,50 @@ impl WasmDistributedCoordinator {
     ) -> Result<WasmDistributedPreparation, WasmCommandRuntimeError> {
         let prepared = runtime.prepare_command_text(command_text)?;
         let (request, webgpu_requested) = prepared.into_parts();
+        if matches!(request.command(), AppCommand::RecoveryBuild(_)) {
+            let workers = usize::from(request.resource_budget().workers()).max(1);
+            if workers < 2 {
+                return Ok(WasmDistributedPreparation::Serial);
+            }
+            let prepared = match runtime
+                .app_context()
+                .prepare_distributed_recovery_build(request)
+            {
+                DistributedRecoveryBuildPreparation::Ready(response) => {
+                    return Ok(WasmDistributedPreparation::Ready(
+                        WasmExecutionResult::from_app_response(response, false),
+                    ))
+                }
+                DistributedRecoveryBuildPreparation::Search(prepared) => prepared,
+            };
+            let producer = RecoveryBuildCoordinator::new(prepared.query().clone(), workers)
+                .map_err(|_| {
+                    distributed_error(
+                        "E_WASM_RECOVERY_PARALLEL_START",
+                        "recovery_parallel_initialization_failed",
+                    )
+                })?;
+            if producer.progress().possible < 2 {
+                return Ok(WasmDistributedPreparation::Serial);
+            }
+            return Ok(WasmDistributedPreparation::Coordinator(Self {
+                prepared: Some(DistributedPreparedSearch::RecoveryBuild(prepared)),
+                producer: Some(DistributedCandidateProducer::RecoveryBuild(producer)),
+                merger: None,
+                pending_build_completion_summary: None,
+                summary: None,
+                completed_progress: WasmDistributedProgress::default(),
+                forward_completed: false,
+                worker_count: workers,
+                verification_required: true,
+                webgpu_requested: false,
+                mode: WasmDistributedMode::CpuMulti,
+                requested_backend: WasmDistributedRequestedBackend::Cpu,
+                preparation_fallback_reason: WasmDistributedFallbackReason::None,
+                backend_execution_override: None,
+                control: ExecutionControl::default(),
+            }));
+        }
         if matches!(request.command(), AppCommand::Setup(_)) {
             let requested_workers = usize::from(request.resource_budget().workers()).max(1);
             if requested_workers < 2 {
@@ -1790,6 +1842,14 @@ impl WasmDistributedCoordinator {
                 });
             }
         }
+        if let Some(DistributedCandidateProducer::RecoveryBuild(producer)) = &self.producer {
+            let mut verifier = WasmDistributedVerifierRuntime::prepare_forward(
+                runtime,
+                &producer.worker_initialization(),
+            )?;
+            verifier.control = self.control.clone();
+            return Ok(verifier);
+        }
         WasmDistributedVerifierRuntime::prepare(runtime, command_text)
     }
 
@@ -1813,7 +1873,9 @@ impl WasmDistributedCoordinator {
         matches!(
             self.producer,
             Some(
-                DistributedCandidateProducer::PcRoots(_) | DistributedCandidateProducer::Tiling(_)
+                DistributedCandidateProducer::PcRoots(_)
+                    | DistributedCandidateProducer::Tiling(_)
+                    | DistributedCandidateProducer::RecoveryBuild(_)
             )
         )
     }
@@ -1828,6 +1890,9 @@ impl WasmDistributedCoordinator {
 
     pub fn worker_initialization(&self) -> Option<Vec<u8>> {
         match self.producer.as_ref() {
+            Some(DistributedCandidateProducer::RecoveryBuild(producer)) => {
+                Some(producer.worker_initialization())
+            }
             Some(DistributedCandidateProducer::Forward(producer)) => {
                 Some(producer.worker_initialization())
             }
@@ -1879,6 +1944,24 @@ impl WasmDistributedCoordinator {
         }
         if self.summary.is_some() || self.forward_completed {
             return Ok(WasmDistributedProducerAdvance::Completed);
+        }
+        if let Some(DistributedCandidateProducer::RecoveryBuild(producer)) = self.producer.as_mut()
+        {
+            let (state, bytes) = producer.produce(&self.control).map_err(|_| {
+                distributed_error(
+                    "E_WASM_RECOVERY_PRODUCE",
+                    "recovery_parallel_produce_failed",
+                )
+            })?;
+            return Ok(match state {
+                RecoveryBuildProduce::Pending => WasmDistributedProducerAdvance::Pending,
+                RecoveryBuildProduce::Batch => WasmDistributedProducerAdvance::Batch(bytes),
+                RecoveryBuildProduce::Cancelled => WasmDistributedProducerAdvance::Cancelled,
+                RecoveryBuildProduce::Completed => {
+                    self.forward_completed = true;
+                    WasmDistributedProducerAdvance::Completed
+                }
+            });
         }
         if matches!(self.producer, Some(DistributedCandidateProducer::Setup(_))) {
             let status = match self.producer.as_mut() {
@@ -2174,6 +2257,13 @@ impl WasmDistributedCoordinator {
                 .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_TILING_MERGE", reason))?;
             return Ok(());
         }
+        if let Some(DistributedCandidateProducer::RecoveryBuild(producer)) = self.producer.as_mut()
+        {
+            producer.absorb(input, &self.control).map_err(|_| {
+                distributed_error("E_WASM_RECOVERY_MERGE", "recovery_parallel_receipt_invalid")
+            })?;
+            return Ok(());
+        }
         if let Some(DistributedCandidateProducer::Setup(producer)) = self.producer.as_mut() {
             producer.absorb(input).map_err(|error| {
                 distributed_error("E_WASM_DISTRIBUTED_SETUP_MERGE", error.reason())
@@ -2372,6 +2462,29 @@ impl WasmDistributedCoordinator {
         mut self,
         workers_used: usize,
     ) -> Result<WasmExecutionResult, WasmCommandRuntimeError> {
+        if matches!(
+            self.producer,
+            Some(DistributedCandidateProducer::RecoveryBuild(_))
+        ) {
+            let Some(DistributedCandidateProducer::RecoveryBuild(producer)) = self.producer.take()
+            else {
+                unreachable!()
+            };
+            let report = producer.finish(&self.control).map_err(|_| {
+                distributed_error("E_WASM_RECOVERY_FINISH", "recovery_parallel_incomplete")
+            })?;
+            let Some(DistributedPreparedSearch::RecoveryBuild(prepared)) = self.prepared.take()
+            else {
+                return Err(distributed_error(
+                    "E_WASM_DISTRIBUTED_STATE",
+                    "recovery app preparation missing",
+                ));
+            };
+            return Ok(WasmExecutionResult::from_app_response(
+                prepared.complete(report),
+                false,
+            ));
+        }
         if matches!(self.producer, Some(DistributedCandidateProducer::Setup(_))) {
             let producer = match self.producer.take() {
                 Some(DistributedCandidateProducer::Setup(producer)) => producer,
@@ -2914,7 +3027,7 @@ impl DistributedCandidateProducer {
             Self::PcRoots(producer) => (Some(producer.root_count() as u128), false),
             Self::Tiling(producer) => (Some(producer.root_count() as u128), false),
             Self::BuildProbability(producer) => (producer.progress().candidate_family_count, true),
-            Self::Forward(_) | Self::Setup(_) => (None, true),
+            Self::Forward(_) | Self::Setup(_) | Self::RecoveryBuild(_) => (None, true),
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => (producer.progress().candidate_family_count, true),
         };
@@ -2935,7 +3048,10 @@ impl DistributedCandidateProducer {
         match self {
             Self::Cpu(producer) => producer.verification_required(),
             Self::PcRoots(_) | Self::Tiling(_) => true,
-            Self::BuildProbability(_) | Self::Forward(_) | Self::Setup(_) => true,
+            Self::BuildProbability(_)
+            | Self::Forward(_)
+            | Self::Setup(_)
+            | Self::RecoveryBuild(_) => true,
             #[cfg(feature = "webgpu-search")]
             Self::WebGpu(producer) => producer.verification_required(),
         }
@@ -2953,6 +3069,9 @@ impl DistributedCandidateProducer {
             Self::BuildProbability(producer) => {
                 producer.advance_with_external_retained(control, external_retained_bytes)
             }
+            Self::RecoveryBuild(_) => Err(invalid_search_error(
+                "recovery_producer_requires_batch_advance",
+            )),
             Self::Forward(_) => Err(invalid_search_error(
                 "forward_producer_requires_batch_advance",
             )),
@@ -2982,6 +3101,7 @@ impl DistributedCandidateProducer {
                 .into_merger()
                 .map(DistributedResultMerger::BuildProbability)
                 .map_err(invalid_search_error),
+            Self::RecoveryBuild(_) => Err(invalid_search_error("recovery_producer_owns_merger")),
             Self::Forward(producer) => Ok(DistributedResultMerger::Forward(producer)),
             Self::Setup(_) => Err(invalid_search_error(
                 "setup_producer_owns_its_result_merger",
@@ -2997,6 +3117,7 @@ impl DistributedCandidateProducer {
             Self::PcRoots(producer) => producer.progress(),
             Self::Tiling(producer) => producer.progress(),
             Self::BuildProbability(producer) => producer.progress(),
+            Self::RecoveryBuild(producer) => recovery_parallel_progress(producer.progress()),
             Self::Forward(producer) => {
                 let progress = producer.progress();
                 WasmDistributedProgress {
@@ -3048,7 +3169,7 @@ impl DistributedVerifier {
             }
             Self::BuildProbability(verifier) => verifier.finish(),
             Self::Forward(_) => Ok(Vec::new()),
-            Self::Setup(_) => Ok(Vec::new()),
+            Self::Setup(_) | Self::RecoveryBuild(_) => Ok(Vec::new()),
         }
     }
 
@@ -3077,6 +3198,7 @@ impl DistributedVerifier {
                     ..WasmDistributedProgress::default()
                 }
             }
+            Self::RecoveryBuild(worker) => recovery_parallel_progress(worker.progress()),
             Self::Setup(_) => WasmDistributedProgress::default(),
         }
     }
@@ -3253,7 +3375,16 @@ impl WasmDistributedVerifierRuntime {
         runtime: &WasmCommandRuntime,
         initialization: &[u8],
     ) -> Result<Self, WasmCommandRuntimeError> {
-        let verifier = if WasmSetupParallelWorker::accepts_initialization(initialization) {
+        let verifier = if RecoveryBuildWorker::accepts_initialization(initialization) {
+            DistributedVerifier::RecoveryBuild(RecoveryBuildWorker::new(initialization).map_err(
+                |_| {
+                    distributed_error(
+                        "E_WASM_RECOVERY_WORKER_START",
+                        "recovery_parallel_worker_initialization_failed",
+                    )
+                },
+            )?)
+        } else if WasmSetupParallelWorker::accepts_initialization(initialization) {
             DistributedVerifier::Setup(WasmSetupParallelWorker::new(initialization).map_err(
                 |error| {
                     distributed_error("E_WASM_DISTRIBUTED_SETUP_VERIFIER_START", error.reason())
@@ -3342,6 +3473,17 @@ impl WasmDistributedVerifierRuntime {
                 },
                 partial,
                 has_pending_work,
+            });
+        }
+        if let DistributedVerifier::RecoveryBuild(verifier) = &mut self.verifier {
+            let (candidate_count, partial) =
+                verifier.consume(input, &self.control).map_err(|_| {
+                    distributed_error("E_WASM_RECOVERY_CONSUME", "recovery_parallel_worker_failed")
+                })?;
+            return Ok(WasmDistributedVerifierConsume {
+                candidate_count,
+                partial: Some(partial),
+                has_pending_work: false,
             });
         }
         if let DistributedVerifier::Forward(verifier) = &mut self.verifier {
@@ -3474,6 +3616,7 @@ impl WasmDistributedVerifierRuntime {
             DistributedVerifier::PcRoots(_)
             | DistributedVerifier::Tiling(_)
             | DistributedVerifier::Forward(_)
+            | DistributedVerifier::RecoveryBuild(_)
             | DistributedVerifier::Setup(_) => {
                 return Err(distributed_error(
                     "E_WASM_DISTRIBUTED_STATE",
@@ -3549,7 +3692,9 @@ impl WasmDistributedVerifierRuntime {
         }
         if matches!(
             self.verifier,
-            DistributedVerifier::Forward(_) | DistributedVerifier::Setup(_)
+            DistributedVerifier::Forward(_)
+                | DistributedVerifier::Setup(_)
+                | DistributedVerifier::RecoveryBuild(_)
         ) {
             if matches!(
                 &self.verifier,
@@ -4872,5 +5017,17 @@ mod build_probability_partial_ingress_tests {
         assert_eq!(consumed_candidates, verifier.progress().candidates);
         assert!(consumed_candidates > 0, "fixture must verify PC candidates");
         assert!(!verifier.has_pending_candidates());
+    }
+}
+
+fn recovery_parallel_progress(progress: RecoveryBuildParallelProgress) -> WasmDistributedProgress {
+    WasmDistributedProgress {
+        candidates: usize::try_from(progress.dispatched).unwrap_or(0),
+        candidate_family_count: Some(progress.possible),
+        build_nodes: usize::try_from(progress.states).unwrap_or(0),
+        coverage_checks: usize::try_from(progress.evaluated).unwrap_or(0),
+        pass_index: usize::try_from(progress.evaluated).unwrap_or(0),
+        pass_count: usize::try_from(progress.possible).unwrap_or(0),
+        ..WasmDistributedProgress::default()
     }
 }

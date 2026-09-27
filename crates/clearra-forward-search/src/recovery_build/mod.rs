@@ -3,7 +3,13 @@
 //! regions. This is the Build/Verify product, not a fixed-role approximation.
 //! No isolated-stage B2B or reachability failure is used as a joint prune.
 mod field;
+mod parallel;
+mod parallel_wire;
 mod population;
+pub use parallel::{
+    RecoveryBuildCoordinator, RecoveryBuildParallelProgress, RecoveryBuildProduce,
+    RecoveryBuildWorker, RECOVERY_PAIRS_PER_TASK,
+};
 mod search;
 #[cfg(test)]
 mod tests;
@@ -27,4 +33,9 @@ pub enum RecoveryBuildError {
     MemoryUnavailable,
     UnsupportedRuleProfile,
     Cancelled,
+    InvalidParallelWire,
+    InvalidParallelState,
 }
+
+#[cfg(test)]
+mod parallel_tests;

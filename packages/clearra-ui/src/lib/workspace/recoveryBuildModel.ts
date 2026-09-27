@@ -2,6 +2,7 @@ import { boardMaskHex, type RuleProfile, type SpinProfile } from './solverWorksp
 import { cliCommandRequestForDesktop, serializeCliCommandArguments } from './cliCommandModel';
 import type { WorkspaceLanguage } from './workspaceI18n';
 export type RecoveryBuildRequest = {
+  /** All three editor masks use the same pre-clear logical canvas. */
   startMask: bigint; middleMask: bigint; resultMask: bigint; height: number;
   firstSupply: string; secondSupply: string;
   maxEarly: 'auto' | number; allowPieceExchange: boolean; holdEnabled: boolean;
@@ -29,6 +30,19 @@ export function compactRecoveryBoard(mask: bigint, height: number): bigint {
 export function recoveryMiddleBase(request: RecoveryBuildRequest): bigint {
   return compactRecoveryBoard(request.startMask | request.middleMask, request.height);
 }
+/** Translate only at the execution boundary, never when changing the selected color.
+ * Full middle rows are absent from the engine's second Build coordinate frame. */
+export function recoveryResultForExecution(request: RecoveryBuildRequest): bigint {
+  let result = 0n; let outputRow = 0;
+  const completed = request.startMask | request.middleMask;
+  for (let y = 0; y < request.height; y++) {
+    const shift = BigInt(y * 10);
+    if (((completed >> shift) & 1023n) === 1023n) continue;
+    result |= ((request.resultMask >> shift) & 1023n) << BigInt(outputRow * 10);
+    outputRow++;
+  }
+  return result;
+}
 export function recoveryEarlyChoices(request: RecoveryBuildRequest): number[] {
   // Every early result lock consumes four different target cells. Do not guess
   // a supply cardinality by counting characters of the pattern language.
@@ -45,7 +59,7 @@ export function validateRecoveryBuildRequest(request: RecoveryBuildRequest): str
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 24) return ['height'];
   const limit = 1n << BigInt(request.height * 10);
   if ([request.startMask, request.middleMask, request.resultMask].some(mask => mask < 0n || mask >= limit)) errors.push('board');
-  if ((request.startMask & request.middleMask) !== 0n || (recoveryMiddleBase(request) & request.resultMask) !== 0n) errors.push('overlap');
+  if ((request.startMask & request.middleMask) !== 0n || ((request.startMask | request.middleMask) & request.resultMask) !== 0n) errors.push('overlap');
   if ([request.middleMask, request.resultMask].some(mask => mask === 0n || countRecoveryCells(mask) % 4 !== 0)) errors.push('target-area');
   if (!request.firstSupply.trim() || !request.secondSupply.trim()) errors.push('supply');
   if (request.maxEarly !== 'auto' && (!Number.isSafeInteger(request.maxEarly) || request.maxEarly < 0)) errors.push('early');
@@ -53,7 +67,7 @@ export function validateRecoveryBuildRequest(request: RecoveryBuildRequest): str
 }
 export function recoveryBuildArguments(request: RecoveryBuildRequest): string[] {
   return ['clearra', 'recovery', 'build', '--start-mask', boardMaskHex(request.startMask),
-    '--middle-mask', boardMaskHex(request.middleMask), '--result-mask', boardMaskHex(request.resultMask),
+    '--middle-mask', boardMaskHex(request.middleMask), '--result-mask', boardMaskHex(recoveryResultForExecution(request)),
     '--height', String(request.height), '--first-supply', request.firstSupply.trim(),
     '--second-supply', request.secondSupply.trim(), '--max-early', String(request.maxEarly),
     request.allowPieceExchange ? '--allow-piece-exchange' : '--no-piece-exchange',

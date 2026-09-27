@@ -1,0 +1,40 @@
+{
+  "source": "user images image(8).png and image(9).png; cell-center color inspection, no OCR",
+  "height": 10,
+  "canvas": {
+    "start_mask": "0xc0383f3fc7",
+    "middle_mask": "0x3ff3fc7c0c038",
+    "result_mask": "0xc120fc1fcfe3c000000000000"
+  },
+  "execution": {
+    "start_mask": "0xc0383f3fc7",
+    "middle_mask": "0x3ff3fc7c0c038",
+    "result_mask": "0x30483f07f3f8f"
+  },
+  "first_supply": "P7",
+  "second_supply": "P7",
+  "hold_enabled": true,
+  "early_limit": "auto",
+  "preserve_b2b": true,
+  "allow_piece_exchange": true,
+  "rule": "srs-plus",
+  "spin_profile": "all-spin-plus",
+  "expected_pattern_pairs": "25401600",
+  "expected_area": {
+    "start": 22,
+    "middle": 28,
+    "result": 28
+  },
+  "expected_completed_middle_rows": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "image_sha256": {
+    "image(8).png": "9b363c3b30d1c1ed1adcd96ff3155405fe69351356ca8286535611e2cca14291",
+    "image(9).png": "f9400ac13392eaa9aecf7bf41a42a4f3b87e928dc4df2b994163f0afb1c8ab07"
+  },
+  "full_population_status": "not executed; no expected success rate asserted"
+}

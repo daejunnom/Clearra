@@ -9,7 +9,7 @@ mod cross_stage_recovery;
 mod parallel;
 mod query;
 mod reachability;
-mod recovery_build;
+pub mod recovery_build;
 mod result;
 mod search;
 mod t_spin_acceleration;

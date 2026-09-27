@@ -1491,9 +1491,16 @@ impl WebCommandRequest {
                     "missing typed recovery-build query",
                 )
             })?;
-            return self.attach_product_capability_contract(AppRequest::new(
-                AppCommand::RecoveryBuild(RecoveryBuildAppCommand::new(query)),
-            ));
+            return self.attach_product_capability_contract(
+                AppRequest::new(AppCommand::RecoveryBuild(RecoveryBuildAppCommand::new(
+                    query,
+                )))
+                .with_resource_budget(ResourceBudget::new(
+                    u16::try_from(self.resolved_worker_budget()).unwrap_or(u16::MAX),
+                    None,
+                    None,
+                )),
+            );
         }
         if self.command_kind == "boundary-recovery" {
             let query = self.boundary_recovery.clone().ok_or_else(|| {

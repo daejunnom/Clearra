@@ -156,17 +156,28 @@ try {
       assert.deepEqual(errors, []);
       // Render the user's supplied geometry in the actual public input owner.
       // Only input editing is exercised; this test never clicks Run search.
-      await height.fill('8'); await flush();
-      const masks = [0xc0383f3fc7n, 0x3ff3fc7c0c038n, 0x30483f07f3f8fn];
+      const imageFixture = JSON.parse(await readFile(resolve(root, 'tests/fixtures/recovery-build/parallel-image.json'), 'utf8'));
+      await height.fill(String(imageFixture.height)); await flush();
+      const masks = ['start_mask','middle_mask','result_mask'].map(key => BigInt(imageFixture.canvas[key]));
       for (let field = 0; field < 3; field++) {
         await fields.nth(field).click();
         const clear = page.locator('.board-actions button').last();
         if (await clear.isEnabled()) await clear.click();
-        for (let y = 0; y < 8; y++) for (let x = 0; x < 10; x++) {
-          if (masks[field] & (1n << BigInt(y * 10 + x))) await board.locator('button').nth((7 - y) * 10 + x).click();
+        for (let y = 0; y < imageFixture.height; y++) for (let x = 0; x < 10; x++) {
+          if (masks[field] & (1n << BigInt(y * 10 + x))) await board.locator('button').nth((imageFixture.height - 1 - y) * 10 + x).click();
         }
       }
-      await fields.nth(1).click();
+      // Check every color remains visible. Context is decorative and never
+      // contributes to aria-pressed or the independently edited mask.
+      for (const selected of [2,0,1,2]) {
+        await fields.nth(selected).click(); await flush();
+        assert.equal(await pressed(), selected===0?22:28);
+        assert.equal(await board.locator('button.reference').count(), selected===0?56:50);
+      }
+      const contextToggle=page.locator('.recovery-field-editor input[type="checkbox"]');
+      await contextToggle.uncheck();await flush();assert.equal(await board.locator('button.reference').count(),0);
+      await contextToggle.check();await flush();assert.equal(await board.locator('button.reference').count(),50);
+      await switches.nth(0).check();await switches.nth(1).check();await switches.nth(2).check();
       assert.equal(await page.locator('.workspace-validation').count(), 0);
       assert.equal(await page.locator('.board-stats').count(), 0);
       assert.deepEqual(errors, []);

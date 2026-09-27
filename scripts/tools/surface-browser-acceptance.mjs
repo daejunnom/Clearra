@@ -173,7 +173,7 @@ try {
         await fields.filter({ hasText: /^Middle$/ }).click();
         await paint(page, 0, 0xfn, 4);
         await fields.filter({ hasText: /^Result$/ }).click();
-        await paint(page, 0, 0xc030n, 4);
+        await paint(page, 0, 0xc030n << 10n, 4);
         const runRecovery = label => completeRun(page,
           () => page.getByRole('button', { name: 'Run search', exact: true }).click(), label);
         const paths = recovery.locator('.recovery-path-gallery');
@@ -187,6 +187,9 @@ try {
         // kind repayment. This exercises the actual new parser, solver and wire.
         await fields.filter({ hasText: /^Start$/ }).click();
         await paint(page, 0, 0x3f0n, 4);
+        await fields.filter({ hasText: /^Result$/ }).click();
+        await paint(page, 0, 0xc030n << 10n, 4);
+        await paint(page, 0, 0xc030n, 4);
         await supplies.nth(0).fill('O'); await supplies.nth(1).fill('I');
         const exchange = recovery.getByRole('checkbox', { name: 'Allow different-piece repayment', exact: true });
         assert.equal(await exchange.isChecked(), false);

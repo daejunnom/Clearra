@@ -451,3 +451,10 @@ mod product_capability_contract_tests;
 #[cfg(test)]
 #[path = "pc_score_minimum_cover_contract_tests.rs"]
 mod pc_score_minimum_cover_contract_tests;
+
+mod distributed_recovery_execution;
+pub use distributed_recovery_execution::{
+    DistributedRecoveryBuildPreparation, PreparedDistributedRecoveryBuildSearch,
+};
+#[cfg(not(target_arch = "wasm32"))]
+mod native_recovery_execution;

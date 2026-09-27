@@ -5,6 +5,7 @@ use clearra_forward_search::{CrossStageEarlyLimit, RecoveryBuildFields, Recovery
 
 pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
     let fail = |message: &str| WebCommandError::new(WebCommandErrorCode::InvalidValue, message);
+    let mut workers = None;
     let mut height = 8;
     let mut initial = Board256Mask::EMPTY;
     let mut middle = None;
@@ -33,6 +34,12 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
             return Err(fail("recovery-build option occurs more than once"));
         }
         match option {
+            "--workers" => {
+                workers = Some(parse_positive(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?)
+            }
             "--start-mask" => {
                 initial = Board256Mask::from_words(parse_board_words(
                     next_value(tokens, &mut cursor, option)?,
@@ -120,5 +127,9 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
     query
         .validate()
         .map_err(|error| fail(&format!("invalid recovery-build input: {error:?}")))?;
-    Ok(WebCommandRequest::recovery_build(query))
+    let request = WebCommandRequest::recovery_build(query);
+    Ok(match workers {
+        Some(count) => request.with_workers(count),
+        None => request,
+    })
 }

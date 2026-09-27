@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import WorkspaceBoardEditor from './WorkspaceBoardEditor.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
-  import { resizeRecoveryBuild, recoveryMiddleBase, type RecoveryBuildRequest } from './recoveryBuildModel';
+  import { resizeRecoveryBuild, type RecoveryBuildRequest } from './recoveryBuildModel';
   import { recoveryBuildMessage, type RecoveryBuildMessage } from './recoveryBuildI18n';
   type RecoveryField = 'startMask' | 'middleMask' | 'resultMask';
   import type { WorkspaceLanguage } from './workspaceI18n';
@@ -19,10 +19,8 @@
   let showReferences = true;
   $: label = (key: RecoveryBuildMessage) => recoveryBuildMessage(language, key);
   $: activeField = fields.find((entry) => entry.field === selected)!;
-  $: references = !showReferences ? [] : selected === 'resultMask'
-    ? [{ mask: recoveryMiddleBase(request), tone: 'dark' as const, label: label('middle') }]
-    : fields.filter(entry => entry.field !== 'resultMask' && entry.field !== selected)
-      .map(entry => ({ mask: request[entry.field], tone: entry.tone, label: label(entry.label) }));
+  $: references = !showReferences ? [] : fields.filter(entry => entry.field !== selected)
+    .map(entry => ({ mask: request[entry.field], tone: entry.tone, label: label(entry.label) }));
   function change(mask: bigint, height = request.height) {
     const next = resizeRecoveryBuild(request, Math.max(request.height, height));
     const limit = (1n << BigInt(next.height * 10)) - 1n;

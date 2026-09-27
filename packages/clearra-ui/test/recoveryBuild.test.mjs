@@ -35,8 +35,8 @@ test('blank height drafts never erase independent gray fields',()=>{
  const grown=api.resizeRecoveryBuild(input,12);assert.equal(grown.startMask,input.startMask);
  const smaller=api.resizeRecoveryBuild(input,4);assert.equal(smaller.startMask,0n);assert.equal(smaller.middleMask,2n);assert.equal(smaller.resultMask,4n);
 });
-test('image start and middle clear five rows; result preview uses the emptied board',()=>{
- const input={...api.createRecoveryBuildRequest(),startMask:BigInt(fixture.start_board_mask),middleMask:BigInt(fixture.middle_target_mask),resultMask:BigInt(fixture.result_target_mask),firstSupply:'P7',secondSupply:'P7'};
+test('image canvas keeps all fields while execution removes the five completed rows',()=>{
+ const input={...api.createRecoveryBuildRequest(),startMask:BigInt(fixture.start_board_mask),middleMask:BigInt(fixture.middle_target_mask),resultMask:BigInt(fixture.result_target_mask)<<50n,height:10,firstSupply:'P7',secondSupply:'P7'};
  assert.equal(api.countRecoveryCells(input.startMask),22);assert.equal(api.countRecoveryCells(input.middleMask),28);assert.equal(api.countRecoveryCells(input.resultMask),28);
  assert.equal(api.recoveryMiddleBase(input),0n);assert.deepEqual(api.validateRecoveryBuildRequest(input),[]);
 });
@@ -93,4 +93,16 @@ test('explicit 256-bit recovery replay preserves high cells while default PC mas
  const witness=api.recoveryBuildWitness(p,p.examples[0]);
  assert.equal(api.buildPcPathReplayFrames(witness,12,api.recoveryBuildTerminalMask(p.examples[0])).at(-1).cells.filter(x=>x!==null).length,24);
  assert.throws(()=>api.buildPcPathReplayFrames({...witness,maskHexDigits:16},12,api.recoveryBuildTerminalMask(p.examples[0])));
+});
+
+test('user parallel fixture preserves canvas fields and lowers only the execution copy', async()=>{
+ const f=JSON.parse(await readFile(new URL('../../../tests/fixtures/recovery-build/parallel-image.json',import.meta.url),'utf8'));
+ const input={...api.createRecoveryBuildRequest(),height:f.height,startMask:BigInt(f.canvas.start_mask),middleMask:BigInt(f.canvas.middle_mask),resultMask:BigInt(f.canvas.result_mask),firstSupply:f.first_supply,secondSupply:f.second_supply,holdEnabled:true,preserveB2B:true,allowPieceExchange:true};
+ const before={...input};const args=api.recoveryBuildArguments(input);
+ assert.deepEqual(api.validateRecoveryBuildRequest(input),[]);
+ assert.equal(api.recoveryResultForExecution(input),BigInt(f.execution.result_mask));
+ assert.equal(BigInt(args[args.indexOf('--result-mask')+1]),BigInt(f.execution.result_mask));
+ assert.deepEqual(input,before);assert.equal(api.countRecoveryCells(input.resultMask),28);
+ assert.ok(args.includes('--preserve-b2b'));assert.ok(args.includes('--allow-piece-exchange'));
+ assert.ok(args.includes('--hold'));assert.equal(api.recoveryMiddleBase(input),0n);
 });

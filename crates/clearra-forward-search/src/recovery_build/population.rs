@@ -50,12 +50,12 @@ pub struct RecoveryBuildPopulation {
     pub recovery_example: Option<RecoveryBuildExample>,
 }
 #[derive(Default)]
-struct Sum {
-    value: f64,
+pub(super) struct Sum {
+    pub(super) value: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, value: f64) {
+    pub(super) fn add(&mut self, value: f64) {
         let adjusted = value - self.correction;
         let next = self.value + adjusted;
         self.correction = (next - self.value) - adjusted;
