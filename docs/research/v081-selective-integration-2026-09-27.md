@@ -100,3 +100,30 @@ Release asset 게시, tag 생성, main promote, Pages/Discord/Cloud 배포는 �
 활성화만 보였고 압력 및 성능 이득 미입증으로 성능 gate를 닫지 못했다. 그 영수증은
 [`v081-accelerator-worker-product-closure-2026-09-27.md`](v081-accelerator-worker-product-closure-2026-09-27.md)에
 보존한다. 이 선별 통합의 benchmark 또는 qualification으로 재사용하지 않는다.
+
+## 첫 비게시 CI 확인과 경로 수정
+
+`a2ddc27d82d3a83d820bf7537305097245d2efb0`의
+[36301789552](https://github.com/daejunnom/Clearra/actions/runs/36301789552)는 failure다.
+
+| 작업 | 관측 결과 | 권위 |
+| --- | --- | --- |
+| Core | 기본/parallel/WASM target check 및 5개 집중 필터 통과 | 새 소스의 v081/memo, reachability, row codec, legal-board, conditioned relation 집중 증거 |
+| WASM ABI | WASM target check, reset 1개, accelerator 2개 테스트 통과 | 실제 WASM 빌드·브라우저 탐색 증거 아님 |
+| Surfaces | 모든 단계 통과 | 순수 계약·mock·typecheck이며 실제 제품 readback 아님 |
+| Native products | 제품 타입 검사와 정책/서명/런타임 집중 테스트 통과; repair 7개 중 6개 실패 | 자료 lifecycle 전체 완료 아님 |
+| Bounded generator proofs | 앞 단계 실패로 미실행 | Open |
+
+6개 repair 실패는 실제 파일 작업 이전의 fixture root assertion이다. CI가
+`v081-selective-store-tests`를 전달했지만 Rust fixture의 폐쇄 허용 경로는
+`accelerator-store-tests`다. CI만 기존 경로에 맞추고 컴파일 전 동일 경로 검사를
+추가했다. Rust의 traversal/link/repository 정책이나 삭제 범위를 완화하지 않는다.
+이 결박과 조기 거절 계약은 새 순수 Node 테스트 두 개로 확인한다.
+
+native test family 하나가 실패하면 뒤의 독립된 CLI family와 bounded proof도
+피드백을 남기도록 했다. 실패 자체는 nonzero 종료로 유지하고 `continue-on-error`는
+사용하지 않는다. typecheck 실패 또는 취소 상태에서는 뒤의 실행을 허용하지 않는다.
+
+CI에서 나온 WASM complete-candidate constructor 2개 및 App의 bitmap-off encoding
+2개 dead-code 경고는 수정하지 않은 main 소스의 feature/target 조합이다. 검색 의미를
+바꾸거나 전역 lint suppression을 추가하지 않았으며 별도 정리 대상으로 기록한다.

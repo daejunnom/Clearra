@@ -49,14 +49,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CLEARRA_FOCUSED_TEST_OUTPUT_ROOT: ${{ github.workspace }}/_local/artifacts/v081-selective-store-tests
+      CLEARRA_FOCUSED_TEST_OUTPUT_ROOT: ${{ github.workspace }}/_local/artifacts/accelerator-store-tests
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Install pinned Rust
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Prepare the exact bounded asset-test root before compiling
+        shell: bash
+        run: |
+          test "$CLEARRA_FOCUSED_TEST_OUTPUT_ROOT" = "$GITHUB_WORKSPACE/_local/artifacts/accelerator-store-tests"
+          mkdir -p "$CLEARRA_FOCUSED_TEST_OUTPUT_ROOT"
       - name: Typecheck integrated native products and benchmark facade
+        id: native-check
         run: |
           cargo check --locked -p clearra-cli -p clearra-gui-host --tests --no-default-features --features clearra-cli/wasm-cpu-runtime
           cargo check --locked -p clearra-cli --features wasm-cpu-runtime
@@ -75,16 +81,27 @@ jobs:
           cargo test --locked -p clearra-accelerator-product-host --bin clearra-accelerator-release-gate -- --test-threads=1
           cargo test --locked -p clearra-accelerator-runtime --lib -- --test-threads=1
       - name: Test explicit asset lifecycle and repair
+        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
         run: |
-          mkdir -p "$CLEARRA_FOCUSED_TEST_OUTPUT_ROOT"
-          cargo test --locked -p clearra-cli --lib accelerator_asset_store::repair_tests --no-default-features -- --test-threads=1
-          cargo test --locked -p clearra-cli --lib accelerator_gui_bridge --no-default-features -- --test-threads=1
-          cargo test --locked -p clearra-cli --lib conditioned_reachability_assets --no-default-features -- --test-threads=1
-          cargo test --locked -p clearra-cli --lib lifecycle_routes --no-default-features -- --test-threads=1
-          cargo test --locked -p clearra-cli --lib exact_accelerators --no-default-features -- --test-threads=1
-          cargo test --locked -p clearra-cli --lib exact_accelerator_flags --no-default-features -- --test-threads=1
-          cargo test --locked -p clearra-cli --lib product_execution_failure_does_not_reclassify_explicit_runtime_refusals --no-default-features -- --test-threads=1
+          failed=0
+          for filter in \
+            accelerator_asset_store::repair_tests \
+            accelerator_gui_bridge \
+            conditioned_reachability_assets \
+            lifecycle_routes \
+            exact_accelerators \
+            exact_accelerator_flags \
+            product_execution_failure_does_not_reclassify_explicit_runtime_refusals; do
+            if cargo test --locked -p clearra-cli --lib "$filter" --no-default-features -- --test-threads=1; then
+              :
+            else
+              failed=$((failed + 1))
+              echo "::error::Focused CLI test family failed: $filter"
+            fi
+          done
+          test "$failed" -eq 0
       - name: Test bounded generation and parser proofs, not full profile regeneration
+        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
         run: |
           cargo test --locked -p clearra-pc4-qualifier --lib conditioned_local_candidate_validation::tests -- --test-threads=1
           cargo test --locked -p clearra-pc4-qualifier --lib conditioned_local_relation_generation::tests -- --test-threads=1
@@ -118,6 +135,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
+      - name: Verify focused CI path and failure contracts
+        run: node --test scripts/ci/v081-source-ci-contract.test.mjs
       - name: Install locked UI dependencies without scripts
         run: |
           corepack enable
