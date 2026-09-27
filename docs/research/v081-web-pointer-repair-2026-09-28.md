@@ -44,3 +44,31 @@ invalid asset 제거 후 exact fallback은 변경하지 않는다. TB와 namespa
 변경한 target이 이미 포함되므로 새 build/download job을 추가하지 않는다.
 
 벤치마크·ABBA, 자료 재생성/재자격, v0.9.0, main 병합과 배포는 하지 않았다.
+
+## 후속: 취소와 포인터 기록 완료가 겹치는 경계
+
+명시 다운로드의 OPFS `active.json`을 `close()`하는 동안 사용자가 취소하면,
+기존 코드는 `close()` 반환 뒤 취소 상태를 재검사하지 않았다. 포인터가 이미
+새 세대로 바뀐 뒤에도 취소가 도착할 수 있어, 이전 자산 보존 계약을 원자적
+경계에서 확인해야 했다. 배타 lock을 보유한 상태에서 이전 포인터의 정확한
+바이트를 보관하고, 취소가 기록 완료와 겹치면 이전 포인터를 복원한 뒤 새
+staging 파일을 제거한다. 복원에 실패하면 성공한 취소로 보고하지 않고
+`accelerator_store_rollback_failed`를 유지한다. 비취소 `close()` 실패가 새
+포인터를 게시했거나, 게시 후 검증 readback이 실패하면
+`accelerator_store_commit_uncertain`으로 표시하고 명시 상태 재확인을 요구한다.
+기존 포인터의 복원 snapshot은 64KiB로 제한한다. 이보다 큰 손상 파일은
+덮어쓰기 전에 `accelerator_store_pointer_requires_remove`로 거절하고, 사용자가
+먼저 명시 삭제한 뒤 다시 설치하도록 안내한다.
+
+실제 download worker는 취소 신호가 있어도 두 위험 코드를 일반 취소로
+덮어쓰지 않는다. GUI는 그동안 이전 자산 보존을 단정하지 않고 상태 재확인
+전 다운로드·삭제를 막는다. worker 자체가 비정상 종료된 뒤에도 상태 확인으로
+새 worker를 시작할 수 있다. 이는 TB namespace나 자동 다운로드 정책을 바꾸지
+않는다.
+
+집중 검증은 production store와 메모리 OPFS 모형에서 기존 세대·첫 설치·손상된
+작은 포인터의 `close()` 취소, 64KiB 초과 포인터의 사전 거절, 게시 후 close
+오류, rollback 실패를 각각 실행했다.
+독립 오류 코드 경계도 검사했고, Node 직접 실행·Web 계약 타입 검사·Svelte
+구문 컴파일이 통과했다. 현재 branch의 실제 브라우저 OPFS, 파일 snapshot,
+cross-tab lock, 사용자 화면 readback 및 새 수정의 CI는 아직 `Open`이다.

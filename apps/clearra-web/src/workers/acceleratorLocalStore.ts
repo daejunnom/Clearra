@@ -8,6 +8,7 @@ const LOCK = 'clearra-exact-accelerators-v1';
 const PROFILES = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
 const PRODUCTS = ['exact-legal-board', 'board-conditioned-reachability'];
 const MAX_BYTES = 64 * 1024 * 1024;
+const MAX_POINTER_SNAPSHOT_BYTES = 64 * 1024;
 type Active = {
   schema: 'clearra.exact-accelerator.local.v1';
   generation: string;
@@ -169,8 +170,18 @@ export async function storeQualifiedAccelerator(
     };
     let markerExisted = true;
     let marker: FileSystemWritableFileStream;
+    let previousMarker: Blob | null = null;
     try {
-      try { await root.getFileHandle('active.json'); }
+      try {
+        const previousFile = await (await root.getFileHandle('active.json')).getFile();
+        // A File handle is not a durable rollback copy once the OPFS entry is
+        // overwritten. Snapshot bounded bytes instead; abnormally large
+        // damaged pointers require explicit deletion before reinstalling.
+        if (previousFile.size > MAX_POINTER_SNAPSHOT_BYTES) {
+          throw new Error('accelerator_store_pointer_requires_remove');
+        }
+        previousMarker = new Blob([await previousFile.arrayBuffer()]);
+      }
       catch (error) {
         if (!missing(error)) throw error;
         markerExisted = false;
@@ -181,6 +192,25 @@ export async function storeQualifiedAccelerator(
       if (!markerExisted) await root.removeEntry('active.json').catch(() => {});
       throw error;
     }
+    async function restorePreviousPointer() {
+      try {
+        if (previousMarker) {
+          const rollback = await (await root.getFileHandle('active.json')).createWritable();
+          try {
+            await rollback.write(previousMarker);
+            await rollback.close();
+          } catch (error) {
+            await rollback.abort().catch(() => {});
+            throw error;
+          }
+        } else await root.removeEntry('active.json');
+        await root.removeEntry(fileName);
+      } catch {
+        // Do not report successful cancellation or delete the new bytes if
+        // the pointer may still name them. The signed reader will revalidate.
+        throw new Error('accelerator_store_rollback_failed');
+      }
+    }
     try {
       requireActiveDownload(signal);
       await marker.write(JSON.stringify(pointer));
@@ -189,15 +219,26 @@ export async function storeQualifiedAccelerator(
     }
     catch (error) {
       await marker.abort().catch(() => {});
-      // close() can fail after publishing. Keep the new bytes if the pointer
-      // did commit; otherwise reclaim only this generation's staging file.
-      const current = await activeFrom(root).catch(() => null);
-      if (current?.file !== fileName) {
-        await root.removeEntry(fileName).catch(() => {});
-        if (!markerExisted) await root.removeEntry('active.json').catch(() => {});
+      // Abort can arrive while close() is in flight, even if the pointer is
+      // not parseable afterwards. Restore the exact prior bytes before
+      // claiming cancellation, rather than trusting a parsed new pointer.
+      if (signal?.aborted) {
+        await restorePreviousPointer();
+        throw new Error('accelerator_download_cancelled');
       }
-      if (signal?.aborted) throw new Error('accelerator_download_cancelled');
+      // close() can fail after publishing. A valid new pointer is a possible
+      // commit, so retain its bytes and require an explicit status readback.
+      const current = await activeFrom(root).catch(() => null);
+      if (current?.file === fileName) throw new Error('accelerator_store_commit_uncertain');
+      await restorePreviousPointer();
       throw error;
+    }
+    // A close can finish after the user cancels while it is in flight.
+    // Readers remain behind this exclusive lease until the old pointer and
+    // the old generation are restored (or rollback is reported as failed).
+    if (signal?.aborted) {
+      await restorePreviousPointer();
+      throw new Error('accelerator_download_cancelled');
     }
     try { await cleanOld(root, fileName); return { cleanupPending: false }; }
     catch { return { cleanupPending: true }; }

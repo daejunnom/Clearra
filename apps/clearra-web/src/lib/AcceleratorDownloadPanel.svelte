@@ -22,6 +22,16 @@
     en: 'This asset exceeds this device’s search-worker transfer limit. You may save it, but searches will use the existing exact path.',
     ja: 'この端末の検索ワーカーに転送できる容量を超えています。保存はできますが、検索には従来の正確な経路を使用します。'
   };
+  const uncertainText = {
+    ko: '저장 상태를 확정할 수 없습니다. 상태·용량 확인을 눌러 다시 검증하세요. 이전 자산이 유지됐다고 단정할 수 없습니다.',
+    en: 'Storage state is uncertain. Use Check status and size to verify it again. The previous asset may not have been preserved.',
+    ja: '保存状態を確定できません。状態と容量を再確認してください。以前のアセットが保持されたとは断定できません。'
+  };
+  const removeFirstText = {
+    ko: '손상된 상태 파일이 너무 큽니다. 저장한 자산 삭제를 누른 뒤 다시 다운로드하세요.',
+    en: 'The damaged status file is too large. Delete the saved asset before downloading again.',
+    ja: '破損した状態ファイルが大きすぎます。保存済みアセットを削除してから再ダウンロードしてください。'
+  };
   $: t = text[language] ?? text.en;
   const runtimeTransferByteCap =
     (getContext<HostCapabilitySnapshot>(HOST_CAPABILITY_SNAPSHOT_CONTEXT) ??
@@ -31,6 +41,8 @@
   let plan: AcceleratorCatalogPlan | null = null;
   let local: { payload_bytes: number; current: boolean } | null = null;
   let localInvalid = false;
+  let uncertain = false;
+  let requiresRemove = false;
   let progress = 0, total = 0;
   let message: keyof typeof text.en | '' = '';
   const size = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
@@ -44,24 +56,31 @@
         busy = false;
         if (destroyed) { worker?.terminate(); worker = null; }
       } else if (data.type === 'progress') { progress = data.transferredBytes; total = data.totalBytes; }
-      else if (data.type === 'status') { plan = data.plan; local = data.local; localInvalid = data.localState === 'invalid_asset'; message = ''; }
-      else if (data.type === 'installed') { local = data.local; localInvalid = false; message = data.cleanupPending ? 'cleanup' : 'changed'; }
-      else if (data.type === 'removed') { local = null; localInvalid = false; message = 'changed'; }
+      else if (data.type === 'status') { plan = data.plan; local = data.local; localInvalid = data.localState === 'invalid_asset'; uncertain = false; if (!localInvalid) requiresRemove = false; message = ''; }
+      else if (data.type === 'installed') { local = data.local; localInvalid = false; uncertain = false; requiresRemove = false; message = data.cleanupPending ? 'cleanup' : 'changed'; }
+      else if (data.type === 'removed') { local = null; localInvalid = false; uncertain = false; requiresRemove = false; message = 'changed'; }
       else if (data.type === 'error') {
+        uncertain = uncertain || data.code === 'accelerator_store_rollback_failed' ||
+          data.code === 'accelerator_store_commit_uncertain';
+        if (uncertain) { message = ''; return; }
+        if (data.code === 'accelerator_store_pointer_requires_remove') {
+          requiresRemove = true; message = ''; return;
+        }
         message = data.code === 'accelerator_download_cancelled' ? 'cancelled'
           : data.code === 'accelerator_store_busy' ? 'busy'
           : data.code === 'accelerator_store_insufficient_space' || data.code === 'QuotaExceededError' ? 'space' : 'error';
       }
     };
-    worker.onerror = () => { busy = false; message = 'error'; worker?.terminate(); worker = null; };
+    worker.onerror = () => { busy = false; uncertain = true; message = ''; worker?.terminate(); worker = null; };
     act('status');
   }
   function act(action: 'status' | 'download' | 'remove' | 'cancel') {
+    if (!worker && action === 'status') { initialize(); return; }
     if (!worker || (busy && action !== 'cancel')) return;
     if (action !== 'cancel') { busy = true; message = ''; progress = 0; total = 0; }
     worker.postMessage({ action, kind, profile, base });
   }
-  function changedSelection() { plan = null; local = null; localInvalid = false; act('status'); }
+  function changedSelection() { plan = null; local = null; localInvalid = false; requiresRemove = false; uncertain = false; act('status'); }
   onDestroy(() => {
     destroyed = true;
     if (busy) worker?.postMessage({ action: 'cancel', kind, profile, base });
@@ -84,7 +103,7 @@
         {#each profiles as name, index}<option value={index}>{name}</option>{/each}
       </select>
     </label>
-    <p role="status">{localInvalid ? t.invalid : local ? `${local.current ? t.current : t.stale} · ${size(local.payload_bytes)}` : t.none}</p>
+    <p role="status">{uncertain ? uncertainText[language] ?? uncertainText.en : localInvalid ? t.invalid : local ? `${local.current ? t.current : t.stale} · ${size(local.payload_bytes)}` : t.none}</p>
     {#if plan?.state === 'not_qualified'}<p role="status">{t.unavailable}</p>{/if}
     {#if plan?.state === 'qualified' && plan.payload_bytes}<p>{t.size}: {size(plan.payload_bytes)}</p>{/if}
     {#if plan?.state === 'qualified' && plan.payload_bytes && plan.payload_bytes > runtimeTransferByteCap}
@@ -93,9 +112,9 @@
     <div class="actions">
       <button type="button" disabled={busy} on:click={() => act('status')}>{t.check}</button>
       {#if plan?.state === 'qualified' && !local?.current}
-        <button type="button" disabled={busy} on:click={() => act('download')}>{t.download}</button>
+        <button type="button" disabled={busy || uncertain || requiresRemove} on:click={() => act('download')}>{t.download}</button>
       {/if}
-      {#if local || localInvalid}<button type="button" disabled={busy} on:click={() => act('remove')}>{t.remove}</button>{/if}
+      {#if local || localInvalid || requiresRemove}<button type="button" disabled={busy || uncertain} on:click={() => act('remove')}>{t.remove}</button>{/if}
     </div>
     {#if busy}
       <p role="status">{total ? `${size(progress)} / ${size(total)}` : t.working}</p>
@@ -103,6 +122,7 @@
       <button type="button" on:click={() => act('cancel')}>{t.cancel}</button>
     {/if}
     {#if message}<p role="status">{t[message]}</p>{/if}
+    {#if requiresRemove && !uncertain}<p role="status">{removeFirstText[language] ?? removeFirstText.en}</p>{/if}
   {/if}
 </details>
 

@@ -9,11 +9,19 @@ import {
   storeQualifiedAccelerator
 } from '../src/workers/acceleratorLocalStore.ts';
 import { repairableLocalAssetError } from '../src/workers/acceleratorLocalAssetErrors.ts';
+import { acceleratorDownloadErrorCode } from '../src/workers/acceleratorDownloadError.ts';
 
 // An in-memory OPFS substitute exercises the product store's authority and
 // recovery contract without using a real browser profile or remote asset.
+assert.equal(acceleratorDownloadErrorCode(new Error('accelerator_store_rollback_failed'), true),
+  'accelerator_store_rollback_failed');
+assert.equal(acceleratorDownloadErrorCode(new Error('accelerator_store_commit_uncertain'), false),
+  'accelerator_store_commit_uncertain');
+assert.equal(acceleratorDownloadErrorCode(new Error('ordinary_error'), true),
+  'accelerator_download_cancelled');
 let afterStagedWrite: (() => void) | null = null;
 let afterPointerWrite: (() => void) | null = null;
+let afterPointerClose: (() => void) | null = null;
 class MemoryFile {
   bytes: Uint8Array<ArrayBuffer>;
   constructor(bytes: Uint8Array<ArrayBuffer>) { this.bytes = bytes; }
@@ -45,12 +53,16 @@ class MemoryDirectory {
       createWritable: async () => {
         let staged: Uint8Array<ArrayBuffer> | null = null;
         return {
-          write: async (value: string | Uint8Array<ArrayBuffer>) => {
-            staged = typeof value === 'string' ? new TextEncoder().encode(value) : value.slice();
+          write: async (value: string | Uint8Array<ArrayBuffer> | Blob) => {
+            staged = typeof value === 'string' ? new TextEncoder().encode(value)
+              : value instanceof Blob ? new Uint8Array(await value.arrayBuffer()) : value.slice();
             if (name.startsWith('gen-')) afterStagedWrite?.();
             if (name === 'active.json') afterPointerWrite?.();
           },
-          close: async () => { if (staged) (entry as MemoryFile).bytes = staged; },
+          close: async () => {
+            if (staged) (entry as MemoryFile).bytes = staged;
+            if (name === 'active.json') afterPointerClose?.();
+          },
           abort: async () => { staged = null; }
         };
       }
@@ -97,6 +109,17 @@ const afterCancel = JSON.parse(await (await (await local.getFileHandle('active.j
 assert.equal(afterCancel.file, pointer.file);
 assert.deepEqual([...local.entries.keys()].sort(), ['active.json', pointer.file].sort());
 assert.equal((await acceleratorLocalStatus(plan.product, plan.profile, plan))?.current, true);
+// Cancellation after close publishes, but before it resolves to the caller,
+// must restore the previous pointer while readers remain behind the lease.
+const closingController = new AbortController();
+afterPointerClose = () => closingController.abort();
+await assert.rejects(storeQualifiedAccelerator(plan, bytes, closingController.signal),
+  /accelerator_download_cancelled/);
+afterPointerClose = null;
+const afterClosingCancel = JSON.parse(await (await (await local.getFileHandle('active.json')).getFile()).text());
+assert.equal(afterClosingCancel.file, pointer.file);
+assert.deepEqual([...local.entries.keys()].sort(), ['active.json', pointer.file].sort());
+assert.equal((await acceleratorLocalStatus(plan.product, plan.profile, plan))?.current, true);
 ((await (await local.getFileHandle(pointer.file)).getFile()) as MemoryFile).bytes[0] ^= 1;
 await assert.rejects(acceleratorLocalStatus(plan.product, plan.profile, plan), /digest_mismatch/);
 await removeLocalAccelerator(plan.product, plan.profile);
@@ -141,6 +164,65 @@ afterPointerWrite = null;
 assert.deepEqual([...local.entries.keys()], []);
 assert.equal(await acceleratorLocalStatus(plan.product, plan.profile, plan), null);
 
+// The same close race on a first installation must not leave an empty marker
+// or a candidate that can be mistaken for an installed signed generation.
+const firstClosingController = new AbortController();
+afterPointerClose = () => firstClosingController.abort();
+await assert.rejects(storeQualifiedAccelerator(plan, bytes, firstClosingController.signal),
+  /accelerator_download_cancelled/);
+afterPointerClose = null;
+assert.deepEqual([...local.entries.keys()], []);
+assert.equal(await acceleratorLocalStatus(plan.product, plan.profile, plan), null);
+
+// Even a pointer too large to parse must remain byte-for-byte unchanged when
+// an explicit repair download is cancelled during its commit.
+const oversizedHandle = await local.getFileHandle('active.json', { create: true });
+const oversizedWrite = await oversizedHandle.createWritable();
+await oversizedWrite.write('x'.repeat(2049));
+await oversizedWrite.close();
+const oversizedBefore = await (await oversizedHandle.getFile()).arrayBuffer();
+const oversizedController = new AbortController();
+afterPointerClose = () => oversizedController.abort();
+await assert.rejects(storeQualifiedAccelerator(plan, bytes, oversizedController.signal),
+  /accelerator_download_cancelled/);
+afterPointerClose = null;
+assert.deepEqual(await (await oversizedHandle.getFile()).arrayBuffer(), oversizedBefore);
+assert.deepEqual([...local.entries.keys()], ['active.json']);
+await removeLocalAccelerator(plan.product, plan.profile);
+
+// An unbounded damaged marker must not be copied into memory for rollback.
+const hugeHandle = await local.getFileHandle('active.json', { create: true });
+const hugeWrite = await hugeHandle.createWritable();
+await hugeWrite.write('x'.repeat(64 * 1024 + 1));
+await hugeWrite.close();
+await assert.rejects(storeQualifiedAccelerator(plan, bytes),
+  /accelerator_store_pointer_requires_remove/);
+assert.equal((await hugeHandle.getFile()).size, 64 * 1024 + 1);
+assert.deepEqual([...local.entries.keys()], ['active.json']);
+await removeLocalAccelerator(plan.product, plan.profile);
+
+await storeQualifiedAccelerator(plan, bytes);
+// A close error after publishing is not proof of an unchanged old pointer.
+afterPointerClose = () => {
+  afterPointerClose = null;
+  throw new Error('close_failure_after_publish');
+};
+await assert.rejects(storeQualifiedAccelerator(plan, bytes), /accelerator_store_commit_uncertain/);
+assert.equal((await acceleratorLocalStatus(plan.product, plan.profile, plan))?.current, true);
+await storeQualifiedAccelerator(plan, bytes);
+// If rollback itself fails, the caller must not claim successful cancellation
+// even when this mock happened to write the old pointer before close failed.
+const failedRollbackController = new AbortController();
+afterPointerClose = () => {
+  failedRollbackController.abort();
+  afterPointerClose = () => { throw new Error('rollback_close_failed'); };
+};
+await assert.rejects(storeQualifiedAccelerator(plan, bytes, failedRollbackController.signal),
+  /accelerator_store_rollback_failed/);
+afterPointerClose = null;
+assert.equal((await acceleratorLocalStatus(plan.product, plan.profile, plan))?.current, true);
+await removeLocalAccelerator(plan.product, plan.profile);
+assert.deepEqual([...local.entries.keys()], []);
 await storeQualifiedAccelerator(plan, bytes);
 const pointer2 = JSON.parse(await (await (await local.getFileHandle('active.json')).getFile()).text());
 await local.removeEntry(pointer2.file);

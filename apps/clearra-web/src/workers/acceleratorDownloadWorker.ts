@@ -7,6 +7,7 @@ import { acceleratorLocalStatus, removeLocalAccelerator, storeQualifiedAccelerat
 import { acceleratorAssetLocation } from './acceleratorAssetLocation';
 import { readAcceleratorDownloadResponse } from './acceleratorDownloadStream';
 import { repairableLocalAssetError } from './acceleratorLocalAssetErrors';
+import { acceleratorDownloadErrorCode } from './acceleratorDownloadError';
 
 type Request = { action: 'status' | 'download' | 'remove' | 'cancel'; kind: number; profile: number; base: string };
 const PROFILES = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
@@ -89,10 +90,15 @@ self.onmessage = async ({ data }: MessageEvent<Request>) => {
           displayed.catalog_identity !== plan.catalog_identity ||
           displayed.generation !== plan.generation) throw new Error('accelerator_download_check_required');
       const result = await download(plan, data.kind, data.profile, data.base, controller.signal);
-      postMessage({ type: 'installed', local: await acceleratorLocalStatus(expected.product, expected.profile, plan), ...result });
+      // Publication already returned. A failed readback cannot be described as
+      // "the previous asset is preserved"; require a new explicit status read.
+      let local;
+      try { local = await acceleratorLocalStatus(expected.product, expected.profile, plan); }
+      catch { throw new Error('accelerator_store_commit_uncertain'); }
+      if (!local?.current) throw new Error('accelerator_store_commit_uncertain');
+      postMessage({ type: 'installed', local, ...result });
     } else throw new Error('accelerator_action_invalid');
   } catch (error) {
-    postMessage({ type: 'error', code: controller.signal.aborted ? 'accelerator_download_cancelled'
-      : error instanceof Error ? error.message : 'accelerator_download_failed' });
+    postMessage({ type: 'error', code: acceleratorDownloadErrorCode(error, controller.signal.aborted) });
   } finally { controller = null; busy = false; postMessage({ type: 'idle' }); }
 };
