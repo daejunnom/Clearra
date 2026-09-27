@@ -2,20 +2,20 @@
 use clearra_app::{
     AppCommand, AppRequest, BoundaryRecoveryAppCommand, BuildProbabilityAppCommand,
     DamageAppCommand, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
-    FumenAppCommand, OperationDocumentProblem, OperationSequenceAppCommand, ParityAppCommand,
-    PcAppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin,
-    PcPathIngressOrigin, PcResultProjection, PcSaveIngressOrigin, PcScoreIngressOrigin,
-    PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, PercentAppCommand,
+    FumenAppCommand, OperationDocumentProblem, OperationSequenceAppCommand,
+    PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_SOURCE_PIECES,
+    ParityAppCommand, PcAppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin,
+    PcMinimalsIngressOrigin, PcPathIngressOrigin, PcResultProjection, PcSaveIngressOrigin,
+    PcScoreIngressOrigin, PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, PercentAppCommand,
     ProductCapabilityContract, RecoveryBuildAppCommand, RenAppCommand, RenderAppCommand,
     RequestStructuralProfiles, ResourceBudget, ScenarioAppCommand, SequenceDependenciesAppCommand,
     SetupAppCommand, SpinFinderAppCommand, SpinStructureAppCommand, SpinStructureProductMode,
-    VerifyAppCommand, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
-    PC_SCORE_MAX_SOURCE_PIECES,
+    VerifyAppCommand,
 };
 use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
 use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
+use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
 use clearra_forward_search::{BoundaryRecoveryQuery, ForwardSearchMode, ForwardSearchQuery};
 use clearra_objectives::policy::{
     objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
@@ -32,8 +32,8 @@ use clearra_problem::{
 use clearra_rules::profile::{builtin_rules::srs_plus, rule_profile::RuleProfile};
 use clearra_spin_structure_search::SpinStructureQuery;
 use clearra_supply::{
-    queue::{queue_parser, queue_pattern_expression::QueuePatternExpression},
     QueueObservationPolicy,
+    queue::{queue_parser, queue_pattern_expression::QueuePatternExpression},
 };
 
 use crate::{WebBuildProbabilityInput, WebBuildV2Input, WebPcScenarioInput, WebSetupScoreInput};
@@ -824,12 +824,12 @@ impl WebCommandRequest {
             (Some(_), _, _) => {
                 return Err(invalid(
                     "typed failed-queue origin requires the failed-queue command and matching product capability contract",
-                ))
+                ));
             }
             (None, _, Some(ProductCapabilityContract::PcFailedQueue)) => {
                 return Err(invalid(
                     "pc.failed-queue product capability requires a closed failed-queue origin",
-                ))
+                ));
             }
             (None, _, _) => {}
         }
@@ -838,7 +838,7 @@ impl WebCommandRequest {
             (PcResultProjection::Standard, Some(_)) => {
                 return Err(invalid(
                     "standard PC projection cannot carry a product capability contract",
-                ))
+                ));
             }
             (PcResultProjection::ChanceProbabilityV2(_), None)
             | (PcResultProjection::MinimumCoverV2(_), None)
@@ -852,7 +852,7 @@ impl WebCommandRequest {
             | (PcResultProjection::AllSpinPreservationChance(_), None) => {
                 return Err(invalid(
                     "typed PC projection requires its matching product capability contract",
-                ))
+                ));
             }
             (PcResultProjection::TilingFamilyV1(_), Some(ProductCapabilityContract::PcTiling))
             | (PcResultProjection::PathFamilyV2(_), Some(ProductCapabilityContract::PcPath))
@@ -896,7 +896,7 @@ impl WebCommandRequest {
             _ => {
                 return Err(invalid(
                     "typed PC projection and product capability contract do not match",
-                ))
+                ));
             }
         }
         if self.command_kind != "pc" {
@@ -1491,9 +1491,18 @@ impl WebCommandRequest {
                     "missing typed recovery-build query",
                 )
             })?;
-            return self.attach_product_capability_contract(AppRequest::new(
-                AppCommand::RecoveryBuild(RecoveryBuildAppCommand::new(query)),
-            ));
+            let workers = u16::try_from(self.resolved_worker_budget()).map_err(|_| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "recovery worker budget exceeds u16",
+                )
+            })?;
+            return self.attach_product_capability_contract(
+                AppRequest::new(AppCommand::RecoveryBuild(RecoveryBuildAppCommand::new(
+                    query,
+                )))
+                .with_resource_budget(ResourceBudget::new(workers, None, None)),
+            );
         }
         if self.command_kind == "boundary-recovery" {
             let query = self.boundary_recovery.clone().ok_or_else(|| {

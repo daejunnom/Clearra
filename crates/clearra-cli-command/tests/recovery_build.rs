@@ -1,7 +1,7 @@
 use clearra_app::{AppCommand, AppContext, AppStatus};
 use clearra_cli_command::CliCommandParser;
 use clearra_host_contract::ProductResultPayloadContent;
-const BASE:&str="clearra recovery build --start-mask 0 --middle-mask 0xf --result-mask 0xc030 --height 8 --first-supply I --second-supply O";
+const BASE: &str = "clearra recovery build --start-mask 0 --middle-mask 0xf --result-mask 0xc030 --height 8 --first-supply I --second-supply O";
 #[test]
 fn recovery_build_two_supplies_lower_into_the_new_typed_query() {
     let request = CliCommandParser::parse(BASE)
@@ -141,4 +141,67 @@ fn recovery_build_cursor_consumes_every_value_and_switch_once() {
         assert!(CliCommandParser::parse(&format!("{BASE} {option}")).is_err());
     }
     assert!(CliCommandParser::parse(&format!("{BASE} --hold --no-hold")).is_err());
+}
+
+#[test]
+fn recovery_build_worker_budget_is_explicit_and_parallel_payload_matches_serial() {
+    let command = BASE.replace(
+        "--first-supply I --second-supply O",
+        "--first-supply [IO] --second-supply [IO]",
+    );
+    for hold in ["--no-hold", "--hold"] {
+        let mut expected = None;
+        for workers in [1, 2, 4, 11] {
+            // Explicit host capacity makes the contract test independent of
+            // how many processors this CI runner happens to provide.
+            let request = CliCommandParser::parse_with_worker_limit(
+                &format!("{command} --workers {workers} --allow-piece-exchange {hold}"),
+                12,
+            )
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+            assert_eq!(request.resource_budget().workers(), workers);
+            let response = AppContext::default().run(request);
+            assert_eq!(response.status(), AppStatus::Success);
+            let host = response.to_host_response();
+            let public = host.product_result_payload().unwrap().clone();
+            if let Some(expected) = &expected {
+                assert_eq!(&public, expected);
+            } else {
+                expected = Some(public);
+            }
+        }
+    }
+    for invalid in ["0", "-1", "65536", "NaN", "1.5"] {
+        assert!(CliCommandParser::parse(&format!("{BASE} --workers {invalid}")).is_err());
+    }
+    assert!(CliCommandParser::parse(&format!("{BASE} --workers 2 --workers 3")).is_err());
+}
+
+#[test]
+fn recovery_build_preserves_injected_hardware_limit_and_ui_reserve() {
+    for (logical, requested, use_all, expected) in [
+        (1, 11, false, 1),
+        (4, 11, false, 3),
+        (12, 11, false, 11),
+        (12, 12, false, 11),
+        (12, 12, true, 12),
+    ] {
+        let all = if use_all { "--use-all-cpu-threads" } else { "" };
+        let request = CliCommandParser::parse_with_worker_limit(
+            &format!("{BASE} --workers {requested} {all}"),
+            logical,
+        )
+        .unwrap()
+        .to_app_request()
+        .unwrap();
+        assert_eq!(request.resource_budget().workers(), expected);
+    }
+    assert!(
+        CliCommandParser::parse(&format!(
+            "{BASE} --use-all-cpu-threads --use-all-logical-processors"
+        ))
+        .is_err()
+    );
 }

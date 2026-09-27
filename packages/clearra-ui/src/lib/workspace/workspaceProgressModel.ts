@@ -170,10 +170,15 @@ export function buildWorkspaceProgressModel(
     if (input.status === 'validating') stages[0].status = 'running';
     else {
       stages[0].status = 'complete';
-      const finalizing = input.progressLabel === 'postprocess';
+      const parallel = input.telemetry?.execution_mode === 'distributed' ? input.telemetry : null;
+      const finalizing = input.progressLabel === 'postprocess' || parallel?.phase === 'merging' || parallel?.phase === 'postprocessing';
       stages[1].status = finalizing ? 'complete' : 'running';
       stages[2].status = finalizing ? 'running' : 'pending';
-      applyMetric(stages[1], input.progressDone, input.progressTotal > 0 ? input.progressTotal : null);
+      const pairsDone = parallel && parallel.availability.layer_done && parallel.exactness.layer_done
+        ? parallel.layer_done : input.progressDone;
+      const pairsTotal = parallel && parallel.availability.layer_total && parallel.exactness.layer_total
+        ? parallel.layer_total : input.progressTotal;
+      applyMetric(stages[1], pairsDone, pairsTotal > 0 ? pairsTotal : null);
     }
   } else if (input.profile === 'damage' || input.profile === 'spin' || input.profile === 'ren') {
     applyForwardProgress(stages, input);

@@ -3,7 +3,14 @@
 //! regions. This is the Build/Verify product, not a fixed-role approximation.
 //! No isolated-stage B2B or reachability failure is used as a joint prune.
 mod field;
+mod parallel;
 mod population;
+pub use parallel::{
+    RecoveryBuildParallelCoordinator, RecoveryBuildParallelError, RecoveryBuildParallelProduce,
+    RecoveryBuildParallelProgress, RecoveryBuildParallelWorker,
+};
+#[cfg(test)]
+mod parallel_tests;
 mod search;
 #[cfg(test)]
 mod tests;

@@ -6,6 +6,8 @@ use clearra_forward_search::{CrossStageEarlyLimit, RecoveryBuildFields, Recovery
 pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
     let fail = |message: &str| WebCommandError::new(WebCommandErrorCode::InvalidValue, message);
     let mut height = 8;
+    let mut workers = None;
+    let mut use_all = false;
     let mut initial = Board256Mask::EMPTY;
     let mut middle = None;
     let mut result = None;
@@ -25,6 +27,7 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
         let option = tokens[option_cursor].as_str();
         let identity = match option {
             "--no-hold" => "--hold",
+            "--use-all-cpu-threads" => "--use-all-logical-processors",
             "--no-piece-exchange" => "--allow-piece-exchange",
             "--no-preserve-b2b" => "--preserve-b2b",
             other => other,
@@ -51,6 +54,10 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
                     option,
                 )?))
             }
+            "--workers" => {
+                let count: u16 = parse_positive(next_value(tokens, &mut cursor, option)?, option)?;
+                workers = Some(usize::from(count));
+            }
             "--height" => {
                 height = parse_positive(next_value(tokens, &mut cursor, option)?, option)?
             }
@@ -71,6 +78,7 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
                     )
                 };
             }
+            "--use-all-cpu-threads" | "--use-all-logical-processors" => use_all = true,
             "--allow-piece-exchange" => exchange = true,
             "--no-piece-exchange" => exchange = false,
             "--hold" => hold = true,
@@ -120,5 +128,9 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
     query
         .validate()
         .map_err(|error| fail(&format!("invalid recovery-build input: {error:?}")))?;
-    Ok(WebCommandRequest::recovery_build(query))
+    let request = WebCommandRequest::recovery_build(query).with_use_all_logical_processors(use_all);
+    Ok(match workers {
+        Some(workers) => request.with_workers(workers),
+        None => request,
+    })
 }

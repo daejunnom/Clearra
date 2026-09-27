@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "id": "recovery-build-user-20260928",
+  "height": 10,
+  "provenance": {
+    "transcription": "cell-by-cell from the two user screenshots; x=left, y=bottom; no vertical shift",
+    "source_sha256": {
+      "image(10).png": "9b363c3b30d1c1ed1adcd96ff3155405fe69351356ca8286535611e2cca14291",
+      "image(20260927-160836).png": "f9400ac13392eaa9aecf7bf41a42a4f3b87e928dc4df2b994163f0afb1c8ab07"
+    }
+  },
+  "rows_top_down": {
+    "start": [
+      "0000000000",
+      "0000000000",
+      "0000000000",
+      "0000000000",
+      "0000000000",
+      "0000000000",
+      "0000000011",
+      "1100000111",
+      "1111001111",
+      "1110001111"
+    ],
+    "middle": [
+      "0000000000",
+      "0000000000",
+      "0000000000",
+      "0000000000",
+      "0000000000",
+      "1111111111",
+      "1111111100",
+      "0011111000",
+      "0000110000",
+      "0001110000"
+    ],
+    "result": [
+      "0010000011",
+      "1111000001",
+      "1110000011",
+      "1111001111",
+      "1111000111",
+      "0000000000",
+      "0000000000",
+      "0000000000",
+      "0000000000",
+      "0000000000"
+    ]
+  },
+  "start_mask": "0xc0383f3fc7",
+  "middle_mask": "0x3ff3fc7c0c038",
+  "result_mask": "0xc120fc1fcfe3c000000000000",
+  "cell_counts": {
+    "start": 22,
+    "middle": 28,
+    "result": 28
+  },
+  "first_supply": "P7",
+  "second_supply": "P7",
+  "hold_enabled": true,
+  "max_early": "auto",
+  "allow_piece_exchange": true,
+  "preserve_b2b": true,
+  "initial_b2b": true,
+  "rule": "srs-plus",
+  "spin_profile": "all-spin-plus",
+  "expected_pair_count": "25401600",
+  "expected_probability": null,
+  "scope": "Full input fixture; no claim of a completed 25,401,600-pair run. Result cells retain screenshot y=5..9 in the existing post-middle-clear frame."
+}

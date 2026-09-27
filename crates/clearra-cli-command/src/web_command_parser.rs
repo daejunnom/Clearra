@@ -2,11 +2,11 @@ mod recovery_build;
 use clearra_app::{
     BuildObjective, BuildProbabilityResultMode, BuildQueueKnowledge, BuildScoreProfile,
     FieldDocumentFormat, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
-    FumenAppCommand, FumenTransformKind, ParityAppCommand, PcChanceIngressOrigin,
+    FumenAppCommand, FumenTransformKind, PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_PATTERNS,
+    PC_SCORE_MAX_SOURCE_PIECES, ParityAppCommand, PcChanceIngressOrigin,
     PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin, PcPathIngressOrigin, PcSaveIngressOrigin,
     PcScoreIngressOrigin, PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, RenderAppCommand,
     RenderArtifactFormat, RequestStructuralProfiles, SpinStructureProductMode,
-    PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_SOURCE_PIECES,
 };
 use clearra_core_domain::board::standard_pc_board::Board256Mask;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
@@ -20,9 +20,9 @@ use clearra_objectives::policy::score_objective_policy::{
     ScoreProfileSelection, SpinProfileSelection,
 };
 use clearra_pc_graph::request::{
-    validate_pc_observation_objective, GpuDeviceSelection, PcCountPolicy, PcExecutionPolicy,
-    PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow, RequestedSearchBackend,
-    SupplyWindowSize, WorkerPolicy,
+    GpuDeviceSelection, PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
+    PcScenarioQuery, PieceWindow, RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
+    validate_pc_observation_objective,
 };
 use clearra_problem::{
     BuildProbabilityAggregation, FinesseMetric, FinessePatternKnowledge, FinessePlacement,
@@ -38,18 +38,18 @@ use clearra_spin_structure_search::{
     StructureBoard,
 };
 use clearra_supply::{
+    QueueObservationPolicy,
     queue::{
         queue_parser::{parse_bag_aligned_pattern, parse_fixed_sequence, parse_observed_queue},
         queue_pattern_expression::QueuePatternExpression,
     },
-    QueueObservationPolicy,
 };
 
 use crate::{
-    ctk3_mask_input::parse_ctk3_board_mask, web_virtual_file::reject_native_path_semantics,
     WebBuildProbabilityInput, WebBuildV2Capability, WebBuildV2Input, WebCommandError,
     WebCommandErrorCode, WebCommandRequest, WebPcScenarioInput, WebSetupScoreInput,
-    WebSetupScoreQueueInput, WebVirtualFileHandle,
+    WebSetupScoreQueueInput, WebVirtualFileHandle, ctk3_mask_input::parse_ctk3_board_mask,
+    web_virtual_file::reject_native_path_semantics,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -358,6 +358,7 @@ impl WebCommandParser {
             }
             "recovery" if tokens.get(cursor).map(String::as_str) == Some("build") => {
                 recovery_build::parse(&tokens[cursor + 1..])
+                    .map(|request| request.with_worker_hardware_limit(worker_hardware_limit.max(1)))
             }
             "recovery" if tokens.get(cursor).map(String::as_str) == Some("boundary") => {
                 parse_boundary_recovery_command(&tokens[cursor + 1..])
@@ -2532,7 +2533,7 @@ fn parse_boundary_recovery_command(
                         return Err(WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
                             "--initial-b2b must be 0 or 1",
-                        ))
+                        ));
                     }
                 };
             }
@@ -2548,7 +2549,7 @@ fn parse_boundary_recovery_command(
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::InvalidValue,
                     format!("unsupported boundary recovery option '{option}'"),
-                ))
+                ));
             }
         }
         if cursor == option_cursor {
@@ -2625,12 +2626,14 @@ fn parse_boundary_recovery_command(
         (None, Some(_)) => {
             return Err(required(
                 "--borrow-role-position with --borrow-placement-mask",
-            ))
+            ));
         }
         (Some(index), mask) => {
             if max_early_placements.is_none_or(|maximum| maximum > 1) {
-                return Err(WebCommandError::new(WebCommandErrorCode::InvalidValue,
-                    "a selected single early role cannot be combined with a maximum above one; omit both borrow options to search every role"));
+                return Err(WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "a selected single early role cannot be combined with a maximum above one; omit both borrow options to search every role",
+                ));
             }
             let placement = mask
                 .or_else(|| placement_role_masks.get(index).copied())
@@ -2860,7 +2863,7 @@ fn parse_forward_command(
                         return Err(WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
                             format!("invalid --spin-category value '{value}'"),
-                        ))
+                        ));
                     }
                 };
             }
@@ -4351,12 +4354,12 @@ fn parse_fumen_utility(tokens: &[String]) -> Result<WebCommandRequest, WebComman
             }
             "--comment" => comments.push(next_value(tokens, &mut cursor, option)?.to_owned()),
             flag if flag.starts_with("--") => {
-                return Err(invalid_web(format!("utility fumen does not accept {flag}")))
+                return Err(invalid_web(format!("utility fumen does not accept {flag}")));
             }
             value => {
                 return Err(invalid_web(format!(
                     "unexpected utility fumen token '{value}'"
-                )))
+                )));
             }
         }
     }
@@ -4409,12 +4412,12 @@ fn parse_render_utility(tokens: &[String]) -> Result<WebCommandRequest, WebComma
             flag if flag.starts_with("--") => {
                 return Err(invalid_web(format!(
                     "utility render does not accept {flag}"
-                )))
+                )));
             }
             value => {
                 return Err(invalid_web(format!(
                     "unexpected utility render token '{value}'"
-                )))
+                )));
             }
         }
     }
@@ -4462,12 +4465,12 @@ fn parse_single_typed_document_options(
             flag if flag.starts_with("--") => {
                 return Err(invalid_web(format!(
                     "utility {command} does not accept {flag}"
-                )))
+                )));
             }
             value => {
                 return Err(invalid_web(format!(
                     "unexpected utility {command} token '{value}'"
-                )))
+                )));
             }
         }
     }
@@ -4953,7 +4956,7 @@ fn parse_pc_command(
                         return Err(WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
                             format!("invalid --count value '{value}'"),
-                        ))
+                        ));
                     }
                 };
             }

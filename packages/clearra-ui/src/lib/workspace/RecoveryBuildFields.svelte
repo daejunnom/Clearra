@@ -2,9 +2,9 @@
   import { createEventDispatcher } from 'svelte';
   import WorkspaceBoardEditor from './WorkspaceBoardEditor.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
-  import { resizeRecoveryBuild, recoveryMiddleBase, type RecoveryBuildRequest } from './recoveryBuildModel';
+  import { resizeRecoveryBuild, type RecoveryBuildRequest } from './recoveryBuildModel';
   import { recoveryBuildMessage, type RecoveryBuildMessage } from './recoveryBuildI18n';
-  type RecoveryField = 'startMask' | 'middleMask' | 'resultMask';
+  import { recoveryFieldReferences, type RecoveryField } from './recoveryFieldReferences';
   import type { WorkspaceLanguage } from './workspaceI18n';
 
   export let request: RecoveryBuildRequest;
@@ -18,15 +18,12 @@
   let selected: RecoveryField = 'startMask';
   let showReferences = true;
   $: label = (key: RecoveryBuildMessage) => recoveryBuildMessage(language, key);
-  $: activeField = fields.find((entry) => entry.field === selected)!;
-  $: references = !showReferences ? [] : selected === 'resultMask'
-    ? [{ mask: recoveryMiddleBase(request), tone: 'dark' as const, label: label('middle') }]
-    : fields.filter(entry => entry.field !== 'resultMask' && entry.field !== selected)
-      .map(entry => ({ mask: request[entry.field], tone: entry.tone, label: label(entry.label) }));
-  function change(mask: bigint, height = request.height) {
+  $: references = recoveryFieldReferences(request, selected, showReferences)
+    .map((reference) => ({ ...reference, label: label(reference.label) }));
+  function change(field: RecoveryField, mask: bigint, height = request.height) {
     const next = resizeRecoveryBuild(request, Math.max(request.height, height));
     const limit = (1n << BigInt(next.height * 10)) - 1n;
-    dispatch('change', { ...next, [selected]: mask & limit });
+    dispatch('change', { ...next, [field]: mask & limit });
   }
 
 </script>
@@ -49,13 +46,13 @@
     </div>
     <p class="workspace-field-help">{label('fieldsHelp')}</p>
   </WorkspaceControlPanel>
-  {#key selected}
-    <WorkspaceBoardEditor mode="forward" height={request.height} existingMask={request[selected]}
-      targetMask={0n} piecesNeeded={null} showStats={false} {language} occupiedTone={activeField.tone}
-      referenceLayers={references} labelOverride={label(activeField.label)} enableGlobalPaste={false}
-      on:change={(event) => change(event.detail.existingMask)}
-      on:import={(event) => change(event.detail.existingMask, event.detail.height)} />
-  {/key}
+  {#each fields.filter((entry) => entry.field === selected) as entry (entry.field)}
+    <WorkspaceBoardEditor mode="forward" height={request.height} existingMask={request[entry.field]}
+      targetMask={0n} piecesNeeded={null} showStats={false} {language} occupiedTone={entry.tone}
+      referenceLayers={references} labelOverride={label(entry.label)} enableGlobalPaste={false}
+      on:change={(event) => change(entry.field, event.detail.existingMask)}
+      on:import={(event) => change(entry.field, event.detail.existingMask, event.detail.height)} />
+  {/each}
 </div>
 
 <style>

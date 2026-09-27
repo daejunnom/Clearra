@@ -78,112 +78,181 @@ impl RecoveryBuildQuery {
         &self,
         control: &ExecutionControl,
     ) -> Result<RecoveryBuildPopulation, RecoveryBuildError> {
-        self.validate()?;
         if control.is_cancelled() {
             return Err(RecoveryBuildError::Cancelled);
         }
-        let first = QueuePatternExpression::parse(&self.first_supply, 0)
-            .map_err(|_| RecoveryBuildError::InvalidSupplyPattern)?;
-        let second = QueuePatternExpression::parse(&self.second_supply, 0)
-            .map_err(|_| RecoveryBuildError::InvalidSupplyPattern)?;
-        let first = PatternUniverseMaterializer::queue_pattern_expression(&first, 0)
-            .map_err(|_| RecoveryBuildError::PatternDomainUnavailable)?;
-        let second = PatternUniverseMaterializer::queue_pattern_expression(&second, 0)
-            .map_err(|_| RecoveryBuildError::PatternDomainUnavailable)?;
+        let prepared = PreparedPopulation::new(self.clone())?;
+        let mut accumulator = PopulationAccumulator::new(prepared.possible);
+        prepared.progress(0, control);
+        for index in 0..prepared.possible {
+            let path = prepared.evaluate(index, control)?;
+            accumulator.record(&prepared, index, path.status, path.states, Some(path))?;
+            if accumulator.report.evaluated % 256 == 0 {
+                prepared.progress(accumulator.report.evaluated, control);
+            }
+        }
+        prepared.progress(prepared.possible, control);
+        control.report_progress("postprocess", 0, None);
+        Ok(accumulator.finish())
+    }
+}
+
+/// Two independent universes are retained; the Cartesian product is an index,
+/// never an allocated list of pairs. Serial and parallel use this same kernel.
+pub(super) struct PreparedPopulation {
+    pub query: RecoveryBuildQuery,
+    first: clearra_supply::pattern_universe::MaterializedPatternUniverse,
+    second: clearra_supply::pattern_universe::MaterializedPatternUniverse,
+    pub possible: u128,
+}
+impl PreparedPopulation {
+    pub fn new(query: RecoveryBuildQuery) -> Result<Self, RecoveryBuildError> {
+        query.validate()?;
+        let parse = |source: &str| {
+            let expression = QueuePatternExpression::parse(source, 0)
+                .map_err(|_| RecoveryBuildError::InvalidSupplyPattern)?;
+            PatternUniverseMaterializer::queue_pattern_expression(&expression, 0)
+                .map_err(|_| RecoveryBuildError::PatternDomainUnavailable)
+        };
+        let first = parse(&query.first_supply)?;
+        let second = parse(&query.second_supply)?;
         let possible = (first.pattern_count() as u128)
             .checked_mul(second.pattern_count() as u128)
             .ok_or(RecoveryBuildError::CounterOverflow)?;
-        let mut report = RecoveryBuildPopulation {
+        Ok(Self {
+            query,
+            first,
+            second,
             possible,
-            evaluated: 0,
-            normal_count: 0,
-            recovery_count: 0,
-            no_path_count: 0,
-            states: 0,
-            normal_probability: 0.0,
-            recovery_probability: 0.0,
-            no_path_probability: 0.0,
-            normal_example: None,
-            recovery_example: None,
+        })
+    }
+    pub fn indices(&self, index: u128) -> Result<(usize, usize), RecoveryBuildError> {
+        if index >= self.possible {
+            return Err(RecoveryBuildError::PatternDomainUnavailable);
+        }
+        let width = self.second.pattern_count() as u128;
+        Ok(((index / width) as usize, (index % width) as usize))
+    }
+    pub fn evaluate(
+        &self,
+        index: u128,
+        control: &ExecutionControl,
+    ) -> Result<RecoveryBuildFixedReport, RecoveryBuildError> {
+        if control.is_cancelled() {
+            return Err(RecoveryBuildError::Cancelled);
+        }
+        let (i, j) = self.indices(index)?;
+        RecoveryBuildFixedQuery {
+            fields: self.query.fields.clone(),
+            first_supply: self.first.sequence_at(i).to_vec(),
+            second_supply: self.second.sequence_at(j).to_vec(),
+            early_limit: self.query.early_limit,
+            allow_piece_exchange: self.query.allow_piece_exchange,
+            hold_enabled: self.query.hold_enabled,
+            preserve_b2b: self.query.preserve_b2b,
+            initial_b2b: self.query.initial_b2b,
+            rule_profile: self.query.rule_profile,
+            spin_profile: self.query.spin_profile,
+        }
+        .search(control)
+    }
+    pub fn progress(&self, completed: u128, control: &ExecutionControl) {
+        const MAX_EXACT: u128 = 9_007_199_254_740_991;
+        if completed <= MAX_EXACT {
+            control.report_progress(
+                "recovery-build",
+                completed as u64,
+                (self.possible <= MAX_EXACT).then_some(self.possible as u64),
+            );
+        }
+    }
+}
+
+pub(super) struct PopulationAccumulator {
+    pub report: RecoveryBuildPopulation,
+    probabilities: [Sum; 3],
+}
+impl PopulationAccumulator {
+    pub fn new(possible: u128) -> Self {
+        Self {
+            report: RecoveryBuildPopulation {
+                possible,
+                evaluated: 0,
+                normal_count: 0,
+                recovery_count: 0,
+                no_path_count: 0,
+                states: 0,
+                normal_probability: 0.0,
+                recovery_probability: 0.0,
+                no_path_probability: 0.0,
+                normal_example: None,
+                recovery_example: None,
+            },
+            probabilities: [Sum::default(), Sum::default(), Sum::default()],
+        }
+    }
+    /// Must be called in global row-major pair order, regardless of completion
+    /// order. This preserves both compensated sums and canonical examples.
+    pub fn record(
+        &mut self,
+        source: &PreparedPopulation,
+        index: u128,
+        status: RecoveryBuildStatus,
+        states: usize,
+        path: Option<RecoveryBuildFixedReport>,
+    ) -> Result<(), RecoveryBuildError> {
+        if index != self.report.evaluated {
+            return Err(RecoveryBuildError::PatternDomainUnavailable);
+        }
+        let (i, j) = source.indices(index)?;
+        let category = match status {
+            RecoveryBuildStatus::Normal => 0,
+            RecoveryBuildStatus::Recovery => 1,
+            RecoveryBuildStatus::NoPath => 2,
         };
-        let mut probabilities = [Sum::default(), Sum::default(), Sum::default()];
-        // Public progress numbers must remain exact in JavaScript. An enormous
-        // universe remains countable internally; no approximate total is sent.
-        let public_total = (possible <= 9_007_199_254_740_991).then_some(possible as u64);
-        control.report_progress("recovery-build", 0, public_total);
-        for i in 0..first.pattern_count() {
-            let a = first.sequence_at(i);
-            for j in 0..second.pattern_count() {
-                if control.is_cancelled() {
-                    return Err(RecoveryBuildError::Cancelled);
+        self.probabilities[category]
+            .add(source.first.weight_at(i).get() * source.second.weight_at(j).get());
+        self.report.states = self
+            .report
+            .states
+            .checked_add(states as u128)
+            .ok_or(RecoveryBuildError::CounterOverflow)?;
+        self.report.evaluated += 1;
+        let example = match status {
+            RecoveryBuildStatus::Normal => {
+                self.report.normal_count += 1;
+                Some(&mut self.report.normal_example)
+            }
+            RecoveryBuildStatus::Recovery => {
+                self.report.recovery_count += 1;
+                Some(&mut self.report.recovery_example)
+            }
+            RecoveryBuildStatus::NoPath => {
+                self.report.no_path_count += 1;
+                None
+            }
+        };
+        if let Some(slot) = example {
+            if slot.is_none() {
+                let path = path.ok_or(RecoveryBuildError::PatternDomainUnavailable)?;
+                if path.status != status || path.states != states {
+                    return Err(RecoveryBuildError::PatternDomainUnavailable);
                 }
-                let b = second.sequence_at(j);
-                let query = RecoveryBuildFixedQuery {
-                    fields: self.fields.clone(),
-                    first_supply: a.to_vec(),
-                    second_supply: b.to_vec(),
-                    early_limit: self.early_limit,
-                    allow_piece_exchange: self.allow_piece_exchange,
-                    hold_enabled: self.hold_enabled,
-                    preserve_b2b: self.preserve_b2b,
-                    initial_b2b: self.initial_b2b,
-                    rule_profile: self.rule_profile,
-                    spin_profile: self.spin_profile,
-                };
-                let path = query.search(control)?;
-                report.evaluated += 1;
-                report.states = report
-                    .states
-                    .checked_add(path.states as u128)
-                    .ok_or(RecoveryBuildError::CounterOverflow)?;
-                let category = match path.status {
-                    RecoveryBuildStatus::Normal => 0,
-                    RecoveryBuildStatus::Recovery => 1,
-                    RecoveryBuildStatus::NoPath => 2,
-                };
-                probabilities[category].add(first.weight_at(i).get() * second.weight_at(j).get());
-                if (report.evaluated % 256 == 0 || report.evaluated == possible)
-                    && report.evaluated <= 9_007_199_254_740_991
-                {
-                    control.report_progress(
-                        "recovery-build",
-                        report.evaluated as u64,
-                        public_total,
-                    );
-                }
-                match category {
-                    0 => {
-                        report.normal_count += 1;
-                        if report.normal_example.is_none() {
-                            report.normal_example = Some(RecoveryBuildExample {
-                                first_pattern: i,
-                                second_pattern: j,
-                                first_queue: a.to_vec(),
-                                second_queue: b.to_vec(),
-                                path,
-                            });
-                        }
-                    }
-                    1 => {
-                        report.recovery_count += 1;
-                        if report.recovery_example.is_none() {
-                            report.recovery_example = Some(RecoveryBuildExample {
-                                first_pattern: i,
-                                second_pattern: j,
-                                first_queue: a.to_vec(),
-                                second_queue: b.to_vec(),
-                                path,
-                            });
-                        }
-                    }
-                    _ => report.no_path_count += 1,
-                }
+                *slot = Some(RecoveryBuildExample {
+                    first_pattern: i,
+                    second_pattern: j,
+                    first_queue: source.first.sequence_at(i).to_vec(),
+                    second_queue: source.second.sequence_at(j).to_vec(),
+                    path,
+                });
             }
         }
-        control.report_progress("postprocess", 0, None);
-        report.normal_probability = probabilities[0].value.clamp(0.0, 1.0);
-        report.recovery_probability = probabilities[1].value.clamp(0.0, 1.0);
-        report.no_path_probability = probabilities[2].value.clamp(0.0, 1.0);
-        Ok(report)
+        Ok(())
+    }
+    pub fn finish(mut self) -> RecoveryBuildPopulation {
+        self.report.normal_probability = self.probabilities[0].value.clamp(0.0, 1.0);
+        self.report.recovery_probability = self.probabilities[1].value.clamp(0.0, 1.0);
+        self.report.no_path_probability = self.probabilities[2].value.clamp(0.0, 1.0);
+        self.report
     }
 }

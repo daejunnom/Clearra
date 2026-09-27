@@ -1,0 +1,110 @@
+name: Recovery Build Regression
+
+on:
+  push:
+    branches:
+      - codex/recovery-build-fields-parallel-20260928
+      - codex/converge-recovery-build-release-20260928
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recovery-build-regression-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the exact combined source without discarding either change set
+        if: github.ref == 'refs/heads/codex/converge-recovery-build-release-20260928'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor c2dd8509914846ed81119cd7094e7f70ac3d979c HEAD
+          git diff --exit-code f7ed59dc3ac695d7983a8a539fe161a67f8ee8dc HEAD -- crates/clearra-app crates/clearra-cli-command crates/clearra-forward-search crates/clearra-wasm packages tests scripts/tools/recovery-build-browser-regression.mjs scripts/tools/recovery-build-regression.sh
+          git diff --exit-code c2dd8509914846ed81119cd7094e7f70ac3d979c HEAD -- crates/clearra-core-executor scripts/tools/build-clearra-wasm.mjs scripts/tools/benchmark-rust-environment.mjs scripts/tools/clearra-build-policy.test.mjs
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Check formatting of the newly integrated Rust files
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=13376dee8638cb5de5437ade910f07f5eab20629
+          if [[ "$GITHUB_REF" == refs/heads/codex/converge-recovery-build-release-20260928 ]]; then
+            base=c2dd8509914846ed81119cd7094e7f70ac3d979c
+          fi
+          mapfile -t files < <(git diff --name-only --diff-filter=ACM "$base" HEAD -- '*.rs')
+          if ((${#files[@]})); then
+            rustfmt --check --edition 2024 --config skip_children=true "${files[@]}"
+          fi
+      - name: Preserve exact implementation source
+        if: always()
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/recovery-tested-sha.txt"
+          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/recovery-build-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-build-source
+          path: |
+            ${{ runner.temp }}/recovery-build-source.tar.gz
+            ${{ runner.temp }}/recovery-tested-sha.txt
+          retention-days: 3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Prepare external browser test tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/clearra-browser-tools"
+          npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$RUNNER_TEMP/clearra-browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+          echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
+      - name: Native and WASM paired-coverage and clear-row regressions
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p build/recovery-regression
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee build/recovery-regression/core.log || result=1
+          cargo test --locked -p clearra-core-executor build_clear_row_pruning -- --nocapture 2>&1 | tee build/recovery-regression/build-clear-row.log || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee build/recovery-regression/cli.log || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee build/recovery-regression/wasm-runtime.log || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee build/recovery-regression/wasm-target.log || result=1
+          exit "$result"
+      - name: UI contracts and real browser field regression
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p build/recovery-regression
+          result=0
+          node --test scripts/tools/clearra-build-policy.test.mjs 2>&1 | tee build/recovery-regression/build-policy.log || result=1
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs 2>&1 | tee build/recovery-regression/ui-prepare.log || result=1
+          node --test packages/clearra-ui/test/recoveryBuild*.test.mjs packages/clearra-ui/test/boundaryRecoverySurface.test.mjs 2>&1 | tee build/recovery-regression/ui-unit.log || result=1
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee build/recovery-regression/ui-types.log || result=1
+          node scripts/tools/recovery-build-browser-regression.mjs 2>&1 | tee build/recovery-regression/browser.log || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-build-regression-results
+          path: build/recovery-regression
+          if-no-files-found: ignore
+          retention-days: 7

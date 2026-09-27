@@ -7,8 +7,8 @@ use crate::{
     render::{AppMessage, AppRenderModel, AppResultKind},
 };
 use clearra_forward_search::{
-    CrossStageEarlyLimit, RecoveryBuildError, RecoveryBuildExample, RecoveryBuildQuery,
-    RecoveryBuildStatus,
+    CrossStageEarlyLimit, RecoveryBuildError, RecoveryBuildExample, RecoveryBuildParallelError,
+    RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildStatus,
 };
 use clearra_host_contract::{
     ProductResultPayload, ProductResultPayloadContent, RecoveryBuildExamplePayload,
@@ -31,19 +31,32 @@ impl RecoveryBuildAppCommand {
 }
 impl RunnableAppCommand for RecoveryBuildAppCommand {
     fn run(self, context: &AppExecutionContext<'_>) -> AppResponse {
-        let report = match self.query.search(context.execution_control) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let searched = crate::native_recovery_build_execution::run_native_recovery_build(
+            self.query.clone(),
+            usize::from(context.resource_budget().workers()),
+            context.execution_control,
+        );
+        #[cfg(target_arch = "wasm32")]
+        let searched = self
+            .query
+            .search(context.execution_control)
+            .map_err(RecoveryBuildParallelError::from);
+        let report = match searched {
             Ok(report) => report,
             Err(error) => {
                 let input = matches!(
-                    error,
-                    RecoveryBuildError::InvalidHeight
-                        | RecoveryBuildError::BoardOutsideField
-                        | RecoveryBuildError::MiddleOverlapsStart
-                        | RecoveryBuildError::ResultOverlapsRetainedMiddle
-                        | RecoveryBuildError::TargetAreaNotTetrominoes
-                        | RecoveryBuildError::EmptySupply
-                        | RecoveryBuildError::InvalidSupplyPattern
-                        | RecoveryBuildError::UnsupportedRuleProfile
+                    &error,
+                    RecoveryBuildParallelError::Search(
+                        RecoveryBuildError::InvalidHeight
+                            | RecoveryBuildError::BoardOutsideField
+                            | RecoveryBuildError::MiddleOverlapsStart
+                            | RecoveryBuildError::ResultOverlapsRetainedMiddle
+                            | RecoveryBuildError::TargetAreaNotTetrominoes
+                            | RecoveryBuildError::EmptySupply
+                            | RecoveryBuildError::InvalidSupplyPattern
+                            | RecoveryBuildError::UnsupportedRuleProfile
+                    )
                 );
                 return AppResponse::failed(
                     if input {
@@ -62,69 +75,75 @@ impl RunnableAppCommand for RecoveryBuildAppCommand {
                 );
             }
         };
-        let query = &self.query;
-        let identity = format!(
-            "{:x}",
-            Sha256::digest(format!("recovery-build.v2:{query:?}").as_bytes())
-        );
-        let public = RecoveryBuildPayload {
-            input_identity: identity,
-            height: query.fields.height,
-            start_board_mask: mask(query.fields.initial.words()),
-            middle_target_mask: mask(query.fields.middle.words()),
-            result_target_mask: mask(query.fields.result.words()),
-            first_supply: query.first_supply.clone(),
-            second_supply: query.second_supply.clone(),
-            early_limit: match query.early_limit {
-                CrossStageEarlyLimit::Auto => None,
-                CrossStageEarlyLimit::AtMost(n) => Some(n.to_string()),
-            },
-            allow_piece_exchange: query.allow_piece_exchange,
-            hold_enabled: query.hold_enabled,
-            preserve_b2b: query.preserve_b2b,
-            initial_b2b: query.initial_b2b,
-            rule_profile: query.rule_profile.as_str().to_owned(),
-            spin_profile: query.spin_profile.as_str().to_owned(),
-            complete: report.evaluated == report.possible,
-            pattern_count: report.possible.to_string(),
-            evaluated_pattern_count: report.evaluated.to_string(),
-            normal_count: report.normal_count.to_string(),
-            recovery_count: report.recovery_count.to_string(),
-            no_path_count: report.no_path_count.to_string(),
-            state_count: report.states.to_string(),
-            normal_probability: report.normal_probability.to_string(),
-            recovery_probability: report.recovery_probability.to_string(),
-            no_path_probability: report.no_path_probability.to_string(),
-            all_paths_enumerated: false,
-            examples: report
-                .normal_example
-                .as_ref()
-                .into_iter()
-                .chain(report.recovery_example.as_ref())
-                .map(example)
-                .collect(),
-        };
-        let fields = vec![
-            RenderField::new("contract", "recovery-build.v2"),
-            RenderField::new("pattern_count", public.pattern_count.clone()),
-            RenderField::new("normal_count", public.normal_count.clone()),
-            RenderField::new("recovery_count", public.recovery_count.clone()),
-            RenderField::new("no_path_count", public.no_path_count.clone()),
-            RenderField::new("complete", public.complete),
-        ];
-        AppResponse::success(AppRenderModel::BoundaryRecovery(AppMessage::new(
-            AppResultKind::BoundaryRecovery,
-            fields,
-        )))
-        .with_public_product_result(
-            ProductResultPayload::new(
-                "recovery-build.v2",
-                "recovery-build",
-                ProductResultPayloadContent::RecoveryBuild(public),
-            ),
-            None,
-        )
+        recovery_build_response(&self.query, report)
     }
+}
+
+pub(crate) fn recovery_build_response(
+    query: &RecoveryBuildQuery,
+    report: RecoveryBuildPopulation,
+) -> AppResponse {
+    let identity = format!(
+        "{:x}",
+        Sha256::digest(format!("recovery-build.v2:{query:?}").as_bytes())
+    );
+    let public = RecoveryBuildPayload {
+        input_identity: identity,
+        height: query.fields.height,
+        start_board_mask: mask(query.fields.initial.words()),
+        middle_target_mask: mask(query.fields.middle.words()),
+        result_target_mask: mask(query.fields.result.words()),
+        first_supply: query.first_supply.clone(),
+        second_supply: query.second_supply.clone(),
+        early_limit: match query.early_limit {
+            CrossStageEarlyLimit::Auto => None,
+            CrossStageEarlyLimit::AtMost(n) => Some(n.to_string()),
+        },
+        allow_piece_exchange: query.allow_piece_exchange,
+        hold_enabled: query.hold_enabled,
+        preserve_b2b: query.preserve_b2b,
+        initial_b2b: query.initial_b2b,
+        rule_profile: query.rule_profile.as_str().to_owned(),
+        spin_profile: query.spin_profile.as_str().to_owned(),
+        complete: report.evaluated == report.possible,
+        pattern_count: report.possible.to_string(),
+        evaluated_pattern_count: report.evaluated.to_string(),
+        normal_count: report.normal_count.to_string(),
+        recovery_count: report.recovery_count.to_string(),
+        no_path_count: report.no_path_count.to_string(),
+        state_count: report.states.to_string(),
+        normal_probability: report.normal_probability.to_string(),
+        recovery_probability: report.recovery_probability.to_string(),
+        no_path_probability: report.no_path_probability.to_string(),
+        all_paths_enumerated: false,
+        examples: report
+            .normal_example
+            .as_ref()
+            .into_iter()
+            .chain(report.recovery_example.as_ref())
+            .map(example)
+            .collect(),
+    };
+    let fields = vec![
+        RenderField::new("contract", "recovery-build.v2"),
+        RenderField::new("pattern_count", public.pattern_count.clone()),
+        RenderField::new("normal_count", public.normal_count.clone()),
+        RenderField::new("recovery_count", public.recovery_count.clone()),
+        RenderField::new("no_path_count", public.no_path_count.clone()),
+        RenderField::new("complete", public.complete),
+    ];
+    AppResponse::success(AppRenderModel::BoundaryRecovery(AppMessage::new(
+        AppResultKind::BoundaryRecovery,
+        fields,
+    )))
+    .with_public_product_result(
+        ProductResultPayload::new(
+            "recovery-build.v2",
+            "recovery-build",
+            ProductResultPayloadContent::RecoveryBuild(public),
+        ),
+        None,
+    )
 }
 fn mask(words: [u64; 4]) -> String {
     format!(
