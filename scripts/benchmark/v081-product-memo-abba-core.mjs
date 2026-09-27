@@ -1,4 +1,39 @@
 // Explicit local-only layout selection. Never inherit a caller's A/B flags.
+export function workerMemoBenchmarkCase(id = 'pc-p7p4-srs-plus') {
+  const common = {
+    compare_fields: ['summary.unique_solution_count', 'summary.normalized_solution_set_hash',
+      'summary.count_complete', 'summary.packing_candidate_set_digest'],
+  };
+  if (id === 'pc-p7p4-srs-plus') return {
+    ...common, id, size: 'large',
+    args: ['pc', '--board-mask', '0', '--height', '4', '--pieces', '10', '--lines', '4',
+      '--patterns', 'P7P4', '--count', 'unique', '--backend', 'cpu', '--no-tablebase'],
+    expected: { 'summary.unique_solution_count': 456923,
+      'summary.normalized_solution_set_hash': 'cts1:98ebe8726537b29f', 'summary.count_complete': true },
+  };
+  if (id === 'pc-existing-field-p7-srs-plus') return {
+    ...common, id, size: 'small',
+    args: ['pc', '--board-mask', '0x3c0f03c0f', '--height', '4', '--pieces', '6', '--lines', '4',
+      '--patterns', 'P7', '--count', 'unique', '--backend', 'cpu', '--no-tablebase'],
+    expected: { 'summary.unique_solution_count': 246,
+      'summary.normalized_solution_set_hash': 'cts1:cb0b19c391d5003e', 'summary.count_complete': true },
+  };
+  throw new Error('unknown fixed worker memo benchmark case');
+}
+
+export function assertProductMemoCaseSelection(summary, selection, entry) {
+  assertProductMemoSelection(summary, selection, {
+    requirePromotion: selection.layout === 'adaptive' && entry.size === 'large',
+  });
+  if (selection.layout === 'adaptive' && entry.size === 'small' &&
+      (summary.standard_bag_product_memo_layout !== 'flat' ||
+       Number(summary.standard_bag_product_memo_directory_bytes) !== 0 ||
+       Number(summary.standard_bag_product_memo_promotion_attempts) !== 0 ||
+       Number(summary.standard_bag_product_memo_promotions) !== 0)) {
+    throw new Error('small adaptive case acquired State-major directory or promotion work');
+  }
+}
+
 export function productMemoAbbaSelection(candidate, arm) {
   if (!['compact', 'state-major', 'adaptive'].includes(candidate)) throw new Error('candidate must be compact, state-major or adaptive');
   if (!['baseline', 'treatment'].includes(arm)) throw new Error('unknown product memo A/B arm');

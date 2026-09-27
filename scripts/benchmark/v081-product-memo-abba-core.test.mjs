@@ -1,6 +1,44 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { assertProductMemoSelection, productMemoAbbaEnvironment, productMemoAbbaSelection } from './v081-product-memo-abba-core.mjs';
+import { assertProductMemoCaseSelection, assertProductMemoSelection, productMemoAbbaEnvironment, productMemoAbbaSelection, workerMemoBenchmarkCase } from './v081-product-memo-abba-core.mjs';
+
+test('small and large fixed cases preserve exact input and completeness oracles', () => {
+  const large = workerMemoBenchmarkCase();
+  const small = workerMemoBenchmarkCase('pc-existing-field-p7-srs-plus');
+  assert.equal(large.size, 'large');
+  assert.equal(large.expected['summary.unique_solution_count'], 456923);
+  assert.equal(small.size, 'small');
+  assert.equal(small.expected['summary.unique_solution_count'], 246);
+  assert(small.args.includes('0x3c0f03c0f'));
+  assert(small.args.includes('P7'));
+  for (const entry of [large, small]) {
+    assert(entry.args.includes('--no-tablebase'));
+    assert(!entry.args.includes('--max-candidates'));
+    assert(entry.compare_fields.includes('summary.packing_candidate_set_digest'));
+    assert.equal(entry.expected['summary.count_complete'], true);
+  }
+  assert.throws(() => workerMemoBenchmarkCase('arbitrary-input'));
+});
+
+test('adaptive case guard proves both tiny flat retention and large migration', () => {
+  const selected = productMemoAbbaSelection('adaptive', 'treatment');
+  const small = { standard_bag_product_memo_policy: 'adaptive',
+    standard_bag_product_memo_layout: 'flat', standard_bag_memo_storage: 'reference',
+    standard_bag_product_memo_storage: 'reference', standard_bag_union_memo_storage: 'reference',
+    standard_bag_product_memo_promotion_attempts: 0, standard_bag_product_memo_promotions: 0,
+    standard_bag_product_memo_directory_bytes: 0 };
+  const entry = workerMemoBenchmarkCase('pc-existing-field-p7-srs-plus');
+  assert.doesNotThrow(() => assertProductMemoCaseSelection(small, selected, entry));
+  assert.throws(() => assertProductMemoCaseSelection({ ...small, standard_bag_product_memo_directory_bytes: 1 }, selected, entry), /small adaptive/);
+  assert.throws(() => assertProductMemoCaseSelection({ ...small, standard_bag_product_memo_promotion_attempts: 1 }, selected, entry), /small adaptive/);
+  assert.throws(() => assertProductMemoCaseSelection(small, selected, workerMemoBenchmarkCase()), /promotion/);
+  const large = { ...small, standard_bag_product_memo_layout: 'state-major',
+    standard_bag_product_memo_storage: 'state-major', standard_bag_memo_storage: 'state-major',
+    standard_bag_product_memo_promotion_attempts: 11, standard_bag_product_memo_promotions: 11,
+    standard_bag_product_memo_directory_bytes: 5857280 };
+  assert.doesNotThrow(() => assertProductMemoCaseSelection(large, selected, workerMemoBenchmarkCase()));
+  assert.throws(() => assertProductMemoCaseSelection(large, selected, entry), /small adaptive/);
+});
 
 test('state-major changes only product layout while both arms retain reference union storage', () => {
   assert.deepEqual(productMemoAbbaSelection('state-major', 'baseline'), { storage: 'reference', layout: 'flat', label: 'reference' });

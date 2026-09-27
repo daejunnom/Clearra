@@ -9,19 +9,9 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { abbaSchedule, assertWorkerExecution, semanticIdentity, sampleFitsRemainingLease } from './v081-accelerator-abba-core.mjs';
 import { PRIVATE_WORKER_MEMORY_SCOPE, readWorkerMemoryAccounting } from './v081-worker-memory-accounting.mjs';
-import { assertProductMemoSelection, productMemoAbbaEnvironment, productMemoAbbaSelection } from './v081-product-memo-abba-core.mjs';
+import { assertProductMemoCaseSelection, productMemoAbbaEnvironment, productMemoAbbaSelection, workerMemoBenchmarkCase } from './v081-product-memo-abba-core.mjs';
 
 const BYTE_LIMIT = 8 * 1024 * 1024;
-const CASE = {
-  id: 'pc-p7p4-srs-plus',
-  args: ['pc', '--board-mask', '0', '--height', '4', '--pieces', '10', '--lines', '4',
-    '--patterns', 'P7P4', '--count', 'unique', '--backend', 'cpu', '--no-tablebase'],
-  compare_fields: ['summary.unique_solution_count', 'summary.normalized_solution_set_hash',
-    'summary.count_complete', 'summary.packing_candidate_set_digest'],
-  expected: { 'summary.unique_solution_count': 456923,
-    'summary.normalized_solution_set_hash': 'cts1:98ebe8726537b29f', 'summary.count_complete': true },
-};
-
 try { await main(process.argv.slice(2)); } catch (error) {
   process.stderr.write(`[worker-memo-abba] ${error.message}\n`);
   process.exitCode = 1;
@@ -36,7 +26,7 @@ async function main(argv) {
     throw new Error('the finite orchestrator requires runtime run --profile local-service; samples use benchmark-search');
   }
   const options = {};
-  const allowed = new Set(['--binary', '--manager', '--owner-root', '--source-root', '--output', '--workers', '--timeout-seconds', '--candidate']);
+  const allowed = new Set(['--binary', '--manager', '--owner-root', '--source-root', '--output', '--workers', '--timeout-seconds', '--candidate', '--case', '--rounds']);
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i], value = argv[i + 1];
     if (!allowed.has(key) || value === undefined || Object.hasOwn(options, key)) throw new Error('distinct known option/value pairs required');
@@ -48,6 +38,12 @@ async function main(argv) {
   const workers = Number(options['--workers'] ?? '11');
   const timeout = Number(options['--timeout-seconds'] ?? '1800');
   const candidate = options['--candidate'] ?? 'compact';
+  const entry = workerMemoBenchmarkCase(options['--case']);
+  const rounds = Number(options['--rounds'] ?? '1');
+  if (!Number.isSafeInteger(rounds) || rounds < 1 || rounds > (entry.size === 'small' ? 2 : 1)) {
+    throw new Error('finite memo suite supports one large round or up to two small rounds');
+  }
+  const schedule = abbaSchedule(rounds);
   productMemoAbbaSelection(candidate, 'treatment');
   if (!Number.isSafeInteger(workers) || workers < 1 || workers > os.availableParallelism() ||
       !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 1800) throw new Error('invalid worker count or finite sample timeout');
@@ -60,14 +56,18 @@ async function main(argv) {
   if (fs.existsSync(output)) throw new Error('output directory must be new; never overwrite an earlier receipt');
   fs.mkdirSync(output, { recursive: true });
   const manifest = {
-    schema: 'clearra.worker-memo-abba.v3', authority: 'local-only-comparison-not-release',
+    schema: 'clearra.worker-memo-abba.v4', authority: 'local-only-comparison-not-release',
     source_revision: checkedCommand('git', ['rev-parse', 'HEAD'], source).trim(),
     tracked_patch_sha256: sha(checkedCommand('git', ['diff', '--no-ext-diff', '--binary', '--', 'crates', 'tools/clearra-pc4-qualifier'], source)),
     untracked_source: checkedCommand('git', ['ls-files', '--others', '--exclude-standard', '--', 'crates', 'tools/clearra-pc4-qualifier'], source)
       .trim().split(/\r?\n/).filter(path => path.endsWith('.rs')).map(path => ({ path, sha256: sha(fs.readFileSync(join(source, path))) })),
     binary_sha256: sha(fs.readFileSync(binary)), workers_requested: workers,
-    timeout_seconds_per_sample: timeout, input: CASE, candidate,
-    order: ['reference', candidate, candidate, 'reference'],
+    timeout_seconds_per_sample: timeout, input: entry, candidate, rounds,
+    order: schedule.map(slot => productMemoAbbaSelection(candidate, slot.arm).label),
+    harness_files: ['run-worker-memo-abba.mjs', 'v081-product-memo-abba-core.mjs',
+      'v081-accelerator-abba-core.mjs', 'v081-worker-memory-accounting.mjs'].map(name => ({
+      path: `scripts/benchmark/${name}`, sha256: sha(fs.readFileSync(new URL(name, import.meta.url))),
+    })),
     memo_selections: { baseline: productMemoAbbaSelection(candidate, 'baseline'), treatment: productMemoAbbaSelection(candidate, 'treatment') },
     timing_scope: 'supervisor-start-through-solver-exit',
     peak_metric: process.platform === 'win32' ? 'job-object-aggregate-commit-bytes' : 'supervisor-owned-tree-memory-bytes',
@@ -91,16 +91,21 @@ async function main(argv) {
     if (checked.code !== 0 || checked.overflow) throw new Error(`memo ${arm} preflight failed without starting the timed suite`);
     const value = JSON.parse(checked.stdout.split(/(?:^|\r?\n)clearra_runtime_receipt=/)[0].trim());
     assert.equal(value.summary.backend_selected, 'wasm-cpu');
-    assertProductMemoSelection(value.summary, selected);
-    if (candidate === 'adaptive' && arm === 'treatment') {
-      assert.equal(value.summary.standard_bag_product_memo_layout, 'flat');
-      assert.equal(Number(value.summary.standard_bag_product_memo_directory_bytes), 0);
-      assert.equal(Number(value.summary.standard_bag_product_memo_promotions), 0);
-    }
+    semanticIdentity(value, workerMemoBenchmarkCase('pc-existing-field-p7-srs-plus'));
+    assertWorkerExecution({ reported_workers_used: Number(value.summary.workers_used),
+      parallel_active_workers: Number(value.summary.parallel_active_workers),
+      cpu_parallel_execution: value.summary.cpu_parallel_execution === true ||
+        value.summary.cpu_parallel_execution === 'true' }, 2, true);
+    assertProductMemoCaseSelection(value.summary, selected,
+      workerMemoBenchmarkCase('pc-existing-field-p7-srs-plus'));
+    const receipt = executionReceipt(checked);
+    assertNormalReceipt(checked, receipt.outcome);
+    write(`preflight-${arm}.json`, { value, supervisor_receipt: receipt.path,
+      outcome: receipt.outcome, command_args: args, excluded_from_timing: true });
   }
   const samples = [];
   let identity, runtimeIdentity, failure;
-  for (const slot of abbaSchedule(1)) {
+  for (const slot of schedule) {
     if (!sampleFitsRemainingLease(Math.ceil(performance.now() - started),
       timeout * 1_000, manifest.outer_lease_ms, 30_000)) {
       failure = 'outer-lease-budget-exhausted-before-sample-admission';
@@ -108,35 +113,40 @@ async function main(argv) {
     }
     const selection = productMemoAbbaSelection(candidate, slot.arm);
     const storage = selection.label;
-    const args = ['--format', 'json', '--lang', 'en', ...CASE.args,
+    const args = ['--format', 'json', '--lang', 'en', ...entry.args,
       '--rule', 'srs-plus', '--workers', String(workers), '--no-legal-board', '--no-conditioned-reachability'];
-    process.stderr.write(`[worker-memo-abba] ${slot.slot}/4 ${storage} started\n`);
+    const sampleId = `${slot.round}-${slot.slot}-${storage}`;
+    process.stderr.write(`[worker-memo-abba] ${entry.id} ${sampleId} started\n`);
     const execution = await invoke(manager, ['runtime', 'run', '--producer', 'benchmark', '--profile', 'benchmark-search',
       '--timeout', String(timeout), '--', binary, ...args], owner,
       productMemoAbbaEnvironment(process.env, selection));
     const sample = { ...slot, storage, memo_selection: selection, state: 'invalid', reason: null, wall_ms: execution.wallMs, command_args: args };
     try {
-      const match = `${execution.stdout}\n${execution.stderr}`.match(/(?:^|\n)clearra_runtime_receipt=([^\r\n]+)/);
-      if (!match || execution.overflow) throw new Error('missing supervisor receipt or bounded output overflow');
-      const receipt = JSON.parse(fs.readFileSync(match[1].trim(), 'utf8'));
+      const receipt = executionReceipt(execution);
       const outcome = receipt.outcome;
-      sample.supervisor_receipt = match[1].trim();
+      sample.supervisor_receipt = receipt.path;
       sample.peak_memory_bytes = outcome.peak_memory_bytes;
       sample.supervisor_duration_ms = outcome.duration_ms;
       sample.memory_pressure_events = outcome.memory_pressure_events;
       sample.performance_adoption_eligible = outcome.memory_pressure_events === 0;
-      if (execution.code !== 0 || outcome.return_code !== 0 || outcome.reason !== 'normal' || !outcome.process_tree_stopped) {
+      try { assertNormalReceipt(execution, outcome); } catch (error) {
         sample.state = outcome.reason === 'timeout' || outcome.reason.includes('memory') ? 'censored' : 'invalid';
-        throw new Error(`supervisor rejected sample: ${outcome.reason}`);
+        throw error;
       }
       const value = JSON.parse(execution.stdout.split(/(?:^|\r?\n)clearra_runtime_receipt=/)[0].trim());
-      sample.semantic_identity = semanticIdentity(value, CASE);
+      sample.semantic_identity = semanticIdentity(value, entry);
       const summary = value.summary;
       sample.reported_workers_used = Number(summary.workers_used);
       sample.parallel_active_workers = Number(summary.parallel_active_workers);
       sample.cpu_parallel_execution = summary.cpu_parallel_execution === true || summary.cpu_parallel_execution === 'true';
       assertWorkerExecution(sample, workers, true);
-      assertProductMemoSelection(summary, selection, { requirePromotion: candidate === 'adaptive' && slot.arm === 'treatment' });
+      assertProductMemoCaseSelection(summary, selection, entry);
+      sample.memo_activity = {
+        policy: summary.standard_bag_product_memo_policy,
+        layout: summary.standard_bag_product_memo_layout,
+        promotion_attempts: Number(summary.standard_bag_product_memo_promotion_attempts),
+        promotions: Number(summary.standard_bag_product_memo_promotions),
+      };
       assert.equal(Number(summary.candidate_digest_retained_bytes), 0);
       assert.equal(Number(summary.legal_board_verified_negative_prunes), 0);
       assert.equal(Number(summary.reachability_conditioned_complete_hits), 0);
@@ -147,14 +157,14 @@ async function main(argv) {
       assert.deepEqual(sample.semantic_identity, identity);
       assert.deepEqual(value.runtime_identity, runtimeIdentity);
       sample.state = 'complete';
-      write(`${slot.slot}-${storage}.json`, value);
+      write(`${sampleId}.json`, value);
     } catch (error) {
       sample.reason = error.message;
       failure = error.message;
     }
     samples.push(sample);
     write('samples.json', samples);
-    process.stderr.write(`[worker-memo-abba] ${slot.slot}/4 ${storage} ${sample.state}\n`);
+    process.stderr.write(`[worker-memo-abba] ${entry.id} ${sampleId} ${sample.state}\n`);
     if (sample.state !== 'complete') break;
   }
   if (sha(fs.readFileSync(binary)) !== manifest.binary_sha256) failure ??= 'binary changed within A/B';
@@ -175,6 +185,17 @@ async function main(argv) {
 
 function sha(value) { return createHash('sha256').update(value).digest('hex'); }
 function mean(values) { return values.length ? values.reduce((total, value) => total + value, 0) / values.length : null; }
+function executionReceipt(execution) {
+  const match = `${execution.stdout}\n${execution.stderr}`.match(/(?:^|\n)clearra_runtime_receipt=([^\r\n]+)/);
+  if (!match || execution.overflow) throw new Error('missing supervisor receipt or bounded output overflow');
+  const path = match[1].trim();
+  return { ...JSON.parse(fs.readFileSync(path, 'utf8')), path };
+}
+function assertNormalReceipt(execution, outcome) {
+  if (execution.code !== 0 || outcome.return_code !== 0 || outcome.reason !== 'normal' || !outcome.process_tree_stopped) {
+    throw new Error(`supervisor rejected sample: ${outcome.reason}`);
+  }
+}
 function checkedCommand(command, args, cwd) {
   const run = spawnSync(command, args, { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: BYTE_LIMIT, windowsHide: true });
   if (run.status !== 0) throw new Error(`preflight failed: ${command} ${args[0]}`);

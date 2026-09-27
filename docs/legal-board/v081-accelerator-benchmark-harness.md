@@ -157,3 +157,35 @@ state-major row는 `(depth, normalized bag, hold)`를 한 번 저장하고 full
 복원하며, logical recycle trigger는 기존 12B/key 추정 그대로다. entry 표현만
 줄였다는 이유로 총 RSS 절감이나 더 빠른 실행을 주장하지 않는다. 이 후보는
 local-search-ab에서만 제공하며 새 binary의 별도 ABBA 이전에 기본값으로 채택하지 않는다.
+
+## 2026-09-27 동적 product memo 검증
+
+후속 `adaptive` 정책은 새 요청을 flat으로 시작하고 실제 live entry 비용이 충분할
+때만 State-major로 전환한다. 제품의 동적 기본 정책과 달리, 강제 flat/State-major 및
+compact 선택 환경변수는 여전히 `local-search-ab` 전용이다. 위 v3의 강제 후보 기록은
+역사 증거로 보존하며 이 정책의 측정으로 재명명하지 않는다.
+
+v4 메모 하네스는 다음 고정 입력을 별도 suite로 지원한다.
+
+| `--case` | 입력 | 동적 treatment의 필수 증거 |
+| --- | --- | --- |
+| `pc-p7p4-srs-plus` (기본값) | 빈 필드 4L, 10개 배치, P7P4 | 실제 promotion이 1회 이상, 456,923개 완결 결과 |
+| `pc-existing-field-p7-srs-plus` | 기존 필드 `0x3c0f03c0f`, 4L, 6개 배치, P7 | flat 유지, directory/attempt/promotion 0, 246개 완결 결과 |
+
+`--candidate adaptive`에서 정책 label과 실제 layout을 구분한다. 워커별 크기가 다르면
+실제 layout은 `mixed`일 수 있으며 promotion 수와 일관될 때만 인정한다. 작은 입력도
+timed sample마다 요청한 워커 수와 실제 CPU parallel 실행을 검사한다. 2-worker tiny
+preflight는 별도 저장하지만 측정 평균에 넣지 않는다.
+
+큰 suite는 `--rounds 1`만, 작은 suite는 `--rounds 1|2`를 허용한다. 두 번째 작은
+round는 BAAB로 순서를 반전하고 `(round, slot, storage)` 파일명으로 기존 표본을
+덮어쓰지 않는다. 각 sample의 timeout은 그대로 보존하며 남은 outer lease가 부족하면
+새 sample을 시작하지 않는다. 11-worker P7P4는 1,800초/sample 계약을 유지한다.
+
+영수증에는 solver binary/source와 함께 하네스 파일들의 SHA256을 기록한다. 같은
+suite 동안 binary를 교체하지 않는다. preflight와 timed sample 모두 정상 감독 종료와
+전체 tree 정지를 요구하며 pressure가 발생한 표본은 clean 성능 채택에서 제외한다.
+OS peak는 Windows Job Object의 aggregate commit bytes, private/shared 표는 종료 시
+논리 retained bytes다. 둘을 working set 또는 active asset peak로 바꿔 부르지 않는다.
+작은 입력의 supervisor-start-through-exit wall time은 시작/종료 비용을 포함하므로
+순수 solver 시간이나 p95 회귀 5% gate를 단독으로 증명하지 않는다.

@@ -213,3 +213,57 @@ worker/epoch-local namespace이므로 동일 numeric key만으로 전역 공유�
 완료한 강제 State-major 및 두 accelerator의 이전 ABBA는 재실행하거나 새 정책의
 성능 증거로 재명명하지 않는다. v0.8.1의 p95/shared-memory/surface/release gate는
 여전히 Open이며 main, Pages, 4194, v0.9.0 TB는 이 변경으로 갱신하지 않는다.
+
+## 동적 State-major의 실제 native 완주 검증
+
+solver 소스 `abc5230a43800686152bacd25b022be322fb2db8`의 비게시 CI
+[`36313061153`](https://github.com/daejunnom/Clearra/actions/runs/36313061153)는
+Core, native-products, wasm-abi, surfaces 네 job 모두 성공했다. Linux WASM typecheck
+및 bounded ABI 계약의 증거이며 실제 브라우저 runtime 또는 release acceptance가 아니다.
+이후 하네스/문서 변경은 solver Rust 소스를 바꾸지 않는다.
+
+새 로컬 native binary SHA256은
+`a1cbf982538fc3f562b527f72fcff0472e46b12c6d3b24ef513bd15fe0a86b25`다.
+같은 binary로 11-worker 작은 P7의 ABBA+BAAB와 빈 필드 4L SRS+ P7P4 ABBA를
+순서대로 실행했다. TB, legal-board, conditioned relation은 모두 비활성했다.
+비교 중 binary와 하네스 해시는 바뀌지 않았으며 tracked Rust patch는 없었다.
+
+| 입력 / arm | 완료 수 | 평균 supervisor-start-through-exit | 평균 aggregate commit peak | 동적 전환 증거 |
+| --- | ---: | ---: | ---: | --- |
+| 기존 필드 P7 / flat | 4 | 92.705ms | 67.620MiB | flat, directory 0 |
+| 기존 필드 P7 / adaptive | 4 | 93.972ms | 67.759MiB | flat, attempts/promotions/directory 모두 0 |
+| P7P4 / flat | 2 | 121.009s | 6.466GiB | flat, promotions 0 |
+| P7P4 / adaptive | 2 | 117.548s | 5.830GiB | 각 표본 attempts 11, promotions 11, 실제 State-major |
+
+모든 timed sample은 실제/활성 보고 워커 11, CPU parallel 실행, 정상 inner 감독 종료와
+tree 정지를 통과했다. 작은 입력은 246개와 `cts1:cb0b19c391d5003e`, 후보 집합 digest
+`270b7d6056dacf2d`가 일치했다. 큰 입력은 456,923개와 `cts1:98ebe8726537b29f`, 후보
+집합 digest `d6715a89054ef642`가 일치했다. 이 집합 증거를 전체 canonical 출력 순서
+또는 모든 surface parity로 확대하지 않는다.
+
+큰 입력의 평균 commit peak는 9.839%, private exit retained bytes는
+5.579→5.140GiB로 7.865% 감소했다. product memo payload는 평균 1,232→763.465MiB이며
+adaptive directory 5.586MiB를 포함하면 37.577% 감소했다. union payload 평균은 두 arm
+모두 2,352MiB로 남아 있다. shared immutable request table은 36,272 bytes를 한 번만
+계수하며 worker 수를 곱하지 않는다. 이 지표는 asset active-session 128MiB gate와 별개다.
+
+작은 입력 pressure는 8회 모두 0이다. 큰 flat 표본은 각각 3/2회, adaptive는 0/0회였고
+outer Node supervisor에도 pressure 4회와 해당 GC acknowledgement 4회가 있었다.
+outer/inner 이벤트는 중복 가능성이 있어 합쳐 unique pressure 횟수로 표현하지 않는다.
+따라서 관측 평균 시간의 2.861% 개선, 작은 입력의 1.367% 차이는 p95 성능 채택 권위가
+아니다. 적은 표본 수와 압력 차이 때문에 기존 gate는 Open이다. 과거 forced State-major
+및 accelerator ABBA는 이 측정의 arm 또는 표본으로 섞지 않는다.
+
+Cargo는 17m43s에 release 컴파일을 완료했지만 build 감독 영수증
+`1790515946486317800-37788-runtime.json`은 root 종료 뒤 descendant 1개를 이유로
+`tree-not-stopped`/125를 기록했다. 정리 후 `process_tree_stopped=true`이고 실제 Cargo,
+rustc, solver 프로세스가 남지 않았음을 확인했다. build pressure 7회는 모두 회복됐지만
+non-Node Cargo의 GC acknowledgement는 0이다. 실패 영수증을 정상 빌드 acceptance로
+재분류하거나 resource 변경 재시도하지 않았다. 새 binary는 로컬 비교용이며 runtime
+identity도 `unverified-local-build`다. 정상 root 종료 뒤 finite drain 검증은 별도 Open이다.
+
+원시 manifest/sample/CLI JSON과 검토 보고서는 선언된 로컬
+`_local/artifacts/v081-adaptive-memo-abba-20260927/`에만 보관한다. 이번 변경은 실제
+동적 전환과 메모리 방향을 검증한 상태이며 release, main fast-forward, 4194 갱신이나
+v0.9.0 TB 재개를 의미하지 않는다. 후속 우선순위는 worker/epoch-private union memo의
+크기 비용과 conditioned miss/exit composition 비용을 분리해 개선하는 것이다.
