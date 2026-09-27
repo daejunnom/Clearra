@@ -133,6 +133,7 @@ test('real WASM realms use one ordinary build and unchanged packs independently 
   assert.ok(job.includes('gh release download conditioned-data-v081-20260924-rc1 --repo daejunnom/Clearra'));
   for (const profile of ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']) {
     assert.ok(job.includes(`--pattern 'conditioned-${profile}.cllr'`));
+    assert.ok(job.includes(`--pattern 'legal-board-${profile}-v2.cllb'`));
   }
   assert.ok(job.includes('node --test apps/clearra-web/test/realAcceleratorRealms.test.mjs'));
   const testSource = readFileSync(new URL('../../apps/clearra-web/test/realAcceleratorRealms.test.mjs', import.meta.url), 'utf8');
@@ -140,6 +141,54 @@ test('real WASM realms use one ordinary build and unchanged packs independently 
   assert.ok(testSource.includes('new Worker(new URL(import.meta.url)'));
   assert.ok(testSource.includes('clearraWasmBuildContractsEqual'));
   assert.ok(testSource.includes('clearra_wasm_accelerator_peer_answer'));
+  assert.ok(testSource.includes('clearra_wasm_accelerator_export_negative_synopsis'));
+  assert.ok(testSource.includes('clearra_wasm_accelerator_admit_negative_synopsis'));
   assert.ok(testSource.includes('clearra_wasm_start_job'));
   assert.ok(testSource.includes('totalBatches > 0'));
+});
+
+test('native compute smoke uses a real current-source CLI without image or release authority', () => {
+  const job = workflow.slice(workflow.indexOf('\n  native-products:'), workflow.indexOf('\n  wasm-abi:'));
+  assert.ok(job.includes('CLEARRA_SOURCE_COMMIT: ${{ github.sha }}'));
+  assert.ok(job.includes('CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}'));
+  assert.ok(job.includes('node-version: 22.23.2'));
+  const smoke = job.slice(job.indexOf('- name: Build one ordinary CLI'));
+  assert.equal(smoke.split('cargo build --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime').length - 1, 1);
+  assert.ok(smoke.includes('CLEARRA_REAL_COMPUTE_SOURCE_COMMIT: ${{ github.sha }}'));
+  assert.ok(smoke.includes('CLEARRA_REAL_COMPUTE_MODE: provision'));
+  assert.ok(smoke.includes('test "$CLEARRA_REAL_COMPUTE_ASSET_ROOT" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke"'));
+  assert.ok(smoke.includes('node --test apps/clearra-discord-bot/test/realComputeAccelerators.test.mjs'));
+  const readonly = smoke.slice(smoke.indexOf('- name: Recheck the same native data layer read-only'));
+  assert.ok(readonly.includes('test "$CLEARRA_REAL_COMPUTE_ASSET_ROOT" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke"'));
+  assert.ok(readonly.includes('chmod -R a-w "$CLEARRA_REAL_COMPUTE_ASSET_ROOT"'));
+  assert.ok(readonly.includes('sudo --user=nobody -- test ! -w "$CLEARRA_REAL_COMPUTE_ASSET_ROOT"'));
+  assert.ok(readonly.includes('sudo --user=nobody -- "$node_binary"'));
+  assert.ok(readonly.includes('verify 0.8.1 "$CLEARRA_REAL_COMPUTE_CLI" "$CLEARRA_REAL_COMPUTE_ASSET_ROOT"'));
+  assert.ok(!readonly.includes(' provision '));
+  assert.ok(!smoke.includes('local-search-ab'));
+  assert.ok(!smoke.includes('docker '));
+  assert.ok(!smoke.includes('gcloud '));
+  assert.ok(!smoke.includes('qualification-receipt'));
+  const testSource = readFileSync(new URL('../../apps/clearra-discord-bot/test/realComputeAccelerators.test.mjs', import.meta.url), 'utf8');
+  assert.ok(testSource.includes("process.env.CLEARRA_REAL_COMPUTE_MODE ?? 'verify'"));
+  assert.ok(testSource.includes('skip: !executable && !assetRoot && !sourceCommit'));
+  assert.ok(testSource.includes("prepareComputeAccelerators({ mode, version: '0.8.1', executable, root: assetRoot })"));
+  assert.ok(testSource.includes("prepareComputeAccelerators({ mode: 'verify', version: '0.8.1', executable, root: assetRoot })"));
+  assert.ok(testSource.includes('installedSnapshot(), before'));
+  assert.ok(testSource.includes('value.runtime_identity?.source_commit, sourceCommit'));
+  assert.ok(testSource.includes('policyPairs.slice(1)'));
+  assert.ok(testSource.includes('Number(summary.legal_board_verified_negative_prunes) > 0'));
+  assert.ok(!testSource.includes('fakeCli('));
+  assert.ok(!testSource.includes('invoke:'));
+  const incompleteEnvironment = { ...process.env,
+    CLEARRA_REAL_COMPUTE_CLI: '', CLEARRA_REAL_COMPUTE_ASSET_ROOT: '',
+    CLEARRA_REAL_COMPUTE_SOURCE_COMMIT: 'f'.repeat(40) };
+  delete incompleteEnvironment.NODE_TEST_CONTEXT;
+  const incomplete = spawnSync(process.execPath, ['--test',
+    fileURLToPath(new URL('../../apps/clearra-discord-bot/test/realComputeAccelerators.test.mjs', import.meta.url))], {
+    env: incompleteEnvironment, encoding: 'utf8', timeout: 10_000, windowsHide: true,
+  });
+  assert.equal(incomplete.error, undefined);
+  assert.equal(incomplete.status, 1, 'an incomplete explicit setup must fail, not silently skip');
+  assert.match(incomplete.stdout, /# skipped 0/u);
 });

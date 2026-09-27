@@ -54,10 +54,10 @@ class ScalarRealm {
     new Uint8Array(this.raw.memory.buffer, this.raw.clearra_wasm_transfer_ptr() >>> 0,
       bytes.length).set(bytes);
   }
-  admit(profile, bytes, peer = false) {
+  admit(profile, bytes, peer = false, kind = 1) {
     this.transfer(bytes, peer);
     this.mutation(peer ? 'clearra_wasm_accelerator_peer_admit'
-      : 'clearra_wasm_accelerator_admit', ...(peer ? [profile, 1024 * 1024] : [1, profile, 1]));
+      : 'clearra_wasm_accelerator_admit', ...(peer ? [profile, 1024 * 1024] : [kind, profile, 1]));
   }
   run(command, cancel = false) {
     this.input(command);
@@ -125,7 +125,16 @@ class ScalarRealm {
       this.mutation('clearra_wasm_accelerator_peer_import', profile);
       return true;
     }
-    if (operation === 'remove') { this.mutation('clearra_wasm_accelerator_remove', 1, profile); return true; }
+    if (operation === 'synopsis') {
+      assert.ok(message.wire.length <= 256 * 1024);
+      this.transfer(message.wire, false);
+      this.mutation('clearra_wasm_accelerator_admit_negative_synopsis', profile);
+      return true;
+    }
+    if (operation === 'remove') {
+      this.mutation('clearra_wasm_accelerator_remove', message.kind ?? 1, profile);
+      return true;
+    }
     throw new Error(`unsupported smoke operation: ${operation}`);
   }
 }
@@ -189,6 +198,30 @@ async function exchange(owner, peer, profile) {
   throw new Error('the bounded peer queue did not drain');
 }
 
+let fixture;
+async function loadFixture() {
+  if (fixture) return fixture;
+  const repository = await realpath(fileURLToPath(new URL('../../../', import.meta.url)));
+  const root = await realpath(wasmRoot);
+  assert.equal(root, join(repository, '_local', 'artifacts', 'v081-browser-peer-smoke', 'wasm'));
+  const assets = await realpath(assetRoot);
+  assert.equal(assets, join(repository, '_local', 'artifacts', 'v081-peer-signed-smoke'));
+  const manifest = JSON.parse(await readFile(join(root, 'clearra_wasm.manifest.json'), 'utf8'));
+  assert.ok(clearraWasmBuildContractsEqual(manifest.build, await createClearraWasmBuildContract(repository)));
+  const artifact = async (entry, extension) => {
+    assert.match(entry.path, new RegExp(`^clearra_wasm(?:_bg)?\\.[0-9a-f]{24}\\.${extension}$`, 'u'));
+    const bytes = await readFile(join(root, entry.path));
+    assert.equal(bytes.length, entry.bytes);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), entry.sha256);
+    return bytes;
+  };
+  const wasm = await artifact(manifest.wasm, 'wasm');
+  await artifact(manifest.bindings, 'js');
+  fixture = { assets, bindings: pathToFileURL(join(root, manifest.bindings.path)).href,
+    compiled: await WebAssembly.compile(wasm), identity: manifest.build.runtime_identity };
+  return fixture;
+}
+
 if (!isMainThread) {
   const realm = await instantiate(workerData.bindings, workerData.compiled, workerData.identity);
   let queue = Promise.resolve();
@@ -203,25 +236,7 @@ if (!isMainThread) {
     skip: wasmRoot && assetRoot ? false : 'requires explicit current-source WASM and existing signed packs',
     timeout: 180_000
   }, async context => {
-    const repository = await realpath(fileURLToPath(new URL('../../../', import.meta.url)));
-    const root = await realpath(wasmRoot);
-    assert.equal(root, join(repository, '_local', 'artifacts', 'v081-browser-peer-smoke', 'wasm'));
-    const assets = await realpath(assetRoot);
-    assert.equal(assets, join(repository, '_local', 'artifacts', 'v081-peer-signed-smoke'));
-    const manifest = JSON.parse(await readFile(join(root, 'clearra_wasm.manifest.json'), 'utf8'));
-    assert.ok(clearraWasmBuildContractsEqual(manifest.build, await createClearraWasmBuildContract(repository)));
-    const artifact = async (entry, extension) => {
-      assert.match(entry.path, new RegExp(`^clearra_wasm(?:_bg)?\\.[0-9a-f]{24}\\.${extension}$`, 'u'));
-      const bytes = await readFile(join(root, entry.path));
-      assert.equal(bytes.length, entry.bytes);
-      assert.equal(createHash('sha256').update(bytes).digest('hex'), entry.sha256);
-      return bytes;
-    };
-    const wasm = await artifact(manifest.wasm, 'wasm');
-    await artifact(manifest.bindings, 'js');
-    const bindings = pathToFileURL(join(root, manifest.bindings.path)).href;
-    const compiled = await WebAssembly.compile(wasm);
-    const identity = manifest.build.runtime_identity;
+    const { assets, bindings, compiled, identity } = await loadFixture();
     const owner = await instantiate(bindings, compiled, identity);
     const peers = [new PeerClient(bindings, compiled, identity), new PeerClient(bindings, compiled, identity)];
     let totalBatches = 0;
@@ -261,6 +276,64 @@ if (!isMainThread) {
           `${totalBatches - startBatches} bounded peer query/reply batches`);
       }
       assert.ok(totalBatches > 0, 'real BuildUp must exercise peer query/reply, not only admission');
+    } finally { await Promise.all(peers.map(peer => peer.stop())); }
+  });
+
+  test('five real legal-board owners and bounded synopsis peers retain exact PC scope and results', {
+    skip: wasmRoot && assetRoot ? false : 'requires explicit current-source WASM and existing signed packs',
+    timeout: 180_000
+  }, async context => {
+    const { assets, bindings, compiled, identity } = await loadFixture();
+    const owner = await instantiate(bindings, compiled, identity);
+    const peers = [new PeerClient(bindings, compiled, identity), new PeerClient(bindings, compiled, identity)];
+    const inputs = [
+      ['eligible-empty-4L', '--lines 4 --height 4 --board-mask 0 --pieces 10 --queue IIOOOIIOOO --no-hold'],
+      ['outside-2L', '--lines 2 --height 2 --board-mask 0 --pieces 5 --queue IIOOO --no-hold'],
+      ['outside-initial-1L', '--lines 1 --height 1 --board-mask 0x3f --pieces 1 --queue I --no-hold'],
+      ['outside-initial-4L', '--lines 4 --height 4 --board-mask 0x3c0f03c0f --pieces 6 --patterns P7 --hold empty']
+    ];
+    const pc = (name, input, enabled) => `clearra pc ${input} --objective unique --count unique ` +
+      `--solution-probabilities --backend cpu --workers 1 --rule ${name} --no-tablebase ` +
+      `--no-conditioned-reachability ${enabled ? '--legal-board' : '--no-legal-board'}`;
+    try {
+      for (const name of profiles) {
+        const profile = profileIds[name];
+        const baseline = inputs.map(([, input]) => owner.run(pc(name, input, false)));
+        const bytes = await readFile(join(assets, `legal-board-${name}-v2.cllb`));
+        const plan = JSON.parse(new TextDecoder().decode(owner.mutation('clearra_wasm_accelerator_catalog', 0, profile)));
+        assert.equal(plan.state, 'qualified');
+        assert.equal(plan.profile, name);
+        assert.equal(bytes.length, plan.payload_bytes);
+        assert.equal(createHash('sha256').update(bytes).digest('hex'), plan.payload_identity);
+        owner.admit(profile, bytes, false, 0);
+        const wire = owner.mutation('clearra_wasm_accelerator_export_negative_synopsis', profile, 256 * 1024);
+        assert.ok(wire.length > 0 && wire.length <= 256 * 1024 && wire.length < bytes.length);
+        for (let index = 0; index < inputs.length; index++) {
+          assert.deepEqual(owner.run(pc(name, inputs[index][1], true)), baseline[index]);
+        }
+        for (const peer of peers) {
+          await assert.rejects(peer.call('synopsis', { profile: (profile + 1) % 5, wire }),
+            /legal_board_asset_not_qualified/u);
+          await peer.call('synopsis', { profile, wire });
+          const corrupt = wire.slice();
+          corrupt[corrupt.length - 1] ^= 1;
+          await assert.rejects(peer.call('synopsis', { profile, wire: corrupt }),
+            /legal_board_asset_not_qualified/u);
+          for (let index = 0; index < inputs.length; index++) {
+            assert.deepEqual(await peer.call('run', { command: pc(name, inputs[index][1], true) }), baseline[index]);
+          }
+          if (name === 'srs-plus') {
+            assert.deepEqual(await peer.call('run', { command: pc(name, inputs[0][1], true), cancel: true }), { cancelled: true });
+            assert.deepEqual(await peer.call('run', { command: pc(name, inputs[0][1], true) }), baseline[0]);
+          }
+          await peer.call('remove', { profile, kind: 0 });
+          assert.deepEqual(await peer.call('run', { command: pc(name, inputs[0][1], true) }), baseline[0]);
+        }
+        owner.mutation('clearra_wasm_accelerator_remove', 0, profile);
+        assert.deepEqual(owner.run(pc(name, inputs[0][1], true)), baseline[0]);
+        context.diagnostic(`${name}: ${wire.length} synopsis bytes; ` +
+          inputs.map(([scope], index) => `${scope}=${baseline[index].keys.length}`).join(', '));
+      }
     } finally { await Promise.all(peers.map(peer => peer.stop())); }
   });
 }
