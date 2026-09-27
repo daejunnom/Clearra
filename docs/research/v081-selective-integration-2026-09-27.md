@@ -127,3 +127,32 @@ native test family 하나가 실패하면 뒤의 독립된 CLI family와 bounded
 CI에서 나온 WASM complete-candidate constructor 2개 및 App의 bitmap-off encoding
 2개 dead-code 경고는 수정하지 않은 main 소스의 feature/target 조합이다. 검색 의미를
 바꾸거나 전역 lint suppression을 추가하지 않았으며 별도 정리 대상으로 기록한다.
+
+## 비게시 CI 통과와 Windows catalog 체크아웃 결함
+
+`896f3955801b4aba9e5a6cae3a8166d1b19d9daa`의
+[36303579824](https://github.com/daejunnom/Clearra/actions/runs/36303579824)는
+Core, native products, WASM ABI, surface contracts 네 job 모두 success다.
+이는 Linux의 집중 소스 검증이며 Windows 실제 제품 readback을 대신하지 않는다.
+
+이 소스의 native 11-worker P7P4 state-major/flat ABBA는 네 표본 모두 complete,
+456,923개 family와 full set/candidate identity가 일치했다. 평균 aggregate commit
+peak는 state-major가 9.10% 작았지만 A1의 memory pressure와 작은 입력의 directory
+overhead 때문에 제품 기본값 변경이나 성능 gate 통과로 처리하지 않는다.
+검토 요약과 원시 영수증은 선언된 로컬
+`_local/artifacts/v081-state-major-abba-20260927/`에만 보관한다.
+
+이어서 legal-board/conditioned ABBA는 Windows native asset `status` preflight에서
+`embedded signed catalog is invalid`로 중단됐다. timed sample, 다운로드, generation
+교체는 없었다. Git의 `core.autocrlf=true`가 public keyring 및 두 catalog의 checkout
+bytes에 CRLF를 만들었고, `include_str!`가 이를 그대로 포함한 것이 원인이다.
+LF 정규형의 catalog digest는 기존 qualified 자산의 identity와 정확히 동일하다.
+
+- legal-board: `2bfce644a9813cfe54fbc88ee376273f60cf1859c7856d25f6f180d4ff52e116`
+- conditioned: `5da97080db94441e67209b8295b82dd55041b9c8747b704ce104a4da4dd1fa12`
+
+세 파일에만 명시 `text eol=lf`를 적용하고, 실제 canonical bytes와 Windows autocrlf
+설정에서도 LF attribute가 우선함을 검사하는 집중 계약을 추가했다. 서명/검증 규칙,
+public key, catalog 내용, asset generation은 변경하지 않는다. 기존 두 CI 계약과
+새 두 계약은 로컬에서 4/4 통과했다. 수정된 executable의 native status와 가속기
+ABBA는 별도 후속 검증이며, 기존 Linux CI success를 이 수정의 success로 재사용하지 않는다.
