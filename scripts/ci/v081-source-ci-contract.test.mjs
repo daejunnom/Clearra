@@ -97,3 +97,22 @@ test('real App parity reuses one product-policy test binary and only the qualifi
   assert.ok(!smoke.includes('qualification-receipt'));
   assert.ok(!smoke.includes('continue-on-error:'));
 });
+
+test('real portfolio UI proof consumes a current-run fixture without delaying independent surfaces', () => {
+  assert.ok(workflow.includes('RUST_MIN_STACK: "16777216"'));
+  const producer = workflow.slice(workflow.indexOf('- name: Produce real minimum portfolios'),
+    workflow.indexOf('\n  product-wire-ui:'));
+  const consumer = workflow.slice(workflow.indexOf('\n  product-wire-ui:'), workflow.indexOf('\n  surfaces:'));
+  const name = 'v081-real-product-wire-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}';
+  assert.ok(producer.includes('cargo test --locked -p clearra-wasm --test exact_accelerator_portfolio_wire --features webgpu-search -- --ignored --test-threads=1'));
+  assert.ok(producer.includes(`name: ${name}`));
+  assert.ok(producer.includes('if-no-files-found: error'));
+  assert.ok(producer.includes('retention-days: 3'));
+  assert.ok(consumer.includes(`name: ${name}`));
+  assert.ok(consumer.includes('needs: wasm-abi'));
+  assert.ok(consumer.includes("needs.wasm-abi.outputs.product_wire_ready == 'true'"));
+  assert.ok(consumer.includes('test -s "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR/portfolio-wire-smoke.json"'));
+  assert.ok(consumer.includes('node --test packages/clearra-ui/test/realPortfolioWire.test.mjs'));
+  assert.ok(!consumer.includes('cargo '));
+  assert.ok(!workflow.slice(workflow.indexOf('\n  surfaces:')).includes('needs:'));
+});

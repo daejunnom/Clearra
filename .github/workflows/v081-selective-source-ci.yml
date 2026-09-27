@@ -147,6 +147,8 @@ jobs:
     if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      product_wire_ready: ${{ steps.real-wire.outcome == 'success' && steps.wire-upload.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -158,6 +160,55 @@ jobs:
           cargo check --locked -p clearra-wasm-abi --target wasm32-unknown-unknown
           cargo test --locked -p clearra-wasm-abi --lib reset_rejects_a_borrowed_runtime_without_a_second_panic -- --test-threads=1
           cargo test --locked -p clearra-wasm-abi --lib accelerator_ -- --test-threads=1
+      - name: Produce real minimum portfolios for UI wire smoke
+        id: real-wire
+        if: ${{ !cancelled() }}
+        env:
+          CLEARRA_REAL_PORTFOLIO_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-product-page-smoke
+        run: |
+          test "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR" = "$GITHUB_WORKSPACE/_local/artifacts/v081-product-page-smoke"
+          mkdir -p "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR"
+          cargo test --locked -p clearra-wasm --test exact_accelerator_portfolio_wire --features webgpu-search -- --ignored --test-threads=1
+          test -s "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR/portfolio-wire-smoke.json"
+      - name: Carry only the current source/run/attempt-bound functional fixture
+        id: wire-upload
+        if: ${{ !cancelled() && steps.real-wire.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: v081-real-product-wire-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/_local/artifacts/v081-product-page-smoke/portfolio-wire-smoke.json
+          if-no-files-found: error
+          retention-days: 3
+
+  product-wire-ui:
+    needs: wasm-abi
+    if: ${{ !cancelled() && needs.wasm-abi.outputs.product_wire_ready == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLEARRA_REAL_PORTFOLIO_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-product-page-smoke
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: v081-real-product-wire-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/_local/artifacts/v081-product-page-smoke
+      - name: Install locked UI test dependencies without scripts
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          test "$(pnpm --version)" = "11.5.0"
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Consume real Rust results through production UI validation and whole-set copy
+        run: |
+          test "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR" = "$GITHUB_WORKSPACE/_local/artifacts/v081-product-page-smoke"
+          test -s "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR/portfolio-wire-smoke.json"
+          node --test packages/clearra-ui/test/realPortfolioWire.test.mjs
 
   surfaces:
     if: github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' && github.ref_type == 'branch'
