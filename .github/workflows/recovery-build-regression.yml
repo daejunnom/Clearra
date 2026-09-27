@@ -22,29 +22,32 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify the exact combined source without discarding either change set
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Verify both source imports and the exact workspace-formatted recovery source
         if: github.ref == 'refs/heads/codex/converge-recovery-build-release-20260928'
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git merge-base --is-ancestor c2dd8509914846ed81119cd7094e7f70ac3d979c HEAD
-          git diff --exit-code f7ed59dc3ac695d7983a8a539fe161a67f8ee8dc HEAD -- crates/clearra-app crates/clearra-cli-command crates/clearra-forward-search crates/clearra-wasm packages tests scripts/tools/recovery-build-browser-regression.mjs scripts/tools/recovery-build-regression.sh
+          imported=71dc202f20037089178e1d65813a2df1d1b86c2e
+          git merge-base --is-ancestor "$imported" HEAD
+          git merge-base --is-ancestor c2dd8509914846ed81119cd7094e7f70ac3d979c "$imported"
+          paths=(crates/clearra-app crates/clearra-cli-command crates/clearra-forward-search crates/clearra-wasm packages tests scripts/tools/recovery-build-browser-regression.mjs scripts/tools/recovery-build-regression.sh)
+          git diff --exit-code f7ed59dc3ac695d7983a8a539fe161a67f8ee8dc "$imported" -- "${paths[@]}"
           git diff --exit-code c2dd8509914846ed81119cd7094e7f70ac3d979c HEAD -- crates/clearra-core-executor scripts/tools/build-clearra-wasm.mjs scripts/tools/benchmark-rust-environment.mjs scripts/tools/clearra-build-policy.test.mjs
-      - name: Install pinned Rust toolchain
-        run: rustup show
-      - name: Check formatting of the newly integrated Rust files
-        shell: bash
-        run: |
-          set -euo pipefail
-          base=13376dee8638cb5de5437ade910f07f5eab20629
-          if [[ "$GITHUB_REF" == refs/heads/codex/converge-recovery-build-release-20260928 ]]; then
-            base=c2dd8509914846ed81119cd7094e7f70ac3d979c
-          fi
-          mapfile -t files < <(git diff --name-only --diff-filter=ACM "$base" HEAD -- '*.rs')
-          if ((${#files[@]})); then
-            rustfmt --check --edition 2024 --config skip_children=true "${files[@]}"
-          fi
+          # Normalize the immutable, previously checked import with the exact
+          # pinned workspace formatter. Compare bytes, not a whitespace-ignored
+          # diff, so sorting imports does not hide a functional source change.
+          expected="$RUNNER_TEMP/recovery-formatted-source"
+          mkdir -p "$expected"
+          git archive "$imported" | tar -x -C "$expected"
+          (cd "$expected" && cargo fmt --all)
+          for path in "${paths[@]}"; do
+            git diff --no-index --exit-code -- "$expected/$path" "$path"
+          done
+      - name: Check the repository-wide formatting contract
+        run: cargo fmt --all --check
       - name: Preserve exact implementation source
         if: always()
         run: |
@@ -83,7 +86,10 @@ jobs:
           mkdir -p build/recovery-regression
           result=0
           cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee build/recovery-regression/core.log || result=1
-          cargo test --locked -p clearra-core-executor build_clear_row_pruning -- --nocapture 2>&1 | tee build/recovery-regression/build-clear-row.log || result=1
+          # These Build integration fixtures each acquire the whole process-wide
+          # memory lease. Isolate test cases, not the solver's internal workers;
+          # contention is an admission result, not a geometry counterexample.
+          cargo test --locked -p clearra-core-executor build_clear_row_pruning -- --nocapture --test-threads=1 2>&1 | tee build/recovery-regression/build-clear-row.log || result=1
           cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee build/recovery-regression/cli.log || result=1
           cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee build/recovery-regression/wasm-runtime.log || result=1
           cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee build/recovery-regression/wasm-target.log || result=1
