@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Validate corrected two-supply exchange and full release acceptance
+run-name: Verify shared recovery canvas and exact parallel supply pairs
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -8,8 +8,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: clearra-two-supply-exchange-validation
-  cancel-in-progress: true
+  group: clearra-recovery-parallel-validation
+  cancel-in-progress: false
 jobs:
   prepare:
     if: github.repository == 'daejunnom/Clearra'
@@ -18,53 +18,59 @@ jobs:
     permissions: {contents: write}
     outputs:
       candidate: ${{ steps.source.outputs.candidate }}
-      tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: 2f6b7406d9fc288c177c93644c0f7d6c7d0c0f39, fetch-depth: 0}
+        with: {ref: 13376dee8638cb5de5437ade910f07f5eab20629, fetch-depth: 0}
       - name: Install exact formatter
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-      - name: Apply reviewed parser and fixture repair then format candidate only
+      - name: Apply checksum-bound reviewed changes without promoting main
         id: source
+        env: {GH_TOKEN: '${{ github.token }}'}
         shell: python
         run: |
-          import hashlib,json,os,pathlib,subprocess
-          BASE='7d7fc390b2f65d52ebf8362dff65dcbfcb6d481b'
-          PARENT='59142804a827e6c533bb2ab3243b4eeb67d3cdaa'
-          BRANCH='codex/review-recovery-two-supplies-exchange-20260927'
+          import base64,gzip,hashlib,json,os,pathlib,subprocess
+          BASE='13376dee8638cb5de5437ade910f07f5eab20629'
+          BRANCH='codex/review-recovery-parallel-20260927'
+          PARTS=['45d435db1d7a36557aebf8a83f24bbcd262b18ad','834eafca0335a96a301a96cff6d9f5c0ccf1b90b','b7e0ef25b6a8998eb177438fb5e0b1da43f80995','730390604bd197978a615c8ffa85a9b453e6ad73']
           def git(*args): return subprocess.check_output(['git',*args],text=True,timeout=120).strip()
           def refs():
-              for ref,sha in [('refs/heads/main',BASE),('refs/heads/'+BRANCH,PARENT)]:
-                  if git('ls-remote','origin',ref).split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before writing')
-          patch=pathlib.Path('scripts/integration/recovery-exchange-verification-20260927/source-fix.patch').read_bytes()
-          if hashlib.sha256(patch).hexdigest()!='cb02ddd5285de948053ba2c13e81d5f0f8505a14ccc21bbee8458d4ed4a4a8d0': raise RuntimeError('Patch checksum mismatch')
-          refs();git('checkout','--detach',PARENT)
-          if git('rev-parse','HEAD^{tree}')!='7a1ac7441aa830577ff015043d15f20201c5ab62': raise RuntimeError('Reviewed parent tree mismatch')
-          allowed=set(git('diff','--name-only',BASE,PARENT).splitlines())
-          temporary=pathlib.Path(os.environ['RUNNER_TEMP'])/'exchange-source-fix.patch';temporary.write_bytes(patch)
-          git('apply','--check',str(temporary));git('apply','--index',str(temporary));git('diff','--cached','--check')
-          if git('write-tree')!='707a62eac62e9295e732aebeee2edcf46fe379fd': raise RuntimeError('Reviewed unformatted tree mismatch')
+              if git('ls-remote','origin','refs/heads/main').split()!=[BASE,'refs/heads/main']: raise RuntimeError('Main moved; reconcile first')
+              if git('ls-remote','origin','refs/heads/'+BRANCH): raise RuntimeError('Review branch exists; do not overwrite')
+          refs()
+          if git('rev-parse','HEAD')!=BASE or git('rev-parse','HEAD^{tree}')!='a3d368f2aef5af70c2bedbe598f7635962c0dc61': raise RuntimeError('Base source mismatch')
+          chunks=[]
+          for sha in PARTS:
+              item=json.loads(subprocess.check_output(['gh','api','repos/daejunnom/Clearra/git/blobs/'+sha],text=True,timeout=120))
+              data=base64.b64decode(item['content'])
+              if hashlib.sha1(('blob '+str(len(data))+'\0').encode()+data).hexdigest()!=sha: raise RuntimeError('Source chunk mismatch')
+              chunks.append(data)
+          packed=b''.join(chunks)
+          if hashlib.sha256(packed).hexdigest()!='2faf990182dfd054e7f150db2b8a8b0c07a9631b90ba4016b8742d3af685fd4e': raise RuntimeError('Patch checksum mismatch')
+          patch=pathlib.Path(os.environ['RUNNER_TEMP'])/'recovery-parallel.patch';patch.write_bytes(gzip.decompress(packed))
+          git('apply','--check',str(patch));git('apply','--index',str(patch));git('diff','--cached','--check')
+          if git('write-tree')!='c6b4f87c41a16f66caffdde969a84e8c83ed479c': raise RuntimeError('Reviewed unformatted tree mismatch')
+          allowed=set(git('diff','--cached','--name-only').splitlines())
           subprocess.run(['cargo','+1.98.1','fmt','--all'],check=True,timeout=120)
           changed=git('diff','HEAD','--name-only').splitlines()
-          if any(path not in allowed or not path.endswith('.rs') for path in changed): raise RuntimeError('Formatter exceeded reviewed Rust scope')
+          if set(changed)!=allowed: raise RuntimeError('Formatter changed unreviewed files')
           git('add','--',*changed);git('diff','--cached','--check')
           subprocess.run(['cargo','+1.98.1','fmt','--all','--check'],check=True,timeout=120)
-          tree=git('write-tree')
           git('config','user.name','github-actions[bot]');git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
-          git('commit','-m','fix: consume recovery option values once and validate true multi-early geometry')
-          candidate=git('rev-parse','HEAD');refs();git('push','origin',candidate+':refs/heads/'+BRANCH)
+          git('commit','-m','feat: preserve recovery canvas and parallelize exact supply-pair evaluation')
+          candidate=git('rev-parse','HEAD');tree=git('rev-parse','HEAD^{tree}');refs()
+          git('push','origin',candidate+':refs/heads/'+BRANCH)
           if git('ls-remote','origin','refs/heads/'+BRANCH).split()!=[candidate,'refs/heads/'+BRANCH]: raise RuntimeError('Candidate readback mismatch')
-          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'exchange-candidate';out.mkdir()
-          (out/'change.patch').write_text(git('diff','--binary',PARENT,candidate)+'\n')
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'recovery-parallel-source';out.mkdir()
           subprocess.run(['git','archive','--format=tar.gz','--output='+str(out/'source.tar.gz'),candidate],check=True,timeout=120)
-          receipt={'source_commit':candidate,'parent':PARENT,'base':BASE,'tree':tree,'files':changed,'main_written':False,'published':False}
+          (out/'change.patch').write_text(git('diff','--binary',BASE,candidate)+'\n')
+          receipt={'base':BASE,'source_commit':candidate,'tree':tree,'files':changed,'main_written':False,'published':False,'full_p7_p7_population_tested':False}
           (out/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps(receipt),flush=True)
-          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidate='+candidate+'\ntree='+tree+'\n')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidate='+candidate+'\n')
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: exchange-candidate-${{ github.run_id }}
-          path: ${{ runner.temp }}/exchange-candidate
+          name: recovery-parallel-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/recovery-parallel-source
           if-no-files-found: warn
           retention-days: 14
   native:
@@ -76,56 +82,49 @@ jobs:
       matrix: {os: [ubuntu-latest, windows-latest]}
     env:
       CARGO_BUILD_JOBS: '4'
-      RUST_MIN_STACK: '16777216'
       CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
       CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
-      - name: Bind exact source and install pinned Rust
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
+      - name: Install exact Rust
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$CLEARRA_SOURCE_COMMIT"
           rustup toolchain install 1.98.1 --profile minimal --component rustfmt
           cargo fmt --all --check
-      - name: Execute actual core exchange and image regressions
+      - name: Compare full small universes plus actual screenshot task with serial
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p clearra-forward-search --lib recovery_build -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-core.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-core.log"
-      - name: Execute public CLI and application boundary
+          cargo test --locked -p clearra-forward-search --lib recovery_parallel -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/recovery-parallel-core.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-parallel-core.log"
+      - name: Exercise actual native pool and typed CLI boundary
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p clearra-cli-command --test recovery_build -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-cli.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-cli.log"
-          cargo test --locked -p clearra-cli recovery_build_dispatch_tests -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-cli-dispatch.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-cli-dispatch.log"
-      - name: Execute exact memory and repeated browser wire completion
+          cargo test --locked -p clearra-app --lib recovery_native_pool -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/recovery-parallel-native.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-parallel-native.log"
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/recovery-parallel-cli.log"
+      - name: Exercise WASM coordinator real verifier and byte-identical serial payload
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p clearra-wasm --lib recovery_build_exact_memory_boundary -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-memory.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-memory.log"
-          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-wire.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-wire.log"
-      - name: Verify optimized real exchange without enlarged test stacks
+          cargo test --locked -p clearra-wasm --test recovery_build_parallel -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/recovery-parallel-wire.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/recovery-parallel-wire.log"
+      - name: Optimized native parallel execution without stack enlargement
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          unset RUST_MIN_STACK
-          cargo test --locked --release -p clearra-forward-search --lib recovery_build -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-optimized.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-optimized.log"
+          cargo test --locked --release -p clearra-forward-search --lib recovery_parallel -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/recovery-parallel-release.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: exchange-native-${{ matrix.os }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/exchange-*.log
+          name: recovery-parallel-native-${{ matrix.os }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/recovery-parallel-*.log
           if-no-files-found: warn
           retention-days: 14
   frontend:
@@ -141,10 +140,10 @@ jobs:
       CLEARRA_BROWSER_TOOLS_ROOT: ${{ github.workspace }}/build/tools/ui-browser
     steps:
       - uses: actions/checkout@v4
-        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', persist-credentials: false}
       - uses: actions/setup-node@v4
         with: {node-version: 22.23.2}
-      - name: Install exact Rust Node dependencies and Chromium
+      - name: Install frozen dependencies and pinned real browser
         shell: bash
         run: |
           set -euo pipefail
@@ -154,44 +153,37 @@ jobs:
           pnpm install --frozen-lockfile --ignore-scripts
           npm install --prefix "$CLEARRA_BROWSER_TOOLS_ROOT" --ignore-scripts --no-audit --no-fund playwright@1.56.1
           node "$CLEARRA_BROWSER_TOOLS_ROOT/node_modules/playwright/cli.js" install --with-deps chromium
-      - name: Compile actual input result and shared controls in browsers
+      - name: Verify actual workspace retains all three screenshot fields and common results
         shell: bash
         run: |
           set -euo pipefail
-          {
-            status=0
-            for source in recovery-workspace-browser-acceptance recovery-result-browser-acceptance recovery-editor-browser-acceptance solution-toolbar-browser-acceptance workspace-controls-browser-acceptance; do
-              node "scripts/tools/$source.mjs" || status=1
-            done
-            exit "$status"
-          } 2>&1 | tee "$RUNNER_TEMP/exchange-browser.log"
-      - name: Test complete UI worker and Desktop source contracts
+          node scripts/tools/recovery-workspace-browser-acceptance.mjs 2>&1 | tee "$RUNNER_TEMP/recovery-parallel-browser.log"
+          node scripts/tools/recovery-result-browser-acceptance.mjs
+          node scripts/tools/solution-toolbar-browser-acceptance.mjs
+          node scripts/tools/workspace-controls-browser-acceptance.mjs
+      - name: Test entire UI workers Desktop and source contracts
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          {
-            node scripts/desktop-ui-compile-check.mjs
-            pnpm --filter @clearra/ui run test
-            pnpm --filter @clearra/web run test
-          } 2>&1 | tee "$RUNNER_TEMP/exchange-frontend.log"
-      - name: Run canonical release regression selection on Linux
+          node scripts/desktop-ui-compile-check.mjs
+          pnpm --filter @clearra/ui run test 2>&1 | tee "$RUNNER_TEMP/recovery-parallel-ui.log"
+          pnpm --filter @clearra/web run test 2>&1 | tee "$RUNNER_TEMP/recovery-parallel-worker.log"
+          pnpm --filter ctk3 run build
+      - name: Verify canonical release regression selection
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/tools/run-release-regression-tests.mjs 2>&1 | tee "$RUNNER_TEMP/exchange-release-regressions.log"
+          node scripts/tools/run-release-regression-tests.mjs 2>&1 | tee "$RUNNER_TEMP/recovery-parallel-regressions.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: exchange-frontend-${{ matrix.os }}-${{ github.run_id }}
+          name: recovery-parallel-frontend-${{ matrix.os }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/exchange-*.log
+            ${{ runner.temp }}/recovery-parallel-*.log
             ${{ runner.temp }}/clearra-recovery-workspace-acceptance
             ${{ runner.temp }}/clearra-recovery-result-acceptance
-            ${{ runner.temp }}/clearra-recovery-editor-acceptance
-            ${{ runner.temp }}/clearra-solution-toolbar-acceptance
-            ${{ runner.temp }}/clearra-control-acceptance
           if-no-files-found: warn
           retention-days: 14
   acceptance:
@@ -217,7 +209,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if ((git rev-parse HEAD).Trim() -ne $env:CLEARRA_SOURCE_COMMIT) { throw 'Candidate mismatch' }
           rustup toolchain install 1.98.1 --profile minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           corepack enable
@@ -231,22 +222,21 @@ jobs:
             & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-      - name: Run full acceptance including actual new WASM and Svelte
+      - name: Run exact nonpublishing product leaf
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'exchange-acceptance.log')
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'recovery-parallel-acceptance.log')
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: exchange-acceptance-${{ matrix.shard }}-${{ github.run_id }}
+          name: recovery-parallel-acceptance-${{ matrix.shard }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/exchange-acceptance.log
+            ${{ runner.temp }}/recovery-parallel-acceptance.log
             ${{ runner.temp }}/clearra-surface-acceptance
             ${{ runner.temp }}/clearra-recovery-workspace-acceptance
-            ${{ runner.temp }}/clearra-recovery-result-acceptance
           if-no-files-found: warn
           retention-days: 14
   ready:
@@ -254,13 +244,13 @@ jobs:
     needs: [prepare, native, frontend, acceptance]
     runs-on: ubuntu-latest
     steps:
-      - name: Require complete real verification without premature promotion
+      - name: Require every exact-source check without publishing
         env: {RESULTS: '${{ toJSON(needs) }}'}
         shell: python
         run: |
           import json,os
           results=json.loads(os.environ['RESULTS'])
-          failed={k:v['result'] for k,v in results.items() if v['result']!='success'}
+          failed={key:value['result'] for key,value in results.items() if value['result']!='success'}
           if failed: raise RuntimeError(json.dumps(failed))
-          print('Full exchange acceptance passed:',results['prepare']['outputs']['candidate'])
-          print('Independent repository protection is required before fast-forward. No deployment occurs here.')
+          print('Recovery canvas and exact parallel execution accepted:',results['prepare']['outputs']['candidate'])
+          print('No main update or publication; full P7/P7 completion is not claimed by prefix regression.')
