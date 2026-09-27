@@ -1,0 +1,359 @@
+diff --git a/packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte b/packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte
+index 7dd074e..ca5ae1c 100644
+--- a/packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte
++++ b/packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte
+@@ -17,6 +17,7 @@
+     createBoundaryRecoveryRequest, recoveryPlacementHorizon, validateBoundaryRecoveryRequest
+   } from './boundaryRecoveryModel';
+   import { trimForwardBoardMask } from './forwardSearchModel';
++  import { isRecoveryEditorHeight, resizeBoundaryRecoveryFields } from './boundaryRecoveryFieldEditing';
+   import WorkspaceBoardEditor from './WorkspaceBoardEditor.svelte';
+   import WorkspaceFailureNotice from './WorkspaceFailureNotice.svelte';
+   import WorkspaceShell from './WorkspaceShell.svelte';
+@@ -35,6 +36,7 @@
+   let selectedRolePosition = 1;
+   let language: WorkspaceLanguage = 'en';
+   let disposed = false;
++  let invalidHeightDraft = false;
+ 
+   $: workerController.setWorkerFactory(workerFactory);
+   $: runtimeView = runtime === 'web' ? workspaceViewFromWasm($wasmWorkerState) : workspaceViewFromDesktop($desktopJobState);
+@@ -43,7 +45,7 @@
+   $: displaySteps = payload?.population ? (example?.steps ?? []) : (payload?.steps ?? []);
+   $: displayCheckpoint = payload?.population ? example?.stage_one_checkpoint_step : payload?.stage_one_checkpoint_step;
+   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
+-  $: validation = validateBoundaryRecoveryRequest(request);
++  $: validation = [...validateBoundaryRecoveryRequest(request), ...(invalidHeightDraft ? ['height'] : [])];
+   $: placementHorizon = recoveryPlacementHorizon(request);
+   $: if (Number.isInteger(placementHorizon) && placementHorizon >= 2 && placementHorizon <= 42) {
+     selectedRolePosition = Math.min(selectedRolePosition, placementHorizon);
+@@ -85,20 +87,8 @@
+   }
+ 
+   function setHeight(value: number) {
+-    const height = Math.max(1, Math.min(24, Math.trunc(value || 1)));
+-    request = {
+-      ...request, height,
+-      initialBoardMask: trimForwardBoardMask(request.initialBoardMask, height),
+-      stageOneBoardMask: trimForwardBoardMask(request.stageOneBoardMask, height),
+-      targetBoardMask: trimForwardBoardMask(request.targetBoardMask, height),
+-      borrowPlacementMask: trimForwardBoardMask(request.borrowPlacementMask, height),
+-      placementRoleMasks: request.placementRoleMasks.map((mask) => trimForwardBoardMask(mask, height))
+-    };
+-  }
+-
+-  function importBorrowPlacement(mask: bigint, height: number) {
+-    const nextHeight = Math.max(request.height, Math.max(1, Math.min(24, height)));
+-    request = { ...request, height: nextHeight, borrowPlacementMask: trimForwardBoardMask(mask, nextHeight) };
++    invalidHeightDraft = !isRecoveryEditorHeight(value);
++    request = resizeBoundaryRecoveryFields(request, value);
+   }
+ 
+   function setRoleMask(position: number, mask: bigint) {
+@@ -182,7 +172,10 @@
+   on:run={run}
+ >
+   <div slot="editor" class="recovery-fields">
+-    <BoundaryRecoveryFields {request} {language} on:change={(event) => request = event.detail} />
++    <BoundaryRecoveryFields {request} {language} on:change={(event) => {
++      if (event.detail.height !== request.height) invalidHeightDraft = false;
++      request = event.detail;
++    }} />
+     <details class="placement-constraints" open={request.placementRoleMasks.length > 0}>
+       <summary>{label('recoveryAdvanced')}</summary>
+     {#if request.placementRoleMasks.length > 0}
+diff --git a/packages/clearra-ui/src/lib/workspace/boundaryRecoveryFieldEditing.ts b/packages/clearra-ui/src/lib/workspace/boundaryRecoveryFieldEditing.ts
+new file mode 100644
+index 0000000..8d7c701
+--- /dev/null
++++ b/packages/clearra-ui/src/lib/workspace/boundaryRecoveryFieldEditing.ts
+@@ -0,0 +1,27 @@
++import type { BoundaryRecoveryRequest } from './boundaryRecoveryModel.ts';
++import { trimForwardBoardMask } from './forwardSearchModel.ts';
++
++/** UI field bounds; an incomplete number draft must not erase any geometry. */
++export function isRecoveryEditorHeight(value: number): boolean {
++  return Number.isSafeInteger(value) && value >= 1 && value <= 24;
++}
++
++/** Resize independent snapshots without inventing a selected legacy placement. */
++export function resizeBoundaryRecoveryFields(
++  request: BoundaryRecoveryRequest,
++  height: number
++): BoundaryRecoveryRequest {
++  if (!isRecoveryEditorHeight(height)) return request;
++  const next: BoundaryRecoveryRequest = {
++    ...request,
++    height,
++    initialBoardMask: trimForwardBoardMask(request.initialBoardMask, height),
++    stageOneBoardMask: trimForwardBoardMask(request.stageOneBoardMask, height),
++    targetBoardMask: trimForwardBoardMask(request.targetBoardMask, height),
++    placementRoleMasks: request.placementRoleMasks.map(mask => trimForwardBoardMask(mask, height))
++  };
++  if (request.borrowPlacementMask !== undefined) {
++    next.borrowPlacementMask = trimForwardBoardMask(request.borrowPlacementMask, height);
++  }
++  return next;
++}
+diff --git a/packages/clearra-ui/test/boundaryRecoveryFieldEditing.contract.ts b/packages/clearra-ui/test/boundaryRecoveryFieldEditing.contract.ts
+new file mode 100644
+index 0000000..11e8123
+--- /dev/null
++++ b/packages/clearra-ui/test/boundaryRecoveryFieldEditing.contract.ts
+@@ -0,0 +1,12 @@
++import assert from 'node:assert/strict';
++import { createBoundaryRecoveryRequest, type BoundaryRecoveryRequest } from '../src/lib/workspace/boundaryRecoveryModel.ts';
++import { resizeBoundaryRecoveryFields } from '../src/lib/workspace/boundaryRecoveryFieldEditing.ts';
++
++const original: BoundaryRecoveryRequest = { ...createBoundaryRecoveryRequest(), queue: 'IOT' };
++for (const maxEarlyPlacements of ['auto', 0, 1, 2] as const) {
++  const edited: BoundaryRecoveryRequest = resizeBoundaryRecoveryFields({ ...original, maxEarlyPlacements }, 4);
++  assert.equal(edited.maxEarlyPlacements, maxEarlyPlacements);
++  assert.equal(edited.height, 4);
++  assert.equal(edited.borrowPlacementMask, undefined);
++  assert.equal(edited.borrowRolePosition, undefined);
++}
+diff --git a/packages/clearra-ui/test/boundaryRecoveryFieldEditing.test.mjs b/packages/clearra-ui/test/boundaryRecoveryFieldEditing.test.mjs
+new file mode 100644
+index 0000000..1a61b56
+--- /dev/null
++++ b/packages/clearra-ui/test/boundaryRecoveryFieldEditing.test.mjs
+@@ -0,0 +1,45 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { createBoundaryRecoveryRequest, boundaryRecoveryArguments } from '../src/lib/workspace/boundaryRecoveryModel.ts';
++import { isRecoveryEditorHeight, resizeBoundaryRecoveryFields } from '../src/lib/workspace/boundaryRecoveryFieldEditing.ts';
++
++test('Auto and numeric quotas resize without creating a legacy borrow restriction', () => {
++  for (const quota of ['auto', 0, 1, 2]) {
++    const input = { ...createBoundaryRecoveryRequest(), queue: 'IOT', maxEarlyPlacements: quota };
++    const result = resizeBoundaryRecoveryFields(input, 4);
++    assert.equal(result.height, 4);
++    assert.equal(Object.hasOwn(result, 'borrowPlacementMask'), false);
++    assert.equal(Object.hasOwn(result, 'borrowRolePosition'), false);
++    const args = boundaryRecoveryArguments(result);
++    assert.equal(args[args.indexOf('--height') + 1], '4');
++    assert.equal(args[args.indexOf('--max-early-placements') + 1], String(quota));
++    assert.ok(!args.includes('--borrow-placement-mask'));
++    assert.ok(!args.includes('--borrow-role-position'));
++  }
++});
++
++test('height changes trim each real mask independently and preserve explicit legacy evidence', () => {
++  const high = 1n << 70n;
++  const input = { ...createBoundaryRecoveryRequest(), queue: 'IO',
++    initialBoardMask: high | 1n, stageOneBoardMask: high | 2n, targetBoardMask: high | 4n,
++    placementRoleMasks: [high | 8n, high | 16n], borrowRolePosition: 2,
++    borrowPlacementMask: high | 32n, maxEarlyPlacements: 1 };
++  const grown = resizeBoundaryRecoveryFields(input, 12);
++  assert.deepEqual(grown.placementRoleMasks, input.placementRoleMasks);
++  assert.equal(grown.borrowPlacementMask, input.borrowPlacementMask);
++  const result = resizeBoundaryRecoveryFields(grown, 4);
++  assert.deepEqual([result.initialBoardMask, result.stageOneBoardMask, result.targetBoardMask], [1n, 2n, 4n]);
++  assert.deepEqual(result.placementRoleMasks, [8n, 16n]);
++  assert.equal(result.borrowPlacementMask, 32n);
++  assert.equal(result.borrowRolePosition, 2);
++  assert.equal(input.initialBoardMask, high | 1n, 'editing must not mutate the previous request');
++});
++
++test('incomplete or invalid height drafts preserve the request and every field', () => {
++  const input = { ...createBoundaryRecoveryRequest(), initialBoardMask: 1n << 70n };
++  for (const height of [0, NaN, Infinity, -1, 2.5, 25, Number.MAX_SAFE_INTEGER]) {
++    assert.equal(isRecoveryEditorHeight(height), false);
++    assert.equal(resizeBoundaryRecoveryFields(input, height), input);
++  }
++  for (const height of [1, 4, 24]) assert.equal(isRecoveryEditorHeight(height), true);
++});
+diff --git a/scripts/lib/wasm-release-gate.ps1 b/scripts/lib/wasm-release-gate.ps1
+index d00b1a6..348c1b8 100644
+--- a/scripts/lib/wasm-release-gate.ps1
++++ b/scripts/lib/wasm-release-gate.ps1
+@@ -273,6 +273,9 @@ function Invoke-WasmBuildTestGate {
+         Invoke-WasmReleaseCommand $nodeCommand.Source @(
+             (Join-Path $Root 'scripts/tools/recovery-editor-browser-acceptance.mjs')
+         ) 'clearra-browser recovery editor acceptance'
++        Invoke-WasmReleaseCommand $nodeCommand.Source @(
++            (Join-Path $Root 'scripts/tools/recovery-workspace-browser-acceptance.mjs')
++        ) 'clearra-browser recovery request owner acceptance'
+         Invoke-WasmReleaseCommand $nodeCommand.Source @(
+             (Join-Path $Root 'scripts/tools/solution-toolbar-browser-acceptance.mjs')
+         ) 'clearra-browser solution toolbar acceptance'
+diff --git a/scripts/tools/recovery-workspace-browser-acceptance.mjs b/scripts/tools/recovery-workspace-browser-acceptance.mjs
+new file mode 100644
+index 0000000..a7946b3
+--- /dev/null
++++ b/scripts/tools/recovery-workspace-browser-acceptance.mjs
+@@ -0,0 +1,141 @@
++// Real BoundaryRecoveryWorkspace, including its actual height/event owner.
++// This prebuild test never executes a solver and does not fake a successful result.
++import assert from 'node:assert/strict';
++import { createServer } from 'node:http';
++import { readFile, mkdir, writeFile } from 'node:fs/promises';
++import { createRequire } from 'node:module';
++import { dirname, resolve } from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { build } from 'esbuild';
++import { compile, preprocess } from 'svelte/compiler';
++import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
++
++const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
++assert.ok(process.env.CLEARRA_BROWSER_TOOLS_ROOT, 'pinned browser tools are required');
++const require = createRequire(resolve(process.env.CLEARRA_BROWSER_TOOLS_ROOT, 'package.json'));
++const { chromium } = require('playwright');
++const reportRoot = resolve(process.env.RUNNER_TEMP || resolve(root, 'build'), 'clearra-recovery-workspace-acceptance');
++await mkdir(reportRoot, { recursive: true });
++const preprocessor = vitePreprocess();
++const fixture = `<script>
++  import { setContext } from 'svelte';
++  import Workspace from './packages/clearra-ui/src/lib/workspace/BoundaryRecoveryWorkspace.svelte';
++  import { WORKSPACE_MODE_VISIBILITY_CONTEXT } from './packages/clearra-ui/src/lib/workspace/workspaceNavigation.ts';
++  setContext(WORKSPACE_MODE_VISIBILITY_CONTEXT, ['pc', 'setup', 'build-probability', 'recovery', 'damage', 'spin-finder', 'ctk', 'player']);
++</script>
++<Workspace workerFactory={null} />`;
++async function component(source, path) {
++  const processed = await preprocess(source, preprocessor, { filename: path });
++  return { contents: compile(processed.code, { filename: path, generate: 'client', css: 'injected' }).js.code,
++    loader: 'js', resolveDir: dirname(path) };
++}
++const bundle = await build({
++  absWorkingDir: root,
++  stdin: { contents: `import { mount } from 'svelte';
++    import Fixture from 'clearra-workspace-fixture'; mount(Fixture, { target: document.getElementById('app') });`,
++    resolveDir: root, sourcefile: 'recovery-workspace-acceptance.js' },
++  bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022',
++  conditions: ['browser'], mainFields: ['svelte', 'browser', 'module', 'main'],
++  define: { 'process.env.NODE_ENV': '"production"' },
++  plugins: [{ name: 'compiled-workspace', setup(builder) {
++    builder.onResolve({ filter: /^clearra-workspace-fixture$/ }, () => ({ path: 'fixture', namespace: 'workspace-fixture' }));
++    builder.onLoad({ filter: /.*/, namespace: 'workspace-fixture' },
++      () => component(fixture, resolve(root, 'recovery-workspace-fixture.svelte')));
++    // No route is exercised by this prebuild test. An accidental navigation
++    // must fail rather than pretending to be a SvelteKit transition.
++    builder.onResolve({ filter: /^\$app\/navigation$/ }, () => ({ path: 'navigation', namespace: 'unavailable-router' }));
++    builder.onLoad({ filter: /.*/, namespace: 'unavailable-router' }, () => ({
++      contents: "export function goto() { throw new Error('Navigation is outside this input-owner test'); }", loader: 'js'
++    }));
++    builder.onLoad({ filter: /\.svelte$/ }, async ({ path }) => component(await readFile(path, 'utf8'), path));
++  } }],
++});
++assert.equal(bundle.outputFiles.length, 1);
++const server = createServer((req, res) => {
++  const path = new URL(req.url, 'http://127.0.0.1').pathname;
++  res.setHeader('Cache-Control', 'no-store');
++  if (path === '/workspace.js') res.writeHead(200, { 'Content-Type': 'text/javascript' }).end(bundle.outputFiles[0].contents);
++  else if (path === '/') res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(
++    '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div id="app"></div><script type="module" src="/workspace.js"></script>');
++  else res.writeHead(404).end();
++});
++const specs = [
++  { language: 'en', width: 1440, touch: false },
++  { language: 'en', width: 320, touch: true },
++  { language: 'ko', width: 390, touch: true },
++  { language: 'ja', width: 390, touch: true },
++];
++const results = [];
++let browser;
++try {
++  await new Promise((ok, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', ok); });
++  const origin = `http://127.0.0.1:${server.address().port}`;
++  browser = await chromium.launch({ headless: true });
++  for (const spec of specs) {
++    const context = await browser.newContext({ viewport: { width: spec.width, height: 1100 },
++      hasTouch: spec.touch, isMobile: spec.touch, locale: spec.language });
++    const page = await context.newPage();
++    page.setDefaultTimeout(10000);
++    const errors = [];
++    page.on('pageerror', error => errors.push(error.stack || String(error)));
++    const flush = () => page.evaluate(() => new Promise(requestAnimationFrame));
++    try {
++      await page.goto(origin);
++      await page.locator('.language-control button').filter({ hasText: spec.language.toUpperCase() }).click();
++      await flush();
++      const height = page.locator('.dimension-field input');
++      const board = page.locator('.recovery-field-editor .board');
++      const gridSize = () => board.locator('button').count();
++      const pressed = () => board.locator('button[aria-pressed="true"]').count();
++      assert.equal(await gridSize(), 80);
++      // This is the event handler missed by the Fields+Controls-only fixture.
++      await height.fill('4'); await flush();
++      assert.deepEqual(errors, [], 'changing height must not perform bigint operations on an absent mask');
++      assert.equal(await height.inputValue(), '4');
++      assert.equal(await gridSize(), 40);
++      await page.locator('.workspace-controls .workspace-queue-input').first().fill('IOT');
++      const early = page.locator('.workspace-controls select').first();
++      assert.equal(await early.inputValue(), 'auto');
++      for (const value of ['1', '2', '0', 'auto']) {
++        await early.selectOption(value); await flush();
++        assert.equal(await early.inputValue(), value);
++        assert.equal(await page.locator('.board-tool .board').count(), 1, 'a quota must not invent a selected borrow editor');
++        assert.deepEqual(errors, []);
++      }
++      // Paint each independent snapshot, then exercise real dimension changes.
++      const fields = page.locator('.field-palette button');
++      assert.equal(await fields.count(), 3);
++      for (let field = 0; field < 3; field++) {
++        await fields.nth(field).click();
++        await board.locator('button').nth(30 + field).click();
++        assert.equal(await pressed(), 1);
++      }
++      await height.fill(''); await flush();
++      assert.equal(await gridSize(), 40, 'an empty draft must not truncate snapshots');
++      assert.equal(await pressed(), 1);
++      assert.equal(await page.locator('.run-actions button.run').isDisabled(), true);
++      await height.fill('6'); await flush();
++      assert.equal(await gridSize(), 60);
++      for (let field = 0; field < 3; field++) {
++        await fields.nth(field).click(); await flush();
++        assert.equal(await pressed(), 1, 'resizing must preserve each low-row snapshot');
++      }
++      // Exact roles use a second board; generic quotas do not.
++      await page.locator('.workspace-controls input[type="checkbox"]').last().check();
++      await flush();
++      assert.equal(await page.locator('.board-tool .board').count(), 2);
++      await height.fill('4'); await flush();
++      for (const grid of await page.locator('.board-tool .board').all()) assert.equal(await grid.locator('button').count(), 40);
++      assert.deepEqual(errors, []);
++      await page.screenshot({ path: resolve(reportRoot, `${spec.language}-${spec.width}.png`), fullPage: true });
++      results.push({ ...spec, status: 'passed', heightTransition: [8, 4, 6, 4], quotas: ['auto', 1, 2, 0] });
++    } catch (error) {
++      await writeFile(resolve(reportRoot, `failed-${spec.language}-${spec.width}.txt`),
++        [String(error.stack || error), ...errors, await page.locator('body').innerText()].join('\n'));
++      await page.screenshot({ path: resolve(reportRoot, `failed-${spec.language}-${spec.width}.png`), fullPage: true });
++      throw error;
++    } finally { await context.close(); }
++  }
++  await writeFile(resolve(reportRoot, 'result.json'), JSON.stringify({ source: process.env.CLEARRA_SOURCE_COMMIT, cases: results }, null, 2) + '\n');
++  console.log('recovery_workspace_acceptance=passed cases=' + results.length);
++} finally { await browser?.close(); await new Promise(ok => server.close(ok)); }
+diff --git a/scripts/tools/surface-browser-acceptance.mjs b/scripts/tools/surface-browser-acceptance.mjs
+index 72fb863..4842830 100644
+--- a/scripts/tools/surface-browser-acceptance.mjs
++++ b/scripts/tools/surface-browser-acceptance.mjs
+@@ -106,6 +106,8 @@ const CENTER_I = 'ctk1|initial=0000000000000000|placements=I:0000000000000078';
+ 
+ async function paint(page, index, mask, height) {
+   const board = page.locator('.board-tool .board').nth(index);
++  assert.equal(await board.locator('button').count(), height * 10,
++    'paint coordinates must match the actual committed field height');
+   for (let y = 0; y < height; y++) for (let x = 0; x < 10; x++) {
+     if ((mask & (1n << BigInt(y * 10 + x))) !== 0n) await board.locator('button').nth((height - 1 - y) * 10 + x).click();
+   }
+@@ -118,7 +120,7 @@ try {
+     const ctx = await context(mode);
+     const page = await ctx.newPage();
+     const errors = [];
+-    page.on('pageerror', error => errors.push(String(error)));
++    page.on('pageerror', error => errors.push(error.stack || String(error)));
+     try {
+       await page.goto(`http://127.0.0.1:4194${base}/?tool=pc`);
+       await page.locator('.product-tabs').waitFor();
+@@ -154,6 +156,9 @@ try {
+         const recovery = await navigateWorkspace(page, 'recovery');
+         await recovery.locator('.recovery-field-editor').waitFor();
+         await page.locator('.dimension-field input').fill('4');
++        await page.evaluate(() => new Promise(requestAnimationFrame));
++        assert.deepEqual(errors, [], 'recovery height editing must not throw before search');
++        assert.equal(await recovery.locator('.recovery-field-editor .board button').count(), 40);
+         await page.getByLabel('Known queue across both stages', { exact: true }).fill('IOT');
+         await page.getByLabel('Stage-one supply tokens', { exact: true }).fill('1');
+         assert.equal(await recovery.getByLabel('Required placements', { exact: true }).count(), 0);
