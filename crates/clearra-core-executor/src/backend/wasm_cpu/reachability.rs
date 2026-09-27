@@ -4,11 +4,9 @@ use clearra_replay::{RotationRequest, ScoringLockEvidence};
 use clearra_rules::kicks::{KickTableProfile, KickTableProfileId, KickTransition};
 use std::sync::{Arc, OnceLock};
 
-use crate::conditioned_local_product::{
-    qualified_local_relation_snapshot, LocalRelationProductLookup,
-    PreparedQualifiedLocalRelationContext, QualifiedLocalRelationPack,
-};
+use crate::conditioned_local_product::LocalRelationProductLookup;
 use crate::conditioned_local_relation::{solver_local_relation_windows, LocalRelationRowFrame};
+use crate::conditioned_local_source::{PreparedRelationContext, RelationSource};
 use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
 
 #[path = "reachability_local_relation.rs"]
@@ -473,7 +471,7 @@ pub(super) struct ReachabilityWorkspace {
     shared_templates: Option<Arc<SharedReachabilityTemplates>>,
     template_dimensions: Option<(u8, u8)>,
     kick_profile_id: KickTableProfileId,
-    conditioned: Option<Arc<QualifiedLocalRelationPack>>,
+    conditioned: Option<RelationSource>,
     conditioned_profile: Option<KickTableProfileId>,
     conditioned_enabled: Option<bool>,
     conditioned_policy_enabled: Option<bool>,
@@ -485,8 +483,7 @@ pub(super) struct ReachabilityWorkspace {
 
 #[derive(Clone, Copy)]
 struct PreparedRelationWindows {
-    contexts:
-        [Result<PreparedQualifiedLocalRelationContext, crate::legal_board::ProviderStatus>; 3],
+    contexts: [Result<PreparedRelationContext, crate::legal_board::ProviderStatus>; 3],
     count: usize,
 }
 
@@ -984,7 +981,7 @@ impl ReachabilityWorkspace {
         self.metrics.conditioned_requested = conditioned_enabled;
         self.metrics.conditioned_policy_enabled = conditioned_enabled && policy_enabled;
         self.conditioned = (conditioned_enabled && policy_enabled)
-            .then(|| qualified_local_relation_snapshot(profile_id))
+            .then(|| RelationSource::snapshot(profile_id))
             .flatten();
         self.metrics.conditioned_snapshot_active = self.conditioned.is_some();
         self.conditioned_profile = Some(profile_id);
@@ -2510,7 +2507,7 @@ mod tests {
             "test-only snapshot must still fit the unchanged shared asset cap"
         );
         workspace.configure_kick_profile(profile, false);
-        workspace.conditioned = Some(snapshot);
+        workspace.conditioned = Some(snapshot.into());
         workspace.conditioned_enabled = Some(true);
         workspace.conditioned_policy_enabled = Some(true);
         workspace.metrics.conditioned_requested = true;
@@ -2580,9 +2577,8 @@ mod tests {
         let mut workspace = ReachabilityWorkspace::default();
         workspace.configure_kick_profile(profile, false);
         // Pin locally to avoid global registry contention with other unit tests.
-        workspace.conditioned = Some(std::sync::Arc::new(
-            qualified_local_relation_for_solver_test(loaded),
-        ));
+        workspace.conditioned =
+            Some(std::sync::Arc::new(qualified_local_relation_for_solver_test(loaded)).into());
         workspace.prepare_template(&catalog, piece);
         assert!(workspace.lock_reachable_after_harddrop_miss_in_frame(
             &catalog,

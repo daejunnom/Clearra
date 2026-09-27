@@ -9,6 +9,7 @@ use std::{
 
 use clearra_pc_graph::request::GpuDeviceSelection;
 mod accelerator_exports;
+mod accelerator_peer_exports;
 mod online_pc4_exports;
 #[cfg(target_arch = "wasm32")]
 use clearra_wasm::prewarm_gpu_search_async;
@@ -854,6 +855,31 @@ pub extern "C" fn clearra_wasm_accelerator_export_negative_synopsis(
 #[no_mangle]
 pub extern "C" fn clearra_wasm_accelerator_admit_negative_synopsis(profile: u32) -> i32 {
     accelerator_exports::admit_negative_synopsis(profile)
+}
+
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_peer_seed(profile: u32) -> i32 {
+    accelerator_peer_exports::seed(profile)
+}
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_peer_admit(profile: u32, reserved_bytes: u32) -> i32 {
+    accelerator_peer_exports::admit(profile, reserved_bytes)
+}
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_peer_drain(profile: u32) -> i32 {
+    accelerator_peer_exports::drain(profile)
+}
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_peer_answer(profile: u32) -> i32 {
+    accelerator_peer_exports::answer(profile)
+}
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_peer_import(profile: u32) -> i32 {
+    accelerator_peer_exports::import(profile)
+}
+#[no_mangle]
+pub extern "C" fn clearra_wasm_accelerator_peer_transfer_resize(byte_len: u32) -> i32 {
+    accelerator_peer_exports::transfer_resize(byte_len)
 }
 
 #[no_mangle]
@@ -3752,6 +3778,62 @@ mod tests {
         let error = ABI_STATE
             .with(|state| String::from_utf8(state.borrow().output.clone()).expect("ASCII error"));
         assert!(!error.starts_with("accelerator_session_in_use:"), "{error}");
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        reset_abi_state_for_test();
+    }
+
+    #[test]
+    fn accelerator_peer_transport_is_bounded_and_cannot_overwrite_a_staged_packet() {
+        reset_abi_state_for_test();
+        assert_eq!(
+            clearra_wasm_accelerator_peer_transfer_resize(256 * 1024 + 1),
+            ABI_ERROR
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_accelerator_peer_transfer_resize(3), ABI_OK);
+        assert_eq!(clearra_wasm_accelerator_peer_transfer_resize(2), ABI_ERROR);
+        assert_eq!(
+            ABI_STATE.with(|state| state.borrow().transfer_input.len()),
+            3
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(
+            clearra_wasm_accelerator_peer_admit(4, 1024 * 1024),
+            ABI_ERROR
+        );
+        assert!(ABI_STATE.with(|state| state.borrow().transfer_input.is_empty()));
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        reset_abi_state_for_test();
+    }
+
+    #[test]
+    fn accelerator_peer_exports_respect_unreleased_output_and_missing_owner() {
+        reset_abi_state_for_test();
+        ABI_STATE.with(|state| state.borrow_mut().set_output_bytes(vec![1]));
+        assert_eq!(
+            clearra_wasm_accelerator_peer_seed(0),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+        assert_eq!(
+            clearra_wasm_accelerator_peer_drain(0),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+        assert_eq!(
+            clearra_wasm_accelerator_peer_answer(0),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+        assert_eq!(
+            clearra_wasm_accelerator_peer_import(0),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+        assert_eq!(
+            clearra_wasm_accelerator_peer_transfer_resize(1),
+            ABI_OUTPUT_NOT_RELEASED
+        );
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_accelerator_peer_seed(u32::MAX), ABI_ERROR);
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_accelerator_peer_drain(0), ABI_ERROR);
         assert_eq!(clearra_wasm_output_release(), ABI_OK);
         reset_abi_state_for_test();
     }

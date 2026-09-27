@@ -6,10 +6,13 @@ pub mod board;
 pub mod buildup;
 mod conditioned_local_index;
 mod conditioned_local_pack;
+mod conditioned_local_peer;
+mod conditioned_local_peer_wire;
 mod conditioned_local_product;
 #[cfg(any(test, feature = "qualification-reference"))]
 mod conditioned_local_qualification;
 mod conditioned_local_relation;
+mod conditioned_local_source;
 mod conditioned_reachability;
 pub mod core_execution_result;
 pub mod core_executor;
@@ -79,6 +82,15 @@ pub use conditioned_local_pack::{
     built_in_local_relation_binding, coalesce_identical_local_relation_records,
     encode_local_relation_candidate_pack, load_local_relation_candidate_pack, LocalRelationBinding,
     LocalRelationCandidatePack, LocalRelationPackError,
+};
+pub use conditioned_local_peer::{
+    answer_qualified_local_relation_peer_queries, drain_local_relation_peer_queries,
+    export_qualified_local_relation_peer_seed, import_trusted_local_relation_peer_reply,
+    install_trusted_local_relation_peer, remove_trusted_local_relation_peer,
+    MAX_RELATION_PEER_RESERVED_BYTES, MIN_RELATION_PEER_RESERVED_BYTES,
+};
+pub use conditioned_local_peer_wire::{
+    LocalRelationPeerError, MAX_RELATION_PEER_BATCH, MAX_RELATION_PEER_WIRE_BYTES,
 };
 pub use conditioned_local_product::{
     active_qualified_local_relation_identity, install_qualified_local_relation_pack,

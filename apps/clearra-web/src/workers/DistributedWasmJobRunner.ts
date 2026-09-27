@@ -14,7 +14,7 @@ import {
   type ClearraVerifierRecoveryMode
 } from './ClearraVerifierPool';
 import type {
-  AcceleratorWorkerPack,
+  AcceleratorWorkerRelation,
   AcceleratorWorkerSynopsis,
   ClearraDistributedCoreProgress,
   ClearraDistributedPlan,
@@ -135,7 +135,7 @@ export class DistributedWasmJobRunner {
     private readonly resourceWaitTimeoutMs = SHARED_RESOURCE_WAIT_TIMEOUT_MS,
     private readonly minimumManagerPolicy: MinimumManagerPolicy = 'auto',
     private readonly legalBoardSynopsis?: AcceleratorWorkerSynopsis | null,
-    private readonly conditionedPack?: AcceleratorWorkerPack | null
+    private readonly conditionedPack?: AcceleratorWorkerRelation | null
   ) {
     this.pool = pool;
     this.resourceAuthority = resourceAuthority ?? authorityForVerifierPool(

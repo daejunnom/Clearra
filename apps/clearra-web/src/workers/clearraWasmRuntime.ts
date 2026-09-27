@@ -38,11 +38,13 @@ export type AcceleratorWorkerSynopsis = {
   wire: ArrayBuffer;
   maximumPeers: number;
 };
-export type AcceleratorWorkerPack = {
+export type AcceleratorWorkerRelation = {
   profile: number;
-  bytes: ArrayBuffer;
+  seed: ArrayBuffer;
   identity: string;
-  activeSessionSharedBytes: number;
+  reservedBytes: number;
+  maximumPeers: number;
+  answerQueries: (wire: ArrayBuffer) => ArrayBuffer;
 };
 export type ClearraWasmModule = {
   accelerator_catalog?: (kind: number, profile: number) => AcceleratorCatalogPlan;
@@ -51,6 +53,11 @@ export type ClearraWasmModule = {
   accelerator_remove?: (kind: number, profile: number) => void;
   accelerator_export_negative_synopsis?: (profile: number, maximumBytes: number) => ArrayBuffer;
   accelerator_admit_negative_synopsis?: (profile: number, wire: ArrayBuffer) => void;
+  accelerator_peer_seed?: (profile: number) => ArrayBuffer;
+  accelerator_peer_admit?: (profile: number, seed: ArrayBuffer, reservedBytes: number) => void;
+  accelerator_peer_drain?: (profile: number) => ArrayBuffer;
+  accelerator_peer_answer?: (profile: number, wire: ArrayBuffer) => ArrayBuffer;
+  accelerator_peer_import?: (profile: number, wire: ArrayBuffer) => void;
   configure_online_pc4?: (generation: unknown) => void;
   online_pc4_pending?: (jobId: number) => Pc4PendingRange | null;
   online_pc4_admit?: (jobId: number, response: unknown) => void;
@@ -222,6 +229,12 @@ type ClearraRawWasmExports = {
   clearra_wasm_accelerator_remove?: (kind: number, profile: number) => number;
   clearra_wasm_accelerator_export_negative_synopsis?: (profile: number, maximumBytes: number) => number;
   clearra_wasm_accelerator_admit_negative_synopsis?: (profile: number) => number;
+  clearra_wasm_accelerator_peer_seed?: (profile: number) => number;
+  clearra_wasm_accelerator_peer_admit?: (profile: number, reservedBytes: number) => number;
+  clearra_wasm_accelerator_peer_drain?: (profile: number) => number;
+  clearra_wasm_accelerator_peer_answer?: (profile: number) => number;
+  clearra_wasm_accelerator_peer_import?: (profile: number) => number;
+  clearra_wasm_accelerator_peer_transfer_resize?: (byteLen: number) => number;
   clearra_wasm_online_pc4_configure?: () => number;
   clearra_wasm_online_pc4_pending?: (jobId: number) => number;
   clearra_wasm_online_pc4_admit?: (jobId: number) => number;
@@ -1020,6 +1033,13 @@ function wrapRawModule(
     const ptr = raw.clearra_wasm_transfer_ptr() >>> 0;
     new Uint8Array(raw.memory.buffer, ptr, input.byteLength).set(new Uint8Array(input));
   };
+  const setPeerTransfer = (input: ArrayBuffer) => {
+    if (input.byteLength > 256 * 1024) throw new Error('bounded relation transport exceeded');
+    assertWasmTransferWithinHostCap(input.byteLength, hostTransferByteCap);
+    requireOk(raw.clearra_wasm_accelerator_peer_transfer_resize!(input.byteLength));
+    const ptr = raw.clearra_wasm_transfer_ptr() >>> 0;
+    new Uint8Array(raw.memory.buffer, ptr, input.byteLength).set(new Uint8Array(input));
+  };
   const setProductPageRequest = (
     alternativeIndex: string,
     memberPageNumber: string,
@@ -1065,6 +1085,33 @@ function wrapRawModule(
         setTransfer(wire);
         requireOk(raw.clearra_wasm_accelerator_admit_negative_synopsis!(profile));
         outputText();
+      }
+    } : {}),
+    ...(raw.clearra_wasm_accelerator_peer_seed && raw.clearra_wasm_accelerator_peer_admit &&
+      raw.clearra_wasm_accelerator_peer_drain && raw.clearra_wasm_accelerator_peer_answer &&
+      raw.clearra_wasm_accelerator_peer_import && raw.clearra_wasm_accelerator_peer_transfer_resize ? {
+      accelerator_peer_seed(profile: number) {
+        requireOk(raw.clearra_wasm_accelerator_peer_seed!(profile));
+        return outputBytes();
+      },
+      accelerator_peer_admit(profile: number, seed: ArrayBuffer, reservedBytes: number) {
+        setPeerTransfer(seed);
+        requireOk(raw.clearra_wasm_accelerator_peer_admit!(profile, reservedBytes));
+        outputBytes();
+      },
+      accelerator_peer_drain(profile: number) {
+        requireOk(raw.clearra_wasm_accelerator_peer_drain!(profile));
+        return outputBytes();
+      },
+      accelerator_peer_answer(profile: number, wire: ArrayBuffer) {
+        setPeerTransfer(wire);
+        requireOk(raw.clearra_wasm_accelerator_peer_answer!(profile));
+        return outputBytes();
+      },
+      accelerator_peer_import(profile: number, wire: ArrayBuffer) {
+        setPeerTransfer(wire);
+        requireOk(raw.clearra_wasm_accelerator_peer_import!(profile));
+        outputBytes();
       }
     } : {}),
     ...(raw.clearra_wasm_online_pc4_configure && raw.clearra_wasm_online_pc4_pending && raw.clearra_wasm_online_pc4_admit ? {

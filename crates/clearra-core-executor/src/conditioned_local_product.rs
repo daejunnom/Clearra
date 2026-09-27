@@ -53,7 +53,7 @@ pub enum LocalRelationProductLookup {
 }
 
 pub struct QualifiedLocalRelationPack {
-    pack: LocalRelationCandidatePack,
+    pub(crate) pack: LocalRelationCandidatePack,
     signed_catalog_identity: [u8; 32],
     bounded_exhaustive_identity: [u8; 32],
 }
@@ -270,6 +270,9 @@ pub fn install_qualified_local_relation_pack(
         .lock()
         .map_err(|_| LocalRelationProductError::RegistryUnavailable)?;
     let slot = profile_slot(pack.binding().kick_profile)?;
+    if crate::conditioned_local_peer::peer_snapshot(pack.binding().kick_profile).is_some() {
+        return Err(LocalRelationProductError::ActiveSessionInUse);
+    }
     let combined = pack
         .accounted_bytes()
         .saturating_add(installed_local_relation_bytes(Some(slot))?)
@@ -340,8 +343,9 @@ pub(crate) fn qualified_local_relation_snapshot(
 pub(crate) fn installed_local_relation_bytes(
     exclude_slot: Option<usize>,
 ) -> Result<usize, LocalRelationProductError> {
+    let peer_bytes = crate::conditioned_local_peer::installed_peer_bytes(exclude_slot)?;
     let Some(registry) = REGISTRY.get() else {
-        return Ok(0);
+        return Ok(peer_bytes);
     };
     let guard = registry
         .read()
@@ -352,7 +356,7 @@ pub(crate) fn installed_local_relation_bytes(
         .enumerate()
         .filter(|(index, _)| Some(*index) != exclude_slot)
         .filter_map(|(_, slot)| slot.as_ref())
-        .fold(0_usize, |total, pack| {
+        .fold(peer_bytes, |total, pack| {
             total.saturating_add(pack.accounted_bytes())
         }))
 }
@@ -378,7 +382,9 @@ pub(crate) fn qualified_local_relation_for_solver_test(
     }
 }
 
-fn profile_slot(profile: KickTableProfileId) -> Result<usize, LocalRelationProductError> {
+pub(crate) fn profile_slot(
+    profile: KickTableProfileId,
+) -> Result<usize, LocalRelationProductError> {
     Ok(match profile {
         KickTableProfileId::Srs90 => 0,
         KickTableProfileId::SrsPlus => 1,
@@ -390,7 +396,7 @@ fn profile_slot(profile: KickTableProfileId) -> Result<usize, LocalRelationProdu
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::conditioned_local_pack::{
         built_in_local_relation_binding, encode_local_relation_candidate_pack,
@@ -442,7 +448,7 @@ mod tests {
         (bytes, binding, window, entry)
     }
 
-    fn signed_authority(
+    pub(crate) fn signed_authority(
         pack: &LocalRelationCandidatePack,
         scope: &str,
         payload_identity: [u8; 32],

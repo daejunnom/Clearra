@@ -294,8 +294,12 @@ pub(super) fn remove(kind: u32, profile: u32) -> i32 {
                 .map_err(|_| ()),
             ProductCatalogKind::BoardConditionedReachability => {
                 remove_qualified_local_relation_pack(kick)
-                    .map(|value| value.is_some())
                     .map_err(|_| ())
+                    .and_then(|full| {
+                        clearra_core_executor::remove_trusted_local_relation_peer(kick)
+                            .map(|peer| full.is_some() || peer)
+                            .map_err(|_| ())
+                    })
             }
         };
         match removed {

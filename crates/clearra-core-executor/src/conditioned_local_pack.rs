@@ -131,6 +131,19 @@ impl LocalRelationCandidatePack {
         self.index.record_count()
     }
 
+    pub(crate) fn context_heads(
+        &self,
+    ) -> impl Iterator<Item = (&ExactConditionedLocalRelation, u64)> {
+        self.index.context_heads()
+    }
+
+    pub(crate) fn prepared_group(
+        &self,
+        group: usize,
+    ) -> Option<crate::conditioned_local_index::PreparedLocalRelationContext> {
+        self.index.prepared_group(group)
+    }
+
     #[cfg(any(test, feature = "qualification-reference"))]
     pub(crate) fn records(&self) -> &[ExactConditionedLocalRelation] {
         self.index.records()
@@ -342,7 +355,7 @@ fn generation_identity(
     digest.finalize().into()
 }
 
-fn encode_record(
+pub(crate) fn encode_record(
     output: &mut Vec<u8>,
     record: &ExactConditionedLocalRelation,
 ) -> Result<(), LocalRelationPackError> {
@@ -385,7 +398,7 @@ fn encode_record(
     Ok(())
 }
 
-fn decode_record(
+pub(crate) fn decode_record(
     bytes: &[u8],
     cursor: &mut usize,
     profile: KickTableProfileId,

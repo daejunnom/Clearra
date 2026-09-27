@@ -35,6 +35,9 @@ type WorkerMessage = {
   profile?: number | null;
   wire?: ArrayBuffer | null;
   bytes?: ArrayBuffer | null;
+  seed?: ArrayBuffer | null;
+  session?: number;
+  reservedBytes?: number;
   requestId?: number;
   batch?: ArrayBuffer;
   offer?: {
@@ -94,7 +97,7 @@ class FakeVerifierWorker {
       return;
     }
     if (message.type === 'accelerator-pack') {
-      this.emit({ type: 'accelerator-pack-ready', applied: Boolean(message.bytes) });
+      this.emit({ type: 'accelerator-pack-ready', applied: Boolean(message.seed) });
       return;
     }
     if (message.type === 'delegation-run') {
@@ -217,14 +220,21 @@ synopsisPool.cancel();
 
 class ConditionedVerifierWorker extends FakeVerifierWorker {
   readonly controls: { profile: number | null; bytes: number }[] = [];
+  readonly replies: ArrayBuffer[] = [];
+  session = 0;
   constructor() { super(false); }
   override postMessage(message: WorkerMessage, transfer?: Transferable[]) {
     const delivered = transfer?.length
       ? structuredClone(message, { transfer }) as WorkerMessage : message;
     if (delivered.type === 'accelerator-pack') {
-      this.controls.push({ profile: delivered.profile ?? null, bytes: delivered.bytes?.byteLength ?? 0 });
+      this.controls.push({ profile: delivered.profile ?? null, bytes: delivered.seed?.byteLength ?? 0 });
+      this.session = delivered.session ?? 0;
     }
+    if (delivered.type === 'conditioned-reply' && delivered.wire) this.replies.push(delivered.wire);
     super.postMessage(delivered);
+  }
+  query(session = this.session, wire = Uint8Array.of(4).buffer) {
+    this.emit({ type: 'conditioned-queries', profile: 1, session, wire });
   }
 }
 const conditionedWorkers: ConditionedVerifierWorker[] = [];
@@ -234,22 +244,63 @@ const conditionedPool = new ClearraVerifierPool(() => {
   return worker as unknown as Worker;
 });
 const conditionedBytes = Uint8Array.of(7, 8, 9).buffer;
-await bounded('one designated relation owner', conditionedPool.initialize(
+let conditionedQueryCount = 0;
+await bounded('bounded relation peers share one host owner', conditionedPool.initialize(
   'clearra pc --lines 4', 2, undefined, 'conditioned-owner', 'atomic-task',
   undefined, 'geometry-verifier', null,
-  { profile: 1, bytes: conditionedBytes,
-    identity: 'qualified-generation', activeSessionSharedBytes: 1024 }
+  { profile: 1, seed: conditionedBytes,
+    identity: 'qualified-generation', reservedBytes: 1024 * 1024,
+    maximumPeers: 2, answerQueries: wire => { conditionedQueryCount++; return wire.slice(0); } }
 ));
-assert.equal(conditionedBytes.byteLength, 0, 'full pack ownership transfers to one verifier');
-assert.deepEqual(conditionedWorkers.map(worker => worker.controls.length), [1, 0]);
+assert.equal(conditionedBytes.byteLength, 3, 'small seed remains reusable; full pack never enters the pool');
+assert.deepEqual(conditionedWorkers.map(worker => worker.controls.length), [1, 1]);
 assert.deepEqual(conditionedWorkers[0].controls[0], { profile: 1, bytes: 3 });
+conditionedWorkers.forEach(worker => worker.query());
+await Promise.resolve();
+assert.equal(conditionedQueryCount, 2, 'every peer can query the same qualified root owner');
+assert.ok(conditionedWorkers.every(worker => new Uint8Array(worker.replies[0])[0] === 4));
 await bounded('conditioned job drain', conditionedPool.finish(() => undefined));
 await bounded('conditioned owner cleared before exact job', conditionedPool.initialize(
   'clearra pc --lines 4', 2, undefined, 'conditioned-owner'
 ));
 assert.deepEqual(conditionedWorkers[0].controls.at(-1), { profile: null, bytes: 0 });
-assert.equal(conditionedWorkers[1].controls.length, 0);
+assert.deepEqual(conditionedWorkers[1].controls.at(-1), { profile: null, bytes: 0 });
+conditionedWorkers.forEach(worker => worker.query());
+await Promise.resolve();
+assert.equal(conditionedQueryCount, 2, 'stale replies/queries after opt-out cannot use the old owner');
 conditionedPool.cancel();
+
+const oversizedRelationWorkers: ConditionedVerifierWorker[] = [];
+const oversizedRelationPool = new ClearraVerifierPool(() => {
+  const worker = new ConditionedVerifierWorker(); oversizedRelationWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+await bounded('optional relation does not reduce requested workers', oversizedRelationPool.initialize(
+  'clearra pc --lines 4', 2, undefined, 'bounded-owner', 'atomic-task', undefined,
+  'geometry-verifier', null, { profile: 1, seed: conditionedBytes, identity: 'qualified-generation',
+    reservedBytes: 1024 * 1024, maximumPeers: 1, answerQueries: () => { throw new Error('must not query'); } }
+));
+assert.equal(oversizedRelationWorkers.length, 2);
+assert.ok(oversizedRelationWorkers.every(worker => worker.controls.length === 0));
+oversizedRelationPool.cancel();
+
+const corruptRelationWorkers: ConditionedVerifierWorker[] = [];
+const corruptRelationPool = new ClearraVerifierPool(() => {
+  const worker = new ConditionedVerifierWorker(); corruptRelationWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+await bounded('fatal broker setup', corruptRelationPool.initialize(
+  'clearra pc --lines 4', 1, undefined, 'corrupt-owner', 'atomic-task', undefined,
+  'geometry-verifier', null, { profile: 1, seed: conditionedBytes, identity: 'qualified-generation',
+    reservedBytes: 1024 * 1024, maximumPeers: 1, answerQueries: () => { throw new Error('snapshot invalid'); } }
+));
+// A cache/proof failure is fatal even while no candidate batch is pending:
+// previously sealed partials may have used this relation generation.
+corruptRelationWorkers[0].query();
+await Promise.resolve();
+await assert.rejects(corruptRelationPool.waitForIdle(), /snapshot invalid/);
+assert.equal(corruptRelationWorkers[0].terminated, true);
+corruptRelationPool.cancel();
 
 class StalledSynopsisWorker extends FakeVerifierWorker {
   constructor() { super(false); }

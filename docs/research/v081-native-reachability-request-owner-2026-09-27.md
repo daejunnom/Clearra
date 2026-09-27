@@ -1,5 +1,9 @@
 # v0.8.1 native 도달성 템플릿의 요청별 공유 owner
 
+> 이 문서는 당시 native 단계의 증거를 그대로 보존한다. 이후 Web의 단일
+> full owner/bounded peer 구현과 남은 surface 검증은
+> [후속 Web owner 기록](v081-web-relation-peer-owner-2026-09-28.md)을 따른다.
+
 ## 범위와 권위
 
 이번 단계는 v0.8.1 기능·소유권 구현을 진행하며 벤치마크는 다음 단계로 미룬다.

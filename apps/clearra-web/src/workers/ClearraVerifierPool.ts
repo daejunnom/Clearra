@@ -2,7 +2,7 @@
 // workers and aggregating their bounded availability and exactness telemetry.
 import {
   ClearraWasmRuntimeError,
-  type AcceleratorWorkerPack,
+  type AcceleratorWorkerRelation,
   type AcceleratorWorkerSynopsis,
   type ClearraDistributedVerifierProgress,
   type ClearraWasmHostCapabilities
@@ -22,6 +22,7 @@ import { VerifierTransportProfile, type TransportOperation } from './VerifierTra
 type VerifierResponse =
   | { type: 'prewarmed' }
   | { type: 'accelerator-pack-ready'; applied: boolean }
+  | { type: 'conditioned-queries'; session: number; profile: number; wire: ArrayBuffer }
   | { type: 'accelerator-synopsis-ready'; applied: boolean }
   | { type: 'delegation-accepted'; acceptance: DelegationAcceptance }
   | {
@@ -222,7 +223,8 @@ class VerifierClient {
     private readonly coordinatorId: string,
     private readonly clientId: string,
     private readonly jobId: string,
-    private readonly transportProfile: VerifierTransportProfile
+    private readonly transportProfile: VerifierTransportProfile,
+    private readonly onFatalRelationError: (error: Error) => void
   ) {
     this.requestWatchdogScanIntervalMs = watchdogScanInterval(
       requestStallTimeoutMs,
@@ -310,7 +312,7 @@ class VerifierClient {
     hostCapabilities?: ClearraWasmHostCapabilities,
     executionKind: ClearraWorkerExecutionKind = 'geometry-verifier',
     legalBoardSynopsis?: AcceleratorWorkerSynopsis | null,
-    conditionedPack?: AcceleratorWorkerPack | null
+    conditionedPack?: AcceleratorWorkerRelation | null
   ): Promise<void> {
     this.initialized = false;
     this.exactCancellationRequested = false;
@@ -397,8 +399,13 @@ class VerifierClient {
     }
   }
 
-  private async installWorkerPack(pack?: AcceleratorWorkerPack | null): Promise<void> {
-    if ((!pack || pack.bytes.byteLength === 0) && this.installedConditionedProfile === null) return;
+  private relationEpoch = 0;
+  private relationBroker: { session: number; relation: AcceleratorWorkerRelation } | null = null;
+
+  private async installWorkerPack(pack?: AcceleratorWorkerRelation | null): Promise<void> {
+    this.relationBroker = null;
+    if ((!pack || pack.seed.byteLength === 0) && this.installedConditionedProfile === null) return;
+    const session = ++this.relationEpoch;
     const worker = this.worker;
     if (!worker) throw new Error('distributed verifier worker disappeared before relation setup');
     await new Promise<void>((resolve, reject) => {
@@ -414,6 +421,7 @@ class VerifierClient {
       const onMessage = (event: MessageEvent<VerifierResponse>) => {
         if (event.data.type === 'accelerator-pack-ready') {
           this.installedConditionedProfile = event.data.applied ? pack?.profile ?? null : null;
+          this.relationBroker = event.data.applied && pack ? { session, relation: pack } : null;
           cleanup();
           resolve();
         } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
@@ -427,11 +435,12 @@ class VerifierClient {
       worker.addEventListener('message', onMessage);
       worker.addEventListener('error', onError);
       try {
+        const seed = pack?.seed.slice(0) ?? null;
         worker.postMessage({
           type: 'accelerator-pack',
           profile: pack?.profile ?? null,
-          bytes: pack?.bytes ?? null
-        }, pack?.bytes ? [pack.bytes] : []);
+          seed, reservedBytes: pack?.reservedBytes ?? 0, session
+        }, seed ? [seed] : []);
       } catch (error) {
         if (this.installedConditionedProfile === null) {
           // A failed transfer to a worker with no prior negative authority
@@ -685,6 +694,28 @@ class VerifierClient {
     const worker = this.workerFactory();
     worker.onmessage = (event: MessageEvent<VerifierResponse>) => {
       const response = event.data;
+      if (response.type === 'conditioned-queries') {
+        const broker = this.relationBroker;
+        if (!broker || response.session !== broker.session || response.profile !== broker.relation.profile) return;
+        try {
+          if (!(response.wire instanceof ArrayBuffer) || response.wire.byteLength > 256 * 1024) {
+            throw new Error('bounded relation query rejected');
+          }
+          // Synchronous immutable lookup runs between root WASM quanta.
+          // There is no network, waiting, or separate compute delegation.
+          const wire = broker.relation.answerQueries(response.wire);
+          if (wire.byteLength > 256 * 1024) throw new Error('bounded relation reply rejected');
+          worker.postMessage({ type: 'conditioned-reply', profile: response.profile,
+            session: response.session, wire }, [wire]);
+        } catch (error) {
+          this.onFatalRelationError(asError(error)); // invalidate even idle, already sealed partials
+        }
+        return;
+      }
+      if (response.type === 'failed' && response.requestId === undefined && this.initialized) {
+        this.onFatalRelationError(new ClearraWasmRuntimeError(response.code, response.message));
+        return;
+      }
       if (response.type === 'delegation-accepted') {
         const pending = this.pendingOffers.get(response.acceptance.taskId);
         if (!pending) return;
@@ -974,6 +1005,7 @@ class VerifierClient {
     this.packReject = null;
     this.synopsisReject = null;
     this.installedConditionedProfile = null;
+    this.relationBroker = null;
     this.installedSynopsisProfile = null;
     this.readyReject = null;
     prewarmReject?.(error);
@@ -1100,7 +1132,7 @@ export class ClearraVerifierPool {
     hostCapabilities?: ClearraWasmHostCapabilities,
     executionKind: ClearraWorkerExecutionKind = 'geometry-verifier',
     legalBoardSynopsis?: AcceleratorWorkerSynopsis | null,
-    conditionedPack?: AcceleratorWorkerPack | null
+    conditionedPack?: AcceleratorWorkerRelation | null
   ) {
     const generation = ++this.generation;
     this.readySubsetFinalization = null;
@@ -1119,7 +1151,8 @@ export class ClearraVerifierPool {
       while (this.clients.length < size) {
         this.clients.push(this.createClient());
       }
-      const initializations = this.clients.map(async (client, index) => {
+      const relation = conditionedPack && size <= conditionedPack.maximumPeers ? conditionedPack : null;
+      const initializations = this.clients.map(async (client) => {
         const initializationTask = withTimeout(
           client.initialize(
             initialization,
@@ -1128,7 +1161,7 @@ export class ClearraVerifierPool {
             hostCapabilities,
             executionKind,
             legalBoardSynopsis,
-            index === 0 ? conditionedPack : null
+            relation
           ),
           this.initializationTimeoutMs,
           'distributed verifier initialization'
@@ -1480,7 +1513,8 @@ export class ClearraVerifierPool {
       this.coordinatorId,
       String(this.nextClientId++),
       this.jobId,
-      this.transportProfile
+      this.transportProfile,
+      (error) => { if (this.active) this.fail(error); }
     );
   }
 

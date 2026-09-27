@@ -706,7 +706,6 @@ const serialAuthority = new SharedExecutionResourceAuthority(sharedCapacity);
 let serialResetCount = 0;
 let serialDrainCount = 0;
 let serialConditionedAdmission = 0;
-let serialConditionedIdentity = '';
 const serialPlan: ClearraDistributedPlan = {
   ...plan,
   mode: 'serial',
@@ -723,8 +722,7 @@ const serialWasm = {
     serialResetCount += 1;
   },
   accelerator_admit(kind: number, profile: number, bytes: ArrayBuffer, activate: boolean) {
-    assert.equal(serialResetCount, 1, 'the coordinator releases its owner before serial admission');
-    assert.deepEqual([kind, profile, bytes.byteLength, activate], [1, 3, 3, true]);
+    void kind; void profile; void bytes; void activate;
     serialConditionedAdmission += 1;
   },
   start_job() {
@@ -776,14 +774,13 @@ const serialTerminal = await new ClearraProductJobRunner(
   serialAuthority,
   100,
   null,
-  { profile: 3, bytes: Uint8Array.of(1, 2, 3).buffer,
-    identity: 'signed-condition-generation', activeSessionSharedBytes: 1024 },
-  (_profile, identity) => { serialConditionedIdentity = identity; }
+  { profile: 3, seed: Uint8Array.of(1, 2, 3).buffer,
+    identity: 'signed-condition-generation', reservedBytes: 1024 * 1024,
+    maximumPeers: 1, answerQueries: wire => wire.slice(0) }
 ).run('clearra pc --lines 1', (event) => serialEvents.push(event));
 assert.equal(serialTerminal.event, 'failed');
 assert.equal(serialResetCount, 1, 'preparation coordinator resets exactly once');
-assert.equal(serialConditionedAdmission, 1);
-assert.equal(serialConditionedIdentity, 'signed-condition-generation');
+assert.equal(serialConditionedAdmission, 0, 'already admitted complete root owner is not rebuilt for serial fallback');
 assert.deepEqual(
   serialEvents
     .filter((event) => event.event === 'progress')

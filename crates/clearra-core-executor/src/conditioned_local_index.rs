@@ -32,6 +32,16 @@ pub(crate) struct PreparedLocalRelationContext {
     physical_bits: u8,
 }
 
+impl PreparedLocalRelationContext {
+    pub(crate) fn group(self) -> usize {
+        self.group
+    }
+
+    pub(crate) fn accepts_board(self, board: u64) -> bool {
+        board >> self.physical_bits == 0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LocalRelationContextPreparation {
     Ready(PreparedLocalRelationContext),
@@ -167,6 +177,27 @@ impl LocalRelationCandidateIndex {
 
     pub fn record_count(&self) -> usize {
         self.records.len()
+    }
+
+    /// Small, canonical context descriptors for trusted in-app peers. This
+    /// does not expose or copy the complete occupancy relation table.
+    pub(crate) fn context_heads(
+        &self,
+    ) -> impl Iterator<Item = (&ExactConditionedLocalRelation, u64)> {
+        self.contexts.iter().map(|context| {
+            let dependencies = self.records[context.start..context.end]
+                .iter()
+                .fold(0, |mask, record| mask | record.dependency_mask);
+            (&self.records[context.start], dependencies)
+        })
+    }
+
+    pub(crate) fn prepared_group(&self, group: usize) -> Option<PreparedLocalRelationContext> {
+        let record = &self.records[self.contexts.get(group)?.start];
+        Some(PreparedLocalRelationContext {
+            group,
+            physical_bits: record.width * record.row_frame.surviving_rows(),
+        })
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -308,7 +339,7 @@ impl LocalRelationCandidateIndex {
     }
 }
 
-fn record_is_canonical(record: &ExactConditionedLocalRelation) -> bool {
+pub(crate) fn record_is_canonical(record: &ExactConditionedLocalRelation) -> bool {
     let bits = u32::from(record.width) * u32::from(record.height);
     record.width == 10
         && (1..=6).contains(&record.height)
@@ -351,7 +382,7 @@ fn strictly_sorted(poses: &[ConditionedReachabilityEntryPose]) -> bool {
         .all(|pair| pose_key(&pair[0]) < pose_key(&pair[1]))
 }
 
-fn conditions_overlap(
+pub(crate) fn conditions_overlap(
     a: &ExactConditionedLocalRelation,
     b: &ExactConditionedLocalRelation,
 ) -> bool {
