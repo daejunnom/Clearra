@@ -1,5 +1,5 @@
 name: Clearra Safe Integration Audit
-run-name: Verify two-supply exchange implementation before publication
+run-name: Validate corrected two-supply exchange and full release acceptance
 on:
   push:
     branches: [codex/clearra-safe-integration-20260925]
@@ -10,34 +10,86 @@ permissions:
 concurrency:
   group: clearra-two-supply-exchange-validation
   cancel-in-progress: true
-env:
-  CLEARRA_SOURCE_COMMIT: 59142804a827e6c533bb2ab3243b4eeb67d3cdaa
-  CLEARRA_ENGINE_BUILD_ID: 59142804a827e6c533bb2ab3243b4eeb67d3cdaa
 jobs:
-  native:
+  prepare:
     if: github.repository == 'daejunnom/Clearra'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {contents: write}
+    outputs:
+      candidate: ${{ steps.source.outputs.candidate }}
+      tree: ${{ steps.source.outputs.tree }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: 2f6b7406d9fc288c177c93644c0f7d6c7d0c0f39, fetch-depth: 0}
+      - name: Install exact formatter
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Apply reviewed parser and fixture repair then format candidate only
+        id: source
+        shell: python
+        run: |
+          import hashlib,json,os,pathlib,subprocess
+          BASE='7d7fc390b2f65d52ebf8362dff65dcbfcb6d481b'
+          PARENT='59142804a827e6c533bb2ab3243b4eeb67d3cdaa'
+          BRANCH='codex/review-recovery-two-supplies-exchange-20260927'
+          def git(*args): return subprocess.check_output(['git',*args],text=True,timeout=120).strip()
+          def refs():
+              for ref,sha in [('refs/heads/main',BASE),('refs/heads/'+BRANCH,PARENT)]:
+                  if git('ls-remote','origin',ref).split()!=[sha,ref]: raise RuntimeError('Reviewed ref moved; reconcile before writing')
+          patch=pathlib.Path('scripts/integration/recovery-exchange-verification-20260927/source-fix.patch').read_bytes()
+          if hashlib.sha256(patch).hexdigest()!='cb02ddd5285de948053ba2c13e81d5f0f8505a14ccc21bbee8458d4ed4a4a8d0': raise RuntimeError('Patch checksum mismatch')
+          refs();git('checkout','--detach',PARENT)
+          if git('rev-parse','HEAD^{tree}')!='7a1ac7441aa830577ff015043d15f20201c5ab62': raise RuntimeError('Reviewed parent tree mismatch')
+          allowed=set(git('diff','--name-only',BASE,PARENT).splitlines())
+          temporary=pathlib.Path(os.environ['RUNNER_TEMP'])/'exchange-source-fix.patch';temporary.write_bytes(patch)
+          git('apply','--check',str(temporary));git('apply','--index',str(temporary));git('diff','--cached','--check')
+          if git('write-tree')!='707a62eac62e9295e732aebeee2edcf46fe379fd': raise RuntimeError('Reviewed unformatted tree mismatch')
+          subprocess.run(['cargo','+1.98.1','fmt','--all'],check=True,timeout=120)
+          changed=git('diff','HEAD','--name-only').splitlines()
+          if any(path not in allowed or not path.endswith('.rs') for path in changed): raise RuntimeError('Formatter exceeded reviewed Rust scope')
+          git('add','--',*changed);git('diff','--cached','--check')
+          subprocess.run(['cargo','+1.98.1','fmt','--all','--check'],check=True,timeout=120)
+          tree=git('write-tree')
+          git('config','user.name','github-actions[bot]');git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit','-m','fix: consume recovery option values once and validate true multi-early geometry')
+          candidate=git('rev-parse','HEAD');refs();git('push','origin',candidate+':refs/heads/'+BRANCH)
+          if git('ls-remote','origin','refs/heads/'+BRANCH).split()!=[candidate,'refs/heads/'+BRANCH]: raise RuntimeError('Candidate readback mismatch')
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'exchange-candidate';out.mkdir()
+          (out/'change.patch').write_text(git('diff','--binary',PARENT,candidate)+'\n')
+          subprocess.run(['git','archive','--format=tar.gz','--output='+str(out/'source.tar.gz'),candidate],check=True,timeout=120)
+          receipt={'source_commit':candidate,'parent':PARENT,'base':BASE,'tree':tree,'files':changed,'main_written':False,'published':False}
+          (out/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps(receipt),flush=True)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidate='+candidate+'\ntree='+tree+'\n')
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exchange-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/exchange-candidate
+          if-no-files-found: warn
+          retention-days: 14
+  native:
+    needs: prepare
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: {os: [ubuntu-latest, windows-latest]}
     env:
       CARGO_BUILD_JOBS: '4'
       RUST_MIN_STACK: '16777216'
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: 59142804a827e6c533bb2ab3243b4eeb67d3cdaa, fetch-depth: 0, persist-credentials: false}
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
       - name: Bind exact source and install pinned Rust
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CLEARRA_SOURCE_COMMIT"
-          test "$(git rev-parse 'HEAD^{tree}')" = 7a1ac7441aa830577ff015043d15f20201c5ab62
           rustup toolchain install 1.98.1 --profile minimal --component rustfmt
-      - name: Check formatting without modifying the tested source
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo fmt --all --check 2>&1 | tee "$RUNNER_TEMP/exchange-format.log"
+          cargo fmt --all --check
       - name: Execute actual core exchange and image regressions
-        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -61,39 +113,35 @@ jobs:
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-memory.log"
           cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-wire.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-wire.log"
-      - name: Record formatter diff for review only after all source tests
+      - name: Verify optimized real exchange without enlarged test stacks
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          test -z "$(git status --porcelain --untracked-files=no)"
-          cargo fmt --all
-          git diff --binary > "$RUNNER_TEMP/exchange-format.patch"
-          git diff --check
-          mkdir -p "$RUNNER_TEMP/formatted-source"
-          git diff --name-only -z | xargs -0 -r cp --parents --target-directory="$RUNNER_TEMP/formatted-source"
-          printf '%s\n' 'Formatting output is not a new verified commit. No source ref, main or deployment was changed.' > "$RUNNER_TEMP/formatted-source/REVIEW_ONLY.txt"
+          unset RUST_MIN_STACK
+          cargo test --locked --release -p clearra-forward-search --lib recovery_build -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/exchange-optimized.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/exchange-optimized.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: exchange-native-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/exchange-*.log
-            ${{ runner.temp }}/exchange-format.patch
-            ${{ runner.temp }}/formatted-source
+          name: exchange-native-${{ matrix.os }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/exchange-*.log
           if-no-files-found: warn
           retention-days: 14
   frontend:
+    needs: prepare
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix: {os: [ubuntu-latest, windows-latest]}
     env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
       CLEARRA_BROWSER_TOOLS_ROOT: ${{ github.workspace }}/build/tools/ui-browser
     steps:
       - uses: actions/checkout@v4
-        with: {ref: 59142804a827e6c533bb2ab3243b4eeb67d3cdaa, fetch-depth: 0, persist-credentials: false}
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
       - uses: actions/setup-node@v4
         with: {node-version: 22.23.2}
       - name: Install exact Rust Node dependencies and Chromium
@@ -146,16 +194,73 @@ jobs:
             ${{ runner.temp }}/clearra-control-acceptance
           if-no-files-found: warn
           retention-days: 14
+  acceptance:
+    needs: [prepare, native, frontend]
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        shard: [FoundationNoProductDebt, FoundationAdversarialCorrectness, FoundationDesktopHost, Sanitizer, RustExact, RustProduct, Pages]
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ needs.prepare.outputs.candidate }}
+      CLEARRA_WEB_BASE_PATH: /Clearra
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ needs.prepare.outputs.candidate }}', fetch-depth: 0, persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: 22.23.2}
+      - name: Prepare exact toolchains and frozen workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD).Trim() -ne $env:CLEARRA_SOURCE_COMMIT) { throw 'Candidate mismatch' }
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "CARGO_BUILD_JOBS=$([Math]::Max(1, [Environment]::ProcessorCount))" >> $env:GITHUB_ENV
+          if ('${{ matrix.shard }}' -eq 'Pages') {
+            rustup target add wasm32-unknown-unknown
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Run full acceptance including actual new WASM and Svelte
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard '${{ matrix.shard }}' -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers ([Math]::Max(1, [Environment]::ProcessorCount)) -VerboseLog -ShowWarnings 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'exchange-acceptance.log')
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exchange-acceptance-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/exchange-acceptance.log
+            ${{ runner.temp }}/clearra-surface-acceptance
+            ${{ runner.temp }}/clearra-recovery-workspace-acceptance
+            ${{ runner.temp }}/clearra-recovery-result-acceptance
+          if-no-files-found: warn
+          retention-days: 14
   ready:
     if: always()
-    needs: [native, frontend]
+    needs: [prepare, native, frontend, acceptance]
     runs-on: ubuntu-latest
     steps:
-      - name: Require real verification without promoting an unverified source
+      - name: Require complete real verification without premature promotion
         env: {RESULTS: '${{ toJSON(needs) }}'}
         shell: python
         run: |
           import json,os
-          failed={k:v['result'] for k,v in json.loads(os.environ['RESULTS']).items() if v['result']!='success'}
+          results=json.loads(os.environ['RESULTS'])
+          failed={k:v['result'] for k,v in results.items() if v['result']!='success'}
           if failed: raise RuntimeError(json.dumps(failed))
-          print('Source preflight passed. Full exact-source acceptance and repository protection are still required. No main update or deployment.')
+          print('Full exchange acceptance passed:',results['prepare']['outputs']['candidate'])
+          print('Independent repository protection is required before fast-forward. No deployment occurs here.')
