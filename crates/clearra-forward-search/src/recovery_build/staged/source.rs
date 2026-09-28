@@ -8,7 +8,7 @@ use clearra_supply::pattern_universe::{
 };
 use std::collections::HashMap;
 
-pub(super) const PIECES: [PieceKind; 7] = [
+pub(in crate::recovery_build) const PIECES: [PieceKind; 7] = [
     PieceKind::I,
     PieceKind::J,
     PieceKind::L,
@@ -17,7 +17,7 @@ pub(super) const PIECES: [PieceKind; 7] = [
     PieceKind::T,
     PieceKind::Z,
 ];
-pub(super) fn cancelled(control: &ExecutionControl) -> Result<(), Error> {
+pub(in crate::recovery_build) fn cancelled(control: &ExecutionControl) -> Result<(), Error> {
     if control.is_cancelled() {
         Err(Error::Cancelled)
     } else {
@@ -29,7 +29,8 @@ struct Atom {
     mask: u8,
     draws: u16,
 }
-pub(super) struct Source {
+#[derive(Clone)]
+pub(in crate::recovery_build) struct Source {
     pub first_len: u16,
     pub end: u16,
     pub universe: Id,
@@ -39,6 +40,43 @@ pub(super) struct Source {
     pub compact_second: bool,
 }
 impl Source {
+    pub fn compile_all(
+        diagram: &mut Diagram,
+        first: &MaterializedPatternUniverse,
+        second: &MaterializedPatternUniverse,
+        control: &ExecutionControl,
+    ) -> Result<Self, Error> {
+        let Some(atoms) = compact_atoms(first) else {
+            return Self::compile(diagram, first, second, 0, first.pattern_count(), control);
+        };
+        let mut source = Self::compile(diagram, first, second, 0, 1, control)?;
+        let root = compile_atoms(
+            diagram,
+            &atoms,
+            0,
+            atoms[0].mask,
+            atoms[0].draws,
+            0,
+            &mut HashMap::new(),
+            control,
+        )?;
+        if diagram.count(root, 0, source.first_len)? != first.pattern_count() as u128 {
+            return Err(Error::PatternDomainUnavailable);
+        }
+        source.universe = diagram.intersect(root, source.second)?;
+        let mut counts = [0_u8; 7];
+        let mut fixed = true;
+        for atom in &atoms {
+            fixed &= u32::from(atom.draws) == atom.mask.count_ones();
+            for (p, n) in counts.iter_mut().enumerate() {
+                *n = n
+                    .checked_add(u8::from(atom.mask & (1 << p) != 0))
+                    .ok_or(Error::CounterOverflow)?;
+            }
+        }
+        source.first_counts = fixed.then_some(counts);
+        Ok(source)
+    }
     pub fn compile(
         diagram: &mut Diagram,
         first: &MaterializedPatternUniverse,
@@ -55,38 +93,7 @@ impl Source {
         let end = first_len
             .checked_add(second_len)
             .ok_or(Error::CounterOverflow)?;
-        let compact = second.uniform_compact_source();
-        let atoms = match compact {
-            Some(UniformCompactPatternSource::FactorizedExpression(shape))
-                if shape.full_sequence_len() == shape.visible_sequence_len() =>
-            {
-                Some(
-                    shape
-                        .atoms()
-                        .map(|a| Atom {
-                            mask: a
-                                .choices()
-                                .iter()
-                                .fold(0, |m, &p| m | (1 << piece_index(p))),
-                            draws: a.draw_count() as u16,
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            }
-            Some(UniformCompactPatternSource::Standard7Bag { sequence_len, .. }) => {
-                let mut atoms = Vec::new();
-                let mut left = sequence_len;
-                while left > 0 {
-                    atoms.push(Atom {
-                        mask: 127,
-                        draws: left.min(7) as u16,
-                    });
-                    left = left.saturating_sub(7);
-                }
-                Some(atoms)
-            }
-            _ => None,
-        };
+        let atoms = compact_atoms(second);
         let (second_root, compact_second, second_counts) = if let Some(atoms) = atoms {
             let root = compile_atoms(
                 diagram,
@@ -243,4 +250,38 @@ fn compile_atoms(
     memo.try_reserve(1).map_err(|_| Error::MemoryUnavailable)?;
     memo.insert((atom, mask, left), id);
     Ok(id)
+}
+
+fn compact_atoms(universe: &MaterializedPatternUniverse) -> Option<Vec<Atom>> {
+    match universe.uniform_compact_source() {
+        Some(UniformCompactPatternSource::FactorizedExpression(shape))
+            if shape.full_sequence_len() == shape.visible_sequence_len() =>
+        {
+            Some(
+                shape
+                    .atoms()
+                    .map(|a| Atom {
+                        mask: a
+                            .choices()
+                            .iter()
+                            .fold(0, |m, &p| m | (1 << piece_index(p))),
+                        draws: a.draw_count() as u16,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }
+        Some(UniformCompactPatternSource::Standard7Bag { sequence_len, .. }) => {
+            let mut atoms = Vec::new();
+            let mut left = sequence_len;
+            while left > 0 {
+                atoms.push(Atom {
+                    mask: 127,
+                    draws: left.min(7) as u16,
+                });
+                left = left.saturating_sub(7);
+            }
+            Some(atoms)
+        }
+        _ => None,
+    }
 }

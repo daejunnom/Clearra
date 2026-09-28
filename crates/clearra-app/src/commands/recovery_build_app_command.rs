@@ -12,7 +12,7 @@ use clearra_forward_search::{
 };
 use clearra_host_contract::{
     ProductResultPayload, ProductResultPayloadContent, RecoveryBuildExamplePayload,
-    RecoveryBuildPayload, RecoveryBuildStepPayload,
+    RecoveryBuildPayload, RecoveryBuildSolutionPayload, RecoveryBuildStepPayload,
 };
 use clearra_output::model::RenderField;
 use sha2::{Digest, Sha256};
@@ -88,6 +88,17 @@ pub(crate) fn recovery_build_response(
         Sha256::digest(format!("recovery-build.v2:{query:?}").as_bytes())
     );
     let public = RecoveryBuildPayload {
+        solutions_complete: report.solutions_complete,
+        solutions: report
+            .solutions
+            .iter()
+            .map(|s| RecoveryBuildSolutionPayload {
+                key: s.key.clone(),
+                covered_count: s.covered_count.to_string(),
+                probability: s.probability.to_string(),
+                example: example(&s.example),
+            })
+            .collect(),
         input_identity: identity,
         height: query.fields.height,
         start_board_mask: mask(query.fields.initial.words()),

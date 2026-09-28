@@ -14,6 +14,7 @@ use clearra_supply::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryBuildQuery {
+    pub all_solutions: bool,
     pub fields: RecoveryBuildFields,
     pub first_supply: String,
     pub second_supply: String,
@@ -34,7 +35,17 @@ pub struct RecoveryBuildExample {
     pub path: RecoveryBuildFixedReport,
 }
 #[derive(Clone, Debug, PartialEq)]
+pub struct RecoveryBuildSolution {
+    /// Exact logical placement identity, not a representative queue identity.
+    pub key: String,
+    pub covered_count: u128,
+    pub probability: f64,
+    pub example: RecoveryBuildExample,
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct RecoveryBuildPopulation {
+    pub solutions: Vec<RecoveryBuildSolution>,
+    pub solutions_complete: bool,
     pub possible: u128,
     pub evaluated: u128,
     pub normal_count: u128,
@@ -167,6 +178,8 @@ impl PopulationAccumulator {
     pub fn new(possible: u128) -> Self {
         Self {
             report: RecoveryBuildPopulation {
+                solutions: Vec::new(),
+                solutions_complete: false,
                 possible,
                 evaluated: 0,
                 normal_count: 0,

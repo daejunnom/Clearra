@@ -50,6 +50,8 @@ pub(super) fn copy_payload(
     ledger: &mut WasmFiniteMemoryLedger,
 ) -> Result<RecoveryBuildPayload, WasmCommandRuntimeError> {
     Ok(RecoveryBuildPayload {
+        solutions_complete: false,
+        solutions: Vec::new(),
         input_identity: try_owned_string(&source.input_identity, ledger)?,
         height: source.height,
         start_board_mask: try_owned_string(&source.start_board_mask, ledger)?,

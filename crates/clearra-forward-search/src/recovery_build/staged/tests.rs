@@ -14,6 +14,7 @@ fn mask(n: u64) -> Mask {
 }
 fn query() -> RecoveryBuildQuery {
     RecoveryBuildQuery {
+        all_solutions: false,
         fields: RecoveryBuildFields {
             height: 8,
             initial: mask(0),
@@ -397,5 +398,50 @@ fn recovery_build_staged_fixture_benchmark() {
             rows*5040,now.elapsed().as_millis(),b.solver.states,b.solver.middle_states,b.solver.tail_states,b.solver.repair_states,b.solver.suffix_hits,b.solver.geometry.lock_queries,b.solver.geometry.cache_hits,b.solver.diagram.node_count());
         let (report, _) = b.finish(&p, &control).unwrap();
         eprintln!("stage_benchmark_result exchange={exchange} counts={:?} probabilities={:?} elapsed_ms={}",report.counts,report.probabilities,now.elapsed().as_millis());
+    }
+}
+
+#[test]
+fn recovery_build_early_limit_counts_second_source_before_middle_completion() {
+    // O from source 1 and another O from source 2 must both be placed before
+    // the trailing I when hold is off. No geometric/queue oracle supplies the
+    // answer: there is only one three-token placement order and both O targets
+    // are on the floor beside the Middle I.
+    let mut q = query();
+    q.fields.middle = mask(0xf);
+    q.fields.result = mask(0x3c0f0);
+    q.first_supply = "O".into();
+    q.second_supply = "OI".into();
+    q.hold_enabled = false;
+    q.early_limit = CrossStageEarlyLimit::AtMost(1);
+    let denied = q.search(&ExecutionControl::default()).unwrap();
+    assert_eq!(
+        (
+            denied.normal_count,
+            denied.recovery_count,
+            denied.no_path_count
+        ),
+        (0, 0, 1)
+    );
+    q.early_limit = CrossStageEarlyLimit::AtMost(2);
+    let allowed = q.search(&ExecutionControl::default()).unwrap();
+    assert_eq!(
+        (
+            allowed.normal_count,
+            allowed.recovery_count,
+            allowed.no_path_count
+        ),
+        (0, 1, 0)
+    );
+    assert_eq!(allowed.recovery_example.unwrap().path.actual_early, 2);
+    // Hold permits storing the second O, placing I, then releasing that O.
+    q.hold_enabled = true;
+    q.early_limit = CrossStageEarlyLimit::AtMost(1);
+    let held = q.search(&ExecutionControl::default()).unwrap();
+    assert_eq!(held.recovery_count, 1);
+    assert_eq!(held.recovery_example.unwrap().path.actual_early, 1);
+    for early in [0, 1, 2] {
+        q.early_limit = CrossStageEarlyLimit::AtMost(early);
+        compare(q.clone());
     }
 }

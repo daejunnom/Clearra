@@ -8,7 +8,7 @@ use super::{
 };
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use std::collections::BTreeMap;
-mod wire;
+pub(super) mod wire;
 const MAX_BATCH: usize = 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,6 +57,7 @@ struct ResultBatch {
 }
 
 pub struct RecoveryBuildParallelCoordinator {
+    pub(super) catalog: Option<super::catalog::Coordinator>,
     source: PreparedPopulation,
     initialization: Vec<u8>,
     accumulator: PopulationAccumulator,
@@ -83,13 +84,24 @@ impl RecoveryBuildParallelCoordinator {
         let initialization = wire::encode_initialization(&source.query);
         // Fixed partitioning makes all worker counts use identical arithmetic
         // and search quotients. Parallelism does not change a probability space.
-        let batch_size = if source.first.pattern_count() <= 64 {
+        let batch_size = if source.first.pattern_count() <= 64 || source.query.allow_piece_exchange
+        {
             1
         } else {
             MAX_BATCH
         };
         let accumulator = PopulationAccumulator::new(source.possible);
+        let catalog = if source.query.all_solutions {
+            Some(super::catalog::Coordinator::new(
+                source.query.clone(),
+                initialization.clone(),
+                workers,
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
+            catalog,
             source,
             initialization,
             accumulator,
@@ -103,10 +115,16 @@ impl RecoveryBuildParallelCoordinator {
             batch_size,
         })
     }
+    pub fn has_pending_preparation(&self) -> bool {
+        self.catalog.as_ref().is_some_and(|c| !c.enumeration_done())
+    }
     pub fn worker_initialization(&self) -> Vec<u8> {
         self.initialization.clone()
     }
     pub fn progress(&self) -> RecoveryBuildParallelProgress {
+        if let Some(catalog) = &self.catalog {
+            return catalog.progress();
+        }
         RecoveryBuildParallelProgress {
             possible: self.source.possible,
             issued: self.next * self.source.second.pattern_count() as u128,
@@ -120,12 +138,15 @@ impl RecoveryBuildParallelCoordinator {
         control: &ExecutionControl,
     ) -> Result<(RecoveryBuildParallelProduce, Vec<u8>), RecoveryBuildParallelError> {
         use RecoveryBuildParallelProduce::*;
+        if let Some(catalog) = &mut self.catalog {
+            return catalog.produce(control);
+        }
         if control.is_cancelled() {
             return Ok((Cancelled, Vec::new()));
         }
         if self.next == self.source.first.pattern_count() as u128 {
             return Ok((
-                if self.issued.is_empty() {
+                if self.issued.is_empty() && self.completed.is_empty() {
                     Completed
                 } else {
                     Pending
@@ -133,7 +154,7 @@ impl RecoveryBuildParallelCoordinator {
                 Vec::new(),
             ));
         }
-        // Out-of-order finished shards occupy the same bounded window.
+        // Limit live work, not completed summaries waiting for an earlier shard.
         if self.issued.len() >= self.capacity {
             return Ok((Pending, Vec::new()));
         }
@@ -157,6 +178,9 @@ impl RecoveryBuildParallelCoordinator {
         bytes: &[u8],
         control: &ExecutionControl,
     ) -> Result<(), RecoveryBuildParallelError> {
+        if let Some(catalog) = &mut self.catalog {
+            return catalog.absorb(bytes, control);
+        }
         if control.is_cancelled() {
             return Err(RecoveryBuildError::Cancelled.into());
         }
@@ -252,6 +276,7 @@ impl RecoveryBuildParallelCoordinator {
             .finished_states
             .checked_add(batch.block.states)
             .ok_or(RecoveryBuildError::CounterOverflow)?;
+        self.issued.remove(&batch.task.start);
         self.completed.insert(batch.task.start, batch);
         while let Some(batch) = self.completed.remove(&self.merged) {
             self.accumulator.record_block(
@@ -260,7 +285,6 @@ impl RecoveryBuildParallelCoordinator {
                 batch.task.count,
                 batch.block,
             )?;
-            self.issued.remove(&self.merged);
             self.merged += batch.task.count as u128;
         }
         self.source.progress(self.finished_pairs, control);
@@ -270,6 +294,9 @@ impl RecoveryBuildParallelCoordinator {
         self,
         control: &ExecutionControl,
     ) -> Result<RecoveryBuildPopulation, RecoveryBuildParallelError> {
+        if let Some(catalog) = self.catalog {
+            return catalog.finish(control);
+        }
         if control.is_cancelled() {
             return Err(RecoveryBuildError::Cancelled.into());
         }
@@ -289,6 +316,7 @@ struct PendingBatch {
     block: Block,
 }
 pub struct RecoveryBuildParallelWorker {
+    catalog: Option<super::catalog::Worker>,
     source: PreparedPopulation,
     initialization: Vec<u8>,
     geometry: Option<Geometry>,
@@ -302,7 +330,16 @@ impl RecoveryBuildParallelWorker {
     pub fn new(bytes: &[u8]) -> Result<Self, RecoveryBuildParallelError> {
         let source = PreparedPopulation::new(wire::decode_initialization(bytes)?)?;
         let possible = source.possible;
+        let catalog = if source.query.all_solutions {
+            Some(super::catalog::Worker::new(
+                source.query.clone(),
+                bytes.to_vec(),
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
+            catalog,
             source,
             initialization: bytes.to_vec(),
             geometry: None,
@@ -314,9 +351,15 @@ impl RecoveryBuildParallelWorker {
         })
     }
     pub fn has_pending_work(&self) -> bool {
+        if let Some(catalog) = &self.catalog {
+            return catalog.has_pending_work();
+        }
         self.pending.is_some()
     }
     pub fn progress(&self) -> RecoveryBuildParallelProgress {
+        if let Some(catalog) = &self.catalog {
+            return catalog.progress();
+        }
         let mut result = self.progress;
         if let Some(pending) = &self.pending {
             result.states = result.states.saturating_add(pending.block.states());
@@ -328,6 +371,9 @@ impl RecoveryBuildParallelWorker {
         bytes: &[u8],
         control: &ExecutionControl,
     ) -> Result<Option<Vec<u8>>, RecoveryBuildParallelError> {
+        if let Some(catalog) = &mut self.catalog {
+            return catalog.consume(bytes, control);
+        }
         if control.is_cancelled() {
             return Err(RecoveryBuildError::Cancelled.into());
         }
@@ -369,6 +415,9 @@ impl RecoveryBuildParallelWorker {
         &mut self,
         control: &ExecutionControl,
     ) -> Result<Option<Vec<u8>>, RecoveryBuildParallelError> {
+        if let Some(catalog) = &mut self.catalog {
+            return catalog.advance(control);
+        }
         if control.is_cancelled() {
             self.pending = None;
             return Err(RecoveryBuildError::Cancelled.into());
@@ -385,7 +434,8 @@ impl RecoveryBuildParallelWorker {
                 .ok_or(RecoveryBuildParallelError::InvalidState(
                     "missing stage shard",
                 ))?;
-        let (block, geometry) = block.finish(&self.source, control)?;
+        let (block, mut geometry) = block.finish(&self.source, control)?;
+        geometry.retire_shard_cache()?;
         self.geometry = Some(geometry);
         self.progress.completed += task.count as u128 * self.source.second.pattern_count() as u128;
         self.progress.states = self
@@ -413,9 +463,12 @@ pub(super) fn search_serial(
                 return Err(RecoveryBuildError::Cancelled.into())
             }
             RecoveryBuildParallelProduce::Pending => {
+                if c.has_pending_preparation() {
+                    continue;
+                }
                 return Err(RecoveryBuildParallelError::InvalidState(
                     "serial stage without work",
-                ))
+                ));
             }
             RecoveryBuildParallelProduce::Batch => {
                 let mut result = w.consume(&bytes, control)?;

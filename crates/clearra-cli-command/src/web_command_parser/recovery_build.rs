@@ -8,6 +8,7 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
     let mut height = 8;
     let mut workers = None;
     let mut use_all = false;
+    let mut all_solutions = false;
     let mut initial = Board256Mask::EMPTY;
     let mut middle = None;
     let mut result = None;
@@ -79,6 +80,7 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
                 };
             }
             "--use-all-cpu-threads" | "--use-all-logical-processors" => use_all = true,
+            "--all-solutions" => all_solutions = true,
             "--allow-piece-exchange" => exchange = true,
             "--no-piece-exchange" => exchange = false,
             "--hold" => hold = true,
@@ -109,6 +111,7 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
         }
     }
     let query = RecoveryBuildQuery {
+        all_solutions,
         fields: RecoveryBuildFields {
             height,
             initial,

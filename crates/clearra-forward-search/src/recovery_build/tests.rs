@@ -113,6 +113,7 @@ fn recovery_build_b2b_applies_to_deferred_middle_clears() {
 fn recovery_build_pattern_product_has_one_event_per_supply_pair() {
     let q = query();
     let p = RecoveryBuildQuery {
+        all_solutions: false,
         fields: q.fields,
         first_supply: "I".into(),
         second_supply: "O".into(),

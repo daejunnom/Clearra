@@ -153,7 +153,7 @@ impl RecoveryBuildFixedQuery {
         let field = self.fields.prepare()?;
         let max = self
             .early_limit
-            .effective_max(self.first_supply.len(), field.result_pieces);
+            .effective_max(field.result_pieces, field.result_pieces);
         let mut states = 0_usize;
         for maximum in [0, max] {
             if maximum == 0 && states != 0 {
@@ -314,7 +314,7 @@ impl RecoveryBuildFixedQuery {
                 if second && maximum == 0 && before_checkpoint {
                     continue;
                 }
-                let early = second && first_source && before_checkpoint;
+                let early = second && before_checkpoint;
                 if early && state.early_count == maximum {
                     continue;
                 }
