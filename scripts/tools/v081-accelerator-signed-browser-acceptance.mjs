@@ -20,6 +20,14 @@ import { realCliProductProjectionRequests, realSetupScoreDocument }
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const profiles = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
+const buildResultSurfaces = {
+  'all-solutions': 'section.solutions-section',
+  'complete-replay-paths': 'section.product-pager.path-family',
+  'minimum-solutions': 'section.product-pager',
+  'field-average-score': 'section.solutions-section',
+  'fixed-queue-maximum-score': 'section.product-pager.score-family',
+  'highest-score-minimum-set': 'section.product-pager'
+};
 const pcProductInputs = Object.fromEntries(profiles.map(profile => {
   const requests = realCliProductProjectionRequests(profile);
   const products = Object.fromEntries(['minimum', 'score-minimum', 'replay'].map(name => {
@@ -34,11 +42,22 @@ const pcProductInputs = Object.fromEntries(profiles.map(profile => {
 const preprocessor = vitePreprocess();
 const fixturePath = resolve(root, 'apps/clearra-web/test/accelerator-signed-browser-fixture.svelte');
 const fixture = `<script>
+  import { tick } from 'svelte';
   import Panel from '../src/lib/AcceleratorDownloadPanel.svelte';
   import BuildProbabilityResult from '../../../packages/clearra-ui/src/lib/workspace/BuildProbabilityResult.svelte';
   let buildView = null;
   let buildMode = 'all-solutions';
-  window.__showBuildResult = ({ response, searchReport, mode }) => {
+  let loadNextProductPage = null;
+  let loadProductMemberPage = null;
+  let releaseProductPages = null;
+  window.__clearBuildResult = async () => {
+    buildView = null;
+    await tick();
+  };
+  window.__showBuildResult = ({ response, searchReport, mode, nextPage, memberPage, releasePages }) => {
+    loadNextProductPage = nextPage;
+    loadProductMemberPage = memberPage;
+    releaseProductPages = releasePages;
     buildMode = mode;
     buildView = {
       kind: 'web', status: 'completed', terminationReason: null, jobId: null,
@@ -56,7 +75,8 @@ const fixture = `<script>
 {#if buildView}
   <div data-testid="build-result" data-result-mode={buildMode}>
     <BuildProbabilityResult view={buildView} language="en" resultMode={buildMode}
-      aggregation="buildability" height={4} existingMask={0n} targetMask={15n} />
+      aggregation="buildability" height={4} existingMask={0n} targetMask={15n}
+      {loadNextProductPage} {loadProductMemberPage} {releaseProductPages} />
   </div>
 {/if}`;
 
@@ -268,7 +288,7 @@ async function browserAcceptance() {
       }
     }
     assert.equal(assetRequests.length, assets.length, 'cross-tab read must not re-download');
-    const execution = await page.evaluate(async ({ profiles, setupScoreDocument, pcProductInputs }) => {
+    const execution = await page.evaluate(async ({ profiles, setupScoreDocument, pcProductInputs, buildResultSurfaces }) => {
       const { createHostCapabilitySnapshot, resolveWorkerAuthority } = await import('/capabilities.js');
       const logicalProcessors = navigator.hardwareConcurrency;
       if (!Number.isSafeInteger(logicalProcessors) || logicalProcessors < 2) {
@@ -342,10 +362,96 @@ async function browserAcceptance() {
           if (onMessage) rootWorker.removeEventListener('message', onMessage);
         }
       }
-      async function run(profile, legal, relation, input) {
+      async function run(profile, legal, relation, input, renderMode = null) {
         const rootWorker = new Worker('/workers/clearraWorker.ts', { type: 'module' });
         try {
-          return await runOnWorker(rootWorker, profile, legal, relation, input);
+          const output = await runOnWorker(rootWorker, profile, legal, relation, input);
+          if (renderMode !== null) {
+            await window.__clearBuildResult();
+            let pageRequestId = 0;
+            let completedProductPages = 0;
+            const loadProductPage = (action, alternativeIndex, memberPageNumber, signal, maximumWorkSteps) =>
+              new Promise((resolve, reject) => {
+                const requestId = ++pageRequestId;
+                const finish = () => {
+                  clearTimeout(timeout);
+                  rootWorker.removeEventListener('message', onMessage);
+                  rootWorker.removeEventListener('error', onError);
+                  signal?.removeEventListener('abort', onAbort);
+                };
+                const onMessage = ({ data }) => {
+                  if (data.request_id !== requestId) return;
+                  if (data.type === 'product_page') {
+                    if (data.payload?.state === 'page') completedProductPages += 1;
+                    finish();
+                    resolve(data.payload);
+                  } else if (data.type === 'product_page_failed') {
+                    finish();
+                    reject(new Error(data.message));
+                  }
+                };
+                const onError = error => {
+                  finish();
+                  reject(new Error(`browser_product_page_worker_error: ${error.message}`));
+                };
+                const onAbort = () => {
+                  finish();
+                  reject(new DOMException('Product page request aborted', 'AbortError'));
+                };
+                const timeout = setTimeout(() => {
+                  finish();
+                  reject(new Error('browser_product_page_timeout'));
+                }, 30_000);
+                rootWorker.addEventListener('message', onMessage);
+                rootWorker.addEventListener('error', onError);
+                signal?.addEventListener('abort', onAbort, { once: true });
+                if (signal?.aborted) {
+                  onAbort();
+                  return;
+                }
+                rootWorker.postMessage({ type: 'load_product_page', requestId, action,
+                  alternativeIndex, memberPageNumber, maximumWorkSteps });
+              });
+            window.__showBuildResult({
+              response: output.result.response,
+              searchReport: output.result.search_report ?? null,
+              mode: renderMode,
+              nextPage: (signal) => loadProductPage('next', undefined, undefined, signal),
+              memberPage: (alternativeIndex, memberPageNumber, signal, maximumWorkSteps) =>
+                loadProductPage('get', alternativeIndex, memberPageNumber, signal, maximumWorkSteps),
+              releasePages: () => rootWorker.postMessage({ type: 'release_product_pages' })
+            });
+            await new Promise((resolve, reject) => {
+              const selector = `[data-testid="build-result"][data-result-mode="${renderMode}"] ${buildResultSurfaces[renderMode]}`;
+              const app = document.getElementById('app');
+              const finish = () => {
+                clearTimeout(timeout);
+                observer.disconnect();
+              };
+              const check = () => {
+                if (!document.querySelector(selector)) return;
+                finish();
+                resolve();
+              };
+              const observer = new MutationObserver(check);
+              const timeout = setTimeout(() => {
+                finish();
+                reject(new Error(`${renderMode}: production Build result did not mount ${selector}`));
+              }, 30_000);
+              observer.observe(app, { childList: true, subtree: true, attributes: true });
+              check();
+            });
+            const productContent = output.result.response.product_result_payload?.content;
+            const lazyBuildPage = productContent?.payload_kind === 'build-coverage-portfolio-v2'
+              ? productContent.payload.page_source_available
+              : productContent?.payload_kind === 'build-v2' &&
+                ['portfolio', 'score-portfolio'].includes(productContent.payload.kind)
+                ? productContent.payload.page_source_available : false;
+            if (lazyBuildPage && completedProductPages < 1) {
+              throw new Error(`${renderMode}: production renderer did not consume a real worker product page`);
+            }
+          }
+          return output;
         } finally {
           rootWorker.postMessage({ type: 'dispose_runtime' });
           await new Promise(resolve => setTimeout(resolve, 100));
@@ -382,7 +488,7 @@ async function browserAcceptance() {
         const input = mode === 'minimum-solutions' ? 'build-minimum' : `build-probability:${mode}`;
         results['srs-plus'].build[mode] = {
           baseline: await run('srs-plus', false, false, input),
-          activated: await run('srs-plus', true, true, input)
+          activated: await run('srs-plus', true, true, input, mode)
         };
       }
       // Exercise invalidation on one warm owner, not merely a fresh worker.
@@ -411,7 +517,11 @@ async function browserAcceptance() {
         rootWorker.terminate();
       }
       return { results, workers, corruption };
-    }, { profiles, setupScoreDocument: realSetupScoreDocument, pcProductInputs });
+    }, { profiles, setupScoreDocument: realSetupScoreDocument, pcProductInputs, buildResultSurfaces })
+      .catch(error => {
+        throw new Error(`signed browser product execution failed; page_errors=${JSON.stringify(errors.slice(-3))}`,
+          { cause: error });
+      });
     const compact = ({ result }) => {
       assert.equal(result.event, 'final_response');
       assert.equal(result.response.status, 'success');
@@ -493,21 +603,6 @@ async function browserAcceptance() {
     }
     assert.deepEqual(compact(build.activated), buildBaseline,
       'installed accelerators must preserve complete Web Build probability results');
-    async function renderBuild(mode, sample, selector) {
-      await page.evaluate(({ response, searchReport, mode }) => {
-        window.__showBuildResult({ response, searchReport, mode });
-      }, { response: sample.result.response, searchReport: sample.result.search_report ?? null, mode });
-      const current = page.locator(`[data-testid="build-result"][data-result-mode="${mode}"]`);
-      try {
-        await current.waitFor({ timeout: 10_000 });
-        await current.locator(selector).waitFor({ timeout: 10_000 });
-      } catch (error) {
-        const mounted = await page.getByTestId('build-result').count();
-        throw new Error(`${mode}: production Build renderer did not mount; containers=${mounted}; ` +
-          `page_errors=${JSON.stringify(errors.slice(-3))}`, { cause: error });
-      }
-    }
-    await renderBuild('all-solutions', build.activated, 'section.solutions-section');
     // Lazy products may deliberately leave the generic solution family
     // unmaterialized; compare its actual meaning separately from the payload.
     const productSearchMeaning = ({ result }) => {
@@ -534,13 +629,6 @@ async function browserAcceptance() {
       'fixed-queue-maximum-score': ['build.fixed-queue-maximum-score', 'build-fixed-score-witness.v1'],
       'highest-score-minimum-set': ['build.highest-score-minimum-set', 'build-probability-score-minimum.v1']
     };
-    const buildResultSurfaces = {
-      'complete-replay-paths': 'section.product-pager.path-family',
-      'minimum-solutions': 'section.product-pager',
-      'field-average-score': 'section.solutions-section',
-      'fixed-queue-maximum-score': 'section.product-pager.score-family',
-      'highest-score-minimum-set': 'section.product-pager'
-    };
     for (const [mode, [contract, resultKind]] of Object.entries(buildProducts)) {
       const pair = execution.results['srs-plus'].build[mode];
       for (const sample of Object.values(pair)) {
@@ -566,7 +654,6 @@ async function browserAcceptance() {
       assert.deepEqual(pair.activated.result.response.product_result_payload,
         pair.baseline.result.response.product_result_payload,
         `${mode}: signed assets must preserve the complete Build product result`);
-      await renderBuild(mode, pair.activated, buildResultSurfaces[mode]);
     }
     for (const profile of profiles) {
       for (const [name, input] of Object.entries(pcProductInputs[profile])) {

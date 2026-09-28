@@ -83,8 +83,10 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes("execution.results['srs-plus'].build[mode]"));
   assert.ok(browser.includes('assert.deepEqual(productSearchMeaning(pair.activated), productSearchMeaning(pair.baseline)'));
   assert.ok(browser.includes('BuildProbabilityResult.svelte'));
-  assert.ok(browser.includes("window.__showBuildResult({ response, searchReport, mode })"));
-  assert.ok(browser.includes("await renderBuild(mode, pair.activated, buildResultSurfaces[mode])"));
+  assert.ok(browser.includes('loadProductMemberPage = memberPage'));
+  assert.ok(browser.includes("rootWorker.postMessage({ type: 'load_product_page', requestId, action,"));
+  assert.ok(browser.includes("activated: await run('srs-plus', true, true, input, mode)"));
+  assert.ok(browser.includes('releasePages: () => rootWorker.postMessage({ type: \'release_product_pages\' })'));
   assert.ok(browser.includes('assert.equal(report.solution_keys_complete, true'));
   assert.ok(browser.includes('assert.deepEqual(compact(build.activated), buildBaseline'));
   assert.ok(browser.includes('realCliProductProjectionRequests(profile)'));
