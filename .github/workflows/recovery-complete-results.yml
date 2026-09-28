@@ -1,0 +1,57 @@
+name: Recovery complete results
+
+on:
+  push:
+    branches: [codex/converge-recovery-complete-results-20260929]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recovery-complete-results-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive exact tracked source
+        run: |
+          mkdir -p _local/artifacts/test/recovery-complete
+          git rev-parse HEAD > _local/artifacts/test/recovery-complete/source-sha.txt
+          git archive --format=tar HEAD | gzip > _local/artifacts/test/recovery-complete/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recovery-complete-source
+          path: _local/artifacts/test/recovery-complete/
+          retention-days: 7
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Native core and host regressions
+        run: |
+          cargo test --locked -p clearra-forward-search recovery_build
+          cargo test --locked -p clearra-cli-command --test recovery_build
+          cargo test --locked -p clearra-wasm --test recovery_build_wire
+      - name: UI regressions and contract types
+        run: |
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+          node --test packages/clearra-ui/test/recovery*.test.mjs
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json
