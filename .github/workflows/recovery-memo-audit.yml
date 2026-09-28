@@ -70,10 +70,16 @@ jobs:
                           self.source.first_len
                       };
                   }
-                  // When different-piece repayment is enabled this vector is output
-                  // evidence, not a constraint. The exact witness still accumulates it.
                   if self.query.allow_piece_exchange {
+                      // Repayment-enabled caps() uses only combined consumption;
+                      // per-stage type allocation and exchange balance are evidence.
+                      // Keep exact arrays on live keys, and both arrays in the memo
+                      // whenever the user requires same-type repayment instead.
                       key.exchange = [0; 7];
+                      for p in 0..7 {
+                          key.middle_counts[p] += key.result_counts[p];
+                          key.result_counts[p] = 0;
+                      }
                   }
                   // Auto cannot bind before exhausting the available first-source
                   // tokens or result cells. Repair still needs at least one early lock.
@@ -105,8 +111,6 @@ jobs:
                               q.hold_enabled = hold;
                               q.allow_piece_exchange = exchange;
                               q.early_limit = limit;
-                              // Every pair is checked against the independent fixed
-                              // queue search, then its representative is replayed.
                               compare(q);
                           }
                       }
@@ -122,8 +126,8 @@ jobs:
               q.fields.height = 10;
               q.fields.initial = mask(0xc0383f3fc7);
               q.fields.middle = mask(0x3ff3fc7c0c038);
-              // This is the existing engine's after-middle contract, not an
-              // edit of the original shared-frame UI fixture.
+              // The engine consumes the existing after-middle frame. The public
+              // fixture remains an unchanged original shared-frame drawing.
               q.fields.result = mask(0x30483f07f3f8f);
               q.first_supply = "P7".into();
               q.second_supply = "P7".into();
@@ -132,23 +136,40 @@ jobs:
                   q.allow_piece_exchange = exchange;
                   let p = PreparedPopulation::new(q.clone()).unwrap();
                   for start in [0, 1600, 3200] {
-                      let mut expected: Option<([u128; 3], [f64; 3])> = None;
+                      let mut expected: Option<([u128; 3], [f64; 3], Vec<u8>)> = None;
                       for exact in [true, false] {
                           let now = std::time::Instant::now();
                           let geometry = Geometry::new(&q, &control).unwrap();
                           let mut b = Block::new(&p, geometry, start, 32, 3, &control).unwrap();
                           b.solver.exact_provenance_memo = exact;
                           while !b.advance(&control).unwrap() {}
+                          let search_ms = now.elapsed().as_millis();
                           let nodes = b.solver.diagram.node_count();
+                          // Compare each original pair's category, not only counts.
+                          // This enumeration is test-only and outside search timing.
+                          let mut language = Vec::with_capacity(32 * p.second.pattern_count());
+                          for i in start..start + 32 {
+                              let first = p.first.sequence_at(i);
+                              let normal = b.solver.source.follow_first(&b.solver.diagram, b.solver.normal, &first);
+                              let recovery = b.solver.source.follow_first(&b.solver.diagram, b.solver.recovery, &first);
+                              for j in 0..p.second.pattern_count() {
+                                  let second = p.second.sequence_at(j);
+                                  let n = b.solver.source.accepts_second(&b.solver.diagram, normal, &second);
+                                  let r = b.solver.source.accepts_second(&b.solver.diagram, recovery, &second);
+                                  assert!(!(n && r));
+                                  language.push(if n { 0 } else if r { 1 } else { 2 });
+                              }
+                          }
                           let (report, _) = b.finish(&p, &control).unwrap();
-                          eprintln!("memo_ab exchange={exchange} start={start} exact={exact} elapsed_ms={} states={} nodes={nodes} counts={:?} probabilities={:?}", now.elapsed().as_millis(), report.states, report.counts, report.probabilities);
-                          if let Some((counts, probabilities)) = expected {
-                              assert_eq!(report.counts, counts);
-                              for (a, b) in report.probabilities.into_iter().zip(probabilities) {
+                          eprintln!("memo_ab exchange={exchange} start={start} exact={exact} search_ms={search_ms} states={} nodes={nodes} counts={:?} probabilities={:?} checked_pairs={}", report.states, report.counts, report.probabilities, language.len());
+                          if let Some((counts, probabilities, expected_language)) = &expected {
+                              assert_eq!(report.counts, *counts);
+                              for (a, b) in report.probabilities.into_iter().zip(*probabilities) {
                                   assert!((a - b).abs() < 1e-12);
                               }
+                              assert_eq!(&language, expected_language);
                           } else {
-                              expected = Some((report.counts, report.probabilities));
+                              expected = Some((report.counts, report.probabilities, language));
                           }
                       }
                   }
@@ -205,8 +226,8 @@ jobs:
               blob=api('/git/blobs',{'content':base64.b64encode(data).decode(),'encoding':'base64'});assert blob['sha']==digest
               entries.append({'path':path,'mode':'100644','type':'blob','sha':digest})
           tree=api('/git/trees',{'base_tree':parent['tree']['sha'],'tree':entries})
-          commit=api('/git/commits',{'message':'perf(recovery): quotient coverage memo without losing execution provenance\n\nKeep exact source indices, exchange balances and early counts in live keys and replay. Canonicalize only constraints that are provably irrelevant to future coverage under the fixed query. Explicit quotas and supply origin remain distinct. Compare independent fixed-queue oracles and same-binary full-detail memo on the original fixture.','tree':tree['sha'],'parents':[base]})
-          api('/git/refs',{'ref':'refs/heads/codex/recovery-memo-result-20260929','sha':commit['sha']})
+          commit=api('/git/commits',{'message':'perf(recovery): share repayment-invariant coverage states\n\nCanonicalize only coverage memo keys: preserve supply origin, physical state, B2B, explicit early quotas, remaining source languages and total inventory. Retain exact historical token indices, per-stage inventories and repayment evidence in live keys and witness reconstruction. Independently check small fixed queues and compare every sampled original P7/P7 category against the unquotiented search.','tree':tree['sha'],'parents':[base]})
+          api('/git/refs',{'ref':'refs/heads/codex/recovery-memo-inventory-result-20260929','sha':commit['sha']})
           result={'base':base,'proposal':commit['sha'],'tree':tree['sha'],'changed_files':entries,'main_updated':False,'deployed':False}
           (report/'proposal.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
           PY
