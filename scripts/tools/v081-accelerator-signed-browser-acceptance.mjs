@@ -17,6 +17,7 @@ import { createClearraWasmBuildContract, clearraWasmBuildContractsEqual }
   from './clearra-wasm-build-contract.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const profiles = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
 const preprocessor = vitePreprocess();
 const fixturePath = resolve(root, 'apps/clearra-web/test/accelerator-signed-browser-fixture.svelte');
 const fixture = `<script>
@@ -131,9 +132,13 @@ async function browserAcceptance() {
     assert.equal(await sha256(path), entry.sha256);
     files.set(`/wasm/${entry.path}`, { path, type });
   }
-  const assets = (await frontendAcceleratorAssets(root)).filter(asset => asset.profile === 'srs');
-  assert.deepEqual(assets.map(asset => asset.product).sort(),
-    ['board-conditioned-reachability', 'exact-legal-board']);
+  const assets = await frontendAcceleratorAssets(root);
+  assert.equal(assets.length, profiles.length * 2);
+  for (const profile of profiles) {
+    assert.deepEqual(assets.filter(asset => asset.profile === profile).map(asset => asset.product).sort(),
+      ['board-conditioned-reachability', 'exact-legal-board'],
+      `${profile}: both independent qualified products must be present`);
+  }
   for (const asset of assets) {
     const path = join(assetRoot, basename(new URL(asset.url).pathname));
     assert.equal((await stat(path)).size, asset.bytes);
@@ -190,28 +195,45 @@ async function browserAcceptance() {
     await page.locator('details.accelerator-download summary').click();
     const download = page.getByRole('button', { name: 'Download displayed asset' });
     const current = page.getByRole('status').filter({ hasText: 'Verified asset saved' });
+    const empty = page.getByRole('status').filter({ hasText: 'No saved asset' });
+    const productSelect = page.locator('details.accelerator-download select').first();
+    const profileSelect = page.locator('details.accelerator-download select').nth(1);
     await download.waitFor();
     assert.deepEqual(assetRequests, [], 'status and capacity must not download an asset');
-    await download.click();
-    await current.waitFor();
-    await page.locator('details.accelerator-download select').first().selectOption('1');
-    await download.waitFor();
-    assert.deepEqual(assetRequests, [assets.find(asset => asset.product === 'exact-legal-board').pathname]);
-    await download.click();
-    await current.waitFor();
-    assert.deepEqual(assetRequests.sort(), assets.map(asset => asset.pathname).sort(),
-      'one explicit request per signed product');
+    for (const [index, profile] of profiles.entries()) {
+      if (index > 0) await profileSelect.selectOption(String(index));
+      for (const kind of ['0', '1']) {
+        await productSelect.selectOption(kind);
+        await empty.waitFor();
+        await download.waitFor();
+        assert.equal(assetRequests.filter(pathname => assets.some(asset =>
+          asset.profile === profile && asset.pathname === pathname)).length, Number(kind),
+        `${profile}: status or selection must not download an asset`);
+        await download.click();
+        await current.waitFor();
+      }
+      assert.deepEqual(assetRequests.filter(pathname => assets.some(asset =>
+        asset.profile === profile && asset.pathname === pathname)).sort(),
+      assets.filter(asset => asset.profile === profile).map(asset => asset.pathname).sort(),
+      `${profile}: one explicit request per signed product`);
+    }
 
     const second = await context.newPage();
     second.setDefaultTimeout(90_000);
     second.on('pageerror', error => errors.push(String(error.stack || error)));
     await second.goto(`http://127.0.0.1:${address.port}/`);
     await second.locator('details.accelerator-download summary').click();
-    await second.getByRole('status').filter({ hasText: 'Verified asset saved' }).waitFor();
-    await second.locator('details.accelerator-download select').first().selectOption('1');
-    await second.getByRole('status').filter({ hasText: 'Verified asset saved' }).waitFor();
-    assert.equal(assetRequests.length, 2, 'cross-tab read must not re-download');
-    const execution = await page.evaluate(async () => {
+    const secondProduct = second.locator('details.accelerator-download select').first();
+    const secondProfile = second.locator('details.accelerator-download select').nth(1);
+    for (const [index] of profiles.entries()) {
+      if (index > 0) await secondProfile.selectOption(String(index));
+      for (const kind of ['0', '1']) {
+        await secondProduct.selectOption(kind);
+        await second.getByRole('status').filter({ hasText: 'Verified asset saved' }).waitFor();
+      }
+    }
+    assert.equal(assetRequests.length, assets.length, 'cross-tab read must not re-download');
+    const execution = await page.evaluate(async profiles => {
       const { createHostCapabilitySnapshot, resolveWorkerAuthority } = await import('/capabilities.js');
       const logicalProcessors = navigator.hardwareConcurrency;
       if (!Number.isSafeInteger(logicalProcessors) || logicalProcessors < 2) {
@@ -225,7 +247,7 @@ async function browserAcceptance() {
       });
       const workers = Math.min(3, logicalProcessors);
       const workerAuthority = resolveWorkerAuthority(snapshot, workers);
-      async function run(legal, relation, input) {
+      async function run(profile, legal, relation, input) {
         const rootWorker = new Worker('/workers/clearraWorker.ts', { type: 'module' });
         let timeout;
         try {
@@ -244,7 +266,7 @@ async function browserAcceptance() {
             : '--board-mask 0 --pieces 10 --queue IIOOOIIOOO --no-hold';
           const commandText = `clearra pc --lines 4 --height 4 ${inputArgs} ` +
             '--objective unique --count unique ' +
-            `--solution-probabilities --backend cpu --workers ${workers} --rule srs --no-tablebase ` +
+            `--solution-probabilities --backend cpu --workers ${workers} --rule ${profile} --no-tablebase ` +
             (legal ? '--legal-board ' : '--no-legal-board ') +
             (relation ? '--conditioned-reachability' : '--no-conditioned-reachability');
           rootWorker.postMessage({ type: 'run_command_text', commandText,
@@ -260,25 +282,30 @@ async function browserAcceptance() {
           rootWorker.terminate();
         }
       }
-      return {
-        existing: {
-          baseline: await run(false, false, 'existing'),
-          activated: await run(true, true, 'existing')
-        },
-        eligible: {
-          baseline: await run(false, false, 'eligible'),
-          activated: await run(true, true, 'eligible')
-        },
-        workers
-      };
-    });
-    const compact = ({ result }, expectedCount) => {
+      const results = {};
+      for (const profile of profiles) {
+        results[profile] = {
+          eligible: {
+            baseline: await run(profile, false, false, 'eligible'),
+            activated: await run(profile, true, true, 'eligible')
+          }
+        };
+        if (profile === 'srs') {
+          results[profile].existing = {
+            baseline: await run(profile, false, false, 'existing'),
+            activated: await run(profile, true, true, 'existing')
+          };
+        }
+      }
+      return { results, workers };
+    }, profiles);
+    const compact = ({ result }) => {
       assert.equal(result.event, 'final_response');
       assert.equal(result.response.status, 'success');
       assert.deepEqual(result.response.runtime_identity, manifest.build.runtime_identity);
       const report = result.search_report;
-      assert.equal(report.unique_solution_count, expectedCount);
-      assert.equal(report.normalized_solution_keys.length, expectedCount);
+      assert.ok(report.unique_solution_count > 0, 'the functional query must find actual solutions');
+      assert.equal(report.normalized_solution_keys.length, report.unique_solution_count);
       return {
         keys: report.normalized_solution_keys,
         hash: report.normalized_solution_set_hash,
@@ -288,30 +315,36 @@ async function browserAcceptance() {
         probabilities: report.solution_probabilities,
       };
     };
-    for (const [name, pair, expectedCount] of [
-      ['existing-field', execution.existing, 245],
-      ['eligible-empty-4L', execution.eligible, 159]
-    ]) {
-      assert.deepEqual(compact(pair.activated, expectedCount), compact(pair.baseline, expectedCount),
-        `${name}: installed accelerators must preserve the complete browser result`);
-      assert.equal(pair.activated.result.search_report.cpu_parallel_execution, true,
-        `${name}: the browser product must execute its distributed CPU path`);
-      assert.equal(pair.activated.result.search_report.workers_used, execution.workers,
-        `${name}: the browser product must report the requested worker count without silent reduction`);
-      const baselineFields = new Map(pair.baseline.result.search_report.summary_fields);
-      const activatedFields = new Map(pair.activated.result.search_report.summary_fields);
-      assert.equal(baselineFields.get('conditioned_reachability_snapshot_active'), 'false');
-      assert.equal(activatedFields.get('conditioned_reachability_requested'), 'true');
-      assert.equal(activatedFields.get('conditioned_reachability_snapshot_active'), 'true',
-        `${name}: the browser root must activate the OPFS relation generation`);
-      assert.match(activatedFields.get('legal_board_verified_negative_prunes') ?? '', /^\d+$/u,
-        `${name}: retain the legal-board pruning counter, including zero outside its scope`);
+    for (const profile of profiles) {
+      for (const [scope, pair] of Object.entries(execution.results[profile])) {
+        const name = `${profile}/${scope}`;
+        const activated = compact(pair.activated);
+        const baseline = compact(pair.baseline);
+        if (profile === 'srs') {
+          assert.equal(activated.keys.length, scope === 'existing' ? 245 : 159,
+            `${name}: retain the previously qualified browser fixture count`);
+        }
+        assert.deepEqual(activated, baseline,
+          `${name}: installed accelerators must preserve the complete browser result`);
+        assert.equal(pair.activated.result.search_report.cpu_parallel_execution, true,
+          `${name}: the browser product must execute its distributed CPU path`);
+        assert.equal(pair.activated.result.search_report.workers_used, execution.workers,
+          `${name}: the browser product must report the requested worker count without silent reduction`);
+        const baselineFields = new Map(pair.baseline.result.search_report.summary_fields);
+        const activatedFields = new Map(pair.activated.result.search_report.summary_fields);
+        assert.equal(baselineFields.get('conditioned_reachability_snapshot_active'), 'false');
+        assert.equal(activatedFields.get('conditioned_reachability_requested'), 'true');
+        assert.equal(activatedFields.get('conditioned_reachability_snapshot_active'), 'true',
+          `${name}: the browser root must activate the matching OPFS relation generation`);
+        assert.match(activatedFields.get('legal_board_verified_negative_prunes') ?? '', /^\d+$/u,
+          `${name}: retain the legal-board pruning counter, including zero outside its scope`);
+      }
     }
     assert.ok(verifierRequests.length >= 1, 'the actual verifier worker must be loaded');
-    assert.equal(assetRequests.length, 2, 'a search must read OPFS, not re-download signed assets');
+    assert.equal(assetRequests.length, assets.length, 'a search must read OPFS, not re-download signed assets');
     assert.deepEqual(errors, []);
     await context.close();
-    console.log('v0.8.1 signed browser UI and product pool: OPFS, cross-tab read, actual verifier workers and complete existing/eligible result parity passed');
+    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers and complete existing/eligible result parity passed');
   } finally {
     await browser?.close();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

@@ -62,6 +62,17 @@ test('the production Web pool smoke consumes one real WASM build and unchanged s
   assert.ok(launcher.includes("outExtension: { '.js': '.mjs' }"));
 });
 
+test('signed browser acceptance installs and searches each qualified profile without another asset fetch', () => {
+  const browser = readFileSync(new URL('../tools/v081-accelerator-signed-browser-acceptance.mjs', import.meta.url), 'utf8');
+  assert.ok(browser.includes("['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']"));
+  assert.ok(browser.includes('assert.equal(assets.length, profiles.length * 2)'));
+  assert.ok(browser.includes('await profileSelect.selectOption(String(index))'));
+  assert.ok(browser.includes('await secondProfile.selectOption(String(index))'));
+  assert.ok(browser.includes('`--solution-probabilities --backend cpu --workers ${workers} --rule ${profile} --no-tablebase `'));
+  assert.ok(browser.includes('assert.deepEqual(activated, baseline'));
+  assert.ok(browser.includes("assert.equal(assetRequests.length, assets.length, 'a search must read OPFS"));
+});
+
 test('embedded signed metadata retains canonical LF bytes without parser normalization', () => {
   for (const path of signedMetadata) {
     const bytes = readFileSync(new URL(`../../${path}`, import.meta.url));
