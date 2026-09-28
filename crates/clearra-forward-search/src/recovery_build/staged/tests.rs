@@ -399,3 +399,101 @@ fn recovery_build_staged_fixture_benchmark() {
         eprintln!("stage_benchmark_result exchange={exchange} counts={:?} probabilities={:?} elapsed_ms={}",report.counts,report.probabilities,now.elapsed().as_millis());
     }
 }
+
+#[test]
+fn recovery_build_staged_memo_keeps_origin_quotas_and_witness_indices() {
+    for hold in [false, true] {
+        for exchange in [false, true] {
+            for clear in [false, true] {
+                for limit in [CrossStageEarlyLimit::Auto, CrossStageEarlyLimit::AtMost(1)] {
+                    let mut q = query();
+                    q.fields.initial = mask(if clear { 0x3f0 | (0x3f0 << 10) } else { 0 });
+                    q.fields.middle = mask(15 | (15 << 10));
+                    q.fields.result = mask((0..4).fold(0, |m, y| m | (0x30 << (10 * y))));
+                    q.first_supply = "[IO][IO]".into();
+                    q.second_supply = "[IO][IO]".into();
+                    q.hold_enabled = hold;
+                    q.allow_piece_exchange = exchange;
+                    q.early_limit = limit;
+                    compare(q);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "finite managed A/B with identical input, binary and worker count"]
+fn recovery_build_staged_memo_original_fixture_ab() {
+    let control = ExecutionControl::default();
+    let mut q = query();
+    q.fields.height = 10;
+    q.fields.initial = mask(0xc0383f3fc7);
+    q.fields.middle = mask(0x3ff3fc7c0c038);
+    // The engine consumes the existing after-middle frame. The public
+    // fixture remains an unchanged original shared-frame drawing.
+    q.fields.result = mask(0x30483f07f3f8f);
+    q.first_supply = "P7".into();
+    q.second_supply = "P7".into();
+    q.preserve_b2b = true;
+    for exchange in [false, true] {
+        q.allow_piece_exchange = exchange;
+        let p = PreparedPopulation::new(q.clone()).unwrap();
+        for start in [0, 1600, 3200] {
+            let mut expected: Option<([u128; 3], [f64; 3], Vec<u8>)> = None;
+            for exact in [true, false] {
+                let now = std::time::Instant::now();
+                let geometry = Geometry::new(&q, &control).unwrap();
+                let mut b = Block::new(&p, geometry, start, 32, 3, &control).unwrap();
+                b.solver.exact_provenance_memo = exact;
+                while !b.advance(&control).unwrap() {}
+                let search_ms = now.elapsed().as_millis();
+                let nodes = b.solver.diagram.node_count();
+                // Compare each original pair's category, not only counts.
+                // This enumeration is test-only and outside search timing.
+                let mut language = Vec::with_capacity(32 * p.second.pattern_count());
+                for i in start..start + 32 {
+                    let first = p.first.sequence_at(i);
+                    let normal =
+                        b.solver
+                            .source
+                            .follow_first(&b.solver.diagram, b.solver.normal, &first);
+                    let recovery =
+                        b.solver
+                            .source
+                            .follow_first(&b.solver.diagram, b.solver.recovery, &first);
+                    for j in 0..p.second.pattern_count() {
+                        let second = p.second.sequence_at(j);
+                        let n = b
+                            .solver
+                            .source
+                            .accepts_second(&b.solver.diagram, normal, &second);
+                        let r =
+                            b.solver
+                                .source
+                                .accepts_second(&b.solver.diagram, recovery, &second);
+                        assert!(!(n && r));
+                        language.push(if n {
+                            0
+                        } else if r {
+                            1
+                        } else {
+                            2
+                        });
+                    }
+                }
+                let (report, _) = b.finish(&p, &control).unwrap();
+                eprintln!("memo_ab exchange={exchange} start={start} exact={exact} search_ms={search_ms} states={} nodes={nodes} counts={:?} probabilities={:?} checked_pairs={}", report.states, report.counts, report.probabilities, language.len());
+                if let Some((counts, probabilities, expected_language)) = &expected {
+                    assert_eq!(report.counts, *counts);
+                    for (a, b) in report.probabilities.into_iter().zip(*probabilities) {
+                        assert!((a - b).abs() < 1e-12);
+                    }
+                    assert_eq!(&language, expected_language);
+                } else {
+                    expected = Some((report.counts, report.probabilities, language));
+                }
+            }
+        }
+    }
+}
