@@ -173,6 +173,7 @@ fn example(value: &RecoveryBuildExample) -> RecoveryBuildExamplePayload {
         }
         .into(),
         terminal_board_mask: mask(path.terminal_board),
+        result_target_mask: mask(path.result_target),
         effective_max_early: path.effective_max_early.to_string(),
         actual_early: path.actual_early.to_string(),
         exchange_balance: path.exchange_balance.to_vec(),

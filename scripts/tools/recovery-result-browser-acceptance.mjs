@@ -96,10 +96,8 @@ try {
       assert.equal(await page.locator('.solution-toolbar .copy-format').count(),1);
       assert.equal(await page.locator('.recovery-path-gallery>li').count(),1);
       assert.equal(await page.locator('.representative-note').count(),1,'do not claim one representative means all solutions');
-      await page.locator('.recovery-path-gallery details summary').click();
-      assert.equal(await page.locator('.recovery-path-gallery ol>li').count(),14);
-      assert.match(await page.locator('.recovery-path-gallery code').innerText(),/ITOLSZJ.*JTOSILZ/);
-      await page.locator('.recovery-path-gallery details summary').click();
+      assert.equal(await page.locator('.recovery-path-gallery details,.recovery-path-gallery code,.frame-count').count(),0);
+      assert.equal(await page.locator('.solution-toolbar input[type="checkbox"]').count(),1);
       const [download]=await Promise.all([page.waitForEvent('download'),page.locator('.download-action button').click()]);
       assert.equal(await download.failure(),null);
       const destination=resolve(reportRoot,`${spec.language}-${spec.width}.ctk3`);await download.saveAs(destination);

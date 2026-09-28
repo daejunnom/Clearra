@@ -95,5 +95,5 @@
   on:dimension={(event)=>setHeight(event.detail)} on:run={run} on:cancel={cancel}>
   <div slot="editor"><RecoveryBuildFields {request} {language} on:change={(event)=>{if(request.height!==event.detail.height)invalidHeightDraft=false;request=event.detail;}} /></div>
   <div slot="controls"><RecoveryBuildControls {request} {language} {validation} on:change={(event)=>request=event.detail} /></div>
-  <div slot="result"><RecoveryBuildResult view={runtimeView} {language} {elapsedMs} /></div>
+  <div slot="result"><RecoveryBuildResult view={runtimeView} {language} {elapsedMs} pngRender={request.pngRender ?? false} /></div>
 </WorkspaceShell>

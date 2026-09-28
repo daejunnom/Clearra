@@ -152,6 +152,7 @@ pub(in crate::recovery_build) struct Geometry {
     preserve: bool,
     pub lock_queries: u128,
     pub cache_hits: u128,
+    paired_inventory: HashMap<(u8, Mask, Mask, [u8; 7], [u8; 7], [u8; 7]), bool>,
 }
 impl Geometry {
     pub fn new(query: &RecoveryBuildQuery, control: &ExecutionControl) -> Result<Self, Error> {
@@ -191,6 +192,7 @@ impl Geometry {
             preserve: query.preserve_b2b,
             lock_queries: 0,
             cache_hits: 0,
+            paired_inventory: HashMap::new(),
         };
         for i in 0..result.stages.len() {
             let p = &result.stages[i].prepared;
@@ -257,6 +259,60 @@ impl Geometry {
                     control,
                 )
                 .map_err(domain_error)?)
+    }
+    /// The two independent domain tests must agree on ONE conserved inventory.
+    /// Bounds alone allow both stages to spend the same last I (or any piece).
+    /// Only reject if every middle signature has an impossible complement.
+    pub fn feasible_inventory(
+        &mut self,
+        id: u32,
+        middle_caps: [u8; 7],
+        result_caps: [u8; 7],
+        total: [u8; 7],
+        control: &ExecutionControl,
+    ) -> Result<bool, Error> {
+        cancelled(control)?;
+        let pos = self.position(id);
+        let stage = &mut self.stages[usize::from(pos.stage)];
+        let middle = stage.fields.middle.without(pos.middle);
+        let result = stage.fields.result.without(pos.result);
+        let key = (pos.stage, middle, result, middle_caps, result_caps, total);
+        if let Some(&value) = self.paired_inventory.get(&key) {
+            return Ok(value);
+        }
+        let signatures = stage
+            .middle_domain
+            .completion_inventories(middle, middle_caps, control)
+            .map_err(domain_error)?;
+        let mut feasible = false;
+        for signature in signatures.iter() {
+            cancelled(control)?;
+            let mut complement = [0; 7];
+            let mut valid = true;
+            for piece in 0..7 {
+                if let Some(left) = total[piece].checked_sub(signature[piece]) {
+                    complement[piece] = left;
+                    valid &= left <= result_caps[piece];
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid
+                && stage
+                    .result_domain
+                    .can_complete(result, complement, control)
+                    .map_err(domain_error)?
+            {
+                feasible = true;
+                break;
+            }
+        }
+        self.paired_inventory
+            .try_reserve(1)
+            .map_err(|_| Error::MemoryUnavailable)?;
+        self.paired_inventory.insert(key, feasible);
+        Ok(feasible)
     }
     pub fn edges(
         &mut self,

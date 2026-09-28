@@ -1,29 +1,36 @@
 import type { RecoveryBuildRequest } from './recoveryBuildModel';
-import { projectRecoveryRows, recoveryResultFrame } from './recoveryResultFrame';
 
 export type RecoveryField = 'startMask' | 'middleMask' | 'resultMask';
 export type RecoveryFieldReference = {
-  field: 'startMask' | 'middleMask';
+  field: RecoveryField;
   mask: bigint;
-  tone: 'dark' | 'medium';
-  label: 'start' | 'middle';
+  tone: 'dark' | 'medium' | 'light';
+  label: 'start' | 'middle' | 'result';
 };
 
-/** Original input snapshots, not a simulated after-clear board. Never mutate
- * or compact draft coordinates merely because the selected editor changes. */
+/** All three layers use the original input frame. Palette selection changes
+ * only the editing owner; it cannot hide or project any other layer. */
 export function recoveryFieldReferences(
-  request: RecoveryBuildRequest,
-  selected: RecoveryField,
-  visible: boolean
+  request: RecoveryBuildRequest, selected: RecoveryField, _legacyVisible = true
 ): RecoveryFieldReference[] {
-  if (!visible) return [];
-  const references: RecoveryFieldReference[] = [
+  return [
     { field: 'startMask', mask: request.startMask, tone: 'dark', label: 'start' },
-    { field: 'middleMask', mask: request.middleMask, tone: 'medium', label: 'middle' }
-  ];
-  const visibleReferences = references.filter((reference) => reference.field !== selected);
-  if (selected !== 'resultMask' || recoveryResultFrame(request) === 'shared') return visibleReferences;
-  const completed = request.startMask | request.middleMask;
-  return visibleReferences.map(reference => ({ ...reference,
-    mask: projectRecoveryRows(reference.mask, completed, request.height) }));
+    { field: 'middleMask', mask: request.middleMask, tone: 'medium', label: 'middle' },
+    { field: 'resultMask', mask: request.resultMask, tone: 'light', label: 'result' }
+  ].filter(reference => reference.field !== selected) as RecoveryFieldReference[];
+}
+
+/** Assign occupied cells to exactly one layer, as in the ordinary Build editor.
+ * Erasing a cell never paints another layer. Imports use the same ownership rule. */
+export function overwriteRecoveryField(
+  request: RecoveryBuildRequest, field: RecoveryField, mask: bigint, height = request.height
+): RecoveryBuildRequest {
+  if (!Number.isInteger(height) || height < 1 || height > 24 || mask < 0n || (mask >> BigInt(height * 10)) !== 0n) {
+    throw new RangeError('invalid recovery field edit');
+  }
+  const next = { ...request, height: Math.max(height, request.height), resultFrame: 'shared' as const };
+  for (const layer of ['startMask','middleMask','resultMask'] as const) {
+    next[layer] = layer === field ? mask : request[layer] & ~mask;
+  }
+  return next;
 }

@@ -14,6 +14,7 @@
   export let expectedTerminalBoardMask: string | null = null;
   export let ariaLabel: string;
   export let invalidLabel: string;
+  export let showFrameCount = true;
 
   let mounted = false;
   let renderedIdentity = '';
@@ -66,7 +67,7 @@
 <div class="pc-path-replay-gif">
   {#if gifUrl}
     <img src={gifUrl} alt={ariaLabel} width="200" height={Math.max(80, targetLines * 20)} />
-    <span class="frame-count">{frameCount} {componentMessage(language, 'surfaceFrames500ms')}</span>
+    {#if showFrameCount}<span class="frame-count">{frameCount} {componentMessage(language, 'surfaceFrames500ms')}</span>{/if}
   {:else if renderError}
     <div class="invalid-replay" role="status">
       <AlertTriangle size={18} />

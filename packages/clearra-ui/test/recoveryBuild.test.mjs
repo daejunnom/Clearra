@@ -60,12 +60,26 @@ test('missing clears, wrong target ownership and fake exhaustive counts are reje
   const p=structuredClone(fixture);mutate(p);assert.equal(api.validateRecoveryBuildPayload(p),false);
  }
 });
-test('CTK3 and Fumen export every actual lock snapshot, not overlapping static piece masks',()=>{
- const pages=api.recoveryBuildExportPages(fixture);assert.equal(pages.length,14);
- assert.equal(pages[0].initialMask,BigInt(fixture.start_board_mask));assert.equal(pages[11].placements[0].piece,'I');
- const ctk=api.encodeSolutionPages(pages,'ctk');const fumen=api.encodeSolutionPages(pages,'fumen');
- assert.match(ctk,/^ctk3_/);assert.match(fumen,/v115@/);
+test('copy exports two cumulative checkpoints, or all 14 placements on one result page',()=>{
+ const pages=api.recoveryBuildExportPages(fixture);assert.equal(pages.length,2);
+ assert.equal(pages[0].initialMask,BigInt(fixture.start_board_mask));
+ assert.equal(pages[0].placements.length,7);assert.equal(pages[1].placements.length,14);
+ assert.deepEqual(pages[1].placements.slice(0,7),pages[0].placements);
+ const result=api.recoveryBuildExportPages(fixture,true);assert.deepEqual(result,[pages[1]]);
+ for(const page of pages) {
+  let occupied=page.initialMask;
+  for(const placement of page.placements){assert.equal(placement.mask&occupied,0n);occupied|=placement.mask;}
+ }
+ assert.match(api.encodeSolutionPages(pages,'ctk'),/^ctk3_/);
+ assert.match(api.encodeSolutionPages(pages,'fumen'),/v115@/);
 });
+
+test('early count includes every result placement before middle completion, regardless of hold source',()=>{
+ assert.equal(api.validateRecoveryBuildPayload(fixture),true);
+ const early=structuredClone(fixture);early.early_limit='1';early.examples[0].effective_max_early='1';early.examples[0].actual_early='1';
+ assert.equal(api.validateRecoveryBuildPayload(early),false);
+});
+
 
 
 test('paired Build progress reports actual pair work rather than phantom geometry phases',()=>{

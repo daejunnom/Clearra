@@ -399,3 +399,102 @@ fn recovery_build_staged_fixture_benchmark() {
         eprintln!("stage_benchmark_result exchange={exchange} counts={:?} probabilities={:?} elapsed_ms={}",report.counts,report.probabilities,now.elapsed().as_millis());
     }
 }
+
+#[test]
+fn recovery_build_joint_inventory_does_not_spend_the_same_piece_twice() {
+    let control = ExecutionControl::default();
+    let mut q = query();
+    // Two isolated horizontal I targets: each fits bounds {I:1,J:1}, but
+    // both together cannot consume I:1,J:1. This is not a movement assertion.
+    q.fields.result = mask(15 << 10);
+    let mut g = Geometry::new(&q, &control).unwrap();
+    let root = g.roots[0];
+    let caps = [1, 1, 0, 0, 0, 0, 0];
+    assert!(g.feasible(root, caps, caps, &control).unwrap());
+    assert!(!g
+        .feasible_inventory(root, caps, caps, caps, &control)
+        .unwrap());
+    assert!(g
+        .feasible_inventory(
+            root,
+            [2, 0, 0, 0, 0, 0, 0],
+            [2, 0, 0, 0, 0, 0, 0],
+            [2, 0, 0, 0, 0, 0, 0],
+            &control
+        )
+        .unwrap());
+}
+
+#[test]
+fn recovery_build_early_limit_counts_second_source_placements_before_checkpoint() {
+    // Hold can expose both second-supply pieces while the first-supply I is
+    // still pending. Pin exact colored placements in the independent serial
+    // search so that two O locks are required before the middle I can enter.
+    use PieceKind::{I, O};
+    let q = RecoveryBuildFixedQuery {
+        fields: RecoveryBuildFields {
+            height: 6,
+            initial: mask(0),
+            middle: mask(15 << 40),
+            result: mask(3 | (3 << 10) | (3 << 20) | (3 << 30)),
+        },
+        first_supply: vec![I],
+        second_supply: vec![O, O],
+        early_limit: CrossStageEarlyLimit::AtMost(1),
+        hold_enabled: true,
+        allow_piece_exchange: true,
+        preserve_b2b: false,
+        initial_b2b: true,
+        rule_profile: RuleProfileId::SrsPlus,
+        spin_profile: SpinProfileId::AllSpinPlus,
+    };
+    let one = q.search(&ExecutionControl::default()).unwrap();
+    assert_eq!(one.status, RecoveryBuildStatus::NoPath);
+    let mut two = q.clone();
+    two.early_limit = CrossStageEarlyLimit::AtMost(2);
+    let result = two.search(&ExecutionControl::default()).unwrap();
+    assert_eq!(result.status, RecoveryBuildStatus::Recovery);
+    assert_eq!(result.actual_early, 2);
+    let query = RecoveryBuildQuery {
+        fields: two.fields.clone(),
+        first_supply: "I".into(),
+        second_supply: "OO".into(),
+        early_limit: CrossStageEarlyLimit::AtMost(1),
+        hold_enabled: true,
+        allow_piece_exchange: true,
+        preserve_b2b: false,
+        initial_b2b: true,
+        rule_profile: RuleProfileId::SrsPlus,
+        spin_profile: SpinProfileId::AllSpinPlus,
+    };
+    compare(query.clone());
+    compare(RecoveryBuildQuery {
+        early_limit: CrossStageEarlyLimit::AtMost(2),
+        ..query.clone()
+    });
+    compare(RecoveryBuildQuery {
+        early_limit: CrossStageEarlyLimit::Auto,
+        ..query
+    });
+}
+
+#[test]
+fn recovery_build_mirrored_example_preserves_its_authorized_target() {
+    let control = ExecutionControl::default();
+    let mut q = query();
+    q.fields.initial = mask(0x3f0);
+    q.fields.middle = mask(15);
+    q.fields.result = mask(7 | (1 << 10)); // J, whose mirror is L.
+    q.first_supply = "I".into();
+    q.second_supply = "L".into();
+    q.hold_enabled = false;
+    q.early_limit = CrossStageEarlyLimit::AtMost(0);
+    let report = q.search(&control).unwrap();
+    assert_eq!(report.normal_count, 1);
+    let example = report.normal_example.unwrap();
+    assert_eq!(
+        example.path.result_target,
+        reflected(q.fields.result, q.fields.height).words()
+    );
+    assert_ne!(example.path.result_target, q.fields.result.words());
+}

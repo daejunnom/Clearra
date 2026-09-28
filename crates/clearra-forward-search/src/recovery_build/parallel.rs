@@ -83,7 +83,8 @@ impl RecoveryBuildParallelCoordinator {
         let initialization = wire::encode_initialization(&source.query);
         // Fixed partitioning makes all worker counts use identical arithmetic
         // and search quotients. Parallelism does not change a probability space.
-        let batch_size = if source.first.pattern_count() <= 64 {
+        let batch_size = if source.query.allow_piece_exchange || source.first.pattern_count() <= 64
+        {
             1
         } else {
             MAX_BATCH
@@ -133,7 +134,8 @@ impl RecoveryBuildParallelCoordinator {
                 Vec::new(),
             ));
         }
-        // Out-of-order finished shards occupy the same bounded window.
+        // Only active work occupies dispatch slots. Completed scalar summaries
+        // wait in rank order without starving idle workers behind a slow shard.
         if self.issued.len() >= self.capacity {
             return Ok((Pending, Vec::new()));
         }
@@ -252,6 +254,30 @@ impl RecoveryBuildParallelCoordinator {
             .finished_states
             .checked_add(batch.block.states)
             .ok_or(RecoveryBuildError::CounterOverflow)?;
+        // Retain only the lexicographically earliest witness, even while a
+        // lower-ranked shard is outstanding. Do not buffer every replay path.
+        for (incoming, retained) in [
+            (
+                &mut batch.block.normal,
+                &mut self.accumulator.report.normal_example,
+            ),
+            (
+                &mut batch.block.recovery,
+                &mut self.accumulator.report.recovery_example,
+            ),
+        ] {
+            if let Some(example) = incoming.take() {
+                if retained.as_ref().is_none_or(|old| {
+                    (example.first_pattern, example.second_pattern)
+                        < (old.first_pattern, old.second_pattern)
+                }) {
+                    *retained = Some(example);
+                }
+            }
+        }
+        // Membership was validated above. Removing this active lease now is
+        // essential: ordered reduction must not impose ordered scheduling.
+        self.issued.remove(&batch.task.start);
         self.completed.insert(batch.task.start, batch);
         while let Some(batch) = self.completed.remove(&self.merged) {
             self.accumulator.record_block(
@@ -260,7 +286,6 @@ impl RecoveryBuildParallelCoordinator {
                 batch.task.count,
                 batch.block,
             )?;
-            self.issued.remove(&self.merged);
             self.merged += batch.task.count as u128;
         }
         self.source.progress(self.finished_pairs, control);

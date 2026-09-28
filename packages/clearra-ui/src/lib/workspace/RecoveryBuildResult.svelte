@@ -2,9 +2,11 @@
   import ResultWorkspaceFrame from './ResultWorkspaceFrame.svelte';
   import SolutionToolbar from './SolutionToolbar.svelte';
   import SolutionCopyFormatControl from './SolutionCopyFormatControl.svelte';
+  import RecoveryPng from './RecoveryPng.svelte';
+  import WorkspaceToggle from './WorkspaceToggle.svelte';
   import PcPathReplayGif from './PcPathReplayGif.svelte';
   import { recoveryBuildMessage } from './recoveryBuildI18n';
-  import { recoveryBuildExportPages, recoveryBuildWitness, recoveryBuildTerminalMask, validateRecoveryBuildPayload } from './recoveryBuildPresentation';
+  import { recoveryBuildExamplePages, recoveryBuildExportPages, recoveryBuildWitness, recoveryBuildTerminalMask, validateRecoveryBuildPayload } from './recoveryBuildPresentation';
   import type { RecoveryBuildPayload } from './recoveryBuildPayloadTypes';
   import type { WorkspaceRuntimeView } from './workspaceRuntime';
   import type { SolutionCopyFormat } from './solutionExport';
@@ -12,6 +14,8 @@
   export let view: WorkspaceRuntimeView;
   export let language: WorkspaceLanguage;
   export let elapsedMs = 0;
+  export let pngRender = false;
+  let resultOnly = false;
   let copyFormat: SolutionCopyFormat = 'ctk';
   $: label = (key: Parameters<typeof recoveryBuildMessage>[1]) => recoveryBuildMessage(language,key);
   $: standard = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language,key);
@@ -20,7 +24,7 @@
   $: payload = candidate && product?.contract === 'recovery-build.v2' && validateRecoveryBuildPayload(candidate) ? candidate : null;
   $: invalid = view.status === 'completed' && !payload;
   function percent(value: string): string { return `${(Number(value)*100).toLocaleString(language,{maximumFractionDigits:4})}%`; }
-  function exportPages(report: RecoveryBuildPayload) { return () => recoveryBuildExportPages(report); }
+  function exportPages(report: RecoveryBuildPayload) { return () => recoveryBuildExportPages(report, resultOnly); }
 </script>
 <ResultWorkspaceFrame ariaLabel={standard('results')} status={view.status} statusLabel={standard(view.status)}
   elapsedLabel={standard('elapsed')} elapsedText={`${(elapsedMs/1000).toFixed(1)}s`} progressProfile="recovery-build" {language}
@@ -37,22 +41,21 @@
     {#if payload.examples.length}
       <SolutionToolbar {language}>
         <svelte:fragment slot="actions"><span class="representative-note">{label('examples')}</span></svelte:fragment>
-        <svelte:fragment slot="copy"><SolutionCopyFormatControl bind:value={copyFormat} {language} loadPages={exportPages(payload)} /></svelte:fragment>
+        <svelte:fragment slot="copy"><WorkspaceToggle label={label('resultOnly')} checked={resultOnly} on:change={(event) => resultOnly = event.detail} /><SolutionCopyFormatControl bind:value={copyFormat} {language} loadPages={exportPages(payload)} /></svelte:fragment>
       </SolutionToolbar>
       <p class="coverage-scope">{label('examplesHelp')}</p>
       <ul class="recovery-path-gallery">
         {#each payload.examples as example (payload.input_identity + example.status)}
           <li data-recovery-path={example.status}>
             <h3>{label(example.status === 'normal' ? 'normal' : 'recovery')}</h3>
-            <PcPathReplayGif witness={recoveryBuildWitness(payload,example)} {language} targetLines={payload.height}
-              expectedTerminalBoardMask={recoveryBuildTerminalMask(example)} ariaLabel={label('details')} invalidLabel={label('invalidResult')} />
+            {#if pngRender}
+              <RecoveryPng page={recoveryBuildExamplePages(payload,example,true)[0]} ariaLabel={label('result')} invalidLabel={label('invalidResult')} />
+            {:else}
+              <PcPathReplayGif witness={recoveryBuildWitness(payload,example)} {language} targetLines={payload.height} showFrameCount={false}
+                expectedTerminalBoardMask={recoveryBuildTerminalMask(example)} ariaLabel={label('result')} invalidLabel={label('invalidResult')} />
+            {/if}
             <p>{label('early')}: {example.actual_early} / {example.effective_max_early}</p>
-            <code>{example.first_queue} → {example.second_queue}</code>
-            <details><summary>{label('details')}</summary>
-              <p>{label('used')}: {example.steps.length}</p>
-              <p>{label('exchanged')}: {example.exchange_balance.join(', ')} (IJLOSTZ)</p>
-              <ol>{#each example.steps as step}<li>{step.piece} · {Number(step.source_index)+1} → {label(step.result_target?'result':'middle')} · {step.cleared_lines} · B2B {step.b2b_active?'✓':'—'}</li>{/each}</ol>
-            </details>
+
           </li>
         {/each}
       </ul>

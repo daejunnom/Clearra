@@ -2,9 +2,9 @@
   import { createEventDispatcher } from 'svelte';
   import WorkspaceBoardEditor from './WorkspaceBoardEditor.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
-  import { changeRecoveryResultFrame, recoveryResultFrame, resizeRecoveryBuild, type RecoveryBuildRequest } from './recoveryBuildModel';
+  import { type RecoveryBuildRequest } from './recoveryBuildModel';
   import { recoveryBuildMessage, type RecoveryBuildMessage } from './recoveryBuildI18n';
-  import { recoveryFieldReferences, type RecoveryField } from './recoveryFieldReferences';
+  import { overwriteRecoveryField, recoveryFieldReferences, type RecoveryField } from './recoveryFieldReferences';
   import type { WorkspaceLanguage } from './workspaceI18n';
 
   export let request: RecoveryBuildRequest;
@@ -16,28 +16,11 @@
     { field: 'resultMask', tone: 'light', label: 'result' }
   ];
   let selected: RecoveryField = 'startMask';
-  let showReferences = true;
-  let frameError = false;
-  $: resultFrame = recoveryResultFrame(request);
   $: label = (key: RecoveryBuildMessage) => recoveryBuildMessage(language, key);
-  $: references = recoveryFieldReferences(request, selected, showReferences)
+  $: references = recoveryFieldReferences(request, selected)
     .map((reference) => ({ ...reference, label: label(reference.label) }));
-  function chooseFrame(event: Event) {
-    const select = event.currentTarget as HTMLSelectElement;
-    try {
-      if (select.value !== 'shared' && select.value !== 'after-middle') throw new RangeError('invalid result frame');
-      dispatch('change', changeRecoveryResultFrame(request, select.value));
-      frameError = false;
-    } catch {
-      select.value = resultFrame;
-      frameError = true;
-    }
-  }
   function change(field: RecoveryField, mask: bigint, height = request.height) {
-    frameError = false;
-    const next = resizeRecoveryBuild(request, Math.max(request.height, height));
-    const limit = (1n << BigInt(next.height * 10)) - 1n;
-    dispatch('change', { ...next, [field]: mask & limit });
+    dispatch('change', overwriteRecoveryField(request, field, mask, Math.max(request.height, height)));
   }
 
 </script>
@@ -52,24 +35,8 @@
         </button>
       {/each}
     </div>
-    <div class="workspace-switch-row">
-      <label class="workspace-switch-label">
-        <input type="checkbox" bind:checked={showReferences} />
-        <span class="workspace-switch" aria-hidden="true"></span><span>{label('context')}</span>
-      </label>
-    </div>
-    {#if selected === 'resultMask'}
-      <label class="result-frame-label">
-        <span>{label('resultFrame')}</span>
-        <select class="recovery-result-frame" value={resultFrame} on:change={chooseFrame}>
-          <option value="shared">{label('sharedFrame')}</option>
-          <option value="after-middle">{label('afterMiddleFrame')}</option>
-        </select>
-      </label>
-    {/if}
     <p class="workspace-field-help">{label('fieldsHelp')}</p>
-    <p class="workspace-field-help">{label(resultFrame === 'shared' ? 'sharedFrameHelp' : 'afterMiddleFrameHelp')}</p>
-    {#if frameError}<p class="workspace-field-help" role="alert">{label('frameError')}</p>{/if}
+
   </WorkspaceControlPanel>
   {#each fields.filter((entry) => entry.field === selected) as entry (entry.field)}
     <WorkspaceBoardEditor mode="forward" height={request.height} existingMask={request[entry.field]}
@@ -82,8 +49,6 @@
 
 <style>
   .recovery-field-editor { display: grid; gap: 14px; min-width: 0; }
-  .result-frame-label { display: grid; gap: 6px; min-width: 0; }
-  .recovery-result-frame { width: 100%; min-width: 0; }
   .field-palette { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .field-palette button { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 8px !important; }
   .field-palette i { width: 14px; height: 14px; border: 1px solid #444; border-radius: 2px; flex: 0 0 auto; }

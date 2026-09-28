@@ -14,7 +14,7 @@ use clearra_core_domain::{
     board::standard_pc_board::Board256Mask, execution_cancellation::ExecutionControl,
 };
 use clearra_problem::BuildProbabilityField;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuildStageDomainError {
@@ -32,6 +32,7 @@ pub struct BuildStageDomain {
     catalog: Catalog,
     extended: ExtendedDomainWorkspace,
     memo: HashMap<([u64; 4], [u8; 7]), bool>,
+    inventories: HashMap<([u64; 4], [u8; 7]), Arc<[[u8; 7]]>>,
 }
 impl BuildStageDomain {
     /// `base` may include other-stage FINAL cells as a relaxed geometry context.
@@ -63,6 +64,7 @@ impl BuildStageDomain {
             catalog,
             extended: ExtendedDomainWorkspace::new(),
             memo: HashMap::new(),
+            inventories: HashMap::new(),
         })
     }
     /// Upper bounds in IJLOSTZ order; a stage need not consume all of them.
@@ -88,12 +90,26 @@ impl BuildStageDomain {
             Catalog::Extended(c) => c.skeletons().len(),
         }
     }
-    fn complete(
+    /// Every feasible residual piece-count vector, in public IJLOSTZ order.
+    /// This is a geometric necessary condition only; no queue or reachability
+    /// assumption is made. Alternative temporal skeletons remain admissible.
+    pub fn completion_inventories(
+        &mut self,
+        remaining: Board256Mask,
+        upper: [u8; 7],
+        control: &ExecutionControl,
+    ) -> Result<Arc<[[u8; 7]]>, BuildStageDomainError> {
+        let caps = [
+            upper[0], upper[3], upper[5], upper[4], upper[6], upper[1], upper[2],
+        ];
+        self.inventory(remaining.words(), caps, control)
+    }
+    fn inventory(
         &mut self,
         remaining: [u64; 4],
-        caps: [u8; 7],
+        mut caps: [u8; 7],
         control: &ExecutionControl,
-    ) -> Result<bool, BuildStageDomainError> {
+    ) -> Result<Arc<[[u8; 7]]>, BuildStageDomainError> {
         if control.is_cancelled() {
             return Err(BuildStageDomainError::Cancelled);
         }
@@ -101,15 +117,54 @@ impl BuildStageDomain {
             .iter()
             .map(|w| w.count_ones() as usize)
             .sum::<usize>();
+        for cap in &mut caps {
+            *cap = (*cap).min((area / 4) as u8);
+        }
+        if let Some(found) = self.inventories.get(&(remaining, caps)) {
+            return Ok(Arc::clone(found));
+        }
+        let mut values = Vec::new();
         if area == 0 {
-            return Ok(true);
+            values
+                .try_reserve(1)
+                .map_err(|_| BuildStageDomainError::Allocation)?;
+            values.push([0; 7]);
+        } else if area % 4 == 0 && caps.iter().map(|&n| usize::from(n)).sum::<usize>() >= area / 4 {
+            for (piece, cells) in self.choices(remaining, caps)? {
+                let next = core::array::from_fn(|w| remaining[w] & !cells[w]);
+                let mut child_caps = caps;
+                child_caps[piece] -= 1;
+                // Catalog order IOTSZJL -> public IJLOSTZ.
+                let public_piece = [0, 3, 5, 4, 6, 1, 2][piece];
+                for value in self.inventory(next, child_caps, control)?.iter() {
+                    let mut value = *value;
+                    value[public_piece] += 1;
+                    values
+                        .try_reserve(1)
+                        .map_err(|_| BuildStageDomainError::Allocation)?;
+                    values.push(value);
+                }
+            }
         }
-        if caps.iter().map(|&v| usize::from(v)).sum::<usize>() < area / 4 {
-            return Ok(false);
-        }
-        if let Some(&value) = self.memo.get(&(remaining, caps)) {
-            return Ok(value);
-        }
+        values.sort_unstable();
+        values.dedup();
+        let packed: Arc<[[u8; 7]]> = values.into();
+        self.inventories
+            .try_reserve(1)
+            .map_err(|_| BuildStageDomainError::Allocation)?;
+        self.inventories
+            .insert((remaining, caps), Arc::clone(&packed));
+        Ok(packed)
+    }
+    fn choices(
+        &mut self,
+        remaining: [u64; 4],
+        caps: [u8; 7],
+    ) -> Result<Vec<(usize, [u64; 4])>, BuildStageDomainError> {
+        let area = remaining
+            .iter()
+            .map(|w| w.count_ones() as usize)
+            .sum::<usize>();
         let mask = caps
             .iter()
             .enumerate()
@@ -186,6 +241,31 @@ impl BuildStageDomain {
                 }
             }
         }
+        Ok(choices)
+    }
+    fn complete(
+        &mut self,
+        remaining: [u64; 4],
+        caps: [u8; 7],
+        control: &ExecutionControl,
+    ) -> Result<bool, BuildStageDomainError> {
+        if control.is_cancelled() {
+            return Err(BuildStageDomainError::Cancelled);
+        }
+        let area = remaining
+            .iter()
+            .map(|w| w.count_ones() as usize)
+            .sum::<usize>();
+        if area == 0 {
+            return Ok(true);
+        }
+        if caps.iter().map(|&v| usize::from(v)).sum::<usize>() < area / 4 {
+            return Ok(false);
+        }
+        if let Some(&value) = self.memo.get(&(remaining, caps)) {
+            return Ok(value);
+        }
+        let choices = self.choices(remaining, caps)?;
         let mut value = false;
         for (piece, cells) in choices {
             let next = core::array::from_fn(|w| remaining[w] & !cells[w]);

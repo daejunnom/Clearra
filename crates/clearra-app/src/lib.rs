@@ -1,4 +1,5 @@
 //! Typed application facade shared by CLI, GUI, and downstream Clearra apps.
+pub mod recovery_solution_cover;
 
 pub mod app_command;
 pub mod app_context;

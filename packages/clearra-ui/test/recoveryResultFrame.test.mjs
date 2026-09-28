@@ -55,7 +55,8 @@ test('coordinate selection round-trips targets and preserves independent drafts'
   assert.equal(after.resultMask, normalized);
   assert.equal(after.startMask, original.startMask);
   assert.equal(after.middleMask, original.middleMask);
-  assert.ok(api.recoveryFieldReferences(after, 'resultMask', true).every(ref => ref.mask === 0n));
+  assert.deepEqual(api.recoveryFieldReferences(after, 'resultMask', true).map(ref => ref.mask),
+    [original.startMask, original.middleMask], 'references always retain shared editor coordinates');
   const shared = api.changeRecoveryResultFrame(after, 'shared');
   assert.deepEqual(shared, original);
   assert.deepEqual(original, before);

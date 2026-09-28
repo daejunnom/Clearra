@@ -185,8 +185,7 @@ try {
         await fields.filter({ hasText: /^Middle$/ }).click();
         await paint(page, 0, 0xfn, 4);
         await fields.filter({ hasText: /^Result$/ }).click();
-        const resultFrame = recovery.getByRole('combobox', { name: 'Result coordinates', exact: true });
-        assert.equal(await resultFrame.inputValue(), 'shared', 'new inputs use the shared Start/Middle frame');
+        assert.equal(await recovery.locator('.recovery-result-frame').count(), 0, 'editor coordinates are fixed');
         // Start + Middle completes row 0. The same physical O must therefore
         // be drawn one row higher in the shared frame, not over that full row.
         // These are independent fixture coordinates, not output from the
@@ -202,30 +201,18 @@ try {
         const paths = recovery.locator('.recovery-path-gallery');
         await runRecovery('paired Build normal, with an actual line clear');
         await paths.locator('[data-recovery-path="normal"]').waitFor();
-        assert.equal(await paths.locator('ol>li').count(), 2);
+        assert.equal(await paths.locator('.pc-path-replay-gif img').count(), 1);
+        assert.equal(await paths.locator('details,code,.frame-count').count(), 0);
         assert.equal(await recovery.locator('.invalid-evidence,.invalid-replay').count(), 0);
         assert.equal(await recovery.locator('.solution-toolbar .copy-format').count(), 1);
         assert.deepEqual(await recovery.locator('.recovery-metrics strong').allTextContents(), ['100%', '0%', '0%']);
-        // The representation switch must preserve this exact logical target.
-        // Keep the old after-middle case as well as exercising the new default;
-        // otherwise a change in either direction can silently break this gate.
-        await resultFrame.selectOption('after-middle');
-        assert.equal(await resultFrame.inputValue(), 'after-middle');
-        assert.equal(await readPaintedMask(page, 0, 4), afterMiddleResult);
-        await resultFrame.selectOption('shared');
-        assert.equal(await readPaintedMask(page, 0, 4), sharedResult);
-        await resultFrame.selectOption('after-middle');
-        assert.equal(await readPaintedMask(page, 0, 4), afterMiddleResult);
-        await runRecovery('same paired Build normal, explicit after-middle coordinates');
-        await paths.locator('[data-recovery-path="normal"]').waitFor();
-        assert.equal(await paths.locator('ol>li').count(), 2);
-        assert.deepEqual(await recovery.locator('.recovery-metrics strong').allTextContents(), ['100%', '0%', '0%']);
-        assert.equal(await recovery.locator('.invalid-evidence,.invalid-replay').count(), 0);
-
         // Empty base, middle I and result O: supplies O then I need different-
         // kind repayment. This exercises the actual new parser, solver and wire.
         await fields.filter({ hasText: /^Start$/ }).click();
         await paint(page, 0, 0x3f0n, 4);
+        await fields.filter({ hasText: /^Result$/ }).click();
+        await paint(page, 0, sharedResult, 4);
+        await paint(page, 0, afterMiddleResult, 4);
         await supplies.nth(0).fill('O'); await supplies.nth(1).fill('I');
         const exchange = recovery.getByRole('checkbox', { name: 'Allow different-piece repayment', exact: true });
         assert.equal(await exchange.isChecked(), false);
@@ -235,8 +222,9 @@ try {
         await exchange.check();
         await runRecovery('different-piece repayment enabled');
         await paths.locator('[data-recovery-path="recovery"]').waitFor();
-        assert.equal(await paths.locator('ol>li').count(), 2);
-        assert.match(await paths.locator('code').innerText(), /O.*I/);
+        assert.equal(await paths.locator('.pc-path-replay-gif img').count(), 1);
+        assert.equal(await paths.locator('details,code,.frame-count').count(), 0);
+        assert.equal(await paths.locator('code').count(), 0);
         assert.equal(await recovery.locator('.invalid-evidence,.invalid-replay').count(), 0);
         await early.selectOption('0');
         await runRecovery('zero early placements disables the same exchange route');

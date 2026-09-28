@@ -170,3 +170,34 @@ fn recovery_build_parallel_worker_yields_within_stage_language_without_repeating
     assert_eq!(w.progress().completed, 49);
     assert_eq!(c.finish(&control).unwrap(), expected);
 }
+
+#[test]
+fn recovery_build_finished_out_of_order_work_releases_dispatch_capacity() {
+    let control = ExecutionControl::default();
+    let mut q = query();
+    q.first_supply = "*".into();
+    q.second_supply = "*".into();
+    let mut c = RecoveryBuildParallelCoordinator::new(q, 1).unwrap();
+    let init = c.worker_initialization();
+    let mut tasks = Vec::new();
+    for _ in 0..4 {
+        let (state, bytes) = c.produce(1, &control).unwrap();
+        assert_eq!(state, RecoveryBuildParallelProduce::Batch);
+        tasks.push(bytes);
+    }
+    assert_eq!(
+        c.produce(1, &control).unwrap().0,
+        RecoveryBuildParallelProduce::Pending
+    );
+    let mut w = RecoveryBuildParallelWorker::new(&init).unwrap();
+    let mut result = w.consume(&tasks[1], &control).unwrap();
+    while result.is_none() {
+        result = w.advance(&control).unwrap();
+    }
+    c.absorb(&result.unwrap(), &control).unwrap();
+    // Task zero remains outstanding. Previously all slots stayed occupied.
+    assert_eq!(
+        c.produce(1, &control).unwrap().0,
+        RecoveryBuildParallelProduce::Batch
+    );
+}

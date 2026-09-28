@@ -11,9 +11,10 @@ export type RecoveryBuildRequest = {
   preserveB2B: boolean; rule: RuleProfile; spinProfile: SpinProfile;
   useAllLogicalProcessors: boolean;
   resultFrame?: RecoveryResultFrame;
+  pngRender?: boolean;
 };
 export function createRecoveryBuildRequest(): RecoveryBuildRequest {
-  return { startMask: 0n, middleMask: 0n, resultMask: 0n, height: 8, resultFrame: 'shared',
+  return { startMask: 0n, middleMask: 0n, resultMask: 0n, height: 8, resultFrame: 'shared', pngRender: false,
     firstSupply: '', secondSupply: '', maxEarly: 'auto', allowPieceExchange: false,
     holdEnabled: true, preserveB2B: false, useAllLogicalProcessors: false, rule: 'srs-plus', spinProfile: 'all-spin-plus' };
 }

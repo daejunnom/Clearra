@@ -6,9 +6,9 @@ use crate::CrossStageEarlyLimit;
 use clearra_core_domain::{board::standard_pc_board::Board256Mask, piece::piece_kind::PieceKind};
 use clearra_rules::profile::rule_profile::RuleProfileId;
 use clearra_scoring::profile::SpinProfileId;
-pub(super) const INIT: &[u8] = b"RBIN\x02";
-const TASK: &[u8] = b"RBTK\x02";
-const RESULT: &[u8] = b"RBRS\x02";
+pub(super) const INIT: &[u8] = b"RBIN\x03";
+const TASK: &[u8] = b"RBTK\x03";
+const RESULT: &[u8] = b"RBRS\x03";
 type Error = RecoveryBuildParallelError;
 fn bad() -> Error {
     Error::InvalidWire("invalid recovery-build packet")
@@ -210,6 +210,7 @@ fn write_path(w: &mut Writer, p: &RecoveryBuildFixedReport) {
         w.0.extend(value.to_le_bytes());
     }
     w.words(p.terminal_board);
+    w.words(p.result_target);
     w.number(p.steps.len() as u128);
     for s in &p.steps {
         w.number(s.source_index as u128);
@@ -243,6 +244,7 @@ fn read_path(r: &mut Reader<'_>) -> Result<RecoveryBuildFixedReport, Error> {
         *value = i16::from_le_bytes(r.take(2)?.try_into().map_err(|_| bad())?);
     }
     let terminal_board = r.words()?;
+    let result_target = r.words()?;
     let count = r.count(120)?;
     let mut steps = Vec::with_capacity(count);
     for _ in 0..count {
@@ -315,6 +317,7 @@ fn read_path(r: &mut Reader<'_>) -> Result<RecoveryBuildFixedReport, Error> {
         exchange_balance,
         steps,
         terminal_board,
+        result_target,
     })
 }
 pub(super) fn encode_result(init: &[u8], batch: &ResultBatch) -> Vec<u8> {

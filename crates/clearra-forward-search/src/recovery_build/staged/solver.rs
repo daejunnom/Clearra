@@ -121,7 +121,7 @@ impl Solver {
         geometry: Geometry,
     ) -> Self {
         let maximum = query.early_limit.effective_max(
-            usize::from(source.first_len),
+            geometry.stages[0].prepared.result_pieces,
             geometry.stages[0].prepared.result_pieces,
         );
         Self {
@@ -356,6 +356,34 @@ impl Solver {
         {
             return Ok(Prepared::Terminal(NONE));
         }
+        // Homogeneous, fully consumed sources have an exact combined inventory.
+        // Other supply languages keep the conservative bounds-only path.
+        if usize::from(self.source.end) == middle_pieces + result_pieces {
+            if let (Some(first), Some(second)) =
+                (self.source.first_counts, self.source.second_counts)
+            {
+                let mut remaining = [0; 7];
+                for piece in 0..7 {
+                    let Some(left) = first[piece]
+                        .checked_add(second[piece])
+                        .and_then(|n| n.checked_sub(key.middle_counts[piece]))
+                        .and_then(|n| n.checked_sub(key.result_counts[piece]))
+                    else {
+                        return Ok(Prepared::Terminal(NONE));
+                    };
+                    remaining[piece] = left;
+                }
+                if !self.geometry.feasible_inventory(
+                    key.geometry,
+                    middle_caps,
+                    result_caps,
+                    remaining,
+                    control,
+                )? {
+                    return Ok(Prepared::Terminal(NONE));
+                }
+            }
+        }
         let mut actions = Vec::new();
         if let Some(active) = key.active {
             self.placements(
@@ -486,7 +514,9 @@ impl Solver {
             if before && edge.result && key.mode == Mode::Middle {
                 continue;
             }
-            let early = before && edge.result && first;
+            // Early is a placement before middle completion, not a token origin.
+            // Drawing ahead through hold must not bypass the user quota.
+            let early = before && edge.result;
             if early && usize::from(key.early) >= self.maximum {
                 continue;
             }
@@ -556,7 +586,7 @@ impl Solver {
                     let mut actual_early = 0;
                     for step in &steps {
                         let step: &super::super::RecoveryBuildStep = step;
-                        if before && step.result_target && step.source_index < first.len() {
+                        if before && step.result_target {
                             actual_early += 1;
                         }
                         before &= !step.middle_complete;
@@ -569,6 +599,10 @@ impl Solver {
                         exchange_balance: key.exchange,
                         steps,
                         terminal_board: pos.board.words(),
+                        result_target: self.geometry.stages[usize::from(pos.stage)]
+                            .fields
+                            .result
+                            .words(),
                     });
                 }
                 Prepared::Actions(actions) => {
