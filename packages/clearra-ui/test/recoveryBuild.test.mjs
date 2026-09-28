@@ -134,3 +134,26 @@ test('ordinary and mandatory minimum use native solver arguments and a stale-sou
  assert.equal(api.recoveryBuildInputKey(q),api.recoveryBuildInputKey({...q,pngRender:true,solutionProbabilities:true,minimumSolutions:true}));
  assert.notEqual(api.recoveryBuildInputKey(q),api.recoveryBuildInputKey({...q,maxEarly:0}));
 });
+
+
+test('first export checkpoint follows original supply ownership through a terminal hold',()=>{
+ const p=structuredClone(fixture), h=n=>'0x'+n.toString(16);
+ p.height=4;p.first_supply='I';p.second_supply='O';p.hold_enabled=true;
+ p.allow_piece_exchange=false;p.preserve_b2b=false;p.early_limit=null;
+ p.start_board_mask='0x0';p.middle_target_mask='0xf';p.result_target_mask='0xc030';
+ p.normal_count='0';p.recovery_count='1';p.no_path_count='0';
+ p.normal_probability='0';p.recovery_probability='1';p.no_path_probability='0';
+ const step=(source,piece,lock,before,after,target,hold,middle)=>({source_index:String(source),piece,
+  result_target:target,rotation:0,x:target?4:1,y:0,hold_decision:hold,
+  board_before_mask:h(before),placement_mask:h(lock),board_after_mask:h(after),
+  cleared_rows:0,cleared_lines:0,recognized_spin:false,b2b_active:true,middle_complete:middle});
+ p.examples=[{first_pattern:'0',second_pattern:'0',first_queue:'I',second_queue:'O',status:'recovery',
+  effective_max_early:'1',actual_early:'1',exchange_balance:[0,0,0,0,0,0,0],terminal_board_mask:'0xc03f',
+  steps:[step(1,'O',0xc030n,0n,0xc030n,true,'store',false),
+    step(0,'I',0xfn,0xc030n,0xc03fn,false,'release-held-at-terminal',true)]}];
+ assert.ok(api.validateRecoveryBuildPayload(p));
+ const [first,final]=api.recoveryBuildExportPages(p);
+ assert.equal(first.placements.length,1);
+ assert.deepEqual(first.placements,[final.placements[1]],'held first-supply I, not the chronologically first O');
+ assert.equal(final.placements.length,2);
+});

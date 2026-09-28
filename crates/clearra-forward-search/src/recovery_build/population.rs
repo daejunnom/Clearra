@@ -146,6 +146,7 @@ impl PreparedPopulation {
             possible,
         })
     }
+    #[cfg(test)]
     pub fn indices(&self, index: u128) -> Result<(usize, usize), RecoveryBuildError> {
         if index >= self.possible {
             return Err(RecoveryBuildError::PatternDomainUnavailable);

@@ -26,6 +26,7 @@ pub(in crate::recovery_build) struct Diagram {
     count_memo: HashMap<(Id, u16, u16), u128>,
 }
 impl Diagram {
+    #[cfg(test)]
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }

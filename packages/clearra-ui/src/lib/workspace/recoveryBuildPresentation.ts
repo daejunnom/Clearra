@@ -74,7 +74,7 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
     }
     const selected = p.selected_solution_keys ?? [], pinned = p.required_solution_keys ?? [];
     for (const list of [selected,pinned]) require(Array.isArray(list) && new Set(list).size === list.length && list.every(key=>keys.has(key)));
-    require(!p.minimum_proven || (p.solutions_complete && pinned.every(key=>selected.includes(key))));
+    require(!p.minimum_proven || (p.solutions_complete && pinned.every(key=>selected.includes(key)) && (solutions.length===0 || selected.length>0)));
     require(p.minimum_proven || (selected.length===0 && pinned.length===0));
     require(!p.solutions_complete || ((solutions.length>0)===(BigInt(p.normal_count)+BigInt(p.recovery_count)>0n)));
     for (const e of [...p.examples, ...solutions.map(s=>s.example)]) {
@@ -142,23 +142,20 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
   } catch { return false; }
 }
 
-/** Cumulative target-coordinate snapshots, not one page per lock. The first
- * checkpoint is the middle stage's placement budget; it includes real early
- * result placements. Deleted rows and all colored cell ownership are retained.
- * The second checkpoint contains every placement (14 for P7/P7). */
+/** Cumulative logical ownership snapshots. The first page contains placements
+ * originating in the first supply, even when held tokens cross the boundary.
+ * The final page contains every placement. Decode row history once, before
+ * selecting source owners; removing steps first would corrupt clear offsets. */
 export function recoveryBuildExamplePages(
   report: RecoveryBuildPayload, example: RecoveryBuildExamplePayload, resultOnly = false
 ): SolutionExportPage[] {
   const witness = recoveryBuildWitness(report, example);
   const final = pcPathWitnessExportPage(witness, report.height, recoveryBuildTerminalMask(example));
-  if (!final) throw new Error('recovery history exceeds export geometry');
+  if (!final || final.placements.length !== example.steps.length) throw new Error('recovery history exceeds export geometry');
   if (resultOnly) return [final];
-  const count = countRecoveryCells(BigInt(report.middle_target_mask)) / 4;
-  const steps = witness.steps.slice(0, count);
-  const terminal = steps.at(-1)?.board_after_line_clear_mask;
-  if (!terminal) throw new Error('missing recovery checkpoint');
-  const first = pcPathWitnessExportPage({ ...witness, steps }, report.height, terminal);
-  if (!first) throw new Error('recovery checkpoint exceeds export geometry');
+  const placements = final.placements.filter((_, index) => Number(example.steps[index].source_index) < example.first_queue.length);
+  if (placements.length !== countRecoveryCells(BigInt(report.middle_target_mask)) / 4) throw new Error('missing recovery source checkpoint');
+  const first: SolutionExportPage = { ...final, placements };
   return [first, final];
 }
 export function recoveryBuildExportPages(report: RecoveryBuildPayload, resultOnly = false): SolutionExportPage[] {

@@ -552,6 +552,7 @@ fn recovery_build_early_limit_counts_second_source_before_middle_completion() {
 
 #[test]
 fn recovery_build_support_quotient_matches_independent_input_enumeration() {
+    use super::diagram::{Diagram, ALL};
     use std::collections::BTreeSet;
     let control = ExecutionControl::default();
     for seed in 0_u64..24 {

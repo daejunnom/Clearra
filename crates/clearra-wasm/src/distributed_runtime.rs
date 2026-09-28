@@ -2496,7 +2496,7 @@ impl WasmDistributedCoordinator {
                 }
             };
             return Ok(WasmExecutionResult::from_app_response(
-                prepared.complete_with_control(result, &self.control),
+                prepared.complete(result),
                 false,
             ));
         }
