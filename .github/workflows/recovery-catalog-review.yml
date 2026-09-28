@@ -1,0 +1,54 @@
+name: Review preserved Recovery catalog
+on:
+  push:
+    branches: [codex/recovery-catalog-review-20260929]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 2f99e96b9bb6499ad508f171c99fb92de94e6bcc
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - run: |
+          mkdir -p _local/artifacts/test/recovery-catalog-review
+          git rev-parse HEAD > _local/artifacts/test/recovery-catalog-review/source-sha.txt
+          git archive --format=tar HEAD | gzip > _local/artifacts/test/recovery-catalog-review/source.tar.gz
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+      - run: tar -czf _local/artifacts/test/recovery-catalog-review/frontend.tar.gz node_modules packages/clearra-ui/node_modules packages/ctk3/dist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-catalog-review-source
+          path: _local/artifacts/test/recovery-catalog-review
+          retention-days: 7
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 2f99e96b9bb6499ad508f171c99fb92de94e6bcc
+          persist-credentials: false
+      - name: Check preserved core proposal
+        run: |
+          mkdir -p _local/artifacts/test/recovery-catalog-review
+          set -o pipefail
+          cargo test --locked -p clearra-forward-search recovery_build -- --test-threads=1 2>&1 | tee _local/artifacts/test/recovery-catalog-review/core.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-catalog-review-tests
+          path: _local/artifacts/test/recovery-catalog-review
+          retention-days: 7
