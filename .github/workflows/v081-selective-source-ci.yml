@@ -132,6 +132,7 @@ jobs:
             lifecycle_routes \
             exact_accelerators \
             exact_accelerator_flags \
+            tie_snapshot::tests \
             product_execution_failure_does_not_reclassify_explicit_runtime_refusals; do
             if cargo test --locked -p clearra-cli --lib "$filter" --no-default-features -- --test-threads=1; then
               :

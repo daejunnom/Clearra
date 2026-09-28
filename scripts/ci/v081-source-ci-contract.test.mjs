@@ -105,6 +105,7 @@ test('an asset-test failure remains failure without suppressing independent proo
 });
 
 test('CI exercises the authoritative CLI ingress and real Desktop/Discord accelerator paths', () => {
+  assert.ok(workflow.includes('tie_snapshot::tests'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-cli-command --lib exact_accelerator --'));
   assert.ok(workflow.includes('exact_accelerator_flags \\\n'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-gui-host --test exact_accelerator_surface_parity --no-default-features --'));
