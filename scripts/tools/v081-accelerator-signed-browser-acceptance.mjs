@@ -45,26 +45,34 @@ const fixture = `<script>
   import { tick } from 'svelte';
   import Panel from '../src/lib/AcceleratorDownloadPanel.svelte';
   import BuildProbabilityResult from '../../../packages/clearra-ui/src/lib/workspace/BuildProbabilityResult.svelte';
+  import { projectWorkspaceSearchReport } from '../../../packages/clearra-ui/src/lib/workspace/workspaceSearchReport';
   let buildView = null;
   let buildMode = 'all-solutions';
   let loadNextProductPage = null;
   let loadProductMemberPage = null;
   let releaseProductPages = null;
+  let loadSolutionPage = null;
   window.__clearBuildResult = async () => {
     buildView = null;
     await tick();
   };
-  window.__showBuildResult = ({ response, searchReport, mode, nextPage, memberPage, releasePages }) => {
+  window.__showBuildResult = ({ response, searchReport, mode, nextPage, memberPage, releasePages, solutionPage }) => {
     loadNextProductPage = nextPage;
     loadProductMemberPage = memberPage;
     releaseProductPages = releasePages;
+    loadSolutionPage = solutionPage;
     buildMode = mode;
     buildView = {
       kind: 'web', status: 'completed', terminationReason: null, jobId: null,
       progressLabel: '', progressDone: 0, progressTotal: 0,
       forwardPatternDone: 0, forwardPatternTotal: 0, progressTelemetry: null,
       publicFailures: [], developerDiagnostics: [], response,
-      searchReport, webgpuReport: null, backendReport: response.backend_report ?? null,
+      searchReport: projectWorkspaceSearchReport(
+        searchReport,
+        response.resource_report?.execution_availability,
+        response.resource_report?.result_completeness
+      ),
+      webgpuReport: null, backendReport: response.backend_report ?? null,
       resourceReport: response.resource_report ?? null,
       renderCapability: response.capability_report?.render_capability ?? null,
       developerError: null
@@ -76,7 +84,7 @@ const fixture = `<script>
   <div data-testid="build-result" data-result-mode={buildMode}>
     <BuildProbabilityResult view={buildView} language="en" resultMode={buildMode}
       aggregation="buildability" height={4} existingMask={0n} targetMask={15n}
-      {loadNextProductPage} {loadProductMemberPage} {releaseProductPages} />
+      {loadNextProductPage} {loadProductMemberPage} {releaseProductPages} {loadSolutionPage} />
   </div>
 {/if}`;
 
@@ -412,6 +420,46 @@ async function browserAcceptance() {
                 rootWorker.postMessage({ type: 'load_product_page', requestId, action,
                   alternativeIndex, memberPageNumber, maximumWorkSteps });
               });
+            const loadSolutionPage = (offset, limit, signal) =>
+              new Promise((resolve, reject) => {
+                const requestId = ++pageRequestId;
+                const finish = () => {
+                  clearTimeout(timeout);
+                  rootWorker.removeEventListener('message', onMessage);
+                  rootWorker.removeEventListener('error', onError);
+                  signal?.removeEventListener('abort', onAbort);
+                };
+                const onMessage = ({ data }) => {
+                  if (data.request_id !== requestId) return;
+                  if (data.type === 'solution_page') {
+                    finish();
+                    resolve({ keys: data.keys, total: data.total });
+                  } else if (data.type === 'solution_page_failed') {
+                    finish();
+                    reject(new Error(data.message));
+                  }
+                };
+                const onError = error => {
+                  finish();
+                  reject(new Error(`browser_solution_page_worker_error: ${error.message}`));
+                };
+                const onAbort = () => {
+                  finish();
+                  reject(new DOMException('Solution page request aborted', 'AbortError'));
+                };
+                const timeout = setTimeout(() => {
+                  finish();
+                  reject(new Error('browser_solution_page_timeout'));
+                }, 30_000);
+                rootWorker.addEventListener('message', onMessage);
+                rootWorker.addEventListener('error', onError);
+                signal?.addEventListener('abort', onAbort, { once: true });
+                if (signal?.aborted) {
+                  onAbort();
+                  return;
+                }
+                rootWorker.postMessage({ type: 'load_solution_page', requestId, offset, limit });
+              });
             window.__showBuildResult({
               response: output.result.response,
               searchReport: output.result.search_report ?? null,
@@ -419,7 +467,8 @@ async function browserAcceptance() {
               nextPage: (signal) => loadProductPage('next', undefined, undefined, signal),
               memberPage: (alternativeIndex, memberPageNumber, signal, maximumWorkSteps) =>
                 loadProductPage('get', alternativeIndex, memberPageNumber, signal, maximumWorkSteps),
-              releasePages: () => rootWorker.postMessage({ type: 'release_product_pages' })
+              releasePages: () => rootWorker.postMessage({ type: 'release_product_pages' }),
+              solutionPage: loadSolutionPage
             });
             await new Promise((resolve, reject) => {
               const surfaceSelector = `[data-testid="build-result"][data-result-mode="${renderMode}"] ${buildResultSurfaces[renderMode]}`;
@@ -440,7 +489,10 @@ async function browserAcceptance() {
                 finish();
                 const surface = document.querySelector(surfaceSelector);
                 reject(new Error(`${renderMode}: production Build result did not show ${visibleResultSelector}; ` +
-                  `surface_present=${Boolean(surface)}; response_solutions=${output.result.search_report?.unique_solution_count ?? 'typed'}`));
+                  `surface_present=${Boolean(surface)}; response_solutions=${output.result.search_report?.unique_solution_count ?? 'typed'}; ` +
+                  `resource_state=${output.result.response.resource_report?.execution_availability?.state ?? 'missing'}; ` +
+                  `completeness=${output.result.response.resource_report?.result_completeness ?? 'missing'}; ` +
+                  `surface_text=${JSON.stringify(surface?.textContent?.trim().slice(0, 200) ?? '')}`));
               }, 30_000);
               observer.observe(app, { childList: true, subtree: true, attributes: true });
               check();

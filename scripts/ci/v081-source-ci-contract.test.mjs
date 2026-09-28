@@ -83,8 +83,13 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes("execution.results['srs-plus'].build[mode]"));
   assert.ok(browser.includes('assert.deepEqual(productSearchMeaning(pair.activated), productSearchMeaning(pair.baseline)'));
   assert.ok(browser.includes('BuildProbabilityResult.svelte'));
+  assert.ok(browser.includes('projectWorkspaceSearchReport('));
+  assert.ok(browser.includes('response.resource_report?.execution_availability'));
+  assert.ok(browser.includes('response.resource_report?.result_completeness'));
   assert.ok(browser.includes('loadProductMemberPage = memberPage'));
+  assert.ok(browser.includes('loadSolutionPage = solutionPage'));
   assert.ok(browser.includes("rootWorker.postMessage({ type: 'load_product_page', requestId, action,"));
+  assert.ok(browser.includes("rootWorker.postMessage({ type: 'load_solution_page', requestId, offset, limit })"));
   assert.ok(browser.includes("activated: await run('srs-plus', true, true, input, mode)"));
   assert.ok(browser.includes('releasePages: () => rootWorker.postMessage({ type: \'release_product_pages\' })'));
   assert.ok(browser.includes("? '.path-representative' : 'li[data-solution-key]'"));
