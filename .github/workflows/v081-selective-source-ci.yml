@@ -313,6 +313,14 @@ jobs:
           test "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR" = "$GITHUB_WORKSPACE/_local/artifacts/v081-product-page-smoke"
           test -s "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR/portfolio-wire-smoke.json"
           node --test packages/clearra-ui/test/realPortfolioWire.test.mjs
+      - name: Install pinned Chromium for actual portfolio clipboard
+        run: |
+          mkdir -p "$RUNNER_TEMP/clearra-browser-tools"
+          npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$RUNNER_TEMP/clearra-browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+          echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
+      - name: Copy the full Rust-produced selected set from a visible member page in Chromium
+        run: node scripts/tools/v081-portfolio-browser-copy-acceptance.mjs
 
   surfaces:
     if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928') && github.ref_type == 'branch'

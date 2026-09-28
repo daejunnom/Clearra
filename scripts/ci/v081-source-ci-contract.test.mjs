@@ -162,6 +162,8 @@ test('real portfolio UI proof consumes a current-run fixture without delaying in
   assert.ok(consumer.includes("needs.wasm-abi.outputs.product_wire_ready == 'true'"));
   assert.ok(consumer.includes('test -s "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR/portfolio-wire-smoke.json"'));
   assert.ok(consumer.includes('node --test packages/clearra-ui/test/realPortfolioWire.test.mjs'));
+  assert.ok(consumer.includes('playwright@1.56.1'));
+  assert.ok(consumer.includes('node scripts/tools/v081-portfolio-browser-copy-acceptance.mjs'));
   assert.ok(!consumer.includes('cargo '));
   assert.ok(!workflow.slice(workflow.indexOf('\n  surfaces:')).includes('needs:'));
   const producerJob = workflow.slice(workflow.indexOf('\n  wasm-abi:'), workflow.indexOf('\n  product-wire-ui:'));
@@ -185,6 +187,13 @@ test('actual multi-page portfolio copy is source-bound and cannot silently skip 
   assert.ok(consumer.includes('!configuredRoot && !expectedSource'));
   assert.ok(consumer.includes('compiledIdentity?.source_commit, expectedSource'));
   assert.ok(consumer.includes('response.runtime_identity, compiledIdentity'));
+  const browser = readFileSync(new URL('../tools/v081-portfolio-browser-copy-acceptance.mjs', import.meta.url), 'utf8');
+  assert.ok(browser.includes('ProductResultPager.svelte'));
+  assert.ok(browser.includes('CLEARRA_REAL_PORTFOLIO_SOURCE_COMMIT'));
+  assert.ok(browser.includes('actual.pages.length, 246'));
+  assert.ok(browser.includes("name: 'Next 100'"));
+  assert.ok(browser.includes("name: 'Copy all'"));
+  assert.ok(browser.includes("[['1', '2'], ['1', '2'], ['1', '3']]"));
   const environment = { ...process.env, CLEARRA_REAL_PORTFOLIO_SMOKE_DIR: '',
     CLEARRA_REAL_PORTFOLIO_SOURCE_COMMIT: 'f'.repeat(40) };
   delete environment.NODE_TEST_CONTEXT;
