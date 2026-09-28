@@ -1,0 +1,88 @@
+name: Recovery quoted pin transport
+on:
+  push:
+    branches: [codex/recovery-pin-transport-check-20260929]
+permissions:
+  contents: read
+jobs:
+  proposal:
+    permissions:
+      contents: write
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source: ${{ steps.commit.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 9117386f690c5fed7dee64f395e8f737995d65c8
+          fetch-depth: 0
+      - name: Quote value tokens without weakening the process-syntax guard
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = 9117386f690c5fed7dee64f395e8f737995d65c8
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('crates/clearra-wasm/tests/recovery_build_wire.rs')
+          text=p.read_text()
+          old='.map(|s| format!(" --required-solution {}", s.key))'
+          assert text.count(old)==1
+          p.write_text(text.replace(old, '.map(|s| format!(" --required-solution {}", serde_json::to_string(&s.key).unwrap()))'))
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          test "$(git diff --name-only)" = crates/clearra-wasm/tests/recovery_build_wire.rs
+          git diff --check
+      - name: Retain the test-only correction
+        id: commit
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- crates/clearra-wasm/tests/recovery_build_wire.rs
+          git commit -m 'test(recovery): quote pinned solution IDs through the browser command transport'
+          test "$(git rev-parse HEAD^)" = 9117386f690c5fed7dee64f395e8f737995d65c8
+          ref=refs/heads/codex/recovery-pins-verified-20260929
+          test -z "$(git ls-remote --heads origin "$ref")"
+          git push origin "HEAD:$ref"
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          mkdir -p _local/artifacts/test/recovery-pin-transport
+          git rev-parse HEAD > _local/artifacts/test/recovery-pin-transport/source-sha.txt
+          git archive --format=tar HEAD | gzip > _local/artifacts/test/recovery-pin-transport/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-pin-transport-source
+          path: _local/artifacts/test/recovery-pin-transport
+          retention-days: 7
+  contracts:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - name: Minimum, catalog and transport contracts
+        shell: bash
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/recovery-pin-transport
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          result=0
+          cargo test --locked -p clearra-app recovery_minimum -- --test-threads=1 2>&1 | tee "$out/minimum.log" || result=1
+          cargo test --locked -p clearra-forward-search recovery_build -- --test-threads=1 2>&1 | tee "$out/core.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --test-threads=1 2>&1 | tee "$out/cli.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1 2>&1 | tee "$out/wire.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$out/wasm-target.log" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-pin-transport-contracts
+          path: _local/artifacts/test/recovery-pin-transport
+          retention-days: 7
