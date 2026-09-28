@@ -62,7 +62,7 @@ test('the production Web pool smoke consumes one real WASM build and unchanged s
   assert.ok(launcher.includes("outExtension: { '.js': '.mjs' }"));
 });
 
-test('signed browser acceptance installs and searches each qualified profile without another asset fetch', () => {
+test('signed browser acceptance searches qualified profiles and fails open after pointer corruption', () => {
   const browser = readFileSync(new URL('../tools/v081-accelerator-signed-browser-acceptance.mjs', import.meta.url), 'utf8');
   assert.ok(browser.includes("['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']"));
   assert.ok(browser.includes('assert.equal(assets.length, profiles.length * 2)'));
@@ -72,6 +72,10 @@ test('signed browser acceptance installs and searches each qualified profile wit
   assert.ok(browser.includes('results[profile].existing = {'));
   assert.ok(browser.includes("'srs-x': 289"));
   assert.ok(browser.includes('assert.deepEqual(activated, baseline'));
+  assert.ok(browser.includes("await corrupt('exact-legal-board')"));
+  assert.ok(browser.includes("await corrupt('board-conditioned-reachability')"));
+  assert.ok(browser.includes("assert.equal(summary(corruption.legalAfter).get('legal_board_verified_negative_prunes'), '0'"));
+  assert.ok(browser.includes("assert.equal(summary(corruption.relationAfter).get('conditioned_reachability_snapshot_active'), 'false'"));
   assert.ok(browser.includes("assert.equal(assetRequests.length, assets.length, 'a search must read OPFS"));
 });
 

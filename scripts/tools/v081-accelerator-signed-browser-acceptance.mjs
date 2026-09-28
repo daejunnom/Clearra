@@ -247,19 +247,22 @@ async function browserAcceptance() {
       });
       const workers = Math.min(3, logicalProcessors);
       const workerAuthority = resolveWorkerAuthority(snapshot, workers);
-      async function run(profile, legal, relation, input) {
-        const rootWorker = new Worker('/workers/clearraWorker.ts', { type: 'module' });
+      async function runOnWorker(rootWorker, profile, legal, relation, input) {
         let timeout;
+        let onMessage;
+        let onError;
         try {
           const terminal = new Promise((resolve, reject) => {
             timeout = setTimeout(() => reject(new Error('browser_product_worker_timeout')), 120_000);
-            rootWorker.addEventListener('error', error => reject(new Error(`browser_product_worker_error: ${error.message}`)));
-            rootWorker.addEventListener('message', ({ data }) => {
+            onError = error => reject(new Error(`browser_product_worker_error: ${error.message}`));
+            onMessage = ({ data }) => {
               if (data.event === 'final_response') resolve(data);
               if (data.event === 'failed' || data.event === 'cancelled' || data.event === 'terminated') {
                 reject(new Error(`browser_product_worker_${data.event}: ${JSON.stringify(data.diagnostics ?? data)}`));
               }
-            });
+            };
+            rootWorker.addEventListener('error', onError);
+            rootWorker.addEventListener('message', onMessage);
           });
           const inputArgs = input === 'existing'
             ? '--board-mask 0x3c0f03c0f --pieces 6 --patterns P7 --hold empty'
@@ -277,6 +280,15 @@ async function browserAcceptance() {
           return { result };
         } finally {
           clearTimeout(timeout);
+          if (onError) rootWorker.removeEventListener('error', onError);
+          if (onMessage) rootWorker.removeEventListener('message', onMessage);
+        }
+      }
+      async function run(profile, legal, relation, input) {
+        const rootWorker = new Worker('/workers/clearraWorker.ts', { type: 'module' });
+        try {
+          return await runOnWorker(rootWorker, profile, legal, relation, input);
+        } finally {
           rootWorker.postMessage({ type: 'dispose_runtime' });
           await new Promise(resolve => setTimeout(resolve, 100));
           rootWorker.terminate();
@@ -295,7 +307,32 @@ async function browserAcceptance() {
           activated: await run(profile, true, true, 'existing')
         };
       }
-      return { results, workers };
+      // Exercise invalidation on one warm owner, not merely a fresh worker.
+      // A corrupt local pointer must revoke already-admitted negative proof
+      // and relation authority before the next exact search begins.
+      const rootWorker = new Worker('/workers/clearraWorker.ts', { type: 'module' });
+      const corruption = {};
+      try {
+        async function corrupt(product) {
+          const origin = await navigator.storage.getDirectory();
+          const root = await origin.getDirectoryHandle('clearra-exact-accelerators-v1');
+          const directory = await (await root.getDirectoryHandle(product)).getDirectoryHandle('srs-plus');
+          const pointer = await (await directory.getFileHandle('active.json')).createWritable();
+          await pointer.write('null');
+          await pointer.close();
+        }
+        corruption.legalBefore = await runOnWorker(rootWorker, 'srs-plus', true, false, 'eligible');
+        await corrupt('exact-legal-board');
+        corruption.legalAfter = await runOnWorker(rootWorker, 'srs-plus', true, false, 'eligible');
+        corruption.relationBefore = await runOnWorker(rootWorker, 'srs-plus', false, true, 'eligible');
+        await corrupt('board-conditioned-reachability');
+        corruption.relationAfter = await runOnWorker(rootWorker, 'srs-plus', false, true, 'eligible');
+      } finally {
+        rootWorker.postMessage({ type: 'dispose_runtime' });
+        await new Promise(resolve => setTimeout(resolve, 100));
+        rootWorker.terminate();
+      }
+      return { results, workers, corruption };
     }, profiles);
     const compact = ({ result }) => {
       assert.equal(result.event, 'final_response');
@@ -338,11 +375,25 @@ async function browserAcceptance() {
           `${name}: retain the legal-board pruning counter, including zero outside its scope`);
       }
     }
+    const corruption = execution.corruption;
+    const expected = compact(execution.results['srs-plus'].eligible.baseline);
+    for (const [name, sample] of Object.entries(corruption)) {
+      assert.deepEqual(compact(sample), expected,
+        `${name}: corrupt OPFS pointers must preserve the complete exact result`);
+    }
+    const summary = sample => new Map(sample.result.search_report.summary_fields);
+    assert.ok(Number(summary(corruption.legalBefore).get('legal_board_verified_negative_prunes')) > 0,
+      'the warm legal-board owner must have exercised a real negative prune');
+    assert.equal(summary(corruption.legalAfter).get('legal_board_verified_negative_prunes'), '0',
+      'a corrupt legal-board pointer must revoke the warm negative proof');
+    assert.equal(summary(corruption.relationBefore).get('conditioned_reachability_snapshot_active'), 'true');
+    assert.equal(summary(corruption.relationAfter).get('conditioned_reachability_snapshot_active'), 'false',
+      'a corrupt relation pointer must revoke the warm relation snapshot');
     assert.ok(verifierRequests.length >= 1, 'the actual verifier worker must be loaded');
     assert.equal(assetRequests.length, assets.length, 'a search must read OPFS, not re-download signed assets');
     assert.deepEqual(errors, []);
     await context.close();
-    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers and complete existing/eligible result parity passed');
+    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete existing/eligible result parity passed');
   } finally {
     await browser?.close();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
