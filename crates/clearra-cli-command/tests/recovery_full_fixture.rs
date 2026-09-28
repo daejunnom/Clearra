@@ -23,7 +23,7 @@ fn recovery_full_original_fixture_completes_through_public_app() {
     .unwrap()
     .to_app_request()
     .unwrap();
-    assert_eq!(request.resource_budget().workers(), workers);
+    assert_eq!(usize::from(request.resource_budget().workers()), workers);
     let AppCommand::RecoveryBuild(recovery) = request.command() else {
         panic!("the public Recovery Build route is required");
     };
@@ -41,7 +41,9 @@ fn recovery_full_original_fixture_completes_through_public_app() {
     assert!(query.initial_b2b);
     assert_eq!(query.rule_profile.as_str(), "srs-plus");
     assert_eq!(query.spin_profile.as_str(), "all-spin-plus");
-    eprintln!("recovery_full_start logical_processors={logical} worker_slots={workers} command={command}");
+    eprintln!(
+        "recovery_full_start logical_processors={logical} worker_slots={workers} command={command}"
+    );
     let started = Instant::now();
     let response = AppContext::default().run(request);
     assert_eq!(response.status(), AppStatus::Success);
@@ -61,7 +63,10 @@ fn recovery_full_original_fixture_completes_through_public_app() {
         payload.no_path_count.parse::<u128>().unwrap(),
     ];
     assert_eq!(counts.iter().sum::<u128>(), 25_401_600);
-    assert!(counts[0] + counts[1] > 0, "the original drawing has known positive paths");
+    assert!(
+        counts[0] + counts[1] > 0,
+        "the original drawing has known positive paths"
+    );
     let probabilities = [
         payload.normal_probability.parse::<f64>().unwrap(),
         payload.recovery_probability.parse::<f64>().unwrap(),
