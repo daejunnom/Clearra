@@ -321,6 +321,8 @@ jobs:
           echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
       - name: Copy the full Rust-produced selected set from a visible member page in Chromium
         run: node scripts/tools/v081-portfolio-browser-copy-acceptance.mjs
+      - name: Exercise the production Desktop panel against bounded Tauri IPC replies in Chromium
+        run: node scripts/tools/v081-desktop-accelerator-panel-browser-acceptance.mjs
 
   surfaces:
     if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928') && github.ref_type == 'branch'

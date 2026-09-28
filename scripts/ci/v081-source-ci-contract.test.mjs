@@ -217,6 +217,20 @@ test('actual multi-page portfolio copy is source-bound and cannot silently skip 
   assert.match(incomplete.stdout, /# skipped 0/u);
 });
 
+test('Desktop panel browser smoke reuses pinned Chromium and exercises real Svelte command wiring', () => {
+  const consumer = workflow.slice(workflow.indexOf('\n  product-wire-ui:'), workflow.indexOf('\n  surfaces:'));
+  assert.ok(consumer.includes('node scripts/tools/v081-desktop-accelerator-panel-browser-acceptance.mjs'));
+  assert.equal(consumer.split('playwright@1.56.1').length - 1, 1);
+  assert.ok(!consumer.includes('cargo build'));
+  const browser = readFileSync(new URL('../tools/v081-desktop-accelerator-panel-browser-acceptance.mjs', import.meta.url), 'utf8');
+  assert.ok(browser.includes('AcceleratorAssetPanel.svelte'));
+  for (const command of ['accelerator_asset_action', 'accelerator_asset_start_download',
+    'accelerator_asset_progress', 'accelerator_asset_cancel']) {
+    assert.ok(browser.includes(command), `${command}: actual Desktop panel boundary must be exercised`);
+  }
+  assert.ok(browser.includes('Only the native IPC replies are simulated'));
+});
+
 test('real WASM realms use one ordinary build and unchanged packs independently of native jobs', () => {
   const job = workflow.slice(workflow.indexOf('\n  wasm-realms:'));
   assert.ok(job.startsWith('\n  wasm-realms:\n'));
