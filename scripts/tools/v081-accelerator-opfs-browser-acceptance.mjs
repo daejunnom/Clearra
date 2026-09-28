@@ -42,6 +42,19 @@ await new Promise((resolve, reject) => {
 });
 const address = server.address();
 assert.ok(address && typeof address !== 'string');
+async function bounded(promise, label) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`browser_${label}_timeout`)), 30_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 let browser;
 try {
   browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
@@ -69,22 +82,22 @@ try {
   }));
   assert.deepEqual(availability, { opfs: true, locks: true });
 
-  const installed = await first.evaluate(async ({ plan, bytes }) => {
+  const installed = await bounded(first.evaluate(async ({ plan, bytes }) => {
     const store = await import('/store.js');
     await store.storeQualifiedAccelerator(plan, new Uint8Array(bytes));
     return store.acceleratorLocalStatus(plan.product, plan.profile, plan);
-  }, { plan, bytes });
+  }, { plan, bytes }), 'install');
   assert.equal(installed.current, true);
-  const crossTab = await second.evaluate(async plan => {
+  const crossTab = await bounded(second.evaluate(async plan => {
     const store = await import('/store.js');
     const status = await store.acceleratorLocalStatus(plan.product, plan.profile, plan);
     const payload = await store.readQualifiedAccelerator(plan);
     return { current: status?.current, bytes: payload ? [...new Uint8Array(payload)] : null };
-  }, plan);
+  }, plan), 'cross_tab_read');
   assert.deepEqual(crossTab, { current: true, bytes });
 
   const lockName = 'clearra-exact-accelerators-v1:exact-legal-board:srs';
-  await first.evaluate(async name => {
+  await bounded(first.evaluate(async name => {
     let acquired;
     const ready = new Promise(resolve => { acquired = resolve; });
     let release;
@@ -96,8 +109,8 @@ try {
       await blocked;
     });
     await ready;
-  }, lockName);
-  const conflict = await second.evaluate(async plan => {
+  }, lockName), 'lock_acquisition');
+  const conflict = await bounded(second.evaluate(async plan => {
     const store = await import('/store.js');
     try {
       await store.acceleratorLocalStatus(plan.product, plan.profile, plan);
@@ -105,14 +118,14 @@ try {
     } catch (error) {
       return error.message;
     }
-  }, plan);
+  }, plan), 'lock_conflict');
   assert.equal(conflict, 'accelerator_store_busy');
-  await first.evaluate(async () => {
+  await bounded(first.evaluate(async () => {
     window.__releaseAcceleratorTestLock();
     await window.__acceleratorTestLock;
-  });
+  }), 'lock_release');
 
-  const repair = await second.evaluate(async ({ plan, bytes }) => {
+  const repair = await bounded(second.evaluate(async ({ plan, bytes }) => {
     const store = await import('/store.js');
     const origin = await navigator.storage.getDirectory();
     const profile = await (await (await origin.getDirectoryHandle('clearra-exact-accelerators-v1'))
@@ -128,7 +141,7 @@ try {
     await store.storeQualifiedAccelerator(plan, new Uint8Array(bytes));
     const restored = await store.acceleratorLocalStatus(plan.product, plan.profile, plan);
     return { error, empty, restored: restored?.current };
-  }, { plan, bytes });
+  }, { plan, bytes }), 'pointer_repair');
   assert.deepEqual(repair, { error: 'accelerator_store_pointer_invalid', empty: null, restored: true });
   await context.close();
   process.stdout.write('v0.8.1 real OPFS: install, cross-tab read, lock conflict, corrupt-pointer remove and reinstall passed\n');
