@@ -18,16 +18,20 @@ const signedMetadata = [
   'config/conditioned-reachability-product-catalog.v1.json',
 ];
 
-test('the convergence branch runs both non-publishing v0.8.1 and recovery gates', () => {
-  const branch = 'codex/v081-main-convergence-20260928';
-  assert.ok(workflow.includes(`branches: ["codex/v081-selective-source-ci-20260927", "${branch}"]`));
+test('both convergence branches run the non-publishing v0.8.1 and recovery gates', () => {
+  const branches = ['codex/v081-main-convergence-20260928', 'codex/converge-v081-linear-20260928'];
+  assert.ok(workflow.includes(`branches: ["codex/v081-selective-source-ci-20260927", "${branches[0]}", "${branches[1]}"]`));
   for (const job of ['core', 'native-products', 'wasm-abi', 'surfaces', 'wasm-realms']) {
     const start = workflow.indexOf(`\n  ${job}:`);
     assert.ok(start >= 0, `missing job ${job}`);
     const guard = workflow.slice(start, workflow.indexOf('\n    runs-on:', start));
-    assert.ok(guard.includes(`refs/heads/${branch}`), `${job} must run on convergence`);
+    for (const branch of branches) {
+      assert.ok(guard.includes(`refs/heads/${branch}`), `${job} must run on ${branch}`);
+    }
   }
-  assert.ok(recoveryWorkflow.includes(`      - ${branch}`));
+  for (const branch of branches) {
+    assert.ok(recoveryWorkflow.includes(`      - ${branch}`));
+  }
   assert.ok(!recoveryWorkflow.includes('deploy-pages'));
 });
 

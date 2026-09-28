@@ -6,6 +6,7 @@ on:
       - codex/recovery-build-fields-parallel-20260928
       - codex/converge-recovery-build-release-20260928
       - codex/v081-main-convergence-20260928
+      - codex/converge-v081-linear-20260928
 
 permissions:
   contents: read
