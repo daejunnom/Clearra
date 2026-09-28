@@ -125,3 +125,25 @@ exact `e1db5ba87b86df98fb6e8ca39b246c0596d58e5f`의
 pressure 0, descendant 0, tree stopped를 확인했다. 실제 확대 행렬의 실행은
 후속 exact-source Linux CI에서 확인할 Open 항목이다. Windows 실행 정책 우회,
 benchmark/ABBA, 자료 재생성 및 v0.9.0 변경은 하지 않는다.
+
+## `d659533d` CI의 호스트 한도 거절과 행렬 교정
+
+후속 [run 36354588266](https://github.com/daejunnom/Clearra/actions/runs/36354588266)은
+Core·WASM ABI·surfaces·WASM realms·UI wire 다섯 job이 성공했다. native job은
+일반/서명 App의 두 step만 실패했고, 같은 job의 actual CLI→Discord·Desktop과
+자료 read-only 검증은 별도 step으로 계속 실행됐다. 두 App 실패 로그는 모두
+`execution_workers_exceed_hardware`이며, 11워커를 허용하지 않는 hosted runner에
+11을 고정 요청한 테스트 입력의 검증 거절이다. CTK decoder fixture는 통과했다.
+이 실패를 solver 결과 차이 또는 자산 손상이라고 해석하지 않는다.
+
+교정된 functional target은 `1, 2, 11` 중 `WorkerPolicy`가 보고한 실제 호스트
+논리 프로세서 수 이하인 요청만 실행한다. 2/11 요청에서는 명시적인
+`use_all_logical_processors`로 n-1 예약에 의한 숨은 1워커 축소를 피한다.
+11코어 미만의 CI는 11-worker parity를 통과했다고 기록하지 않는다. 큰 호스트의
+11-worker 실행, 실제 활성 worker 수와 성능은 별도 Open으로 남는다. 제품 정책의
+하드웨어 상한이나 실패 의미를 완화하지 않았다.
+
+로컬 직접 재현 시도는 감독 실행기의 메모리 압력 fail-close로 test executable
+완성 전에 종료됐다. 자원을 변경한 자동 재시도는 하지 않았으며 이 시도를
+테스트 실패 또는 통과로 세지 않는다. 교정 코드의 정확한 Linux CI 결과는 아직
+후속 실행 대상이다.

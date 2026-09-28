@@ -16,7 +16,7 @@ use clearra_objectives::policy::{
 };
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
-    RequestedSearchBackend,
+    RequestedSearchBackend, WorkerPolicy,
 };
 use clearra_problem::{
     BuildProbabilityField, BuildProbabilityQuery, BuildSolutionProbabilityPolicy,
@@ -69,8 +69,19 @@ fn policy(legal: bool, conditioned: bool, workers: usize) -> PcExecutionPolicy {
         .with_requested_backend(RequestedSearchBackend::Cpu)
         .with_allow_backend_fallback(false)
         .with_workers(workers)
+        .with_use_all_logical_processors(workers > 1)
         .with_exact_legal_board_enabled(legal)
         .with_conditioned_reachability_enabled(conditioned)
+}
+
+fn supported_worker_requests() -> impl Iterator<Item = usize> {
+    let hardware = WorkerPolicy::hardware_worker_limit();
+    // Native validation must reject oversubscription. The hosted CI runner
+    // may have only two CPUs; never relabel a capped 11-worker request as an
+    // executed 11-worker result. Larger hosts exercise the additional arm.
+    [1, 2, 11]
+        .into_iter()
+        .filter(move |&workers| workers <= hardware)
 }
 
 fn minimum_request(
@@ -327,7 +338,7 @@ fn compare_products(installed: bool) {
         assert_eq!(expected.selected_solution_count(), 1);
         let meaning = portfolio_meaning(expected.portfolio_alternatives());
         assert!(!meaning.candidates.is_empty());
-        for workers in [1, 2, 11] {
+        for workers in supported_worker_requests() {
             for (legal, conditioned) in [(false, false), (false, true), (true, false), (true, true)]
             {
                 if workers == 1 && !legal && !conditioned {
@@ -375,7 +386,7 @@ fn compare_products(installed: bool) {
         .pc_score_portfolio_v2()
         .unwrap();
     assert!(expected.completeness().complete());
-    for workers in [1, 2, 11] {
+    for workers in supported_worker_requests() {
         for (legal, conditioned) in [(false, false), (false, true), (true, false), (true, true)] {
             if workers == 1 && !legal && !conditioned {
                 continue;
@@ -538,7 +549,7 @@ fn compare_products(installed: bool) {
         );
     }
     assert!(ranking.candidates()[0].candidate_id() < ranking.candidates()[1].candidate_id());
-    for workers in [1, 2, 11] {
+    for workers in supported_worker_requests() {
         for (legal, conditioned) in [(false, false), (false, true), (true, false), (true, true)] {
             let actual = success(&context, setup_score_request(legal, conditioned, workers));
             assert_eq!(
