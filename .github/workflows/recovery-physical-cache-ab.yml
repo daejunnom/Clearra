@@ -1,0 +1,210 @@
+name: Recovery physical lock cache A-B
+on:
+  push:
+    branches: [codex/recovery-physical-cache-ab-20260929]
+    paths: [.github/workflows/recovery-physical-cache-ab.yml]
+permissions:
+  contents: read
+jobs:
+  differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    env:
+      BASE: c2d0050143386baef74797574feeca74d238a113
+      REPORT: _local/artifacts/test/recovery-physical-cache-ab
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c2d0050143386baef74797574feeca74d238a113
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Bind exact source and prepare managed benchmark
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE"
+          test "$(git rev-parse HEAD:crates/clearra-forward-search/src/recovery_build/staged/geometry.rs)" = 623d5ccdce20ae3fa02c9e6fd8eec365fa0863f6
+          rustup show
+          mkdir -p "$REPORT"
+          cargo build --locked --release -p clearra-manage
+          cargo test --locked --release -p clearra-forward-search recovery_build_memo_fixture_ab --no-run
+      - name: Baseline memo-quotient candidate
+        run: |
+          set -euo pipefail
+          build/cargo/default/release/clearra-manage runtime run --producer recovery-physical-baseline --profile benchmark-search --timeout 420 -- cargo test --locked --release -p clearra-forward-search recovery_build_memo_fixture_ab -- --ignored --nocapture --test-threads=1 2>&1 | tee "$REPORT/baseline.log"
+      - name: Add bounded exact physical-lock reuse before logical target filtering
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('crates/clearra-forward-search/src/recovery_build/staged/geometry.rs')
+          s=p.read_text()
+          replacements={
+              '    reach: ReachabilityWorkspace,': '    reach: ReachabilityWorkspace,\n    physical_locks: HashMap<(ForwardBoard, usize), Arc<[ReachableLock]>>,\n    physical_lock_count: usize,',
+              '            profile: SpinProfile::builtin(query.spin_profile),': '            physical_locks: HashMap::new(),\n            physical_lock_count: 0,\n            profile: SpinProfile::builtin(query.spin_profile),',
+              '        let locks = self\n            .reach\n            .reachable_locks(pos.board, PIECES[piece], true, true)\n            .to_vec();': '        let locks = self.physical_locks(pos.board, piece)?;',
+              '        for lock in locks {': '        for &lock in locks.iter() {',
+          }
+          for before,after in replacements.items():
+              assert s.count(before)==1,(before,s.count(before))
+              s=s.replace(before,after)
+          marker='    pub fn edges(\n'
+          assert s.count(marker)==1
+          method='''    /// Height, rotation profile and reachability flags are immutable for
+              /// this query-owned Geometry. Physical lock evidence depends on
+              /// the full actual board and piece, not stage ownership, B2B,
+              /// logical row labels or the queue. Those conditions are still
+              /// checked below for EVERY logical edge. Keep every returned lock
+              /// and its original first-success/immobility evidence unchanged.
+              fn physical_locks(
+                  &mut self,
+                  board: ForwardBoard,
+                  piece: usize,
+              ) -> Result<Arc<[ReachableLock]>, Error> {
+                  if let Some(locks) = self.physical_locks.get(&(board, piece)) {
+                      return Ok(Arc::clone(locks));
+                  }
+                  let locks: Arc<[ReachableLock]> = self
+                      .reach
+                      .reachable_locks(board, PIECES[piece], true, true)
+                      .to_vec()
+                      .into();
+                  // This is an evictable memo, never a search limit. A miss or
+                  // eviction recomputes the complete exact reachability result.
+                  const MAX_ENTRIES: usize = 4096;
+                  const MAX_LOCKS: usize = 8 * 1024 * 1024 / size_of::<ReachableLock>();
+                  if self.physical_locks.len() >= MAX_ENTRIES
+                      || self.physical_lock_count + locks.len() > MAX_LOCKS
+                  {
+                      self.physical_locks.clear();
+                      self.physical_lock_count = 0;
+                  }
+                  if locks.len() <= MAX_LOCKS {
+                      self.physical_locks
+                          .try_reserve(1)
+                          .map_err(|_| Error::MemoryUnavailable)?;
+                      self.physical_lock_count += locks.len();
+                      self.physical_locks.insert((board, piece), Arc::clone(&locks));
+                  }
+                  Ok(locks)
+              }
+          '''
+          # Remove YAML embedding indentation while preserving Rust block depth.
+          lines=method.splitlines()
+          method=lines[0]+'\n'+'\n'.join(line[10:] if line.startswith('          ') else line for line in lines[1:])+'\n'
+          s=s.replace(marker,method+marker)
+          s+='''
+          #[cfg(test)]
+          mod physical_lock_tests {
+              use super::*;
+              use clearra_rules::profile::rule_profile::RuleProfileId;
+
+              #[test]
+              fn recovery_build_physical_cache_preserves_every_lock_and_evidence() {
+                  let control = ExecutionControl::default();
+                  for height in [4_u8, 10] {
+                      let query = RecoveryBuildQuery {
+                          fields: RecoveryBuildFields {
+                              height,
+                              initial: Mask::EMPTY,
+                              middle: Mask::from_words([15, 0, 0, 0]),
+                              result: Mask::from_words([0xc030, 0, 0, 0]),
+                          },
+                          first_supply: "I".into(),
+                          second_supply: "O".into(),
+                          early_limit: crate::CrossStageEarlyLimit::Auto,
+                          allow_piece_exchange: true,
+                          hold_enabled: true,
+                          preserve_b2b: false,
+                          initial_b2b: true,
+                          rule_profile: RuleProfileId::SrsPlus,
+                          spin_profile: clearra_scoring::profile::SpinProfileId::AllSpinPlus,
+                      };
+                      let mut cached = Geometry::new(&query, &control).unwrap();
+                      let mut direct = ReachabilityWorkspace::new(height, query.rule_profile).unwrap();
+                      let mut seed = 0x9215_2740_0119_ab17_u64;
+                      for _ in 0..48 {
+                          seed ^= seed << 13;
+                          seed ^= seed >> 7;
+                          seed ^= seed << 17;
+                          let board = ForwardBoard::from_words([seed & ((1_u64 << 40) - 1), 0, 0, 0]);
+                          for piece in 0..7 {
+                              let expected = direct.reachable_locks(board, PIECES[piece], true, true).to_vec();
+                              let first = cached.physical_locks(board, piece).unwrap();
+                              let second = cached.physical_locks(board, piece).unwrap();
+                              assert_eq!(first.as_ref(), expected.as_slice());
+                              assert_eq!(second.as_ref(), expected.as_slice());
+                              assert!(Arc::ptr_eq(&first, &second));
+                          }
+                      }
+                      // Force the optional cache's capacity boundary. Previously
+                      // returned evidence stays valid and the next miss computes
+                      // its complete result instead of rejecting a search state.
+                      cached.physical_lock_count = usize::MAX / 2;
+                      let expected = direct.reachable_locks(ForwardBoard::EMPTY, PIECES[0], true, true).to_vec();
+                      let actual = cached.physical_locks(ForwardBoard::EMPTY, 0).unwrap();
+                      assert_eq!(actual.as_ref(), expected.as_slice());
+                      assert_eq!(cached.physical_locks.len(), 1);
+                      assert_eq!(cached.physical_lock_count, actual.len());
+                  }
+              }
+          }
+          '''
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          git diff --binary > "$REPORT/reviewed-candidate.patch"
+      - name: Exact fixed-oracle and physical evidence tests
+        run: |
+          set -euo pipefail
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$REPORT/core.log"
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$REPORT/cli.log"
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$REPORT/wasm-runtime.log"
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$REPORT/wasm-target.log"
+      - name: Identical-shard candidate measurement
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p clearra-forward-search recovery_build_memo_fixture_ab --no-run
+          build/cargo/default/release/clearra-manage runtime run --producer recovery-physical-candidate --profile benchmark-search --timeout 420 -- cargo test --locked --release -p clearra-forward-search recovery_build_memo_fixture_ab -- --ignored --nocapture --test-threads=1 2>&1 | tee "$REPORT/candidate.log"
+          python3 - <<'PY'
+          import json,os,pathlib,re
+          root=pathlib.Path(os.environ['REPORT']);pat=r'memo_ab start=(\d+) exchange=(true|false) counts=\[(\d+), (\d+), (\d+)\] states=(\d+) geometry_queries=(\d+) elapsed_ms=(\d+)'
+          def load(name):
+              rows=re.findall(pat,(root/name).read_text());assert len(rows)==6
+              return {(int(r[0]),r[1]):{'counts':list(map(int,r[2:5])),'states':int(r[5]),'geometry_queries':int(r[6]),'ms':int(r[7])} for r in rows}
+          a,b=load('baseline.log'),load('candidate.log');assert a.keys()==b.keys();out=[]
+          for key in a:
+              for invariant in ['counts','states','geometry_queries']:assert a[key][invariant]==b[key][invariant],(key,invariant)
+              out.append({'start':key[0],'exchange':key[1]=='true','baseline':a[key],'candidate':b[key]})
+          (root/'comparison.json').write_text(json.dumps(out,indent=2)+'\n');print(json.dumps(out,indent=2))
+          PY
+      - name: Preserve a source-only proposal for inspection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,json,os,pathlib,subprocess,urllib.request
+          repo='daejunnom/Clearra';base=os.environ['BASE'];root=pathlib.Path(os.environ['REPORT']);path='crates/clearra-forward-search/src/recovery_build/staged/geometry.rs'
+          assert subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()==[path]
+          def api(route,data=None):
+              req=urllib.request.Request('https://api.github.com/repos/'+repo+route,data=None if data is None else json.dumps(data).encode(),headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json'},method='GET' if data is None else 'POST')
+              with urllib.request.urlopen(req,timeout=60) as response:return json.load(response)
+          source=api('/git/commits/'+base)
+          blob=api('/git/blobs',{'content':base64.b64encode(pathlib.Path(path).read_bytes()).decode(),'encoding':'base64'})
+          assert blob['sha']==subprocess.check_output(['git','hash-object',path],text=True).strip()
+          entries=[{'path':path,'mode':'100644','type':'blob','sha':blob['sha']}]
+          tree=api('/git/trees',{'base_tree':source['tree']['sha'],'tree':entries})
+          commit=api('/git/commits',{'message':'perf(recovery): reuse exact physical lock evidence across logical histories\n\nCache by the full physical board and piece inside one immutable height/rule query. Preserve all original locks and evidence; continue logical ownership, row mapping and B2B checks per edge. Bound the optional memo to 4096 keys and 8 MiB lock payload; eviction never prunes.','tree':tree['sha'],'parents':[base]})
+          api('/git/refs',{'ref':'refs/heads/codex/recovery-physical-cache-proposal-20260929','sha':commit['sha']})
+          result={'base':base,'proposal':commit['sha'],'tree':tree['sha'],'files':entries,'main_updated':False}
+          (root/'proposal.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-physical-cache-ab
+          path: _local/artifacts/test/recovery-physical-cache-ab/
+          if-no-files-found: warn
+          retention-days: 14
