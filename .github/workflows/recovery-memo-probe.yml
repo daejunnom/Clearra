@@ -1,0 +1,83 @@
+name: Recovery continuation memo A-B
+
+on:
+  push:
+    branches: [codex/recovery-memo-probe-20260928]
+    paths:
+      - .github/workflows/recovery-memo-probe.yml
+      - scripts/tools/recovery-memo-proposal.py
+
+permissions:
+  contents: write
+
+concurrency:
+  group: recovery-memo-proposal-20260928
+  cancel-in-progress: false
+
+jobs:
+  differential:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BASE: 53757c6c4a4d5ba6e1832dbd431123bbd0531a96
+      PROPOSAL: codex/recovery-memo-result-20260928
+      REPORT: _local/artifacts/test/recovery-memo-ab
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply reviewed memo-only transformation to the pinned candidate
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/codex/recovery-memo-probe-20260928
+          test -z "$(git status --porcelain)"
+          cp scripts/tools/recovery-memo-proposal.py "$RUNNER_TEMP/recovery-memo-proposal.py"
+          git switch --detach "$BASE"
+          test "$(git rev-parse HEAD)" = "$BASE"
+          rustup show
+          python3 "$RUNNER_TEMP/recovery-memo-proposal.py"
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          prefix='crates/clearra-forward-search/src/recovery_build/staged/'
+          expected={prefix+'solver.rs',prefix+'tests.rs'}
+          actual=set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          assert actual == expected, actual
+          PY
+          mkdir -p "$REPORT"
+          git diff --binary > "$REPORT/memo-only.patch"
+          git diff --stat > "$REPORT/changed-files.txt"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- crates/clearra-forward-search/src/recovery_build/staged/solver.rs crates/clearra-forward-search/src/recovery_build/staged/tests.rs
+          git commit -m 'perf(recovery): share continuation answers without merging replay provenance'
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$PROPOSAL")"
+          git push origin "HEAD:refs/heads/$PROPOSAL"
+          git rev-parse HEAD > "$REPORT/source-sha.txt"
+          git rev-parse HEAD^{tree} > "$REPORT/source-tree.txt"
+      - name: Exact fixed-pair oracle, literal memo, hold replay and existing regressions
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p clearra-forward-search recovery_build -- --nocapture --test-threads=1 2>&1 | tee "$REPORT/core.log"
+          cargo test --locked --release -p clearra-cli-command --test recovery_build -- --nocapture --test-threads=1 2>&1 | tee "$REPORT/cli.log"
+          cargo test --locked --release -p clearra-wasm --test recovery_build_wire -- --nocapture --test-threads=1 2>&1 | tee "$REPORT/wire.log"
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$REPORT/wasm-target.log"
+      - name: Build the normal resource supervisor before measurement
+        run: cargo build --locked --release -p clearra-manage
+      - name: Same-resource A-B with exact membership comparison for every tested pair
+        run: |
+          set -euo pipefail
+          build/cargo/default/release/clearra-manage --root . runtime run --producer recovery-memo-ab --profile benchmark-search --timeout 420 -- \
+            cargo test --locked --release -p clearra-forward-search recovery_build_memo_quotient_benchmark -- --ignored --nocapture --test-threads=1 2>&1 | tee "$REPORT/benchmark.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-memo-ab
+          path: _local/artifacts/test/recovery-memo-ab/
+          if-no-files-found: warn
+          retention-days: 14
