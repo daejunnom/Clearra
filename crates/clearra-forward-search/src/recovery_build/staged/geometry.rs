@@ -148,6 +148,8 @@ pub(in crate::recovery_build) struct Geometry {
     entries: Vec<Entry>,
     unique: HashMap<Position, u32>,
     reach: ReachabilityWorkspace,
+    physical_locks: HashMap<(ForwardBoard, usize), Arc<[ReachableLock]>>,
+    physical_lock_count: usize,
     profile: SpinProfile,
     preserve: bool,
     pub lock_queries: u128,
@@ -187,6 +189,8 @@ impl Geometry {
             unique: HashMap::new(),
             reach: ReachabilityWorkspace::new(query.fields.height, query.rule_profile)
                 .map_err(|_| Error::UnsupportedRuleProfile)?,
+            physical_locks: HashMap::new(),
+            physical_lock_count: 0,
             profile: SpinProfile::builtin(query.spin_profile),
             preserve: query.preserve_b2b,
             lock_queries: 0,
@@ -258,6 +262,45 @@ impl Geometry {
                 )
                 .map_err(domain_error)?)
     }
+    /// Height, rotation profile and reachability flags are immutable for
+    /// this query-owned Geometry. Physical lock evidence depends on
+    /// the full actual board and piece, not stage ownership, B2B,
+    /// logical row labels or the queue. Those conditions are still
+    /// checked below for EVERY logical edge. Keep every returned lock
+    /// and its original first-success/immobility evidence unchanged.
+    fn physical_locks(
+        &mut self,
+        board: ForwardBoard,
+        piece: usize,
+    ) -> Result<Arc<[ReachableLock]>, Error> {
+        if let Some(locks) = self.physical_locks.get(&(board, piece)) {
+            return Ok(Arc::clone(locks));
+        }
+        let locks: Arc<[ReachableLock]> = self
+            .reach
+            .reachable_locks(board, PIECES[piece], true, true)
+            .to_vec()
+            .into();
+        // This is an evictable memo, never a search limit. A miss or
+        // eviction recomputes the complete exact reachability result.
+        const MAX_ENTRIES: usize = 4096;
+        const MAX_LOCKS: usize = 8 * 1024 * 1024 / size_of::<ReachableLock>();
+        if self.physical_locks.len() >= MAX_ENTRIES
+            || self.physical_lock_count + locks.len() > MAX_LOCKS
+        {
+            self.physical_locks.clear();
+            self.physical_lock_count = 0;
+        }
+        if locks.len() <= MAX_LOCKS {
+            self.physical_locks
+                .try_reserve(1)
+                .map_err(|_| Error::MemoryUnavailable)?;
+            self.physical_lock_count += locks.len();
+            self.physical_locks
+                .insert((board, piece), Arc::clone(&locks));
+        }
+        Ok(locks)
+    }
     pub fn edges(
         &mut self,
         id: u32,
@@ -276,12 +319,9 @@ impl Geometry {
             .filter(|&row| pos.deleted & (1 << row) == 0)
             .collect::<Vec<_>>();
         self.lock_queries += 1;
-        let locks = self
-            .reach
-            .reachable_locks(pos.board, PIECES[piece], true, true)
-            .to_vec();
+        let locks = self.physical_locks(pos.board, piece)?;
         let mut output = Vec::new();
-        for lock in locks {
+        for &lock in locks.iter() {
             cancelled(control)?;
             let stage = &self.stages[usize::from(pos.stage)];
             let mut middle = Mask::EMPTY;
@@ -449,6 +489,66 @@ impl Geometry {
             b2b_active: after.b2b,
             middle_complete: after.middle_count() == stage.prepared.middle_pieces,
             logical_cells,
+        }
+    }
+}
+
+#[cfg(test)]
+mod physical_lock_tests {
+    use super::*;
+    use clearra_rules::profile::rule_profile::RuleProfileId;
+
+    #[test]
+    fn recovery_build_physical_cache_preserves_every_lock_and_evidence() {
+        let control = ExecutionControl::default();
+        for height in [4_u8, 10] {
+            let query = RecoveryBuildQuery {
+                fields: RecoveryBuildFields {
+                    height,
+                    initial: Mask::EMPTY,
+                    middle: Mask::from_words([15, 0, 0, 0]),
+                    result: Mask::from_words([0xc030, 0, 0, 0]),
+                },
+                first_supply: "I".into(),
+                second_supply: "O".into(),
+                early_limit: crate::CrossStageEarlyLimit::Auto,
+                allow_piece_exchange: true,
+                hold_enabled: true,
+                preserve_b2b: false,
+                initial_b2b: true,
+                rule_profile: RuleProfileId::SrsPlus,
+                spin_profile: clearra_scoring::profile::SpinProfileId::AllSpinPlus,
+            };
+            let mut cached = Geometry::new(&query, &control).unwrap();
+            let mut direct = ReachabilityWorkspace::new(height, query.rule_profile).unwrap();
+            let mut seed = 0x9215_2740_0119_ab17_u64;
+            for _ in 0..48 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let board = ForwardBoard::from_words([seed & ((1_u64 << 40) - 1), 0, 0, 0]);
+                for piece in 0..7 {
+                    let expected = direct
+                        .reachable_locks(board, PIECES[piece], true, true)
+                        .to_vec();
+                    let first = cached.physical_locks(board, piece).unwrap();
+                    let second = cached.physical_locks(board, piece).unwrap();
+                    assert_eq!(first.as_ref(), expected.as_slice());
+                    assert_eq!(second.as_ref(), expected.as_slice());
+                    assert!(Arc::ptr_eq(&first, &second));
+                }
+            }
+            // Force the optional cache's capacity boundary. Previously
+            // returned evidence stays valid and the next miss computes
+            // its complete result instead of rejecting a search state.
+            cached.physical_lock_count = usize::MAX / 2;
+            let expected = direct
+                .reachable_locks(ForwardBoard::EMPTY, PIECES[0], true, true)
+                .to_vec();
+            let actual = cached.physical_locks(ForwardBoard::EMPTY, 0).unwrap();
+            assert_eq!(actual.as_ref(), expected.as_slice());
+            assert_eq!(cached.physical_locks.len(), 1);
+            assert_eq!(cached.physical_lock_count, actual.len());
         }
     }
 }
