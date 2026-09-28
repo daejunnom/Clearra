@@ -244,6 +244,11 @@ test('Desktop panel browser smoke reuses pinned Chromium and exercises real Svel
   assert.ok(!consumer.includes('cargo build'));
   const browser = readFileSync(new URL('../tools/v081-desktop-accelerator-panel-browser-acceptance.mjs', import.meta.url), 'utf8');
   assert.ok(browser.includes('AcceleratorAssetPanel.svelte'));
+  assert.ok(browser.includes('zero-byte local candidates and catalog-only files must remain removable'));
+  const panel = readFileSync(new URL('../../apps/clearra-desktop/src/lib/AcceleratorAssetPanel.svelte', import.meta.url), 'utf8');
+  assert.ok(panel.includes('local?.local_candidate_bundle_bytes'));
+  assert.ok(panel.includes('local?.candidate_catalog_bytes'));
+  assert.ok(panel.includes('bytes !== null && bytes !== undefined'));
   for (const command of ['accelerator_asset_action', 'accelerator_asset_start_download',
     'accelerator_asset_progress', 'accelerator_asset_cancel']) {
     assert.ok(browser.includes(command), `${command}: actual Desktop panel boundary must be exercised`);

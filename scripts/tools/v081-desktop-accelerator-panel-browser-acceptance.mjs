@@ -93,6 +93,12 @@ async function browserAcceptance() {
     await page.addInitScript(() => {
       const calls = [];
       const installed = new Set();
+      const candidateOnly = new Map([
+        ['board-conditioned-reachability:no-kick', {
+          installed: false, local_candidate_bundle_bytes: 0, local_candidate_catalog_bytes: 0
+        }],
+        ['exact-legal-board:srs-plus', { installed: false, candidate_catalog_bytes: 0 }]
+      ]);
       const operations = new Map();
       let nextId = 0;
       window.__desktopAcceleratorCalls = calls;
@@ -101,10 +107,10 @@ async function browserAcceptance() {
         const key = `${args.product}:${args.profile}`;
         if (command === 'accelerator_asset_action') {
           if (args.action === 'check') return JSON.stringify({ qualified: true, compressed_bytes: 2 * 1024 * 1024 });
-          if (args.action === 'status') return JSON.stringify(installed.has(key)
+          if (args.action === 'status') return JSON.stringify(candidateOnly.get(key) ?? (installed.has(key)
             ? { installed: true, qualified: true, installed_payload_bytes: 2 * 1024 * 1024 }
-            : { installed: false });
-          if (args.action === 'remove') { installed.delete(key); return '{}'; }
+            : { installed: false }));
+          if (args.action === 'remove') { installed.delete(key); candidateOnly.delete(key); return '{}'; }
         }
         if (command === 'accelerator_asset_start_download') {
           const id = ++nextId;
@@ -169,6 +175,21 @@ async function browserAcceptance() {
     assert.deepEqual((await readCalls()).filter(call => call.command === 'accelerator_asset_cancel'),
       [{ command: 'accelerator_asset_cancel', operationId: 2 }]);
     await page.getByRole('status').filter({ hasText: 'No installed asset' }).waitFor();
+    await profile.selectOption('no-kick');
+    await page.getByRole('status').filter({ hasText: 'An unqualified local candidate is stored' }).waitFor();
+    await page.getByRole('button', { name: 'Delete saved asset' }).click();
+    await page.getByRole('status').filter({ hasText: 'No installed asset' }).waitFor();
+    await product.selectOption('exact-legal-board');
+    await profile.selectOption('srs-plus');
+    await page.getByRole('status').filter({ hasText: 'An unqualified local candidate is stored' }).waitFor();
+    await page.getByRole('button', { name: 'Delete saved asset' }).click();
+    await page.getByRole('status').filter({ hasText: 'No installed asset' }).waitFor();
+    assert.deepEqual((await readCalls()).filter(call => call.action === 'remove').slice(-2), [
+      { command: 'accelerator_asset_action', action: 'remove',
+        product: 'board-conditioned-reachability', profile: 'no-kick' },
+      { command: 'accelerator_asset_action', action: 'remove',
+        product: 'exact-legal-board', profile: 'srs-plus' }
+    ], 'zero-byte local candidates and catalog-only files must remain removable');
     assert.deepEqual(errors, []);
     await page.close();
     console.log('v0.8.1 Desktop Svelte panel: explicit selection, IPC envelope, progress, remove and cancel passed');

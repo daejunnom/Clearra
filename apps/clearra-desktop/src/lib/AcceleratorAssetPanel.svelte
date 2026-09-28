@@ -17,8 +17,20 @@
   let product: typeof products[number] = products[0];
   let profile: typeof profiles[number] = profiles[0];
   let catalog: { qualified?: boolean; compressed_bytes?: number; catalog_status?: string } | null = null;
-  let local: { installed?: boolean; qualified?: boolean; validation?: string; installed_payload_bytes?: number; candidate_bundle_bytes?: number; forward_layer_count?: number; legal_layer_count?: number } | null = null;
-  $: hasStoredFiles = Boolean(local?.installed || local?.candidate_bundle_bytes || local?.forward_layer_count || local?.legal_layer_count);
+  let local: {
+    installed?: boolean; qualified?: boolean; validation?: string;
+    installed_payload_bytes?: number | null;
+    candidate_bundle_bytes?: number | null; candidate_catalog_bytes?: number | null;
+    legacy_candidate_bundle_bytes?: number | null;
+    local_candidate_bundle_bytes?: number | null; local_candidate_catalog_bytes?: number | null;
+    forward_layer_count?: number; legal_layer_count?: number;
+  } | null = null;
+  const fileExists = (bytes: number | null | undefined) => bytes !== null && bytes !== undefined;
+  $: hasStoredFiles = Boolean(local?.installed || [
+    local?.candidate_bundle_bytes, local?.candidate_catalog_bytes,
+    local?.legacy_candidate_bundle_bytes, local?.local_candidate_bundle_bytes,
+    local?.local_candidate_catalog_bytes
+  ].some(fileExists) || (local?.forward_layer_count ?? 0) > 0 || (local?.legal_layer_count ?? 0) > 0);
   let busy = false, destroyed = false, cancelling = false;
   let operationId: number | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
