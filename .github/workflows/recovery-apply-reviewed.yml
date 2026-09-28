@@ -1,0 +1,110 @@
+name: Apply reviewed Recovery corrections
+on:
+  push:
+    branches: [codex/recovery-reviewed-implementation-20260929]
+permissions:
+  contents: write
+jobs:
+  apply-and-test:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      BASE: 69d8f3da5a382cb3c801675f92341ff913b3b839
+      PROPOSAL: codex/recovery-reviewed-result-20260929
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Bind reviewed bytes and apply to exact source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/codex/recovery-reviewed-implementation-20260929
+          cat scripts/tools/recovery-reviewed-patch/part-{0,1,2,3,4} > "$RUNNER_TEMP/recovery.patch.xz"
+          echo "b85a3ecd115808399343a4d65f0eca5acbfbb96a2934a887c648a6cd68155492  $RUNNER_TEMP/recovery.patch.xz" | sha256sum -c -
+          xz -dc "$RUNNER_TEMP/recovery.patch.xz" > "$RUNNER_TEMP/recovery.patch"
+          echo "0a97e58ed169016112749ad6418d797e00ef0ab4433351dba5914766e4002593  $RUNNER_TEMP/recovery.patch" | sha256sum -c -
+          git checkout --detach "$BASE"
+          git apply --check "$RUNNER_TEMP/recovery.patch"
+          git apply "$RUNNER_TEMP/recovery.patch"
+          git diff --check
+      - name: Format with the pinned workspace toolchain and retain proposal
+        run: |
+          set -euo pipefail
+          rustup show
+          git add -- .github/workflows/recovery-complete-results.yml crates packages scripts/tools tests/fixtures/recovery-build/browser-example.json
+          git diff --cached --name-only > "$RUNNER_TEMP/recovery-expected-paths.txt"
+          cargo fmt --all
+          git add -- .github/workflows/recovery-complete-results.yml crates packages scripts/tools tests/fixtures/recovery-build/browser-example.json
+          git diff --cached --name-only > "$RUNNER_TEMP/recovery-actual-paths.txt"
+          diff -u "$RUNNER_TEMP/recovery-expected-paths.txt" "$RUNNER_TEMP/recovery-actual-paths.txt"
+          cargo fmt --all --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(recovery): enforce actual early locks and joint stage inventory; unify editor and replay exports'
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test -z "$(git ls-remote --heads origin refs/heads/$PROPOSAL)"
+          git push origin "HEAD:refs/heads/$PROPOSAL"
+      - name: Preserve source and patch before tests
+        if: always()
+        run: |
+          mkdir -p _local/artifacts/test/recovery-reviewed
+          git rev-parse HEAD > _local/artifacts/test/recovery-reviewed/source-sha.txt
+          git diff "$BASE" HEAD --binary > _local/artifacts/test/recovery-reviewed/changes.patch
+          git archive --format=tar HEAD | gzip > _local/artifacts/test/recovery-reviewed/source.tar.gz
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Locked dependency preparation
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Core, exact minimum and host tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          output=_local/artifacts/test/recovery-reviewed
+          result=0
+          cargo test --locked -p clearra-app recovery_minimum 2>&1 | tee "$output/minimum.log" || result=1
+          cargo test --locked -p clearra-forward-search recovery_build 2>&1 | tee "$output/core.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build 2>&1 | tee "$output/cli.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire 2>&1 | tee "$output/wire.log" || result=1
+          exit "$result"
+      - name: UI contracts
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          output=_local/artifacts/test/recovery-reviewed
+          result=0
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs 2>&1 | tee "$output/ui-prepare.log" || result=1
+          node --test packages/clearra-ui/test/recovery*.test.mjs 2>&1 | tee "$output/ui.log" || result=1
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee "$output/types.log" || result=1
+          exit "$result"
+      - name: Real Svelte editor and rendering
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          output=_local/artifacts/test/recovery-reviewed
+          result=0
+          npm install --prefix "$RUNNER_TEMP/browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1 || exit 1
+          "$RUNNER_TEMP/browser-tools/node_modules/.bin/playwright" install --with-deps chromium || exit 1
+          export CLEARRA_BROWSER_TOOLS_ROOT="$RUNNER_TEMP/browser-tools"
+          node scripts/tools/recovery-build-browser-regression.mjs 2>&1 | tee "$output/browser-fields.log" || result=1
+          node scripts/tools/recovery-result-browser-acceptance.mjs 2>&1 | tee "$output/browser-results.log" || result=1
+          node scripts/tools/recovery-workspace-browser-acceptance.mjs 2>&1 | tee "$output/browser-workspace.log" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-reviewed-implementation
+          path: |
+            _local/artifacts/test/recovery-reviewed
+            build/recovery-regression
+            ${{ runner.temp }}/clearra-recovery-result-acceptance
+            ${{ runner.temp }}/clearra-recovery-workspace-acceptance
+          retention-days: 7
