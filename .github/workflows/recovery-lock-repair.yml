@@ -1,0 +1,113 @@
+name: Recovery desktop lock repair
+
+on:
+  push:
+    branches: [codex/repair-recovery-lock-20260928]
+    paths: [.github/workflows/recovery-lock-repair.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: recovery-desktop-lock-repair-20260928
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.repository == 'daejunnom/Clearra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASE_SHA: 9948013d6733e48c6f0614182029c3a485baaf2b
+      LOCK_PATH: apps/clearra-desktop/src-tauri/Cargo.lock
+      REPORT_DIR: _local/artifacts/test/recovery-lock-repair
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 9948013d6733e48c6f0614182029c3a485baaf2b
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Bind source and exact Rust toolchain
+        run: |
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD:$LOCK_PATH)" = 8a447c6cc9f20c0c3e3cb7cb47f2e25ca310b118
+          rustup toolchain install 1.98.1 --profile minimal
+          cargo +1.98.1 --version
+          mkdir -p "$REPORT_DIR"
+      - name: Refresh only the desktop dependency lock
+        run: |
+          cargo +1.98.1 metadata --manifest-path apps/clearra-desktop/src-tauri/Cargo.toml --format-version 1 > /dev/null
+          test "$(git diff --name-only)" = "$LOCK_PATH"
+          git diff --check
+          git diff -- "$LOCK_PATH" > "$REPORT_DIR/desktop-lock.patch"
+          cp "$LOCK_PATH" "$REPORT_DIR/Cargo.lock"
+          git hash-object "$LOCK_PATH" > "$REPORT_DIR/lock-blob.txt"
+      - name: Verify the unchanged locked dependency contract twice
+        run: |
+          before="$(git hash-object "$LOCK_PATH")"
+          cargo +1.98.1 metadata --locked --manifest-path apps/clearra-desktop/src-tauri/Cargo.toml --format-version 1 > /dev/null
+          test "$(git hash-object "$LOCK_PATH")" = "$before"
+          cargo +1.98.1 metadata --locked --manifest-path apps/clearra-desktop/src-tauri/Cargo.toml --format-version 1 > /dev/null
+          test "$(git hash-object "$LOCK_PATH")" = "$before"
+          test "$(git diff --name-only)" = "$LOCK_PATH"
+      - name: Publish an isolated lock-only proposal without changing the candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request
+
+          repo = 'daejunnom/Clearra'
+          base = os.environ['BASE_SHA']
+          path = os.environ['LOCK_PATH']
+          report = pathlib.Path(os.environ['REPORT_DIR'])
+          proposal_ref = 'refs/heads/codex/repair-recovery-lock-result-20260928'
+          assert os.environ['GITHUB_REPOSITORY'] == repo
+          assert os.environ['GITHUB_REF'] == 'refs/heads/codex/repair-recovery-lock-20260928'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == base
+          assert subprocess.check_output(['git', 'diff', '--name-only'], text=True).strip() == path
+
+          def api(route, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/' + repo + route,
+                  data=data,
+                  method='GET' if payload is None else 'POST',
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'X-GitHub-Api-Version': '2022-11-28',
+                           'Content-Type': 'application/json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+
+          candidate = api('/git/ref/heads/codex/converge-recovery-stage-20260928')
+          assert candidate['object']['sha'] == base, 'Candidate moved; proposal publication stopped.'
+          source = api('/git/commits/' + base)
+          content = pathlib.Path(path).read_bytes()
+          expected_blob = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+          blob = api('/git/blobs', {'content': base64.b64encode(content).decode(), 'encoding': 'base64'})
+          assert blob['sha'] == expected_blob
+          tree = api('/git/trees', {'base_tree': source['tree']['sha'], 'tree': [
+              {'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']}]})
+          commit = api('/git/commits', {
+              'message': 'fix(desktop): synchronize the recovery candidate dependency lock\n\nRefresh desktop Cargo metadata with pinned Rust 1.98.1 and verify --locked twice. Keep all source, required CI, release authority and deployment workflows unchanged.',
+              'tree': tree['sha'], 'parents': [base]})
+          api('/git/refs', {'ref': proposal_ref, 'sha': commit['sha']})
+          result = {'base': base, 'proposal': commit['sha'], 'tree': tree['sha'],
+                    'lock_blob': blob['sha'], 'changed_paths': [path],
+                    'locked_metadata_passes': 2, 'main_updated': False,
+                    'candidate_updated': False}
+          (report / 'proposal.json').write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Lock-only proposal: `' + commit['sha'] + '`\n\n')
+              summary.write('Two --locked metadata checks passed. This is not a release approval.\n')
+          PY
+      - name: Retain the exact lock and patch for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-desktop-lock-repair
+          path: _local/artifacts/test/recovery-lock-repair/
+          if-no-files-found: warn
+          retention-days: 7
