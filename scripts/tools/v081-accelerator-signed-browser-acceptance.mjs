@@ -286,10 +286,18 @@ async function browserAcceptance() {
             commandText = `clearra setup score --document-format ctk3 --document ${setupScoreDocument} ` +
               '--setup-queue I --solution-queue OOOI --clear 2 --no-hold ' +
               `--score-profile tetrio --initial-b2b 0 --workers ${workers} --rule ${profile} ${acceleratorFlags}`;
-          } else if (input === 'build-probability') {
+          } else if (input === 'build-minimum') {
+            commandText = 'clearra build cover --base-mask 0 --target-mask 0xf --height 4 ' +
+              '--queue I --no-hold --queue-knowledge oracle --objective min-cover ' +
+              `--backend cpu --no-backend-fallback --workers ${workers} --rule ${profile} ${acceleratorFlags}`;
+          } else if (input.startsWith('build-probability:')) {
+            const resultMode = input.slice('build-probability:'.length);
+            const scoreOptions = [
+              'field-average-score', 'fixed-queue-maximum-score', 'highest-score-minimum-set'
+            ].includes(resultMode) ? '--score-profile tetrio --initial-b2b 0 ' : '';
             commandText = 'clearra build-probability --base-mask 0 --target-mask 0xf --height 4 ' +
               '--queue I --no-hold --include-mirror --aggregate buildability ' +
-              '--result-mode all-solutions --solution-probabilities ' +
+              `--result-mode ${resultMode} --solution-probabilities ${scoreOptions}` +
               `--backend cpu --workers ${workers} --rule ${profile} ${acceleratorFlags}`;
           } else {
             commandText = `clearra pc --lines 4 --height 4 ` +
@@ -346,10 +354,15 @@ async function browserAcceptance() {
           };
         }
       }
-      results['srs-plus'].build = {
-        baseline: await run('srs-plus', false, false, 'build-probability'),
-        activated: await run('srs-plus', true, true, 'build-probability')
-      };
+      results['srs-plus'].build = {};
+      for (const mode of ['all-solutions', 'complete-replay-paths', 'minimum-solutions',
+        'field-average-score', 'fixed-queue-maximum-score', 'highest-score-minimum-set']) {
+        const input = mode === 'minimum-solutions' ? 'build-minimum' : `build-probability:${mode}`;
+        results['srs-plus'].build[mode] = {
+          baseline: await run('srs-plus', false, false, input),
+          activated: await run('srs-plus', true, true, input)
+        };
+      }
       // Exercise invalidation on one warm owner, not merely a fresh worker.
       // A corrupt local pointer must revoke already-admitted negative proof
       // and relation authority before the next exact search begins.
@@ -443,7 +456,7 @@ async function browserAcceptance() {
       assert.deepEqual(ranking(setup.activated), ranking(setup.baseline),
         `${profile}/setup: accelerator policy must preserve complete ranked Setup-score results`);
     }
-    const build = execution.results['srs-plus'].build;
+    const build = execution.results['srs-plus'].build['all-solutions'];
     const buildBaseline = compact(build.baseline);
     assert.equal(buildBaseline.keys.length, 2,
       'the Web Build probability fixture must retain both mirror-distinct I placements');
@@ -458,9 +471,8 @@ async function browserAcceptance() {
     }
     assert.deepEqual(compact(build.activated), buildBaseline,
       'installed accelerators must preserve complete Web Build probability results');
-    // Minimum/score/replay use live product pages. Their generic SearchReport
-    // may intentionally leave the solution set unmaterialized, so a zero
-    // generic unique_solution_count does not mean the product is empty.
+    // Lazy products may deliberately leave the generic solution family
+    // unmaterialized; compare its actual meaning separately from the payload.
     const productSearchMeaning = ({ result }) => {
       const report = result.search_report;
       return {
@@ -478,6 +490,39 @@ async function browserAcceptance() {
         probabilityComplete: report.probability_complete,
       };
     };
+    const buildProducts = {
+      'complete-replay-paths': ['build.complete-replay-paths', 'build-path-family.v1'],
+      'minimum-solutions': ['build.cover', 'build-coverage-portfolio.v2'],
+      'field-average-score': ['build.field-average-score', 'build-field-average-score.v1'],
+      'fixed-queue-maximum-score': ['build.fixed-queue-maximum-score', 'build-fixed-score-witness.v1'],
+      'highest-score-minimum-set': ['build.highest-score-minimum-set', 'build-probability-score-minimum.v1']
+    };
+    for (const [mode, [contract, resultKind]] of Object.entries(buildProducts)) {
+      const pair = execution.results['srs-plus'].build[mode];
+      for (const sample of Object.values(pair)) {
+        assert.equal(sample.result.event, 'final_response', `${mode}: complete execution`);
+        assert.equal(sample.result.response.status, 'success', `${mode}: successful execution`);
+        assert.deepEqual(sample.result.response.runtime_identity, manifest.build.runtime_identity);
+        const payload = sample.result.response.product_result_payload;
+        assert.equal(payload?.contract, contract);
+        assert.equal(payload?.result_kind, resultKind);
+        if (mode === 'minimum-solutions') {
+          // Typed Build cover owns its result without a legacy SearchReport.
+          assert.equal(payload.content.payload.completeness.exact_minimum_proven, true);
+          assert.equal(payload.content.payload.page_source_available, true);
+        } else {
+          assert.equal(sample.result.search_report.count_complete, true, `${mode}: complete source count`);
+          assert.equal(sample.result.search_report.resource_truncated, false, `${mode}: no truncation`);
+        }
+      }
+      if (mode !== 'minimum-solutions') {
+        assert.deepEqual(productSearchMeaning(pair.activated), productSearchMeaning(pair.baseline),
+          `${mode}: signed assets must preserve the Build search meaning`);
+      }
+      assert.deepEqual(pair.activated.result.response.product_result_payload,
+        pair.baseline.result.response.product_result_payload,
+        `${mode}: signed assets must preserve the complete Build product result`);
+    }
     for (const profile of profiles) {
       for (const [name, input] of Object.entries(pcProductInputs[profile])) {
         const pair = execution.results[profile].products[name];
@@ -528,7 +573,7 @@ async function browserAcceptance() {
     assert.equal(assetRequests.length, assets.length, 'a search must read OPFS, not re-download signed assets');
     assert.deepEqual(errors, []);
     await context.close();
-    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score/minimum/score-minimum/replay parity, plus SRS+ Build probability passed');
+    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score/minimum/score-minimum/replay parity, plus SRS+ Build result-mode parity passed');
   } finally {
     await browser?.close();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
