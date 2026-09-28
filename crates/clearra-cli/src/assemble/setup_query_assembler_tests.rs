@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn preserves_independent_setup_exact_accelerator_flags() {
+    let baseline =
+        SetupQueryAssembler::assemble(&SetupArgs::new("IOTS", false)).expect("default setup query");
+    assert!(baseline.exact_legal_board_enabled());
+    assert!(baseline.conditioned_reachability_enabled());
+    for legal in [false, true] {
+        for conditioned in [false, true] {
+            let args = SetupArgs::new("IOTS", false)
+                .with_exact_legal_board_enabled(Some(legal))
+                .with_conditioned_reachability_enabled(Some(conditioned));
+            let query = SetupQueryAssembler::assemble(&args).expect("setup accelerator policy");
+
+            assert_eq!(query.exact_legal_board_enabled(), legal);
+            assert_eq!(query.conditioned_reachability_enabled(), conditioned);
+            assert_eq!(query.rule(), baseline.rule());
+            assert_eq!(query.residue(), baseline.residue());
+            assert_eq!(query.tablebase_requested(), baseline.tablebase_requested());
+            assert_eq!(
+                query.queue_observation_policy(),
+                baseline.queue_observation_policy()
+            );
+        }
+    }
+}
+
+#[test]
 fn assembles_residue_and_cycle_boundary_policy() {
     let query = SetupQueryAssembler::assemble(&SetupArgs::new("I,T,O", true)).expect("setup query");
 

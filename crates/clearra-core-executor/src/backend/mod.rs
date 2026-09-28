@@ -30,6 +30,11 @@ pub mod search_backend_executor;
 pub mod search_backend_warmup;
 pub mod wasm_build_probability_backend;
 mod wasm_cpu;
+pub(crate) use wasm_cpu::exact_entry_lock_anchors;
+pub(crate) use wasm_cpu::exact_local_relation;
+#[cfg(any(test, feature = "qualification-reference"))]
+pub(crate) use wasm_cpu::exact_solver_local_relation_spawn_entries;
+pub(crate) use wasm_cpu::exact_spawn_lock_anchors;
 pub mod wasm_cpu_search_backend;
 pub mod wasm_setup_parallel_backend;
 pub mod wasm_setup_search_backend;
@@ -103,14 +108,17 @@ pub use wasm_build_probability_backend::{
 #[cfg(feature = "webgpu-search")]
 pub use wasm_cpu::WasmWebGpuCandidateProducer;
 pub use wasm_cpu::{
-    canonical_wasm_candidate_packet_batch_sha256, encode_canonical_wasm_candidate_packet_batch,
-    materialize_pc4_ilc_transition, Pc4IlcMaterializationError, Pc4IlcPlacement,
-    WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedResultMerger,
-    WasmBuildProbabilityDistributedVerifier, WasmCandidatePacket, WasmCandidateProducerAdvance,
-    WasmCpuCandidateProducer, WasmDistributedBackendExecution, WasmDistributedGeometrySummary,
-    WasmDistributedProgress, WasmDistributedResultMerger, WasmDistributedVerifier,
-    WasmPackedTilingIdentity, WasmPcRootProducer, WasmPcRootResultMerger, WasmTilingRootAdvance,
-    WasmTilingRootChunk, WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
+    any_pc4_ilc_target_field, canonical_wasm_candidate_packet_batch_sha256,
+    encode_canonical_wasm_candidate_packet_batch, enumerate_pc4_ilc_geometric_predecessor_fields,
+    enumerate_pc4_ilc_predecessor_fields, enumerate_pc4_ilc_target_fields,
+    materialize_pc4_ilc_transition, Pc4IlcForwardMembershipWorkspace, Pc4IlcMaterializationError,
+    Pc4IlcPlacement, WasmBuildProbabilityCandidateProducer,
+    WasmBuildProbabilityDistributedResultMerger, WasmBuildProbabilityDistributedVerifier,
+    WasmCandidatePacket, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
+    WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
+    WasmDistributedResultMerger, WasmDistributedVerifier, WasmPackedTilingIdentity,
+    WasmPcRootProducer, WasmPcRootResultMerger, WasmTilingRootAdvance, WasmTilingRootChunk,
+    WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
 pub(crate) use wasm_cpu::{DocumentLockReachability, DocumentReachabilityEngine};
 pub use wasm_cpu_search_backend::{

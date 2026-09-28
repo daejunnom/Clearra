@@ -709,6 +709,30 @@ mod case_gui_setup_request_uses_residue_and_cycle_boundary_policy {
     }
 
     #[test]
+    fn gui_setup_request_preserves_independent_exact_accelerator_switches() {
+        let form = crate::GuiSetupSearchForm::new("IOTS", false, "srs-x");
+        for legal in [false, true] {
+            for conditioned in [false, true] {
+                let backend = GuiBackendForm::default()
+                    .with_exact_legal_board_enabled(legal)
+                    .with_conditioned_reachability_enabled(conditioned);
+                let AppCommand::Setup(command) =
+                    SetupRequestBuilder::build_command(&form, &backend).expect("GUI setup request")
+                else {
+                    panic!("expected setup command");
+                };
+
+                assert_eq!(command.query().exact_legal_board_enabled(), legal);
+                assert_eq!(
+                    command.query().conditioned_reachability_enabled(),
+                    conditioned
+                );
+                assert_eq!(command.query().rule().id().as_str(), "srs-x");
+            }
+        }
+    }
+
+    #[test]
     fn gui_setup_request_preserves_selected_kick_table() {
         let form = crate::GuiSetupSearchForm::new("IOTS", false, "srs-x");
         let command = SetupRequestBuilder::build_command(&form, &GuiBackendForm::default())
@@ -848,6 +872,29 @@ mod case_gui_worker_policy_preserves_auto_and_full_cpu_opt_in {
         assert_eq!(all.workers(), hardware);
         assert_eq!(all.workers_requested(), None);
         assert!(all.use_all_logical_processors());
+    }
+}
+
+mod case_gui_exact_accelerators_are_independently_disableable {
+    use crate::request::BackendRequestBuilder;
+
+    use super::*;
+
+    #[test]
+    fn gui_exact_accelerators_are_independently_disableable() {
+        let default = BackendRequestBuilder::build_execution_policy(&GuiBackendForm::default())
+            .expect("default GUI execution policy");
+        assert!(default.exact_legal_board_enabled());
+        assert!(default.conditioned_reachability_enabled());
+
+        let disabled = BackendRequestBuilder::build_execution_policy(
+            &GuiBackendForm::default()
+                .with_exact_legal_board_enabled(false)
+                .with_conditioned_reachability_enabled(false),
+        )
+        .expect("disabled exact accelerators");
+        assert!(!disabled.exact_legal_board_enabled());
+        assert!(!disabled.conditioned_reachability_enabled());
     }
 }
 

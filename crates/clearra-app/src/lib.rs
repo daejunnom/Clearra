@@ -31,6 +31,10 @@ mod field_document_parity;
 pub mod gui_bridge;
 pub mod io;
 pub mod language;
+#[cfg(feature = "local-search-ab")]
+mod local_product_benchmark_bootstrap;
+#[cfg(feature = "local-search-ab")]
+pub use local_product_benchmark_bootstrap::configure_local_product_search_benchmark;
 #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
 mod native_build_probability_execution;
 #[cfg(not(target_arch = "wasm32"))]

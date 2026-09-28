@@ -37,3 +37,8 @@ scripts/release/oracle/*known-hosts text eol=lf
 tests/fixtures/contracts/oracle_candidate_settings_v080.v1.txt text eol=lf
 tools/asset-import/*.svg text eol=lf
 assets/skins/**/*.json text eol=lf
+# Signed accelerator metadata is embedded byte-for-byte. Its validator and
+# installed generation journal require the original canonical LF identity.
+/config/accelerator-activation-keyring.v1.json text eol=lf
+/config/legal-board-product-catalog.v1.json text eol=lf
+/config/conditioned-reachability-product-catalog.v1.json text eol=lf

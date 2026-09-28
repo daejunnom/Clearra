@@ -13,6 +13,7 @@ default = ["bitmap-render"]
 bitmap-render = ["clearra-output/bitmap-render"]
 native-c-core = ["clearra-core-executor/native-c-core"]
 parallel = ["clearra-core-executor/parallel"]
+local-search-ab = ["clearra-core-executor/local-search-ab"]
 webgpu-search = ["clearra-core-executor/webgpu-search"]
 wasm-stage-profiling = [
     "clearra-core-executor/wasm-stage-profiling",
@@ -50,4 +51,6 @@ serde_json = { workspace = true, optional = true }
 getrandom = "0.4.3"
 
 [dev-dependencies]
+clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
+clearra-accelerator-runtime = { path = "../clearra-accelerator-runtime" }
 fumen = "0.1.2"

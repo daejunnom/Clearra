@@ -61,6 +61,8 @@ impl ExecutionPolicyAssembler {
             gpu_warmup: args.gpu_warmup(),
             tablebase_requested: args.tablebase_requested(),
             precompute_build_dependencies: args.precompute_build_dependencies(),
+            exact_legal_board_enabled: args.exact_legal_board_enabled(),
+            conditioned_reachability_enabled: args.conditioned_reachability_enabled(),
             deterministic: args.deterministic(),
             max_frontier_states: args.max_frontier_states(),
             max_candidates: args.max_candidates(),
@@ -84,6 +86,8 @@ impl ExecutionPolicyAssembler {
             gpu_warmup: args.gpu_warmup(),
             tablebase_requested: None,
             precompute_build_dependencies: None,
+            exact_legal_board_enabled: None,
+            conditioned_reachability_enabled: None,
             deterministic: args.deterministic(),
             max_frontier_states: args.max_frontier_states(),
             max_candidates: args.max_candidates(),
@@ -109,6 +113,8 @@ impl ExecutionPolicyAssembler {
                 gpu_warmup: args.gpu_warmup(),
                 tablebase_requested: None,
                 precompute_build_dependencies: None,
+                exact_legal_board_enabled: None,
+                conditioned_reachability_enabled: None,
                 deterministic: args.deterministic(),
                 max_frontier_states: args.max_frontier_states(),
                 max_candidates: args.max_candidates(),
@@ -131,6 +137,8 @@ pub struct ExecutionPolicyInput<'a> {
     pub gpu_warmup: Option<bool>,
     pub tablebase_requested: Option<bool>,
     pub precompute_build_dependencies: Option<bool>,
+    pub exact_legal_board_enabled: Option<bool>,
+    pub conditioned_reachability_enabled: Option<bool>,
     pub deterministic: Option<bool>,
     pub max_frontier_states: Option<usize>,
     pub max_candidates: Option<usize>,
@@ -224,6 +232,12 @@ fn assemble_policy_on(
     }
     if let Some(precompute_build_dependencies) = input.precompute_build_dependencies {
         policy = policy.with_precompute_build_dependencies(precompute_build_dependencies);
+    }
+    if let Some(exact_legal_board_enabled) = input.exact_legal_board_enabled {
+        policy = policy.with_exact_legal_board_enabled(exact_legal_board_enabled);
+    }
+    if let Some(conditioned_reachability_enabled) = input.conditioned_reachability_enabled {
+        policy = policy.with_conditioned_reachability_enabled(conditioned_reachability_enabled);
     }
     if let Some(deterministic) = input.deterministic {
         policy = policy.with_deterministic(deterministic);

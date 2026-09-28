@@ -42,7 +42,11 @@ impl SetupQueryAssembler {
             .with_rule(rule)
             .with_queue_observation_policy(args.queue_observation_policy())
             .with_remaining_pieces(pieces)
-            .with_tablebase_requested(args.tablebase_requested() == Some(true));
+            .with_tablebase_requested(args.tablebase_requested() == Some(true))
+            .with_exact_legal_board_enabled(args.exact_legal_board_enabled().unwrap_or(true))
+            .with_conditioned_reachability_enabled(
+                args.conditioned_reachability_enabled().unwrap_or(true),
+            );
         if let Some(value) = args.initial_hold() {
             query = query.with_hold_policy(parse_initial_hold(value)?);
         }

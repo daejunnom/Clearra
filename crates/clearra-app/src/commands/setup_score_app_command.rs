@@ -23,7 +23,7 @@ use crate::{
     app_error::{AppError, AppErrorCode},
     app_response::{AppResponse, AppStatus},
     build_solution_probability_result::build_v2_facade::{
-        BuildColoredTargetSetV1, BuildObjective, BuildSetupV1Request,
+        BuildColoredTargetSetV1, BuildObjective, BuildSetupV1Request, BuildV2RequestProfileQuery,
     },
     commands::execution_error_response::core_execution_error_response,
     pc_score_summary_result::{
@@ -242,6 +242,22 @@ impl SetupScoreAppCommand {
 
     pub const fn initial_b2b(&self) -> u32 {
         self.initial_b2b
+    }
+
+    /// Setup-score's coverage candidates are built from one caller policy.
+    /// An empty document performs no BuildUp work and loads no accelerator.
+    pub(crate) fn exact_accelerator_policy(&self) -> Option<(bool, bool)> {
+        let policy = self
+            .candidates
+            .first()?
+            .coverage
+            .request_profile_query()
+            .core_query()
+            .execution_policy();
+        Some((
+            policy.exact_legal_board_enabled(),
+            policy.conditioned_reachability_enabled(),
+        ))
     }
 
     /// Conservative upper bound for every Setup-score owner which remains
@@ -477,6 +493,8 @@ fn score_execution_policy(coverage_policy: &PcExecutionPolicy) -> PcExecutionPol
     let policy = PcExecutionPolicy::mvp_default()
         .with_requested_backend(RequestedSearchBackend::Cpu)
         .with_allow_backend_fallback(false)
+        .with_exact_legal_board_enabled(coverage_policy.exact_legal_board_enabled())
+        .with_conditioned_reachability_enabled(coverage_policy.conditioned_reachability_enabled())
         .with_max_patterns(PC_SCORE_MAX_PATTERNS);
 
     #[cfg(target_family = "wasm")]
@@ -586,6 +604,35 @@ mod tests {
             policy,
         )
         .expect("valid Setup-score command")
+    }
+
+    #[test]
+    fn setup_score_preserves_both_accelerator_switches_in_coverage_and_continuation() {
+        for legal in [false, true] {
+            for conditioned in [false, true] {
+                let policy = PcExecutionPolicy::mvp_default()
+                    .with_requested_backend(RequestedSearchBackend::Cpu)
+                    .with_allow_backend_fallback(false)
+                    .with_exact_legal_board_enabled(legal)
+                    .with_conditioned_reachability_enabled(conditioned);
+                let command = setup_score_command(policy);
+                assert_eq!(
+                    crate::AppCommand::SetupScore(command.clone()).exact_accelerator_policy(),
+                    Some((legal, conditioned))
+                );
+                let candidate = command.candidates.first().expect("Setup-score candidate");
+                let coverage = candidate
+                    .coverage
+                    .request_profile_query()
+                    .core_query()
+                    .execution_policy();
+                let continuation = candidate.continuation.execution_policy();
+                for selected in [coverage, continuation] {
+                    assert_eq!(selected.exact_legal_board_enabled(), legal);
+                    assert_eq!(selected.conditioned_reachability_enabled(), conditioned);
+                }
+            }
+        }
     }
 
     #[test]

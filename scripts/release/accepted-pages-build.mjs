@@ -9,6 +9,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { verifyAcceptedWasmBuild } from "./accepted-wasm-build.mjs";
+import { frontendAcceleratorAssets } from "../tools/clearra-frontend-paths.mjs";
 
 export const PAGES_IDENTITY_FILE = "clearra-build-identity.json";
 export const PAGES_IDENTITY_SCHEMA = "clearra.pages.identity.v2";
@@ -212,6 +213,25 @@ async function validateDeployableSurfaces(root, authority, preservationOnly = fa
     validateWasmArtifact(root, manifest?.bindings, "bindings", /\.js$/u),
     validateWasmArtifact(root, manifest?.wasm, "wasm", /\.wasm$/u),
   ]);
+  // Historical rollback capture verifies its already sealed file set, but a
+  // newly accepted v0.8.1+ Pages artifact must include every qualified pack.
+  // The browser cannot fetch the Release redirect through CORS, so omitting
+  // this mirror would silently disable the explicit GUI download control.
+  if (!preservationOnly && acceptedVersionAtLeastV081(authority.version)) {
+    for (const asset of await frontendAcceleratorAssets()) {
+      const payload = await readRequiredFile(resolve(root, `.${asset.pathname}`), `Pages ${asset.product}/${asset.profile}`);
+      if (payload.byteLength !== asset.bytes ||
+          createHash('sha256').update(payload).digest('hex') !== asset.digest) {
+        throw new Error(`accepted Pages accelerator mirror differs from signed source catalog: ${asset.product}/${asset.profile}`);
+      }
+    }
+  }
+}
+
+function acceptedVersionAtLeastV081(version) {
+  const [, majorText, minorText, patchText] = /^(\d+)\.(\d+)\.(\d+)/u.exec(version);
+  const [major, minor, patch] = [majorText, minorText, patchText].map(Number);
+  return major > 0 || minor > 8 || (minor === 8 && patch >= 1);
 }
 
 async function validateWasmArtifact(root, artifact, label, suffixPattern) {

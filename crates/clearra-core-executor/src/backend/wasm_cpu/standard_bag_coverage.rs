@@ -1,9 +1,14 @@
-use std::{
-    collections::HashMap,
-    hash::{BuildHasherDefault, Hasher},
-};
+use std::sync::{Arc, OnceLock};
 
-use super::{mix_digest, piece_order_language::PieceOrderLanguageCache, WasmExactSearchError};
+use super::{
+    compact_exact_u64_map::{ExactU64MemoMap, ExactU64MemoStorage},
+    mix_digest,
+    piece_order_language::PieceOrderLanguageCache,
+    standard_bag_product_memo::{
+        StandardBagProductMemo, StandardBagProductMemoKey, StandardBagProductMemoLayout,
+    },
+    WasmExactSearchError,
+};
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_supply::{
@@ -25,39 +30,6 @@ const CANCELLATION_POLL_MASK: u32 = 0xff;
 const STANDARD_PIECE_COUNT: usize = PieceKind::STANDARD_TETROMINOES.len();
 const STANDARD_BAG_MASK_COUNT: usize = 1 << STANDARD_PIECE_COUNT;
 const CURSOR_TRANSITION_UNAVAILABLE: u8 = u8::MAX;
-
-type ExactU64Map = HashMap<u64, u32, BuildHasherDefault<ExactU64Hasher>>;
-
-/// Query-local hasher for already packed exact integer keys. Hash collisions
-/// remain harmless because `HashMap` confirms the complete `u64` key.
-#[derive(Default)]
-struct ExactU64Hasher(u64);
-
-impl Hasher for ExactU64Hasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        let mut value = 0xcbf2_9ce4_8422_2325_u64;
-        for byte in bytes {
-            value ^= u64::from(*byte);
-            value = value.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        self.0 = splitmix64(value);
-    }
-
-    fn write_u64(&mut self, value: u64) {
-        self.0 = splitmix64(value);
-    }
-}
-
-fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
-}
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C, align(32))]
@@ -372,6 +344,232 @@ pub(super) struct StandardBagCoverageResult {
     pub edge_checks: usize,
 }
 
+/// Immutable supply tables belong to one request, not to its mutable language
+/// or decision-node arenas. The first symbolic candidate initializes them;
+/// unused or unsupported requests never allocate the table payloads.
+#[derive(Default)]
+pub(super) struct SharedStandardBagRequest {
+    snapshot: OnceLock<StandardBagRequestSnapshot>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct StandardBagRequestIdentity {
+    structure: MaterializedPatternUniverseStructure,
+    pattern_count: usize,
+    initial_hold: HoldAutomatonState,
+    hold_enabled: bool,
+    projects_unplaced_lookahead: bool,
+}
+
+struct StandardBagRequestSnapshot {
+    identity: StandardBagRequestIdentity,
+    tables: Result<Option<Arc<StandardBagRequestTables>>, WasmExactSearchError>,
+}
+
+struct StandardBagRequestTables {
+    sequence_len: u8,
+    initial_hold_code: u8,
+    cursor_transitions: StandardBagCursorTransitions,
+    suffix_counts: Box<[u128]>,
+    #[cfg(test)]
+    supply_identity: SupplyExecutionState,
+}
+
+impl StandardBagRequestTables {
+    fn retained_bytes(&self) -> usize {
+        core::mem::size_of::<Self>()
+            .saturating_add(self.cursor_transitions.retained_bytes())
+            .saturating_add(self.suffix_counts.len() * core::mem::size_of::<u128>())
+    }
+
+    fn compile(
+        universe: &MaterializedPatternUniverse,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+    ) -> Result<Option<Self>, WasmExactSearchError> {
+        let MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len } =
+            universe.structure()
+        else {
+            return Ok(None);
+        };
+        let sequence_len = u8::try_from(sequence_len).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_standard_bag_sequence_too_long")
+        })?;
+        if !StandardBagCoverage::supports(universe, initial_hold) {
+            return Ok(None);
+        }
+        let initial_hold_code = match (initial_hold.hold_empty(), initial_hold.hold_piece()) {
+            (true, None) => 0,
+            (false, Some(piece)) => piece_code(piece),
+            _ => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_initial_hold_state_invalid",
+                ));
+            }
+        };
+        let suffix_counts = compile_suffix_counts(sequence_len)?.into_boxed_slice();
+        let supply_automaton = SupplyExecutionAutomaton::for_bag(&PieceKind::STANDARD_TETROMINOES)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_standard_bag_supply_automaton_invalid")
+            })?;
+        let mut supply_identity = initial_hold;
+        supply_identity.source_kind = PieceSourceKind::BagUniverse;
+        supply_identity.hold_policy = if hold_enabled {
+            HoldPolicy::Allowed
+        } else {
+            HoldPolicy::Forbidden
+        };
+        let cursor_transitions = StandardBagCursorTransitions::compile(
+            sequence_len,
+            &supply_automaton,
+            supply_identity,
+            hold_enabled,
+        )?;
+        Ok(Some(Self {
+            sequence_len,
+            initial_hold_code,
+            cursor_transitions,
+            suffix_counts,
+            #[cfg(test)]
+            supply_identity,
+        }))
+    }
+}
+
+impl SharedStandardBagRequest {
+    fn tables(
+        &self,
+        universe: &MaterializedPatternUniverse,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+    ) -> Result<Option<Arc<StandardBagRequestTables>>, WasmExactSearchError> {
+        let identity = StandardBagRequestIdentity {
+            structure: universe.structure(),
+            pattern_count: universe.pattern_count(),
+            initial_hold,
+            hold_enabled,
+            projects_unplaced_lookahead,
+        };
+        let snapshot = self.snapshot.get_or_init(|| StandardBagRequestSnapshot {
+            identity,
+            tables: StandardBagRequestTables::compile(universe, initial_hold, hold_enabled)
+                .map(|tables| tables.map(Arc::new)),
+        });
+        // A request owner must never cross the supply/hold/projected-lookahead
+        // boundary, including after an unsupported result was cached.
+        if snapshot.identity != identity {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_standard_bag_shared_request_identity_mismatch",
+            ));
+        }
+        snapshot.tables.clone()
+    }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub fn retained_bytes(&self) -> usize {
+        self.snapshot
+            .get()
+            .and_then(|snapshot| snapshot.tables.as_ref().ok())
+            .and_then(Option::as_ref)
+            .map_or(0, |tables| tables.retained_bytes())
+    }
+}
+
+/// Exit-time logical payload accounting, not allocator overhead or an OS peak.
+/// Entry payload and row-directory payload are disjoint subsets of StandardBag.
+#[derive(Clone, Copy, Debug)]
+#[cfg(any(feature = "parallel", test))]
+pub(super) struct StandardBagMemoAccounting {
+    pub product_policy: &'static str,
+    pub product_layout: &'static str,
+    pub product_storage: &'static str,
+    pub union_storage: &'static str,
+    pub product_entries: usize,
+    pub union_entries: usize,
+    pub product_capacity: usize,
+    pub union_capacity: usize,
+    pub product_payload_bytes: usize,
+    pub union_payload_bytes: usize,
+    pub product_directory_bytes: usize,
+    pub product_active_rows: usize,
+    pub product_allocated_rows: usize,
+    pub product_row_slots: usize,
+    pub product_promotion_attempts: usize,
+    pub product_promotions: usize,
+}
+
+#[cfg(any(feature = "parallel", test))]
+impl Default for StandardBagMemoAccounting {
+    fn default() -> Self {
+        Self {
+            product_policy: "not-used",
+            product_layout: "not-used",
+            product_storage: "not-used",
+            union_storage: "not-used",
+            product_entries: 0,
+            union_entries: 0,
+            product_capacity: 0,
+            union_capacity: 0,
+            product_payload_bytes: 0,
+            union_payload_bytes: 0,
+            product_directory_bytes: 0,
+            product_active_rows: 0,
+            product_allocated_rows: 0,
+            product_row_slots: 0,
+            product_promotion_attempts: 0,
+            product_promotions: 0,
+        }
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl StandardBagMemoAccounting {
+    /// Private owners are summed; these values are already inside the worker's
+    /// StandardBag retained total and must not be added a second time.
+    pub fn merge(&mut self, other: Self) {
+        fn labels(left: &'static str, right: &'static str) -> &'static str {
+            match (left, right) {
+                ("not-used", label) | (label, "not-used") => label,
+                (left, right) if left == right => left,
+                _ => "mixed",
+            }
+        }
+        self.product_policy = labels(self.product_policy, other.product_policy);
+        self.product_layout = labels(self.product_layout, other.product_layout);
+        self.product_storage = labels(self.product_storage, other.product_storage);
+        self.union_storage = labels(self.union_storage, other.union_storage);
+        self.product_entries = self.product_entries.saturating_add(other.product_entries);
+        self.union_entries = self.union_entries.saturating_add(other.union_entries);
+        self.product_capacity = self.product_capacity.saturating_add(other.product_capacity);
+        self.union_capacity = self.union_capacity.saturating_add(other.union_capacity);
+        self.product_payload_bytes = self
+            .product_payload_bytes
+            .saturating_add(other.product_payload_bytes);
+        self.union_payload_bytes = self
+            .union_payload_bytes
+            .saturating_add(other.union_payload_bytes);
+        self.product_directory_bytes = self
+            .product_directory_bytes
+            .saturating_add(other.product_directory_bytes);
+        self.product_active_rows = self
+            .product_active_rows
+            .saturating_add(other.product_active_rows);
+        self.product_allocated_rows = self
+            .product_allocated_rows
+            .saturating_add(other.product_allocated_rows);
+        self.product_row_slots = self
+            .product_row_slots
+            .saturating_add(other.product_row_slots);
+        self.product_promotion_attempts = self
+            .product_promotion_attempts
+            .saturating_add(other.product_promotion_attempts);
+        self.product_promotions = self
+            .product_promotions
+            .saturating_add(other.product_promotions);
+    }
+}
+
 /// Exact symbolic product for a lexicographically materialized standard 7-bag.
 ///
 /// Decision nodes denote sets of concrete queue strings. Product memoization
@@ -384,17 +582,16 @@ pub(super) struct StandardBagCoverage {
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
     initial_hold_code: u8,
-    cursor_transitions: StandardBagCursorTransitions,
+    tables: Arc<StandardBagRequestTables>,
     #[cfg(test)]
     supply_identity: SupplyExecutionState,
-    suffix_counts: Vec<u128>,
     nodes: Vec<DecisionNode>,
     node_summaries: Vec<DecisionSummary>,
     node_levels: Vec<u8>,
     node_valid_masks: Vec<u8>,
     bucket_heads: Vec<u32>,
-    product_memo: ExactU64Map,
-    union_memo: ExactU64Map,
+    product_memo: StandardBagProductMemo,
+    union_memo: ExactU64MemoMap,
     epoch_global_root: u32,
     global_words: Vec<u64>,
     global_covered_pattern_count: usize,
@@ -430,61 +627,72 @@ impl StandardBagCoverage {
         hold_enabled: bool,
         projects_unplaced_lookahead: bool,
     ) -> Result<Option<Self>, WasmExactSearchError> {
-        let MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len } =
-            universe.structure()
+        let Some(tables) = StandardBagRequestTables::compile(universe, initial_hold, hold_enabled)?
         else {
             return Ok(None);
         };
-        let sequence_len = u8::try_from(sequence_len).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_standard_bag_sequence_too_long")
-        })?;
-        if !Self::supports(universe, initial_hold) {
-            return Ok(None);
-        }
-        let initial_hold_code = match (initial_hold.hold_empty(), initial_hold.hold_piece()) {
-            (true, None) => 0,
-            (false, Some(piece)) => piece_code(piece),
-            _ => {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_initial_hold_state_invalid",
-                ));
-            }
-        };
-        let suffix_counts = compile_suffix_counts(sequence_len)?;
-        let supply_automaton = SupplyExecutionAutomaton::for_bag(&PieceKind::STANDARD_TETROMINOES)
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem("wasm_standard_bag_supply_automaton_invalid")
-            })?;
-        let mut supply_identity = initial_hold;
-        supply_identity.source_kind = PieceSourceKind::BagUniverse;
-        supply_identity.hold_policy = if hold_enabled {
-            HoldPolicy::Allowed
-        } else {
-            HoldPolicy::Forbidden
-        };
-        let cursor_transitions = StandardBagCursorTransitions::compile(
-            sequence_len,
-            &supply_automaton,
-            supply_identity,
+        Self::from_request_tables(
+            universe,
             hold_enabled,
-        )?;
-        Ok(Some(Self {
-            sequence_len,
+            projects_unplaced_lookahead,
+            Arc::new(tables),
+        )
+        .map(Some)
+    }
+
+    pub fn for_universe_with_shared(
+        universe: &MaterializedPatternUniverse,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+        shared: &SharedStandardBagRequest,
+    ) -> Result<Option<Self>, WasmExactSearchError> {
+        let Some(tables) = shared.tables(
+            universe,
+            initial_hold,
+            hold_enabled,
+            projects_unplaced_lookahead,
+        )?
+        else {
+            return Ok(None);
+        };
+        Self::from_request_tables(universe, hold_enabled, projects_unplaced_lookahead, tables)
+            .map(Some)
+    }
+
+    fn from_request_tables(
+        universe: &MaterializedPatternUniverse,
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+        tables: Arc<StandardBagRequestTables>,
+    ) -> Result<Self, WasmExactSearchError> {
+        // Product builds adapt their layout to live per-worker memo cost. Only
+        // local A/B builds may force a layout or change union slot storage.
+        let memo_storage = ExactU64MemoStorage::from_environment()
+            .map_err(WasmExactSearchError::InvalidProblem)?;
+        let product_layout = StandardBagProductMemoLayout::from_environment()
+            .map_err(WasmExactSearchError::InvalidProblem)?;
+        let max_source_depth = tables.cursor_transitions.max_source_depth;
+        Ok(Self {
+            sequence_len: tables.sequence_len,
             materialized_pattern_count: universe.pattern_count(),
             hold_enabled,
             projects_unplaced_lookahead,
-            initial_hold_code,
-            cursor_transitions,
+            initial_hold_code: tables.initial_hold_code,
             #[cfg(test)]
-            supply_identity,
-            suffix_counts,
+            supply_identity: tables.supply_identity,
+            tables,
             nodes: Vec::new(),
             node_summaries: Vec::new(),
             node_levels: Vec::new(),
             node_valid_masks: Vec::new(),
             bucket_heads: Vec::new(),
-            product_memo: ExactU64Map::default(),
-            union_memo: ExactU64Map::default(),
+            product_memo: StandardBagProductMemo::new(
+                product_layout,
+                memo_storage,
+                max_source_depth,
+            ),
+            union_memo: ExactU64MemoMap::new(memo_storage),
             epoch_global_root: REJECT,
             global_words: Vec::new(),
             global_covered_pattern_count: 0,
@@ -494,7 +702,7 @@ impl StandardBagCoverage {
             edge_check_count: 0,
             root_cache_hits: 0,
             root_cache_misses: 0,
-        }))
+        })
     }
 
     pub fn cover_language(
@@ -614,18 +822,19 @@ impl StandardBagCoverage {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.cursor_transitions.retained_bytes()
+        self.shared_request_retained_bytes()
             + self.nodes.capacity() * core::mem::size_of::<DecisionNode>()
-            + self.suffix_counts.capacity() * core::mem::size_of::<u128>()
             + self.node_summaries.capacity() * core::mem::size_of::<DecisionSummary>()
             + self.node_levels.capacity() * core::mem::size_of::<u8>()
             + self.node_valid_masks.capacity() * core::mem::size_of::<u8>()
             + self.bucket_heads.capacity() * core::mem::size_of::<u32>()
-            + self.product_memo.capacity()
-                * (core::mem::size_of::<u64>() + core::mem::size_of::<u32>())
-            + self.union_memo.capacity()
-                * (core::mem::size_of::<u64>() + core::mem::size_of::<u32>())
+            + self.memo_retained_payload_bytes()
+            + self.product_memo.directory_retained_bytes()
             + self.global_words.capacity() * core::mem::size_of::<u64>()
+    }
+
+    pub fn shared_request_retained_bytes(&self) -> usize {
+        self.tables.retained_bytes()
     }
 
     pub const fn root_cache_hits(&self) -> usize {
@@ -636,8 +845,48 @@ impl StandardBagCoverage {
         self.root_cache_misses
     }
 
+    #[cfg(any(feature = "parallel", test))]
+    pub const fn memo_storage_label(&self) -> &'static str {
+        self.product_memo.storage_label()
+    }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub fn memo_accounting(&self) -> StandardBagMemoAccounting {
+        let (product_promotion_attempts, product_promotions) = self.product_memo.promotion_counts();
+        StandardBagMemoAccounting {
+            product_policy: self.product_memo.policy().label(),
+            product_layout: self.product_memo.layout().label(),
+            product_storage: self.product_memo.storage_label(),
+            union_storage: self.union_memo.storage().label(),
+            product_entries: self.product_memo.len(),
+            union_entries: self.union_memo.len(),
+            product_capacity: self.product_memo.capacity(),
+            union_capacity: self.union_memo.capacity(),
+            product_payload_bytes: self.product_memo.retained_payload_bytes(),
+            union_payload_bytes: self.union_memo.retained_payload_bytes(),
+            product_directory_bytes: self.product_memo.directory_retained_bytes(),
+            product_active_rows: self.product_memo.active_rows(),
+            product_allocated_rows: self.product_memo.allocated_rows(),
+            product_row_slots: self.product_memo.row_slots(),
+            product_promotion_attempts,
+            product_promotions,
+        }
+    }
+
+    pub fn memo_retained_payload_bytes(&self) -> usize {
+        self.product_memo
+            .retained_payload_bytes()
+            .saturating_add(self.union_memo.retained_payload_bytes())
+    }
+
     pub fn local_live_bytes(&self) -> usize {
-        self.cursor_transitions.retained_bytes()
+        // Cache-recycle admission uses the accepted logical key/value estimate
+        // in both A/B arms. It deliberately excludes reference tuple padding,
+        // so improved retained accounting cannot clear useful caches earlier.
+        // Actual representation payload is reported separately above.
+        // Preserve the accepted per-arena recycle threshold after sharing.
+        // This is a logical live estimate, not unique process allocation.
+        self.tables.cursor_transitions.retained_bytes()
             + self.nodes.len() * core::mem::size_of::<DecisionNode>()
             + self.node_summaries.len() * core::mem::size_of::<DecisionSummary>()
             + self.node_levels.len() * core::mem::size_of::<u8>()
@@ -686,9 +935,12 @@ impl StandardBagCoverage {
         source: SourceState,
         piece_index: usize,
     ) -> Result<SourceState, WasmExactSearchError> {
-        self.cursor_transitions.advance(source, piece_index)?.ok_or(
-            WasmExactSearchError::InvalidProblem("wasm_standard_bag_piece_missing"),
-        )
+        self.tables
+            .cursor_transitions
+            .advance(source, piece_index)?
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_standard_bag_piece_missing",
+            ))
     }
 
     fn matching_supply_step(
@@ -704,7 +956,7 @@ impl StandardBagCoverage {
                 "wasm_standard_bag_hold_state_invalid",
             ));
         }
-        self.cursor_transitions.validate_source(source)?;
+        self.tables.cursor_transitions.validate_source(source)?;
         let current_index = usize::from(piece_code(current_piece) - 1);
         let desired_index = usize::from(piece_code(desired_piece) - 1);
         match branch_kind {
@@ -713,6 +965,7 @@ impl StandardBagCoverage {
                     return Ok(None);
                 }
                 Ok(self
+                    .tables
                     .cursor_transitions
                     .advance(source, current_index)?
                     .map(|next_source| CompactSupplyStep {
@@ -725,6 +978,7 @@ impl StandardBagCoverage {
                     return Ok(None);
                 }
                 Ok(self
+                    .tables
                     .cursor_transitions
                     .advance(source, current_index)?
                     .map(|next_source| CompactSupplyStep {
@@ -736,11 +990,15 @@ impl StandardBagCoverage {
                 if !self.hold_enabled || hold_code != 0 {
                     return Ok(None);
                 }
-                let Some(after_current) = self.cursor_transitions.advance(source, current_index)?
+                let Some(after_current) = self
+                    .tables
+                    .cursor_transitions
+                    .advance(source, current_index)?
                 else {
                     return Ok(None);
                 };
                 Ok(self
+                    .tables
                     .cursor_transitions
                     .advance(after_current, desired_index)?
                     .map(|next_source| CompactSupplyStep {
@@ -1030,9 +1288,8 @@ impl StandardBagCoverage {
         }
 
         let root = self.intern_node(source.depth, source.bag_remainder, children)?;
-        if self.product_memo.try_reserve(1).is_ok() {
-            self.product_memo.insert(key, root);
-        }
+        // Admission failure only skips caching; the exact root remains valid.
+        let _ = self.product_memo.try_insert(key, root);
         Ok(root)
     }
 
@@ -1395,7 +1652,7 @@ impl StandardBagCoverage {
         } else {
             usize::from(source.normalized().bag_remainder)
         };
-        self.suffix_counts[depth * 128 + remainder]
+        self.tables.suffix_counts[depth * 128 + remainder]
     }
 
     fn ensure_buckets(&mut self) {
@@ -1494,11 +1751,12 @@ fn compile_suffix_counts(sequence_len: u8) -> Result<Vec<u128>, WasmExactSearchE
     Ok(counts)
 }
 
-const fn product_key(language_node: u32, source: SourceState, hold_code: u8) -> u64 {
-    language_node as u64
-        | (source.depth as u64) << 32
-        | (source.bag_remainder as u64) << 40
-        | (hold_code as u64) << 48
+const fn product_key(
+    language_node: u32,
+    source: SourceState,
+    hold_code: u8,
+) -> StandardBagProductMemoKey {
+    StandardBagProductMemoKey::new(language_node, source.depth, source.bag_remainder, hold_code)
 }
 
 const fn union_key(left: u32, right: u32) -> u64 {
@@ -1628,6 +1886,471 @@ mod supply_automaton_tests {
             .expect("standard bag automaton")
     }
 
+    fn request_fixture(sequence_len: usize) -> (MaterializedPatternUniverse, HoldAutomatonState) {
+        let universe = PatternUniverseMaterializer::standard_7_bag(sequence_len, 1, 0x77)
+            .expect("compact standard bag universe");
+        let initial = HoldAutomatonState::new(
+            PieceSourceId::new(0x77),
+            0,
+            None,
+            0,
+            BagState::fresh_standard_7_bag().packed_remainder_key(),
+            SupplyProvenanceId(0x77),
+        );
+        (universe, initial)
+    }
+
+    fn branching_piece_language(
+        placed_len: usize,
+        phase: usize,
+    ) -> super::super::buildup::BuildOrderGraph {
+        use super::super::buildup::{BuildOrderGraph, BuildOrderNodeSpec};
+        use clearra_core_domain::piece::rotation::RotationState;
+
+        let mut specs = Vec::new();
+        let mut edges = Vec::new();
+        for depth in 0..placed_len {
+            specs.push(BuildOrderNodeSpec {
+                edge_start: u32::try_from(edges.len()).expect("small edge index"),
+                edge_count: 2,
+                depth: u8::try_from(depth).expect("small depth"),
+                accepting: false,
+            });
+            for offset in [0, 2] {
+                edges.push(BuildOrderGraph::edge(
+                    u32::try_from(depth + 1).expect("small node"),
+                    u8::try_from(depth).expect("small operation"),
+                    PieceKind::STANDARD_TETROMINOES
+                        [(depth + phase + offset) % STANDARD_PIECE_COUNT],
+                    RotationState::Zero,
+                    0,
+                    0,
+                    0,
+                ));
+            }
+        }
+        specs.push(BuildOrderNodeSpec {
+            edge_start: u32::try_from(edges.len()).expect("small terminal"),
+            edge_count: 0,
+            depth: u8::try_from(placed_len).expect("small terminal depth"),
+            accepting: true,
+        });
+        BuildOrderGraph::from_topological_parts(specs, edges, 0, 0, true)
+            .expect("bounded exact piece language graph")
+    }
+
+    #[test]
+    fn v081_state_major_product_memo_failed_admission_recomputes_exact_coverage() {
+        let (universe, initial) = request_fixture(3);
+        let mut language = PieceOrderLanguageCache::default();
+        let root = language
+            .canonicalize(&branching_piece_language(3, 0))
+            .expect("exact language");
+        let control = ExecutionControl::default();
+        let mut observed_nonempty = false;
+        for hold_enabled in [false, true] {
+            for projected in [false, true] {
+                let mut reference =
+                    StandardBagCoverage::for_universe(&universe, initial, hold_enabled, projected)
+                        .expect("reference")
+                        .expect("supported");
+                let mut treatment =
+                    StandardBagCoverage::for_universe(&universe, initial, hold_enabled, projected)
+                        .expect("candidate")
+                        .expect("supported");
+                reference.product_memo = StandardBagProductMemo::new(
+                    StandardBagProductMemoLayout::Flat,
+                    ExactU64MemoStorage::Reference,
+                    reference.tables.cursor_transitions.max_source_depth,
+                );
+                treatment.product_memo = StandardBagProductMemo::new(
+                    StandardBagProductMemoLayout::StateMajor,
+                    ExactU64MemoStorage::Reference,
+                    treatment.tables.cursor_transitions.max_source_depth,
+                );
+                treatment.product_memo.fail_admissions_for_test(usize::MAX);
+                for _ in 0..2 {
+                    let a = reference
+                        .cover_language(&language, root, &control)
+                        .expect("reference coverage");
+                    let b = treatment
+                        .cover_language(&language, root, &control)
+                        .expect("exact fallback coverage");
+                    observed_nonempty |= a.covers_any_pattern;
+                    assert_eq!(a.covers_any_pattern, b.covers_any_pattern);
+                    assert_eq!(a.covered_pattern_count, b.covered_pattern_count);
+                    assert_eq!(a.witness_pattern_id, b.witness_pattern_id);
+                    assert_eq!(
+                        reference
+                            .materialize_root(a.root)
+                            .expect("reference queues"),
+                        treatment.materialize_root(b.root).expect("fallback queues")
+                    );
+                    reference.merge_global(a.root).expect("reference merge");
+                    treatment.merge_global(b.root).expect("fallback merge");
+                    assert_eq!(treatment.memo_accounting().product_entries, 0);
+                }
+                assert_eq!(
+                    reference.materialize_global().expect("reference global"),
+                    treatment.materialize_global().expect("fallback global")
+                );
+                assert_eq!(treatment.memo_accounting().product_directory_bytes, 0);
+            }
+        }
+        assert!(
+            observed_nonempty,
+            "fallback fixture also checks nonempty exact results"
+        );
+    }
+
+    #[test]
+    fn v081_state_major_product_memo_matches_symbolic_counts_witness_materialization_and_recycle() {
+        for sequence_len in [1_usize, 3, 7, 8] {
+            let (universe, _) = request_fixture(sequence_len);
+            for initial_held_piece in [None, Some(PieceKind::J)] {
+                let initial = HoldAutomatonState::new(
+                    PieceSourceId::new(0x77),
+                    0,
+                    initial_held_piece,
+                    0,
+                    BagState::fresh_standard_7_bag().packed_remainder_key(),
+                    SupplyProvenanceId(0x77),
+                );
+                for hold_enabled in [false, true] {
+                    if !hold_enabled && initial_held_piece.is_some() {
+                        continue;
+                    }
+                    for projected in [false, true] {
+                        let shared = SharedStandardBagRequest::default();
+                        let mut reference = StandardBagCoverage::for_universe_with_shared(
+                            &universe,
+                            initial,
+                            hold_enabled,
+                            projected,
+                            &shared,
+                        )
+                        .expect("reference construction")
+                        .expect("supported request");
+                        let mut treatment = StandardBagCoverage::for_universe_with_shared(
+                            &universe,
+                            initial,
+                            hold_enabled,
+                            projected,
+                            &shared,
+                        )
+                        .expect("candidate construction")
+                        .expect("supported request");
+                        let max_source_depth = reference.tables.cursor_transitions.max_source_depth;
+                        reference.product_memo = StandardBagProductMemo::new(
+                            StandardBagProductMemoLayout::Flat,
+                            ExactU64MemoStorage::Reference,
+                            max_source_depth,
+                        );
+                        treatment.product_memo = StandardBagProductMemo::new(
+                            StandardBagProductMemoLayout::StateMajor,
+                            ExactU64MemoStorage::Reference,
+                            max_source_depth,
+                        );
+                        reference.union_memo = ExactU64MemoMap::new(ExactU64MemoStorage::Reference);
+                        treatment.union_memo = ExactU64MemoMap::new(ExactU64MemoStorage::Reference);
+                        let mut language = PieceOrderLanguageCache::default();
+                        let control = ExecutionControl::default();
+                        for placed_len in [sequence_len.saturating_sub(1).max(1), sequence_len] {
+                            for phase in [0, 1] {
+                                let root = language
+                                    .canonicalize(&branching_piece_language(placed_len, phase))
+                                    .expect("canonical piece language");
+                                for _ in 0..2 {
+                                    let a = reference
+                                        .cover_language(&language, root, &control)
+                                        .expect("reference coverage");
+                                    let b = treatment
+                                        .cover_language(&language, root, &control)
+                                        .expect("candidate coverage");
+                                    assert_eq!(a.covers_any_pattern, b.covers_any_pattern);
+                                    assert_eq!(a.witness_pattern_id, b.witness_pattern_id);
+                                    assert_eq!(a.covered_pattern_count, b.covered_pattern_count);
+                                    assert_eq!(a.product_states, b.product_states);
+                                    assert_eq!(a.edge_checks, b.edge_checks);
+                                    assert_eq!(
+                                        reference
+                                            .materialize_root(a.root)
+                                            .expect("reference queue identities"),
+                                        treatment
+                                            .materialize_root(b.root)
+                                            .expect("candidate queue identities")
+                                    );
+                                    reference.merge_global(a.root).expect("reference union");
+                                    treatment.merge_global(b.root).expect("candidate union");
+                                    // Layout factoring must not change the accepted epoch/recycle trigger.
+                                    assert_eq!(
+                                        reference.local_live_bytes(),
+                                        treatment.local_live_bytes()
+                                    );
+                                }
+                            }
+                        }
+                        assert_eq!(reference.root_cache_hits(), treatment.root_cache_hits());
+                        assert_eq!(reference.root_cache_misses(), treatment.root_cache_misses());
+                        assert_eq!(
+                            reference.materialize_global().expect("reference global"),
+                            treatment.materialize_global().expect("candidate global")
+                        );
+                        let accounting = treatment.memo_accounting();
+                        assert_eq!(accounting.product_layout, "state-major");
+                        assert_eq!(accounting.product_storage, "state-major");
+                        assert_eq!(accounting.union_storage, "reference");
+                        assert!(accounting.product_capacity >= accounting.product_entries);
+                        assert!(accounting.union_capacity >= accounting.union_entries);
+                        assert!(
+                            accounting.product_allocated_rows >= accounting.product_active_rows
+                        );
+                        assert!(accounting.product_row_slots >= accounting.product_allocated_rows);
+                        assert_eq!(
+                            accounting.product_payload_bytes + accounting.union_payload_bytes,
+                            treatment.memo_retained_payload_bytes()
+                        );
+                        assert!(
+                            accounting
+                                .product_payload_bytes
+                                .saturating_add(accounting.union_payload_bytes)
+                                .saturating_add(accounting.product_directory_bytes)
+                                <= treatment.retained_bytes()
+                        );
+                        let directory_bytes = accounting.product_directory_bytes;
+                        reference
+                            .flush_and_recycle_local_cache()
+                            .expect("reference recycle");
+                        treatment
+                            .flush_and_recycle_local_cache()
+                            .expect("candidate recycle");
+                        assert_eq!(treatment.memo_accounting().product_entries, 0);
+                        assert_eq!(treatment.memo_accounting().product_active_rows, 0);
+                        assert_eq!(
+                            treatment.memo_accounting().product_directory_bytes,
+                            directory_bytes
+                        );
+                        let root = language
+                            .canonicalize(&branching_piece_language(sequence_len, 0))
+                            .expect("live language after BDD recycle");
+                        let a = reference
+                            .cover_language(&language, root, &control)
+                            .expect("reference new epoch");
+                        let b = treatment
+                            .cover_language(&language, root, &control)
+                            .expect("candidate new epoch");
+                        assert_eq!(
+                            reference
+                                .materialize_root(a.root)
+                                .expect("reference new identities"),
+                            treatment
+                                .materialize_root(b.root)
+                                .expect("candidate new identities")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v081_shared_standard_bag_tables_match_reference_transitions_counts_and_materialization() {
+        for sequence_len in [1, 3, 7, 8, 10] {
+            let (universe, initial) = request_fixture(sequence_len);
+            for hold_enabled in [false, true] {
+                for projected in [false, true] {
+                    let shared = SharedStandardBagRequest::default();
+                    assert_eq!(shared.retained_bytes(), 0);
+                    let mut reference = StandardBagCoverage::for_universe(
+                        &universe,
+                        initial,
+                        hold_enabled,
+                        projected,
+                    )
+                    .expect("reference")
+                    .expect("supported");
+                    let mut treatment = StandardBagCoverage::for_universe_with_shared(
+                        &universe,
+                        initial,
+                        hold_enabled,
+                        projected,
+                        &shared,
+                    )
+                    .expect("shared")
+                    .expect("supported");
+                    assert_eq!(
+                        reference.tables.suffix_counts,
+                        treatment.tables.suffix_counts
+                    );
+                    assert_eq!(reference.retained_bytes(), treatment.retained_bytes());
+                    assert_eq!(
+                        shared.retained_bytes(),
+                        treatment.shared_request_retained_bytes()
+                    );
+                    for depth in 0..=u8::try_from(sequence_len + 1).expect("bounded depth") {
+                        for bag_remainder in 1..=FULL_STANDARD_BAG {
+                            let source = SourceState {
+                                depth,
+                                bag_remainder,
+                            };
+                            for piece in 0..STANDARD_PIECE_COUNT {
+                                assert_eq!(
+                                    reference.tables.cursor_transitions.advance(source, piece),
+                                    treatment.tables.cursor_transitions.advance(source, piece),
+                                );
+                            }
+                        }
+                    }
+                    let children = [ACCEPT, REJECT, ACCEPT, REJECT, REJECT, ACCEPT, REJECT];
+                    let reference_root = reference
+                        .intern_node(0, FULL_STANDARD_BAG, children)
+                        .expect("reference exact root");
+                    let treatment_root = treatment
+                        .intern_node(0, FULL_STANDARD_BAG, children)
+                        .expect("shared exact root");
+                    assert_eq!(
+                        reference
+                            .materialize_root(reference_root)
+                            .expect("reference rows"),
+                        treatment
+                            .materialize_root(treatment_root)
+                            .expect("shared rows"),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v081_shared_standard_bag_eleven_workers_share_tables_but_keep_mutable_memo_private() {
+        let (universe, initial) = request_fixture(3);
+        let universe = Arc::new(universe);
+        let shared = Arc::new(SharedStandardBagRequest::default());
+        let workers = (0..11_u32)
+            .map(|rank| {
+                let universe = Arc::clone(&universe);
+                let shared = Arc::clone(&shared);
+                std::thread::spawn(move || {
+                    let mut coverage = StandardBagCoverage::for_universe_with_shared(
+                        &universe, initial, true, true, &shared,
+                    )
+                    .expect("request table")
+                    .expect("standard bag");
+                    coverage
+                        .product_memo
+                        .try_insert(
+                            StandardBagProductMemoKey::new(37, 0, FULL_STANDARD_BAG, 0),
+                            rank + 2,
+                        )
+                        .expect("private memo");
+                    coverage
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut results = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("worker"))
+            .collect::<Vec<_>>();
+        for (rank, coverage) in results.iter().enumerate() {
+            assert!(Arc::ptr_eq(&results[0].tables, &coverage.tables));
+            assert_eq!(
+                coverage.product_memo.get(&StandardBagProductMemoKey::new(
+                    37,
+                    0,
+                    FULL_STANDARD_BAG,
+                    0
+                )),
+                Some(&(rank as u32 + 2))
+            );
+            assert_eq!(
+                coverage.memo_storage_label(),
+                results[0].memo_storage_label()
+            );
+        }
+        let tables = Arc::downgrade(&results[0].tables);
+        results[0].product_memo.clear();
+        assert_eq!(
+            results[1].product_memo.get(&StandardBagProductMemoKey::new(
+                37,
+                0,
+                FULL_STANDARD_BAG,
+                0
+            )),
+            Some(&3)
+        );
+        drop(shared);
+        assert!(tables.upgrade().is_some(), "workers retain immutable lease");
+        drop(results);
+        assert!(
+            tables.upgrade().is_none(),
+            "request tables release with final lease"
+        );
+    }
+
+    #[test]
+    fn v081_shared_standard_bag_request_rejects_changed_supply_identity_and_keeps_unsupported_lazy()
+    {
+        let (universe, initial) = request_fixture(3);
+        let shared = SharedStandardBagRequest::default();
+        StandardBagCoverage::for_universe_with_shared(&universe, initial, true, true, &shared)
+            .expect("first request")
+            .expect("supported");
+        for (hold, projected) in [(false, true), (true, false)] {
+            let result = StandardBagCoverage::for_universe_with_shared(
+                &universe, initial, hold, projected, &shared,
+            );
+            assert!(matches!(
+                result,
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_standard_bag_shared_request_identity_mismatch"
+                ))
+            ));
+        }
+        let (other_universe, other_initial) = request_fixture(2);
+        assert!(StandardBagCoverage::for_universe_with_shared(
+            &other_universe,
+            other_initial,
+            true,
+            true,
+            &shared,
+        )
+        .is_err());
+        let mut other_initial = initial;
+        other_initial.provenance = SupplyProvenanceId(0x88);
+        assert!(StandardBagCoverage::for_universe_with_shared(
+            &universe,
+            other_initial,
+            true,
+            true,
+            &shared,
+        )
+        .is_err());
+        let unsupported = SharedStandardBagRequest::default();
+        let fixed = FixedSequence::new(vec![PieceKind::O]);
+        let fixed = PatternUniverseMaterializer::fixed_sequence(&fixed, 0x88);
+        assert!(StandardBagCoverage::for_universe_with_shared(
+            &fixed,
+            initial,
+            true,
+            true,
+            &unsupported,
+        )
+        .expect("unsupported is normal fallback")
+        .is_none());
+        assert_eq!(unsupported.retained_bytes(), 0);
+        assert!(
+            StandardBagCoverage::for_universe_with_shared(
+                &universe,
+                initial,
+                true,
+                true,
+                &unsupported,
+            )
+            .is_err(),
+            "an unsupported snapshot must not silently cross requests"
+        );
+    }
+
     #[test]
     fn compact_standard_bag_boundary_round_trips_through_canonical_epoch_transition() {
         let coverage = coverage(true);
@@ -1718,7 +2441,10 @@ mod supply_automaton_tests {
                     let source_is_reachable = standard_bag_source_is_reachable(source);
 
                     for piece_index in 0..STANDARD_PIECE_COUNT {
-                        let fast = coverage.cursor_transitions.advance(source, piece_index);
+                        let fast = coverage
+                            .tables
+                            .cursor_transitions
+                            .advance(source, piece_index);
                         if !source_is_reachable {
                             assert!(fast.is_err(), "depth={depth} mask={raw_bag_remainder:#x}");
                             continue;
@@ -1829,7 +2555,10 @@ mod supply_automaton_tests {
             StandardBagCursorTransitions::checked_storage_len(11).expect("4L cursor table size");
 
         assert_eq!(expected_bytes, 10_752);
-        assert_eq!(coverage.cursor_transitions.retained_bytes(), expected_bytes);
+        assert_eq!(
+            coverage.tables.cursor_transitions.retained_bytes(),
+            expected_bytes
+        );
         assert_eq!(
             StandardBagCoverage::checked_cursor_transition_retained_bytes(&universe),
             Some(expected_bytes as u128)
@@ -1860,6 +2589,7 @@ mod supply_automaton_tests {
         };
         assert!(standard_bag_source_is_reachable(out_of_scope));
         assert!(coverage
+            .tables
             .cursor_transitions
             .advance(out_of_scope, 0)
             .is_err());

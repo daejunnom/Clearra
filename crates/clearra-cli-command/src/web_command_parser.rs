@@ -46,10 +46,10 @@ use clearra_supply::{
 };
 
 use crate::{
-    ctk3_mask_input::parse_ctk3_board_mask, web_virtual_file::reject_native_path_semantics,
-    WebBuildProbabilityInput, WebBuildV2Capability, WebBuildV2Input, WebCommandError,
-    WebCommandErrorCode, WebCommandRequest, WebPcScenarioInput, WebSetupScoreInput,
-    WebSetupScoreQueueInput, WebVirtualFileHandle,
+    ctk3_mask_input::parse_ctk3_board_mask, exact_accelerator_options::ExactAcceleratorSelections,
+    web_virtual_file::reject_native_path_semantics, WebBuildProbabilityInput, WebBuildV2Capability,
+    WebBuildV2Input, WebCommandError, WebCommandErrorCode, WebCommandRequest, WebPcScenarioInput,
+    WebSetupScoreInput, WebSetupScoreQueueInput, WebVirtualFileHandle,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -1709,6 +1709,10 @@ fn parse_setup_score_command(
     let mut use_all_seen = false;
     let mut backend_seen = false;
     let mut no_fallback_seen = false;
+    let mut exact_legal_board_enabled = true;
+    let mut exact_legal_board_seen = false;
+    let mut conditioned_reachability_enabled = true;
+    let mut conditioned_reachability_seen = false;
     let mut cursor = 0_usize;
     while cursor < tokens.len() {
         let option = tokens[cursor].as_str();
@@ -1876,6 +1880,26 @@ fn parse_setup_score_command(
                 no_fallback_seen = true;
                 cursor += 1;
             }
+            "--legal-board" | "--no-legal-board" => {
+                if exact_legal_board_seen {
+                    return Err(repeated_setup_score_option(
+                        "--legal-board/--no-legal-board",
+                    ));
+                }
+                exact_legal_board_enabled = option == "--legal-board";
+                exact_legal_board_seen = true;
+                cursor += 1;
+            }
+            "--conditioned-reachability" | "--no-conditioned-reachability" => {
+                if conditioned_reachability_seen {
+                    return Err(repeated_setup_score_option(
+                        "--conditioned-reachability/--no-conditioned-reachability",
+                    ));
+                }
+                conditioned_reachability_enabled = option == "--conditioned-reachability";
+                conditioned_reachability_seen = true;
+                cursor += 1;
+            }
             "--allow-backend-fallback" => {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::InvalidValue,
@@ -1979,7 +2003,9 @@ fn parse_setup_score_command(
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_runtime_webgpu_available(false)
         .with_hold_enabled(hold_enabled)
-        .with_use_all_logical_processors(use_all_logical_processors);
+        .with_use_all_logical_processors(use_all_logical_processors)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled);
     if let Some(limit) = max_patterns {
         request = request.with_max_patterns(limit);
     }
@@ -2020,6 +2046,9 @@ fn parse_setup_command(
     let mut automatic_worker_limit = None;
     let mut use_all_logical_processors = false;
     let mut tablebase_requested = false;
+    let mut exact_legal_board_enabled = true;
+    let mut conditioned_reachability_enabled = true;
+    let mut exact_accelerator_selections = ExactAcceleratorSelections::default();
     let mut cursor = 0_usize;
     while cursor < tokens.len() {
         match tokens[cursor].as_str() {
@@ -2141,6 +2170,24 @@ fn parse_setup_command(
             }
             "--no-tablebase" | "--no-tb" => {
                 tablebase_requested = false;
+                cursor += 1;
+            }
+            "--legal-board" => {
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(true)?;
+                cursor += 1;
+            }
+            "--no-legal-board" => {
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(false)?;
+                cursor += 1;
+            }
+            "--conditioned-reachability" => {
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(true)?;
+                cursor += 1;
+            }
+            "--no-conditioned-reachability" => {
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(false)?;
                 cursor += 1;
             }
             flag if flag.starts_with("--") => {
@@ -2269,7 +2316,9 @@ fn parse_setup_command(
         .with_queue_observation_policy(queue_observation_policy)
         .with_worker_hardware_limit(worker_hardware_limit)
         .with_use_all_logical_processors(use_all_logical_processors)
-        .with_tablebase_requested(tablebase_requested);
+        .with_tablebase_requested(tablebase_requested)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled);
     if let Some((source, _)) = queue_based_source {
         request = request.with_setup_queue_based_source(source);
     }
@@ -3105,6 +3154,10 @@ fn parse_build_v2_command(
     let mut cpu_warmup_seen = false;
     let mut backend_seen = false;
     let mut no_backend_fallback_seen = false;
+    let mut exact_legal_board_enabled = true;
+    let mut exact_legal_board_seen = false;
+    let mut conditioned_reachability_enabled = true;
+    let mut conditioned_reachability_seen = false;
     let mut cursor = 0usize;
 
     while cursor < options.len() {
@@ -3364,6 +3417,24 @@ fn parse_build_v2_command(
                 no_backend_fallback_seen = true;
                 cursor += 1;
             }
+            "--legal-board" | "--no-legal-board" => {
+                if exact_legal_board_seen {
+                    return Err(repeated_build_v2_option("--legal-board/--no-legal-board"));
+                }
+                exact_legal_board_enabled = option == "--legal-board";
+                exact_legal_board_seen = true;
+                cursor += 1;
+            }
+            "--conditioned-reachability" | "--no-conditioned-reachability" => {
+                if conditioned_reachability_seen {
+                    return Err(repeated_build_v2_option(
+                        "--conditioned-reachability/--no-conditioned-reachability",
+                    ));
+                }
+                conditioned_reachability_enabled = option == "--conditioned-reachability";
+                conditioned_reachability_seen = true;
+                cursor += 1;
+            }
             "--allow-backend-fallback" => {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::InvalidValue,
@@ -3558,7 +3629,9 @@ fn parse_build_v2_command(
         .with_runtime_webgpu_available(false)
         .with_hold_enabled(hold_enabled)
         .with_use_all_logical_processors(use_all_logical_processors)
-        .with_cpu_warmup(cpu_warmup);
+        .with_cpu_warmup(cpu_warmup)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled);
     if let Some(queue) = queue {
         request = request.with_queue(queue);
     }
@@ -3645,6 +3718,9 @@ fn parse_build_probability_command(
     let mut preserve_back_to_back = false;
     let mut precompute_build_dependencies = false;
     let mut build_dependency_option_requested = false;
+    let mut exact_legal_board_enabled = true;
+    let mut conditioned_reachability_enabled = true;
+    let mut exact_accelerator_selections = ExactAcceleratorSelections::default();
     let mut solution_probabilities = false;
     let mut queue_knowledge = None;
     let mut finesse_metric = FinesseMetric::Off;
@@ -3904,6 +3980,24 @@ fn parse_build_probability_command(
                 build_dependency_option_requested = true;
                 cursor += 1;
             }
+            "--legal-board" => {
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(true)?;
+                cursor += 1;
+            }
+            "--no-legal-board" => {
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(false)?;
+                cursor += 1;
+            }
+            "--conditioned-reachability" => {
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(true)?;
+                cursor += 1;
+            }
+            "--no-conditioned-reachability" => {
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(false)?;
+                cursor += 1;
+            }
             "--solution-probabilities" => {
                 if solution_probabilities {
                     return Err(WebCommandError::new(
@@ -3985,6 +4079,14 @@ fn parse_build_probability_command(
     }
     let aggregation_kind = aggregation.resolve();
     let tiling_only = aggregation_kind == BuildAggregationKind::Tiling;
+    if tiling_only {
+        if let Some(option) = exact_accelerator_selections.explicitly_enabled_option() {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                format!("{option} is not available with tiling-only Build semantics"),
+            ));
+        }
+    }
     let result_mode = result_mode.unwrap_or_default();
     let queue_knowledge = queue_knowledge.unwrap_or_default();
     if tiling_only && queue_knowledge == QueueObservationPolicy::VisibleSeven {
@@ -4112,6 +4214,8 @@ fn parse_build_probability_command(
         .with_use_all_logical_processors(use_all_logical_processors)
         .with_cpu_warmup(cpu_warmup)
         .with_precompute_build_dependencies(precompute_build_dependencies)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled)
         .with_solution_probabilities(solution_probabilities)
         .with_queue_observation_policy(queue_knowledge);
     if matches!(
@@ -4677,12 +4781,23 @@ fn parse_pc_allspin_command(
                 };
                 next_unique_pc_allspin_value(tokens, &mut cursor, &mut seen, canonical, option)?;
             }
-            "--no-hold" | "--use-all-cpu-threads" | "--cpu-warmup" | "--gpu-warmup" => {
+            "--no-hold"
+            | "--use-all-cpu-threads"
+            | "--cpu-warmup"
+            | "--gpu-warmup"
+            | "--legal-board"
+            | "--no-legal-board"
+            | "--conditioned-reachability"
+            | "--no-conditioned-reachability" => {
                 let canonical = match option {
                     "--no-hold" => "hold-policy",
                     "--use-all-cpu-threads" => "logical-processors",
                     "--cpu-warmup" => "cpu-warmup",
                     "--gpu-warmup" => "gpu-warmup",
+                    "--legal-board" | "--no-legal-board" => "legal-board-policy",
+                    "--conditioned-reachability" | "--no-conditioned-reachability" => {
+                        "conditioned-reachability-policy"
+                    }
                     _ => unreachable!("matched PC All-Spin flag"),
                 };
                 record_pc_allspin_option(&mut seen, canonical, option)?;
@@ -4878,6 +4993,11 @@ fn parse_pc_command(
     let mut gpu_warmup = false;
     let mut tablebase_requested = false;
     let mut precompute_build_dependencies = false;
+    let mut exact_legal_board_enabled = true;
+    let mut conditioned_reachability_enabled = true;
+    let mut exact_legal_board_option_requested = false;
+    let mut conditioned_reachability_option_requested = false;
+    let mut exact_accelerator_selections = ExactAcceleratorSelections::default();
     let mut solution_probabilities = false;
     let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut virtual_files = Vec::new();
@@ -5060,6 +5180,28 @@ fn parse_pc_command(
                 tablebase_requested = false;
                 cursor += 1;
             }
+            "--legal-board" => {
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(true)?;
+                exact_legal_board_option_requested = true;
+                cursor += 1;
+            }
+            "--no-legal-board" => {
+                exact_legal_board_enabled = exact_accelerator_selections.legal_board(false)?;
+                exact_legal_board_option_requested = true;
+                cursor += 1;
+            }
+            "--conditioned-reachability" => {
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(true)?;
+                conditioned_reachability_option_requested = true;
+                cursor += 1;
+            }
+            "--no-conditioned-reachability" => {
+                conditioned_reachability_enabled =
+                    exact_accelerator_selections.conditioned_reachability(false)?;
+                conditioned_reachability_option_requested = true;
+                cursor += 1;
+            }
             "--build-dependency-dag" => {
                 precompute_build_dependencies = true;
                 cursor += 1;
@@ -5226,6 +5368,14 @@ fn parse_pc_command(
             (initial_b2b.is_some(), "--initial-b2b"),
             (tablebase_requested, "--tablebase"),
             (precompute_build_dependencies, "--build-dependency-dag"),
+            (
+                exact_legal_board_option_requested && exact_legal_board_enabled,
+                "--legal-board",
+            ),
+            (
+                conditioned_reachability_option_requested && conditioned_reachability_enabled,
+                "--conditioned-reachability",
+            ),
             (solution_probabilities, "--solution-probabilities"),
             (
                 queue_observation_policy.requires_observation_policy(),
@@ -5285,6 +5435,8 @@ fn parse_pc_command(
         .with_gpu_warmup(gpu_warmup)
         .with_tablebase_requested(tablebase_requested)
         .with_precompute_build_dependencies(precompute_build_dependencies)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled)
         .with_solution_probabilities(solution_probabilities)
         .with_queue_observation_policy(queue_observation_policy)
         .with_hold_enabled(hold_enabled)
