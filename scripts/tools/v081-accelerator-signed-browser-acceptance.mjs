@@ -15,10 +15,19 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import { frontendAcceleratorAssets } from './clearra-frontend-paths.mjs';
 import { createClearraWasmBuildContract, clearraWasmBuildContractsEqual }
   from './clearra-wasm-build-contract.mjs';
-import { realSetupScoreDocument } from '../../apps/clearra-discord-bot/test/support/realCliProductProjectionRequests.mjs';
+import { realCliProductProjectionRequests, realSetupScoreDocument }
+  from '../../apps/clearra-discord-bot/test/support/realCliProductProjectionRequests.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const profiles = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
+const pcProductRequests = realCliProductProjectionRequests('srs-plus');
+const pcProductInputs = Object.fromEntries(['minimum', 'score-minimum', 'replay'].map(name => {
+  const baseline = pcProductRequests.find(request => request.name === name && request.policy === 'false:false');
+  const activated = pcProductRequests.find(request => request.name === name && request.policy === 'true:true');
+  assert.ok(baseline && activated && baseline.kind === activated.kind,
+    `${name}: the shared real CLI fixture must supply both accelerator policies`);
+  return [name, { kind: baseline.kind, baseline: baseline.arguments, activated: activated.arguments }];
+}));
 const preprocessor = vitePreprocess();
 const fixturePath = resolve(root, 'apps/clearra-web/test/accelerator-signed-browser-fixture.svelte');
 const fixture = `<script>
@@ -234,7 +243,7 @@ async function browserAcceptance() {
       }
     }
     assert.equal(assetRequests.length, assets.length, 'cross-tab read must not re-download');
-    const execution = await page.evaluate(async ({ profiles, setupScoreDocument }) => {
+    const execution = await page.evaluate(async ({ profiles, setupScoreDocument, pcProductInputs }) => {
       const { createHostCapabilitySnapshot, resolveWorkerAuthority } = await import('/capabilities.js');
       const logicalProcessors = navigator.hardwareConcurrency;
       if (!Number.isSafeInteger(logicalProcessors) || logicalProcessors < 2) {
@@ -268,7 +277,9 @@ async function browserAcceptance() {
           const acceleratorFlags = (legal ? '--legal-board ' : '--no-legal-board ') +
             (relation ? '--conditioned-reachability' : '--no-conditioned-reachability');
           let commandText;
-          if (input === 'setup-score') {
+          if (Array.isArray(input)) {
+            commandText = `clearra ${input.join(' ')} --workers ${workers}`;
+          } else if (input === 'setup-score') {
             commandText = `clearra setup score --document-format ctk3 --document ${setupScoreDocument} ` +
               '--setup-queue I --solution-queue OOOI --clear 2 --no-hold ' +
               `--score-profile tetrio --initial-b2b 0 --workers ${workers} --rule ${profile} ${acceleratorFlags}`;
@@ -329,6 +340,13 @@ async function browserAcceptance() {
         baseline: await run('srs-plus', false, false, 'build-probability'),
         activated: await run('srs-plus', true, true, 'build-probability')
       };
+      results['srs-plus'].products = {};
+      for (const [name, input] of Object.entries(pcProductInputs)) {
+        results['srs-plus'].products[name] = {
+          baseline: await run('srs-plus', false, false, input.baseline),
+          activated: await run('srs-plus', true, true, input.activated)
+        };
+      }
       // Exercise invalidation on one warm owner, not merely a fresh worker.
       // A corrupt local pointer must revoke already-admitted negative proof
       // and relation authority before the next exact search begins.
@@ -355,7 +373,7 @@ async function browserAcceptance() {
         rootWorker.terminate();
       }
       return { results, workers, corruption };
-    }, { profiles, setupScoreDocument: realSetupScoreDocument });
+    }, { profiles, setupScoreDocument: realSetupScoreDocument, pcProductInputs });
     const compact = ({ result }) => {
       assert.equal(result.event, 'final_response');
       assert.equal(result.response.status, 'success');
@@ -437,6 +455,35 @@ async function browserAcceptance() {
     }
     assert.deepEqual(compact(build.activated), buildBaseline,
       'installed accelerators must preserve complete Web Build probability results');
+    for (const [name, input] of Object.entries(pcProductInputs)) {
+      const pair = execution.results['srs-plus'].products[name];
+      for (const sample of Object.values(pair)) {
+        assert.equal(sample.result.event, 'final_response');
+        assert.equal(sample.result.response.status, 'success');
+        assert.deepEqual(sample.result.response.runtime_identity, manifest.build.runtime_identity);
+        const payload = sample.result.response.product_result_payload;
+        assert.equal(payload?.result_kind, input.kind);
+        assert.equal(payload?.contract, {
+          minimum: 'pc.minimals', 'score-minimum': 'pc.score-minimals', replay: 'pc.path'
+        }[name]);
+        assert.equal(payload?.content.payload_kind,
+          name === 'replay' ? 'pc-path-family' : 'coverage-portfolio');
+        assert.equal(sample.result.search_report.count_complete, true);
+        assert.equal(sample.result.search_report.resource_truncated, false);
+        if (name === 'replay') {
+          assert.equal(payload.content.payload.complete, true);
+          assert.ok(Number(payload.content.payload.witness_count) > 0);
+        } else {
+          assert.equal(payload.content.payload.page_handle_available, true);
+          assert.ok(payload.content.payload.members.length > 0);
+        }
+      }
+      assert.deepEqual(compact(pair.activated), compact(pair.baseline),
+        `srs-plus/${name}: installed accelerators must preserve complete search results`);
+      assert.deepEqual(pair.activated.result.response.product_result_payload,
+        pair.baseline.result.response.product_result_payload,
+        `srs-plus/${name}: installed accelerators must preserve canonical product pages`);
+    }
     const corruption = execution.corruption;
     const expected = compact(execution.results['srs-plus'].eligible.baseline);
     for (const [name, sample] of Object.entries(corruption)) {
@@ -456,7 +503,7 @@ async function browserAcceptance() {
     assert.equal(assetRequests.length, assets.length, 'a search must read OPFS, not re-download signed assets');
     assert.deepEqual(errors, []);
     await context.close();
-    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score/Build probability result parity passed');
+    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score/Build probability/minimum/score-minimum/replay result parity passed');
   } finally {
     await browser?.close();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
