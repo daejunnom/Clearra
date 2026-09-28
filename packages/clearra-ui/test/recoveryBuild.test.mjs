@@ -108,3 +108,29 @@ test('explicit 256-bit recovery replay preserves high cells while default PC mas
  assert.equal(api.buildPcPathReplayFrames(witness,12,api.recoveryBuildTerminalMask(p.examples[0])).at(-1).cells.filter(x=>x!==null).length,24);
  assert.throws(()=>api.buildPcPathReplayFrames({...witness,maskHexDigits:16},12,api.recoveryBuildTerminalMask(p.examples[0])));
 });
+
+test('complete catalog rows, minimum keys and pinned identities survive without counting samples as all solutions',()=>{
+ const p=structuredClone(fixture);
+ p.solutions_complete=true;
+ p.solutions=[{key:'first',covered_count:'1',probability:'1',example:structuredClone(p.examples[0])},
+  {key:'second',covered_count:'1',probability:'1',example:structuredClone(p.examples[0])}];
+ assert.ok(api.validateRecoveryBuildPayload(p));
+ assert.equal(api.recoveryBuildExportPages(p).length,4);
+ p.minimum_proven=true;p.selected_solution_keys=['second'];p.required_solution_keys=['second'];
+ assert.ok(api.validateRecoveryBuildPayload(p));
+ assert.equal(api.recoveryBuildExportPages(p).length,2);
+ assert.equal(api.recoveryBuildExportPages(p,true).length,1);
+ p.required_solution_keys=['first'];assert.equal(api.validateRecoveryBuildPayload(p),false);
+ p.required_solution_keys=['second'];p.solutions_complete=false;assert.equal(api.validateRecoveryBuildPayload(p),false);
+});
+test('ordinary and mandatory minimum use native solver arguments and a stale-source binding, not a renderer subset',()=>{
+ const q={...api.createRecoveryBuildRequest(),firstSupply:'I',secondSupply:'O',middleMask:15n,resultMask:0xc030n};
+ const ordinary=api.recoveryBuildArguments({...q,minimumSolutions:true});
+ assert.ok(ordinary.includes('--minimum-solutions'));assert.ok(ordinary.includes('--all-solutions'));
+ const selected={sourceIdentity:'1'.repeat(64),keys:['recovery-tiling.v1:0|m0:a','recovery-tiling.v1:1|r0:b']};
+ const args=api.recoveryBuildArguments(q,4,selected);
+ assert.equal(args[args.indexOf('--minimum-source')+1],selected.sourceIdentity);
+ assert.deepEqual(args.flatMap((v,i)=>v==='--required-solution'?[args[i+1]]:[]),selected.keys);
+ assert.equal(api.recoveryBuildInputKey(q),api.recoveryBuildInputKey({...q,pngRender:true,solutionProbabilities:true,minimumSolutions:true}));
+ assert.notEqual(api.recoveryBuildInputKey(q),api.recoveryBuildInputKey({...q,maxEarly:0}));
+});

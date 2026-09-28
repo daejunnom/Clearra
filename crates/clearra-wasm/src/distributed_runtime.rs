@@ -2467,7 +2467,7 @@ impl WasmDistributedCoordinator {
                 ));
             };
             return Ok(WasmExecutionResult::from_app_response(
-                prepared.complete(result),
+                prepared.complete_with_control(result, &self.control),
                 false,
             ));
         }
@@ -2496,7 +2496,7 @@ impl WasmDistributedCoordinator {
                 }
             };
             return Ok(WasmExecutionResult::from_app_response(
-                prepared.complete(result),
+                prepared.complete_with_control(result, &self.control),
                 false,
             ));
         }

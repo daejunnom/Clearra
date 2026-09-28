@@ -12,6 +12,8 @@ export type RecoveryBuildRequest = {
   useAllLogicalProcessors: boolean;
   resultFrame?: RecoveryResultFrame;
   pngRender?: boolean;
+  minimumSolutions?: boolean;
+  solutionProbabilities?: boolean;
 };
 export function createRecoveryBuildRequest(): RecoveryBuildRequest {
   return { startMask: 0n, middleMask: 0n, resultMask: 0n, height: 8, resultFrame: 'shared', pngRender: false,
@@ -59,7 +61,8 @@ export function validateRecoveryBuildRequest(request: RecoveryBuildRequest): str
   if (request.maxEarly !== 'auto' && (!Number.isSafeInteger(request.maxEarly) || request.maxEarly < 0)) errors.push('early');
   return errors;
 }
-export function recoveryBuildArguments(request: RecoveryBuildRequest, workers?: number): string[] {
+export type RecoveryMinimumSelection = { sourceIdentity: string; keys: string[] };
+export function recoveryBuildArguments(request: RecoveryBuildRequest, workers?: number, selection?: RecoveryMinimumSelection): string[] {
   if (workers !== undefined && (!Number.isSafeInteger(workers) || workers < 1 || workers > 65535)) {
     throw new RangeError('recovery worker count must be an integer in 1..65535');
   }
@@ -73,8 +76,16 @@ export function recoveryBuildArguments(request: RecoveryBuildRequest, workers?: 
     request.allowPieceExchange ? '--allow-piece-exchange' : '--no-piece-exchange',
     request.holdEnabled ? '--hold' : '--no-hold', request.preserveB2B ? '--preserve-b2b' : '--no-preserve-b2b',
     '--initial-b2b', '1', '--rule', request.rule, '--spin-profile', request.spinProfile,
+    '--all-solutions',
+    ...((request.minimumSolutions || selection) ? ['--minimum-solutions'] : []),
+    ...(selection ? ['--minimum-source',selection.sourceIdentity,...selection.keys.flatMap(key=>['--required-solution',key])] : []),
     ...(request.useAllLogicalProcessors ? ['--use-all-cpu-threads'] : []),
     ...(workers === undefined ? [] : ['--workers', String(workers)])];
 }
-export const recoveryBuildCommand = (request: RecoveryBuildRequest, workers?: number): string => serializeCliCommandArguments(recoveryBuildArguments(request, workers));
-export const recoveryBuildDesktopRequest = (request: RecoveryBuildRequest, language: WorkspaceLanguage, workers?: number) => cliCommandRequestForDesktop(recoveryBuildArguments(request, workers), language);
+export const recoveryBuildCommand = (request: RecoveryBuildRequest, workers?: number, selection?: RecoveryMinimumSelection): string => serializeCliCommandArguments(recoveryBuildArguments(request, workers, selection));
+export const recoveryBuildDesktopRequest = (request: RecoveryBuildRequest, language: WorkspaceLanguage, workers?: number, selection?: RecoveryMinimumSelection) => cliCommandRequestForDesktop(recoveryBuildArguments(request, workers, selection), language);
+
+/** Physics-only request binding for result actions. Display toggles do not invalidate pins. */
+export function recoveryBuildInputKey(request: RecoveryBuildRequest): string {
+  return recoveryBuildCommand({...request,minimumSolutions:false,useAllLogicalProcessors:false});
+}

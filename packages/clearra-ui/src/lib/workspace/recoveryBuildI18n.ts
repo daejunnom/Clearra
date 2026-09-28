@@ -1,5 +1,13 @@
 import type { WorkspaceLanguage } from './workspaceI18n';
 const text = {
+  perSolutionProbability: ['Per-solution build probability', '해법별 구축 확률', '解ごとの構築確率'],
+  solutions: ['Solutions', '해법', '解'],
+  completeSolutions: ['All solutions', '전체 해법', '全解'],
+  provenMinimum: ['Minimum solutions', '최소 해법', '最小解'],
+  previousPage: ['Previous page', '이전 페이지', '前のページ'],
+  nextPage: ['Next page', '다음 페이지', '次のページ'],
+  solutionPage: ['Solution pages', '해법 페이지', '解のページ'],
+  galleryHelp: ['Each drawing combines its valid build orders. Probabilities count each supply pair once.', '각 도면의 가능한 구축 순서를 합쳐 계산합니다. 확률은 같은 공급 조합을 한 번만 셉니다.', '各図の有効な構築順をまとめ、同じ供給組は一度だけ数えます。'],
   start: ['Start', '시작', '開始'],
   middle: ['Middle', '중간', '中間'],
   result: ['Result', '결과', '結果'],

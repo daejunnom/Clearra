@@ -95,7 +95,17 @@ impl PreparedDistributedRecoveryBuildSearch {
     }
 
     pub fn complete(self, report: RecoveryBuildPopulation) -> AppResponse {
-        let response = recovery_build_response(&self.query, report);
+        self.complete_with_control(
+            report,
+            &clearra_core_domain::execution_cancellation::ExecutionControl::default(),
+        )
+    }
+    pub fn complete_with_control(
+        self,
+        report: RecoveryBuildPopulation,
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+    ) -> AppResponse {
+        let response = recovery_build_response(&self.query, report, control);
         let response = if self.validation_report.is_empty() {
             response
         } else {

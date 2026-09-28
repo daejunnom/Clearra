@@ -41,6 +41,22 @@ pub(super) fn write_example(object: &mut JsonObject<'_>, source: &RecoveryBuildE
 }
 
 pub(super) fn write_payload(object: &mut JsonObject<'_>, source: &RecoveryBuildPayload) {
+    object.boolean("solutions_complete", source.solutions_complete);
+    object.boolean("minimum_proven", source.minimum_proven);
+    object.array("selected_solution_keys", |output| {
+        write_string_array(output, &source.selected_solution_keys)
+    });
+    object.array("required_solution_keys", |output| {
+        write_string_array(output, &source.required_solution_keys)
+    });
+    object.array("solutions", |output| {
+        write_object_array(output, &source.solutions, |object, solution| {
+            object.string("key", &solution.key);
+            object.string("covered_count", &solution.covered_count);
+            object.string("probability", &solution.probability);
+            object.object("example", |nested| write_example(nested, &solution.example));
+        })
+    });
     object.string("input_identity", &source.input_identity);
     object.number("height", source.height);
     object.string("start_board_mask", &source.start_board_mask);

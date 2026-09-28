@@ -14,6 +14,10 @@ fn mask(n: u64) -> Mask {
 }
 fn query() -> RecoveryBuildQuery {
     RecoveryBuildQuery {
+        all_solutions: false,
+        minimum_solutions: false,
+        required_solution_keys: Vec::new(),
+        minimum_source_identity: None,
         fields: RecoveryBuildFields {
             height: 8,
             initial: mask(0),
@@ -410,16 +414,14 @@ fn recovery_build_joint_inventory_does_not_spend_the_same_piece_twice() {
     let mut g = Geometry::new(&q, &control).unwrap();
     let root = g.roots[0];
     let caps = [1, 1, 0, 0, 0, 0, 0];
-    assert!(g.feasible(root, caps, caps, &control).unwrap());
-    assert!(!g
-        .feasible_inventory(root, caps, caps, caps, &control)
-        .unwrap());
+    assert!(g.feasible(root, caps, caps, None, &control).unwrap());
+    assert!(!g.feasible(root, caps, caps, Some(caps), &control).unwrap());
     assert!(g
-        .feasible_inventory(
+        .feasible(
             root,
             [2, 0, 0, 0, 0, 0, 0],
             [2, 0, 0, 0, 0, 0, 0],
-            [2, 0, 0, 0, 0, 0, 0],
+            Some([2, 0, 0, 0, 0, 0, 0]),
             &control
         )
         .unwrap());
@@ -456,6 +458,10 @@ fn recovery_build_early_limit_counts_second_source_placements_before_checkpoint(
     assert_eq!(result.status, RecoveryBuildStatus::Recovery);
     assert_eq!(result.actual_early, 2);
     let query = RecoveryBuildQuery {
+        all_solutions: false,
+        minimum_solutions: false,
+        required_solution_keys: Vec::new(),
+        minimum_source_identity: None,
         fields: two.fields.clone(),
         first_supply: "I".into(),
         second_supply: "OO".into(),
@@ -497,4 +503,92 @@ fn recovery_build_mirrored_example_preserves_its_authorized_target() {
         reflected(q.fields.result, q.fields.height).words()
     );
     assert_ne!(example.path.result_target, q.fields.result.words());
+}
+
+#[test]
+fn recovery_build_early_limit_counts_second_source_before_middle_completion() {
+    // O from source 1 and another O from source 2 must both be placed before
+    // the trailing I when hold is off. No geometric/queue oracle supplies the
+    // answer: there is only one three-token placement order and both O targets
+    // are on the floor beside the Middle I.
+    let mut q = query();
+    q.fields.middle = mask(0xf);
+    q.fields.result = mask(0x3c0f0);
+    q.first_supply = "O".into();
+    q.second_supply = "OI".into();
+    q.hold_enabled = false;
+    q.early_limit = CrossStageEarlyLimit::AtMost(1);
+    let denied = q.search(&ExecutionControl::default()).unwrap();
+    assert_eq!(
+        (
+            denied.normal_count,
+            denied.recovery_count,
+            denied.no_path_count
+        ),
+        (0, 0, 1)
+    );
+    q.early_limit = CrossStageEarlyLimit::AtMost(2);
+    let allowed = q.search(&ExecutionControl::default()).unwrap();
+    assert_eq!(
+        (
+            allowed.normal_count,
+            allowed.recovery_count,
+            allowed.no_path_count
+        ),
+        (0, 1, 0)
+    );
+    assert_eq!(allowed.recovery_example.unwrap().path.actual_early, 2);
+    // Hold permits storing the second O, placing I, then releasing that O.
+    q.hold_enabled = true;
+    q.early_limit = CrossStageEarlyLimit::AtMost(1);
+    let held = q.search(&ExecutionControl::default()).unwrap();
+    assert_eq!(held.recovery_count, 1);
+    assert_eq!(held.recovery_example.unwrap().path.actual_early, 1);
+    for early in [0, 1, 2] {
+        q.early_limit = CrossStageEarlyLimit::AtMost(early);
+        compare(q.clone());
+    }
+}
+
+#[test]
+fn recovery_build_support_quotient_matches_independent_input_enumeration() {
+    use std::collections::BTreeSet;
+    let control = ExecutionControl::default();
+    for seed in 0_u64..24 {
+        let mut d = Diagram::default();
+        let predicates = (0..5)
+            .map(|row| {
+                (0..49)
+                    .map(|pair| (pair * (row + 3) + seed as usize * 7) % (row + 5) < 2)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut roots = Vec::new();
+        for accepted in &predicates {
+            let mut first = [NONE; 7];
+            for a in 0..7 {
+                first[a] = d
+                    .branch(
+                        1,
+                        core::array::from_fn(|b| if accepted[a * 7 + b] { ALL } else { NONE }),
+                    )
+                    .unwrap();
+            }
+            roots.push(d.branch(0, first).unwrap());
+        }
+        let expected = (0..49)
+            .map(|i| {
+                predicates
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(r, p)| p[i].then_some(r))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|s| !s.is_empty())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            d.support_classes(&roots, &control).unwrap(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+    }
 }

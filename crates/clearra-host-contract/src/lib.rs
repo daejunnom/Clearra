@@ -85,5 +85,6 @@ pub use solution_set_artifact_payload::{
 };
 
 pub use recovery_build_payload::{
-    RecoveryBuildExamplePayload, RecoveryBuildPayload, RecoveryBuildStepPayload,
+    RecoveryBuildExamplePayload, RecoveryBuildPayload, RecoveryBuildSolutionPayload,
+    RecoveryBuildStepPayload,
 };

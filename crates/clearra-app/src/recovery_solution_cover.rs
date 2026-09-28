@@ -25,6 +25,7 @@ pub struct RecoverySolutionCoverageCatalog {
 }
 #[derive(Debug)]
 pub enum RecoveryMinimumError {
+    Cancelled,
     IncompleteCatalog,
     StaleInput,
     InvalidSolutionIdentity,
@@ -194,5 +195,188 @@ mod tests {
             c.prepare_minimum([1; 32], &[]),
             Err(RecoveryMinimumError::IncompleteCatalog)
         ));
+    }
+}
+
+/// Compile the exact support quotient to the existing original-row minimum
+/// authority. A class represents every input with that same supporter set;
+/// weights stay in the probability layer and are never replaced by class size.
+pub(crate) fn select_recovery_minimum(
+    query: &clearra_forward_search::RecoveryBuildQuery,
+    report: &clearra_forward_search::RecoveryBuildPopulation,
+    identity: [u8; 32],
+    control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+) -> Result<Vec<String>, RecoveryMinimumError> {
+    use clearra_coverage::{
+        cover::exact_minimum_cover_portfolios::{
+            ExactMinimumCoverPortfolioPreparationAdvance as Advance,
+            ExactMinimumCoverPortfolioPreparationSession as Session,
+        },
+        pattern::pattern_id::PatternId,
+    };
+    use sha2::{Digest, Sha256};
+    if !report.solutions_complete || report.evaluated != report.possible {
+        return Err(RecoveryMinimumError::IncompleteCatalog);
+    }
+    let classes = report
+        .coverage_classes
+        .as_ref()
+        .ok_or(RecoveryMinimumError::IncompleteCatalog)?;
+    let mut memberships = vec![Vec::new(); report.solutions.len()];
+    for (index, support) in classes.iter().enumerate() {
+        if support.is_empty() || !support.windows(2).all(|p| p[0] < p[1]) {
+            return Err(RecoveryMinimumError::InvalidSolutionIdentity);
+        }
+        for &candidate in support {
+            memberships
+                .get_mut(candidate)
+                .ok_or(RecoveryMinimumError::InvalidSolutionIdentity)?
+                .push(PatternId::new(index));
+        }
+    }
+    let catalog = RecoverySolutionCoverageCatalog {
+        input_identity: identity,
+        universe_identity: Sha256::digest(
+            [b"recovery-support-classes.v1:".as_slice(), &identity].concat(),
+        )
+        .into(),
+        weight_model_identity: Sha256::digest(b"exact-unweighted-cardinality-not-probability")
+            .into(),
+        pattern_count: classes.len(),
+        expected_solution_count: report.solutions.len(),
+        enumeration_complete: true,
+        coverage_complete: true,
+        rows: report
+            .solutions
+            .iter()
+            .zip(memberships)
+            .map(|(solution, bits)| {
+                Ok(RecoverySolutionCoverageRow {
+                    solution_id: solution.key.clone(),
+                    covered_pairs: PatternBitSet::from_patterns(classes.len(), bits)
+                        .map_err(|_| RecoveryMinimumError::PatternCountMismatch)?,
+                })
+            })
+            .collect::<Result<Vec<_>, RecoveryMinimumError>>()?,
+    };
+    let prepared = catalog.prepare_minimum(identity, &query.required_solution_keys)?;
+    let ids = prepared.solution_ids;
+    let (required, rows) = prepared.input.into_augmented_parts();
+    let convert = |e| RecoveryMinimumError::Exact(PinnedMinimumCoverError::Portfolio(e));
+    let mut session =
+        Session::new_with_memory_guard(&required, &rows, &mut |_| Ok(())).map_err(convert)?;
+    let mut work = 0;
+    let mut enumerator = loop {
+        if control.is_cancelled() {
+            return Err(RecoveryMinimumError::Cancelled);
+        }
+        match session
+            .advance_with_memory_guard_and_control(4096, &mut |_| Ok(()), &mut || {
+                control.is_cancelled()
+            })
+            .map_err(convert)?
+        {
+            Advance::Pending { visited_nodes } => {
+                work += visited_nodes;
+                control.report_progress("recovery-minimum", work, None);
+            }
+            Advance::Coverable { enumerator, .. } => break enumerator,
+            Advance::Cancelled { .. } => return Err(RecoveryMinimumError::Cancelled),
+            _ => return Err(RecoveryMinimumError::IncompleteCatalog),
+        }
+    };
+    loop {
+        if control.is_cancelled() {
+            return Err(RecoveryMinimumError::Cancelled);
+        }
+        let page = enumerator
+            .next_page_with_control(1, 4096, &mut || control.is_cancelled())
+            .map_err(convert)?;
+        if let Some(portfolio) = page.portfolios().first() {
+            let keys = portfolio
+                .row_indices()
+                .iter()
+                .map(|&index| ids[index].clone())
+                .collect::<Vec<_>>();
+            if !query
+                .required_solution_keys
+                .iter()
+                .all(|key| keys.contains(key))
+            {
+                return Err(RecoveryMinimumError::InvalidSolutionIdentity);
+            }
+            return Ok(keys);
+        }
+        if page.enumeration_complete() {
+            return Err(RecoveryMinimumError::IncompleteCatalog);
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod benchmark {
+    #[test]
+    #[ignore = "finite exact full P7/P7 benchmark, reports actual host and requested compute slots"]
+    fn recovery_minimum_catalog_original_fixture_parallel_benchmark() {
+        use clearra_core_domain::{
+            board::standard_pc_board::Board256Mask as M, execution_cancellation::ExecutionControl,
+        };
+        use clearra_forward_search::{
+            CrossStageEarlyLimit, RecoveryBuildFields, RecoveryBuildQuery,
+        };
+        use clearra_rules::profile::rule_profile::RuleProfileId;
+        use clearra_scoring::profile::SpinProfileId;
+        let mask = |v| M::from_words([v, 0, 0, 0]);
+        let early = std::env::var("CLEARRA_EARLY_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok());
+        let workers = std::env::var("CLEARRA_BENCH_WORKERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(11);
+        let query = RecoveryBuildQuery {
+            all_solutions: true,
+            minimum_solutions: false,
+            required_solution_keys: Vec::new(),
+            minimum_source_identity: None,
+            fields: RecoveryBuildFields {
+                height: 10,
+                initial: mask(0xc0383f3fc7),
+                middle: mask(0x3ff3fc7c0c038),
+                result: mask(0x30483f07f3f8f),
+            },
+            first_supply: "P7".into(),
+            second_supply: "P7".into(),
+            early_limit: early.map_or(CrossStageEarlyLimit::Auto, CrossStageEarlyLimit::AtMost),
+            allow_piece_exchange: true,
+            hold_enabled: true,
+            preserve_b2b: true,
+            initial_b2b: true,
+            rule_profile: RuleProfileId::SrsPlus,
+            spin_profile: SpinProfileId::AllSpinPlus,
+        };
+        let start = std::time::Instant::now();
+        eprintln!(
+            "recovery_full_fixture_started workers={} host_logical={:?} early={:?}",
+            workers,
+            std::thread::available_parallelism(),
+            early
+        );
+        let report = crate::native_recovery_build_execution::run_native_recovery_build(
+            query,
+            workers,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+        assert_eq!(report.evaluated, 25_401_600);
+        assert!(report.solutions_complete);
+        assert!(!report.solutions.is_empty());
+        for solution in &report.solutions {
+            assert!(solution.covered_count > 0);
+            if let Some(limit) = early {
+                assert!(solution.example.path.actual_early <= limit);
+            }
+        }
+        eprintln!("recovery_full_fixture_completed elapsed_ms={} normal={} recovery={} no_path={} solutions={} states={}",start.elapsed().as_millis(),report.normal_count,report.recovery_count,report.no_path_count,report.solutions.len(),report.states);
     }
 }

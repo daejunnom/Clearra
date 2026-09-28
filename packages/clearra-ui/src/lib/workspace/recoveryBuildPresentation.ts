@@ -61,7 +61,23 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
     require(Array.isArray(p.examples) && p.examples.length <= 2 && new Set(p.examples.map(e => e.status)).size === p.examples.length);
     require(p.examples.some(e => e.status === 'normal') === (BigInt(p.normal_count)>0n));
     require(p.examples.some(e => e.status === 'recovery') === (BigInt(p.recovery_count)>0n));
-    for (const e of p.examples) {
+    const solutions = p.solutions ?? [];
+    require(Array.isArray(solutions));
+    require(p.solutions_complete === undefined || flag(p.solutions_complete));
+    require(p.minimum_proven === undefined || flag(p.minimum_proven));
+    const keys = new Set<string>();
+    for (const row of solutions) {
+      require(typeof row.key === 'string' && row.key.length > 0 && !keys.has(row.key));
+      keys.add(row.key);
+      require(decimal(row.covered_count) && BigInt(row.covered_count)>0n && BigInt(row.covered_count)<=BigInt(p.pattern_count));
+      require(probability(row.probability));
+    }
+    const selected = p.selected_solution_keys ?? [], pinned = p.required_solution_keys ?? [];
+    for (const list of [selected,pinned]) require(Array.isArray(list) && new Set(list).size === list.length && list.every(key=>keys.has(key)));
+    require(!p.minimum_proven || (p.solutions_complete && pinned.every(key=>selected.includes(key))));
+    require(p.minimum_proven || (selected.length===0 && pinned.length===0));
+    require(!p.solutions_complete || ((solutions.length>0)===(BigInt(p.normal_count)+BigInt(p.recovery_count)>0n)));
+    for (const e of [...p.examples, ...solutions.map(s=>s.example)]) {
       const resultHex = e.result_target_mask ?? p.result_target_mask;
       require(hex(resultHex) && BigInt(resultHex) < bound);
       const targetResult = BigInt(resultHex);
@@ -147,5 +163,9 @@ export function recoveryBuildExamplePages(
 }
 export function recoveryBuildExportPages(report: RecoveryBuildPayload, resultOnly = false): SolutionExportPage[] {
   if (!validateRecoveryBuildPayload(report)) throw new Error('invalid recovery-build output');
-  return report.examples.flatMap(example => recoveryBuildExamplePages(report, example, resultOnly));
+  const selected = report.minimum_proven ? new Set(report.selected_solution_keys) : null;
+  const examples = report.solutions_complete
+    ? (report.solutions ?? []).filter(s=>!selected || selected.has(s.key)).map(s=>s.example)
+    : report.examples;
+  return examples.flatMap(example => recoveryBuildExamplePages(report, example, resultOnly));
 }

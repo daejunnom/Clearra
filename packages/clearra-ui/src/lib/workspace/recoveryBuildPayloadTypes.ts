@@ -29,7 +29,15 @@ export type RecoveryBuildExamplePayload = {
   exchange_balance: number[];
   steps: RecoveryBuildStepPayload[];
 };
+export type RecoveryBuildSolutionPayload = {
+  key: string; covered_count: string; probability: string; example: RecoveryBuildExamplePayload;
+};
 export type RecoveryBuildPayload = {
+  solutions_complete?: boolean;
+  solutions?: RecoveryBuildSolutionPayload[];
+  minimum_proven?: boolean;
+  selected_solution_keys?: string[];
+  required_solution_keys?: string[];
   input_identity: string;
   height: number;
   start_board_mask: string;

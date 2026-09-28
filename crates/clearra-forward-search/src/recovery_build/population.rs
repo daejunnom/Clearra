@@ -14,6 +14,10 @@ use clearra_supply::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryBuildQuery {
+    pub all_solutions: bool,
+    pub minimum_solutions: bool,
+    pub required_solution_keys: Vec<String>,
+    pub minimum_source_identity: Option<String>,
     pub fields: RecoveryBuildFields,
     pub first_supply: String,
     pub second_supply: String,
@@ -34,7 +38,20 @@ pub struct RecoveryBuildExample {
     pub path: RecoveryBuildFixedReport,
 }
 #[derive(Clone, Debug, PartialEq)]
+pub struct RecoveryBuildSolution {
+    /// Exact logical placement identity, not a representative queue identity.
+    pub key: String,
+    pub covered_count: u128,
+    pub probability: f64,
+    pub example: RecoveryBuildExample,
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct RecoveryBuildPopulation {
+    pub solutions: Vec<RecoveryBuildSolution>,
+    pub solutions_complete: bool,
+    /// Each class is a distinct nonempty set of solutions accepting an input.
+    /// It is exact for minimum cover, not a probability weight or sampled queue.
+    pub coverage_classes: Option<Vec<Vec<usize>>>,
     pub possible: u128,
     pub evaluated: u128,
     pub normal_count: u128,
@@ -64,6 +81,19 @@ impl Sum {
 impl RecoveryBuildQuery {
     pub fn validate(&self) -> Result<(), RecoveryBuildError> {
         self.fields.prepare()?;
+        if (self.minimum_solutions && !self.all_solutions)
+            || (!self.required_solution_keys.is_empty() && !self.minimum_solutions)
+            || self.required_solution_keys.iter().any(|k| k.is_empty())
+            || self
+                .required_solution_keys
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.required_solution_keys.len()
+        {
+            return Err(RecoveryBuildError::InvalidSupplyPattern);
+        }
+
         for input in [&self.first_supply, &self.second_supply] {
             let parsed = QueuePatternExpression::parse(input, 0)
                 .map_err(|_| RecoveryBuildError::InvalidSupplyPattern)?;
@@ -167,6 +197,9 @@ impl PopulationAccumulator {
     pub fn new(possible: u128) -> Self {
         Self {
             report: RecoveryBuildPopulation {
+                solutions: Vec::new(),
+                solutions_complete: false,
+                coverage_classes: None,
                 possible,
                 evaluated: 0,
                 normal_count: 0,

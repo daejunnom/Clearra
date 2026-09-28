@@ -91,7 +91,8 @@ struct Root {
     status: RecoveryBuildStatus,
 }
 
-pub(super) struct Solver {
+pub(in crate::recovery_build) struct Solver {
+    plan: Option<super::super::catalog::Plan>,
     pub diagram: Diagram,
     pub source: Source,
     pub geometry: Geometry,
@@ -125,6 +126,7 @@ impl Solver {
             geometry.stages[0].prepared.result_pieces,
         );
         Self {
+            plan: None,
             diagram,
             source,
             geometry,
@@ -147,6 +149,23 @@ impl Solver {
             done: false,
         }
     }
+    pub fn with_plan(mut self, plan: super::super::catalog::Plan) -> Self {
+        self.plan = Some(plan);
+        self
+    }
+    fn orientation_count(&self) -> usize {
+        if self.plan.is_some() {
+            1
+        } else {
+            self.geometry.roots.len()
+        }
+    }
+    fn geometry_root(&self) -> u32 {
+        self.geometry.roots[self
+            .plan
+            .as_ref()
+            .map_or(self.orientation, |p| usize::from(p.orientation))]
+    }
     /// A finite amount of solver work, not one monolithic fixed queue pair.
     pub fn advance(&mut self, fuel: usize, control: &ExecutionControl) -> Result<bool, Error> {
         for _ in 0..fuel.max(1) {
@@ -155,7 +174,7 @@ impl Solver {
                 return Ok(true);
             }
             if self.machine.is_none() {
-                if self.orientation == self.geometry.roots.len() {
+                if self.orientation == self.orientation_count() {
                     if self.repairing || self.maximum == 0 {
                         self.done = true;
                         continue;
@@ -170,11 +189,11 @@ impl Solver {
                 };
                 let allowed = self.diagram.difference(self.source.universe, covered)?;
                 if allowed == NONE {
-                    self.orientation = self.geometry.roots.len();
+                    self.orientation = self.orientation_count();
                     continue;
                 }
                 let key = Key {
-                    geometry: self.geometry.roots[self.orientation],
+                    geometry: self.geometry_root(),
                     source: self.source.universe,
                     allowed,
                     depth: 0,
@@ -350,39 +369,48 @@ impl Solver {
         let Some((middle_caps, result_caps)) = self.caps(key, middle_pieces, result_pieces) else {
             return Ok(Prepared::Terminal(NONE));
         };
-        if !self
-            .geometry
-            .feasible(key.geometry, middle_caps, result_caps, control)?
+        let inventory = if self.query.allow_piece_exchange
+            && usize::from(self.source.end) == middle_pieces + result_pieces
         {
-            return Ok(Prepared::Terminal(NONE));
-        }
-        // Homogeneous, fully consumed sources have an exact combined inventory.
-        // Other supply languages keep the conservative bounds-only path.
-        if usize::from(self.source.end) == middle_pieces + result_pieces {
-            if let (Some(first), Some(second)) =
-                (self.source.first_counts, self.source.second_counts)
-            {
-                let mut remaining = [0; 7];
-                for piece in 0..7 {
-                    let Some(left) = first[piece]
-                        .checked_add(second[piece])
-                        .and_then(|n| n.checked_sub(key.middle_counts[piece]))
-                        .and_then(|n| n.checked_sub(key.result_counts[piece]))
-                    else {
-                        return Ok(Prepared::Terminal(NONE));
-                    };
-                    remaining[piece] = left;
+            match (self.source.first_counts, self.source.second_counts) {
+                (Some(first), Some(second)) => {
+                    let mut remaining = [0_u8; 7];
+                    for p in 0..7 {
+                        let Some(value) = first[p]
+                            .checked_add(second[p])
+                            .and_then(|v| v.checked_sub(key.middle_counts[p]))
+                            .and_then(|v| v.checked_sub(key.result_counts[p]))
+                        else {
+                            return Ok(Prepared::Terminal(NONE));
+                        };
+                        remaining[p] = value;
+                    }
+                    Some(remaining)
                 }
-                if !self.geometry.feasible_inventory(
-                    key.geometry,
-                    middle_caps,
-                    result_caps,
-                    remaining,
-                    control,
-                )? {
-                    return Ok(Prepared::Terminal(NONE));
-                }
+                _ => None,
             }
+        } else {
+            None
+        };
+        if let Some(plan) = &self.plan {
+            // The catalog already fixes both complete inventories. Do not run
+            // another unconstrained exact-cover search at each physical node.
+            if !plan.inventory_allows(
+                key.middle_counts,
+                key.result_counts,
+                middle_caps,
+                result_caps,
+            ) {
+                return Ok(Prepared::Terminal(NONE));
+            }
+        } else if !self.geometry.feasible(
+            key.geometry,
+            middle_caps,
+            result_caps,
+            inventory,
+            control,
+        )? {
+            return Ok(Prepared::Terminal(NONE));
         }
         let mut actions = Vec::new();
         if let Some(active) = key.active {
@@ -511,6 +539,13 @@ impl Solver {
             .edges(key.geometry, usize::from(token.piece), control)?
             .iter()
         {
+            if self
+                .plan
+                .as_ref()
+                .is_some_and(|plan| !plan.allows(&self.geometry, key.geometry, edge, token.piece))
+            {
+                continue;
+            }
             if before && edge.result && key.mode == Mode::Middle {
                 continue;
             }

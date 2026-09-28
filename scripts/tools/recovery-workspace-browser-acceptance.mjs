@@ -69,11 +69,11 @@ const specs = [
 // contract. Each localized label must resolve to exactly one real checkbox.
 const switchNames = {
   en: { hold: 'Hold', useAll: 'Use every logical processor',
-    exchange: 'Allow different-piece repayment', b2b: 'Preserve B2B', png: 'PNG render' },
+    exchange: 'Allow different-piece repayment', b2b: 'Preserve B2B', png: 'PNG render', minimum: 'Minimum solutions', probability: 'Per-solution build probability' },
   ko: { hold: '홀드', useAll: '모든 논리 프로세서 사용',
-    exchange: '다른 종류의 미노로 반환 허용', b2b: 'B2B 보존', png: 'PNG 렌더' },
+    exchange: '다른 종류의 미노로 반환 허용', b2b: 'B2B 보존', png: 'PNG 렌더', minimum: '최소 해법', probability: '해법별 구축 확률' },
   ja: { hold: 'ホールド', useAll: 'すべての論理プロセッサを使用',
-    exchange: '異なる種類のミノで補完', b2b: 'B2Bを維持', png: 'PNG描画' },
+    exchange: '異なる種類のミノで補完', b2b: 'B2Bを維持', png: 'PNG描画', minimum: '最小解法集合', probability: '解ごとの構築確率' },
 };
 const results = [];
 let browser;
@@ -134,7 +134,7 @@ try {
       }
       for (const offset of [30,31,20,21]) await board.locator('button').nth(offset).click();
       const controls = page.locator('.workspace-controls');
-      assert.equal(await controls.getByRole('checkbox').count(), 5,
+      assert.equal(await controls.getByRole('checkbox').count(), 7,
         'hold, all-processor opt-in, different-piece repayment and one global B2B toggle');
       const switches = Object.fromEntries(Object.entries(switchNames[spec.language]).map(
         ([key, name]) => [key, controls.getByRole('checkbox', { name, exact: true })]));
@@ -144,7 +144,7 @@ try {
       const switchState = async () => Object.fromEntries(await Promise.all(
         Object.entries(switches).map(async ([key, toggle]) => [key, await toggle.isChecked()])));
       const initialSwitches = await switchState();
-      assert.deepEqual(initialSwitches, { hold: true, useAll: false, exchange: false, b2b: false, png: false });
+      assert.deepEqual(initialSwitches, { hold: true, useAll: false, exchange: false, b2b: false, png: false, minimum: false, probability: false });
       for (const [key, toggle] of Object.entries(switches)) {
         await toggle.setChecked(!initialSwitches[key]); await flush();
         assert.deepEqual(await switchState(), { ...initialSwitches, [key]: !initialSwitches[key] },

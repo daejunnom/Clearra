@@ -76,7 +76,34 @@ impl RecoveryBuildExamplePayload {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RecoveryBuildSolutionPayload {
+    pub key: String,
+    pub covered_count: String,
+    pub probability: String,
+    pub example: RecoveryBuildExamplePayload,
+}
+impl RecoveryBuildSolutionPayload {
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        (self.key.capacity() as u128)
+            .checked_add(self.covered_count.capacity() as u128)?
+            .checked_add(self.probability.capacity() as u128)?
+            .checked_add(self.example.checked_retained_capacity_bytes()?)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoveryBuildPayload {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub minimum_proven: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub selected_solution_keys: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub required_solution_keys: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub solutions_complete: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub solutions: Vec<RecoveryBuildSolutionPayload>,
     pub input_identity: String,
     pub height: u8,
     pub start_board_mask: String,
@@ -106,7 +133,19 @@ pub struct RecoveryBuildPayload {
 }
 impl RecoveryBuildPayload {
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
-        let mut bytes = 0_u128;
+        let mut bytes = (self.solutions.capacity() as u128)
+            .checked_mul(core::mem::size_of::<RecoveryBuildSolutionPayload>() as u128)?;
+        for keys in [&self.selected_solution_keys, &self.required_solution_keys] {
+            bytes = bytes.checked_add(
+                (keys.capacity() as u128).checked_mul(core::mem::size_of::<String>() as u128)?,
+            )?;
+            for key in keys {
+                bytes = bytes.checked_add(key.capacity() as u128)?;
+            }
+        }
+        for solution in &self.solutions {
+            bytes = bytes.checked_add(solution.checked_retained_capacity_bytes()?)?;
+        }
         bytes = bytes.checked_add(self.input_identity.capacity() as u128)?;
         bytes = bytes.checked_add(self.start_board_mask.capacity() as u128)?;
         bytes = bytes.checked_add(self.middle_target_mask.capacity() as u128)?;

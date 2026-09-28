@@ -1,7 +1,8 @@
 //! Allocation-admitted copy of the paired-Build response (no geometry recomputation).
 use super::*;
 use clearra_host_contract::{
-    RecoveryBuildExamplePayload, RecoveryBuildPayload, RecoveryBuildStepPayload,
+    RecoveryBuildExamplePayload, RecoveryBuildPayload, RecoveryBuildSolutionPayload,
+    RecoveryBuildStepPayload,
 };
 
 pub(super) fn copy_step(
@@ -51,6 +52,22 @@ pub(super) fn copy_payload(
     ledger: &mut WasmFiniteMemoryLedger,
 ) -> Result<RecoveryBuildPayload, WasmCommandRuntimeError> {
     Ok(RecoveryBuildPayload {
+        minimum_proven: source.minimum_proven,
+        selected_solution_keys: try_owned_vec(&source.selected_solution_keys, ledger, |s, l| {
+            try_owned_string(s, l)
+        })?,
+        required_solution_keys: try_owned_vec(&source.required_solution_keys, ledger, |s, l| {
+            try_owned_string(s, l)
+        })?,
+        solutions_complete: source.solutions_complete,
+        solutions: try_owned_vec(&source.solutions, ledger, |s, l| {
+            Ok(RecoveryBuildSolutionPayload {
+                key: try_owned_string(&s.key, l)?,
+                probability: try_owned_string(&s.probability, l)?,
+                covered_count: try_owned_string(&s.covered_count, l)?,
+                example: copy_example(&s.example, l)?,
+            })
+        })?,
         input_identity: try_owned_string(&source.input_identity, ledger)?,
         height: source.height,
         start_board_mask: try_owned_string(&source.start_board_mask, ledger)?,

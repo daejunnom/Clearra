@@ -95,6 +95,13 @@ pub(crate) fn run_native_recovery_build(
                 }
             }
             if idle.iter().all(|free| *free) {
+                // A lazy geometric producer can yield before its first task.
+                // No worker result is outstanding in this case; keep advancing
+                // the same cancellation-aware producer, not blocking on recv.
+                if coordinator.has_pending_preparation() {
+                    thread::yield_now();
+                    continue;
+                }
                 return Err(Error::InvalidState("recovery coordinator stalled"));
             }
             let (index, packet) = receiver

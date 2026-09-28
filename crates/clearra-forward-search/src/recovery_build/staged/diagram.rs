@@ -4,9 +4,9 @@
 use super::super::RecoveryBuildError as Error;
 use std::collections::HashMap;
 
-pub(super) type Id = u32;
-pub(super) const NONE: Id = 0;
-pub(super) const ALL: Id = 1;
+pub(in crate::recovery_build) type Id = u32;
+pub(in crate::recovery_build) const NONE: Id = 0;
+pub(in crate::recovery_build) const ALL: Id = 1;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Node {
     level: u16,
@@ -18,8 +18,8 @@ enum Op {
     Intersect,
     Difference,
 }
-#[derive(Default)]
-pub(super) struct Diagram {
+#[derive(Clone, Default)]
+pub(in crate::recovery_build) struct Diagram {
     nodes: Vec<Node>,
     unique: HashMap<Node, Id>,
     apply_memo: HashMap<(Op, Id, Id), Id>,
@@ -190,5 +190,137 @@ impl Diagram {
             .map_err(|_| Error::MemoryUnavailable)?;
         self.count_memo.insert((id, level, end), count);
         Ok(count)
+    }
+}
+
+/// Value-only DAG, postorder indexed. A task never transports native node IDs.
+#[derive(Clone, Debug)]
+pub(in crate::recovery_build) struct DiagramPacket {
+    pub nodes: Vec<(u16, [u32; 7])>,
+    pub roots: [u32; 2],
+}
+impl Diagram {
+    pub fn export(&self, roots: [Id; 2]) -> Result<DiagramPacket, Error> {
+        fn visit(
+            d: &Diagram,
+            id: Id,
+            nodes: &mut Vec<(u16, [u32; 7])>,
+            seen: &mut HashMap<Id, Id>,
+        ) -> Result<Id, Error> {
+            if id < 2 {
+                return Ok(id);
+            }
+            if let Some(&r) = seen.get(&id) {
+                return Ok(r);
+            }
+            let node = d
+                .nodes
+                .get((id - 2) as usize)
+                .ok_or(Error::PatternDomainUnavailable)?;
+            let mut children = [0; 7];
+            for (out, &child) in children.iter_mut().zip(node.children.iter()) {
+                *out = visit(d, child, nodes, seen)?;
+            }
+            let next = u32::try_from(nodes.len())
+                .ok()
+                .and_then(|v| v.checked_add(2))
+                .ok_or(Error::CounterOverflow)?;
+            nodes.try_reserve(1).map_err(|_| Error::MemoryUnavailable)?;
+            seen.try_reserve(1).map_err(|_| Error::MemoryUnavailable)?;
+            nodes.push((node.level, children));
+            seen.insert(id, next);
+            Ok(next)
+        }
+        let mut nodes = Vec::new();
+        let mut seen = HashMap::new();
+        let mut mapped = [0; 2];
+        for (out, root) in mapped.iter_mut().zip(roots) {
+            *out = visit(self, root, &mut nodes, &mut seen)?;
+        }
+        Ok(DiagramPacket {
+            nodes,
+            roots: mapped,
+        })
+    }
+    pub fn import(&mut self, packet: &DiagramPacket, end: u16) -> Result<[Id; 2], Error> {
+        let mut ids = vec![NONE, ALL];
+        ids.try_reserve(packet.nodes.len())
+            .map_err(|_| Error::MemoryUnavailable)?;
+        for (level, children) in &packet.nodes {
+            if *level >= end {
+                return Err(Error::PatternDomainUnavailable);
+            }
+            let mut mapped = [0; 7];
+            for (out, &child) in mapped.iter_mut().zip(children) {
+                *out = *ids
+                    .get(child as usize)
+                    .ok_or(Error::PatternDomainUnavailable)?;
+                if self.level(*out) <= *level {
+                    return Err(Error::PatternDomainUnavailable);
+                }
+            }
+            ids.push(self.branch(*level, mapped)?);
+        }
+        Ok([
+            *ids.get(packet.roots[0] as usize)
+                .ok_or(Error::PatternDomainUnavailable)?,
+            *ids.get(packet.roots[1] as usize)
+                .ok_or(Error::PatternDomainUnavailable)?,
+        ])
+    }
+}
+
+impl Diagram {
+    /// Quotient the input language by identical candidate support. All branches
+    /// are visited, with memoized state vectors; no sampled input or 25M rows.
+    pub fn support_classes(
+        &self,
+        roots: &[Id],
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+    ) -> Result<Vec<Vec<usize>>, Error> {
+        use std::collections::{BTreeSet, HashSet};
+        let mut pending = vec![roots.to_vec()];
+        let mut visited = HashSet::new();
+        let mut classes = BTreeSet::new();
+        while let Some(state) = pending.pop() {
+            if control.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            if visited.contains(&state) {
+                continue;
+            }
+            let level = state
+                .iter()
+                .map(|&id| self.level(id))
+                .min()
+                .unwrap_or(u16::MAX);
+            if level == u16::MAX {
+                let support = state
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &id)| (id == ALL).then_some(i))
+                    .collect::<Vec<_>>();
+                if !support.is_empty() {
+                    classes.insert(support);
+                }
+            } else {
+                pending
+                    .try_reserve(7)
+                    .map_err(|_| Error::MemoryUnavailable)?;
+                for piece in 0..7 {
+                    pending.push(
+                        state
+                            .iter()
+                            .map(|&id| self.follow(id, level, piece))
+                            .collect(),
+                    );
+                }
+            }
+            visited
+                .try_reserve(1)
+                .map_err(|_| Error::MemoryUnavailable)?;
+            visited.insert(state);
+        }
+        Ok(classes.into_iter().collect())
     }
 }

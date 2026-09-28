@@ -1,10 +1,10 @@
 //! Stage-factorized coverage. The original Cartesian universe is counted, not
 //! enumerated. First-source shards are disjoint; alternative executions and
 //! mirrored targets contribute set union within a shard.
-mod diagram;
-mod geometry;
-mod solver;
-mod source;
+pub(super) mod diagram;
+pub(super) mod geometry;
+pub(super) mod solver;
+pub(super) mod source;
 #[cfg(test)]
 mod tests;
 use super::{

@@ -22,7 +22,7 @@ use clearra_scoring::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-pub(super) struct Stage {
+pub(in crate::recovery_build) struct Stage {
     pub fields: RecoveryBuildFields,
     pub prepared: PreparedFields,
     pub middle_domain: BuildStageDomain,
@@ -113,7 +113,7 @@ impl Stage {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) struct Position {
+pub(in crate::recovery_build) struct Position {
     pub stage: u8,
     pub board: ForwardBoard,
     pub middle: Mask,
@@ -130,7 +130,7 @@ impl Position {
     }
 }
 #[derive(Clone, Copy)]
-pub(super) struct Edge {
+pub(in crate::recovery_build) struct Edge {
     pub next: u32,
     pub result: bool,
     pub lock: ReachableLock,
@@ -150,9 +150,9 @@ pub(in crate::recovery_build) struct Geometry {
     reach: ReachabilityWorkspace,
     profile: SpinProfile,
     preserve: bool,
+    coupled: HashMap<(u8, Mask, Mask, [u8; 7]), bool>,
     pub lock_queries: u128,
     pub cache_hits: u128,
-    paired_inventory: HashMap<(u8, Mask, Mask, [u8; 7], [u8; 7], [u8; 7]), bool>,
 }
 impl Geometry {
     pub fn new(query: &RecoveryBuildQuery, control: &ExecutionControl) -> Result<Self, Error> {
@@ -190,9 +190,9 @@ impl Geometry {
                 .map_err(|_| Error::UnsupportedRuleProfile)?,
             profile: SpinProfile::builtin(query.spin_profile),
             preserve: query.preserve_b2b,
+            coupled: HashMap::new(),
             lock_queries: 0,
             cache_hits: 0,
-            paired_inventory: HashMap::new(),
         };
         for i in 0..result.stages.len() {
             let p = &result.stages[i].prepared;
@@ -231,6 +231,28 @@ impl Geometry {
         self.unique.insert(position, id);
         Ok(id)
     }
+    /// Called only after a shard has released every geometry ID. Reusing the
+    /// catalogs does not require retaining all visited physical boards forever.
+    pub fn retire_shard_cache(&mut self) -> Result<(), Error> {
+        const HOT_POSITIONS: usize = 16_384;
+        if self.entries.len() <= HOT_POSITIONS {
+            return Ok(());
+        }
+        let roots = self
+            .roots
+            .iter()
+            .map(|&id| self.position(id))
+            .collect::<Vec<_>>();
+        self.entries = Vec::new();
+        self.unique = HashMap::new();
+        self.coupled.clear();
+        self.roots.clear();
+        for root in roots {
+            let id = self.intern(root)?;
+            self.roots.push(id);
+        }
+        Ok(())
+    }
     pub fn position(&self, id: u32) -> Position {
         self.entries[id as usize].position
     }
@@ -239,80 +261,47 @@ impl Geometry {
         id: u32,
         middle_caps: [u8; 7],
         result_caps: [u8; 7],
+        inventory: Option<[u8; 7]>,
         control: &ExecutionControl,
     ) -> Result<bool, Error> {
-        let pos = self.position(id);
-        let stage = &mut self.stages[usize::from(pos.stage)];
-        Ok(stage
-            .middle_domain
-            .can_complete(
-                stage.fields.middle.without(pos.middle),
-                middle_caps,
-                control,
-            )
-            .map_err(domain_error)?
-            && stage
-                .result_domain
-                .can_complete(
-                    stage.fields.result.without(pos.result),
-                    result_caps,
-                    control,
-                )
-                .map_err(domain_error)?)
-    }
-    /// The two independent domain tests must agree on ONE conserved inventory.
-    /// Bounds alone allow both stages to spend the same last I (or any piece).
-    /// Only reject if every middle signature has an impossible complement.
-    pub fn feasible_inventory(
-        &mut self,
-        id: u32,
-        middle_caps: [u8; 7],
-        result_caps: [u8; 7],
-        total: [u8; 7],
-        control: &ExecutionControl,
-    ) -> Result<bool, Error> {
-        cancelled(control)?;
         let pos = self.position(id);
         let stage = &mut self.stages[usize::from(pos.stage)];
         let middle = stage.fields.middle.without(pos.middle);
         let result = stage.fields.result.without(pos.result);
-        let key = (pos.stage, middle, result, middle_caps, result_caps, total);
-        if let Some(&value) = self.paired_inventory.get(&key) {
+        if let Some(total) = inventory {
+            // This is an inventory join, NOT an independent reachability join.
+            // Temporal realizations remain in the complete ILC domains and the
+            // combined board still verifies every lock, clear, spin and hold.
+            let key = (pos.stage, middle, result, total);
+            if let Some(&value) = self.coupled.get(&key) {
+                return Ok(value);
+            }
+            let value = BuildStageDomain::can_complete_pair(
+                &mut stage.middle_domain,
+                middle,
+                &mut stage.result_domain,
+                result,
+                total,
+                control,
+            )
+            .map_err(domain_error)?;
+            if self.coupled.len() >= 16_384 {
+                self.coupled.clear();
+            }
+            self.coupled
+                .try_reserve(1)
+                .map_err(|_| Error::MemoryUnavailable)?;
+            self.coupled.insert(key, value);
             return Ok(value);
         }
-        let signatures = stage
+        Ok(stage
             .middle_domain
-            .completion_inventories(middle, middle_caps, control)
-            .map_err(domain_error)?;
-        let mut feasible = false;
-        for signature in signatures.iter() {
-            cancelled(control)?;
-            let mut complement = [0; 7];
-            let mut valid = true;
-            for piece in 0..7 {
-                if let Some(left) = total[piece].checked_sub(signature[piece]) {
-                    complement[piece] = left;
-                    valid &= left <= result_caps[piece];
-                } else {
-                    valid = false;
-                    break;
-                }
-            }
-            if valid
-                && stage
-                    .result_domain
-                    .can_complete(result, complement, control)
-                    .map_err(domain_error)?
-            {
-                feasible = true;
-                break;
-            }
-        }
-        self.paired_inventory
-            .try_reserve(1)
-            .map_err(|_| Error::MemoryUnavailable)?;
-        self.paired_inventory.insert(key, feasible);
-        Ok(feasible)
+            .can_complete(middle, middle_caps, control)
+            .map_err(domain_error)?
+            && stage
+                .result_domain
+                .can_complete(result, result_caps, control)
+                .map_err(domain_error)?)
     }
     pub fn edges(
         &mut self,

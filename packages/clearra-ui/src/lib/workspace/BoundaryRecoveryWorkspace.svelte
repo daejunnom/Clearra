@@ -9,7 +9,7 @@
     clearWasmTerminalResult, sharedBrowserHostCapabilitySnapshot, updateWasmCommandText,
     wasmWorkerState, WasmTerminalWorkerController, type HostCapabilitySnapshot } from '../wasm';
   import { createRecoveryBuildRequest, recoveryBuildCommand, recoveryBuildDesktopRequest,
-    resizeRecoveryBuild, validateRecoveryBuildRequest } from './recoveryBuildModel';
+    resizeRecoveryBuild, validateRecoveryBuildRequest, recoveryBuildInputKey, type RecoveryMinimumSelection } from './recoveryBuildModel';
   import RecoveryBuildFields from './RecoveryBuildFields.svelte';
   import RecoveryBuildControls from './RecoveryBuildControls.svelte';
   import RecoveryBuildResult from './RecoveryBuildResult.svelte';
@@ -26,6 +26,8 @@
   let invalidHeightDraft = false;
   let workerCount = 1;
   let elapsedMs = 0;
+  let executedInputKey = '';
+  $: currentInputKey = recoveryBuildInputKey(request);
   let startedAt = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
   $: workerController.setWorkerFactory(workerFactory);
@@ -76,14 +78,15 @@
     invalidHeightDraft = !Number.isInteger(height) || height<1 || height>24;
     request = resizeRecoveryBuild(request,height);
   }
-  async function run() {
-    if(active || validation.length) return;
+  async function run(selection?: RecoveryMinimumSelection) {
+    if(active || validation.length || (selection && executedInputKey !== currentInputKey)) return;
+    executedInputKey = currentInputKey;
     workerCount = automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors).workersEffective;
     if (runtime === 'web') workerController.prewarm(workerCount, false, CPU_ONLY_RUNTIME_WARMUP_POLICY,
       automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors));
     stopTimer();elapsedMs=0;startedAt=performance.now();timer=setInterval(()=>elapsedMs=performance.now()-startedAt,100);
-    if(runtime==='web') { updateWasmCommandText(recoveryBuildCommand(request, workerCount));workerController.run(); }
-    else { updateDesktopRequest(recoveryBuildDesktopRequest(request,language,workerCount));await startDesktopJob(); }
+    if(runtime==='web') { updateWasmCommandText(recoveryBuildCommand(request, workerCount, selection));workerController.run(); }
+    else { updateDesktopRequest(recoveryBuildDesktopRequest(request,language,workerCount,selection));await startDesktopJob(); }
   }
   async function cancel() { if(runtime==='web') workerController.cancel();else await cancelDesktopJob(); }
 </script>
@@ -92,8 +95,10 @@
   dimensionLabel={standard('fieldHeight')} dimensionValue={request.height} dimensionMin={1} dimensionMax={24}
   cancelLabel={standard('cancel')} runLabel={standard('run')} runDisabled={validation.length>0}
   on:language={(event)=>{language=event.detail;persistWorkspaceLanguage(language);}}
-  on:dimension={(event)=>setHeight(event.detail)} on:run={run} on:cancel={cancel}>
+  on:dimension={(event)=>setHeight(event.detail)} on:run={() => run()} on:cancel={cancel}>
   <div slot="editor"><RecoveryBuildFields {request} {language} on:change={(event)=>{if(request.height!==event.detail.height)invalidHeightDraft=false;request=event.detail;}} /></div>
   <div slot="controls"><RecoveryBuildControls {request} {language} {validation} on:change={(event)=>request=event.detail} /></div>
-  <div slot="result"><RecoveryBuildResult view={runtimeView} {language} {elapsedMs} pngRender={request.pngRender ?? false} /></div>
+  <div slot="result"><RecoveryBuildResult view={runtimeView} {language} {elapsedMs} pngRender={request.pngRender ?? false} showProbabilities={request.solutionProbabilities ?? false}
+    minimumDisabled={active || validation.length>0 || executedInputKey !== currentInputKey}
+    on:minimum={(event) => run(event.detail)} /></div>
 </WorkspaceShell>
