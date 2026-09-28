@@ -1,0 +1,170 @@
+name: Recovery memo domain A-B
+
+on:
+  push:
+    branches: [codex/recovery-memo-domain-ab-20260929]
+    paths: [.github/workflows/recovery-memo-domain-ab.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      BASE: c63ac9a46f11431af02c2e5f242c439a61003785
+      REPORT: _local/artifacts/test/recovery-memo-domain-ab
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c63ac9a46f11431af02c2e5f242c439a61003785
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Bind exact baseline and toolchain
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE"
+          test "$(git rev-parse HEAD:crates/clearra-forward-search/src/recovery_build/staged/solver.rs)" = 713ef927e463a276f99acc9bcae93b93a0278af4
+          rustup show
+          mkdir -p "$REPORT"
+          cargo build --locked --release -p clearra-manage
+          cargo test --locked --release -p clearra-forward-search recovery_build_memo_fixture_ab --no-run
+      - name: Current origin-only quotient baseline
+        run: |
+          set -euo pipefail
+          build/cargo/default/release/clearra-manage runtime run --producer recovery-domain-baseline --profile benchmark-search --timeout 420 -- cargo test --locked --release -p clearra-forward-search recovery_build_memo_fixture_ab -- --ignored --nocapture --test-threads=1 2>&1 | tee "$REPORT/baseline.log"
+      - name: Quotient only facts unused by future search, never mutate a live state
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('crates/clearra-forward-search/src/recovery_build/staged/solver.rs')
+          s=p.read_text()
+          before='''    /// output metric, not a remaining acceptance condition. Keep the
+              /// per-target inventories (caps), board, clear history, B2B, unread
+              /// languages, depth, hold permission and early quota unchanged.'''
+          after='''    /// output metric, not a remaining acceptance condition. Its caps use
+              /// only the combined used inventory, never the historical split.
+              /// A quota at least as large as every possible early placement
+              /// cannot bind; only whether repair has started matters in that
+              /// case. All live counters and tokens remain exact for witnesses.
+              /// Keep board/clear/B2B, source languages, hold permission, depth,
+              /// source side, and every binding quota or inventory distinction.'''
+          # Dedent is explicit because this Python literal is inside workflow YAML.
+          before=before.replace('\n              ///','\n    ///')
+          after=after.replace('\n              ///','\n    ///')
+          assert s.count(before)==1
+          s=s.replace(before,after)
+          before='''        if self.query.allow_piece_exchange {
+                      key.exchange = [0; 7];
+                  }
+                  key
+              }'''
+          before=before.replace('\n                  ', '\n        ').replace('\n              }','\n    }').replace('\n                      ', '\n            ')
+          # Use the exact existing method tail rather than matching other query
+          # policy checks elsewhere in the solver.
+          before='        if self.query.allow_piece_exchange {\n            key.exchange = [0; 7];\n        }\n        key\n    }'
+          after='''        if self.query.allow_piece_exchange {
+                      key.exchange = [0; 7];
+                      for p in 0..7 {
+                          // At most 120 placements fit the two 24-row targets.
+                          key.middle_counts[p] += key.result_counts[p];
+                          key.result_counts[p] = 0;
+                      }
+                  }
+                  let pos = self.geometry.position(key.geometry);
+                  let prepared = &self.geometry.stages[usize::from(pos.stage)].prepared;
+                  let possible_early = usize::from(self.source.first_len)
+                      .min(prepared.middle_pieces)
+                      .min(prepared.result_pieces);
+                  if self.maximum >= possible_early {
+                      key.early = u8::from(key.early != 0);
+                  }
+                  key
+              }'''
+          # Leading indentation of every line is independent of YAML indentation.
+          import textwrap
+          after=textwrap.dedent(after)
+          after='\n'.join('    '+line for line in after.splitlines())
+          # Construct the replacement deterministically with the committed style.
+          after=('        if self.query.allow_piece_exchange {\n'
+                 '            key.exchange = [0; 7];\n'
+                 '            for p in 0..7 {\n'
+                 '                // At most 120 placements fit the two 24-row targets.\n'
+                 '                key.middle_counts[p] += key.result_counts[p];\n'
+                 '                key.result_counts[p] = 0;\n'
+                 '            }\n'
+                 '        }\n'
+                 '        let pos = self.geometry.position(key.geometry);\n'
+                 '        let prepared = &self.geometry.stages[usize::from(pos.stage)].prepared;\n'
+                 '        let possible_early = usize::from(self.source.first_len)\n'
+                 '            .min(prepared.middle_pieces)\n'
+                 '            .min(prepared.result_pieces);\n'
+                 '        if self.maximum >= possible_early {\n'
+                 '            key.early = u8::from(key.early != 0);\n'
+                 '        }\n'
+                 '        key\n'
+                 '    }')
+          assert s.count(before)==1
+          p.write_text(s.replace(before,after))
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          git diff --binary > "$REPORT/reviewed-candidate.patch"
+      - name: Exact oracle and public serial-parallel regressions
+        run: |
+          set -euo pipefail
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$REPORT/core.log"
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$REPORT/cli.log"
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$REPORT/wasm-runtime.log"
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$REPORT/wasm-target.log"
+      - name: Same-shard same-resource candidate A-B
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p clearra-forward-search recovery_build_memo_fixture_ab --no-run
+          build/cargo/default/release/clearra-manage runtime run --producer recovery-domain-candidate --profile benchmark-search --timeout 420 -- cargo test --locked --release -p clearra-forward-search recovery_build_memo_fixture_ab -- --ignored --nocapture --test-threads=1 2>&1 | tee "$REPORT/candidate.log"
+          python3 - <<'PY'
+          import json,os,pathlib,re
+          root=pathlib.Path(os.environ['REPORT'])
+          pattern=r'memo_ab start=(\d+) exchange=(true|false) counts=\[(\d+), (\d+), (\d+)\] states=(\d+) geometry_queries=(\d+) elapsed_ms=(\d+)'
+          def load(name):
+              found=re.findall(pattern,(root/name).read_text());assert len(found)==6
+              return {(int(r[0]),r[1]):{'counts':list(map(int,r[2:5])),'states':int(r[5]),'geometry_queries':int(r[6]),'ms':int(r[7])} for r in found}
+          a,b=load('baseline.log'),load('candidate.log');assert a.keys()==b.keys()
+          result=[]
+          for key in a:
+              assert a[key]['counts']==b[key]['counts'],key
+              result.append({'start':key[0],'exchange':key[1]=='true','baseline':a[key],'candidate':b[key]})
+          (root/'comparison.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
+          PY
+      - name: Preserve a single-source-file proposal for review only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,json,os,pathlib,subprocess,urllib.request
+          repo='daejunnom/Clearra';base=os.environ['BASE'];root=pathlib.Path(os.environ['REPORT']);path='crates/clearra-forward-search/src/recovery_build/staged/solver.rs'
+          assert subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()==[path]
+          def api(route,data=None):
+              req=urllib.request.Request('https://api.github.com/repos/'+repo+route,data=None if data is None else json.dumps(data).encode(),headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json'},method='GET' if data is None else 'POST')
+              with urllib.request.urlopen(req,timeout=60) as response:return json.load(response)
+          source=api('/git/commits/'+base)
+          blob=api('/git/blobs',{'content':base64.b64encode(pathlib.Path(path).read_bytes()).decode(),'encoding':'base64'})
+          assert blob['sha']==subprocess.check_output(['git','hash-object',path],text=True).strip()
+          entries=[{'path':path,'mode':'100644','type':'blob','sha':blob['sha']}]
+          tree=api('/git/trees',{'base_tree':source['tree']['sha'],'tree':entries})
+          commit=api('/git/commits',{'message':'perf(recovery): quotient free inventory allocation and nonbinding early limits\n\nOnly memo keys forget the split of already-used inventory when different-piece repayment is enabled, and the count beyond zero when the early limit provably cannot bind. Live search state and replay counters remain exact. Preserve binding limits, same-piece repayment, original source sides, hold, queue language, B2B and geometry.','tree':tree['sha'],'parents':[base]})
+          api('/git/refs',{'ref':'refs/heads/codex/recovery-memo-domain-proposal-20260929','sha':commit['sha']})
+          result={'base':base,'proposal':commit['sha'],'tree':tree['sha'],'files':entries,'main_updated':False}
+          (root/'proposal.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-memo-domain-ab
+          path: _local/artifacts/test/recovery-memo-domain-ab/
+          if-no-files-found: warn
+          retention-days: 14
