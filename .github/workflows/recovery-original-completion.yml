@@ -1,0 +1,112 @@
+name: Recovery original fixture completion
+
+on:
+  push:
+    branches: [codex/converge-recovery-completion-20260929]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recovery-original-completion-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  original-fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      REPORT: _local/artifacts/test/recovery-original-completion
+      CLEARRA_BUILD_PURPOSE: product
+      CLEARRA_WEB_BASE_PATH: /Clearra
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Pin toolchains and check source formatting
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          rustup show
+          cargo fmt --all --check
+          mkdir -p "$REPORT"
+          cargo build --locked --release -p clearra-manage
+          echo "CLEARRA_MANAGE_BIN=$GITHUB_WORKSPACE/build/cargo/default/release/clearra-manage" >> "$GITHUB_ENV"
+      - name: Install the exact managed WASM binding tool
+        shell: pwsh
+        run: |
+          ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose product -ToolName wasm-bindgen-cli -Version 0.2.126
+          if ($LASTEXITCODE -ne 0) { throw 'WASM binding tool installation failed' }
+      - name: Install frozen dependencies and exercise coordinate contracts
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile --ignore-scripts
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+          node --test packages/clearra-ui/test/recoveryBuild*.test.mjs packages/clearra-ui/test/recoveryResultFrame.test.mjs packages/clearra-ui/test/boundaryRecoverySurface.test.mjs 2>&1 | tee "$REPORT/coordinates.log"
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json
+      - name: Build the actual current web UI, worker and WASM through the normal owner
+        run: |
+          set -euo pipefail
+          pnpm --filter @clearra/web run build 2>&1 | tee "$REPORT/web-build.log"
+          git diff --exit-code
+      - name: Prepare the pinned Chromium test host
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$RUNNER_TEMP/browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+          echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/browser-tools" >> "$GITHUB_ENV"
+      - name: Bind the test build without fabricating accepted deployment evidence
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          root=pathlib.Path.cwd();export=root/'apps/clearra-web/build';report=root/os.environ['REPORT']
+          manifest=json.loads((export/'wasm/clearra_wasm.manifest.json').read_text())
+          assert manifest['build']['runtime_identity']['source_commit']==os.environ['GITHUB_SHA']
+          files=[]
+          for p in sorted(export.rglob('*')):
+              assert not p.is_symlink()
+              if p.is_file():
+                  b=p.read_bytes();files.append({'path':p.relative_to(export).as_posix(),'size':len(b),'sha256':hashlib.sha256(b).hexdigest()})
+          identity={'schema':'clearra.local-test-build.v1','production_authority':False,'sourceCommit':os.environ['GITHUB_SHA'],'files':files}
+          (report/'test-build-identity.json').write_text(json.dumps(identity,indent=2)+'\n')
+          source=(root/'scripts/tools/recovery-result-frame-browser.mjs').read_text()
+          replacements={
+              "const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');": "const root = process.cwd();",
+              "const accepted = resolve(root, '_local/artifacts/test/recovery-zero/accepted');": "const accepted = resolve(root, 'apps/clearra-web/build');",
+              "resolve(accepted, 'clearra-build-identity.json')": "resolve(root, '_local/artifacts/test/recovery-original-completion/test-build-identity.json')",
+              "assert.equal(identity.sourceCommit, '1868d31da7730cc9d3018aecd18e442c6940a5d7');": "assert.equal(identity.sourceCommit, process.env.GITHUB_SHA); assert.equal(identity.production_authority, false);",
+          }
+          for old,new in replacements.items():
+              assert source.count(old)==1,old
+              source=source.replace(old,new)
+          # This copy changes only the artifact source and exact source binding.
+          # It does not alter any field, supply, policy, success assertion or the
+          # original 720-second completion deadline. There is no response mock.
+          assert 'timeout:spec.full?720000:60000' in source
+          assert 'spec.full?fixture.expected_pair_count' in source
+          (report/'candidate-full-fixture.mjs').write_text(source)
+          PY
+      - name: Complete the unchanged original P7/P7 through the real browser worker path
+        env:
+          CLEARRA_RECOVERY_FULL_FIXTURE: '1'
+        run: |
+          set -euo pipefail
+          "$CLEARRA_MANAGE_BIN" runtime run --producer recovery-original-full-fixture --profile benchmark-search --timeout 900 -- node "$REPORT/candidate-full-fixture.mjs" 2>&1 | tee "$REPORT/full-fixture.log"
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-original-completion
+          path: |
+            _local/artifacts/test/recovery-original-completion/
+            _local/artifacts/test/recovery-result-frame/
+          if-no-files-found: warn
+          retention-days: 14
