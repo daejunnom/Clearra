@@ -190,6 +190,7 @@ mod constructor {
                 backend_policy: core_query.execution_policy().clone(),
                 output_policy: output_policy_for(preset),
                 pc_chance_evidence_policy: PcChanceEvidencePolicy::Disabled,
+                build_replay_evidence_requested: false,
                 replay_trace_policy,
                 trace_policy,
                 continuation_policy,
@@ -289,6 +290,7 @@ mod constructor {
                 backend_policy,
                 output_policy: output_policy_for(preset),
                 pc_chance_evidence_policy: PcChanceEvidencePolicy::Disabled,
+                build_replay_evidence_requested: false,
                 replay_trace_policy,
                 trace_policy,
                 continuation_policy,
@@ -396,6 +398,23 @@ mod execution_accessors {
     impl SearchProblem {
         pub fn pc_chance_evidence_policy(&self) -> PcChanceEvidencePolicy {
             self.pc_chance_evidence_policy
+        }
+
+        /// Build complete replay is a separate product-evidence request. It
+        /// must not turn on score aggregation or borrow a PC path policy.
+        pub fn build_replay_evidence_requested(&self) -> bool {
+            self.build_replay_evidence_requested
+        }
+
+        pub fn with_build_replay_evidence(mut self) -> Self {
+            if !self.build_replay_evidence_requested {
+                self.build_replay_evidence_requested = true;
+                self.problem_id = SearchProblemId::new(format!(
+                    "{}:build-complete-replay-v1",
+                    self.problem_id.as_str()
+                ));
+            }
+            self
         }
 
         /// Opts an already compiled problem into the private pc-probability.v2
@@ -592,6 +611,7 @@ mod model {
         pub(super) backend_policy: BackendPolicy,
         pub(super) output_policy: SearchOutputPolicy,
         pub(super) pc_chance_evidence_policy: PcChanceEvidencePolicy,
+        pub(super) build_replay_evidence_requested: bool,
         pub(super) replay_trace_policy: SearchReplayTracePolicy,
         pub(super) trace_policy: TracePolicy,
         pub(super) continuation_policy: ContinuationPolicy,
