@@ -41,6 +41,7 @@ jobs:
     env:
       CLEARRA_WEB_BASE_PATH: /Clearra
       CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
