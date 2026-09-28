@@ -1,0 +1,82 @@
+name: Recovery minimum contract verification
+on:
+  push:
+    branches: [codex/recovery-minimum-contract-fix-20260929]
+permissions:
+  contents: read
+jobs:
+  proposal:
+    permissions:
+      contents: write
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source: ${{ steps.commit.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply the explicit test-only correction
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          cp scripts/tools/recovery-contract-fix.patch "$RUNNER_TEMP/recovery-contract-fix.patch"
+          git checkout --detach f0dfe0e38e0cc47a89649d7d6c62f38420f7880d
+          git apply --check "$RUNNER_TEMP/recovery-contract-fix.patch"
+          git apply "$RUNNER_TEMP/recovery-contract-fix.patch"
+          git diff --check
+          git add -- crates/clearra-forward-search/src/recovery_build/population.rs crates/clearra-wasm/tests/recovery_build_wire.rs
+          cargo fmt --all --check
+          test "$(git diff --cached --name-only | wc -l)" = 2
+          git diff --exit-code
+      - name: Retain isolated source
+        id: commit
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'test(recovery): use distinct mirrored drawings for exact pinned minimum'
+          test "$(git rev-parse HEAD^)" = f0dfe0e38e0cc47a89649d7d6c62f38420f7880d
+          ref=refs/heads/codex/recovery-minimum-tested-20260929
+          test -z "$(git ls-remote --heads origin "$ref")"
+          git push origin "HEAD:$ref"
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          mkdir -p _local/artifacts/test/recovery-minimum
+          git rev-parse HEAD > _local/artifacts/test/recovery-minimum/source-sha.txt
+          git archive --format=tar HEAD | gzip > _local/artifacts/test/recovery-minimum/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-minimum-source
+          path: _local/artifacts/test/recovery-minimum
+          retention-days: 7
+  contracts:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - name: Exact minimum, full catalog and both host paths
+        shell: bash
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/recovery-minimum
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          result=0
+          cargo test --locked -p clearra-app recovery_minimum -- --test-threads=1 2>&1 | tee "$out/minimum.log" || result=1
+          cargo test --locked -p clearra-forward-search recovery_build -- --test-threads=1 2>&1 | tee "$out/core.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --test-threads=1 2>&1 | tee "$out/cli.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1 2>&1 | tee "$out/wire.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$out/wasm-target.log" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-minimum-contracts
+          path: _local/artifacts/test/recovery-minimum
+          retention-days: 7
