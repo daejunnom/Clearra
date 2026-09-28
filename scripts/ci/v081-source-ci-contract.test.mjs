@@ -77,9 +77,10 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes("input === 'build-probability'"));
   assert.ok(browser.includes('assert.equal(report.solution_keys_complete, true'));
   assert.ok(browser.includes('assert.deepEqual(compact(build.activated), buildBaseline'));
-  assert.ok(browser.includes("realCliProductProjectionRequests('srs-plus')"));
+  assert.ok(browser.includes('realCliProductProjectionRequests(profile)'));
   assert.ok(browser.includes("['minimum', 'score-minimum', 'replay']"));
-  assert.ok(browser.includes("results['srs-plus'].products[name] = {"));
+  assert.ok(browser.includes('results[profile].products[name] = {'));
+  assert.ok(browser.includes('Object.entries(pcProductInputs[profile])'));
   assert.ok(browser.includes('productSearchMeaning(pair.activated)'));
   assert.ok(!browser.includes('assert.deepEqual(compact(pair.activated), compact(pair.baseline)'));
   assert.ok(browser.includes('assert.deepEqual(pair.activated.result.response.product_result_payload,'));
