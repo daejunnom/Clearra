@@ -399,3 +399,151 @@ fn recovery_build_staged_fixture_benchmark() {
         eprintln!("stage_benchmark_result exchange={exchange} counts={:?} probabilities={:?} elapsed_ms={}",report.counts,report.probabilities,now.elapsed().as_millis());
     }
 }
+
+fn memo_answers(
+    q: &RecoveryBuildQuery,
+    literal: bool,
+    start: usize,
+    rows: usize,
+) -> (Vec<(bool, bool)>, [u128; 3], u128) {
+    let control = ExecutionControl::default();
+    let p = PreparedPopulation::new(q.clone()).unwrap();
+    let geometry = Geometry::new(q, &control).unwrap();
+    let mut b = Block::new(&p, geometry, start, rows, 3, &control).unwrap();
+    b.solver.literal_memo = literal;
+    while !b.advance(&control).unwrap() {}
+    let mut answers = Vec::new();
+    for i in start..start + rows {
+        let first = p.first.sequence_at(i);
+        let normal = b
+            .solver
+            .source
+            .follow_first(&b.solver.diagram, b.solver.normal, &first);
+        let recovery = b
+            .solver
+            .source
+            .follow_first(&b.solver.diagram, b.solver.recovery, &first);
+        for j in 0..p.second.pattern_count() {
+            let second = p.second.sequence_at(j);
+            answers.push((
+                b.solver
+                    .source
+                    .accepts_second(&b.solver.diagram, normal, &second),
+                b.solver
+                    .source
+                    .accepts_second(&b.solver.diagram, recovery, &second),
+            ));
+        }
+    }
+    let states = b.solver.states;
+    let (r, _) = b.finish(&p, &control).unwrap();
+    for e in [&r.normal, &r.recovery].into_iter().flatten() {
+        // The quotient may share answers across ranks, never replay indices.
+        let supply = e
+            .first_queue
+            .iter()
+            .chain(&e.second_queue)
+            .collect::<Vec<_>>();
+        let mut used = std::collections::HashSet::new();
+        let mut exchange = [0_i16; 7];
+        let mut active = None;
+        let mut held = None;
+        let mut cursor = 0;
+        for s in &e.path.steps {
+            if active.is_none() && cursor < supply.len() {
+                active = Some(cursor);
+                cursor += 1;
+            }
+            match s.hold_decision {
+                "none" => {}
+                "store" => {
+                    assert!(q.hold_enabled && held.is_none());
+                    held = active.take();
+                    assert!(cursor < supply.len());
+                    active = Some(cursor);
+                    cursor += 1;
+                }
+                "swap" => {
+                    assert!(q.hold_enabled && active.is_some() && held.is_some());
+                    std::mem::swap(&mut active, &mut held);
+                }
+                "release-held-at-terminal" => {
+                    assert!(q.hold_enabled && cursor == supply.len() && active.is_none());
+                    active = held.take();
+                }
+                other => panic!("unknown hold event: {other}"),
+            }
+            assert_eq!(active.take(), Some(s.source_index));
+            assert!(used.insert(s.source_index));
+            assert_eq!(*supply[s.source_index], s.piece);
+            exchange[crate::recovery_build::search::piece_index(s.piece)] +=
+                i16::from(s.source_index < e.first_queue.len()) - i16::from(!s.result_target);
+        }
+        assert_eq!(exchange, e.path.exchange_balance);
+    }
+    (answers, r.counts, states)
+}
+
+#[test]
+fn recovery_build_memo_quotient_preserves_each_pair_and_real_hold_indices() {
+    for hold in [false, true] {
+        for exchange in [false, true] {
+            for limit in [CrossStageEarlyLimit::Auto, CrossStageEarlyLimit::AtMost(1)] {
+                for extra in [false, true] {
+                    let mut q = query();
+                    q.hold_enabled = hold;
+                    q.allow_piece_exchange = exchange;
+                    q.early_limit = limit;
+                    q.fields.middle = mask((0..4).fold(0, |m, y| m | (5 << (10 * y))));
+                    q.fields.result = mask((0..4).fold(0, |m, y| m | (0x300 << (10 * y))));
+                    let supply = if extra { "[IO][IO][IO]" } else { "[IO][IO]" };
+                    q.first_supply = supply.into();
+                    q.second_supply = supply.into();
+                    // The independent fixed-pair engine validates every member
+                    // and checks physical replay, not just the aggregate count.
+                    compare(q.clone());
+                    let rows = PreparedPopulation::new(q.clone())
+                        .unwrap()
+                        .first
+                        .pattern_count();
+                    let old = memo_answers(&q, true, 0, rows);
+                    let new = memo_answers(&q, false, 0, rows);
+                    assert_eq!(new.0, old.0, "{q:?}");
+                    assert_eq!(new.1, old.1, "{q:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "finite managed A/B; same solver, source, rules, input ranks and resources"]
+fn recovery_build_memo_quotient_benchmark() {
+    let mut q = query();
+    q.fields.height = 10;
+    q.fields.initial = mask(0xc0383f3fc7);
+    q.fields.middle = mask(0x3ff3fc7c0c038);
+    // This is the engine's after-middle input. The browser test still paints
+    // the original shared-coordinate fixture and calls the UI conversion.
+    q.fields.result = mask(0x30483f07f3f8f);
+    q.first_supply = "P7".into();
+    q.second_supply = "P7".into();
+    q.preserve_b2b = true;
+    for start in [0_usize, 704, 2496, 4992] {
+        for exchange in [false, true] {
+            q.allow_piece_exchange = exchange;
+            let now = std::time::Instant::now();
+            let old = memo_answers(&q, true, start, 32);
+            let old_ms = now.elapsed().as_millis();
+            let now = std::time::Instant::now();
+            let new = memo_answers(&q, false, start, 32);
+            let new_ms = now.elapsed().as_millis();
+            assert_eq!(
+                new.0, old.0,
+                "all 161280 pairs, start={start}, exchange={exchange}"
+            );
+            assert_eq!(new.1, old.1);
+            eprintln!("memo_quotient_ab start={start} rows=32 exchange={exchange} counts={:?} literal_states={} quotient_states={} literal_ms={old_ms} quotient_ms={new_ms}", new.1, old.2, new.2);
+        }
+    }
+}

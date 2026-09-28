@@ -98,6 +98,8 @@ pub(super) struct Solver {
     query: RecoveryBuildQuery,
     maximum: usize,
     memo: HashMap<Key, Id>,
+    #[cfg(test)]
+    pub(super) literal_memo: bool,
     machine: Option<Machine>,
     root: Option<Key>,
     roots: Vec<Root>,
@@ -131,6 +133,8 @@ impl Solver {
             query,
             maximum,
             memo: HashMap::new(),
+            #[cfg(test)]
+            literal_memo: false,
             machine: None,
             root: None,
             roots: Vec::new(),
@@ -222,7 +226,7 @@ impl Solver {
     }
     fn tick(&mut self, machine: &mut Machine, control: &ExecutionControl) -> Result<(), Error> {
         if let Some(key) = machine.pending.take() {
-            if let Some(&value) = self.memo.get(&key) {
+            if let Some(&value) = self.memo.get(&self.memo_key(key)) {
                 if key.mode == Mode::Tail {
                     self.suffix_hits += 1;
                 }
@@ -297,11 +301,53 @@ impl Solver {
         }
         Ok(())
     }
+    /// Quotient continuation answers, never execution states or witnesses.
+    /// The token's exact rank only labels output; future rules inspect its
+    /// piece and which of the two original supplies it belongs to. Draw depth,
+    /// unread/allowed languages, active-vs-hold, board, deletion history, B2B,
+    /// first-used count and the exact early-placement limit remain in the key.
+    fn memo_key(&self, mut key: Key) -> Key {
+        #[cfg(test)]
+        if self.literal_memo {
+            return key;
+        }
+        for token in [&mut key.active, &mut key.hold].into_iter().flatten() {
+            token.index = if token.index < self.source.first_len {
+                0
+            } else {
+                self.source.first_len
+            };
+        }
+        if self.query.allow_piece_exchange {
+            // This balance is not an acceptance condition with repayment on.
+            // Keep it in the actual Key for the final replay, not in the memo.
+            key.exchange = [0; 7];
+            let pos = self.geometry.position(key.geometry);
+            let stage = &self.geometry.stages[usize::from(pos.stage)];
+            if usize::from(self.source.end)
+                == stage.prepared.middle_pieces + stage.prepared.result_pieces
+                && self.source.first_counts.is_some()
+                && self.source.second_counts.is_some()
+            {
+                // caps() reads only their sum in this mode. Both regions have
+                // at most 60 tetrominoes, so the u8 sum is bounded by 120.
+                for piece in 0..7 {
+                    key.result_counts[piece] += key.middle_counts[piece];
+                }
+                key.middle_counts = [0; 7];
+            } else {
+                // caps() does not inspect either inventory in this mode.
+                key.middle_counts = [0; 7];
+                key.result_counts = [0; 7];
+            }
+        }
+        key
+    }
     fn remember(&mut self, key: Key, value: Id) -> Result<(), Error> {
         self.memo
             .try_reserve(1)
             .map_err(|_| Error::MemoryUnavailable)?;
-        self.memo.insert(key, value);
+        self.memo.insert(self.memo_key(key), value);
         Ok(())
     }
     fn map(&mut self, value: Id, map: Map) -> Result<Id, Error> {
@@ -574,7 +620,7 @@ impl Solver {
                 Prepared::Actions(actions) => {
                     let mut selected = None;
                     for action in actions {
-                        if let Some(&value) = self.memo.get(&action.child) {
+                        if let Some(&value) = self.memo.get(&self.memo_key(action.child)) {
                             let value = self.map(value, action.map)?;
                             if self.accepts(value, key.depth, &queue) {
                                 selected = Some(action);
