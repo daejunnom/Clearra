@@ -32,6 +32,7 @@ test('both convergence branches run the non-publishing v0.8.1 and recovery gates
   for (const branch of branches) {
     assert.ok(recoveryWorkflow.includes(`      - ${branch}`));
   }
+  assert.ok(recoveryWorkflow.includes('node scripts/tools/v081-accelerator-opfs-browser-acceptance.mjs'));
   assert.ok(!recoveryWorkflow.includes('deploy-pages'));
 });
 
