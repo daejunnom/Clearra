@@ -409,3 +409,13 @@ jobs:
       - name: Execute the production Web pool and verifier worker with the same WASM and signed packs
         if: ${{ !cancelled() }}
         run: node scripts/tools/run-real-web-verifier-pool-smoke.mjs
+      - name: Install pinned Chromium for the signed accelerator browser boundary
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/clearra-browser-tools"
+          npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$RUNNER_TEMP/clearra-browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+          echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
+      - name: Exercise actual browser UI, signed WASM admission, and cross-tab asset storage
+        if: ${{ !cancelled() }}
+        run: node scripts/tools/v081-accelerator-signed-browser-acceptance.mjs
