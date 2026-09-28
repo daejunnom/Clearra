@@ -441,6 +441,15 @@ async function browserAcceptance() {
               observer.observe(app, { childList: true, subtree: true, attributes: true });
               check();
             });
+            const surface = document.querySelector(
+              `[data-testid="build-result"][data-result-mode="${renderMode}"] ${buildResultSurfaces[renderMode]}`
+            );
+            const visibleResults = renderMode === 'complete-replay-paths'
+              ? surface.querySelectorAll('.path-representative').length
+              : surface.querySelectorAll('li[data-solution-key]').length;
+            if (visibleResults < 1) {
+              throw new Error(`${renderMode}: production Build result mounted without a visible solution`);
+            }
             const productContent = output.result.response.product_result_payload?.content;
             const lazyBuildPage = productContent?.payload_kind === 'build-coverage-portfolio-v2'
               ? productContent.payload.page_source_available
