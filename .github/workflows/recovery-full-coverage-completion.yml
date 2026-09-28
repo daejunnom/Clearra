@@ -1,0 +1,101 @@
+name: Recovery full coverage completion
+
+on:
+  push:
+    branches: [codex/converge-recovery-completion-20260928]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recovery-full-completion-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  exact-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup show
+      - run: cargo fmt --all --check
+      - name: Native and distributed exact-coverage regressions
+        run: |
+          set -euo pipefail
+          mkdir -p _local/artifacts/test/recovery-completion
+          cargo test --locked --release -p clearra-forward-search recovery_build -- --nocapture --test-threads=1 2>&1 | tee _local/artifacts/test/recovery-completion/core.log
+          cargo test --locked --release -p clearra-cli-command --test recovery_build -- --nocapture --test-threads=1 2>&1 | tee _local/artifacts/test/recovery-completion/cli.log
+          cargo test --locked --release -p clearra-wasm --test recovery_build_wire -- --nocapture --test-threads=1 2>&1 | tee _local/artifacts/test/recovery-completion/wire.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-completion-exact-tests
+          path: _local/artifacts/test/recovery-completion/
+          retention-days: 14
+
+  original-full-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CLEARRA_WEB_BASE_PATH: /Clearra
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - run: rustup show
+      - name: Restore only pinned tool and dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/tools/cargo/wasm-bindgen-cli/0.2.126
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: recovery-completion-tools-${{ runner.os }}-1.98.1-bindgen-0.2.126-${{ hashFiles('Cargo.lock') }}
+      - name: Prepare the frozen frontend and normal build manager
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile --ignore-scripts
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+          cargo build --locked --release -p clearra-manage
+          echo "CLEARRA_MANAGE_BIN=$GITHUB_WORKSPACE/build/cargo/default/release/clearra-manage" >> "$GITHUB_ENV"
+      - name: Install the managed exact WASM binding tool
+        run: pwsh -NoProfile -File scripts/tools/install-managed-cargo-tool.ps1 -Purpose product -ToolName wasm-bindgen-cli -Version 0.2.126
+      - name: Coordinate and public UI contracts
+        run: |
+          set -euo pipefail
+          mkdir -p _local/artifacts/test/recovery-full-coverage
+          node --test packages/clearra-ui/test/recoveryBuild*.test.mjs packages/clearra-ui/test/recoveryResultFrame.test.mjs packages/clearra-ui/test/boundaryRecoverySurface.test.mjs 2>&1 | tee _local/artifacts/test/recovery-full-coverage/ui.log
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json
+      - name: Build this exact candidate through the normal frontend and WASM producer
+        run: |
+          set -euo pipefail
+          pnpm --filter @clearra/web build 2>&1 | tee _local/artifacts/test/recovery-full-coverage/build.log
+      - name: Prepare the same pinned browser as the timed-out baseline
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$RUNNER_TEMP/browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+          echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/browser-tools" >> "$GITHUB_ENV"
+      - name: Complete the original P7-P7 input without lowering the universe or changing limits
+        run: |
+          set -euo pipefail
+          "$CLEARRA_MANAGE_BIN" --root . runtime run --producer recovery-full-browser --profile benchmark-search --timeout 780 -- \
+            node scripts/tools/recovery-full-coverage-browser.mjs 2>&1 | tee _local/artifacts/test/recovery-full-coverage/browser.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-original-full-completion
+          path: _local/artifacts/test/recovery-full-coverage/
+          if-no-files-found: warn
+          retention-days: 14
