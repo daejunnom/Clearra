@@ -35,8 +35,8 @@ test('blank height drafts never erase independent gray fields',()=>{
  const grown=api.resizeRecoveryBuild(input,12);assert.equal(grown.startMask,input.startMask);
  const smaller=api.resizeRecoveryBuild(input,4);assert.equal(smaller.startMask,0n);assert.equal(smaller.middleMask,2n);assert.equal(smaller.resultMask,4n);
 });
-test('image start and middle clear five rows; result preview uses the emptied board',()=>{
- const input={...api.createRecoveryBuildRequest(),startMask:BigInt(fixture.start_board_mask),middleMask:BigInt(fixture.middle_target_mask),resultMask:BigInt(fixture.result_target_mask),firstSupply:'P7',secondSupply:'P7'};
+test('legacy after-middle image target uses the emptied board',()=>{
+ const input={...api.createRecoveryBuildRequest(),startMask:BigInt(fixture.start_board_mask),middleMask:BigInt(fixture.middle_target_mask),resultMask:BigInt(fixture.result_target_mask),resultFrame:'after-middle',firstSupply:'P7',secondSupply:'P7'};
  assert.equal(api.countRecoveryCells(input.startMask),22);assert.equal(api.countRecoveryCells(input.middleMask),28);assert.equal(api.countRecoveryCells(input.resultMask),28);
  assert.equal(api.recoveryMiddleBase(input),0n);assert.deepEqual(api.validateRecoveryBuildRequest(input),[]);
 });

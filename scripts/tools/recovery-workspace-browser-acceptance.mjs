@@ -182,14 +182,14 @@ try {
       assert.deepEqual(errors, []);
       // Render the user's supplied geometry in the actual public input owner.
       // Only input editing is exercised; this test never clicks Run search.
-      await height.fill('8'); await flush();
-      const masks = [0xc0383f3fc7n, 0x3ff3fc7c0c038n, 0x30483f07f3f8fn];
+      await height.fill('10'); await flush();
+      const masks = [0xc0383f3fc7n, 0x3ff3fc7c0c038n, 0xc120fc1fcfe3c000000000000n];
       for (let field = 0; field < 3; field++) {
         await fields.nth(field).click();
         const clear = page.locator('.board-actions button').last();
         if (await clear.isEnabled()) await clear.click();
-        for (let y = 0; y < 8; y++) for (let x = 0; x < 10; x++) {
-          if (masks[field] & (1n << BigInt(y * 10 + x))) await board.locator('button').nth((7 - y) * 10 + x).click();
+        for (let y = 0; y < 10; y++) for (let x = 0; x < 10; x++) {
+          if (masks[field] & (1n << BigInt(y * 10 + x))) await board.locator('button').nth((9 - y) * 10 + x).click();
         }
       }
       await fields.nth(1).click();
@@ -197,7 +197,7 @@ try {
       assert.equal(await page.locator('.board-stats').count(), 0);
       assert.deepEqual(errors, []);
       await page.screenshot({ path: resolve(reportRoot, `${spec.language}-${spec.width}.png`), fullPage: true });
-      results.push({ ...spec, status: 'passed', heightTransition: [8, 4, 6, 4, 8], quotas: ['auto', 1, 0], supplies: ['P7','P7'], namedSwitches: Object.keys(switches), independentSwitches: true, removedLegacyControls: true });
+      results.push({ ...spec, status: 'passed', heightTransition: [8, 4, 6, 4, 10], quotas: ['auto', 1, 0], supplies: ['P7','P7'], namedSwitches: Object.keys(switches), independentSwitches: true, removedLegacyControls: true });
     } catch (error) {
       await writeFile(resolve(reportRoot, `failed-${spec.language}-${spec.width}.txt`),
         [String(error.stack || error), ...errors, await page.locator('body').innerText()].join('\n'));

@@ -1,4 +1,5 @@
 import type { RecoveryBuildRequest } from './recoveryBuildModel';
+import { projectRecoveryRows, recoveryResultFrame } from './recoveryResultFrame';
 
 export type RecoveryField = 'startMask' | 'middleMask' | 'resultMask';
 export type RecoveryFieldReference = {
@@ -20,5 +21,9 @@ export function recoveryFieldReferences(
     { field: 'startMask', mask: request.startMask, tone: 'dark', label: 'start' },
     { field: 'middleMask', mask: request.middleMask, tone: 'medium', label: 'middle' }
   ];
-  return references.filter((reference) => reference.field !== selected);
+  const visibleReferences = references.filter((reference) => reference.field !== selected);
+  if (selected !== 'resultMask' || recoveryResultFrame(request) === 'shared') return visibleReferences;
+  const completed = request.startMask | request.middleMask;
+  return visibleReferences.map(reference => ({ ...reference,
+    mask: projectRecoveryRows(reference.mask, completed, request.height) }));
 }

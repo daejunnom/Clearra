@@ -1,15 +1,19 @@
 import { boardMaskHex, type RuleProfile, type SpinProfile } from './solverWorkspaceModel';
 import { cliCommandRequestForDesktop, serializeCliCommandArguments } from './cliCommandModel';
 import type { WorkspaceLanguage } from './workspaceI18n';
+import { recoveryResultFrame, recoveryResultMaskForEngine, type RecoveryResultFrame } from './recoveryResultFrame';
+export { changeRecoveryResultFrame, recoveryResultFrame, recoveryResultMaskForEngine } from './recoveryResultFrame';
+export type { RecoveryResultFrame } from './recoveryResultFrame';
 export type RecoveryBuildRequest = {
   startMask: bigint; middleMask: bigint; resultMask: bigint; height: number;
   firstSupply: string; secondSupply: string;
   maxEarly: 'auto' | number; allowPieceExchange: boolean; holdEnabled: boolean;
   preserveB2B: boolean; rule: RuleProfile; spinProfile: SpinProfile;
   useAllLogicalProcessors: boolean;
+  resultFrame?: RecoveryResultFrame;
 };
 export function createRecoveryBuildRequest(): RecoveryBuildRequest {
-  return { startMask: 0n, middleMask: 0n, resultMask: 0n, height: 8,
+  return { startMask: 0n, middleMask: 0n, resultMask: 0n, height: 8, resultFrame: 'shared',
     firstSupply: '', secondSupply: '', maxEarly: 'auto', allowPieceExchange: false,
     holdEnabled: true, preserveB2B: false, useAllLogicalProcessors: false, rule: 'srs-plus', spinProfile: 'all-spin-plus' };
 }
@@ -45,8 +49,10 @@ export function validateRecoveryBuildRequest(request: RecoveryBuildRequest): str
   const errors: string[] = [];
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 24) return ['height'];
   const limit = 1n << BigInt(request.height * 10);
-  if ([request.startMask, request.middleMask, request.resultMask].some(mask => mask < 0n || mask >= limit)) errors.push('board');
-  if ((request.startMask & request.middleMask) !== 0n || (recoveryMiddleBase(request) & request.resultMask) !== 0n) errors.push('overlap');
+  if ([request.startMask, request.middleMask, request.resultMask].some(mask => mask < 0n || mask >= limit)) return ['board'];
+  try { recoveryResultFrame(request); } catch { return ['result-frame']; }
+  const occupied = recoveryResultFrame(request) === 'shared' ? request.startMask | request.middleMask : recoveryMiddleBase(request);
+  if ((request.startMask & request.middleMask) !== 0n || (occupied & request.resultMask) !== 0n) errors.push('overlap');
   if ([request.middleMask, request.resultMask].some(mask => mask === 0n || countRecoveryCells(mask) % 4 !== 0)) errors.push('target-area');
   if (!request.firstSupply.trim() || !request.secondSupply.trim()) errors.push('supply');
   if (request.maxEarly !== 'auto' && (!Number.isSafeInteger(request.maxEarly) || request.maxEarly < 0)) errors.push('early');
@@ -56,8 +62,11 @@ export function recoveryBuildArguments(request: RecoveryBuildRequest, workers?: 
   if (workers !== undefined && (!Number.isSafeInteger(workers) || workers < 1 || workers > 65535)) {
     throw new RangeError('recovery worker count must be an integer in 1..65535');
   }
+  // Lower the editor frame once. CLI, WASM, native search and replay continue
+  // to receive the same established after-middle coordinate contract.
+  const resultMask = recoveryResultMaskForEngine(request);
   return ['clearra', 'recovery', 'build', '--start-mask', boardMaskHex(request.startMask),
-    '--middle-mask', boardMaskHex(request.middleMask), '--result-mask', boardMaskHex(request.resultMask),
+    '--middle-mask', boardMaskHex(request.middleMask), '--result-mask', boardMaskHex(resultMask),
     '--height', String(request.height), '--first-supply', request.firstSupply.trim(),
     '--second-supply', request.secondSupply.trim(), '--max-early', String(request.maxEarly),
     request.allowPieceExchange ? '--allow-piece-exchange' : '--no-piece-exchange',
