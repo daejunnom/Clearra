@@ -1,0 +1,220 @@
+name: Recovery coverage memo audit
+
+on:
+  push:
+    branches: [codex/recovery-memo-audit-20260929]
+    paths: [.github/workflows/recovery-memo-audit.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: recovery-memo-audit-20260929
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BASE: 53757c6c4a4d5ba6e1832dbd431123bbd0531a96
+      REPORT: _local/artifacts/test/recovery-memo-audit
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 53757c6c4a4d5ba6e1832dbd431123bbd0531a96
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Bind and prepare the minimal source proposal
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = "$BASE"
+          test "$(git rev-parse HEAD:crates/clearra-forward-search/src/recovery_build/staged/solver.rs)" = 6353e74ed9e198ab9102ac253ae447bd7ec51d7c
+          mkdir -p "$REPORT"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root = Path('crates/clearra-forward-search/src/recovery_build/staged')
+          p = root / 'solver.rs'
+          text = p.read_text()
+          def replace(old, new, count=1):
+              global text
+              assert text.count(old) == count, (old, text.count(old))
+              text = text.replace(old, new)
+          replace('    memo: HashMap<Key, Id>,', '''    memo: HashMap<Key, Id>,
+              #[cfg(test)]
+              pub(super) exact_provenance_memo: bool,''')
+          replace('            memo: HashMap::new(),', '''            memo: HashMap::new(),
+                      #[cfg(test)]
+                      exact_provenance_memo: false,''')
+          replace('self.memo.get(&key)', 'self.memo.get(&self.memo_key(key))')
+          replace('self.memo.get(&action.child)', 'self.memo.get(&self.memo_key(action.child))')
+          replace('        self.memo.insert(key, value);', '        self.memo.insert(self.memo_key(key), value);')
+          anchor = '    fn remember(&mut self, key: Key, value: Id) -> Result<(), Error> {'
+          replace(anchor, '''    /// Quotient only the coverage memo key. Actual source indices and balances
+              /// remain on execution keys and are reconstructed by witness(). A token's
+              /// historical offset is not a future legality condition: only its type
+              /// and which of the two supplies it belongs to are inspected by actions.
+              fn memo_key(&self, mut key: Key) -> Key {
+                  #[cfg(test)]
+                  if self.exact_provenance_memo {
+                      return key;
+                  }
+                  for token in [&mut key.active, &mut key.hold].into_iter().flatten() {
+                      token.index = if token.index < self.source.first_len {
+                          0
+                      } else {
+                          self.source.first_len
+                      };
+                  }
+                  // When different-piece repayment is enabled this vector is output
+                  // evidence, not a constraint. The exact witness still accumulates it.
+                  if self.query.allow_piece_exchange {
+                      key.exchange = [0; 7];
+                  }
+                  // Auto cannot bind before exhausting the available first-source
+                  // tokens or result cells. Repair still needs at least one early lock.
+                  // A user-specified quota, however, keeps the exact count in its key.
+                  if matches!(self.query.early_limit, crate::CrossStageEarlyLimit::Auto) {
+                      key.early = u8::from(key.early != 0);
+                  }
+                  key
+              }
+          ''' + anchor)
+          p.write_text(text)
+          tests = root / 'tests.rs'
+          data = tests.read_bytes()
+          assert hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == 'c1226110b27e32a49320e58b9b49f0affb5d9ea1'
+          with tests.open('a') as f:
+              f.write('''
+          #[test]
+          fn recovery_build_staged_memo_keeps_origin_quotas_and_witness_indices() {
+              for hold in [false, true] {
+                  for exchange in [false, true] {
+                      for clear in [false, true] {
+                          for limit in [CrossStageEarlyLimit::Auto, CrossStageEarlyLimit::AtMost(1)] {
+                              let mut q = query();
+                              q.fields.initial = mask(if clear { 0x3f0 | (0x3f0 << 10) } else { 0 });
+                              q.fields.middle = mask(15 | (15 << 10));
+                              q.fields.result = mask((0..4).fold(0, |m, y| m | (0x30 << (10 * y))));
+                              q.first_supply = "[IO][IO]".into();
+                              q.second_supply = "[IO][IO]".into();
+                              q.hold_enabled = hold;
+                              q.allow_piece_exchange = exchange;
+                              q.early_limit = limit;
+                              // Every pair is checked against the independent fixed
+                              // queue search, then its representative is replayed.
+                              compare(q);
+                          }
+                      }
+                  }
+              }
+          }
+
+          #[test]
+          #[ignore = "finite managed A/B with identical input, binary and worker count"]
+          fn recovery_build_staged_memo_original_fixture_ab() {
+              let control = ExecutionControl::default();
+              let mut q = query();
+              q.fields.height = 10;
+              q.fields.initial = mask(0xc0383f3fc7);
+              q.fields.middle = mask(0x3ff3fc7c0c038);
+              // This is the existing engine's after-middle contract, not an
+              // edit of the original shared-frame UI fixture.
+              q.fields.result = mask(0x30483f07f3f8f);
+              q.first_supply = "P7".into();
+              q.second_supply = "P7".into();
+              q.preserve_b2b = true;
+              for exchange in [false, true] {
+                  q.allow_piece_exchange = exchange;
+                  let p = PreparedPopulation::new(q.clone()).unwrap();
+                  for start in [0, 1600, 3200] {
+                      let mut expected = None;
+                      for exact in [true, false] {
+                          let now = std::time::Instant::now();
+                          let geometry = Geometry::new(&q, &control).unwrap();
+                          let mut b = Block::new(&p, geometry, start, 32, 3, &control).unwrap();
+                          b.solver.exact_provenance_memo = exact;
+                          while !b.advance(&control).unwrap() {}
+                          let nodes = b.solver.diagram.node_count();
+                          let (report, _) = b.finish(&p, &control).unwrap();
+                          eprintln!("memo_ab exchange={exchange} start={start} exact={exact} elapsed_ms={} states={} nodes={nodes} counts={:?} probabilities={:?}", now.elapsed().as_millis(), report.states, report.counts, report.probabilities);
+                          if let Some((counts, probabilities)) = expected {
+                              assert_eq!(report.counts, counts);
+                              for (a, b) in report.probabilities.into_iter().zip(probabilities) {
+                                  assert!((a - b).abs() < 1e-12);
+                              }
+                          } else {
+                              expected = Some((report.counts, report.probabilities));
+                          }
+                      }
+                  }
+              }
+          }
+          ''')
+          PY
+      - name: Use the exact workspace formatter and review changed paths
+        run: |
+          set -euo pipefail
+          rustup show
+          cargo fmt --all
+          cargo fmt --all --check
+          python3 - <<'PY'
+          import subprocess
+          expected = {'crates/clearra-forward-search/src/recovery_build/staged/solver.rs', 'crates/clearra-forward-search/src/recovery_build/staged/tests.rs'}
+          actual = set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          assert actual == expected, actual
+          PY
+          git diff --check
+          git diff --binary > "$REPORT/source.patch"
+      - name: Exact core, native host and distributed protocol regressions
+        shell: bash
+        run: |
+          set -uo pipefail
+          result=0
+          cargo test --locked --release -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$REPORT/core.log" || result=1
+          cargo test --locked --release -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$REPORT/cli.log" || result=1
+          cargo test --locked --release -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$REPORT/wire.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$REPORT/wasm.log" || result=1
+          exit "$result"
+      - name: Same-binary bounded A/B, without changing any quota or result condition
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p clearra-manage
+          build/cargo/default/release/clearra-manage --root . runtime run --producer recovery-memo-ab --profile benchmark-search --timeout 300 -- cargo test --locked --release -p clearra-forward-search recovery_build_staged_memo_original_fixture_ab -- --ignored --nocapture --test-threads=1 2>&1 | tee "$REPORT/ab.log"
+      - name: Publish only the reviewed source proposal, never main or deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request
+          repo='daejunnom/Clearra'; base=os.environ['BASE']; report=pathlib.Path(os.environ['REPORT'])
+          assert os.environ['GITHUB_REF']=='refs/heads/codex/recovery-memo-audit-20260929'
+          paths=['crates/clearra-forward-search/src/recovery_build/staged/solver.rs','crates/clearra-forward-search/src/recovery_build/staged/tests.rs']
+          assert set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())==set(paths)
+          def api(route, data=None):
+              request=urllib.request.Request('https://api.github.com/repos/'+repo+route,data=None if data is None else json.dumps(data).encode(),method='GET' if data is None else 'POST',headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'})
+              with urllib.request.urlopen(request,timeout=60) as response:return json.load(response)
+          parent=api('/git/commits/'+base);entries=[]
+          for path in paths:
+              data=pathlib.Path(path).read_bytes(); digest=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              blob=api('/git/blobs',{'content':base64.b64encode(data).decode(),'encoding':'base64'});assert blob['sha']==digest
+              entries.append({'path':path,'mode':'100644','type':'blob','sha':digest})
+          tree=api('/git/trees',{'base_tree':parent['tree']['sha'],'tree':entries})
+          commit=api('/git/commits',{'message':'perf(recovery): quotient coverage memo without losing execution provenance\n\nKeep exact source indices, exchange balances and early counts in live keys and replay. Canonicalize only constraints that are provably irrelevant to future coverage under the fixed query. Explicit quotas and supply origin remain distinct. Compare independent fixed-queue oracles and same-binary full-detail memo on the original fixture.','tree':tree['sha'],'parents':[base]})
+          api('/git/refs',{'ref':'refs/heads/codex/recovery-memo-result-20260929','sha':commit['sha']})
+          result={'base':base,'proposal':commit['sha'],'tree':tree['sha'],'changed_files':entries,'main_updated':False,'deployed':False}
+          (report/'proposal.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-memo-audit
+          path: _local/artifacts/test/recovery-memo-audit
+          retention-days: 7
