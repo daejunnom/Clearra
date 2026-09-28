@@ -130,7 +130,9 @@ fn recovery_build_distributed_protocol_matches_serial_and_requires_all_pairs() {
 
 #[test]
 fn recovery_build_all_minimum_and_mandatory_minimum_use_complete_coverage() {
-    let command = "clearra recovery build --start-mask 0x3f0 --middle-mask 0xf --result-mask 0xc030 --height 8 --first-supply I --second-supply O --no-hold --max-early 0 --all-solutions";
+    // A centered O is self-mirrored. Use a left O so the two distinct
+    // drawings cover the same single queue and require one unpinned solution.
+    let command = "clearra recovery build --start-mask 0x3f0 --middle-mask 0xf --result-mask 0xc03 --height 8 --first-supply I --second-supply O --no-hold --max-early 0 --all-solutions";
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
     let all = runtime.run_command_text(command).unwrap();
