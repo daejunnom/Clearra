@@ -35,8 +35,30 @@ const preprocessor = vitePreprocess();
 const fixturePath = resolve(root, 'apps/clearra-web/test/accelerator-signed-browser-fixture.svelte');
 const fixture = `<script>
   import Panel from '../src/lib/AcceleratorDownloadPanel.svelte';
+  import BuildProbabilityResult from '../../../packages/clearra-ui/src/lib/workspace/BuildProbabilityResult.svelte';
+  let buildView = null;
+  let buildMode = 'all-solutions';
+  window.__showBuildResult = ({ response, searchReport, mode }) => {
+    buildMode = mode;
+    buildView = {
+      kind: 'web', status: 'completed', terminationReason: null, jobId: null,
+      progressLabel: '', progressDone: 0, progressTotal: 0,
+      forwardPatternDone: 0, forwardPatternTotal: 0, progressTelemetry: null,
+      publicFailures: [], developerDiagnostics: [], response,
+      searchReport, webgpuReport: null, backendReport: response.backend_report ?? null,
+      resourceReport: response.resource_report ?? null,
+      renderCapability: response.capability_report?.render_capability ?? null,
+      developerError: null
+    };
+  };
 </script>
-<Panel language="en" />`;
+<Panel language="en" />
+{#if buildView}
+  <div data-testid="build-result" data-result-mode={buildMode}>
+    <BuildProbabilityResult view={buildView} language="en" resultMode={buildMode}
+      aggregation="buildability" height={4} existingMask={0n} targetMask={15n} />
+  </div>
+{/if}`;
 
 async function component(source, path) {
   const processed = await preprocess(source, preprocessor, { filename: path });
@@ -471,6 +493,15 @@ async function browserAcceptance() {
     }
     assert.deepEqual(compact(build.activated), buildBaseline,
       'installed accelerators must preserve complete Web Build probability results');
+    async function renderBuild(mode, sample, selector) {
+      await page.evaluate(({ response, searchReport, mode }) => {
+        window.__showBuildResult({ response, searchReport, mode });
+      }, { response: sample.result.response, searchReport: sample.result.search_report ?? null, mode });
+      const current = page.locator(`[data-testid="build-result"][data-result-mode="${mode}"]`);
+      await current.waitFor();
+      await current.locator(selector).waitFor();
+    }
+    await renderBuild('all-solutions', build.activated, 'section.solutions-section');
     // Lazy products may deliberately leave the generic solution family
     // unmaterialized; compare its actual meaning separately from the payload.
     const productSearchMeaning = ({ result }) => {
@@ -497,6 +528,13 @@ async function browserAcceptance() {
       'fixed-queue-maximum-score': ['build.fixed-queue-maximum-score', 'build-fixed-score-witness.v1'],
       'highest-score-minimum-set': ['build.highest-score-minimum-set', 'build-probability-score-minimum.v1']
     };
+    const buildResultSurfaces = {
+      'complete-replay-paths': 'section.product-pager.path-family',
+      'minimum-solutions': 'section.product-pager',
+      'field-average-score': 'section.solutions-section',
+      'fixed-queue-maximum-score': 'section.product-pager.score-family',
+      'highest-score-minimum-set': 'section.product-pager'
+    };
     for (const [mode, [contract, resultKind]] of Object.entries(buildProducts)) {
       const pair = execution.results['srs-plus'].build[mode];
       for (const sample of Object.values(pair)) {
@@ -522,6 +560,7 @@ async function browserAcceptance() {
       assert.deepEqual(pair.activated.result.response.product_result_payload,
         pair.baseline.result.response.product_result_payload,
         `${mode}: signed assets must preserve the complete Build product result`);
+      await renderBuild(mode, pair.activated, buildResultSurfaces[mode]);
     }
     for (const profile of profiles) {
       for (const [name, input] of Object.entries(pcProductInputs[profile])) {
@@ -573,7 +612,7 @@ async function browserAcceptance() {
     assert.equal(assetRequests.length, assets.length, 'a search must read OPFS, not re-download signed assets');
     assert.deepEqual(errors, []);
     await context.close();
-    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score/minimum/score-minimum/replay parity, plus SRS+ Build result-mode parity passed');
+    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score/minimum/score-minimum/replay parity, plus SRS+ Build result-mode and production renderer parity passed');
   } finally {
     await browser?.close();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
