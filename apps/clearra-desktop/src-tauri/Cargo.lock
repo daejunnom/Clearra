@@ -522,7 +522,9 @@ name = "clearra-forward-search"
 version = "0.8.1"
 dependencies = [
  "clearra-core-domain",
+ "clearra-core-executor",
  "clearra-piece-registry",
+ "clearra-problem",
  "clearra-replay",
  "clearra-rules",
  "clearra-scoring",
