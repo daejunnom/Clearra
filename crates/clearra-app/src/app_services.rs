@@ -1763,6 +1763,7 @@ impl AppCoreExecutorService {
                 solution_probability_policy,
                 control,
                 true,
+                false,
                 &mut memory_guard,
             )?;
         let derivation = derivation.ok_or(CoreExecutionError::RuntimeUnavailable {
@@ -1836,6 +1837,7 @@ impl AppCoreExecutorService {
                             solution_probability_policy,
                             control,
                             retain_private_score_authority,
+                            problem.build_replay_evidence_requested(),
                             &mut terminal_memory_guard,
                         )
                     },
@@ -1873,9 +1875,45 @@ impl AppCoreExecutorService {
             solution_probability_policy,
             control,
             false,
+            false,
             &mut memory_guard,
         )
         .map(|(result, _)| result)
+    }
+
+    /// Keeps exact Build replay graphs until the command has produced its
+    /// typed replay payload. The command then closes the ordinary public
+    /// solution surface before returning the response.
+    pub(crate) fn materialize_build_probability_replay_source_with_memory_guard(
+        &self,
+        result: CoreExecutionResult,
+        solution_probability_policy: BuildSolutionProbabilityPolicy,
+        control: &ExecutionControl,
+        mut memory_guard: impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
+    ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        self.materialize_build_probability_public_result_with_derivation_and_memory_guard(
+            result,
+            solution_probability_policy,
+            control,
+            false,
+            true,
+            &mut memory_guard,
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub(crate) fn materialize_build_probability_replay_source(
+        &self,
+        result: CoreExecutionResult,
+        solution_probability_policy: BuildSolutionProbabilityPolicy,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        self.materialize_build_probability_replay_source_with_memory_guard(
+            result,
+            solution_probability_policy,
+            control,
+            |_, _| Ok(()),
+        )
     }
 
     fn materialize_build_probability_public_result_with_derivation_and_memory_guard(
@@ -1884,6 +1922,7 @@ impl AppCoreExecutorService {
         solution_probability_policy: BuildSolutionProbabilityPolicy,
         control: &ExecutionControl,
         retain_private_score_authority: bool,
+        retain_private_replay_authority: bool,
         memory_guard: &mut impl FnMut(&CoreExecutionResult, u128) -> Result<(), CoreExecutionError>,
     ) -> Result<(CoreExecutionResult, Option<PcScoreDerivation>), CoreExecutionError> {
         memory_guard(&result, 0)?;
@@ -1903,7 +1942,9 @@ impl AppCoreExecutorService {
         };
         memory_guard(&result, 0)?;
         let result = attach_solution_set_audit_with_memory_guard(result, memory_guard)?;
-        let result = if retain_private_score_authority && derivation.is_some() {
+        let result = if (retain_private_score_authority && derivation.is_some())
+            || retain_private_replay_authority
+        {
             result
         } else {
             finalize_coverage_summary_public_surface_with_memory_guard(result, memory_guard)?
