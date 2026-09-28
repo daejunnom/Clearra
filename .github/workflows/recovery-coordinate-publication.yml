@@ -1,0 +1,107 @@
+name: Dispatch Recovery coordinate correction
+
+# Invoke existing publication owners without granting acceptance or touching
+# source refs. Experimental solver memo changes are not part of this release.
+on:
+  push:
+    branches: [codex/dispatch-recovery-coordinate-20260929]
+    paths: [.github/workflows/recovery-coordinate-publication.yml]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: coordinate-publication-53757c6
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 53757c6c4a4d5ba6e1832dbd431123bbd0531a96
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Verify exact source and dispatch unchanged canonical owners once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+          import { githubApi as api } from './scripts/release/queue-pages-publication.mjs';
+          const repository = 'daejunnom/Clearra';
+          const source = '53757c6c4a4d5ba6e1832dbd431123bbd0531a96';
+          const snapshot = '1868d31da7730cc9d3018aecd18e442c6940a5d7';
+          const base = `repos/${repository}`;
+          const output = '_local/artifacts/test/recovery-coordinate-publication';
+          assert.equal(process.env.GITHUB_REPOSITORY, repository);
+          assert.equal(process.env.GITHUB_REF, 'refs/heads/codex/dispatch-recovery-coordinate-20260929');
+          assert.equal(process.env.GITHUB_RUN_ATTEMPT, '1', 'Never rerun a dispatch owner');
+          assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], {encoding:'utf8'}).trim(), source);
+          execFileSync('git', ['merge-base','--is-ancestor',snapshot,source]);
+          execFileSync('git', ['diff','--exit-code',snapshot,source,'--','crates','core-c','Cargo.toml','Cargo.lock','apps/clearra-desktop/src-tauri/Cargo.lock','.github/workflows/release-cli.yml','.github/workflows/pages.yml','.github/workflows/queue-pages-publication.yml']);
+          mkdirSync(output, {recursive:true});
+          const record = { source_commit:source, snapshot_sha:snapshot, solver_changes:false,
+            required_ci_run:36424023492, coordinate_job:108931478007,
+            full_fixture_status:'previous 720-second probe incomplete; no full P7/P7 probability or performance acceptance claimed',
+            dispatches:[] };
+          const save = () => writeFileSync(`${output}/dispatch-receipts.json`,JSON.stringify(record,null,2)+'\n');
+          const assertMain = () => assert.equal(api('GET',`${base}/git/ref/heads/main`).object.sha,source);
+          assertMain();
+          const management = api('GET',`${base}/actions/runs/36424023492`);
+          assert.equal(management.head_sha,source);
+          assert.equal(management.path,'.github/workflows/management-policy.yml');
+          assert.equal(management.head_branch,'codex/converge-recovery-result-frame-20260928');
+          assert.equal(management.event,'push');
+          assert.equal(management.status,'completed');
+          assert.equal(management.conclusion,'success');
+          const diagnostic = api('GET',`${base}/actions/runs/36423426248`);
+          assert.equal(diagnostic.head_sha,source);
+          assert.equal(diagnostic.path,'.github/workflows/recovery-zero-coverage-regression.yml');
+          // The functional coordinate job passed. The separate original-full
+          // workload timed out, remains failed, and is not reclassified as a
+          // passing performance test. Only canonical acceptance grants release.
+          const coordinate = api('GET',`${base}/actions/jobs/108931478007`);
+          assert.equal(coordinate.run_id,36423426248);
+          assert.equal(coordinate.head_sha,source);
+          assert.equal(coordinate.name,'coordinate-regression');
+          assert.equal(coordinate.status,'completed');
+          assert.equal(coordinate.conclusion,'success');
+          const previous = api('GET',`${base}/actions/workflows/release-cli.yml/runs?head_sha=${source}&event=workflow_dispatch&per_page=100`);
+          assert.equal(previous.total_count,0,'Inspect an existing acceptance; never duplicate it');
+          function dispatch(workflow, inputs) {
+            assertMain();
+            const receipt = api('POST',`${base}/actions/workflows/${workflow}/dispatches`,{ref:'main',inputs});
+            record.dispatches.push({workflow,receipt});save();
+            const id=String(receipt.workflow_run_id??'');
+            assert.match(id,/^[1-9][0-9]*$/u,'Uncertain receipt: do not repeat POST');
+            assert.equal(receipt.html_url,`https://github.com/${repository}/actions/runs/${id}`);
+            assert.equal(receipt.run_url,`https://api.github.com/${base}/actions/runs/${id}`);
+            const run=api('GET',`${base}/actions/runs/${id}`);
+            assert.equal(run.head_sha,source);assert.equal(run.head_branch,'main');
+            assert.equal(run.event,'workflow_dispatch');assert.equal(run.run_attempt,1);
+            assert.equal(run.path,`.github/workflows/${workflow}`);
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY,`${workflow}: ${receipt.html_url}\n\n`);
+            console.log(JSON.stringify({workflow,id,source}));
+            return id;
+          }
+          const acceptance=dispatch('release-cli.yml',{});
+          dispatch('queue-pages-publication.yml',{acceptance_run_id:acceptance,snapshot_sha:snapshot});
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,'Coordinate fix only. Solver optimization remains on a separate branch. The old full-fixture timeout has not become a passing result. Canonical acceptance and publication evidence remain required.\n');
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-coordinate-publication-receipts
+          path: _local/artifacts/test/recovery-coordinate-publication
+          if-no-files-found: warn
+          retention-days: 14
