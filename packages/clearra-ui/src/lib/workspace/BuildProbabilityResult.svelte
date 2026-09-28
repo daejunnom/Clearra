@@ -153,7 +153,9 @@
           )
         })
       : null;
-  $: solutionCommentByKey = buildSolutionComments();
+  $: solutionCommentByKey = buildSolutionComments(
+    solutionKeys, solutionProbabilityByKey, finesseView, label, language
+  );
   $: solutionExportKeySource = boundSolutionPageLoader && solutionCount !== null
     ? createPagedSolutionExportKeySource({
         keyCount: solutionCount,
@@ -199,23 +201,29 @@
       policy.success_probability_gap != null;
   }
 
-  function buildSolutionComments(): Record<string, string> {
+  function buildSolutionComments(
+    keys: typeof solutionKeys,
+    probabilityByKey: typeof solutionProbabilityByKey,
+    finesse: typeof finesseView,
+    translate: typeof label,
+    locale: WorkspaceLanguage
+  ): Record<string, string> {
     return Object.fromEntries(
-      solutionKeys.flatMap((key) => {
+      keys.flatMap((key) => {
         const parts: string[] = [];
-        const probability = solutionProbabilityByKey[key];
+        const probability = probabilityByKey[key];
         if (probability) {
           parts.push(
-            `${label('solutionProbability')}: ${workspaceProbability(language, probability.probability)}`
+            `${translate('solutionProbability')}: ${workspaceProbability(locale, probability.probability)}`
           );
         }
-        for (const finesse of finesseView?.solutionByKey[key] ?? []) {
-          const policy = label(
-            finesse.policy === 'oracle' ? 'finesseOraclePolicy' : 'finesseVisibleSevenPolicy'
+        for (const solutionFinesse of finesse?.solutionByKey[key] ?? []) {
+          const policy = translate(
+            solutionFinesse.policy === 'oracle' ? 'finesseOraclePolicy' : 'finesseVisibleSevenPolicy'
           );
-          const materialized = finesse.complete ? '' : ` (${label('finesseMaterialized')})`;
+          const materialized = solutionFinesse.complete ? '' : ` (${translate('finesseMaterialized')})`;
           parts.push(
-            `${label('finesseSolutionAverageInputs')} (${policy}): ${inputCount(finesse.average_inputs)}${materialized}`
+            `${translate('finesseSolutionAverageInputs')} (${policy}): ${formatFinesseInputCount(solutionFinesse.average_inputs, locale)}${materialized}`
           );
         }
         return parts.length ? [[key, parts.join(' | ')]] : [];

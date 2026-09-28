@@ -542,4 +542,7 @@ test('Build rejects malformed or cross-contract coverage summaries as one unit',
   assert.match(resultSource, /authorizedCoverage\?\.successProbability/u);
   assert.match(resultSource, /authorizedCoverage\.failedPatternCount/u);
   assert.match(resultSource, /coverageAggregation\.state === 'rejected'/u);
+  assert.match(resultSource,
+    /buildSolutionComments\(\s*solutionKeys, solutionProbabilityByKey, finesseView, label, language\s*\)/u,
+    'solution comments must react to the result family and active language');
 });

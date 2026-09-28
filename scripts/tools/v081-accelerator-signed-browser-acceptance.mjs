@@ -498,8 +498,14 @@ async function browserAcceptance() {
         window.__showBuildResult({ response, searchReport, mode });
       }, { response: sample.result.response, searchReport: sample.result.search_report ?? null, mode });
       const current = page.locator(`[data-testid="build-result"][data-result-mode="${mode}"]`);
-      await current.waitFor();
-      await current.locator(selector).waitFor();
+      try {
+        await current.waitFor({ timeout: 10_000 });
+        await current.locator(selector).waitFor({ timeout: 10_000 });
+      } catch (error) {
+        const mounted = await page.getByTestId('build-result').count();
+        throw new Error(`${mode}: production Build renderer did not mount; containers=${mounted}; ` +
+          `page_errors=${JSON.stringify(errors.slice(-3))}`, { cause: error });
+      }
     }
     await renderBuild('all-solutions', build.activated, 'section.solutions-section');
     // Lazy products may deliberately leave the generic solution family
