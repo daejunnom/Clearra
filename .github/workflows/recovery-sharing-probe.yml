@@ -1,0 +1,162 @@
+name: Recovery exact continuation sharing probe
+
+on:
+  push:
+    branches: [codex/recovery-sharing-probe-20260928]
+    paths: [.github/workflows/recovery-sharing-probe.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  sharing:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASE: 0a79456263dd0a76ef6a24ec24f916df81549f8e
+      REPORT: _local/artifacts/test/recovery-sharing-probe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 0a79456263dd0a76ef6a24ec24f916df81549f8e
+          fetch-depth: 0
+      - name: Apply the finite structural-bound quotient; keep actual early counts in replay
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE"
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          rustup show
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('crates/clearra-forward-search/src/recovery_build/staged')
+          def once(s,a,b):
+              assert s.count(a)==1, a
+              return s.replace(a,b,1)
+          p=root/'solver.rs';s=p.read_text()
+          s=once(s,'    pub(super) literal_memo: bool,','    pub(super) literal_memo: bool,\n    #[cfg(test)]\n    pub(super) literal_early: bool,')
+          s=once(s,'            literal_memo: false,','            literal_memo: false,\n            #[cfg(test)]\n            literal_early: false,')
+          s=once(s,'        key\n    }\n    fn remember(','''        #[cfg(test)]
+                  if self.literal_early {
+                      return key;
+                  }
+                  let pos = self.geometry.position(key.geometry);
+                  let structural = usize::from(self.source.first_len).min(
+                      self.geometry.stages[usize::from(pos.stage)].prepared.result_pieces,
+                  );
+                  if self.maximum == structural {
+                      // With no tighter user bound, each early placement already
+                      // consumes a different first token and result role. The
+                      // bound can never reject a further geometrically possible
+                      // early edge. Only zero versus positive affects whether a
+                      // completed path qualifies as Repair. Actual counts remain
+                      // untouched in execution keys and are replayed exactly.
+                      key.early = u8::from(key.early > 0);
+                  }
+                  key
+              }
+              fn remember(''')
+          p.write_text(s)
+          p=root/'tests.rs';s=p.read_text()
+          old='''    literal: bool,
+              start: usize,
+              rows: usize,
+          ) -> (Vec<(bool, bool)>, [u128; 3], u128) {'''
+          new='''    literal: bool,
+              start: usize,
+              rows: usize,
+          ) -> (Vec<(bool, bool)>, [u128; 3], u128) {
+              memo_answers_mode(q, literal, false, start, rows)
+          }
+          fn memo_answers_mode(
+              q: &RecoveryBuildQuery,
+              literal: bool,
+              literal_early: bool,
+              start: usize,
+              rows: usize,
+          ) -> (Vec<(bool, bool)>, [u128; 3], u128) {'''
+          s=once(s,old,new)
+          s=once(s,'    b.solver.literal_memo = literal;','    b.solver.literal_memo = literal;\n    b.solver.literal_early = literal_early;')
+          s += '''
+          #[test]
+          #[ignore = "finite managed exact sharing A/B; not a fixture-specific production policy"]
+          fn recovery_build_sharing_benchmark() {
+              let mut q = query();
+              q.fields.height = 10;
+              q.fields.initial = mask(0xc0383f3fc7);
+              q.fields.middle = mask(0x3ff3fc7c0c038);
+              q.fields.result = mask(0x30483f07f3f8f);
+              q.first_supply = "P7".into();
+              q.second_supply = "P7".into();
+              q.preserve_b2b = true;
+              q.allow_piece_exchange = true;
+              for start in [0_usize, 480, 2400, 4920] {
+                  let now = std::time::Instant::now();
+                  let mut old_answers = Vec::new();
+                  let mut old_counts = [0_u128; 3];
+                  let mut old_states = 0;
+                  for offset in (0..120).step_by(32) {
+                      let old = memo_answers_mode(&q, false, true, start + offset, (120-offset).min(32));
+                      old_answers.extend(old.0);
+                      for i in 0..3 { old_counts[i] += old.1[i]; }
+                      old_states += old.2;
+                  }
+                  let old_ms = now.elapsed().as_millis();
+                  let now = std::time::Instant::now();
+                  let mut small_answers = Vec::new();
+                  let mut small_counts = [0_u128; 3];
+                  let mut small_states = 0;
+                  for offset in (0..120).step_by(32) {
+                      let small = memo_answers(&q, false, start + offset, (120-offset).min(32));
+                      small_answers.extend(small.0);
+                      for i in 0..3 { small_counts[i] += small.1[i]; }
+                      small_states += small.2;
+                  }
+                  let small_ms = now.elapsed().as_millis();
+                  assert_eq!(small_answers, old_answers);
+                  assert_eq!(small_counts, old_counts);
+                  let now = std::time::Instant::now();
+                  let wide = memo_answers(&q, false, start, 120);
+                  let wide_ms = now.elapsed().as_millis();
+                  assert_eq!(wide.0, old_answers, "every 604800 pair must agree at {start}");
+                  assert_eq!(wide.1, old_counts);
+                  eprintln!("sharing_ab first_start={start} first_rows=120 counts={:?} old_states={old_states} early_states={small_states} wide_states={} old_ms={old_ms} early_ms={small_ms} wide_ms={wide_ms}",wide.1,wide.2);
+              }
+          }
+          '''
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          git diff --check
+          mkdir -p "$REPORT"
+          git diff --binary > "$REPORT/proposal.patch"
+          python3 - <<'PY'
+          import subprocess
+          p='crates/clearra-forward-search/src/recovery_build/staged/'
+          assert set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()) == {p+'solver.rs',p+'tests.rs'}
+          PY
+          git add -- crates/clearra-forward-search/src/recovery_build/staged/solver.rs crates/clearra-forward-search/src/recovery_build/staged/tests.rs
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'perf(recovery): share nonbinding early-count answers without altering execution'
+          proposal=codex/recovery-sharing-result-20260928
+          test -z "$(git ls-remote --heads origin refs/heads/$proposal)"
+          git push origin "HEAD:refs/heads/$proposal"
+          git rev-parse HEAD > "$REPORT/source-sha.txt"
+          git rev-parse HEAD^{tree} > "$REPORT/source-tree.txt"
+      - name: Exact oracle and replay checks, including bounded and unbounded early counts
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p clearra-forward-search recovery_build -- --nocapture --test-threads=1 2>&1 | tee "$REPORT/core.log"
+          cargo build --locked --release -p clearra-manage
+      - name: Compare all pairs in each first-language shard under one resource lease
+        run: |
+          set -euo pipefail
+          build/cargo/default/release/clearra-manage --root . runtime run --producer recovery-sharing-ab --profile benchmark-search --timeout 420 -- \
+            cargo test --locked --release -p clearra-forward-search recovery_build_sharing_benchmark -- --ignored --nocapture --test-threads=1 2>&1 | tee "$REPORT/benchmark.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-sharing-probe
+          path: _local/artifacts/test/recovery-sharing-probe/
+          retention-days: 14
