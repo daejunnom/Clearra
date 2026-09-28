@@ -80,6 +80,8 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes("realCliProductProjectionRequests('srs-plus')"));
   assert.ok(browser.includes("['minimum', 'score-minimum', 'replay']"));
   assert.ok(browser.includes("results['srs-plus'].products[name] = {"));
+  assert.ok(browser.includes('productSearchMeaning(pair.activated)'));
+  assert.ok(!browser.includes('assert.deepEqual(compact(pair.activated), compact(pair.baseline)'));
   assert.ok(browser.includes('assert.deepEqual(pair.activated.result.response.product_result_payload,'));
   assert.ok(browser.includes("'srs-x': 289"));
   assert.ok(browser.includes('assert.deepEqual(activated, baseline'));

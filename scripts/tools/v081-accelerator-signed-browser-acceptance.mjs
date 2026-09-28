@@ -455,6 +455,26 @@ async function browserAcceptance() {
     }
     assert.deepEqual(compact(build.activated), buildBaseline,
       'installed accelerators must preserve complete Web Build probability results');
+    // Minimum/score/replay use live product pages. Their generic SearchReport
+    // may intentionally leave the solution set unmaterialized, so a zero
+    // generic unique_solution_count does not mean the product is empty.
+    const productSearchMeaning = ({ result }) => {
+      const report = result.search_report;
+      return {
+        solutionFound: report.solution_found,
+        countComplete: report.count_complete,
+        solutionCountCalculated: report.solution_count_calculated,
+        solutionSetMaterialized: report.solution_set_materialized,
+        solutionPageAvailable: report.solution_page_available,
+        uniqueSolutionCount: report.unique_solution_count,
+        normalizedSolutionKeys: report.normalized_solution_keys,
+        normalizedSolutionSetHash: report.normalized_solution_set_hash,
+        coveredPatternCount: report.covered_pattern_count,
+        totalPossiblePatternCount: report.total_possible_pattern_count,
+        coverageProbability: report.coverage_probability,
+        probabilityComplete: report.probability_complete,
+      };
+    };
     for (const [name, input] of Object.entries(pcProductInputs)) {
       const pair = execution.results['srs-plus'].products[name];
       for (const sample of Object.values(pair)) {
@@ -478,7 +498,7 @@ async function browserAcceptance() {
           assert.ok(payload.content.payload.members.length > 0);
         }
       }
-      assert.deepEqual(compact(pair.activated), compact(pair.baseline),
+      assert.deepEqual(productSearchMeaning(pair.activated), productSearchMeaning(pair.baseline),
         `srs-plus/${name}: installed accelerators must preserve complete search results`);
       assert.deepEqual(pair.activated.result.response.product_result_payload,
         pair.baseline.result.response.product_result_payload,
