@@ -28,17 +28,22 @@ jobs:
           git checkout --detach "$BASE"
           git apply --check "$RUNNER_TEMP/recovery.patch"
           git apply "$RUNNER_TEMP/recovery.patch"
+          # This token may publish source but not workflow changes. Retain the
+          # baseline workflow; the operator must review and write CI separately.
+          git restore --source="$BASE" --staged --worktree .github/workflows/recovery-complete-results.yml
+          git diff --exit-code -- .github/workflows
           git diff --check
-      - name: Format with the pinned workspace toolchain and retain proposal
+      - name: Format with the pinned workspace toolchain and retain source-only proposal
         run: |
           set -euo pipefail
           rustup show
-          git add -- .github/workflows/recovery-complete-results.yml crates packages scripts/tools tests/fixtures/recovery-build/browser-example.json
+          git add -- crates packages scripts/tools tests/fixtures/recovery-build/browser-example.json
           git diff --cached --name-only > "$RUNNER_TEMP/recovery-expected-paths.txt"
           cargo fmt --all
-          git add -- .github/workflows/recovery-complete-results.yml crates packages scripts/tools tests/fixtures/recovery-build/browser-example.json
+          git add -- crates packages scripts/tools tests/fixtures/recovery-build/browser-example.json
           git diff --cached --name-only > "$RUNNER_TEMP/recovery-actual-paths.txt"
           diff -u "$RUNNER_TEMP/recovery-expected-paths.txt" "$RUNNER_TEMP/recovery-actual-paths.txt"
+          git diff --cached --exit-code -- .github/workflows
           cargo fmt --all --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -61,6 +66,7 @@ jobs:
           version: 11.5.0
           run_install: false
       - name: Locked dependency preparation
+        id: dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Core, exact minimum and host tests
         shell: bash
@@ -74,7 +80,7 @@ jobs:
           cargo test --locked -p clearra-wasm --test recovery_build_wire 2>&1 | tee "$output/wire.log" || result=1
           exit "$result"
       - name: UI contracts
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         shell: bash
         run: |
           set -uo pipefail
@@ -85,7 +91,7 @@ jobs:
           pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee "$output/types.log" || result=1
           exit "$result"
       - name: Real Svelte editor and rendering
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         shell: bash
         run: |
           set -uo pipefail
