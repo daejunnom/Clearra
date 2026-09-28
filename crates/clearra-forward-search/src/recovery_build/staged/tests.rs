@@ -399,3 +399,58 @@ fn recovery_build_staged_fixture_benchmark() {
         eprintln!("stage_benchmark_result exchange={exchange} counts={:?} probabilities={:?} elapsed_ms={}",report.counts,report.probabilities,now.elapsed().as_millis());
     }
 }
+
+#[test]
+fn recovery_build_staged_memo_repeated_tokens_keep_origin_and_witness() {
+    for count in [2_usize, 3] {
+        let mut q = query();
+        let columns = (0..count).fold(0_u64, |m, x| m | (1 << (2 * x)));
+        q.fields.middle = mask((0..4).fold(0, |m, y| m | (columns << (10 * y))));
+        q.fields.result = mask((0..count * 2).fold(0, |m, y| m | (0x300 << (10 * y))));
+        q.first_supply = if count == 2 { "[IO][IO]" } else { "[IO]I[IO]" }.into();
+        q.second_supply = if count == 2 { "[IO][IO]" } else { "[IO]O[IO]" }.into();
+        for hold in [false, true] {
+            for exchange in [false, true] {
+                for early in [CrossStageEarlyLimit::Auto, CrossStageEarlyLimit::AtMost(1)] {
+                    q.hold_enabled = hold;
+                    q.allow_piece_exchange = exchange;
+                    q.early_limit = early;
+                    // compare checks EVERY original input pair against
+                    // the independent fixed-queue forward solver. It
+                    // also checks original token IDs and real replay.
+                    compare(q.clone());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "bounded managed A/B, not a full-population acceptance"]
+fn recovery_build_memo_fixture_ab() {
+    let control = ExecutionControl::default();
+    for start in [0_usize, 1152, 2496] {
+        for exchange in [false, true] {
+            let mut q = query();
+            q.fields.height = 10;
+            q.fields.initial = mask(0xc0383f3fc7);
+            q.fields.middle = mask(0x3ff3fc7c0c038);
+            // Engine coordinates: the UI independently lowers the
+            // unchanged shared-frame screenshot by its five clears.
+            q.fields.result = mask(0x30483f07f3f8f);
+            q.first_supply = "P7".into();
+            q.second_supply = "P7".into();
+            q.preserve_b2b = true;
+            q.allow_piece_exchange = exchange;
+            let p = PreparedPopulation::new(q.clone()).unwrap();
+            let now = std::time::Instant::now();
+            let geometry = Geometry::new(&q, &control).unwrap();
+            let mut b = Block::new(&p, geometry, start, 32, 3, &control).unwrap();
+            while !b.advance(&control).unwrap() {}
+            let states = b.solver.states;
+            let (report, geometry) = b.finish(&p, &control).unwrap();
+            assert_eq!(report.counts.iter().sum::<u128>(), 32 * 5040);
+            eprintln!("memo_ab start={start} exchange={exchange} counts={:?} states={states} geometry_queries={} elapsed_ms={}", report.counts, geometry.lock_queries, now.elapsed().as_millis());
+        }
+    }
+}

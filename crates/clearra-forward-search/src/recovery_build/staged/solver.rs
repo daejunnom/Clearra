@@ -222,7 +222,7 @@ impl Solver {
     }
     fn tick(&mut self, machine: &mut Machine, control: &ExecutionControl) -> Result<(), Error> {
         if let Some(key) = machine.pending.take() {
-            if let Some(&value) = self.memo.get(&key) {
+            if let Some(&value) = self.memo.get(&self.memo_key(key)) {
                 if key.mode == Mode::Tail {
                     self.suffix_hits += 1;
                 }
@@ -297,11 +297,34 @@ impl Solver {
         }
         Ok(())
     }
+    /// Memoize future coverage, not a replay's past token numbering.
+    /// The exact index is observed by search only through its source
+    /// side; the live Key and Map::Place retain it for witness replay.
+    /// When cross-kind repayment is allowed, exchange balance is an
+    /// output metric, not a remaining acceptance condition. Keep the
+    /// per-target inventories (caps), board, clear history, B2B, unread
+    /// languages, depth, hold permission and early quota unchanged.
+    fn memo_key(&self, mut key: Key) -> Key {
+        let origin = |token: Token| Token {
+            index: if token.index < self.source.first_len {
+                0
+            } else {
+                self.source.first_len
+            },
+            ..token
+        };
+        key.active = key.active.map(origin);
+        key.hold = key.hold.map(origin);
+        if self.query.allow_piece_exchange {
+            key.exchange = [0; 7];
+        }
+        key
+    }
     fn remember(&mut self, key: Key, value: Id) -> Result<(), Error> {
         self.memo
             .try_reserve(1)
             .map_err(|_| Error::MemoryUnavailable)?;
-        self.memo.insert(key, value);
+        self.memo.insert(self.memo_key(key), value);
         Ok(())
     }
     fn map(&mut self, value: Id, map: Map) -> Result<Id, Error> {
@@ -574,7 +597,7 @@ impl Solver {
                 Prepared::Actions(actions) => {
                     let mut selected = None;
                     for action in actions {
-                        if let Some(&value) = self.memo.get(&action.child) {
+                        if let Some(&value) = self.memo.get(&self.memo_key(action.child)) {
                             let value = self.map(value, action.map)?;
                             if self.accepts(value, key.depth, &queue) {
                                 selected = Some(action);
