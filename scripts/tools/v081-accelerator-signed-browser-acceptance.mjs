@@ -225,7 +225,7 @@ async function browserAcceptance() {
       });
       const workers = Math.min(3, logicalProcessors);
       const workerAuthority = resolveWorkerAuthority(snapshot, workers);
-      async function run(legal, relation) {
+      async function run(legal, relation, input) {
         const rootWorker = new Worker('/workers/clearraWorker.ts', { type: 'module' });
         let timeout;
         try {
@@ -239,8 +239,11 @@ async function browserAcceptance() {
               }
             });
           });
-          const commandText = 'clearra pc --lines 4 --height 4 --board-mask 0x3c0f03c0f ' +
-            '--pieces 6 --patterns P7 --hold empty --objective unique --count unique ' +
+          const inputArgs = input === 'existing'
+            ? '--board-mask 0x3c0f03c0f --pieces 6 --patterns P7 --hold empty'
+            : '--board-mask 0 --pieces 10 --queue IIOOOIIOOO --no-hold';
+          const commandText = `clearra pc --lines 4 --height 4 ${inputArgs} ` +
+            '--objective unique --count unique ' +
             `--solution-probabilities --backend cpu --workers ${workers} --rule srs --no-tablebase ` +
             (legal ? '--legal-board ' : '--no-legal-board ') +
             (relation ? '--conditioned-reachability' : '--no-conditioned-reachability');
@@ -257,15 +260,25 @@ async function browserAcceptance() {
           rootWorker.terminate();
         }
       }
-      return { baseline: await run(false, false), activated: await run(true, true), workers };
+      return {
+        existing: {
+          baseline: await run(false, false, 'existing'),
+          activated: await run(true, true, 'existing')
+        },
+        eligible: {
+          baseline: await run(false, false, 'eligible'),
+          activated: await run(true, true, 'eligible')
+        },
+        workers
+      };
     });
-    const compact = ({ result }) => {
+    const compact = ({ result }, expectedCount) => {
       assert.equal(result.event, 'final_response');
       assert.equal(result.response.status, 'success');
       assert.deepEqual(result.response.runtime_identity, manifest.build.runtime_identity);
       const report = result.search_report;
-      assert.equal(report.unique_solution_count, 245);
-      assert.equal(report.normalized_solution_keys.length, 245);
+      assert.equal(report.unique_solution_count, expectedCount);
+      assert.equal(report.normalized_solution_keys.length, expectedCount);
       return {
         keys: report.normalized_solution_keys,
         hash: report.normalized_solution_set_hash,
@@ -275,23 +288,30 @@ async function browserAcceptance() {
         probabilities: report.solution_probabilities,
       };
     };
-    assert.deepEqual(compact(execution.activated), compact(execution.baseline),
-      'installed accelerators must preserve the complete browser result');
-    assert.equal(execution.activated.result.search_report.cpu_parallel_execution, true,
-      'the browser product must execute its distributed CPU path');
-    assert.equal(execution.activated.result.search_report.workers_used, execution.workers,
-      'the browser product must report the requested worker count without silent reduction');
-    const baselineFields = new Map(execution.baseline.result.search_report.summary_fields);
-    const activatedFields = new Map(execution.activated.result.search_report.summary_fields);
-    assert.equal(baselineFields.get('conditioned_reachability_snapshot_active'), 'false');
-    assert.equal(activatedFields.get('conditioned_reachability_requested'), 'true');
-    assert.equal(activatedFields.get('conditioned_reachability_snapshot_active'), 'true',
-      'the browser root must activate the OPFS relation generation, not silently use exact fallback');
+    for (const [name, pair, expectedCount] of [
+      ['existing-field', execution.existing, 245],
+      ['eligible-empty-4L', execution.eligible, 159]
+    ]) {
+      assert.deepEqual(compact(pair.activated, expectedCount), compact(pair.baseline, expectedCount),
+        `${name}: installed accelerators must preserve the complete browser result`);
+      assert.equal(pair.activated.result.search_report.cpu_parallel_execution, true,
+        `${name}: the browser product must execute its distributed CPU path`);
+      assert.equal(pair.activated.result.search_report.workers_used, execution.workers,
+        `${name}: the browser product must report the requested worker count without silent reduction`);
+      const baselineFields = new Map(pair.baseline.result.search_report.summary_fields);
+      const activatedFields = new Map(pair.activated.result.search_report.summary_fields);
+      assert.equal(baselineFields.get('conditioned_reachability_snapshot_active'), 'false');
+      assert.equal(activatedFields.get('conditioned_reachability_requested'), 'true');
+      assert.equal(activatedFields.get('conditioned_reachability_snapshot_active'), 'true',
+        `${name}: the browser root must activate the OPFS relation generation`);
+      assert.match(activatedFields.get('legal_board_verified_negative_prunes') ?? '', /^\d+$/u,
+        `${name}: retain the legal-board pruning counter, including zero outside its scope`);
+    }
     assert.ok(verifierRequests.length >= 1, 'the actual verifier worker must be loaded');
     assert.equal(assetRequests.length, 2, 'a search must read OPFS, not re-download signed assets');
     assert.deepEqual(errors, []);
     await context.close();
-    console.log('v0.8.1 signed browser UI and product pool: OPFS, cross-tab read, actual verifier workers and complete result parity passed');
+    console.log('v0.8.1 signed browser UI and product pool: OPFS, cross-tab read, actual verifier workers and complete existing/eligible result parity passed');
   } finally {
     await browser?.close();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
