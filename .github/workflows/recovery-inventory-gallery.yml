@@ -1,0 +1,54 @@
+name: Recovery inventory and gallery regression
+on:
+  push:
+    branches: [codex/recovery-inventory-gallery-20260929]
+permissions:
+  contents: read
+concurrency:
+  group: recovery-inventory-gallery-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  review-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Preserve tracked source without local credentials
+        run: |
+          mkdir -p _local/artifacts/test/recovery-inventory
+          git archive --format=tar HEAD | gzip > _local/artifacts/test/recovery-inventory/source.tar.gz
+          git rev-parse HEAD > _local/artifacts/test/recovery-inventory/source-sha.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+      - name: Preserve locked frontend test dependencies for offline review
+        run: |
+          tar -czf _local/artifacts/test/recovery-inventory/frontend-dependencies.tar.gz node_modules packages/clearra-ui/node_modules packages/ctk3/dist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-inventory-review-source
+          path: _local/artifacts/test/recovery-inventory/
+          retention-days: 7
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup show
+      - name: Core, command and distributed invariants
+        run: |
+          cargo test --locked -p clearra-forward-search recovery_build -- --test-threads=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --test-threads=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1
