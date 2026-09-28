@@ -1,0 +1,100 @@
+name: Dispatch verified Recovery publication
+
+on:
+  push:
+    branches: [codex/dispatch-recovery-release-20260928]
+    paths: [.github/workflows/recovery-release-dispatch.yml]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: dispatch-recovery-release-1868d31
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.repository == 'daejunnom/Clearra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 1868d31da7730cc9d3018aecd18e442c6940a5d7
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Dispatch the unchanged canonical acceptance and Pages queue owners
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+          import { githubApi as api } from './scripts/release/queue-pages-publication.mjs';
+
+          const repository = 'daejunnom/Clearra';
+          const source = '1868d31da7730cc9d3018aecd18e442c6940a5d7';
+          const snapshot = '7915a7eb68f0531732684c7f4f3ff9372ca324ad';
+          const base = `repos/${repository}`;
+          const report = '_local/artifacts/test/recovery-release-dispatch';
+          assert.equal(process.env.GITHUB_REPOSITORY, repository);
+          assert.equal(process.env.GITHUB_REF, 'refs/heads/codex/dispatch-recovery-release-20260928');
+          assert.equal(process.env.GITHUB_RUN_ATTEMPT, '1', 'Do not rerun a dispatch owner.');
+          assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), source);
+          mkdirSync(report, { recursive: true });
+          const receipt = { source_commit: source, snapshot_sha: snapshot, dispatches: [] };
+          const save = () => writeFileSync(`${report}/dispatch-receipts.json`, JSON.stringify(receipt, null, 2) + '\n');
+          const assertMain = () => assert.equal(api('GET', `${base}/git/ref/heads/main`).object.sha, source);
+          assertMain();
+          assert.equal(api('GET', `${base}/git/ref/heads/codex/converge-recovery-stage-20260928`).object.sha, source);
+          for (const [id, workflow] of [
+            ['36387494406', 'recovery-stage-regression.yml'],
+            ['36387494429', 'management-policy.yml'],
+          ]) {
+            const run = api('GET', `${base}/actions/runs/${id}`);
+            assert.equal(String(run.id), id);
+            assert.equal(run.head_sha, source);
+            assert.equal(run.head_branch, 'codex/converge-recovery-stage-20260928');
+            assert.equal(run.event, 'push');
+            assert.equal(run.path, `.github/workflows/${workflow}`);
+            assert.equal(run.repository.full_name, repository);
+            assert.equal(run.status, 'completed');
+            assert.equal(run.conclusion, 'success');
+          }
+          const prior = api('GET', `${base}/actions/workflows/release-cli.yml/runs?head_sha=${source}&event=workflow_dispatch&per_page=100`);
+          assert.equal(prior.total_count, 0, 'An acceptance already exists; inspect it instead of dispatching twice.');
+
+          function dispatch(workflow, inputs) {
+            assertMain();
+            const created = api('POST', `${base}/actions/workflows/${workflow}/dispatches`, { ref: 'main', inputs });
+            receipt.dispatches.push({ workflow, receipt: created });
+            save();
+            const id = String(created.workflow_run_id ?? '');
+            assert.match(id, /^[1-9][0-9]*$/u, 'Uncertain POST receipt: do not retry.');
+            assert.equal(created.html_url, `https://github.com/${repository}/actions/runs/${id}`);
+            assert.equal(created.run_url, `https://api.github.com/${base}/actions/runs/${id}`);
+            const run = api('GET', `${base}/actions/runs/${id}`);
+            assert.equal(run.head_sha, source);
+            assert.equal(run.head_branch, 'main');
+            assert.equal(run.event, 'workflow_dispatch');
+            assert.equal(run.path, `.github/workflows/${workflow}`);
+            console.log(`${workflow}: ${id}, exact source ${source}`);
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${workflow}: ${created.html_url}\n\n`);
+            return id;
+          }
+          const acceptance = dispatch('release-cli.yml', {});
+          dispatch('queue-pages-publication.yml', { acceptance_run_id: acceptance, snapshot_sha: snapshot });
+          JS
+      - name: Retain dispatch ownership receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-release-dispatch-receipts
+          path: _local/artifacts/test/recovery-release-dispatch/
+          if-no-files-found: warn
+          retention-days: 7
