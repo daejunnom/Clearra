@@ -98,6 +98,8 @@ pub(super) struct Solver {
     query: RecoveryBuildQuery,
     maximum: usize,
     memo: HashMap<Key, Id>,
+    #[cfg(test)]
+    pub(super) exact_provenance_memo: bool,
     machine: Option<Machine>,
     root: Option<Key>,
     roots: Vec<Root>,
@@ -131,6 +133,8 @@ impl Solver {
             query,
             maximum,
             memo: HashMap::new(),
+            #[cfg(test)]
+            exact_provenance_memo: false,
             machine: None,
             root: None,
             roots: Vec::new(),
@@ -222,7 +226,7 @@ impl Solver {
     }
     fn tick(&mut self, machine: &mut Machine, control: &ExecutionControl) -> Result<(), Error> {
         if let Some(key) = machine.pending.take() {
-            if let Some(&value) = self.memo.get(&key) {
+            if let Some(&value) = self.memo.get(&self.memo_key(key)) {
                 if key.mode == Mode::Tail {
                     self.suffix_hits += 1;
                 }
@@ -297,11 +301,40 @@ impl Solver {
         }
         Ok(())
     }
+    /// Quotient only the coverage memo key. Actual source indices and balances
+    /// remain on execution keys and are reconstructed by witness(). A token's
+    /// historical offset is not a future legality condition: only its type
+    /// and which of the two supplies it belongs to are inspected by actions.
+    fn memo_key(&self, mut key: Key) -> Key {
+        #[cfg(test)]
+        if self.exact_provenance_memo {
+            return key;
+        }
+        for token in [&mut key.active, &mut key.hold].into_iter().flatten() {
+            token.index = if token.index < self.source.first_len {
+                0
+            } else {
+                self.source.first_len
+            };
+        }
+        // When different-piece repayment is enabled this vector is output
+        // evidence, not a constraint. The exact witness still accumulates it.
+        if self.query.allow_piece_exchange {
+            key.exchange = [0; 7];
+        }
+        // Auto cannot bind before exhausting the available first-source
+        // tokens or result cells. Repair still needs at least one early lock.
+        // A user-specified quota, however, keeps the exact count in its key.
+        if matches!(self.query.early_limit, crate::CrossStageEarlyLimit::Auto) {
+            key.early = u8::from(key.early != 0);
+        }
+        key
+    }
     fn remember(&mut self, key: Key, value: Id) -> Result<(), Error> {
         self.memo
             .try_reserve(1)
             .map_err(|_| Error::MemoryUnavailable)?;
-        self.memo.insert(key, value);
+        self.memo.insert(self.memo_key(key), value);
         Ok(())
     }
     fn map(&mut self, value: Id, map: Map) -> Result<Id, Error> {
@@ -574,7 +607,7 @@ impl Solver {
                 Prepared::Actions(actions) => {
                     let mut selected = None;
                     for action in actions {
-                        if let Some(&value) = self.memo.get(&action.child) {
+                        if let Some(&value) = self.memo.get(&self.memo_key(action.child)) {
                             let value = self.map(value, action.map)?;
                             if self.accepts(value, key.depth, &queue) {
                                 selected = Some(action);

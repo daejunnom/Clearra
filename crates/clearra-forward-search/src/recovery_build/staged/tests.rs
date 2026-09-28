@@ -399,3 +399,68 @@ fn recovery_build_staged_fixture_benchmark() {
         eprintln!("stage_benchmark_result exchange={exchange} counts={:?} probabilities={:?} elapsed_ms={}",report.counts,report.probabilities,now.elapsed().as_millis());
     }
 }
+
+#[test]
+fn recovery_build_staged_memo_keeps_origin_quotas_and_witness_indices() {
+    for hold in [false, true] {
+        for exchange in [false, true] {
+            for clear in [false, true] {
+                for limit in [CrossStageEarlyLimit::Auto, CrossStageEarlyLimit::AtMost(1)] {
+                    let mut q = query();
+                    q.fields.initial = mask(if clear { 0x3f0 | (0x3f0 << 10) } else { 0 });
+                    q.fields.middle = mask(15 | (15 << 10));
+                    q.fields.result = mask((0..4).fold(0, |m, y| m | (0x30 << (10 * y))));
+                    q.first_supply = "[IO][IO]".into();
+                    q.second_supply = "[IO][IO]".into();
+                    q.hold_enabled = hold;
+                    q.allow_piece_exchange = exchange;
+                    q.early_limit = limit;
+                    // Every pair is checked against the independent fixed
+                    // queue search, then its representative is replayed.
+                    compare(q);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "finite managed A/B with identical input, binary and worker count"]
+fn recovery_build_staged_memo_original_fixture_ab() {
+    let control = ExecutionControl::default();
+    let mut q = query();
+    q.fields.height = 10;
+    q.fields.initial = mask(0xc0383f3fc7);
+    q.fields.middle = mask(0x3ff3fc7c0c038);
+    // This is the existing engine's after-middle contract, not an
+    // edit of the original shared-frame UI fixture.
+    q.fields.result = mask(0x30483f07f3f8f);
+    q.first_supply = "P7".into();
+    q.second_supply = "P7".into();
+    q.preserve_b2b = true;
+    for exchange in [false, true] {
+        q.allow_piece_exchange = exchange;
+        let p = PreparedPopulation::new(q.clone()).unwrap();
+        for start in [0, 1600, 3200] {
+            let mut expected: Option<([u128; 3], [f64; 3])> = None;
+            for exact in [true, false] {
+                let now = std::time::Instant::now();
+                let geometry = Geometry::new(&q, &control).unwrap();
+                let mut b = Block::new(&p, geometry, start, 32, 3, &control).unwrap();
+                b.solver.exact_provenance_memo = exact;
+                while !b.advance(&control).unwrap() {}
+                let nodes = b.solver.diagram.node_count();
+                let (report, _) = b.finish(&p, &control).unwrap();
+                eprintln!("memo_ab exchange={exchange} start={start} exact={exact} elapsed_ms={} states={} nodes={nodes} counts={:?} probabilities={:?}", now.elapsed().as_millis(), report.states, report.counts, report.probabilities);
+                if let Some((counts, probabilities)) = expected {
+                    assert_eq!(report.counts, counts);
+                    for (a, b) in report.probabilities.into_iter().zip(probabilities) {
+                        assert!((a - b).abs() < 1e-12);
+                    }
+                } else {
+                    expected = Some((report.counts, report.probabilities));
+                }
+            }
+        }
+    }
+}
