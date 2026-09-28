@@ -301,9 +301,13 @@ impl Solver {
     /// The exact index is observed by search only through its source
     /// side; the live Key and Map::Place retain it for witness replay.
     /// When cross-kind repayment is allowed, exchange balance is an
-    /// output metric, not a remaining acceptance condition. Keep the
-    /// per-target inventories (caps), board, clear history, B2B, unread
-    /// languages, depth, hold permission and early quota unchanged.
+    /// output metric, not a remaining acceptance condition. Its caps use
+    /// only the combined used inventory, never the historical split.
+    /// A quota at least as large as every possible early placement
+    /// cannot bind; only whether repair has started matters in that
+    /// case. All live counters and tokens remain exact for witnesses.
+    /// Keep board/clear/B2B, source languages, hold permission, depth,
+    /// source side, and every binding quota or inventory distinction.
     fn memo_key(&self, mut key: Key) -> Key {
         let origin = |token: Token| Token {
             index: if token.index < self.source.first_len {
@@ -317,6 +321,19 @@ impl Solver {
         key.hold = key.hold.map(origin);
         if self.query.allow_piece_exchange {
             key.exchange = [0; 7];
+            for p in 0..7 {
+                // At most 120 placements fit the two 24-row targets.
+                key.middle_counts[p] += key.result_counts[p];
+                key.result_counts[p] = 0;
+            }
+        }
+        let pos = self.geometry.position(key.geometry);
+        let prepared = &self.geometry.stages[usize::from(pos.stage)].prepared;
+        let possible_early = usize::from(self.source.first_len)
+            .min(prepared.middle_pieces)
+            .min(prepared.result_pieces);
+        if self.maximum >= possible_early {
+            key.early = u8::from(key.early != 0);
         }
         key
     }
