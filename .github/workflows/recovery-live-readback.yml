@@ -42,7 +42,8 @@ jobs:
           repo = 'daejunnom/Clearra'
           source = '1868d31da7730cc9d3018aecd18e442c6940a5d7'
           base = 'https://daejunnom.github.io/Clearra/'
-          identity_sha = '6a5b8fce5f68bcc1e05c3a0c1be048f06414a47fc952f55f91d5bd91da5802fb'
+          identity_canonical_sha = '6a5b8fce5f68bcc1e05c3a0c1be048f06414a47fc952f55f91d5bd91da5802fb'
+          identity_file_sha = '012f91e8f87b0d839389695987bb38e6ddff921da685400f0e2bc6f968d42996'
           root = pathlib.Path('_local/artifacts/test/recovery-live-readback')
           accepted = root / 'accepted'
           root.mkdir(parents=True, exist_ok=True)
@@ -104,8 +105,10 @@ jobs:
                   assert run['status'] == 'completed' and run['conclusion'] == 'success'
                   assert run['run_attempt'] == 1
               expected_identity = (accepted / 'clearra-build-identity.json').read_bytes()
-              assert hashlib.sha256(expected_identity).hexdigest() == identity_sha
+              assert hashlib.sha256(expected_identity).hexdigest() == identity_file_sha, 'Accepted identity file bytes differ'
               identity = json.loads(expected_identity)
+              canonical_identity = json.dumps(identity, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+              assert hashlib.sha256(canonical_identity).hexdigest() == identity_canonical_sha, 'Canonical acceptance identity differs'
               assert identity['sourceCommit'] == source and identity['engineBuildId'] == source
               assert identity['acceptedRunId'] == '36388470463' and identity['acceptedRunAttempt'] == '1'
               assert identity['basePath'] == '/Clearra'
@@ -128,8 +131,8 @@ jobs:
               assert public_bytes('clearra-build-identity.json', len(expected_identity)) == expected_identity
               check_main()
               report.update(status='passed', verified_payload_count=len(entries),
-                            identity_sha256=identity_sha, identity_stable_before_after=True,
-                            root_html_matches=True, main_stable_before_after=True)
+                            identity_canonical_sha256=identity_canonical_sha, identity_file_sha256=identity_file_sha,
+                            identity_stable_before_after=True, root_html_matches=True, main_stable_before_after=True)
               print('PASS: public payloads=' + str(len(entries)) + '; source=' + source)
           except Exception as error:
               report.update(status='failed', error_type=type(error).__name__, error=str(error))
