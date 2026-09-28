@@ -132,7 +132,7 @@ jobs:
                   q.allow_piece_exchange = exchange;
                   let p = PreparedPopulation::new(q.clone()).unwrap();
                   for start in [0, 1600, 3200] {
-                      let mut expected = None;
+                      let mut expected: Option<([u128; 3], [f64; 3])> = None;
                       for exact in [true, false] {
                           let now = std::time::Instant::now();
                           let geometry = Geometry::new(&q, &control).unwrap();
@@ -173,13 +173,11 @@ jobs:
       - name: Exact core, native host and distributed protocol regressions
         shell: bash
         run: |
-          set -uo pipefail
-          result=0
-          cargo test --locked --release -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$REPORT/core.log" || result=1
-          cargo test --locked --release -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$REPORT/cli.log" || result=1
-          cargo test --locked --release -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$REPORT/wire.log" || result=1
-          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$REPORT/wasm.log" || result=1
-          exit "$result"
+          set -euo pipefail
+          cargo test --locked --release -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$REPORT/core.log"
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$REPORT/cli.log"
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$REPORT/wire.log"
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$REPORT/wasm.log"
       - name: Same-binary bounded A/B, without changing any quota or result condition
         shell: bash
         run: |
