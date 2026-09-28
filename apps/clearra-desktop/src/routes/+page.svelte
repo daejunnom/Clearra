@@ -17,7 +17,10 @@
     SolverWorkspace,
     SpinStructureWorkspace
   } from '@clearra/ui/workspace';
-  import { onMount } from 'svelte';
+  import { onMount, setContext } from 'svelte';
+  import AcceleratorAssetPanel from '../lib/AcceleratorAssetPanel.svelte';
+
+  setContext('clearra.accelerator-download-control.v1', AcceleratorAssetPanel);
 
   const tools = ['pc', 'setup', 'setup-score', 'spin-structure', 'build', 'build-probability', 'recovery', 'sequence', 'sequence-dependencies', 'parity', 'fumen', 'render', 'to-gray', 'mirror', 'damage', 'spin-finder', 'ren', 'ctk', 'player'] as const;
 

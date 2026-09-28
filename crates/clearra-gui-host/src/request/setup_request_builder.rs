@@ -53,6 +53,8 @@ impl SetupRequestBuilder {
             SetupSearchQuery::default()
                 .with_rule(parse_rule_profile(form.rule())?)
                 .with_remaining_pieces(pieces)
+                .with_exact_legal_board_enabled(backend.exact_legal_board_enabled())
+                .with_conditioned_reachability_enabled(backend.conditioned_reachability_enabled())
                 .with_cycle_reset_borrow_policy(borrow_policy)
                 .with_candidate_priority(candidate_priority)
                 .with_length_preference(length_preference),

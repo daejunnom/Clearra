@@ -11,6 +11,7 @@ import {
 import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
 import { isLocalSearchProfileMode } from '../lib/localSearchProfile';
 import { withHostExecutionTiming } from './HostExecutionProfile';
+import { relationPeerReservation, RELATION_PEER_WIRE_CAP } from './ConditionedRelationPeerBudget';
 
 import { ClearraProductJobRunner } from './ClearraProductJobRunner';
 import {
@@ -21,6 +22,9 @@ import { SharedExecutionAvailabilityError } from './SharedExecutionResourceAutho
 import {
   ClearraWasmRuntimeError,
   loadClearraWasmModule,
+  type AcceleratorRequestPolicy,
+  type AcceleratorWorkerRelation,
+  type AcceleratorWorkerSynopsis,
   type ClearraWasmFailureDiagnostics,
   type ClearraWasmHostCapabilities,
   type ClearraWasmModule
@@ -31,6 +35,7 @@ import {
   prewarmPc4TablebaseAssets,
   releasePc4TablebaseAssets
 } from './pc4TablebaseAssets';
+import { currentQualifiedAcceleratorIdentity, readQualifiedAccelerator } from './acceleratorLocalStore';
 
 const MAX_EAGER_PREWARM_TOTAL_WORKERS = 9;
 const RUNTIME_PREWARM_TIMEOUT_MS = 15_000;
@@ -255,6 +260,13 @@ async function runCommandText(
     wasm.configure_host(wasmHostCapabilities(hostCapabilitySnapshot));
     loadedWasm = wasm;
     releaseProductPages();
+    // The root retains the complete legal-board, and peers may receive only
+    // its bounded negative-only derivative. The signed relation is staged
+    // for one serial or distributed owner, never every verifier.
+    const accelerators = await activateLocalAccelerators(
+      wasm, commandText, hostCapabilitySnapshot.wasmTransferByteCap,
+      workerAuthority.workersEffective
+    );
     await startTablebaseWarmupAfterWasm(wasm);
     if (job.cancelled) {
       releaseJobResources(job);
@@ -267,7 +279,11 @@ async function runCommandText(
       wasm,
       jobId,
       lifecycleOwnerId,
-      wasmHostCapabilities(hostCapabilitySnapshot)
+      wasmHostCapabilities(hostCapabilitySnapshot),
+      undefined,
+      undefined,
+      accelerators.legalBoardSynopsis,
+      accelerators.conditionedPack
     );
     const modulePrepareMs = profileStarted === null ? 0 : performance.now() - profileStarted;
     const terminal = await job.runner.run(commandText, (event) => {
@@ -303,6 +319,170 @@ async function runCommandText(
         requestedWarmupPolicy
       );
     }
+  }
+}
+
+const ACCELERATOR_PROFILES = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
+type ActivatedAccelerators = {
+  legalBoardSynopsis: AcceleratorWorkerSynopsis | null;
+  conditionedPack: AcceleratorWorkerRelation | null;
+};
+let acceleratorOwner: ClearraWasmModule | null = null;
+const activeAcceleratorIdentities = new Map<string, string>();
+
+async function activateLocalAccelerators(
+  wasm: ClearraWasmModule,
+  commandText: string,
+  transferByteCap: number,
+  workerCount: number
+): Promise<ActivatedAccelerators> {
+  const unavailable = (): ActivatedAccelerators => ({ legalBoardSynopsis: null, conditionedPack: null });
+  if (!wasm.accelerator_catalog || !wasm.accelerator_request_policy ||
+      !wasm.accelerator_admit || !wasm.accelerator_remove) return unavailable();
+  if (acceleratorOwner !== wasm) {
+    acceleratorOwner = wasm;
+    activeAcceleratorIdentities.clear();
+  }
+  let requestPolicy: AcceleratorRequestPolicy | null = null;
+  try {
+    requestPolicy = wasm.accelerator_request_policy(commandText);
+  } catch {
+    // The command runner owns the canonical parser error. Clear any prior
+    // asset before it handles this request; a parse failure is never a reason
+    // to retain a previous negative-proof snapshot.
+  }
+  const profile = requestPolicy && requestPolicy.profile !== null &&
+    Number.isInteger(requestPolicy.profile) && requestPolicy.profile >= 0 &&
+    requestPolicy.profile < ACCELERATOR_PROFILES.length
+      ? requestPolicy.profile : -1;
+  // A custom/unknown rule cannot inherit the previous request's accelerator.
+  // Clear its owner slots before the exact path begins.
+  // The product holds at most one profile per accelerator in this WASM
+  // owner. A prior request for another kick table cannot retain memory or
+  // leak its proof into a new request.
+  for (let stale = 0; stale < ACCELERATOR_PROFILES.length; stale += 1) {
+    if (stale === profile) continue;
+    for (const kind of [0, 1]) {
+      const key = `${kind}:${stale}`;
+      if (activeAcceleratorIdentities.has(key)) {
+        wasm.accelerator_remove(kind, stale);
+        activeAcceleratorIdentities.delete(key);
+      }
+    }
+  }
+  if (profile < 0) return unavailable();
+  let conditionedPack: AcceleratorWorkerRelation | null = null;
+  for (const kind of [0, 1]) {
+    // A previously loaded generation must never survive a failed local read
+    // or a new catalog. If an in-flight lease prevents removal, fail closed
+    // instead of allowing a stale negative proof into this request.
+    const disabled = kind === 0 ? !requestPolicy?.legal_board
+      : !requestPolicy?.conditioned_reachability;
+    const key = `${kind}:${profile}`;
+    if (disabled) {
+      if (activeAcceleratorIdentities.has(key)) {
+        wasm.accelerator_remove(kind, profile);
+        activeAcceleratorIdentities.delete(key);
+      }
+      continue;
+    }
+    try {
+      const plan = wasm.accelerator_catalog(kind, profile);
+      if (plan.state !== 'qualified' || !plan.payload_bytes || plan.payload_bytes > transferByteCap) {
+        if (activeAcceleratorIdentities.has(key)) {
+          wasm.accelerator_remove(kind, profile);
+          activeAcceleratorIdentities.delete(key);
+        }
+        continue;
+      }
+      const identity = await currentQualifiedAcceleratorIdentity(plan);
+      // Both products retain a single complete root owner across requests.
+      // Distributed verifiers receive only bounded local derivatives.
+      if (identity && activeAcceleratorIdentities.get(key) === identity) continue;
+      if (activeAcceleratorIdentities.has(key)) {
+        wasm.accelerator_remove(kind, profile);
+        activeAcceleratorIdentities.delete(key);
+      }
+      if (!identity) continue;
+      const bytes = await readQualifiedAccelerator(plan);
+      if (bytes) {
+        if (kind === 1) {
+          if (!Number.isSafeInteger(plan.active_session_shared_bytes) ||
+              !plan.active_session_shared_bytes || plan.active_session_shared_bytes < 0) continue;
+        }
+        wasm.accelerator_admit(kind, profile, bytes, true);
+        activeAcceleratorIdentities.set(key, identity);
+      }
+    } catch (error) {
+      // Invalid/missing local assets are Unknown, not negative evidence.
+      // A previously admitted asset cannot retain negative authority after
+      // the local pointer check fails; clear it before exact fallback.
+      if (activeAcceleratorIdentities.has(key)) {
+        wasm.accelerator_remove(kind, profile);
+        activeAcceleratorIdentities.delete(key);
+      }
+      console.warn('Clearra local accelerator unavailable; using exact search', error);
+    }
+  }
+  let residentUpperBound = 0;
+  try {
+    for (const kind of [0, 1]) {
+      if (!activeAcceleratorIdentities.has(`${kind}:${profile}`)) continue;
+      const plan = wasm.accelerator_catalog(kind, profile);
+      if (plan.state !== 'qualified' || !Number.isSafeInteger(plan.active_session_shared_bytes) ||
+          !plan.active_session_shared_bytes || plan.active_session_shared_bytes < 0) return unavailable();
+      residentUpperBound += plan.active_session_shared_bytes;
+    }
+  } catch { return unavailable(); }
+  if (activeAcceleratorIdentities.has(`1:${profile}`) && workerCount >= 1 &&
+      wasm.accelerator_peer_seed && wasm.accelerator_peer_answer) {
+    try {
+      const reservedBytes = relationPeerReservation(residentUpperBound, workerCount);
+      // Do not reduce requested workers to fit an optional accelerator. Peers
+      // without the minimum honest reservation keep the exact fallback.
+      if (reservedBytes !== null) {
+        const seed = wasm.accelerator_peer_seed(profile);
+        if (seed.byteLength > 0 && seed.byteLength <= Math.min(transferByteCap, RELATION_PEER_WIRE_CAP)) {
+          conditionedPack = {
+            profile, seed, reservedBytes, maximumPeers: workerCount,
+            identity: activeAcceleratorIdentities.get(`1:${profile}`)!,
+            answerQueries: (wire) => wasm.accelerator_peer_answer!(profile, wire)
+          };
+          residentUpperBound += reservedBytes * workerCount;
+        }
+      }
+    } catch {
+      // Only bounded peer acceleration is unavailable; the complete root
+      // owner and ordinary exact verifiers keep their existing semantics.
+      conditionedPack = null;
+    }
+  }
+  if (!activeAcceleratorIdentities.has(`0:${profile}`) ||
+      !wasm.accelerator_export_negative_synopsis || workerCount < 1) {
+    return { legalBoardSynopsis: null, conditionedPack };
+  }
+  try {
+    // The signed resident upper bounds include the complete root bundle and
+    // relation pack. Reserve room for temporary admission buffers and keep
+    // all peer summaries below 16 MiB in aggregate.
+    const totalSynopsisBudget = Math.max(0, Math.min(
+      16 * 1024 * 1024,
+      128 * 1024 * 1024 - residentUpperBound - 4 * 1024 * 1024
+    ));
+    const maximumBytes = Math.min(
+      transferByteCap,
+      2 * 1024 * 1024,
+      Math.floor(totalSynopsisBudget / Math.max(1, workerCount))
+    );
+    const wire = wasm.accelerator_export_negative_synopsis(profile, maximumBytes);
+    return {
+      legalBoardSynopsis: wire.byteLength > 0 && wire.byteLength <= maximumBytes
+        ? { profile, wire, maximumPeers: workerCount } : null,
+      conditionedPack
+    };
+  } catch {
+    // No negative proof leaves the existing exact verifier unchanged.
+    return { legalBoardSynopsis: null, conditionedPack };
   }
 }
 

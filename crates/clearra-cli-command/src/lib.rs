@@ -5,6 +5,7 @@
 //! crate so browser and GUI hosts cannot accidentally acquire process authority.
 
 mod ctk3_mask_input;
+mod exact_accelerator_options;
 mod operation_document;
 mod sfinder_compat;
 mod web_build_v2_input;
@@ -33,6 +34,8 @@ pub use web_virtual_file::WebVirtualFileHandle;
 
 #[cfg(test)]
 mod build_v2_ingress_tests;
+#[cfg(test)]
+mod exact_accelerator_ingress_tests;
 #[cfg(test)]
 mod queue_parser_contract_tests;
 #[cfg(test)]

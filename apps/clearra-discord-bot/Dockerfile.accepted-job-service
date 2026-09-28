@@ -37,9 +37,12 @@ FROM node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e
 ARG CLEARRA_SOURCE_COMMIT
 ARG CLEARRA_ENGINE_BUILD_ID
 ARG CLEARRA_CLI_SHA256
+ARG CLEARRA_PRODUCT_VERSION
 ENV NODE_ENV=production
 ENV PORT=8080
 ENV CLEARRA_EXECUTABLE=/usr/local/bin/clearra
+ENV CLEARRA_LEGAL_BOARD_DIRECTORY=/opt/clearra/accelerators/legal-board
+ENV CLEARRA_CONDITIONED_REACHABILITY_DIRECTORY=/opt/clearra/accelerators/conditioned-reachability
 ENV CLEARRA_SOURCE_COMMIT=${CLEARRA_SOURCE_COMMIT}
 ENV CLEARRA_ENGINE_BUILD_ID=${CLEARRA_ENGINE_BUILD_ID}
 ENV CLEARRA_SEARCH_CONTRACT_REVISION=clearra.search.contract.v2
@@ -56,6 +59,11 @@ COPY --from=accepted-inputs /usr/local/bin/clearra /usr/local/bin/clearra
 COPY --from=accepted-inputs /workspace/discord-runtime/ ./
 RUN printf '%s  %s\n' "$CLEARRA_CLI_SHA256" /usr/local/bin/clearra | sha256sum --check --strict \
     && node --input-type=module -e "await import('./src/clearra/command.mjs');await import('./src/job-service/server.mjs');await import('./scripts/run-cloud-candidate-smoke-job.mjs')"
+RUN node ./scripts/provision-v081-accelerators.mjs provision "$CLEARRA_PRODUCT_VERSION" \
+      /usr/local/bin/clearra /opt/clearra/accelerators \
+    && if test -d /opt/clearra/accelerators; then chmod -R a-w /opt/clearra/accelerators; fi
 USER node
+RUN node ./scripts/provision-v081-accelerators.mjs verify "$CLEARRA_PRODUCT_VERSION" \
+      /usr/local/bin/clearra /opt/clearra/accelerators
 EXPOSE 8080
 CMD ["node", "./src/job-service/main.mjs"]
