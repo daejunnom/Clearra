@@ -1,0 +1,140 @@
+name: Recovery result-frame release regression
+
+on:
+  push:
+    branches: [codex/converge-recovery-release-repair-20260929]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: recovery-result-frame-release-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  coordinate-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Coordinate and existing host contracts
+        run: |
+          set -euo pipefail
+          mkdir -p _local/artifacts/test/recovery-result-frame-release
+          node --check scripts/tools/surface-browser-acceptance.mjs
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+          node --test packages/clearra-ui/test/recoveryBuild*.test.mjs packages/clearra-ui/test/recoveryResultFrame.test.mjs packages/clearra-ui/test/boundaryRecoverySurface.test.mjs 2>&1 | tee _local/artifacts/test/recovery-result-frame-release/ui.log
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: accepted-pages-build-1868d31da7730cc9d3018aecd18e442c6940a5d7-run-36388470463-attempt-1
+          path: _local/artifacts/test/recovery-zero/accepted
+          github-token: ${{ github.token }}
+          repository: daejunnom/Clearra
+          run-id: 36388470463
+      - name: Prepare pinned browser tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$RUNNER_TEMP/browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+          echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/browser-tools" >> "$GITHUB_ENV"
+      - name: Actual UI, original coordinates, released worker and WASM
+        run: |
+          set -euo pipefail
+          node scripts/tools/recovery-result-frame-browser.mjs 2>&1 | tee _local/artifacts/test/recovery-result-frame-release/browser.log
+          node scripts/tools/recovery-workspace-browser-acceptance.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-result-frame-release-regression
+          path: |
+            _local/artifacts/test/recovery-result-frame-release/
+            _local/artifacts/test/recovery-result-frame/
+            ${{ runner.temp }}/clearra-recovery-workspace-acceptance/
+          retention-days: 14
+
+  original-full-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Lower the untouched original fixture with the production UI adapter
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { readFileSync, mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import { build } from 'esbuild';
+          const bytes = readFileSync('tests/fixtures/recovery-build/user-20260928.json');
+          const fixture = JSON.parse(bytes);
+          assert.equal(fixture.result_mask, '0xc120fc1fcfe3c000000000000');
+          assert.equal(fixture.result_frame, 'shared');
+          assert.equal(fixture.first_supply, 'P7');
+          assert.equal(fixture.second_supply, 'P7');
+          assert.equal(fixture.expected_pair_count, '25401600');
+          assert.equal(fixture.hold_enabled, true);
+          assert.equal(fixture.allow_piece_exchange, true);
+          assert.equal(fixture.preserve_b2b, true);
+          assert.equal(fixture.max_early, 'auto');
+          const bundle = await build({
+            stdin: { contents: "export { createRecoveryBuildRequest, recoveryBuildCommand } from './packages/clearra-ui/src/lib/workspace/recoveryBuildModel.ts';", resolveDir: process.cwd() },
+            bundle: true, write: false, platform: 'node', format: 'esm',
+          });
+          assert.equal(bundle.outputFiles.length, 1);
+          const api = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].contents).toString('base64'));
+          const request = { ...api.createRecoveryBuildRequest(), height: fixture.height,
+            startMask: BigInt(fixture.start_mask), middleMask: BigInt(fixture.middle_mask),
+            resultMask: BigInt(fixture.result_mask), resultFrame: fixture.result_frame,
+            firstSupply: fixture.first_supply, secondSupply: fixture.second_supply,
+            holdEnabled: fixture.hold_enabled, allowPieceExchange: fixture.allow_piece_exchange,
+            preserveB2B: fixture.preserve_b2b, maxEarly: fixture.max_early,
+            rule: fixture.rule, spinProfile: fixture.spin_profile };
+          const command = api.recoveryBuildCommand(request);
+          assert.ok(!/[\r\n]/u.test(command));
+          assert.equal(request.resultMask, BigInt(fixture.result_mask));
+          const output = '_local/artifacts/test/recovery-result-frame-full';
+          mkdirSync(output, { recursive: true });
+          writeFileSync(output + '/input.json', JSON.stringify({
+            source: process.env.GITHUB_SHA, fixture_sha256: createHash('sha256').update(bytes).digest('hex'),
+            fixture, command, engine: 'native AppContext with production worker pool',
+            scope: 'Full 25,401,600-pair completion, not a claim that the prior 720-second browser budget passed.',
+          }, null, 2) + '\n');
+          appendFileSync(process.env.GITHUB_ENV, 'CLEARRA_RECOVERY_FULL_COMMAND=' + command + '\n');
+          JS
+      - name: Build the exact full-population test with the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup show
+          cargo test --locked --release -p clearra-cli-command --test recovery_full_fixture --no-run 2>&1 | tee _local/artifacts/test/recovery-result-frame-full/build.log
+      - name: Complete all original pairs under a finite native execution boundary
+        run: |
+          set -euo pipefail
+          # Keep the old 720-second browser failure intact. This independent
+          # native completion run does not change its budget or claim speedup.
+          timeout --signal=TERM --kill-after=15s 1800s cargo test --locked --release -p clearra-cli-command --test recovery_full_fixture -- --ignored --nocapture --test-threads=1 2>&1 | tee _local/artifacts/test/recovery-result-frame-full/full.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-original-full-native
+          path: _local/artifacts/test/recovery-result-frame-full/
+          retention-days: 14

@@ -173,15 +173,45 @@ try {
         await fields.filter({ hasText: /^Middle$/ }).click();
         await paint(page, 0, 0xfn, 4);
         await fields.filter({ hasText: /^Result$/ }).click();
+        const frame = recovery.getByRole('combobox', { name: 'Result coordinates', exact: true });
+        assert.equal(await frame.inputValue(), 'shared');
+        const resultMask = () => recovery.locator('.recovery-field-editor .board button')
+          .evaluateAll(cells => cells.reduce((mask, cell, index) => cell.getAttribute('aria-pressed') === 'true'
+            ? mask | (1n << BigInt((3 - Math.floor(index / 10)) * 10 + index % 10)) : mask, 0n).toString());
+        // The old acceptance painted an after-clear O into the new shared
+        // editor. It overlaps Start; do not force-click or disable validation.
         await paint(page, 0, 0xc030n, 4);
+        assert.equal(await recovery.getByRole('button', { name: 'Run search', exact: true }).isDisabled(), true);
+        assert.equal(await resultMask(), String(0xc030n));
+        await paint(page, 0, 0xc030n, 4);
+        // A full bottom row is removed by Middle, so this same O is one row
+        // higher in the shared drawing. The product adapter must lower it.
+        await paint(page, 0, 0x300c000n, 4);
+        assert.equal(await resultMask(), String(0x300c000n));
         const runRecovery = label => completeRun(page,
           () => page.getByRole('button', { name: 'Run search', exact: true }).click(), label);
         const paths = recovery.locator('.recovery-path-gallery');
-        await runRecovery('paired Build normal, with an actual line clear');
+        const metrics = () => recovery.locator('.recovery-metrics strong').allTextContents();
+        await runRecovery('paired Build normal, shared coordinates with an actual line clear');
         await paths.locator('[data-recovery-path="normal"]').waitFor();
         assert.equal(await paths.locator('ol>li').count(), 2);
         assert.equal(await recovery.locator('.invalid-evidence,.invalid-replay').count(), 0);
         assert.equal(await recovery.locator('.solution-toolbar .copy-format').count(), 1);
+        assert.equal(await resultMask(), String(0x300c000n), 'search must not move the shared drawing');
+        const sharedMetrics = await metrics();
+        assert.deepEqual(sharedMetrics, ['100%', '0%', '0%']);
+        // Preserve the same logical target when selecting the legacy input
+        // frame, and execute again through real workers rather than inspecting
+        // labels alone. The subsequent no-clear repayment case uses this frame.
+        await frame.selectOption('after-middle');
+        await page.evaluate(() => new Promise(requestAnimationFrame));
+        assert.equal(await frame.inputValue(), 'after-middle');
+        assert.equal(await resultMask(), String(0xc030n));
+        await runRecovery('paired Build normal, explicit after-middle coordinates');
+        await paths.locator('[data-recovery-path="normal"]').waitFor();
+        assert.equal(await paths.locator('ol>li').count(), 2);
+        assert.deepEqual(await metrics(), sharedMetrics);
+        assert.equal(await recovery.locator('.invalid-evidence,.invalid-replay').count(), 0);
 
         // Empty base, middle I and result O: supplies O then I need different-
         // kind repayment. This exercises the actual new parser, solver and wire.
