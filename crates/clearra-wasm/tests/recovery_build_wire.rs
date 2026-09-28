@@ -170,7 +170,12 @@ fn recovery_build_all_minimum_and_mandatory_minimum_use_complete_coverage() {
     let pins = report
         .solutions
         .iter()
-        .map(|s| format!(" --required-solution {}", s.key))
+        .map(|s| {
+            format!(
+                " --required-solution {}",
+                serde_json::to_string(&s.key).unwrap()
+            )
+        })
         .collect::<String>();
     let pinned = runtime
         .run_command_text(&format!(
