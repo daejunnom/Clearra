@@ -73,6 +73,10 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes("results[profile].setup = {"));
   assert.ok(browser.includes("input === 'setup-score'"));
   assert.ok(browser.includes("assert.deepEqual(ranking(setup.activated), ranking(setup.baseline)"));
+  assert.ok(browser.includes("results['srs-plus'].build = {"));
+  assert.ok(browser.includes("input === 'build-probability'"));
+  assert.ok(browser.includes('assert.equal(report.solution_keys_complete, true'));
+  assert.ok(browser.includes('assert.deepEqual(compact(build.activated), buildBaseline'));
   assert.ok(browser.includes("'srs-x': 289"));
   assert.ok(browser.includes('assert.deepEqual(activated, baseline'));
   assert.ok(browser.includes("await corrupt('exact-legal-board')"));

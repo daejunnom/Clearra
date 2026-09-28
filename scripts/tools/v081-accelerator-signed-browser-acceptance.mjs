@@ -267,17 +267,25 @@ async function browserAcceptance() {
           });
           const acceleratorFlags = (legal ? '--legal-board ' : '--no-legal-board ') +
             (relation ? '--conditioned-reachability' : '--no-conditioned-reachability');
-          const commandText = input === 'setup-score'
-            ? `clearra setup score --document-format ctk3 --document ${setupScoreDocument} ` +
+          let commandText;
+          if (input === 'setup-score') {
+            commandText = `clearra setup score --document-format ctk3 --document ${setupScoreDocument} ` +
               '--setup-queue I --solution-queue OOOI --clear 2 --no-hold ' +
-              `--score-profile tetrio --initial-b2b 0 --workers ${workers} --rule ${profile} ${acceleratorFlags}`
-            : `clearra pc --lines 4 --height 4 ` +
+              `--score-profile tetrio --initial-b2b 0 --workers ${workers} --rule ${profile} ${acceleratorFlags}`;
+          } else if (input === 'build-probability') {
+            commandText = 'clearra build-probability --base-mask 0 --target-mask 0xf --height 4 ' +
+              '--queue I --no-hold --include-mirror --aggregate buildability ' +
+              '--result-mode all-solutions --solution-probabilities ' +
+              `--backend cpu --workers ${workers} --rule ${profile} ${acceleratorFlags}`;
+          } else {
+            commandText = `clearra pc --lines 4 --height 4 ` +
               (input === 'existing'
                 ? '--board-mask 0x3c0f03c0f --pieces 6 --patterns P7 --hold empty '
                 : '--board-mask 0 --pieces 10 --queue IIOOOIIOOO --no-hold ') +
               '--objective unique --count unique ' +
               `--solution-probabilities --backend cpu --workers ${workers} --rule ${profile} --no-tablebase ` +
               acceleratorFlags;
+          }
           rootWorker.postMessage({ type: 'run_command_text', commandText,
             prewarmWorkerCount: workers, tablebaseRequested: false,
             hostCapabilitySnapshot: snapshot, workerAuthority,
@@ -317,6 +325,10 @@ async function browserAcceptance() {
           activated: await run(profile, true, true, 'setup-score')
         };
       }
+      results['srs-plus'].build = {
+        baseline: await run('srs-plus', false, false, 'build-probability'),
+        activated: await run('srs-plus', true, true, 'build-probability')
+      };
       // Exercise invalidation on one warm owner, not merely a fresh worker.
       // A corrupt local pointer must revoke already-admitted negative proof
       // and relation authority before the next exact search begins.
@@ -401,11 +413,30 @@ async function browserAcceptance() {
         assert.equal(result.candidate_count, '2');
         assert.equal(result.setup_pattern_count, '1');
         assert.deepEqual(result.candidates.map(candidate => candidate.rank), ['1', '2']);
+        assert.deepEqual(result.candidates.map(candidate => candidate.completed_board_mask),
+          ['0x000000000000000f', '0x00000000000003c0']);
+        assert.ok(Number.isFinite(Number(result.average_priority_score)) &&
+          Number(result.average_priority_score) > 0);
         return result;
       };
       assert.deepEqual(ranking(setup.activated), ranking(setup.baseline),
         `${profile}/setup: accelerator policy must preserve complete ranked Setup-score results`);
     }
+    const build = execution.results['srs-plus'].build;
+    const buildBaseline = compact(build.baseline);
+    assert.equal(buildBaseline.keys.length, 2,
+      'the Web Build probability fixture must retain both mirror-distinct I placements');
+    for (const [name, sample] of Object.entries(build)) {
+      const report = sample.result.search_report;
+      assert.equal(report.count_complete, true, `${name}: Build solution count must be complete`);
+      assert.equal(report.solution_keys_complete, true, `${name}: Build solution keys must be complete`);
+      assert.equal(report.probability_complete, true, `${name}: Build probability must be complete`);
+      assert.equal(report.resource_truncated, false, `${name}: Build result must not be truncated`);
+      assert.equal(report.covered_pattern_count, 1, `${name}: the fixed queue must be covered`);
+      assert.equal(report.materialized_pattern_count, 1, `${name}: retain the complete queue universe`);
+    }
+    assert.deepEqual(compact(build.activated), buildBaseline,
+      'installed accelerators must preserve complete Web Build probability results');
     const corruption = execution.corruption;
     const expected = compact(execution.results['srs-plus'].eligible.baseline);
     for (const [name, sample] of Object.entries(corruption)) {
@@ -413,8 +444,9 @@ async function browserAcceptance() {
         `${name}: corrupt OPFS pointers must preserve the complete exact result`);
     }
     const summary = sample => new Map(sample.result.search_report.summary_fields);
-    assert.ok(Number(summary(corruption.legalBefore).get('legal_board_verified_negative_prunes')) > 0,
-      'the warm legal-board owner must have exercised a real negative prune');
+    const legalPrunesBefore = Number(summary(corruption.legalBefore).get('legal_board_verified_negative_prunes'));
+    assert.ok(legalPrunesBefore > 0,
+      `the warm legal-board owner must have exercised a real negative prune; observed=${legalPrunesBefore}`);
     assert.equal(summary(corruption.legalAfter).get('legal_board_verified_negative_prunes'), '0',
       'a corrupt legal-board pointer must revoke the warm negative proof');
     assert.equal(summary(corruption.relationBefore).get('conditioned_reachability_snapshot_active'), 'true');
@@ -424,7 +456,7 @@ async function browserAcceptance() {
     assert.equal(assetRequests.length, assets.length, 'a search must read OPFS, not re-download signed assets');
     assert.deepEqual(errors, []);
     await context.close();
-    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score result parity passed');
+    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score/Build probability result parity passed');
   } finally {
     await browser?.close();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
