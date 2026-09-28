@@ -1,0 +1,137 @@
+name: Recovery zero coverage regression
+
+on:
+  push:
+    branches: [codex/fix-recovery-zero-coverage-20260928]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: recovery-zero-coverage-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  released-browser-reproduction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: accepted-pages-build-1868d31da7730cc9d3018aecd18e442c6940a5d7-run-36388470463-attempt-1
+          path: _local/artifacts/test/recovery-zero/accepted
+          github-token: ${{ github.token }}
+          repository: daejunnom/Clearra
+          run-id: 36388470463
+      - name: Prepare browser tools outside product dependencies
+        run: |
+          npm install --prefix "$RUNNER_TEMP/browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$RUNNER_TEMP/browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Exercise released UI, parser, real workers and result rendering
+        env:
+          BROWSER_ROOT: ${{ runner.temp }}/browser-tools
+        run: |
+          cat > _local/artifacts/test/recovery-zero/probe.mjs <<'JS'
+          import assert from 'node:assert/strict';
+          import { createServer } from 'node:http';
+          import { readFile, writeFile } from 'node:fs/promises';
+          import { resolve, extname } from 'node:path';
+          import { createRequire } from 'node:module';
+          const { chromium } = createRequire(resolve(process.env.BROWSER_ROOT,'package.json'))('playwright');
+          const root = resolve('_local/artifacts/test/recovery-zero');
+          const accepted = resolve(root,'accepted');
+          const identity = JSON.parse(await readFile(resolve(accepted,'clearra-build-identity.json'),'utf8'));
+          assert.equal(identity.sourceCommit,'1868d31da7730cc9d3018aecd18e442c6940a5d7');
+          const server = createServer(async (req,res) => {
+            const pathname = decodeURIComponent(new URL(req.url,'http://127.0.0.1').pathname);
+            if (!pathname.startsWith('/Clearra/') || pathname.split('/').includes('..')) return res.writeHead(404).end();
+            const relative = pathname.slice('/Clearra/'.length) || 'index.html';
+            try {
+              const body = await readFile(resolve(accepted,relative));
+              const mime = {'.html':'text/html; charset=utf-8','.js':'text/javascript','.json':'application/json','.wasm':'application/wasm','.css':'text/css'}[extname(relative)] || 'application/octet-stream';
+              res.writeHead(200,{'Content-Type':mime,'Cache-Control':'no-store'}).end(body);
+            } catch { res.writeHead(404).end(); }
+          });
+          await new Promise((ok,fail)=>{server.once('error',fail);server.listen(4194,'127.0.0.1',ok)});
+          const cases = [
+            {id:'normal',height:8,masks:['0','0xf','0xc030'],first:'I',second:'O',exchange:false,b2b:false,expected:'1'},
+            {id:'after-clear',height:8,masks:['0x3f0','0xf','0xc030'],first:'I',second:'O',exchange:false,b2b:true,expected:'1'},
+            {id:'repayment',height:8,masks:['0','0xf','0xc030'],first:'O',second:'I',exchange:true,b2b:false,expected:'1'},
+            {id:'fixture-fixed-P7',height:10,masks:['0xc0383f3fc7','0x3ff3fc7c0c038','0x30483f07f3f8f'],first:'ITOLSZJ',second:'P7',exchange:false,b2b:true,expected:'1'},
+          ];
+          let browser;
+          const reports=[];
+          try {
+            browser=await chromium.launch({headless:true});
+            for (const processors of [1,4]) for (const spec of cases) {
+              const context=await browser.newContext({viewport:{width:1440,height:1100},locale:'en-US'});
+              await context.addInitScript((n)=>{
+                Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>n});
+                window.workerInputs=[];window.workerOutputs=[];
+                const Original=window.Worker;
+                window.Worker=class extends Original {
+                  constructor(...args){super(...args);this.addEventListener('message',e=>window.workerOutputs.push(e.data));}
+                  postMessage(...args){if(typeof args[0]==='object')window.workerInputs.push(args[0]);return super.postMessage(...args);}
+                };
+              },processors);
+              const page=await context.newPage();page.setDefaultTimeout(20000);
+              const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+              const report={case:spec.id,processors,source:identity.sourceCommit};
+              try {
+                await page.goto('http://127.0.0.1:4194/Clearra/?tool=recovery');
+                await page.locator('.field-palette button').first().waitFor();
+                await page.locator('.dimension-field input').fill(String(spec.height));
+                const fields=page.locator('.field-palette button');
+                for(let f=0;f<3;f++) {
+                  await fields.nth(f).click();
+                  const board=page.locator('.recovery-field-editor .board button');
+                  assert.equal(await board.count(),spec.height*10);
+                  const mask=BigInt(spec.masks[f]);
+                  for(let y=0;y<spec.height;y++)for(let x=0;x<10;x++)if(mask&(1n<<BigInt(y*10+x)))await board.nth((spec.height-1-y)*10+x).click();
+                }
+                const supplies=page.locator('.recovery-supplies .workspace-queue-input');
+                await supplies.nth(0).fill(spec.first);await supplies.nth(1).fill(spec.second);
+                await page.getByRole('checkbox',{name:'Hold',exact:true}).check();
+                await page.getByRole('checkbox',{name:'Allow different-piece repayment',exact:true}).setChecked(spec.exchange);
+                await page.getByRole('checkbox',{name:'Preserve B2B',exact:true}).setChecked(spec.b2b);
+                await page.locator('.run-actions button.run').click();
+                await page.locator('.recovery-metrics').waitFor({timeout:45000});
+                report.metrics=await page.locator('.recovery-metrics').innerText();
+                report.workerInputs=await page.evaluate(()=>window.workerInputs);
+                report.workerOutputs=await page.evaluate(()=>window.workerOutputs);
+                report.errors=errors;
+                const metrics=await page.locator('.recovery-metrics strong').allTextContents();
+                report.success=metrics[2]==='0%';
+                console.log(JSON.stringify({case:spec.id,processors,metrics,success:report.success,errors}));
+              } catch(e) {
+                report.error=String(e);report.errors=errors;report.body=await page.locator('body').innerText();
+                report.workerInputs=await page.evaluate(()=>window.workerInputs).catch(()=>[]);
+                report.workerOutputs=await page.evaluate(()=>window.workerOutputs).catch(()=>[]);
+                console.log(JSON.stringify({case:spec.id,processors,error:report.error,errors}));
+              } finally {
+                await page.screenshot({path:resolve(root,`${spec.id}-${processors}.png`),fullPage:true});
+                reports.push(report);
+                await writeFile(resolve(root,'released-browser-reproduction.json'),JSON.stringify(reports,(k,v)=>typeof v==='bigint'?String(v):v,2));
+                await context.close();
+              }
+            }
+          } finally {await browser?.close();await new Promise(ok=>server.close(ok));}
+          assert.ok(reports.every(r=>r.success),'Released browser returned zero coverage or failed for a known-positive input; inspect the captured raw command and payload.');
+          JS
+          node _local/artifacts/test/recovery-zero/probe.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-zero-released-reproduction
+          path: |
+            _local/artifacts/test/recovery-zero/*.json
+            _local/artifacts/test/recovery-zero/*.png
+            _local/artifacts/test/recovery-zero/probe.mjs
+          retention-days: 7
