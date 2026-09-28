@@ -1,0 +1,96 @@
+name: Recovery inventory core proposal
+on:
+  push:
+    branches: [codex/recovery-inventory-apply-20260929]
+    paths: [.github/workflows/recovery-inventory-apply.yml]
+permissions:
+  contents: write
+concurrency:
+  group: recovery-inventory-core-proposal
+  cancel-in-progress: false
+jobs:
+  proposal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BASE: 8a96df8b696b098b234cc60dcfc2e870b9c7840f
+      PROPOSAL: codex/recovery-inventory-core-proposal-20260929
+      REPORT: _local/artifacts/test/recovery-inventory-core
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 8a96df8b696b098b234cc60dcfc2e870b9c7840f
+          fetch-depth: 1
+      - name: Materialize the digest-bound reviewed source patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,os,pathlib,subprocess,zlib
+          assert os.environ['GITHUB_REPOSITORY']=='daejunnom/Clearra'
+          assert os.environ['GITHUB_REF']=='refs/heads/codex/recovery-inventory-apply-20260929'
+          assert os.environ['GITHUB_RUN_ATTEMPT']=='1'
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['BASE']
+          assert not subprocess.check_output(['git','status','--porcelain'],text=True).strip()
+          chunks=['7dc0c61d4b39f1abecf07a3706aeed7e5fa181c0','36f7b8b7aa34ebe6736bc61ac5bde48bf9b630db','d6cd28d285d86fdaa75d2d00a826e97a3534c2f3','965f322418469c44be7df8380b334d72910fd6d5']
+          data=b''
+          for sha in chunks:
+            obj=json.loads(subprocess.check_output(['gh','api',f'repos/daejunnom/Clearra/git/blobs/{sha}']))
+            assert obj['sha']==sha and obj['encoding']=='base64'
+            part=base64.b64decode(obj['content'])
+            assert hashlib.sha1(b'blob '+str(len(part)).encode()+b'\0'+part).hexdigest()==sha
+            data+=part
+          assert len(data)==23464
+          patch=zlib.decompress(data)
+          assert len(patch)==99116
+          assert hashlib.sha256(patch).hexdigest()=='53d7ad2200d7e6907303bea2447b2c83a7a5b6b12e95d26430f1095697afdbbc'
+          report=pathlib.Path(os.environ['REPORT']);report.mkdir(parents=True,exist_ok=True)
+          path=report/'reviewed-source.patch';path.write_bytes(patch)
+          subprocess.run(['git','apply','--check',str(path)],check=True)
+          subprocess.run(['git','apply','--index',str(path)],check=True)
+          changed=subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines()
+          assert len(changed)==25
+          allowed=('crates/clearra-forward-search/','crates/clearra-core-executor/','crates/clearra-app/','crates/clearra-cli-command/','crates/clearra-host-contract/','crates/clearra-wasm/')
+          assert all(p.startswith(allowed) and p.endswith('.rs') for p in changed)
+          (report/'changed-paths.json').write_text(json.dumps(changed,indent=2)+'\n')
+          PY
+      - name: Format and preserve only the isolated product proposal
+        run: |
+          set -euo pipefail
+          rustup show
+          cargo fmt --all
+          cargo fmt --all --check
+          python3 - <<'PY'
+          import json,os,pathlib,subprocess
+          expected=set(json.loads((pathlib.Path(os.environ['REPORT'])/'changed-paths.json').read_text()))
+          actual=set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          assert actual <= expected,actual-expected
+          subprocess.run(['git','add','--',*sorted(expected)],check=True)
+          PY
+          test -z "$(git ls-remote --heads origin refs/heads/$PROPOSAL)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(recovery): inventory-joined solution catalog and physical early quotas'
+          git push origin "HEAD:refs/heads/$PROPOSAL"
+          git rev-parse HEAD > "$REPORT/proposal-sha.txt"
+          git rev-parse HEAD^{tree} > "$REPORT/proposal-tree.txt"
+          git diff --binary "$BASE" HEAD > "$REPORT/formatted.patch"
+          git archive --format=tar HEAD | gzip > "$REPORT/source.tar.gz"
+      - name: Compile and test exact core and host paths
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$REPORT"
+          result=0
+          cargo test --locked -p clearra-core-executor inventory_tests -- --test-threads=1 2>&1 | tee "$REPORT/inventory.log" || result=1
+          cargo test --locked -p clearra-forward-search recovery_build -- --test-threads=1 2>&1 | tee "$REPORT/core.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --test-threads=1 2>&1 | tee "$REPORT/cli.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1 2>&1 | tee "$REPORT/wasm.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$REPORT/target.log" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-inventory-core-proposal
+          path: _local/artifacts/test/recovery-inventory-core/
+          retention-days: 7
