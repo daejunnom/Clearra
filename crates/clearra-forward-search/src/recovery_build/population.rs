@@ -1,9 +1,8 @@
-//! Two separately parsed canonical supply universes. Their Cartesian product
-//! is traversed lazily and never truncated, sampled, or counted twice per path.
-use super::{
-    RecoveryBuildError, RecoveryBuildFields, RecoveryBuildFixedQuery, RecoveryBuildFixedReport,
-    RecoveryBuildStatus,
-};
+//! Two separately parsed canonical supply universes. Stage coverage languages
+//! count their product without traversing all pairs or counting paths twice.
+#[cfg(test)]
+use super::RecoveryBuildFixedQuery;
+use super::{RecoveryBuildError, RecoveryBuildFields, RecoveryBuildFixedReport};
 use crate::CrossStageEarlyLimit;
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_rules::profile::rule_profile::RuleProfileId;
@@ -81,19 +80,10 @@ impl RecoveryBuildQuery {
         if control.is_cancelled() {
             return Err(RecoveryBuildError::Cancelled);
         }
-        let prepared = PreparedPopulation::new(self.clone())?;
-        let mut accumulator = PopulationAccumulator::new(prepared.possible);
-        prepared.progress(0, control);
-        for index in 0..prepared.possible {
-            let path = prepared.evaluate(index, control)?;
-            accumulator.record(&prepared, index, path.status, path.states, Some(path))?;
-            if accumulator.report.evaluated % 256 == 0 {
-                prepared.progress(accumulator.report.evaluated, control);
-            }
-        }
-        prepared.progress(prepared.possible, control);
-        control.report_progress("postprocess", 0, None);
-        Ok(accumulator.finish())
+        super::parallel::search_serial(self.clone(), control).map_err(|error| match error {
+            super::RecoveryBuildParallelError::Search(error) => error,
+            _ => RecoveryBuildError::PatternDomainUnavailable,
+        })
     }
 }
 
@@ -101,8 +91,8 @@ impl RecoveryBuildQuery {
 /// never an allocated list of pairs. Serial and parallel use this same kernel.
 pub(super) struct PreparedPopulation {
     pub query: RecoveryBuildQuery,
-    first: clearra_supply::pattern_universe::MaterializedPatternUniverse,
-    second: clearra_supply::pattern_universe::MaterializedPatternUniverse,
+    pub first: clearra_supply::pattern_universe::MaterializedPatternUniverse,
+    pub second: clearra_supply::pattern_universe::MaterializedPatternUniverse,
     pub possible: u128,
 }
 impl PreparedPopulation {
@@ -133,6 +123,7 @@ impl PreparedPopulation {
         let width = self.second.pattern_count() as u128;
         Ok(((index / width) as usize, (index % width) as usize))
     }
+    #[cfg(test)]
     pub fn evaluate(
         &self,
         index: u128,
@@ -191,61 +182,42 @@ impl PopulationAccumulator {
             probabilities: [Sum::default(), Sum::default(), Sum::default()],
         }
     }
-    /// Must be called in global row-major pair order, regardless of completion
-    /// order. This preserves both compensated sums and canonical examples.
-    pub fn record(
+    /// Merge certified, disjoint first-source ranges in rank order. Alternative
+    /// paths and mirrored targets have already been unioned inside each range.
+    pub fn record_block(
         &mut self,
         source: &PreparedPopulation,
-        index: u128,
-        status: RecoveryBuildStatus,
-        states: usize,
-        path: Option<RecoveryBuildFixedReport>,
+        start: usize,
+        count: usize,
+        block: super::staged::BlockResult,
     ) -> Result<(), RecoveryBuildError> {
-        if index != self.report.evaluated {
+        let width = source.second.pattern_count() as u128;
+        if start as u128 * width != self.report.evaluated
+            || block
+                .counts
+                .iter()
+                .try_fold(0_u128, |sum, n| sum.checked_add(*n))
+                != Some(count as u128 * width)
+        {
             return Err(RecoveryBuildError::PatternDomainUnavailable);
         }
-        let (i, j) = source.indices(index)?;
-        let category = match status {
-            RecoveryBuildStatus::Normal => 0,
-            RecoveryBuildStatus::Recovery => 1,
-            RecoveryBuildStatus::NoPath => 2,
-        };
-        self.probabilities[category]
-            .add(source.first.weight_at(i).get() * source.second.weight_at(j).get());
+        self.report.evaluated += count as u128 * width;
         self.report.states = self
             .report
             .states
-            .checked_add(states as u128)
+            .checked_add(block.states)
             .ok_or(RecoveryBuildError::CounterOverflow)?;
-        self.report.evaluated += 1;
-        let example = match status {
-            RecoveryBuildStatus::Normal => {
-                self.report.normal_count += 1;
-                Some(&mut self.report.normal_example)
-            }
-            RecoveryBuildStatus::Recovery => {
-                self.report.recovery_count += 1;
-                Some(&mut self.report.recovery_example)
-            }
-            RecoveryBuildStatus::NoPath => {
-                self.report.no_path_count += 1;
-                None
-            }
-        };
-        if let Some(slot) = example {
-            if slot.is_none() {
-                let path = path.ok_or(RecoveryBuildError::PatternDomainUnavailable)?;
-                if path.status != status || path.states != states {
-                    return Err(RecoveryBuildError::PatternDomainUnavailable);
-                }
-                *slot = Some(RecoveryBuildExample {
-                    first_pattern: i,
-                    second_pattern: j,
-                    first_queue: source.first.sequence_at(i).to_vec(),
-                    second_queue: source.second.sequence_at(j).to_vec(),
-                    path,
-                });
-            }
+        self.report.normal_count += block.counts[0];
+        self.report.recovery_count += block.counts[1];
+        self.report.no_path_count += block.counts[2];
+        for (sum, value) in self.probabilities.iter_mut().zip(block.probabilities) {
+            sum.add(value);
+        }
+        if self.report.normal_example.is_none() {
+            self.report.normal_example = block.normal;
+        }
+        if self.report.recovery_example.is_none() {
+            self.report.recovery_example = block.recovery;
         }
         Ok(())
     }

@@ -6,9 +6,9 @@ use crate::CrossStageEarlyLimit;
 use clearra_core_domain::{board::standard_pc_board::Board256Mask, piece::piece_kind::PieceKind};
 use clearra_rules::profile::rule_profile::RuleProfileId;
 use clearra_scoring::profile::SpinProfileId;
-pub(super) const INIT: &[u8] = b"RBIN\x01";
-const TASK: &[u8] = b"RBTK\x01";
-const RESULT: &[u8] = b"RBRS\x01";
+pub(super) const INIT: &[u8] = b"RBIN\x02";
+const TASK: &[u8] = b"RBTK\x02";
+const RESULT: &[u8] = b"RBRS\x02";
 type Error = RecoveryBuildParallelError;
 fn bad() -> Error {
     Error::InvalidWire("invalid recovery-build packet")
@@ -320,12 +320,19 @@ fn read_path(r: &mut Reader<'_>) -> Result<RecoveryBuildFixedReport, Error> {
 pub(super) fn encode_result(init: &[u8], batch: &ResultBatch) -> Vec<u8> {
     let mut w = Writer(RESULT.to_vec());
     task_write(&mut w, init, batch.task);
-    for record in &batch.records {
-        w.byte(status_code(record.status));
-        w.number(record.states as u128);
-        w.flag(record.path.is_some());
-        if let Some(path) = &record.path {
-            write_path(&mut w, path);
+    for count in batch.block.counts {
+        w.number(count);
+    }
+    for probability in batch.block.probabilities {
+        w.0.extend(probability.to_le_bytes());
+    }
+    w.number(batch.block.states);
+    for example in [&batch.block.normal, &batch.block.recovery] {
+        w.flag(example.is_some());
+        if let Some(example) = example {
+            w.number(example.first_pattern as u128);
+            w.number(example.second_pattern as u128);
+            write_path(&mut w, &example.path);
         }
     }
     w.0
@@ -334,21 +341,40 @@ pub(super) fn decode_result(bytes: &[u8], init: &[u8]) -> Result<ResultBatch, Er
     let mut r = Reader(bytes);
     r.header(RESULT)?;
     let task = task_read(&mut r, init)?;
-    let mut records = Vec::with_capacity(task.count);
-    for _ in 0..task.count {
-        let status = status(&mut r)?;
-        let states = r.count(usize::MAX)?;
-        let path = if r.flag()? {
-            Some(read_path(&mut r)?)
-        } else {
-            None
-        };
-        records.push(Record {
-            status,
-            states,
-            path,
-        });
+    let mut counts = [0; 3];
+    for count in &mut counts {
+        *count = r.number()?;
+    }
+    let mut probabilities = [0.0; 3];
+    for p in &mut probabilities {
+        *p = f64::from_le_bytes(r.take(8)?.try_into().map_err(|_| bad())?);
+        if !p.is_finite() || !(0.0..=1.0).contains(p) {
+            return Err(bad());
+        }
+    }
+    let states = r.number()?;
+    let mut examples = [None, None];
+    for example in &mut examples {
+        if r.flag()? {
+            *example = Some(RecoveryBuildExample {
+                first_pattern: r.count(usize::MAX)?,
+                second_pattern: r.count(usize::MAX)?,
+                first_queue: Vec::new(),
+                second_queue: Vec::new(),
+                path: read_path(&mut r)?,
+            });
+        }
     }
     r.end()?;
-    Ok(ResultBatch { task, records })
+    let [normal, recovery] = examples;
+    Ok(ResultBatch {
+        task,
+        block: BlockResult {
+            counts,
+            probabilities,
+            states,
+            normal,
+            recovery,
+        },
+    })
 }

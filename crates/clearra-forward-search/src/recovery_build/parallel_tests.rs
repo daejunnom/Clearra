@@ -136,12 +136,12 @@ fn recovery_build_parallel_p7_product_is_lazy_and_reorder_window_is_bounded() {
         assert!(issued <= 8);
     }
     assert_eq!(issued, 8);
-    assert_eq!(c.progress().issued, 256);
+    assert_eq!(c.progress().issued, 256 * 5040);
     assert_eq!(c.progress().completed, 0);
     assert!(c.finish(&control).is_err());
 }
 #[test]
-fn recovery_build_parallel_worker_yields_between_pairs_without_repeating_one() {
+fn recovery_build_parallel_worker_yields_within_stage_language_without_repeating_one() {
     let mut q = query();
     q.first_supply = "*".into();
     q.second_supply = "*".into();

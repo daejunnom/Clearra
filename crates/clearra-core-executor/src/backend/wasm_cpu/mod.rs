@@ -1,3 +1,5 @@
+mod build_stage_domain;
+pub use build_stage_domain::{BuildStageDomain, BuildStageDomainError};
 #[cfg(test)]
 mod build_clear_row_pruning_tests;
 mod build_clear_rows;

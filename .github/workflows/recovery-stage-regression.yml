@@ -1,0 +1,75 @@
+name: Recovery Stage Regression
+
+on:
+  push:
+    branches: [codex/converge-recovery-stage-20260928]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recovery-stage-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  stage-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind immutable source and pinned workspace formatting
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor 7915a7eb68f0531732684c7f4f3ff9372ca324ad HEAD
+          cargo fmt --all --check
+          mkdir -p build/recovery-stage
+          git rev-parse HEAD > build/recovery-stage/tested-sha.txt
+      - name: Check stage languages and the independent fixed-pair oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture --test-threads=1 2>&1 | tee build/recovery-stage/core.log
+      - name: Check inherited Build pruning and both host protocols
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p build/recovery-stage
+          result=0
+          cargo test --locked -p clearra-core-executor build_clear_row_pruning -- --nocapture --test-threads=1 2>&1 | tee build/recovery-stage/build.log || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee build/recovery-stage/cli.log || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee build/recovery-stage/wire.log || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee build/recovery-stage/wasm.log || result=1
+          exit "$result"
+      - name: Prepare finite performance executable
+        run: |
+          cargo build --locked --release -p clearra-manage
+          cargo test --locked --release -p clearra-forward-search --lib --no-run --message-format=json > build/recovery-stage/executables.jsonl
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          paths=[]
+          for line in Path('build/recovery-stage/executables.jsonl').read_text().splitlines():
+              obj=json.loads(line)
+              if obj.get('reason') == 'compiler-artifact' and obj.get('target',{}).get('name') == 'clearra_forward_search' and obj.get('executable'):
+                  paths.append(obj['executable'])
+          assert len(paths) == 1, paths
+          with open(os.environ['GITHUB_ENV'],'a') as f: f.write('CLEARRA_STAGE_TEST_BIN='+paths[0]+'\n')
+          PY
+      - name: Measure the normalized boundary fixture with a finite lease
+        env:
+          CLEARRA_STAGE_BENCH_ROWS: 32
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/cargo/default/release/clearra-manage --root . runtime run --producer recovery-stage-benchmark --profile benchmark-search --timeout 180 -- "$CLEARRA_STAGE_TEST_BIN" recovery_build_staged_fixture_benchmark --ignored --nocapture --test-threads=1 2>&1 | tee build/recovery-stage/benchmark.log
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-stage-regression
+          path: build/recovery-stage
+          retention-days: 7
