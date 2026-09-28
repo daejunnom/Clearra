@@ -4,10 +4,11 @@
 
 use clearra_app::{
     AppCommand, AppContext, AppCoreExecutorService, AppRequest, AppResponse, AppServices,
-    AppStatus, BuildCoverV2Request, BuildObjective, BuildV2AppCommand,
-    CoveragePortfolioAlternativeSet, FieldDocumentFormat, PcChanceIngressOrigin,
-    PcMinimalsIngressOrigin, PcPathIngressOrigin, PcResultProjection, ProductCapabilityContract,
-    ScenarioAppCommand, SetupScoreAppCommand, SetupScoreDocumentV1, PC_SCORE_MAX_PATTERNS,
+    AppStatus, BuildCoverV2Request, BuildObjective, BuildProbabilityAppCommand,
+    BuildProbabilityResultMode, BuildV2AppCommand, CoveragePortfolioAlternativeSet,
+    FieldDocumentFormat, PcChanceIngressOrigin, PcMinimalsIngressOrigin, PcPathIngressOrigin,
+    PcResultProjection, ProductCapabilityContract, ScenarioAppCommand, SetupScoreAppCommand,
+    SetupScoreDocumentV1, PC_SCORE_MAX_PATTERNS,
 };
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
@@ -76,12 +77,13 @@ fn policy(legal: bool, conditioned: bool, workers: usize) -> PcExecutionPolicy {
 
 fn supported_worker_requests() -> impl Iterator<Item = usize> {
     let hardware = WorkerPolicy::hardware_worker_limit();
+    let parallel_enabled = cfg!(feature = "parallel");
     // Native validation must reject oversubscription. The hosted CI runner
-    // may have only two CPUs; never relabel a capped 11-worker request as an
-    // executed 11-worker result. Larger hosts exercise the additional arm.
+    // may have only two CPUs, and non-parallel builds cannot create a worker
+    // pool. Never relabel an unavailable worker arm as an executed result.
     [1, 2, 11]
         .into_iter()
-        .filter(move |&workers| workers <= hardware)
+        .filter(move |&workers| workers <= hardware && (workers == 1 || parallel_enabled))
 }
 
 fn minimum_request(
@@ -153,6 +155,35 @@ fn build_request(legal: bool, conditioned: bool) -> AppRequest {
     AppRequest::new(AppCommand::BuildV2(BuildV2AppCommand::build_cover(
         BuildCoverV2Request::new(query, BuildObjective::MinCover).unwrap(),
     )))
+}
+
+fn build_probability_request(
+    legal: bool,
+    conditioned: bool,
+    mode: BuildProbabilityResultMode,
+) -> AppRequest {
+    let core = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+        PieceWindow::new(1),
+    )
+    .with_exact_pieces(Some(1))
+    .with_execution_policy(policy(legal, conditioned, 1));
+    let field =
+        BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0]).unwrap();
+    let mut query = BuildProbabilityQuery::new(core, field)
+        .with_solution_probability_policy(BuildSolutionProbabilityPolicy::Include);
+    if matches!(
+        mode,
+        BuildProbabilityResultMode::FieldAverageScore
+            | BuildProbabilityResultMode::FixedQueueMaximumScore
+            | BuildProbabilityResultMode::HighestScoreMinimumSet
+    ) {
+        query = query.with_score_summary(ScoreProfileSelection::Guideline, 0);
+    }
+    AppRequest::new(AppCommand::BuildProbability(
+        BuildProbabilityAppCommand::new(query).with_result_mode(mode),
+    ))
 }
 
 fn one_piece_report_request(legal: bool, conditioned: bool, replay: bool) -> AppRequest {
@@ -452,6 +483,36 @@ fn compare_products(installed: bool) {
             portfolio_meaning(report.portfolio_alternative_owner().unwrap()),
             portfolio_meaning(expected.portfolio_alternative_owner().unwrap())
         );
+    }
+    for mode in [
+        BuildProbabilityResultMode::CompleteReplayPaths,
+        BuildProbabilityResultMode::FieldAverageScore,
+        BuildProbabilityResultMode::FixedQueueMaximumScore,
+        BuildProbabilityResultMode::HighestScoreMinimumSet,
+        BuildProbabilityResultMode::FailedQueues,
+    ] {
+        let baseline = context.run(build_probability_request(false, false, mode));
+        assert_eq!(
+            baseline.status(),
+            AppStatus::Success,
+            "{mode:?}: {baseline:#?}"
+        );
+        let expected = baseline
+            .public_result_payload()
+            .expect("Build result aggregation requires a typed public payload");
+        for (legal, conditioned) in [(false, true), (true, false), (true, true)] {
+            let actual = context.run(build_probability_request(legal, conditioned, mode));
+            assert_eq!(
+                actual.status(),
+                AppStatus::Success,
+                "{mode:?} legal={legal} conditioned={conditioned}: {actual:#?}"
+            );
+            assert_eq!(
+                actual.public_result_payload(),
+                Some(expected),
+                "Build probability aggregation {mode:?} legal={legal} conditioned={conditioned}"
+            );
+        }
     }
     let baseline = success(&context, one_piece_report_request(false, false, false));
     let expected = baseline

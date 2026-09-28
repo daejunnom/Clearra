@@ -2975,6 +2975,7 @@ impl CompactBuildProbabilitySession {
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().execution_constraints().requested()
             || self.problem.objective().score().requested()
+            || self.problem.build_replay_evidence_requested()
             || self
                 .problem
                 .pc_chance_evidence_policy()
@@ -3686,6 +3687,7 @@ impl CompactBuildProbabilitySession {
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().execution_constraints().requested()
             || self.problem.objective().score().requested()
+            || self.problem.build_replay_evidence_requested()
             || self
                 .problem
                 .pc_chance_evidence_policy()
@@ -4187,7 +4189,10 @@ impl CompactBuildProbabilitySession {
             .with_solution_coverages(solution_coverages)
             .with_normalized_solution_coverages(normalized_solution_coverages)
             .with_exact_scoring_execution_batch(scoring_batch);
-        let result = if execution_constraints.requested() || score_requested {
+        let result = if execution_constraints.requested()
+            || score_requested
+            || self.problem.build_replay_evidence_requested()
+        {
             let pattern_weights = (0..universe.pattern_count())
                 .map(|pattern| universe.weight_at(pattern).get().to_string())
                 .collect();
@@ -4479,6 +4484,7 @@ impl CompactBuildProbabilitySession {
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().execution_constraints().requested()
             || self.problem.objective().score().requested()
+            || self.problem.build_replay_evidence_requested()
             || self
                 .problem
                 .pc_chance_evidence_policy()
