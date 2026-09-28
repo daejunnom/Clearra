@@ -332,6 +332,26 @@ fn success(context: &AppContext, request: AppRequest) -> AppResponse {
     response
 }
 
+fn failed_queue_meaning(response: &AppResponse) -> Vec<(String, String)> {
+    response
+        .render_model()
+        .unwrap()
+        .core_result()
+        .unwrap()
+        .summary_field_entries()
+        .filter(|(key, _)| {
+            matches!(
+                *key,
+                "result_mode"
+                    | "build_failed_queue_contract"
+                    | "failed_queue_probability"
+                    | "total_pattern_count"
+            ) || key.starts_with("failed_pattern_")
+        })
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+}
+
 fn assert_relation_snapshot(response: &AppResponse, requested: bool, installed: bool) {
     let result = response.render_model().unwrap().core_result().unwrap();
     assert_eq!(
@@ -497,9 +517,14 @@ fn compare_products(installed: bool) {
             AppStatus::Success,
             "{mode:?}: {baseline:#?}"
         );
-        let expected = baseline
-            .public_result_payload()
-            .expect("Build result aggregation requires a typed public payload");
+        let expected = baseline.public_result_payload();
+        let expected_failed_queues = if mode == BuildProbabilityResultMode::FailedQueues {
+            assert!(expected.is_none(), "failed queues use exact result fields");
+            Some(failed_queue_meaning(&baseline))
+        } else {
+            assert!(expected.is_some(), "{mode:?} requires a typed payload");
+            None
+        };
         for (legal, conditioned) in [(false, true), (true, false), (true, true)] {
             let actual = context.run(build_probability_request(legal, conditioned, mode));
             assert_eq!(
@@ -509,9 +534,16 @@ fn compare_products(installed: bool) {
             );
             assert_eq!(
                 actual.public_result_payload(),
-                Some(expected),
+                expected,
                 "Build probability aggregation {mode:?} legal={legal} conditioned={conditioned}"
             );
+            if let Some(expected_failed_queues) = &expected_failed_queues {
+                assert_eq!(
+                    &failed_queue_meaning(&actual),
+                    expected_failed_queues,
+                    "Build failed-queue complement legal={legal} conditioned={conditioned}"
+                );
+            }
         }
     }
     let baseline = success(&context, one_piece_report_request(false, false, false));
