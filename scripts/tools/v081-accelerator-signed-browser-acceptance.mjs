@@ -15,6 +15,7 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import { frontendAcceleratorAssets } from './clearra-frontend-paths.mjs';
 import { createClearraWasmBuildContract, clearraWasmBuildContractsEqual }
   from './clearra-wasm-build-contract.mjs';
+import { realSetupScoreDocument } from '../../apps/clearra-discord-bot/test/support/realCliProductProjectionRequests.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const profiles = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
@@ -233,7 +234,7 @@ async function browserAcceptance() {
       }
     }
     assert.equal(assetRequests.length, assets.length, 'cross-tab read must not re-download');
-    const execution = await page.evaluate(async profiles => {
+    const execution = await page.evaluate(async ({ profiles, setupScoreDocument }) => {
       const { createHostCapabilitySnapshot, resolveWorkerAuthority } = await import('/capabilities.js');
       const logicalProcessors = navigator.hardwareConcurrency;
       if (!Number.isSafeInteger(logicalProcessors) || logicalProcessors < 2) {
@@ -264,14 +265,19 @@ async function browserAcceptance() {
             rootWorker.addEventListener('error', onError);
             rootWorker.addEventListener('message', onMessage);
           });
-          const inputArgs = input === 'existing'
-            ? '--board-mask 0x3c0f03c0f --pieces 6 --patterns P7 --hold empty'
-            : '--board-mask 0 --pieces 10 --queue IIOOOIIOOO --no-hold';
-          const commandText = `clearra pc --lines 4 --height 4 ${inputArgs} ` +
-            '--objective unique --count unique ' +
-            `--solution-probabilities --backend cpu --workers ${workers} --rule ${profile} --no-tablebase ` +
-            (legal ? '--legal-board ' : '--no-legal-board ') +
+          const acceleratorFlags = (legal ? '--legal-board ' : '--no-legal-board ') +
             (relation ? '--conditioned-reachability' : '--no-conditioned-reachability');
+          const commandText = input === 'setup-score'
+            ? `clearra setup score --document-format ctk3 --document ${setupScoreDocument} ` +
+              '--setup-queue I --solution-queue OOOI --clear 2 --no-hold ' +
+              `--score-profile tetrio --initial-b2b 0 --workers ${workers} --rule ${profile} ${acceleratorFlags}`
+            : `clearra pc --lines 4 --height 4 ` +
+              (input === 'existing'
+                ? '--board-mask 0x3c0f03c0f --pieces 6 --patterns P7 --hold empty '
+                : '--board-mask 0 --pieces 10 --queue IIOOOIIOOO --no-hold ') +
+              '--objective unique --count unique ' +
+              `--solution-probabilities --backend cpu --workers ${workers} --rule ${profile} --no-tablebase ` +
+              acceleratorFlags;
           rootWorker.postMessage({ type: 'run_command_text', commandText,
             prewarmWorkerCount: workers, tablebaseRequested: false,
             hostCapabilitySnapshot: snapshot, workerAuthority,
@@ -306,6 +312,10 @@ async function browserAcceptance() {
           baseline: await run(profile, false, false, 'existing'),
           activated: await run(profile, true, true, 'existing')
         };
+        results[profile].setup = {
+          baseline: await run(profile, false, false, 'setup-score'),
+          activated: await run(profile, true, true, 'setup-score')
+        };
       }
       // Exercise invalidation on one warm owner, not merely a fresh worker.
       // A corrupt local pointer must revoke already-admitted negative proof
@@ -333,7 +343,7 @@ async function browserAcceptance() {
         rootWorker.terminate();
       }
       return { results, workers, corruption };
-    }, profiles);
+    }, { profiles, setupScoreDocument: realSetupScoreDocument });
     const compact = ({ result }) => {
       assert.equal(result.event, 'final_response');
       assert.equal(result.response.status, 'success');
@@ -353,7 +363,8 @@ async function browserAcceptance() {
     const existingCounts = { srs: 245, 'srs-plus': 246, 'srs-x': 289,
       'jstris-180': 246, 'no-kick': 175 };
     for (const profile of profiles) {
-      for (const [scope, pair] of Object.entries(execution.results[profile])) {
+      for (const scope of ['eligible', 'existing']) {
+        const pair = execution.results[profile][scope];
         const name = `${profile}/${scope}`;
         const activated = compact(pair.activated);
         const baseline = compact(pair.baseline);
@@ -374,6 +385,26 @@ async function browserAcceptance() {
         assert.match(activatedFields.get('legal_board_verified_negative_prunes') ?? '', /^\d+$/u,
           `${name}: retain the legal-board pruning counter, including zero outside its scope`);
       }
+      const setup = execution.results[profile].setup;
+      const ranking = sample => {
+        assert.equal(sample.result.event, 'final_response');
+        assert.equal(sample.result.response.status, 'success');
+        assert.deepEqual(sample.result.response.runtime_identity, manifest.build.runtime_identity);
+        const payload = sample.result.response.product_result_payload;
+        assert.equal(payload?.contract, 'setup.score');
+        assert.equal(payload?.result_kind, 'setup-score-ranking.v1');
+        assert.equal(payload?.content.payload_kind, 'setup-score-ranking');
+        const result = payload.content.payload;
+        assert.equal(result.complete, true);
+        assert.equal(result.rule_profile, profile);
+        assert.equal(result.source_page_count, '3');
+        assert.equal(result.candidate_count, '2');
+        assert.equal(result.setup_pattern_count, '1');
+        assert.deepEqual(result.candidates.map(candidate => candidate.rank), ['1', '2']);
+        return result;
+      };
+      assert.deepEqual(ranking(setup.activated), ranking(setup.baseline),
+        `${profile}/setup: accelerator policy must preserve complete ranked Setup-score results`);
     }
     const corruption = execution.corruption;
     const expected = compact(execution.results['srs-plus'].eligible.baseline);
@@ -393,7 +424,7 @@ async function browserAcceptance() {
     assert.equal(assetRequests.length, assets.length, 'a search must read OPFS, not re-download signed assets');
     assert.deepEqual(errors, []);
     await context.close();
-    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete existing/eligible result parity passed');
+    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score result parity passed');
   } finally {
     await browser?.close();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

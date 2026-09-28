@@ -70,6 +70,9 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes('await secondProfile.selectOption(String(index))'));
   assert.ok(browser.includes('`--solution-probabilities --backend cpu --workers ${workers} --rule ${profile} --no-tablebase `'));
   assert.ok(browser.includes('results[profile].existing = {'));
+  assert.ok(browser.includes("results[profile].setup = {"));
+  assert.ok(browser.includes("input === 'setup-score'"));
+  assert.ok(browser.includes("assert.deepEqual(ranking(setup.activated), ranking(setup.baseline)"));
   assert.ok(browser.includes("'srs-x': 289"));
   assert.ok(browser.includes('assert.deepEqual(activated, baseline'));
   assert.ok(browser.includes("await corrupt('exact-legal-board')"));
