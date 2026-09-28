@@ -16,13 +16,11 @@ fn recovery_full_original_fixture_completes_through_public_app() {
         .expect("record actual host capacity")
         .get();
     let workers = logical.saturating_sub(1).max(1);
-    let request = CliCommandParser::parse_with_worker_limit(
-        &format!("{command} --workers {workers}"),
-        logical,
-    )
-    .unwrap()
-    .to_app_request()
-    .unwrap();
+    let request =
+        CliCommandParser::parse_with_worker_limit(&format!("{command} --workers {workers}"), logical)
+            .unwrap()
+            .to_app_request()
+            .unwrap();
     assert_eq!(usize::from(request.resource_budget().workers()), workers);
     let AppCommand::RecoveryBuild(recovery) = request.command() else {
         panic!("the public Recovery Build route is required");
