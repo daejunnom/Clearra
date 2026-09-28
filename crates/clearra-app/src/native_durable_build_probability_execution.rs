@@ -1761,7 +1761,6 @@ pub(crate) fn run_provider_admitted_native_build_probability<
         total_workers,
         control,
         retain_private_score_authority,
-        problem.build_replay_evidence_requested(),
     ) {
         Ok(result) => result,
         Err(error) => {

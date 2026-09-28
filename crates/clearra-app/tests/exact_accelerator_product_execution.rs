@@ -500,11 +500,6 @@ fn compare_products(installed: bool) {
         let expected = baseline
             .public_result_payload()
             .expect("Build result aggregation requires a typed public payload");
-        if mode == BuildProbabilityResultMode::CompleteReplayPaths {
-            let public = baseline.render_model().unwrap().core_result().unwrap();
-            assert!(public.exact_scoring_execution_batches().is_empty());
-            assert!(public.postprocess_executions().is_empty());
-        }
         for (legal, conditioned) in [(false, true), (true, false), (true, true)] {
             let actual = context.run(build_probability_request(legal, conditioned, mode));
             assert_eq!(
@@ -517,11 +512,6 @@ fn compare_products(installed: bool) {
                 Some(expected),
                 "Build probability aggregation {mode:?} legal={legal} conditioned={conditioned}"
             );
-            if mode == BuildProbabilityResultMode::CompleteReplayPaths {
-                let public = actual.render_model().unwrap().core_result().unwrap();
-                assert!(public.exact_scoring_execution_batches().is_empty());
-                assert!(public.postprocess_executions().is_empty());
-            }
         }
     }
     let baseline = success(&context, one_piece_report_request(false, false, false));

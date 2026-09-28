@@ -16,7 +16,6 @@ use crate::{
     build_solution_probability_result::build_probability_response,
     commands::execution_error_response::core_execution_error_response,
     pc_score_postprocess::PcScoreDerivation,
-    search_output_surface_postprocess::finalize_coverage_summary_public_surface_with_memory_guard,
     AppCoreExecutorService,
 };
 
@@ -218,15 +217,7 @@ impl BuildProbabilityAppCommand {
             }
             BuildProbabilityResultMode::FailedQueues => (None, None),
         };
-        let result = if self.result_mode == BuildProbabilityResultMode::CompleteReplayPaths {
-            let result = result.without_build_replay_transient_evidence();
-            match finalize_coverage_summary_public_surface_with_memory_guard(result, &mut |_, _| {
-                Ok(())
-            }) {
-                Ok(result) => result,
-                Err(error) => return core_execution_error_response(error),
-            }
-        } else if self.result_mode == BuildProbabilityResultMode::FailedQueues {
+        let result = if self.result_mode == BuildProbabilityResultMode::FailedQueues {
             match decorate_build_failed_queues(
                 &self.query,
                 result,

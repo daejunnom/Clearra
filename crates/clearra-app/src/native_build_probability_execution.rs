@@ -444,7 +444,6 @@ fn run_native_build_probability_with_workers_inner(
             total_workers,
             control,
             retain_private_score_authority,
-            problem.build_replay_evidence_requested(),
         ),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
@@ -621,7 +620,6 @@ fn finish_native_build_probability(
     total_workers: usize,
     control: &ExecutionControl,
     retain_private_score_authority: bool,
-    retain_private_replay_authority: bool,
 ) -> Result<NativeBuildProbabilityExecutionOutput, CoreExecutionError> {
     let (external_container_bytes, mut external_payload_bytes) =
         checked_worker_output_memory(&output).ok_or_else(|| {
@@ -746,22 +744,6 @@ fn finish_native_build_probability(
                             derivation,
                         )
                     })
-            } else if retain_private_replay_authority {
-                service
-                    .materialize_build_probability_replay_source_with_memory_guard(
-                        result,
-                        solution_probability_policy,
-                        control,
-                        |stage_result, checked_future_bytes| {
-                            authority
-                                .validate_public_result_memory_with_future(
-                                    stage_result,
-                                    checked_future_bytes,
-                                )
-                                .map_err(core_error)
-                        },
-                    )
-                    .map(NativeBuildProbabilityExecutionOutput::without_score_derivation)
             } else {
                 service
                     .materialize_build_probability_public_result_with_memory_guard(

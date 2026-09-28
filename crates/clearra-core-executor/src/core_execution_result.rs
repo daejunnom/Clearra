@@ -882,18 +882,6 @@ impl CoreExecutionResult {
         self
     }
 
-    /// Drops the Build-only replay graph and materialized path witnesses after
-    /// the typed product payload has consumed them. Coverage and solution
-    /// summaries remain intact for the ordinary Build response validator.
-    pub fn without_build_replay_transient_evidence(mut self) -> Self {
-        self.postprocess_replay_trace = None;
-        self.postprocess_executions = Vec::new();
-        self.postprocess_execution_complete = false;
-        self.postprocess_pattern_weights = Vec::new();
-        self.exact_scoring_execution_batches = Vec::new();
-        self
-    }
-
     /// Removes only the executed-problem owner retained by a scoring session.
     /// Generic score output keeps its established replay/score surface, but no
     /// producer-private problem snapshot may cross the App boundary.

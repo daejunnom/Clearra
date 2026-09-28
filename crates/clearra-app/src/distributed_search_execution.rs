@@ -563,19 +563,6 @@ impl PreparedDistributedSearch {
             }
             CooperativeSearchResponseKind::BuildProbability {
                 solution_probability_policy,
-                result_command: Some(command),
-                ..
-            } if command.result_mode()
-                == crate::BuildProbabilityResultMode::CompleteReplayPaths =>
-            {
-                core_executor.materialize_build_probability_replay_source(
-                    result,
-                    *solution_probability_policy,
-                    control,
-                )
-            }
-            CooperativeSearchResponseKind::BuildProbability {
-                solution_probability_policy,
                 ..
             } => core_executor.materialize_build_probability_public_result(
                 result,
@@ -1099,18 +1086,6 @@ impl PreparedDistributedSearch {
                         build_score_derivation = Some(derivation);
                         result
                     })
-            }
-            CooperativeSearchResponseKind::BuildProbability {
-                solution_probability_policy,
-                result_command: Some(command),
-                ..
-            } if command.result_mode() == crate::BuildProbabilityResultMode::CompleteReplayPaths => {
-                core_executor.materialize_build_probability_replay_source_with_memory_guard(
-                    result,
-                    *solution_probability_policy,
-                    control,
-                    &mut terminal_guard,
-                )
             }
             CooperativeSearchResponseKind::BuildProbability {
                 solution_probability_policy,

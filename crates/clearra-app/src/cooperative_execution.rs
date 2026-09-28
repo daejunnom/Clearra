@@ -3204,26 +3204,6 @@ impl CooperativeAppExecution {
                                         result
                                     })
                             }
-                            Some(session)
-                                if result_command.as_deref().is_some_and(|command| {
-                                    command.result_mode()
-                                        == crate::BuildProbabilityResultMode::CompleteReplayPaths
-                                }) =>
-                            {
-                                core_executor.materialize_build_probability_replay_source_with_memory_guard(
-                                    result,
-                                    *solution_probability_policy,
-                                    control,
-                                    |stage_result, checked_future_bytes| {
-                                        session
-                                            .validate_public_result_memory_with_future(
-                                                stage_result,
-                                                checked_future_bytes,
-                                            )
-                                            .map_err(WasmCpuSearchError::into_core_execution_error)
-                                    },
-                                )
-                            }
                             Some(session) => core_executor
                                 .materialize_build_probability_public_result_with_memory_guard(
                                     result,
