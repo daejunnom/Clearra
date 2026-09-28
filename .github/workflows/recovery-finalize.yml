@@ -1,0 +1,191 @@
+name: Recovery catalog final verification
+on:
+  push:
+    branches: [codex/recovery-catalog-finalize-20260929]
+permissions:
+  contents: read
+jobs:
+  proposal:
+    permissions:
+      contents: write
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source: ${{ steps.commit.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply the reviewed source-only patch
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          cp scripts/tools/recovery-finalize.patch.xz "$RUNNER_TEMP/patch.xz"
+          echo "380aa52f43fdb672862f8d27619b615468720f067410f8944aecebbfa702b207  $RUNNER_TEMP/patch.xz" | sha256sum -c -
+          xz -dc "$RUNNER_TEMP/patch.xz" > "$RUNNER_TEMP/patch"
+          echo "a533308bbe110399ce59c991cddfdf3e4b25fe040401221c2cce58ffe2f09e4d  $RUNNER_TEMP/patch" | sha256sum -c -
+          git checkout --detach de262fd961e6d9f40d64d087930259a96b0c4fc8
+          git apply --check "$RUNNER_TEMP/patch"
+          git apply "$RUNNER_TEMP/patch"
+          git diff --check
+          git add -- crates packages scripts/tools
+          git diff --cached --name-only > "$RUNNER_TEMP/expected-paths"
+          cargo fmt --all
+          git add -- crates packages scripts/tools
+          git diff --cached --name-only > "$RUNNER_TEMP/actual-paths"
+          diff -u "$RUNNER_TEMP/expected-paths" "$RUNNER_TEMP/actual-paths"
+          git diff --cached --exit-code -- .github/workflows
+          cargo fmt --all --check
+      - name: Publish isolated exact source
+        id: commit
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(recovery): preserve hold-source export checkpoints and compile all host paths'
+          test "$(git rev-parse HEAD^)" = de262fd961e6d9f40d64d087930259a96b0c4fc8
+          ref=refs/heads/codex/recovery-complete-verified-20260929
+          test -z "$(git ls-remote --heads origin "$ref")"
+          git push origin "HEAD:$ref"
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          mkdir -p _local/artifacts/test/recovery-final
+          git rev-parse HEAD > _local/artifacts/test/recovery-final/source-sha.txt
+          git archive --format=tar HEAD | gzip > _local/artifacts/test/recovery-final/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-final-source
+          path: _local/artifacts/test/recovery-final
+          retention-days: 7
+  native-contracts:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - name: Exact minimum, core and both host paths
+        shell: bash
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/recovery-final-native
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          result=0
+          cargo fmt --all --check 2>&1 | tee "$out/format.log" || result=1
+          cargo test --locked -p clearra-app recovery_minimum -- --test-threads=1 2>&1 | tee "$out/minimum.log" || result=1
+          cargo test --locked -p clearra-forward-search recovery_build -- --test-threads=1 2>&1 | tee "$out/core.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --test-threads=1 2>&1 | tee "$out/cli.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1 2>&1 | tee "$out/wire.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$out/wasm-target.log" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-final-native
+          path: _local/artifacts/test/recovery-final-native
+          retention-days: 7
+  browser-contracts:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: UI contracts and pinned real browser
+        run: |
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+          mkdir -p _local/artifacts/test/recovery-final-browser
+          npm install --prefix "$RUNNER_TEMP/browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$RUNNER_TEMP/browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Inputs, actual GIF/PNG, 100-row paging, source ownership and pinned minimum events
+        shell: bash
+        env:
+          CLEARRA_BROWSER_TOOLS_ROOT: ${{ runner.temp }}/browser-tools
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/recovery-final-browser
+          git rev-parse HEAD > "$out/source-sha.txt"
+          result=0
+          node --test packages/clearra-ui/test/recovery*.test.mjs 2>&1 | tee "$out/unit.log" || result=1
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee "$out/types.log" || result=1
+          for probe in recovery-build-browser-regression recovery-result-browser-acceptance recovery-workspace-browser-acceptance recovery-gallery-browser-acceptance; do
+            node "scripts/tools/$probe.mjs" 2>&1 | tee "$out/$probe.log" || result=1
+          done
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-final-browser
+          path: |
+            _local/artifacts/test/recovery-final-browser
+            build/recovery-regression
+            ${{ runner.temp }}/clearra-recovery-result-acceptance
+            ${{ runner.temp }}/clearra-recovery-workspace-acceptance
+            ${{ runner.temp }}/clearra-recovery-gallery-acceptance
+          retention-days: 7
+  full-fixture:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Build optimized tests and manager outside measured search
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=_local/artifacts/test/recovery-final-benchmark
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          nproc > "$out/host-logical.txt"
+          cargo build --locked --release -p clearra-manage
+          cargo test --locked --release -p clearra-app recovery_minimum_catalog_original_fixture_parallel_benchmark --no-run --message-format=json > "$out/build.jsonl"
+          python3 - <<'PY'
+          import json,pathlib
+          root=pathlib.Path('_local/artifacts/test/recovery-final-benchmark')
+          binaries=[v['executable'] for line in (root/'build.jsonl').read_text().splitlines() if (v:=json.loads(line)).get('reason')=='compiler-artifact' and v.get('executable') and v['target']['name']=='clearra_app' and v['profile']['test']]
+          assert len(binaries)==1,binaries
+          (root/'binary.txt').write_text(binaries[0])
+          PY
+      - name: Exact P7/P7 with 11 slots and early 0, 1, Auto
+        shell: bash
+        env:
+          CLEARRA_BENCH_WORKERS: 11
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/recovery-final-benchmark
+          binary="$(cat "$out/binary.txt")"
+          manager=build/cargo/default/release/clearra-manage
+          result=0
+          for early in 0 1 auto; do
+            export CLEARRA_EARLY_LIMIT="$early"
+            "$manager" --root . runtime run --producer "recovery-catalog-$early" --profile benchmark-search --timeout 600 -- "$binary" recovery_minimum_catalog_original_fixture_parallel_benchmark --ignored --nocapture --test-threads=1 2>&1 | tee "$out/early-$early.log" || { result=1; break; }
+          done
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-final-benchmark
+          path: |
+            _local/artifacts/test/recovery-final-benchmark
+            _local/runtime/receipts
+          retention-days: 7
