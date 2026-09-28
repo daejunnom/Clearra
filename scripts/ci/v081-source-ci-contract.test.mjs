@@ -69,6 +69,8 @@ test('signed browser acceptance installs and searches each qualified profile wit
   assert.ok(browser.includes('await profileSelect.selectOption(String(index))'));
   assert.ok(browser.includes('await secondProfile.selectOption(String(index))'));
   assert.ok(browser.includes('`--solution-probabilities --backend cpu --workers ${workers} --rule ${profile} --no-tablebase `'));
+  assert.ok(browser.includes('results[profile].existing = {'));
+  assert.ok(browser.includes("'srs-x': 289"));
   assert.ok(browser.includes('assert.deepEqual(activated, baseline'));
   assert.ok(browser.includes("assert.equal(assetRequests.length, assets.length, 'a search must read OPFS"));
 });

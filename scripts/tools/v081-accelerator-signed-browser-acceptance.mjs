@@ -290,12 +290,10 @@ async function browserAcceptance() {
             activated: await run(profile, true, true, 'eligible')
           }
         };
-        if (profile === 'srs') {
-          results[profile].existing = {
-            baseline: await run(profile, false, false, 'existing'),
-            activated: await run(profile, true, true, 'existing')
-          };
-        }
+        results[profile].existing = {
+          baseline: await run(profile, false, false, 'existing'),
+          activated: await run(profile, true, true, 'existing')
+        };
       }
       return { results, workers };
     }, profiles);
@@ -315,15 +313,15 @@ async function browserAcceptance() {
         probabilities: report.solution_probabilities,
       };
     };
+    const existingCounts = { srs: 245, 'srs-plus': 246, 'srs-x': 289,
+      'jstris-180': 246, 'no-kick': 175 };
     for (const profile of profiles) {
       for (const [scope, pair] of Object.entries(execution.results[profile])) {
         const name = `${profile}/${scope}`;
         const activated = compact(pair.activated);
         const baseline = compact(pair.baseline);
-        if (profile === 'srs') {
-          assert.equal(activated.keys.length, scope === 'existing' ? 245 : 159,
-            `${name}: retain the previously qualified browser fixture count`);
-        }
+        assert.equal(activated.keys.length, scope === 'existing' ? existingCounts[profile] : 159,
+          `${name}: retain the independently measured exact WASM fixture count`);
         assert.deepEqual(activated, baseline,
           `${name}: installed accelerators must preserve the complete browser result`);
         assert.equal(pair.activated.result.search_report.cpu_parallel_execution, true,
