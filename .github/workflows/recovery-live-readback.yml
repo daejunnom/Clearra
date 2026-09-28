@@ -1,0 +1,152 @@
+name: Recovery public deployment readback
+
+on:
+  push:
+    branches: [codex/verify-recovery-live-20260928]
+    paths: [.github/workflows/recovery-live-readback.yml]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: recovery-public-readback-1868d31
+  cancel-in-progress: false
+
+jobs:
+  public-readback:
+    if: github.repository == 'daejunnom/Clearra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 1868d31da7730cc9d3018aecd18e442c6940a5d7
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download the existing accepted Pages artifact without rebuilding
+        uses: actions/download-artifact@v4
+        with:
+          name: accepted-pages-build-1868d31da7730cc9d3018aecd18e442c6940a5d7-run-36388470463-attempt-1
+          path: _local/artifacts/test/recovery-live-readback/accepted
+          github-token: ${{ github.token }}
+          repository: daejunnom/Clearra
+          run-id: 36388470463
+      - name: Compare public HTML, workers, bindings and WASM with the accepted bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures, datetime, hashlib, json, os, pathlib, re, subprocess, urllib.request
+
+          repo = 'daejunnom/Clearra'
+          source = '1868d31da7730cc9d3018aecd18e442c6940a5d7'
+          base = 'https://daejunnom.github.io/Clearra/'
+          identity_sha = '6a5b8fce5f68bcc1e05c3a0c1be048f06414a47fc952f55f91d5bd91da5802fb'
+          root = pathlib.Path('_local/artifacts/test/recovery-live-readback')
+          accepted = root / 'accepted'
+          root.mkdir(parents=True, exist_ok=True)
+          report = {
+              'schema': 'clearra.recovery.public-readback.v1',
+              'source_commit': source, 'accepted_run_id': '36388470463',
+              'deployment_run_id': '36390660362', 'readback_run_id': os.environ['GITHUB_RUN_ID'],
+              'page_url': base, 'mode': 'read-only', 'status': 'running',
+              'product_source_changed': False, 'deployment_dispatched': False,
+              'files': [], 'excluded_public_paths': [
+                  {'path': '.nojekyll', 'reason': 'Deployment control file, not a browser runtime asset; checked locally.'}
+              ]
+          }
+
+          def api(route):
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/' + repo + route,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  content = response.read(4 * 1024 * 1024 + 1)
+                  assert len(content) <= 4 * 1024 * 1024
+                  return json.loads(content)
+
+          def check_main():
+              assert api('/git/ref/heads/main')['object']['sha'] == source, 'Main moved during readback'
+
+          def public_bytes(path, size):
+              assert re.fullmatch(r'[A-Za-z0-9_./-]*', path)
+              assert not path.startswith('/') and '..' not in pathlib.PurePosixPath(path).parts
+              assert 0 <= size <= 32 * 1024 * 1024
+              url = base + path
+              request = urllib.request.Request(url, headers={
+                  'User-Agent': 'Clearra-deployment-readback',
+                  'Cache-Control': 'no-cache', 'Accept-Encoding': 'identity'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  assert response.status == 200 and response.geturl() == url, path
+                  data = response.read(size + 1)
+              assert len(data) == size, 'Public size mismatch: ' + path
+              return data
+
+          def check_file(entry):
+              path, size, expected = entry['path'], entry['size'], entry['sha256']
+              actual = hashlib.sha256(public_bytes(path, size)).hexdigest()
+              assert actual == expected, 'Public SHA-256 mismatch: ' + path
+              return {'path': path, 'bytes': size, 'sha256': actual, 'status': 'matched'}
+
+          try:
+              assert os.environ['GITHUB_REPOSITORY'] == repo
+              assert os.environ['GITHUB_REF'] == 'refs/heads/codex/verify-recovery-live-20260928'
+              assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == source
+              check_main()
+              for run_id, workflow in [('36388470463', 'release-cli.yml'), ('36390660362', 'pages.yml')]:
+                  run = api('/actions/runs/' + run_id)
+                  assert str(run['id']) == run_id and run['head_sha'] == source
+                  assert run['head_branch'] == 'main' and run['event'] == 'workflow_dispatch'
+                  assert run['path'] == '.github/workflows/' + workflow
+                  assert run['repository']['full_name'] == repo
+                  assert run['status'] == 'completed' and run['conclusion'] == 'success'
+                  assert run['run_attempt'] == 1
+              expected_identity = (accepted / 'clearra-build-identity.json').read_bytes()
+              assert hashlib.sha256(expected_identity).hexdigest() == identity_sha
+              identity = json.loads(expected_identity)
+              assert identity['sourceCommit'] == source and identity['engineBuildId'] == source
+              assert identity['acceptedRunId'] == '36388470463' and identity['acceptedRunAttempt'] == '1'
+              assert identity['basePath'] == '/Clearra'
+              assert len(identity['files']) == 40
+              paths = [entry['path'] for entry in identity['files']]
+              assert len(paths) == len(set(paths))
+              for entry in identity['files']:
+                  path = pathlib.PurePosixPath(entry['path'])
+                  assert not path.is_absolute() and '..' not in path.parts
+                  data = (accepted / path).read_bytes()
+                  assert len(data) == entry['size']
+                  assert hashlib.sha256(data).hexdigest() == entry['sha256']
+              assert public_bytes('clearra-build-identity.json', len(expected_identity)) == expected_identity
+              assert public_bytes('', (accepted / 'index.html').stat().st_size) == (accepted / 'index.html').read_bytes()
+              entries = [entry for entry in identity['files'] if entry['path'] != '.nojekyll']
+              with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                  for result in pool.map(check_file, entries):
+                      report['files'].append(result)
+                      print('MATCH', result['path'], result['sha256'])
+              assert public_bytes('clearra-build-identity.json', len(expected_identity)) == expected_identity
+              check_main()
+              report.update(status='passed', verified_payload_count=len(entries),
+                            identity_sha256=identity_sha, identity_stable_before_after=True,
+                            root_html_matches=True, main_stable_before_after=True)
+              print('PASS: public payloads=' + str(len(entries)) + '; source=' + source)
+          except Exception as error:
+              report.update(status='failed', error_type=type(error).__name__, error=str(error))
+              raise
+          finally:
+              report['checked_at_utc'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              (root / 'public-readback.json').write_text(json.dumps(report, indent=2) + '\n')
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                  summary.write('Public deployment readback: **' + report['status'] + '**\n\n')
+                  summary.write('Product source: `' + source + '`\n\n')
+                  summary.write('No rebuild, release dispatch, main update or deployment was performed.\n')
+          PY
+      - name: Retain the read-only public readback report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-public-readback-1868d31
+          path: _local/artifacts/test/recovery-live-readback/public-readback.json
+          if-no-files-found: warn
+          retention-days: 30
