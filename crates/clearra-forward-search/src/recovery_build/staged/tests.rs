@@ -406,11 +406,21 @@ fn memo_answers(
     start: usize,
     rows: usize,
 ) -> (Vec<(bool, bool)>, [u128; 3], u128) {
+    memo_answers_mode(q, literal, false, start, rows)
+}
+fn memo_answers_mode(
+    q: &RecoveryBuildQuery,
+    literal: bool,
+    literal_early: bool,
+    start: usize,
+    rows: usize,
+) -> (Vec<(bool, bool)>, [u128; 3], u128) {
     let control = ExecutionControl::default();
     let p = PreparedPopulation::new(q.clone()).unwrap();
     let geometry = Geometry::new(q, &control).unwrap();
     let mut b = Block::new(&p, geometry, start, rows, 3, &control).unwrap();
     b.solver.literal_memo = literal;
+    b.solver.literal_early = literal_early;
     while !b.advance(&control).unwrap() {}
     let mut answers = Vec::new();
     for i in start..start + rows {
@@ -545,5 +555,58 @@ fn recovery_build_memo_quotient_benchmark() {
             assert_eq!(new.1, old.1);
             eprintln!("memo_quotient_ab start={start} rows=32 exchange={exchange} counts={:?} literal_states={} quotient_states={} literal_ms={old_ms} quotient_ms={new_ms}", new.1, old.2, new.2);
         }
+    }
+}
+
+#[test]
+#[ignore = "finite managed exact sharing A/B; not a fixture-specific production policy"]
+fn recovery_build_sharing_benchmark() {
+    let mut q = query();
+    q.fields.height = 10;
+    q.fields.initial = mask(0xc0383f3fc7);
+    q.fields.middle = mask(0x3ff3fc7c0c038);
+    q.fields.result = mask(0x30483f07f3f8f);
+    q.first_supply = "P7".into();
+    q.second_supply = "P7".into();
+    q.preserve_b2b = true;
+    q.allow_piece_exchange = true;
+    for start in [0_usize, 480, 2400, 4920] {
+        let now = std::time::Instant::now();
+        let mut old_answers = Vec::new();
+        let mut old_counts = [0_u128; 3];
+        let mut old_states = 0;
+        for offset in (0..120).step_by(32) {
+            let old = memo_answers_mode(&q, false, true, start + offset, (120 - offset).min(32));
+            old_answers.extend(old.0);
+            for i in 0..3 {
+                old_counts[i] += old.1[i];
+            }
+            old_states += old.2;
+        }
+        let old_ms = now.elapsed().as_millis();
+        let now = std::time::Instant::now();
+        let mut small_answers = Vec::new();
+        let mut small_counts = [0_u128; 3];
+        let mut small_states = 0;
+        for offset in (0..120).step_by(32) {
+            let small = memo_answers(&q, false, start + offset, (120 - offset).min(32));
+            small_answers.extend(small.0);
+            for i in 0..3 {
+                small_counts[i] += small.1[i];
+            }
+            small_states += small.2;
+        }
+        let small_ms = now.elapsed().as_millis();
+        assert_eq!(small_answers, old_answers);
+        assert_eq!(small_counts, old_counts);
+        let now = std::time::Instant::now();
+        let wide = memo_answers(&q, false, start, 120);
+        let wide_ms = now.elapsed().as_millis();
+        assert_eq!(
+            wide.0, old_answers,
+            "every 604800 pair must agree at {start}"
+        );
+        assert_eq!(wide.1, old_counts);
+        eprintln!("sharing_ab first_start={start} first_rows=120 counts={:?} old_states={old_states} early_states={small_states} wide_states={} old_ms={old_ms} early_ms={small_ms} wide_ms={wide_ms}",wide.1,wide.2);
     }
 }

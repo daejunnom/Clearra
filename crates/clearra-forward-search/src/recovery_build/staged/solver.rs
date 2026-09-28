@@ -100,6 +100,8 @@ pub(super) struct Solver {
     memo: HashMap<Key, Id>,
     #[cfg(test)]
     pub(super) literal_memo: bool,
+    #[cfg(test)]
+    pub(super) literal_early: bool,
     machine: Option<Machine>,
     root: Option<Key>,
     roots: Vec<Root>,
@@ -135,6 +137,8 @@ impl Solver {
             memo: HashMap::new(),
             #[cfg(test)]
             literal_memo: false,
+            #[cfg(test)]
+            literal_early: false,
             machine: None,
             root: None,
             roots: Vec::new(),
@@ -340,6 +344,25 @@ impl Solver {
                 key.middle_counts = [0; 7];
                 key.result_counts = [0; 7];
             }
+        }
+        #[cfg(test)]
+        if self.literal_early {
+            return key;
+        }
+        let pos = self.geometry.position(key.geometry);
+        let structural = usize::from(self.source.first_len).min(
+            self.geometry.stages[usize::from(pos.stage)]
+                .prepared
+                .result_pieces,
+        );
+        if self.maximum == structural {
+            // With no tighter user bound, each early placement already
+            // consumes a different first token and result role. The
+            // bound can never reject a further geometrically possible
+            // early edge. Only zero versus positive affects whether a
+            // completed path qualifies as Repair. Actual counts remain
+            // untouched in execution keys and are replayed exactly.
+            key.early = u8::from(key.early > 0);
         }
         key
     }
