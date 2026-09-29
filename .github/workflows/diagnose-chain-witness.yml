@@ -1,0 +1,39 @@
+name: Diagnose chain witness domain
+on:
+  push:
+    branches: [codex/diagnose-chain-witness-20260929]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 0a58eb03a9cefa17c0b6a09993fb366dda6a3fb2
+          persist-credentials: false
+      - name: Add error-location diagnostics only in this disposable checkout
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('crates/clearra-forward-search/src/recovery_build')
+          for name in ['catalog.rs','catalog/plan.rs','staged/solver.rs','staged/source.rs','staged/diagram.rs']:
+              p=root/name
+              text=p.read_text()
+              text=text.replace('Error::PatternDomainUnavailable','{ eprintln!("domain_failure {}:{}", file!(), line!()); Error::PatternDomainUnavailable }')
+              p.write_text(text)
+          PY
+      - name: Execute unchanged behavioral assertions
+        env:
+          RUST_BACKTRACE: 1
+        run: |
+          set -uo pipefail
+          mkdir -p _local/artifacts/test/chain-diagnosis
+          cargo test --locked -p clearra-forward-search recovery_build_chain -- --nocapture --test-threads=1 2>&1 | tee _local/artifacts/test/chain-diagnosis/diagnosis.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chain-witness-diagnosis
+          path: _local/artifacts/test/chain-diagnosis/
+          retention-days: 7
