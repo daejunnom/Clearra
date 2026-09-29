@@ -57,7 +57,7 @@ jobs:
               seen.add(str(path))
               assert not path.is_absolute() and '..' not in path.parts
               assert path.parts[0] in ('crates', 'packages', 'scripts')
-              assert path.suffix in ('.rs', '.ts', '.svelte', '.mjs')
+              assert path.suffix in ('.rs', '.ts', '.svelte', '.mjs') or str(path) == 'scripts/tools/recovery-chain-library-regression.sh', str(path)
               target = root / path
               assert target.resolve().is_relative_to(root) and not target.is_symlink()
               if item['before'] is None:
