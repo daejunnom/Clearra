@@ -1,0 +1,84 @@
+name: Recovery multistage core
+on:
+  push:
+    branches: [codex/resume-recovery-chain-20260929]
+    paths: [.github/workflows/recovery-chain-core.yml]
+permissions:
+  contents: read
+concurrency:
+  group: recovery-chain-core-20260929
+  cancel-in-progress: false
+jobs:
+  proposal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 2a849b8e95c812f2b81d954ab91f3ee377e3a67a
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: _local/chain-helper
+          persist-credentials: false
+      - name: Assemble explicit source without changing product defaults
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 _local/chain-helper/scripts/tools/recovery-chain-integrate.py
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          paths=subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()
+          assert paths and all(p.startswith('crates/clearra-forward-search/') for p in paths),paths
+          PY
+          proposal=codex/recovery-chain-core-tested-20260929
+          test -z "$(git ls-remote --heads origin "refs/heads/$proposal")"
+          git add -- crates/clearra-forward-search
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'feat(recovery): generalize exact symbolic coverage to ordered target chains'
+          git push origin "HEAD:refs/heads/$proposal"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          mkdir -p _local/artifacts/test/chain-source
+          git rev-parse HEAD > _local/artifacts/test/chain-source/source-sha.txt
+          git archive HEAD | gzip > _local/artifacts/test/chain-source/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-source
+          path: _local/artifacts/test/chain-source
+          retention-days: 7
+  contracts:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - name: Exact multi-boundary and legacy regression contracts
+        shell: bash
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/chain-contracts
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_chain -- --test-threads=1 --nocapture 2>&1 | tee "$out/chain.log" || result=1
+          cargo test --locked -p clearra-forward-search recovery_build -- --test-threads=1 2>&1 | tee "$out/legacy.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1 2>&1 | tee "$out/wasm.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$out/wasm-target.log" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-contracts
+          path: _local/artifacts/test/chain-contracts
+          retention-days: 7
