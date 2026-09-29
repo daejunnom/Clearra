@@ -48,7 +48,10 @@
   export let enableGlobalPaste = true;
   // Optional snapshot references are visual context only and never enter edits/imports.
   export let occupiedTone: 'dark' | 'medium' | 'light' | null = null;
-  export let referenceLayers: Array<{ mask: bigint; tone: 'dark' | 'medium' | 'light'; label: string }> = [];
+  export let referenceLayers: Array<{ mask: bigint; tone: 'dark' | 'medium' | 'light'; label: string; hatch?: 'forward' | 'backward' }> = [];
+  // Recovery owns cross-layer/structural history. Other editors retain their
+  // existing local snapshot history and need not provide this optional bridge.
+  export let externalHistory: { canUndo: boolean; canRedo: boolean; undo: () => void; redo: () => void } | null = null;
   const tones = { dark: '#606060', medium: '#a0a0a0', light: '#dedede' };
   // Pass every changing value explicitly so legacy Svelte tracks painted cells.
   function cellTone(x: number, y: number, currentMode: BoardEditorMode, mask: bigint,
@@ -62,7 +65,11 @@
     return references.filter((layer) => boardCellOccupied(layer.mask, x, y)).map((layer) => layer.label).join(' · ');
   }
 
+  function referenceAngle(x: number, y: number, references: typeof referenceLayers): string {
+    return references.find(layer => boardCellOccupied(layer.mask, x, y))?.hatch === 'backward' ? '45deg' : '135deg';
+  }
   const dispatch = createEventDispatcher<{
+    history: void;
     change: Snapshot;
     import: { existingMask: bigint; height: number };
   }>();
@@ -115,6 +122,7 @@
   function beginPaint(event: PointerEvent, x: number, y: number) {
     if (!event.isPrimary || event.button !== 0) return;
     event.preventDefault();
+    dispatch('history');
     painting = true;
     paintingPointer = event.pointerId;
     boardElement?.setPointerCapture(event.pointerId);
@@ -182,6 +190,7 @@
     const normalized = normalize(next);
     if (normalized.existingMask === existingMask && normalized.targetMask === targetMask) return;
     if (recordHistory) {
+      dispatch('history');
       undoStack = [...undoStack.slice(-63), snapshot()];
       redoStack = [];
     }
@@ -266,6 +275,7 @@
       const imported = decodeInterchangeField(source, mode === 'pc' ? 6 : 24);
       importError = false;
       importFailureKey = 'fieldImportInvalid';
+      dispatch('history');
       dispatch('import', {
         existingMask: imported.boardMask,
         height: Math.max(height, imported.occupiedHeight || 1)
@@ -309,10 +319,11 @@
         <strong>{height}L · 10×{height}</strong>
       </div>
       <div class="board-actions" role="toolbar" aria-label={displayedBoardLabel}>
-        <button type="button" title={label('undo')} aria-label={label('undo')} disabled={!undoStack.length} on:click={undo}>
+        <button type="button" title={label('undo')} aria-label={label('undo')} disabled={externalHistory ? !externalHistory.canUndo : !undoStack.length} on:click={() => externalHistory ? externalHistory.undo() : undo()}>
           <Undo2 size={16} strokeWidth={1.8} />
         </button>
-        <button type="button" title={label('redo')} aria-label={label('redo')} disabled={!redoStack.length} on:click={redo}>
+        <slot name="afterUndo" />
+        <button type="button" title={label('redo')} aria-label={label('redo')} disabled={externalHistory ? !externalHistory.canRedo : !redoStack.length} on:click={() => externalHistory ? externalHistory.redo() : redo()}>
           <Redo2 size={16} strokeWidth={1.8} />
         </button>
         {#if mode === 'build-probability'}
@@ -414,6 +425,7 @@
             class:existing={boardCellOccupied(existingMask, x, y)}
             class:reference={mode === 'forward' && !boardCellOccupied(existingMask, x, y) && Boolean(cellTone(x, y, mode, existingMask, occupiedTone, referenceLayers))}
             style:background-color={cellTone(x, y, mode, existingMask, occupiedTone, referenceLayers)}
+            style:--reference-angle={referenceAngle(x, y, referenceLayers)}
             title={referenceLabel(x, y, referenceLayers) || undefined}
             class:target={mode === 'build-probability' && boardCellOccupied(targetMask, x, y)}
             aria-label={`${labelOverride ?? label(mode === 'pc' ? 'field' : mode === 'forward' || activeLayer === 'existing' ? 'existingField' : 'targetBuild')} ${x + 1}, ${y + 1}`}
@@ -451,11 +463,11 @@
 
 <style>
   .board-tool { min-width: 0; }
-  .section-heading { align-items: flex-end; display: flex; gap: 16px; justify-content: space-between; margin-bottom: 14px; }
+  .section-heading { flex-wrap: wrap; align-items: flex-end; display: flex; gap: 16px; justify-content: space-between; margin-bottom: 14px; }
   .section-heading > div:first-child { display: grid; gap: 3px; }
   .eyebrow { color: #66716d; font-size: 11px; font-weight: 700; text-transform: uppercase; }
   strong { color: #17211e; font-size: 15px; }
-  .board-actions { align-items: center; display: flex; gap: 5px; }
+  .board-actions { flex-wrap: wrap; max-width: 100%; align-items: center; display: flex; gap: 5px; }
   .board-actions button { align-items: center; background: #fff; border: 1px solid #cbd3ce; border-radius: 5px; color: #34403c; cursor: pointer; display: inline-flex; height: 32px; justify-content: center; padding: 0; width: 32px; }
   .board-actions button:hover:not(:disabled), .board-actions button.active { background: #e4f1ee; border-color: #36847c; color: #075f58; }
   .board-actions button:disabled { cursor: default; opacity: .35; }
@@ -484,7 +496,7 @@
   .board > button:hover, .board > button:focus-visible { background: #33423f; outline: 2px solid #75c8bc; outline-offset: -2px; }
   .board.build > button.existing { background: #737d79; box-shadow: inset 2px 2px 0 rgba(255,255,255,.1), inset -2px -2px 0 rgba(20,26,24,.25); }
   .board.pc > button.existing, .board > button.target { background: #d8e2de; box-shadow: inset 2px 2px 0 rgba(255,255,255,.16), inset -2px -2px 0 rgba(41,56,51,.18); }
-  .board > button.reference { background-image: repeating-linear-gradient(135deg, transparent 0 5px, #10181777 5px 7px); }
+  .board > button.reference { background-image: repeating-linear-gradient(var(--reference-angle, 135deg), transparent 0 5px, #10181777 5px 7px); }
   .board > button span { display: block; height: 100%; width: 100%; }
   .board-stats { display: grid; gap: 1px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 10px 0 0; }
   .board-stats.build-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }

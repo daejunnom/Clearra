@@ -1,7 +1,13 @@
 //! Stage-factorized paired Build coverage with demand-driven boundary repair.
 //! The original weighted supply universe is preserved without pair expansion.
 mod catalog;
+mod chain;
+pub use chain::{
+    RecoveryChainCoverage, RecoveryChainError, RecoveryChainQuery, RecoveryChainSession,
+    RecoveryChainStep, RecoveryChainWitness,
+};
 mod field;
+mod mirror;
 mod parallel;
 mod population;
 mod staged;

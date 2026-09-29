@@ -95,8 +95,8 @@ fn recovery_build_catalog_complements_and_hold_match_complete_source_union() {
     q.second_supply = "I".into();
     assert_eq!(
         compare(q).solutions.len(),
-        2,
-        "4x2 has two horizontal I or two O tilings under these supplies"
+        4,
+        "two 4x2 tilings in each of the two initial-symmetry orientations"
     );
 }
 #[test]
@@ -200,4 +200,53 @@ fn recovery_build_catalog_original_fixture_benchmark() {
         result.solutions.len(),
         result.states
     );
+}
+
+#[test]
+fn recovery_build_initial_symmetry_keeps_the_suffix_coupled_and_union_exact() {
+    let mut q = query();
+    q.fields.middle = mask(0x1007);
+    q.fields.result = mask(0x300c00);
+    q.first_supply = "J".into();
+    q.second_supply = "O".into();
+    q.hold_enabled = false;
+    q.allow_piece_exchange = false;
+    q.early_limit = CrossStageEarlyLimit::AtMost(0);
+    // Independently execute the explicitly reflected drawing with the fixed
+    // solver, which deliberately does not add automatic orientations.
+    let mut actual_fields = q.fields.clone();
+    actual_fields.middle = mask(0x20380);
+    actual_fields.result = mask(0x300c0000);
+    let expected = RecoveryBuildFixedQuery {
+        fields: actual_fields.clone(),
+        first_supply: vec![clearra_core_domain::piece::piece_kind::PieceKind::J],
+        second_supply: vec![clearra_core_domain::piece::piece_kind::PieceKind::O],
+        early_limit: q.early_limit,
+        allow_piece_exchange: false,
+        hold_enabled: false,
+        preserve_b2b: false,
+        initial_b2b: true,
+        rule_profile: q.rule_profile,
+        spin_profile: q.spin_profile,
+    }
+    .search(&ExecutionControl::default())
+    .unwrap();
+    assert_eq!(expected.status, Status::Normal);
+    let report = compare(q.clone());
+    assert_eq!(report.possible, 1);
+    assert_eq!(report.normal_count, 1);
+    assert_eq!(report.recovery_count, 0);
+    for solution in &report.solutions {
+        assert_eq!(solution.covered_count, 1);
+        assert_eq!(
+            solution.example.path.middle_target,
+            actual_fields.middle.words()
+        );
+        assert_eq!(
+            solution.example.path.result_target,
+            actual_fields.result.words()
+        );
+    }
+    q.fields.initial = mask(512);
+    assert_eq!(compare(q).normal_count, 0);
 }

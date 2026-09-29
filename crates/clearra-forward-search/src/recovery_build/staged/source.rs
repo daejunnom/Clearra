@@ -285,3 +285,72 @@ fn compact_atoms(universe: &MaterializedPatternUniverse) -> Option<Vec<Atom>> {
         _ => None,
     }
 }
+
+/// Compile one independent, fully specified source at an absolute input level.
+/// Multi-boundary composition reuses the same source-language owner as the
+/// existing two-stage catalog. The Cartesian product is never materialized.
+pub(in crate::recovery_build) fn compile_language(
+    diagram: &mut Diagram,
+    universe: &MaterializedPatternUniverse,
+    offset: u16,
+    control: &ExecutionControl,
+) -> Result<(Id, Option<[u8; 7]>, bool), Error> {
+    cancelled(control)?;
+    if !universe.complete() || universe.pattern_count() == 0 {
+        return Err(Error::PatternDomainUnavailable);
+    }
+    let len = u16::try_from(universe.sequence_len_at(0)).map_err(|_| Error::CounterOverflow)?;
+    let end = offset.checked_add(len).ok_or(Error::CounterOverflow)?;
+    if len == 0 {
+        return Err(Error::EmptySupply);
+    }
+    if let Some(atoms) = compact_atoms(universe) {
+        let first = atoms.first().ok_or(Error::EmptySupply)?;
+        let root = compile_atoms(
+            diagram,
+            &atoms,
+            0,
+            first.mask,
+            first.draws,
+            offset,
+            &mut HashMap::new(),
+            control,
+        )?;
+        if diagram.count(root, offset, end)? != universe.pattern_count() as u128 {
+            return Err(Error::PatternDomainUnavailable);
+        }
+        let mut counts = [0_u8; 7];
+        let mut fixed = true;
+        for atom in &atoms {
+            fixed &= u32::from(atom.draws) == atom.mask.count_ones();
+            for (piece, count) in counts.iter_mut().enumerate() {
+                *count = count
+                    .checked_add(u8::from(atom.mask & (1 << piece) != 0))
+                    .ok_or(Error::CounterOverflow)?;
+            }
+        }
+        return Ok((root, fixed.then_some(counts), true));
+    }
+    let mut root = NONE;
+    let mut counts = None;
+    let mut fixed = true;
+    for index in 0..universe.pattern_count() {
+        cancelled(control)?;
+        let queue = universe.sequence_at(index);
+        if queue.len() != usize::from(len) {
+            return Err(Error::PatternDomainUnavailable);
+        }
+        let next = encode_queue(diagram, &queue, offset, ALL)?;
+        root = diagram.union(root, next)?;
+        let inventory = inventory(&queue)?;
+        if let Some(old) = counts {
+            fixed &= old == inventory;
+        } else {
+            counts = Some(inventory);
+        }
+    }
+    if diagram.count(root, offset, end)? != universe.pattern_count() as u128 {
+        return Err(Error::PatternDomainUnavailable);
+    }
+    Ok((root, if fixed { counts } else { None }, false))
+}

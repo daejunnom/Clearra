@@ -23,6 +23,7 @@ export type RecoveryBuildExamplePayload = {
   second_queue: string;
   status: string;
   terminal_board_mask: string;
+  middle_target_mask?: string | null;
   result_target_mask?: string;
   effective_max_early: string;
   actual_early: string;

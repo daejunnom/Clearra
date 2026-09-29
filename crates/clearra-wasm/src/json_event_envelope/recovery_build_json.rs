@@ -29,6 +29,7 @@ pub(super) fn write_example(object: &mut JsonObject<'_>, source: &RecoveryBuildE
     object.string("second_queue", &source.second_queue);
     object.string("status", &source.status);
     object.string("terminal_board_mask", &source.terminal_board_mask);
+    object.optional_string("middle_target_mask", source.middle_target_mask.as_deref());
     object.string("result_target_mask", &source.result_target_mask);
     object.string("effective_max_early", &source.effective_max_early);
     object.string("actual_early", &source.actual_early);
