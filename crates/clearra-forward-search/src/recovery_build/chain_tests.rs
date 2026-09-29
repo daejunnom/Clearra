@@ -178,8 +178,9 @@ fn recovery_build_chain_source_is_symbolic_beyond_wasm_cartesian_address_space()
 }
 #[test]
 fn recovery_build_chain_preserves_per_source_inventory_and_boundary_quotas() {
-    // Three independently grounded targets. First source can only build stage 2,
-    // second source only stage 1, and the final O builds the last target.
+    // The first O can build either of the later O targets. Placing it in the
+    // final target crosses two unfinished boundaries, but counts once at each
+    // boundary. The representative witness must not be forced to one order.
     let control = ExecutionControl::default();
     let mut q = chain(3);
     q.chain_stages[0].target = cells(&[0, 1, 2, 3]);
@@ -197,10 +198,31 @@ fn recovery_build_chain_preserves_per_source_inventory_and_boundary_quotas() {
     q.early_limit = CrossStageEarlyLimit::AtMost(1);
     let result = super::parallel::search_serial(q.clone(), &control).unwrap();
     assert_eq!(result.recovery_count, 1);
-    assert!(result
-        .solutions
-        .iter()
-        .all(|s| s.example.path.stage_early_counts == vec![1, 0]));
+    for solution in &result.solutions {
+        let path = &solution.example.path;
+        let mut completed = [false; 3];
+        let mut independently_counted = vec![0; 2];
+        for step in &path.steps {
+            assert_eq!(step.cleared_rows, 0, "this fixture has no line clears");
+            let owner = path
+                .stage_targets
+                .iter()
+                .position(|&target| target == step.placement)
+                .expect("each target is exactly one independently grounded mino");
+            assert!(!completed[owner]);
+            for boundary in 0..owner {
+                if !completed[..=boundary].iter().all(|&done| done) {
+                    independently_counted[boundary] += 1;
+                }
+            }
+            completed[owner] = true;
+        }
+        assert!(completed.into_iter().all(|done| done));
+        assert_eq!(path.stage_early_counts, independently_counted);
+        assert_eq!(independently_counted[0], 1);
+        assert!(independently_counted.iter().all(|&count| count <= 1));
+        assert_eq!(path.actual_early, 1);
+    }
     q.allow_piece_exchange = false;
     assert_eq!(
         q.search(&control).unwrap().no_path_count,
