@@ -760,6 +760,83 @@ async function browserAcceptance() {
     assert.ok(verifierRequests.length >= 1, 'the actual verifier worker must be loaded');
     assert.equal(assetRequests.length, assets.length, 'a search must read OPFS, not re-download signed assets');
     assert.deepEqual(errors, []);
+    // A 0.5 GiB device cannot transfer the larger legal-board bundle in one
+    // search-worker message. The saved asset must be presented as inactive,
+    // not as an accelerator that silently ran or as a failed exact search.
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'deviceMemory', { configurable: true, value: 0.5 });
+    });
+    const lowMemoryPage = await context.newPage();
+    try {
+      await lowMemoryPage.goto(`http://127.0.0.1:${address.port}/`);
+      await lowMemoryPage.locator('details.accelerator-download summary').click();
+      await lowMemoryPage.locator('details.accelerator-download select').nth(1).selectOption('2');
+      await lowMemoryPage.getByRole('status').filter({ hasText: 'Verified asset saved' }).waitFor();
+      const unavailable = lowMemoryPage.getByRole('status').filter({
+        hasText: 'This asset exceeds this device’s search-worker transfer limit'
+      });
+      await unavailable.waitFor();
+      assert.match(await unavailable.textContent(), /16\.0 MiB/u,
+        'low-memory SRS-X must disclose the actual worker limit before download');
+      assert.equal(assetRequests.length, assets.length,
+        'a low-memory status check must not download an unusable asset');
+      const lowMemoryResult = await lowMemoryPage.evaluate(async () => {
+        const { createHostCapabilitySnapshot, resolveWorkerAuthority } = await import('/capabilities.js');
+        const snapshot = createHostCapabilitySnapshot({
+          snapshotId: 'signed-browser-low-memory-exact-fallback', source: 'browser-main',
+          reportedLogicalProcessors: navigator.hardwareConcurrency,
+          reportedDeviceMemoryGiB: navigator.deviceMemory,
+          webGpuAvailable: false, crossOriginIsolated: self.crossOriginIsolated
+        });
+        if (snapshot.wasmTransferByteCap !== 16 * 1024 * 1024) {
+          throw new Error('low-memory browser snapshot did not keep the 16 MiB transfer cap');
+        }
+        const worker = new Worker('/workers/clearraWorker.ts', { type: 'module' });
+        try {
+          return await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('low_memory_exact_fallback_timeout')), 120_000);
+            worker.addEventListener('error', error => {
+              clearTimeout(timeout);
+              reject(new Error(`low_memory_worker_error: ${error.message}`));
+            });
+            worker.addEventListener('message', ({ data }) => {
+              if (data.event === 'final_response') {
+                clearTimeout(timeout);
+                resolve(data);
+              } else if (['failed', 'cancelled', 'terminated'].includes(data.event)) {
+                clearTimeout(timeout);
+                reject(new Error(`low_memory_worker_${data.event}: ${JSON.stringify(data.diagnostics ?? data)}`));
+              }
+            });
+            worker.postMessage({
+              type: 'run_command_text',
+              commandText: 'clearra pc --lines 4 --height 4 --board-mask 0 --pieces 10 ' +
+                '--queue IIOOOIIOOO --no-hold --objective unique --count unique ' +
+                '--solution-probabilities --backend cpu --workers 1 --rule srs-x ' +
+                '--no-tablebase --legal-board --no-conditioned-reachability',
+              prewarmWorkerCount: 1, tablebaseRequested: false,
+              hostCapabilitySnapshot: snapshot,
+              workerAuthority: resolveWorkerAuthority(snapshot, 1),
+              warmupPolicy: { backend: 'cpu', cpuWarmup: false, gpuWarmup: false }
+            });
+          });
+        } finally {
+          worker.postMessage({ type: 'dispose_runtime' });
+          await new Promise(resolve => setTimeout(resolve, 100));
+          worker.terminate();
+        }
+      });
+      assert.deepEqual(compact({ result: lowMemoryResult }),
+        compact(execution.results['srs-x'].eligible.baseline),
+        'an installed oversized SRS-X asset must preserve the exact browser result');
+      assert.equal(new Map(lowMemoryResult.search_report.summary_fields)
+        .get('legal_board_verified_negative_prunes'), '0',
+      'the oversized asset must not silently claim a negative proof');
+      assert.equal(assetRequests.length, assets.length,
+        'low-memory exact fallback must read local state without new network asset reads');
+    } finally {
+      await lowMemoryPage.close();
+    }
     await context.close();
     console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score/minimum/score-minimum/replay parity, plus SRS+ Build result-mode and production renderer parity passed');
   } finally {

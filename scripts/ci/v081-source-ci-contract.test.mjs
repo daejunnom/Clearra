@@ -90,6 +90,11 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes('loadSolutionPage = solutionPage'));
   assert.ok(browser.includes("rootWorker.postMessage({ type: 'load_product_page', requestId, action,"));
   assert.ok(browser.includes("rootWorker.postMessage({ type: 'load_solution_page', requestId, offset, limit })"));
+  assert.ok(browser.includes("Object.defineProperty(navigator, 'deviceMemory', { configurable: true, value: 0.5 })"));
+  assert.ok(browser.includes('a low-memory status check must not download an unusable asset'));
+  assert.ok(browser.includes("snapshot.wasmTransferByteCap !== 16 * 1024 * 1024"));
+  assert.ok(browser.includes("compact(execution.results['srs-x'].eligible.baseline)"));
+  assert.ok(browser.includes('the oversized asset must not silently claim a negative proof'));
   assert.ok(browser.includes("activated: await run('srs-plus', true, true, input, mode)"));
   assert.ok(browser.includes('releasePages: () => rootWorker.postMessage({ type: \'release_product_pages\' })'));
   assert.ok(browser.includes("? '.path-representative' : 'li[data-solution-key]'"));
