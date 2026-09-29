@@ -95,8 +95,8 @@ fn recovery_build_catalog_complements_and_hold_match_complete_source_union() {
     q.second_supply = "I".into();
     assert_eq!(
         compare(q).solutions.len(),
-        2,
-        "4x2 has two horizontal I or two O tilings under these supplies"
+        4,
+        "two 4x2 tilings in each initial-symmetry orientation"
     );
 }
 #[test]

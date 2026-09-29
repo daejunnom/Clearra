@@ -90,10 +90,10 @@ pub(crate) fn recovery_build_response(
     identity_query.required_solution_keys.clear();
     identity_query.minimum_source_identity = None;
     let digest: [u8; 32] =
-        Sha256::digest(format!("recovery-build.v3:{identity_query:?}").as_bytes()).into();
+        Sha256::digest(format!("recovery-build.v4:{identity_query:?}").as_bytes()).into();
     let identity = format!(
         "{:x}",
-        Sha256::digest(format!("recovery-build.v3:{identity_query:?}").as_bytes())
+        Sha256::digest(format!("recovery-build.v4:{identity_query:?}").as_bytes())
     );
     let selected = if query.minimum_solutions {
         if query
@@ -226,6 +226,7 @@ fn example(value: &RecoveryBuildExample) -> RecoveryBuildExamplePayload {
         }
         .into(),
         terminal_board_mask: mask(path.terminal_board),
+        middle_target_mask: Some(mask(path.middle_target)),
         result_target_mask: mask(path.result_target),
         effective_max_early: path.effective_max_early.to_string(),
         actual_early: path.actual_early.to_string(),

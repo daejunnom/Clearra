@@ -39,6 +39,10 @@ pub(super) fn copy_example(
         second_queue: try_owned_string(&source.second_queue, ledger)?,
         status: try_owned_string(&source.status, ledger)?,
         terminal_board_mask: try_owned_string(&source.terminal_board_mask, ledger)?,
+        middle_target_mask: try_optional_owned_string(
+            source.middle_target_mask.as_deref(),
+            ledger,
+        )?,
         result_target_mask: try_owned_string(&source.result_target_mask, ledger)?,
         effective_max_early: try_owned_string(&source.effective_max_early, ledger)?,
         actual_early: try_owned_string(&source.actual_early, ledger)?,

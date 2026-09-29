@@ -47,23 +47,35 @@ fn reflected(mask: Mask, height: u8) -> Mask {
     result
 }
 fn orientations(q: &RecoveryBuildQuery) -> Vec<RecoveryBuildFields> {
-    let mut result = vec![q.fields.clone()];
-    let (base, _, _) = place_and_clear(
-        10,
-        q.fields.height,
-        ForwardBoard::from_mask(q.fields.initial.union(q.fields.middle)),
-    );
-    let base = Mask::from_words(base.words());
-    if reflected(base, q.fields.height) == base {
-        let mirror = reflected(q.fields.result, q.fields.height);
-        if mirror != q.fields.result {
-            let mut f = q.fields.clone();
-            f.result = mirror;
-            result.push(f);
+    let mut candidates = vec![q.fields.clone()];
+    if reflected(q.fields.initial, q.fields.height) == q.fields.initial {
+        let mut f = q.fields.clone();
+        f.middle = reflected(f.middle, f.height);
+        f.result = reflected(f.result, f.height);
+        candidates.push(f);
+    }
+    let mut result = Vec::new();
+    for original in candidates {
+        let (base, _, _) = place_and_clear(
+            10,
+            original.height,
+            ForwardBoard::from_mask(original.initial.union(original.middle)),
+        );
+        let base = Mask::from_words(base.words());
+        if !result.contains(&original) {
+            result.push(original.clone());
+        }
+        if reflected(base, original.height) == base {
+            let mut f = original;
+            f.result = reflected(f.result, f.height);
+            if !result.contains(&f) {
+                result.push(f);
+            }
         }
     }
     result
 }
+
 fn oracle(
     q: &RecoveryBuildQuery,
     first: &[PieceKind],

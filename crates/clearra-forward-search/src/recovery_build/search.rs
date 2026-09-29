@@ -69,6 +69,7 @@ pub struct RecoveryBuildFixedReport {
     pub exchange_balance: [i16; 7],
     pub steps: Vec<RecoveryBuildStep>,
     pub terminal_board: [u64; 4],
+    pub middle_target: [u64; 4],
     pub result_target: [u64; 4],
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -177,6 +178,7 @@ impl RecoveryBuildFixedQuery {
                     exchange_balance: terminal.exchange,
                     steps,
                     terminal_board: field.terminal.words(),
+                    middle_target: self.fields.middle.words(),
                     result_target: self.fields.result.words(),
                 });
             }
@@ -189,6 +191,7 @@ impl RecoveryBuildFixedQuery {
             exchange_balance: [0; 7],
             steps: Vec::new(),
             terminal_board: field.terminal.words(),
+            middle_target: self.fields.middle.words(),
             result_target: self.fields.result.words(),
         })
     }

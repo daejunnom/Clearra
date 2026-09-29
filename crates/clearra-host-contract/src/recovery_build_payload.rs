@@ -41,6 +41,8 @@ pub struct RecoveryBuildExamplePayload {
     pub second_queue: String,
     pub status: String,
     pub terminal_board_mask: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub middle_target_mask: Option<String>,
     pub result_target_mask: String,
     pub effective_max_early: String,
     pub actual_early: String,
@@ -56,6 +58,8 @@ impl RecoveryBuildExamplePayload {
         bytes = bytes.checked_add(self.second_queue.capacity() as u128)?;
         bytes = bytes.checked_add(self.status.capacity() as u128)?;
         bytes = bytes.checked_add(self.terminal_board_mask.capacity() as u128)?;
+        bytes = bytes
+            .checked_add(self.middle_target_mask.as_ref().map_or(0, |v| v.capacity()) as u128)?;
         bytes = bytes.checked_add(self.result_target_mask.capacity() as u128)?;
         bytes = bytes.checked_add(self.effective_max_early.capacity() as u128)?;
         bytes = bytes.checked_add(self.actual_early.capacity() as u128)?;

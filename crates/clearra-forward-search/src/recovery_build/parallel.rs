@@ -227,6 +227,7 @@ impl RecoveryBuildParallelCoordinator {
                 "invalid stage probability measure",
             ));
         }
+        let variants = super::mirror::orientations(&self.source.query.fields)?;
         for (category, slot) in [(0, &mut batch.block.normal), (1, &mut batch.block.recovery)] {
             let needed =
                 expected.examples & (1 << category) != 0 && batch.block.counts[category] > 0;
@@ -245,6 +246,10 @@ impl RecoveryBuildParallelCoordinator {
                     || example.first_pattern >= start + batch.task.count
                     || example.second_pattern >= self.source.second.pattern_count()
                     || example.path.status != status
+                    || !variants.iter().any(|f| {
+                        example.path.middle_target == f.middle.words()
+                            && example.path.result_target == f.result.words()
+                    })
                     || example.path.steps.is_empty()
                 {
                     return Err(RecoveryBuildParallelError::InvalidWire(

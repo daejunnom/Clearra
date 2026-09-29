@@ -153,6 +153,10 @@ impl Coordinator {
         if *expected != packet.task.plan {
             return Err(ParallelError::InvalidWire("catalog plan binding mismatch"));
         }
+        let variants = super::mirror::orientations(&self.prepared.query.fields)?;
+        let target = variants
+            .get(usize::from(packet.task.plan.orientation))
+            .ok_or(ParallelError::InvalidWire("unknown catalog orientation"))?;
         let languages = self.diagram.import(&packet.languages, self.source.end)?;
         for (id, example, status) in [
             (languages[0], &mut packet.normal, Status::Normal),
@@ -169,6 +173,8 @@ impl Coordinator {
                 if e.first_pattern >= self.prepared.first.pattern_count()
                     || e.second_pattern >= self.prepared.second.pattern_count()
                     || e.path.status != status
+                    || e.path.middle_target != target.middle.words()
+                    || e.path.result_target != target.result.words()
                     || e.path.steps.len()
                         != packet.task.plan.middle.len() + packet.task.plan.result.len()
                 {

@@ -17,6 +17,20 @@ function mirror(mask: bigint, height: number): bigint {
   }
   return result;
 }
+export function recoveryTargetOrientations(start: bigint, middle: bigint, result: bigint, height: number): Array<{middle: bigint; result: bigint}> {
+  const pairs: Array<{middle: bigint; result: bigint}> = [];
+  const add = (m: bigint, r: bigint) => {
+    if (!pairs.some(p => p.middle === m && p.result === r)) pairs.push({middle:m,result:r});
+  };
+  const suffix = (m: bigint, r: bigint) => {
+    add(m,r);
+    const base = compactRecoveryBoard(start|m,height);
+    if (base === mirror(base,height)) add(m,mirror(r,height));
+  };
+  suffix(middle,result);
+  if (start === mirror(start,height)) suffix(mirror(middle,height),mirror(result,height));
+  return pairs;
+}
 function require(ok: unknown): asserts ok { if (!ok) throw new Error('invalid recovery-build evidence'); }
 
 export const recoveryBuildTerminalMask = (example: RecoveryBuildExamplePayload): string => `0x${BigInt(example.terminal_board_mask).toString(16).padStart(64,'0')}`;
@@ -77,17 +91,22 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
     require(!p.minimum_proven || (p.solutions_complete && pinned.every(key=>selected.includes(key)) && (solutions.length===0 || selected.length>0)));
     require(p.minimum_proven || (selected.length===0 && pinned.length===0));
     require(!p.solutions_complete || ((solutions.length>0)===(BigInt(p.normal_count)+BigInt(p.recovery_count)>0n)));
+    const orientations = recoveryTargetOrientations(start,middle,result,p.height);
     for (const e of [...p.examples, ...solutions.map(s=>s.example)]) {
+      const middleHex = e.middle_target_mask ?? p.middle_target_mask;
+      require(hex(middleHex) && BigInt(middleHex) < bound);
+      const targetMiddle = BigInt(middleHex);
       const resultHex = e.result_target_mask ?? p.result_target_mask;
       require(hex(resultHex) && BigInt(resultHex) < bound);
       const targetResult = BigInt(resultHex);
-      require(targetResult === result || (base === mirror(base,p.height) && targetResult === mirror(result,p.height)));
+      require(orientations.some(o => o.middle === targetMiddle && o.result === targetResult));
+      const targetBase = compactRecoveryBoard(start|targetMiddle,p.height);
       require(['normal','recovery'].includes(e.status) && decimal(e.first_pattern) && decimal(e.second_pattern));
       require(/^[IJLOSTZ]+$/u.test(e.first_queue) && /^[IJLOSTZ]+$/u.test(e.second_queue));
       require(decimal(e.effective_max_early) && decimal(e.actual_early));
       const effective = Math.min(m,p.early_limit === null ? Infinity : Number(p.early_limit));
       require(e.effective_max_early === String(effective) && BigInt(e.actual_early) <= BigInt(e.effective_max_early));
-      require(hex(e.terminal_board_mask) && BigInt(e.terminal_board_mask) === compactRecoveryBoard(base|targetResult,p.height));
+      require(hex(e.terminal_board_mask) && BigInt(e.terminal_board_mask) === compactRecoveryBoard(targetBase|targetResult,p.height));
       require(Array.isArray(e.exchange_balance) && e.exchange_balance.length === 7 && e.exchange_balance.every(number));
       require(Array.isArray(e.steps) && e.steps.length === n+m);
       const combined = e.first_queue+e.second_queue;
@@ -96,7 +115,7 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
       const balance = Array<number>(7).fill(0), deleted = new Set<number>();
       for(let y=0;y<p.height;y++) if(((start>>BigInt(y*10))&1023n)===1023n) deleted.add(y);
       const completeRows = new Set<number>();
-      for(let y=0;y<p.height;y++) if((((start|middle)>>BigInt(y*10))&1023n)===1023n) completeRows.add(y);
+      for(let y=0;y<p.height;y++) if((((start|targetMiddle)>>BigInt(y*10))&1023n)===1023n) completeRows.add(y);
       let liftedResult=0n, physical=0;
       for(let logical=0;physical<p.height;logical++) if(!completeRows.has(logical)) {
         liftedResult |= ((targetResult>>BigInt(physical*10))&1023n)<<BigInt(logical*10);physical++;
@@ -117,10 +136,10 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
         const lock=BigInt(step.placement_mask);require(countRecoveryCells(lock)===4 && !(lock&board) && BigInt(step.board_before_mask)===board);
         const map:number[]=[];for(let y=0;map.length<p.height;y++) if(!deleted.has(y))map.push(y);
         let logical=0n;for(let y=0;y<p.height;y++)logical|=((lock>>BigInt(y*10))&1023n)<<BigInt(map[y]*10);
-        const target=step.result_target?liftedResult:middle, used=step.result_target?usedResult:usedMiddle;
+        const target=step.result_target?liftedResult:targetMiddle, used=step.result_target?usedResult:usedMiddle;
         require((logical&target)===logical && !(logical&used));
-        if(step.result_target && usedMiddle!==middle)early++;
-        if(e.status==='normal' && step.result_target)require(usedMiddle===middle);
+        if(step.result_target && usedMiddle!==targetMiddle)early++;
+        if(e.status==='normal' && step.result_target)require(usedMiddle===targetMiddle);
         if(step.result_target)usedResult|=logical;else usedMiddle|=logical;
         if(source<e.first_queue.length)firstUsed++;
         balance['IJLOSTZ'.indexOf(step.piece)]+=Number(source<e.first_queue.length)-Number(!step.result_target);
@@ -130,9 +149,9 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
         for(let y=0;y<p.height;y++) if(full&(2**y))deleted.add(map[y]);
         if(step.cleared_lines>0)b2b=step.cleared_lines===4 || board===0n || step.recognized_spin;
         require(b2b===step.b2b_active && (!p.preserve_b2b || step.cleared_lines===0 || b2b));
-        require(step.middle_complete===(usedMiddle===middle));
+        require(step.middle_complete===(usedMiddle===targetMiddle));
       }
-      require(firstUsed===n && usedMiddle===middle && usedResult===liftedResult && e.actual_early===String(early));
+      require(firstUsed===n && usedMiddle===targetMiddle && usedResult===liftedResult && e.actual_early===String(early));
       require(e.status==='normal'?early===0:early>0);
       require(balance.every((v,i)=>v===e.exchange_balance[i]) && balance.reduce((a,b)=>a+b,0)===0);
       require(p.allow_piece_exchange || balance.every(v=>v===0));
