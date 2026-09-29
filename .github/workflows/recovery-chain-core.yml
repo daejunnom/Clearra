@@ -1,0 +1,139 @@
+name: Recovery multi-boundary core verification
+on:
+  push:
+    branches: [codex/recovery-chain-core-20260929-v1]
+    paths: [.github/workflows/recovery-chain-core.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          fetch-depth: 0
+      - name: Import reviewed library sources without changing the product route
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/codex/recovery-chain-core-20260929-v1
+          git fetch --no-tags origin "$GITHUB_SHA"
+          git restore --source "$GITHUB_SHA" --staged --worktree -- crates/clearra-forward-search/src/recovery_build/chain
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('crates/clearra-forward-search/src')
+          p=root/'recovery_build/mod.rs'
+          text=p.read_text()
+          assert text.count('mod catalog;')==1
+          p.write_text(text.replace('mod catalog;', 'mod catalog;\npub mod chain;'))
+          p=root/'lib.rs'
+          text=p.read_text()
+          assert 'RecoveryChainQuery' not in text
+          p.write_text(text+'\npub use recovery_build::chain::{RecoveryChainQuery, RecoveryChainSession, RecoveryChainError, RecoveryChainCoverage, RecoveryChainWitness, RecoveryChainStep};\n')
+          p=root/'recovery_build/staged/source.rs'
+          text=p.read_text()
+          assert 'fn compile_language(' not in text
+          text += '''
+          /// Compile one source at an absolute input offset using the same
+          /// compact remainder DAG and fallback semantics as paired Build.
+          pub(in crate::recovery_build) fn compile_language(
+              diagram: &mut Diagram,
+              universe: &MaterializedPatternUniverse,
+              offset: u16,
+              control: &ExecutionControl,
+          ) -> Result<(Id, Option<[u8; 7]>, bool), Error> {
+              cancelled(control)?;
+              let len = u16::try_from(universe.sequence_len_at(0)).map_err(|_| Error::CounterOverflow)?;
+              let end = offset.checked_add(len).ok_or(Error::CounterOverflow)?;
+              if len == 0 { return Err(Error::EmptySupply); }
+              if let Some(atoms) = compact_atoms(universe) {
+                  let first = atoms.first().ok_or(Error::EmptySupply)?;
+                  let root = compile_atoms(diagram, &atoms, 0, first.mask, first.draws, offset,
+                      &mut HashMap::new(), control)?;
+                  let mut counts = [0_u8; 7];
+                  let mut fixed = true;
+                  for atom in &atoms {
+                      fixed &= u32::from(atom.draws) == atom.mask.count_ones();
+                      for (piece, count) in counts.iter_mut().enumerate() {
+                          *count = count.checked_add(u8::from(atom.mask & (1 << piece) != 0))
+                              .ok_or(Error::CounterOverflow)?;
+                      }
+                  }
+                  if diagram.count(root, offset, end)? != universe.pattern_count() as u128 {
+                      return Err(Error::PatternDomainUnavailable);
+                  }
+                  return Ok((root, fixed.then_some(counts), true));
+              }
+              let mut root = NONE;
+              let mut counts = None;
+              let mut same = true;
+              for index in 0..universe.pattern_count() {
+                  cancelled(control)?;
+                  let queue = universe.sequence_at(index);
+                  if queue.len() != usize::from(len) { return Err(Error::PatternDomainUnavailable); }
+                  let branch = encode_queue(diagram, &queue, offset, ALL)?;
+                  root = diagram.union(root, branch)?;
+                  let value = inventory(&queue)?;
+                  if let Some(old) = counts { same &= old == value; } else { counts = Some(value); }
+              }
+              if diagram.count(root, offset, end)? != universe.pattern_count() as u128 {
+                  return Err(Error::PatternDomainUnavailable);
+              }
+              Ok((root, if same { counts } else { None }, false))
+          }
+          '''
+          p.write_text(text)
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+      - name: Preserve an isolated source-only proposal
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- crates/clearra-forward-search
+          git diff --cached --name-only
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(recovery): add exact multi-boundary library with continuous supply state'
+          sha="$(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          git push origin HEAD:refs/heads/codex/recovery-chain-compiled-20260929-v1
+          echo "Source-only proposal: $sha (not main or deployment approval)" >> "$GITHUB_STEP_SUMMARY"
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - name: Compile and exercise independent exact regressions
+        shell: bash
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/recovery-chain-core
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          rustc --version > "$out/toolchain.txt"
+          status=0
+          cargo fmt --all --check 2>&1 | tee "$out/format.log" || status=1
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture --test-threads=1 2>&1 | tee "$out/core.log" || status=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture --test-threads=1 2>&1 | tee "$out/cli.log" || status=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture --test-threads=1 2>&1 | tee "$out/wasm.log" || status=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$out/wasm-target.log" || status=1
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-core-results
+          path: _local/artifacts/test/recovery-chain-core/
+          retention-days: 7
