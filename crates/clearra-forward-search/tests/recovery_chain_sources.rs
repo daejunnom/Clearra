@@ -102,7 +102,10 @@ fn recovery_chain_keeps_a_token_held_across_two_boundaries() {
     for solution in report.solutions {
         let path = solution.example.path;
         assert_eq!(
-            path.steps.iter().map(|s| s.source_index).collect::<Vec<_>>(),
+            path.steps
+                .iter()
+                .map(|s| s.source_index)
+                .collect::<Vec<_>>(),
             [1, 2, 0]
         );
         assert_eq!(
@@ -113,7 +116,9 @@ fn recovery_chain_keeps_a_token_held_across_two_boundaries() {
     }
     q.allow_piece_exchange = false;
     assert_eq!(
-        q.search(&ExecutionControl::default()).unwrap().no_path_count,
+        q.search(&ExecutionControl::default())
+            .unwrap()
+            .no_path_count,
         1
     );
 }
