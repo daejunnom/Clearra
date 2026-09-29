@@ -126,25 +126,25 @@ struct TileFrame {
     remaining: Mask,
     choices: std::vec::IntoIter<(u8, Mask)>,
 }
-struct Tiles {
+pub(in crate::recovery_build) struct Tiles {
     pending: Option<(Mask, [u8; 7])>,
     frames: Vec<TileFrame>,
     path: Vec<Tile>,
 }
-enum TileAdvance {
+pub(in crate::recovery_build) enum TileAdvance {
     Pending,
     Done,
     Found(Vec<Tile>),
 }
 impl Tiles {
-    fn new(target: Mask, caps: [u8; 7]) -> Self {
+    pub(in crate::recovery_build) fn new(target: Mask, caps: [u8; 7]) -> Self {
         Self {
             pending: Some((target, caps)),
             frames: Vec::new(),
             path: Vec::new(),
         }
     }
-    fn advance(
+    pub(in crate::recovery_build) fn advance(
         &mut self,
         domain: &mut BuildStageDomain,
         control: &ExecutionControl,

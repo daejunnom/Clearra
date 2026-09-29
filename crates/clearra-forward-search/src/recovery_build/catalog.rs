@@ -2,7 +2,7 @@
 //! by conserved inventories, then each exact physical verifier accepts a
 //! symbolic language of BOTH supplies. Tasks partition tilings, never claim to
 //! partition probabilities: the coordinator ORs their input languages.
-mod plan;
+pub(in crate::recovery_build) mod plan;
 #[cfg(test)]
 mod tests;
 mod wire;

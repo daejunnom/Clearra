@@ -285,3 +285,61 @@ fn compact_atoms(universe: &MaterializedPatternUniverse) -> Option<Vec<Atom>> {
         _ => None,
     }
 }
+
+/// Compile a single stage at its absolute source offset. The terminal accepts
+/// all subsequent stages. This shares the ordinary two-stage source semantics.
+pub(in crate::recovery_build) fn segment(
+    diagram: &mut Diagram,
+    universe: &MaterializedPatternUniverse,
+    offset: u16,
+    control: &ExecutionControl,
+) -> Result<(Id, Option<[u8; 7]>, bool), Error> {
+    if let Some(atoms) = compact_atoms(universe).filter(|a| !a.is_empty()) {
+        let root = compile_atoms(
+            diagram,
+            &atoms,
+            0,
+            atoms[0].mask,
+            atoms[0].draws,
+            offset,
+            &mut HashMap::new(),
+            control,
+        )?;
+        let len = u16::try_from(universe.sequence_len_at(0)).map_err(|_| Error::CounterOverflow)?;
+        let end = offset.checked_add(len).ok_or(Error::CounterOverflow)?;
+        if diagram.count(root, offset, end)? != universe.pattern_count() as u128 {
+            return Err(Error::PatternDomainUnavailable);
+        }
+        let mut counts = [0_u8; 7];
+        let mut fixed = true;
+        for atom in &atoms {
+            fixed &= u32::from(atom.draws) == atom.mask.count_ones();
+            for (p, n) in counts.iter_mut().enumerate() {
+                *n = n
+                    .checked_add(u8::from(atom.mask & (1 << p) != 0))
+                    .ok_or(Error::CounterOverflow)?;
+            }
+        }
+        return Ok((root, fixed.then_some(counts), true));
+    }
+    let mut root = NONE;
+    let mut counts = None;
+    let mut same = true;
+    let len = universe.sequence_len_at(0);
+    for i in 0..universe.pattern_count() {
+        cancelled(control)?;
+        let queue = universe.sequence_at(i);
+        if queue.len() != len {
+            return Err(Error::PatternDomainUnavailable);
+        }
+        let branch = encode_queue(diagram, &queue, offset, ALL)?;
+        root = diagram.union(root, branch)?;
+        let value = inventory(&queue)?;
+        if let Some(old) = counts {
+            same &= old == value;
+        } else {
+            counts = Some(value);
+        }
+    }
+    Ok((root, if same { counts } else { None }, false))
+}
