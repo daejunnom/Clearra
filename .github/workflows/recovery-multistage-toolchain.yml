@@ -1,0 +1,51 @@
+name: Recovery multistage offline compiler
+
+on:
+  push:
+    branches: [codex/recovery-multistage-toolchain-20260929]
+    paths: [.github/workflows/recovery-multistage-toolchain.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  compiler-inputs:
+    if: github.repository == 'daejunnom/Clearra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          persist-credentials: false
+      - name: Resolve only the committed toolchain and locked public Cargo packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          rustup show
+          cargo fetch --locked --target x86_64-unknown-linux-gnu --target wasm32-unknown-unknown
+          git diff --exit-code
+      - name: Archive an explicit compiler and registry allowlist, never credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=_local/artifacts/test/recovery-multistage-compiler
+          mkdir -p "$out"
+          compiler="$(dirname "$(dirname "$(rustup which rustc)")")"
+          registry="${CARGO_HOME:-$HOME/.cargo}/registry"
+          test -d "$compiler/bin"
+          test -d "$compiler/lib"
+          tar -C "$compiler" -cf - bin lib libexec etc share/doc/rust/licenses 2>/dev/null | gzip -1 > "$out/compiler.tar.gz"
+          tar -C "$registry" -cf - cache index src | gzip -1 > "$out/registry.tar.gz"
+          rustc --version --verbose > "$out/rustc.txt"
+          cargo --version > "$out/cargo.txt"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          sha256sum "$out"/*.tar.gz > "$out/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: recovery-multistage-compiler
+          path: _local/artifacts/test/recovery-multistage-compiler/
+          compression-level: 0
+          retention-days: 3
