@@ -207,6 +207,58 @@ pub(crate) fn select_recovery_minimum(
     identity: [u8; 32],
     control: &clearra_core_domain::execution_cancellation::ExecutionControl,
 ) -> Result<Vec<String>, RecoveryMinimumError> {
+    if !report.solutions_complete || report.evaluated != report.possible {
+        return Err(RecoveryMinimumError::IncompleteCatalog);
+    }
+    let classes = report
+        .coverage_classes
+        .as_ref()
+        .ok_or(RecoveryMinimumError::IncompleteCatalog)?;
+    let ids = report
+        .solutions
+        .iter()
+        .map(|s| s.key.clone())
+        .collect::<Vec<_>>();
+    select_support_minimum(
+        &ids,
+        classes,
+        &query.required_solution_keys,
+        identity,
+        control,
+    )
+}
+
+/// Uses the same exact minimum authority on a complete multi-stage catalog.
+/// The expected query binds every target, source, rule and boundary constraint.
+pub fn select_recovery_chain_minimum(
+    query: &clearra_forward_search::RecoveryChainQuery,
+    report: &clearra_forward_search::RecoveryChainCatalog,
+    pinned: &[String],
+    control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+) -> Result<Vec<String>, RecoveryMinimumError> {
+    use sha2::{Digest, Sha256};
+    if &report.input != query {
+        return Err(RecoveryMinimumError::StaleInput);
+    }
+    if !report.complete {
+        return Err(RecoveryMinimumError::IncompleteCatalog);
+    }
+    let identity = Sha256::digest(format!("recovery-chain.v1:{query:?}").as_bytes()).into();
+    let ids = report
+        .solutions
+        .iter()
+        .map(|s| s.key.clone())
+        .collect::<Vec<_>>();
+    select_support_minimum(&ids, &report.coverage_classes, pinned, identity, control)
+}
+
+fn select_support_minimum(
+    solution_ids: &[String],
+    classes: &[Vec<usize>],
+    pinned: &[String],
+    identity: [u8; 32],
+    control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+) -> Result<Vec<String>, RecoveryMinimumError> {
     use clearra_coverage::{
         cover::exact_minimum_cover_portfolios::{
             ExactMinimumCoverPortfolioPreparationAdvance as Advance,
@@ -215,14 +267,7 @@ pub(crate) fn select_recovery_minimum(
         pattern::pattern_id::PatternId,
     };
     use sha2::{Digest, Sha256};
-    if !report.solutions_complete || report.evaluated != report.possible {
-        return Err(RecoveryMinimumError::IncompleteCatalog);
-    }
-    let classes = report
-        .coverage_classes
-        .as_ref()
-        .ok_or(RecoveryMinimumError::IncompleteCatalog)?;
-    let mut memberships = vec![Vec::new(); report.solutions.len()];
+    let mut memberships = vec![Vec::new(); solution_ids.len()];
     for (index, support) in classes.iter().enumerate() {
         if support.is_empty() || !support.windows(2).all(|p| p[0] < p[1]) {
             return Err(RecoveryMinimumError::InvalidSolutionIdentity);
@@ -243,23 +288,22 @@ pub(crate) fn select_recovery_minimum(
         weight_model_identity: Sha256::digest(b"exact-unweighted-cardinality-not-probability")
             .into(),
         pattern_count: classes.len(),
-        expected_solution_count: report.solutions.len(),
+        expected_solution_count: solution_ids.len(),
         enumeration_complete: true,
         coverage_complete: true,
-        rows: report
-            .solutions
+        rows: solution_ids
             .iter()
             .zip(memberships)
             .map(|(solution, bits)| {
                 Ok(RecoverySolutionCoverageRow {
-                    solution_id: solution.key.clone(),
+                    solution_id: solution.clone(),
                     covered_pairs: PatternBitSet::from_patterns(classes.len(), bits)
                         .map_err(|_| RecoveryMinimumError::PatternCountMismatch)?,
                 })
             })
             .collect::<Result<Vec<_>, RecoveryMinimumError>>()?,
     };
-    let prepared = catalog.prepare_minimum(identity, &query.required_solution_keys)?;
+    let prepared = catalog.prepare_minimum(identity, pinned)?;
     let ids = prepared.solution_ids;
     let (required, rows) = prepared.input.into_augmented_parts();
     let convert = |e| RecoveryMinimumError::Exact(PinnedMinimumCoverError::Portfolio(e));
@@ -298,11 +342,7 @@ pub(crate) fn select_recovery_minimum(
                 .iter()
                 .map(|&index| ids[index].clone())
                 .collect::<Vec<_>>();
-            if !query
-                .required_solution_keys
-                .iter()
-                .all(|key| keys.contains(key))
-            {
+            if !pinned.iter().all(|key| keys.contains(key)) {
                 return Err(RecoveryMinimumError::InvalidSolutionIdentity);
             }
             return Ok(keys);
@@ -378,5 +418,77 @@ mod benchmark {
             }
         }
         eprintln!("recovery_full_fixture_completed elapsed_ms={} normal={} recovery={} no_path={} solutions={} states={}",start.elapsed().as_millis(),report.normal_count,report.recovery_count,report.no_path_count,report.solutions.len(),report.states);
+    }
+}
+
+#[cfg(test)]
+mod chain_catalog_tests {
+    use super::*;
+    use clearra_core_domain::{
+        board::standard_pc_board::Board256Mask as Mask, execution_cancellation::ExecutionControl,
+    };
+    use clearra_forward_search::{CrossStageEarlyLimit, RecoveryChainQuery};
+    fn query() -> RecoveryChainQuery {
+        RecoveryChainQuery {
+            height: 8,
+            initial: Mask::EMPTY,
+            targets: [0xc03, 0x300c, 0xc030]
+                .into_iter()
+                .map(|v| Mask::from_words([v, 0, 0, 0]))
+                .collect(),
+            supplies: vec!["[IO]".into(); 3],
+            early_limit: CrossStageEarlyLimit::AtMost(0),
+            allow_piece_exchange: false,
+            hold_enabled: true,
+            preserve_b2b: false,
+            initial_b2b: true,
+            rule_profile: clearra_rules::profile::rule_profile::RuleProfileId::SrsPlus,
+            spin_profile: clearra_scoring::profile::SpinProfileId::AllSpinPlus,
+        }
+    }
+    #[test]
+    fn chain_minimum_preserves_success_union_and_all_required_mirrors() {
+        let q = query();
+        let control = ExecutionControl::default();
+        let report = q.catalog(&control).unwrap();
+        assert_eq!(report.solutions.len(), 2);
+        assert_eq!(report.coverage.possible, 8);
+        assert_eq!(report.coverage_classes.len(), 1);
+        let minimum = select_recovery_chain_minimum(&q, &report, &[], &control).unwrap();
+        assert_eq!(minimum.len(), 1);
+        let pins = report
+            .solutions
+            .iter()
+            .map(|s| s.key.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            select_recovery_chain_minimum(&q, &report, &pins, &control).unwrap(),
+            pins
+        );
+        assert_eq!(
+            report.coverage.normal_count, 1,
+            "minimum constraint classes never replace probability counts"
+        );
+    }
+    #[test]
+    fn chain_minimum_rejects_stale_queries_unfinished_catalogs_and_unknown_pins() {
+        let q = query();
+        let control = ExecutionControl::default();
+        let mut report = q.catalog(&control).unwrap();
+        let mut other = q.clone();
+        other.supplies[0] = "O".into();
+        assert!(matches!(
+            select_recovery_chain_minimum(&other, &report, &[], &control),
+            Err(RecoveryMinimumError::StaleInput)
+        ));
+        assert!(matches!(
+            select_recovery_chain_minimum(&q, &report, &["foreign".into()], &control),
+            Err(RecoveryMinimumError::UnknownPinnedSolution(_))
+        ));
+        report.complete = false;
+        assert!(matches!(
+            select_recovery_chain_minimum(&q, &report, &[], &control),
+            Err(RecoveryMinimumError::IncompleteCatalog)
+        ));
     }
 }

@@ -1,7 +1,10 @@
 //! Ordered, shared-frame multi-boundary coverage. This library path deliberately
 //! has its own result type: aggregate coverage is not a complete tiling catalog.
 //! The two-target product route stays unchanged until host/catalog integration.
+mod catalog;
 mod fields;
+mod plan;
+pub use catalog::{RecoveryChainCatalog, RecoveryChainCatalogSession, RecoveryChainSolution};
 mod solver;
 mod source;
 #[cfg(test)]

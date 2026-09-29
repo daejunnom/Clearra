@@ -158,6 +158,7 @@ pub(super) struct Solver {
     maximum: Vec<usize>,
     terminal: ForwardBoard,
     domains: Vec<BuildStageDomain>,
+    plan: Option<super::plan::Plan>,
     reach: ReachabilityWorkspace,
     profile: SpinProfile,
     root: State,
@@ -172,6 +173,33 @@ impl Solver {
         targets: Vec<Mask>,
         repair: bool,
         sources: &Sources,
+        control: &ExecutionControl,
+    ) -> Result<Self, Error> {
+        Self::build(q, targets, repair, sources, None, control)
+    }
+    pub(super) fn for_plan(
+        q: &RecoveryChainQuery,
+        plan: super::plan::Plan,
+        repair: bool,
+        sources: &Sources,
+        control: &ExecutionControl,
+    ) -> Result<Self, Error> {
+        plan.validate(q)?;
+        Self::build(
+            q,
+            plan.targets.clone(),
+            repair,
+            sources,
+            Some(plan),
+            control,
+        )
+    }
+    fn build(
+        q: &RecoveryChainQuery,
+        targets: Vec<Mask>,
+        repair: bool,
+        sources: &Sources,
+        plan: Option<super::plan::Plan>,
         control: &ExecutionControl,
     ) -> Result<Self, Error> {
         cancelled(control)?;
@@ -196,28 +224,13 @@ impl Solver {
             })
             .collect::<Vec<_>>();
         let union = targets.iter().fold(q.initial, |u, &t| u.union(t));
-        let mut domains = Vec::new();
-        // These are relaxed geometry domains, NOT boards already occupied by
-        // future stages. Physical placement below uses only State.board.
-        for &target in &targets {
-            cancelled(control)?;
-            let h = (0..q.height)
-                .rev()
-                .find(|&y| (0..10).any(|x| target.contains_index(u16::from(y) * 10 + x)))
-                .map_or(1, |y| y + 1);
-            let clip = Mask::all_cells(u16::from(h) * 10).map_err(|_| Core::BoardOutsideField)?;
-            let context = union.without(target);
-            let base = Mask::from_words(core::array::from_fn(|w| {
-                context.words()[w] & clip.words()[w]
-            }));
-            let field = BuildProbabilityField::from_words_preserving_height(
-                h,
-                base.words(),
-                target.words(),
-            )
-            .map_err(|_| Core::BoardOutsideField)?;
-            domains.push(BuildStageDomain::compile(field, control).map_err(domain_error)?);
-        }
+        // A complete tiling already certifies its static completion domain.
+        // Its physical order/hold/reachability is still verified below.
+        let domains = if plan.is_some() {
+            Vec::new()
+        } else {
+            compile_domains(q, &targets, control)?
+        };
         let (initial, _, _) = place_and_clear(10, q.height, ForwardBoard::from_mask(q.initial));
         let (terminal, _, _) = place_and_clear(10, q.height, ForwardBoard::from_mask(union));
         let root = State {
@@ -246,6 +259,7 @@ impl Solver {
             maximum,
             terminal,
             domains,
+            plan,
             reach: ReachabilityWorkspace::new(q.height, q.rule_profile)
                 .map_err(|_| Core::UnsupportedRuleProfile)?,
             profile: SpinProfile::builtin(q.spin_profile),
@@ -419,7 +433,11 @@ impl Solver {
                     }
                 }
             }
-            if !self.domains[i]
+            if let Some(plan) = &self.plan {
+                if !plan.remaining_fits(i, key.used[i], caps) {
+                    return Ok(false);
+                }
+            } else if !self.domains[i]
                 .can_complete(remaining, caps, control)
                 .map_err(domain_error)?
             {
@@ -559,6 +577,13 @@ impl Solver {
             }) else {
                 continue;
             };
+            if self
+                .plan
+                .as_ref()
+                .is_some_and(|plan| !plan.allows(target, token.piece, logical))
+            {
+                continue;
+            }
             let Some(accounting) =
                 key.accounting
                     .lock(source, target, piece, &self.demands, &self.maximum)
@@ -711,4 +736,35 @@ impl Solver {
             }
         }
     }
+}
+
+/// Relaxed ILC domains retain all row-clear representations. Other target cells
+/// are context only; they are never installed into a physical play state.
+pub(super) fn compile_domains(
+    q: &RecoveryChainQuery,
+    targets: &[Mask],
+    control: &ExecutionControl,
+) -> Result<Vec<BuildStageDomain>, Error> {
+    let union = targets.iter().fold(q.initial, |u, &t| u.union(t));
+    let mut domains = Vec::new();
+    domains
+        .try_reserve_exact(targets.len())
+        .map_err(|_| Core::MemoryUnavailable)?;
+    for &target in targets {
+        cancelled(control)?;
+        let h = (0..q.height)
+            .rev()
+            .find(|&y| (0..10).any(|x| target.contains_index(u16::from(y) * 10 + x)))
+            .map_or(1, |y| y + 1);
+        let clip = Mask::all_cells(u16::from(h) * 10).map_err(|_| Core::BoardOutsideField)?;
+        let context = union.without(target);
+        let base = Mask::from_words(core::array::from_fn(|w| {
+            context.words()[w] & clip.words()[w]
+        }));
+        let field =
+            BuildProbabilityField::from_words_preserving_height(h, base.words(), target.words())
+                .map_err(|_| Core::BoardOutsideField)?;
+        domains.push(BuildStageDomain::compile(field, control).map_err(domain_error)?);
+    }
+    Ok(domains)
 }

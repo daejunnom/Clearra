@@ -359,3 +359,168 @@ fn cooperative_slice_size_does_not_change_exact_output() {
         );
     }
 }
+
+#[test]
+fn complete_chain_catalog_keeps_both_mirrors_without_summing_probabilities() {
+    let q = query(&[0xc03, 0x300c, 0xc030], &["[IO]", "[IO]", "[IO]"]);
+    let c = q.catalog(&ExecutionControl::default()).unwrap();
+    assert!(c.complete);
+    assert_eq!(c.input, q);
+    assert_eq!(c.solutions.len(), 2);
+    assert_counts(&c.coverage, [1, 0, 7]);
+    assert_eq!(c.coverage_classes, vec![vec![0, 1]]);
+    for row in c.solutions {
+        assert_eq!(row.covered_count, 1);
+        assert!((row.probability - 0.125).abs() < 1e-12);
+        assert_eq!(row.example.steps.len(), 3);
+    }
+}
+#[test]
+fn complete_chain_catalog_preserves_alternative_tilings_not_just_first_witness() {
+    let q = query(&[0x3c0f, 0x3c0, 0xc03 << 20], &["[IO][IO]", "I", "O"]);
+    let control = ExecutionControl::default();
+    let c = q.catalog(&control).unwrap();
+    let reference = q.coverage(&control).unwrap();
+    assert_eq!(
+        [
+            c.coverage.normal_count,
+            c.coverage.recovery_count,
+            c.coverage.no_path_count
+        ],
+        [
+            reference.normal_count,
+            reference.recovery_count,
+            reference.no_path_count
+        ]
+    );
+    assert_eq!(
+        c.solutions.len(),
+        4,
+        "II and OO tilings, each in two directions"
+    );
+    assert_eq!(c.coverage_classes.len(), 2);
+    for support in &c.coverage_classes {
+        assert_eq!(support.len(), 2);
+    }
+    let signatures = c
+        .solutions
+        .iter()
+        .map(|r| {
+            let mut counts = [0; 7];
+            for s in r.example.steps.iter().filter(|s| s.target_stage == 0) {
+                counts[crate::recovery_build::search::piece_index(s.piece)] += 1;
+            }
+            counts
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(signatures.len(), 2);
+}
+#[test]
+fn chain_catalog_union_matches_continuous_reference_with_hold_and_early_limits() {
+    let control = ExecutionControl::default();
+    for hold in [false, true] {
+        for exchange in [false, true] {
+            for early in [0, 1, 2] {
+                let mut q = query(&[0xf, 0xc030, 0x300c0], &["[IO]", "[IO]", "[IO]"]);
+                q.hold_enabled = hold;
+                q.allow_piece_exchange = exchange;
+                q.early_limit = CrossStageEarlyLimit::AtMost(early);
+                let expected = q.coverage(&control).unwrap();
+                let actual = q.catalog(&control).unwrap();
+                assert_counts(
+                    &actual.coverage,
+                    [
+                        expected.normal_count,
+                        expected.recovery_count,
+                        expected.no_path_count,
+                    ],
+                );
+                assert!(
+                    (actual.coverage.normal_probability - expected.normal_probability).abs()
+                        < 1e-12
+                );
+                assert!(
+                    (actual.coverage.recovery_probability - expected.recovery_probability).abs()
+                        < 1e-12
+                );
+                for row in actual.solutions {
+                    assert!(row.covered_count > 0);
+                    assert!(row.example.early_by_boundary.iter().all(|n| *n <= early));
+                }
+            }
+        }
+    }
+}
+#[test]
+fn chain_catalog_recovers_non_adjacent_early_placements_and_held_source() {
+    let control = ExecutionControl::default();
+    let mut q = query(&[0xf << 20, 0xf << 10, 0xf], &["I", "I", "I"]);
+    q.early_limit = CrossStageEarlyLimit::AtMost(2);
+    let report = q.catalog(&control).unwrap();
+    assert_counts(&report.coverage, [0, 1, 0]);
+    assert_eq!(
+        report.coverage.recovery_example.unwrap().early_by_boundary,
+        vec![2, 1]
+    );
+    let mut q = query(&[0xf, 0xc030, 0x300c0], &["O", "I", "O"]);
+    q.allow_piece_exchange = true;
+    q.early_limit = CrossStageEarlyLimit::AtMost(0);
+    let report = q.catalog(&control).unwrap();
+    assert_counts(&report.coverage, [1, 0, 0]);
+    for row in report.solutions {
+        let last = row.example.steps.last().unwrap();
+        assert_eq!(last.source_index, 0);
+        assert_eq!(last.hold_decision, "release-held-at-terminal");
+    }
+}
+#[test]
+fn chain_plan_inventory_is_complemented_across_all_remaining_stages() {
+    let control = ExecutionControl::default();
+    let mut q = query(&[0x3c0f, 0x3c0f << 6, 0xc030], &["II", "OO", "O"]);
+    q.allow_piece_exchange = true;
+    let mut diagram = Diagram::default();
+    let sources = Sources::compile(&q, &mut diagram, &control).unwrap();
+    let mut producer = super::plan::Producer::new(&q, &sources).unwrap();
+    let mut count = 0;
+    while !producer.done {
+        if let Some(plan) = producer.advance(7, &control).unwrap() {
+            let mut inventory = [0; 7];
+            for tile in plan.stages.iter().flatten() {
+                inventory[usize::from(tile.piece)] += 1;
+            }
+            assert_eq!(inventory, [2, 0, 0, 3, 0, 0, 0]);
+            count += 1;
+        }
+    }
+    assert_eq!(count, 4);
+}
+#[test]
+fn chain_catalog_is_cooperative_and_refuses_incomplete_or_cancelled_proofs() {
+    let q = query(&[0xc03, 0x300c, 0xc030], &["O", "O", "O"]);
+    let control = ExecutionControl::default();
+    let expected = q.catalog(&control).unwrap();
+    for fuel in [1, 7, 256] {
+        let mut session = RecoveryChainCatalogSession::new(q.clone(), &control).unwrap();
+        while !session.advance(fuel, &control).unwrap() {}
+        assert_eq!(session.finish(&control).unwrap(), expected);
+    }
+    assert!(matches!(
+        RecoveryChainCatalogSession::new(q.clone(), &control)
+            .unwrap()
+            .finish(&control),
+        Err(RecoveryChainError::Incomplete)
+    ));
+    let token = clearra_core_domain::execution_cancellation::CancellationToken::new();
+    let handle = token.handle();
+    let control = ExecutionControl::new(token);
+    let mut session = RecoveryChainCatalogSession::new(q, &control).unwrap();
+    handle.cancel();
+    assert_eq!(
+        session.advance(1, &control),
+        Err(RecoveryBuildError::Cancelled.into())
+    );
+    assert_eq!(
+        session.finish(&control),
+        Err(RecoveryBuildError::Cancelled.into())
+    );
+}
