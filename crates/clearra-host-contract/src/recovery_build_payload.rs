@@ -35,12 +35,25 @@ impl RecoveryBuildStepPayload {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoveryBuildExamplePayload {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_target_masks: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_queues: Vec<String>,
+    #[serde(default)]
+    pub stage_patterns: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub placement_stages: Vec<u8>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub early_by_boundary: Vec<u8>,
     pub first_pattern: String,
     pub second_pattern: String,
     pub first_queue: String,
     pub second_queue: String,
     pub status: String,
     pub terminal_board_mask: String,
+    /// Absent in legacy evidence, where the requested middle was always used.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub middle_target_mask: Option<String>,
     pub result_target_mask: String,
     pub effective_max_early: String,
     pub actual_early: String,
@@ -50,12 +63,31 @@ pub struct RecoveryBuildExamplePayload {
 impl RecoveryBuildExamplePayload {
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
         let mut bytes = 0_u128;
+        for values in [
+            &self.stage_target_masks,
+            &self.stage_queues,
+            &self.stage_patterns,
+        ] {
+            bytes = bytes.checked_add(
+                (values.capacity() as u128).checked_mul(core::mem::size_of::<String>() as u128)?,
+            )?;
+            for value in values {
+                bytes = bytes.checked_add(value.capacity() as u128)?;
+            }
+        }
+        bytes = bytes.checked_add(self.placement_stages.capacity() as u128)?;
+        bytes = bytes.checked_add(self.early_by_boundary.capacity() as u128)?;
         bytes = bytes.checked_add(self.first_pattern.capacity() as u128)?;
         bytes = bytes.checked_add(self.second_pattern.capacity() as u128)?;
         bytes = bytes.checked_add(self.first_queue.capacity() as u128)?;
         bytes = bytes.checked_add(self.second_queue.capacity() as u128)?;
         bytes = bytes.checked_add(self.status.capacity() as u128)?;
         bytes = bytes.checked_add(self.terminal_board_mask.capacity() as u128)?;
+        bytes = bytes.checked_add(
+            self.middle_target_mask
+                .as_ref()
+                .map_or(0, |value| value.capacity()) as u128,
+        )?;
         bytes = bytes.checked_add(self.result_target_mask.capacity() as u128)?;
         bytes = bytes.checked_add(self.effective_max_early.capacity() as u128)?;
         bytes = bytes.checked_add(self.actual_early.capacity() as u128)?;
@@ -94,6 +126,11 @@ impl RecoveryBuildSolutionPayload {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoveryBuildPayload {
+    /// Nonempty only for common-frame multi-stage inputs.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_targets: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_supplies: Vec<String>,
     #[cfg_attr(feature = "serde", serde(default))]
     pub minimum_proven: bool,
     #[cfg_attr(feature = "serde", serde(default))]
@@ -135,7 +172,12 @@ impl RecoveryBuildPayload {
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
         let mut bytes = (self.solutions.capacity() as u128)
             .checked_mul(core::mem::size_of::<RecoveryBuildSolutionPayload>() as u128)?;
-        for keys in [&self.selected_solution_keys, &self.required_solution_keys] {
+        for keys in [
+            &self.selected_solution_keys,
+            &self.required_solution_keys,
+            &self.stage_targets,
+            &self.stage_supplies,
+        ] {
             bytes = bytes.checked_add(
                 (keys.capacity() as u128).checked_mul(core::mem::size_of::<String>() as u128)?,
             )?;

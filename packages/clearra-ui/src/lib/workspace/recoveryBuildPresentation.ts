@@ -4,12 +4,8 @@ import { buildPcPathReplayFrames, pcPathWitnessExportPage } from './pcPathReplay
 import { compactRecoveryBoard, countRecoveryCells } from './recoveryBuildModel';
 import type { SolutionExportPage, SolutionPiece } from './solutionExport';
 
-const decimal = (x: unknown): x is string => typeof x === 'string' && /^(0|[1-9][0-9]*)$/u.test(x);
-const hex = (x: unknown): x is string => typeof x === 'string' && /^0x[0-9a-f]{1,64}$/u.test(x);
-const piece = (x: unknown): x is string => typeof x === 'string' && /^[IJLOSTZ]$/u.test(x);
-const number = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x);
-const flag = (x: unknown): x is boolean => typeof x === 'boolean';
-const probability = (x: unknown): x is string => typeof x === 'string' && /^(?:0(?:\.[0-9]+)?|1(?:\.0+)?|[0-9]+(?:\.[0-9]+)?e-[0-9]+)$/u.test(x) && Number(x) >= 0 && Number(x) <= 1;
+import { decimal, hex, piece, number, flag, requireEvidence as require, validateRecoverySummary } from './recoveryBuildValidation';
+import { validateRecoveryChainPayload } from './recoveryChainPresentation';
 function mirror(mask: bigint, height: number): bigint {
   let result = 0n;
   for (let y = 0; y < height; y++) for (let x = 0; x < 10; x++) {
@@ -17,13 +13,28 @@ function mirror(mask: bigint, height: number): bigint {
   }
   return result;
 }
-function require(ok: unknown): asserts ok { if (!ok) throw new Error('invalid recovery-build evidence'); }
+/** Target pairs, not independent flags: reflect the suffix at a symmetric
+ * boundary. Physical replay validation below still uses unchanged source tokens. */
+export function recoveryTargetOrientations(start: bigint, middle: bigint, result: bigint, height: number): Array<{middle: bigint; result: bigint}> {
+  const pairs: Array<{middle: bigint; result: bigint}> = [];
+  const add = (m: bigint, r: bigint) => {
+    if (!pairs.some(p => p.middle === m && p.result === r)) pairs.push({middle:m,result:r});
+  };
+  const suffix = (m: bigint, r: bigint) => {
+    add(m,r);
+    const base = compactRecoveryBoard(start|m,height);
+    if (base === mirror(base,height)) add(m,mirror(r,height));
+  };
+  suffix(middle,result);
+  if (start === mirror(start,height)) suffix(mirror(middle,height),mirror(result,height));
+  return pairs;
+}
 
 export const recoveryBuildTerminalMask = (example: RecoveryBuildExamplePayload): string => `0x${BigInt(example.terminal_board_mask).toString(16).padStart(64,'0')}`;
 const replayMask = (mask: string): string => `0x${BigInt(mask).toString(16).padStart(64,'0')}`;
 
 export function recoveryBuildWitness(report: RecoveryBuildPayload, example: RecoveryBuildExamplePayload): PathReplayGeometryWitness {
-  return { maskHexDigits: 64, candidate_id: `${report.input_identity}:${example.status}`, pattern_id: `${example.first_pattern}:${example.second_pattern}`,
+  return { maskHexDigits: 64, candidate_id: `${report.input_identity}:${example.status}`, pattern_id: example.stage_patterns?.length ? example.stage_patterns.join(':') : `${example.first_pattern}:${example.second_pattern}`,
     normalized_trace_key: JSON.stringify(example.steps), steps: example.steps.map((step, index) => ({
       step_index: String(index), active_piece: step.piece, placement_mask: replayMask(step.placement_mask),
       board_before_mask: replayMask(step.board_before_mask),
@@ -38,6 +49,13 @@ export function recoveryBuildWitness(report: RecoveryBuildPayload, example: Reco
 export function validateRecoveryBuildPayload(value: unknown): value is RecoveryBuildPayload {
   try {
     const p = value as RecoveryBuildPayload;
+    if (p && p.stage_targets !== undefined && (!Array.isArray(p.stage_targets) || p.stage_targets.length > 0)) {
+      validateRecoveryChainPayload(p);
+      for (const e of [...p.examples,...(p.solutions ?? []).map(s=>s.example)]) {
+        buildPcPathReplayFrames(recoveryBuildWitness(p,e),p.height,recoveryBuildTerminalMask(e));
+      }
+      return true;
+    }
     require(p && /^[0-9a-f]{64}$/u.test(p.input_identity) && number(p.height) && p.height >= 1 && p.height <= 24);
     const bound = 1n << BigInt(p.height * 10);
     require([p.start_board_mask, p.middle_target_mask, p.result_target_mask].every(x => hex(x) && BigInt(x) < bound));
@@ -46,48 +64,24 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
     require(Number.isInteger(n) && n > 0 && Number.isInteger(m) && m > 0 && !(start & middle));
     const base = compactRecoveryBoard(start | middle, p.height);
     require(!(base & result));
-    require(typeof p.first_supply === 'string' && p.first_supply.trim() && typeof p.second_supply === 'string' && p.second_supply.trim());
-    require(p.early_limit === null || decimal(p.early_limit));
-    require([p.allow_piece_exchange, p.hold_enabled, p.preserve_b2b, p.initial_b2b, p.complete, p.all_paths_enumerated].every(flag));
-    require(p.complete && !p.all_paths_enumerated);
-    require(['srs', 'srs-plus', 'srs-x', 'jstris-180'].includes(p.rule_profile));
-    require(['disabled','t-spin-simple','t-spins','t-spins-plus','all-spin','all-spin-plus','all-mini','all-mini-plus'].includes(p.spin_profile));
-    const counts = [p.pattern_count,p.evaluated_pattern_count,p.normal_count,p.recovery_count,p.no_path_count,p.state_count];
-    require(counts.every(decimal));
-    require(BigInt(p.pattern_count) > 0n && p.pattern_count === p.evaluated_pattern_count);
-    require(BigInt(p.normal_count) + BigInt(p.recovery_count) + BigInt(p.no_path_count) === BigInt(p.pattern_count));
-    require([p.normal_probability,p.recovery_probability,p.no_path_probability].every(probability));
-    require(Math.abs(Number(p.normal_probability)+Number(p.recovery_probability)+Number(p.no_path_probability)-1) < 1e-9);
-    require(Array.isArray(p.examples) && p.examples.length <= 2 && new Set(p.examples.map(e => e.status)).size === p.examples.length);
-    require(p.examples.some(e => e.status === 'normal') === (BigInt(p.normal_count)>0n));
-    require(p.examples.some(e => e.status === 'recovery') === (BigInt(p.recovery_count)>0n));
+    validateRecoverySummary(p);
     const solutions = p.solutions ?? [];
-    require(Array.isArray(solutions));
-    require(p.solutions_complete === undefined || flag(p.solutions_complete));
-    require(p.minimum_proven === undefined || flag(p.minimum_proven));
-    const keys = new Set<string>();
-    for (const row of solutions) {
-      require(typeof row.key === 'string' && row.key.length > 0 && !keys.has(row.key));
-      keys.add(row.key);
-      require(decimal(row.covered_count) && BigInt(row.covered_count)>0n && BigInt(row.covered_count)<=BigInt(p.pattern_count));
-      require(probability(row.probability));
-    }
-    const selected = p.selected_solution_keys ?? [], pinned = p.required_solution_keys ?? [];
-    for (const list of [selected,pinned]) require(Array.isArray(list) && new Set(list).size === list.length && list.every(key=>keys.has(key)));
-    require(!p.minimum_proven || (p.solutions_complete && pinned.every(key=>selected.includes(key)) && (solutions.length===0 || selected.length>0)));
-    require(p.minimum_proven || (selected.length===0 && pinned.length===0));
-    require(!p.solutions_complete || ((solutions.length>0)===(BigInt(p.normal_count)+BigInt(p.recovery_count)>0n)));
+    const orientations = recoveryTargetOrientations(start,middle,result,p.height);
     for (const e of [...p.examples, ...solutions.map(s=>s.example)]) {
+      const middleHex = e.middle_target_mask ?? p.middle_target_mask;
+      require(hex(middleHex) && BigInt(middleHex) < bound);
+      const targetMiddle = BigInt(middleHex);
       const resultHex = e.result_target_mask ?? p.result_target_mask;
       require(hex(resultHex) && BigInt(resultHex) < bound);
       const targetResult = BigInt(resultHex);
-      require(targetResult === result || (base === mirror(base,p.height) && targetResult === mirror(result,p.height)));
+      require(orientations.some(o => o.middle === targetMiddle && o.result === targetResult));
+      const targetBase = compactRecoveryBoard(start|targetMiddle,p.height);
       require(['normal','recovery'].includes(e.status) && decimal(e.first_pattern) && decimal(e.second_pattern));
       require(/^[IJLOSTZ]+$/u.test(e.first_queue) && /^[IJLOSTZ]+$/u.test(e.second_queue));
       require(decimal(e.effective_max_early) && decimal(e.actual_early));
       const effective = Math.min(m,p.early_limit === null ? Infinity : Number(p.early_limit));
       require(e.effective_max_early === String(effective) && BigInt(e.actual_early) <= BigInt(e.effective_max_early));
-      require(hex(e.terminal_board_mask) && BigInt(e.terminal_board_mask) === compactRecoveryBoard(base|targetResult,p.height));
+      require(hex(e.terminal_board_mask) && BigInt(e.terminal_board_mask) === compactRecoveryBoard(targetBase|targetResult,p.height));
       require(Array.isArray(e.exchange_balance) && e.exchange_balance.length === 7 && e.exchange_balance.every(number));
       require(Array.isArray(e.steps) && e.steps.length === n+m);
       const combined = e.first_queue+e.second_queue;
@@ -96,7 +90,7 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
       const balance = Array<number>(7).fill(0), deleted = new Set<number>();
       for(let y=0;y<p.height;y++) if(((start>>BigInt(y*10))&1023n)===1023n) deleted.add(y);
       const completeRows = new Set<number>();
-      for(let y=0;y<p.height;y++) if((((start|middle)>>BigInt(y*10))&1023n)===1023n) completeRows.add(y);
+      for(let y=0;y<p.height;y++) if((((start|targetMiddle)>>BigInt(y*10))&1023n)===1023n) completeRows.add(y);
       let liftedResult=0n, physical=0;
       for(let logical=0;physical<p.height;logical++) if(!completeRows.has(logical)) {
         liftedResult |= ((targetResult>>BigInt(physical*10))&1023n)<<BigInt(logical*10);physical++;
@@ -117,10 +111,10 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
         const lock=BigInt(step.placement_mask);require(countRecoveryCells(lock)===4 && !(lock&board) && BigInt(step.board_before_mask)===board);
         const map:number[]=[];for(let y=0;map.length<p.height;y++) if(!deleted.has(y))map.push(y);
         let logical=0n;for(let y=0;y<p.height;y++)logical|=((lock>>BigInt(y*10))&1023n)<<BigInt(map[y]*10);
-        const target=step.result_target?liftedResult:middle, used=step.result_target?usedResult:usedMiddle;
+        const target=step.result_target?liftedResult:targetMiddle, used=step.result_target?usedResult:usedMiddle;
         require((logical&target)===logical && !(logical&used));
-        if(step.result_target && usedMiddle!==middle)early++;
-        if(e.status==='normal' && step.result_target)require(usedMiddle===middle);
+        if(step.result_target && usedMiddle!==targetMiddle)early++;
+        if(e.status==='normal' && step.result_target)require(usedMiddle===targetMiddle);
         if(step.result_target)usedResult|=logical;else usedMiddle|=logical;
         if(source<e.first_queue.length)firstUsed++;
         balance['IJLOSTZ'.indexOf(step.piece)]+=Number(source<e.first_queue.length)-Number(!step.result_target);
@@ -130,9 +124,9 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
         for(let y=0;y<p.height;y++) if(full&(2**y))deleted.add(map[y]);
         if(step.cleared_lines>0)b2b=step.cleared_lines===4 || board===0n || step.recognized_spin;
         require(b2b===step.b2b_active && (!p.preserve_b2b || step.cleared_lines===0 || b2b));
-        require(step.middle_complete===(usedMiddle===middle));
+        require(step.middle_complete===(usedMiddle===targetMiddle));
       }
-      require(firstUsed===n && usedMiddle===middle && usedResult===liftedResult && e.actual_early===String(early));
+      require(firstUsed===n && usedMiddle===targetMiddle && usedResult===liftedResult && e.actual_early===String(early));
       require(e.status==='normal'?early===0:early>0);
       require(balance.every((v,i)=>v===e.exchange_balance[i]) && balance.reduce((a,b)=>a+b,0)===0);
       require(p.allow_piece_exchange || balance.every(v=>v===0));
@@ -153,6 +147,17 @@ export function recoveryBuildExamplePages(
   const final = pcPathWitnessExportPage(witness, report.height, recoveryBuildTerminalMask(example));
   if (!final || final.placements.length !== example.steps.length) throw new Error('recovery history exceeds export geometry');
   if (resultOnly) return [final];
+  if (example.stage_queues?.length) {
+    if (!example.stage_target_masks || example.stage_target_masks.length !== example.stage_queues.length) throw new Error('invalid recovery stage checkpoints');
+    let sourceEnd=0, expected=0;
+    return example.stage_queues.map((queue,stage)=> {
+      sourceEnd+=queue.length;
+      expected+=countRecoveryCells(BigInt(example.stage_target_masks![stage]))/4;
+      const placements=final.placements.filter((_,index)=>Number(example.steps[index].source_index)<sourceEnd);
+      if(placements.length!==expected) throw new Error('missing recovery stage checkpoint');
+      return {...final,placements};
+    });
+  }
   const placements = final.placements.filter((_, index) => Number(example.steps[index].source_index) < example.first_queue.length);
   if (placements.length !== countRecoveryCells(BigInt(report.middle_target_mask)) / 4) throw new Error('missing recovery source checkpoint');
   const first: SolutionExportPage = { ...final, placements };

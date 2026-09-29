@@ -1,8 +1,8 @@
 //! Query-bound value packets; graph references are local postorder indices.
 use super::*;
 use crate::recovery_build::parallel::wire::{read_path, write_path, Reader, Writer};
-const TASK: &[u8] = b"RCATK\x02";
-const RESULT: &[u8] = b"RCATR\x02";
+const TASK: &[u8] = b"RCATK\x03";
+const RESULT: &[u8] = b"RCATR\x03";
 fn invalid() -> ParallelError {
     ParallelError::InvalidWire("invalid recovery catalog packet")
 }
@@ -24,7 +24,7 @@ fn task_read(r: &mut Reader<'_>, init: &[u8]) -> Result<Task, ParallelError> {
     }
     let ordinal = r.number()?;
     let orientation = r.byte()?;
-    if orientation > 1 {
+    if orientation > 3 {
         return Err(invalid());
     }
     let mut groups = [Vec::new(), Vec::new()];

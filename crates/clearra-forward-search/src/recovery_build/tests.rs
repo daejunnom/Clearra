@@ -113,6 +113,7 @@ fn recovery_build_b2b_applies_to_deferred_middle_clears() {
 fn recovery_build_pattern_product_has_one_event_per_supply_pair() {
     let q = query();
     let p = RecoveryBuildQuery {
+        stages: Vec::new(),
         all_solutions: false,
         minimum_solutions: false,
         required_solution_keys: Vec::new(),

@@ -30,9 +30,6 @@ pub(in crate::recovery_build) struct Stage {
     pub result_to_logical: Vec<u8>,
     logical_to_result: Vec<Option<u8>>,
 }
-fn as_mask(board: ForwardBoard) -> Mask {
-    Mask::from_words(board.words())
-}
 fn field(height: u8, base: Mask, target: Mask) -> Result<BuildProbabilityField, Error> {
     BuildProbabilityField::from_words_preserving_height(height, base.words(), target.words())
         .map_err(|_| Error::BoardOutsideField)
@@ -158,25 +155,7 @@ impl Geometry {
     pub fn new(query: &RecoveryBuildQuery, control: &ExecutionControl) -> Result<Self, Error> {
         cancelled(control)?;
         query.validate()?;
-        let mut fields = vec![query.fields.clone()];
-        let (base2, _, _) = place_and_clear(
-            10,
-            query.fields.height,
-            ForwardBoard::from_mask(query.fields.initial.union(query.fields.middle)),
-        );
-        // Exactly the existing Build mirror applicability rule, without a new
-        // user switch. Each target is actually verified on the original board;
-        // we do not presume that a kick table or a held piece is mirror-invariant.
-        let target = field(query.fields.height, as_mask(base2), query.fields.result)?
-            .with_horizontal_mirror_included(true);
-        if target.includes_applicable_horizontal_mirror() {
-            let mirrored = target.mirrored_horizontally().target();
-            if mirrored != query.fields.result {
-                let mut other = query.fields.clone();
-                other.result = mirrored;
-                fields.push(other);
-            }
-        }
+        let fields = super::super::mirror::orientations(&query.fields)?;
         let stages = fields
             .into_iter()
             .map(|f| Stage::compile(f, control))

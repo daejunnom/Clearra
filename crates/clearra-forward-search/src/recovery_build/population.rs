@@ -12,6 +12,8 @@ use clearra_supply::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryBuildQuery {
+    /// Complete common-frame target/supply chain. Empty preserves the paired API.
+    pub stages: Vec<super::RecoveryBuildStage>,
     pub all_solutions: bool,
     pub minimum_solutions: bool,
     pub required_solution_keys: Vec<String>,
@@ -78,7 +80,11 @@ impl Sum {
 }
 impl RecoveryBuildQuery {
     pub fn validate(&self) -> Result<(), RecoveryBuildError> {
-        self.fields.prepare()?;
+        if self.stages.is_empty() {
+            self.fields.prepare()?;
+        } else {
+            super::chain::validate(self)?;
+        }
         if (self.minimum_solutions && !self.all_solutions)
             || (!self.required_solution_keys.is_empty() && !self.minimum_solutions)
             || self.required_solution_keys.iter().any(|k| k.is_empty())
@@ -126,6 +132,9 @@ pub(super) struct PreparedPopulation {
 impl PreparedPopulation {
     pub fn new(query: RecoveryBuildQuery) -> Result<Self, RecoveryBuildError> {
         query.validate()?;
+        if !query.stages.is_empty() {
+            return Err(RecoveryBuildError::InvalidSupplyPattern);
+        }
         let parse = |source: &str| {
             let expression = QueuePatternExpression::parse(source, 0)
                 .map_err(|_| RecoveryBuildError::InvalidSupplyPattern)?;

@@ -8,6 +8,7 @@ use clearra_scoring::profile::SpinProfileId;
 
 fn query() -> RecoveryBuildQuery {
     RecoveryBuildQuery {
+        stages: Vec::new(),
         all_solutions: false,
         minimum_solutions: false,
         required_solution_keys: Vec::new(),
@@ -232,4 +233,49 @@ fn recovery_build_slow_first_shard_does_not_starve_idle_workers() {
     c.absorb(&complete(&mut w, &first, &control), &control)
         .unwrap();
     assert_eq!(c.finish(&control).unwrap(), q.search(&control).unwrap());
+}
+
+#[test]
+fn recovery_build_initial_mirror_metadata_survives_both_worker_paths() {
+    let control = ExecutionControl::default();
+    for catalog in [false, true] {
+        let mut q = query();
+        q.all_solutions = catalog;
+        q.fields.middle = Board256Mask::from_words([0x1007, 0, 0, 0]);
+        q.fields.result = Board256Mask::from_words([0x300c00, 0, 0, 0]);
+        q.first_supply = "J".into();
+        q.second_supply = "O".into();
+        q.allow_piece_exchange = false;
+        q.early_limit = CrossStageEarlyLimit::AtMost(0);
+        let expected = q.search(&control).unwrap();
+        assert_eq!(expected.normal_count, 1);
+        assert_eq!(
+            expected.normal_example.as_ref().unwrap().path.middle_target,
+            [0x20380, 0, 0, 0]
+        );
+        let mut coordinator = RecoveryBuildParallelCoordinator::new(q, 2).unwrap();
+        let init = coordinator.worker_initialization();
+        let mut legacy = init.clone();
+        legacy[4] = 4;
+        assert!(RecoveryBuildParallelWorker::new(&legacy).is_err());
+        let mut worker = RecoveryBuildParallelWorker::new(&init).unwrap();
+        let mut completed = false;
+        for _ in 0..10000 {
+            let (status, task) = coordinator.produce(32, &control).unwrap();
+            match status {
+                RecoveryBuildParallelProduce::Batch => {
+                    let bytes = complete(&mut worker, &task, &control);
+                    coordinator.absorb(&bytes, &control).unwrap();
+                }
+                RecoveryBuildParallelProduce::Completed => {
+                    completed = true;
+                    break;
+                }
+                RecoveryBuildParallelProduce::Pending => {}
+                _ => panic!("unexpected cancellation"),
+            }
+        }
+        assert!(completed);
+        assert_eq!(coordinator.finish(&control).unwrap(), expected);
+    }
 }

@@ -61,6 +61,7 @@ pub struct RecoveryBuildStep {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryBuildFixedReport {
+    pub chain: Option<super::RecoveryChainWitness>,
     pub status: RecoveryBuildStatus,
     pub states: usize,
     pub effective_max_early: usize,
@@ -69,6 +70,8 @@ pub struct RecoveryBuildFixedReport {
     pub exchange_balance: [i16; 7],
     pub steps: Vec<RecoveryBuildStep>,
     pub terminal_board: [u64; 4],
+    /// Actual first target for this jointly selected orientation.
+    pub middle_target: [u64; 4],
     pub result_target: [u64; 4],
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -166,6 +169,7 @@ impl RecoveryBuildFixedQuery {
                 .ok_or(RecoveryBuildError::CounterOverflow)?;
             if let Some((steps, terminal)) = found {
                 return Ok(RecoveryBuildFixedReport {
+                    chain: None,
                     status: if maximum == 0 {
                         RecoveryBuildStatus::Normal
                     } else {
@@ -177,11 +181,13 @@ impl RecoveryBuildFixedQuery {
                     exchange_balance: terminal.exchange,
                     steps,
                     terminal_board: field.terminal.words(),
+                    middle_target: self.fields.middle.words(),
                     result_target: self.fields.result.words(),
                 });
             }
         }
         Ok(RecoveryBuildFixedReport {
+            chain: None,
             status: RecoveryBuildStatus::NoPath,
             states,
             effective_max_early: max,
@@ -189,6 +195,7 @@ impl RecoveryBuildFixedQuery {
             exchange_balance: [0; 7],
             steps: Vec::new(),
             terminal_board: field.terminal.words(),
+            middle_target: self.fields.middle.words(),
             result_target: self.fields.result.words(),
         })
     }

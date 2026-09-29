@@ -33,12 +33,25 @@ pub(super) fn copy_example(
     ledger: &mut WasmFiniteMemoryLedger,
 ) -> Result<RecoveryBuildExamplePayload, WasmCommandRuntimeError> {
     Ok(RecoveryBuildExamplePayload {
+        stage_target_masks: try_owned_vec(&source.stage_target_masks, ledger, |v, l| {
+            try_owned_string(v, l)
+        })?,
+        stage_queues: try_owned_vec(&source.stage_queues, ledger, |v, l| try_owned_string(v, l))?,
+        stage_patterns: try_owned_vec(&source.stage_patterns, ledger, |v, l| {
+            try_owned_string(v, l)
+        })?,
+        placement_stages: try_owned_vec(&source.placement_stages, ledger, |v, _| Ok(*v))?,
+        early_by_boundary: try_owned_vec(&source.early_by_boundary, ledger, |v, _| Ok(*v))?,
         first_pattern: try_owned_string(&source.first_pattern, ledger)?,
         second_pattern: try_owned_string(&source.second_pattern, ledger)?,
         first_queue: try_owned_string(&source.first_queue, ledger)?,
         second_queue: try_owned_string(&source.second_queue, ledger)?,
         status: try_owned_string(&source.status, ledger)?,
         terminal_board_mask: try_owned_string(&source.terminal_board_mask, ledger)?,
+        middle_target_mask: try_optional_owned_string(
+            source.middle_target_mask.as_deref(),
+            ledger,
+        )?,
         result_target_mask: try_owned_string(&source.result_target_mask, ledger)?,
         effective_max_early: try_owned_string(&source.effective_max_early, ledger)?,
         actual_early: try_owned_string(&source.actual_early, ledger)?,
@@ -52,6 +65,10 @@ pub(super) fn copy_payload(
     ledger: &mut WasmFiniteMemoryLedger,
 ) -> Result<RecoveryBuildPayload, WasmCommandRuntimeError> {
     Ok(RecoveryBuildPayload {
+        stage_targets: try_owned_vec(&source.stage_targets, ledger, |v, l| try_owned_string(v, l))?,
+        stage_supplies: try_owned_vec(&source.stage_supplies, ledger, |v, l| {
+            try_owned_string(v, l)
+        })?,
         minimum_proven: source.minimum_proven,
         selected_solution_keys: try_owned_vec(&source.selected_solution_keys, ledger, |s, l| {
             try_owned_string(s, l)

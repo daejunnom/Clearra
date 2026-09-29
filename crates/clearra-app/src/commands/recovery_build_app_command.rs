@@ -89,11 +89,13 @@ pub(crate) fn recovery_build_response(
     identity_query.minimum_solutions = false;
     identity_query.required_solution_keys.clear();
     identity_query.minimum_source_identity = None;
+    // Initial-boundary mirroring changes the coverage catalog semantics even
+    // when the visible inputs are identical. Reject pins from the v3 catalog.
     let digest: [u8; 32] =
-        Sha256::digest(format!("recovery-build.v3:{identity_query:?}").as_bytes()).into();
+        Sha256::digest(format!("recovery-build.v4:{identity_query:?}").as_bytes()).into();
     let identity = format!(
         "{:x}",
-        Sha256::digest(format!("recovery-build.v3:{identity_query:?}").as_bytes())
+        Sha256::digest(format!("recovery-build.v4:{identity_query:?}").as_bytes())
     );
     let selected = if query.minimum_solutions {
         if query
@@ -127,6 +129,12 @@ pub(crate) fn recovery_build_response(
         Vec::new()
     };
     let public = RecoveryBuildPayload {
+        stage_targets: query
+            .stages
+            .iter()
+            .map(|s| mask(s.target.words()))
+            .collect(),
+        stage_supplies: query.stages.iter().map(|s| s.supply.clone()).collect(),
         minimum_proven: query.minimum_solutions,
         selected_solution_keys: selected,
         required_solution_keys: query.required_solution_keys.clone(),
@@ -207,6 +215,27 @@ fn mask(words: [u64; 4]) -> String {
 fn example(value: &RecoveryBuildExample) -> RecoveryBuildExamplePayload {
     let path = &value.path;
     RecoveryBuildExamplePayload {
+        stage_target_masks: path
+            .chain
+            .as_ref()
+            .map_or_else(Vec::new, |c| c.targets.iter().map(|&m| mask(m)).collect()),
+        stage_queues: path.chain.as_ref().map_or_else(Vec::new, |c| {
+            c.queues
+                .iter()
+                .map(|q| q.iter().map(|p| p.as_ascii()).collect())
+                .collect()
+        }),
+        stage_patterns: path.chain.as_ref().map_or_else(Vec::new, |c| {
+            c.pattern_indices.iter().map(ToString::to_string).collect()
+        }),
+        placement_stages: path
+            .chain
+            .as_ref()
+            .map_or_else(Vec::new, |c| c.placement_stages.clone()),
+        early_by_boundary: path
+            .chain
+            .as_ref()
+            .map_or_else(Vec::new, |c| c.early_by_boundary.clone()),
         first_pattern: value.first_pattern.to_string(),
         second_pattern: value.second_pattern.to_string(),
         first_queue: value
@@ -226,6 +255,7 @@ fn example(value: &RecoveryBuildExample) -> RecoveryBuildExamplePayload {
         }
         .into(),
         terminal_board_mask: mask(path.terminal_board),
+        middle_target_mask: Some(mask(path.middle_target)),
         result_target_mask: mask(path.result_target),
         effective_max_early: path.effective_max_early.to_string(),
         actual_early: path.actual_early.to_string(),

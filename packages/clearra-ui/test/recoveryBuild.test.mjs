@@ -157,3 +157,48 @@ test('first export checkpoint follows original supply ownership through a termin
  assert.deepEqual(first.placements,[final.placements[1]],'held first-supply I, not the chronologically first O');
  assert.equal(final.placements.length,2);
 });
+
+test('initial symmetry transforms the complete remaining target suffix',()=>{
+ const variants=api.recoveryTargetOrientations(0n,0x1007n,0x300c00n,8);
+ assert.deepEqual(variants,[{middle:0x1007n,result:0x300c00n},{middle:0x20380n,result:0x300c0000n}]);
+ assert.deepEqual(api.recoveryTargetOrientations(512n,0x1007n,0x300c00n,8),[variants[0]]);
+ assert.deepEqual(api.recoveryTargetOrientations(0x3f0n,0xfn,0xc03n,8),
+  [{middle:0xfn,result:0xc03n},{middle:0xfn,result:0xc0300n}]);
+});
+
+function initiallyMirroredEvidence(){
+ const p=structuredClone(fixture),h=n=>'0x'+n.toString(16);
+ const middle=0x20380n,result=0x300c0000n;
+ Object.assign(p,{height:8,start_board_mask:'0x0',middle_target_mask:'0x1007',result_target_mask:'0x300c00',
+  first_supply:'J',second_supply:'O',early_limit:'0',hold_enabled:false,allow_piece_exchange:false,preserve_b2b:false,
+  initial_b2b:true,pattern_count:'1',evaluated_pattern_count:'1',normal_count:'1',recovery_count:'0',no_path_count:'0',
+  normal_probability:'1',recovery_probability:'0',no_path_probability:'0',complete:true,all_paths_enumerated:false});
+ const step=(source,before,lock,resultTarget)=>({source_index:String(source),piece:resultTarget?'O':'J',result_target:resultTarget,
+  rotation:0,x:resultTarget?8:7,y:resultTarget?1:0,hold_decision:'none',board_before_mask:h(before),placement_mask:h(lock),
+  board_after_mask:h(before|lock),cleared_rows:0,cleared_lines:0,recognized_spin:false,b2b_active:true,middle_complete:true});
+ p.examples=[{first_pattern:'0',second_pattern:'0',first_queue:'J',second_queue:'O',status:'normal',
+  middle_target_mask:h(middle),result_target_mask:h(result),terminal_board_mask:h(middle|result),
+  effective_max_early:'0',actual_early:'0',exchange_balance:[0,0,0,0,0,0,0],
+  steps:[step(0,0n,middle,false),step(1,middle,result,true)]}];
+ return p;
+}
+test('reflected middle metadata survives physical replay and both source-frame exports',()=>{
+ const p=initiallyMirroredEvidence();
+ assert.ok(api.validateRecoveryBuildPayload(p));
+ const pages=api.recoveryBuildExportPages(p);
+ assert.equal(pages[0].placements.length,1); assert.equal(pages[1].placements.length,2);
+ assert.equal(pages[0].placements[0].mask,0x20380n);
+ assert.equal(pages[1].placements[1].mask,0x300c0000n);
+ assert.deepEqual(api.recoveryBuildExportPages(p,true),[pages[1]]);
+ p.solutions_complete=true;p.solutions=[{key:'reflected',covered_count:'1',probability:'1',example:structuredClone(p.examples[0])}];
+ p.minimum_proven=true;p.selected_solution_keys=['reflected'];p.required_solution_keys=['reflected'];
+ assert.ok(api.validateRecoveryBuildPayload(p));
+});
+test('an oriented middle cannot be mixed with an unreflected suffix or a different source',()=>{
+ for(const mutate of [p=>delete p.examples[0].middle_target_mask,
+  p=>p.examples[0].result_target_mask=p.result_target_mask,
+  p=>p.start_board_mask='0x200', p=>p.examples[0].first_queue='L',
+  p=>p.examples[0].steps[0].source_index='1']){
+  const p=initiallyMirroredEvidence(); mutate(p); assert.equal(api.validateRecoveryBuildPayload(p),false);
+ }
+});

@@ -23,12 +23,28 @@ pub(super) fn write_step(object: &mut JsonObject<'_>, source: &RecoveryBuildStep
 }
 
 pub(super) fn write_example(object: &mut JsonObject<'_>, source: &RecoveryBuildExamplePayload) {
+    object.array("stage_target_masks", |o| {
+        write_string_array(o, &source.stage_target_masks)
+    });
+    object.array("stage_queues", |o| {
+        write_string_array(o, &source.stage_queues)
+    });
+    object.array("stage_patterns", |o| {
+        write_string_array(o, &source.stage_patterns)
+    });
+    object.array("placement_stages", |o| {
+        write_number_array(o, &source.placement_stages)
+    });
+    object.array("early_by_boundary", |o| {
+        write_number_array(o, &source.early_by_boundary)
+    });
     object.string("first_pattern", &source.first_pattern);
     object.string("second_pattern", &source.second_pattern);
     object.string("first_queue", &source.first_queue);
     object.string("second_queue", &source.second_queue);
     object.string("status", &source.status);
     object.string("terminal_board_mask", &source.terminal_board_mask);
+    object.optional_string("middle_target_mask", source.middle_target_mask.as_deref());
     object.string("result_target_mask", &source.result_target_mask);
     object.string("effective_max_early", &source.effective_max_early);
     object.string("actual_early", &source.actual_early);
@@ -41,6 +57,12 @@ pub(super) fn write_example(object: &mut JsonObject<'_>, source: &RecoveryBuildE
 }
 
 pub(super) fn write_payload(object: &mut JsonObject<'_>, source: &RecoveryBuildPayload) {
+    object.array("stage_targets", |o| {
+        write_string_array(o, &source.stage_targets)
+    });
+    object.array("stage_supplies", |o| {
+        write_string_array(o, &source.stage_supplies)
+    });
     object.boolean("solutions_complete", source.solutions_complete);
     object.boolean("minimum_proven", source.minimum_proven);
     object.array("selected_solution_keys", |output| {
@@ -86,7 +108,7 @@ pub(super) fn write_payload(object: &mut JsonObject<'_>, source: &RecoveryBuildP
         write_object_array(output, &source.examples, write_example)
     });
 }
-fn write_number_array(output: &mut JsonSink, values: &[i16]) {
+fn write_number_array<T: std::fmt::Display>(output: &mut JsonSink, values: &[T]) {
     output.push('[');
     for (index, value) in values.iter().enumerate() {
         if index != 0 {

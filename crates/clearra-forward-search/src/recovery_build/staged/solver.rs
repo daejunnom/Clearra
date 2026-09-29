@@ -627,6 +627,7 @@ impl Solver {
                         before &= !step.middle_complete;
                     }
                     return Ok(RecoveryBuildFixedReport {
+                        chain: None,
                         status,
                         states: usize::try_from(self.states).map_err(|_| Error::CounterOverflow)?,
                         effective_max_early: self.maximum,
@@ -634,6 +635,10 @@ impl Solver {
                         exchange_balance: key.exchange,
                         steps,
                         terminal_board: pos.board.words(),
+                        middle_target: self.geometry.stages[usize::from(pos.stage)]
+                            .fields
+                            .middle
+                            .words(),
                         result_target: self.geometry.stages[usize::from(pos.stage)]
                             .fields
                             .result

@@ -17,12 +17,18 @@ export type RecoveryBuildStepPayload = {
   middle_complete: boolean;
 };
 export type RecoveryBuildExamplePayload = {
+  stage_target_masks?: string[];
+  stage_queues?: string[];
+  stage_patterns?: string[];
+  placement_stages?: number[];
+  early_by_boundary?: number[];
   first_pattern: string;
   second_pattern: string;
   first_queue: string;
   second_queue: string;
   status: string;
   terminal_board_mask: string;
+  middle_target_mask?: string | null;
   result_target_mask?: string;
   effective_max_early: string;
   actual_early: string;
@@ -43,6 +49,8 @@ export type RecoveryBuildPayload = {
   start_board_mask: string;
   middle_target_mask: string;
   result_target_mask: string;
+  stage_targets?: string[];
+  stage_supplies?: string[];
   first_supply: string;
   second_supply: string;
   early_limit: string | null;

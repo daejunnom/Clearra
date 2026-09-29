@@ -56,7 +56,7 @@ struct ResultBatch {
     block: BlockResult,
 }
 
-pub struct RecoveryBuildParallelCoordinator {
+pub(super) struct PairCoordinator {
     pub(super) catalog: Option<super::catalog::Coordinator>,
     source: PreparedPopulation,
     initialization: Vec<u8>,
@@ -70,7 +70,7 @@ pub struct RecoveryBuildParallelCoordinator {
     capacity: usize,
     batch_size: usize,
 }
-impl RecoveryBuildParallelCoordinator {
+impl PairCoordinator {
     pub fn new(
         query: RecoveryBuildQuery,
         workers: usize,
@@ -227,6 +227,7 @@ impl RecoveryBuildParallelCoordinator {
                 "invalid stage probability measure",
             ));
         }
+        let variants = super::mirror::orientations(&self.source.query.fields)?;
         for (category, slot) in [(0, &mut batch.block.normal), (1, &mut batch.block.recovery)] {
             let needed =
                 expected.examples & (1 << category) != 0 && batch.block.counts[category] > 0;
@@ -245,6 +246,10 @@ impl RecoveryBuildParallelCoordinator {
                     || example.first_pattern >= start + batch.task.count
                     || example.second_pattern >= self.source.second.pattern_count()
                     || example.path.status != status
+                    || !variants.iter().any(|fields| {
+                        example.path.middle_target == fields.middle.words()
+                            && example.path.result_target == fields.result.words()
+                    })
                     || example.path.steps.is_empty()
                 {
                     return Err(RecoveryBuildParallelError::InvalidWire(
@@ -339,7 +344,7 @@ struct PendingBatch {
     task: Task,
     block: Block,
 }
-pub struct RecoveryBuildParallelWorker {
+pub(super) struct PairWorker {
     catalog: Option<super::catalog::Worker>,
     source: PreparedPopulation,
     initialization: Vec<u8>,
@@ -347,7 +352,7 @@ pub struct RecoveryBuildParallelWorker {
     pending: Option<PendingBatch>,
     progress: RecoveryBuildParallelProgress,
 }
-impl RecoveryBuildParallelWorker {
+impl PairWorker {
     pub fn is_initialization(bytes: &[u8]) -> bool {
         bytes.starts_with(wire::INIT)
     }
@@ -477,8 +482,8 @@ pub(super) fn search_serial(
     query: RecoveryBuildQuery,
     control: &ExecutionControl,
 ) -> Result<RecoveryBuildPopulation, RecoveryBuildParallelError> {
-    let mut c = RecoveryBuildParallelCoordinator::new(query, 1)?;
-    let mut w = RecoveryBuildParallelWorker::new(&c.worker_initialization())?;
+    let mut c = super::RecoveryBuildParallelCoordinator::new(query, 1)?;
+    let mut w = super::RecoveryBuildParallelWorker::new(&c.worker_initialization())?;
     loop {
         let (status, bytes) = c.produce(MAX_BATCH, control)?;
         match status {

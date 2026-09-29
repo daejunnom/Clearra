@@ -1,7 +1,9 @@
 //! New two-input request grammar. Legacy role/limit flags are deliberately not
 //! accepted here; neither an ignored constraint nor a hidden cutoff is injected.
 use super::*;
-use clearra_forward_search::{CrossStageEarlyLimit, RecoveryBuildFields, RecoveryBuildQuery};
+use clearra_forward_search::{
+    CrossStageEarlyLimit, RecoveryBuildFields, RecoveryBuildQuery, RecoveryBuildStage,
+};
 
 pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
     let fail = |message: &str| WebCommandError::new(WebCommandErrorCode::InvalidValue, message);
@@ -17,6 +19,8 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
     let mut result = None;
     let mut first = None;
     let mut second = None;
+    let mut stage_masks = Vec::new();
+    let mut stage_supplies = Vec::new();
     let mut early = CrossStageEarlyLimit::Auto;
     let mut exchange = false;
     let mut hold = true;
@@ -36,10 +40,27 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
             "--no-preserve-b2b" => "--preserve-b2b",
             other => other,
         };
-        if identity != "--required-solution" && !seen.insert(identity) {
+        if !["--required-solution", "--stage-mask", "--stage-supply"].contains(&identity)
+            && !seen.insert(identity)
+        {
             return Err(fail("recovery-build option occurs more than once"));
         }
         match option {
+            "--stage-mask" => {
+                if stage_masks.len() >= 60 {
+                    return Err(fail("too many recovery targets"));
+                }
+                stage_masks.push(Board256Mask::from_words(parse_board_words(
+                    next_value(tokens, &mut cursor, option)?,
+                    option,
+                )?));
+            }
+            "--stage-supply" => {
+                if stage_supplies.len() >= 60 {
+                    return Err(fail("too many recovery supplies"));
+                }
+                stage_supplies.push(next_value(tokens, &mut cursor, option)?.to_owned());
+            }
             "--start-mask" => {
                 initial = Board256Mask::from_words(parse_board_words(
                     next_value(tokens, &mut cursor, option)?,
@@ -127,7 +148,32 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
             cursor += 1;
         }
     }
+    let stages = if !stage_masks.is_empty() || !stage_supplies.is_empty() {
+        if middle.is_some() || result.is_some() || first.is_some() || second.is_some() {
+            return Err(fail(
+                "stage arrays cannot be mixed with paired target or supply flags",
+            ));
+        }
+        if stage_masks.len() < 2 || stage_masks.len() != stage_supplies.len() {
+            return Err(fail(
+                "each recovery stage requires one target and one supply",
+            ));
+        }
+        let n = stage_masks.len();
+        middle = Some(stage_masks[0]);
+        result = Some(stage_masks[n - 1]);
+        first = Some(stage_supplies[0].clone());
+        second = Some(stage_supplies[n - 1].clone());
+        stage_masks
+            .into_iter()
+            .zip(stage_supplies)
+            .map(|(target, supply)| RecoveryBuildStage { target, supply })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let query = RecoveryBuildQuery {
+        stages,
         all_solutions,
         minimum_solutions,
         required_solution_keys,
