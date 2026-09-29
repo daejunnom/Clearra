@@ -1,0 +1,126 @@
+name: Recovery multi-stage implementation check
+
+on:
+  push:
+    branches: [codex/recovery-chain-proposal-20260929]
+    paths: [.github/workflows/recovery-chain-proposal.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: recovery-chain-proposal-20260929
+  cancel-in-progress: false
+
+jobs:
+  implementation:
+    if: github.repository == 'daejunnom/Clearra' && github.actor == 'daejunnom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      BASE_SHA: b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+      OUT: _local/artifacts/test/recovery-chain-proposal
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Apply the exact reviewed source patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['BASE_SHA']
+          out=pathlib.Path(os.environ['OUT']); out.mkdir(parents=True,exist_ok=True)
+          chunks=['92c75d33c6c56d47100ebd3e84e3f9c0add90878','4a00022738f24d2d3e9a696ef555a6d1591466cc','085b80b7cf367f4631baaaee1c548154aaabbed3','4cb2f6d3655379da770a7cf28164ff6d6403ae02','dff1576773db720384520eb1bc11ef64c3c6d039']
+          parts=[]
+          for sha in chunks:
+              req=urllib.request.Request('https://api.github.com/repos/daejunnom/Clearra/git/blobs/'+sha,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+              with urllib.request.urlopen(req,timeout=60) as response: value=json.load(response)
+              content=base64.b64decode(value['content'])
+              assert hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()==sha
+              parts.append(content)
+          archive=b''.join(parts)
+          assert hashlib.sha256(archive).hexdigest()=='0958af70cdd9775d74e443b037148d784e357120b94e849f35eff963295d4436'
+          patch=lzma.decompress(archive,memlimit=134217728)
+          assert len(patch)==188997
+          target=out/'implementation.patch'; target.write_bytes(patch)
+          files=[line.split('\t')[-1] for line in subprocess.check_output(['git','apply','--numstat',str(target)],text=True).splitlines()]
+          assert len(files)==47 and len(set(files))==47
+          assert all(p.startswith(('crates/','packages/clearra-ui/')) and '..' not in pathlib.PurePosixPath(p).parts for p in files)
+          (out/'expected-files.json').write_text(json.dumps(files,indent=2)+'\n')
+          subprocess.run(['git','apply','--check',str(target)],check=True)
+          subprocess.run(['git','apply',str(target)],check=True)
+          subprocess.run(['git','diff','--check'],check=True)
+          PY
+      - name: Format with the pinned workspace toolchain
+        run: |
+          rustup show
+          cargo fmt --all
+          cargo fmt --all --check
+      - name: Preserve an isolated source-only candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['OUT']); expected=set(json.loads((out/'expected-files.json').read_text()))
+          subprocess.run(['git','add','--','crates','packages/clearra-ui'],check=True)
+          actual=set(subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines())
+          assert actual==expected,(sorted(actual-expected),sorted(expected-actual))
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          subprocess.run(['git','config','user.name','github-actions[bot]'],check=True)
+          subprocess.run(['git','config','user.email','41898282+github-actions[bot]@users.noreply.github.com'],check=True)
+          subprocess.run(['git','commit','-m','feat(recovery): carry exact supply and hold states across multiple targets\n\nAdd common-frame multi-stage targets, compressed coverage, bounded worker tasks, per-boundary early limits, remaining-target mirror orientations, full replay metadata and stage-aware exports. Preserve the existing two-target route. Isolated candidate pending native, WASM and browser verification.'],check=True)
+          sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          assert subprocess.check_output(['git','rev-parse','HEAD^'],text=True).strip()==os.environ['BASE_SHA']
+          ref='refs/heads/codex/recovery-chain-source-20260929'
+          env=os.environ.copy()
+          env.update(GIT_CONFIG_COUNT='1',GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',GIT_CONFIG_VALUE_0='AUTHORIZATION: basic '+base64.b64encode(('x-access-token:'+os.environ['GH_TOKEN']).encode()).decode())
+          assert not subprocess.check_output(['git','ls-remote','--heads','origin',ref],env=env,text=True).strip(),'Proposal already exists; inspect before changing it.'
+          subprocess.run(['git','push','origin','HEAD:'+ref],env=env,check=True)
+          (out/'source-sha.txt').write_text(sha+'\n')
+          with (out/'source.tar').open('wb') as f: subprocess.run(['git','archive','HEAD'],stdout=f,check=True)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write('Source-only candidate: `'+sha+'`. Main and deployment were not changed.\n')
+          PY
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Native and WASM contracts
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p "$OUT"
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$OUT/forward.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$OUT/cli.log" || result=1
+          cargo test --locked -p clearra-app recovery_solution_cover -- --nocapture 2>&1 | tee "$OUT/app.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$OUT/wasm.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$OUT/wasm-target.log" || result=1
+          exit "$result"
+      - name: UI and transport contracts
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p "$OUT"
+          result=0
+          pnpm install --frozen-lockfile --ignore-scripts 2>&1 | tee "$OUT/install.log" || result=1
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs 2>&1 | tee "$OUT/ui-prepare.log" || result=1
+          node --test packages/clearra-ui/test/recovery*.test.mjs 2>&1 | tee "$OUT/ui.log" || result=1
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee "$OUT/types.log" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-proposal-evidence
+          path: _local/artifacts/test/recovery-chain-proposal/
+          retention-days: 7
+          if-no-files-found: error
