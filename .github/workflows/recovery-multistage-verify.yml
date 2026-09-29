@@ -1,0 +1,175 @@
+name: Recovery multi-stage host and browser verification
+on:
+  push:
+    branches: [codex/recovery-multistage-verify-20260929]
+permissions:
+  contents: read
+jobs:
+  proposal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.commit.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: operator
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: e8f1315b711fdc0b619fdd59a42a8f311ece097f
+          path: source
+      - name: Apply the exact explicit-weight correction
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = e8f1315b711fdc0b619fdd59a42a8f311ece097f
+          echo '91d300b389f34210ec2773b0405215e2c870b2e056fa290a16c853162cf00c7d  ../operator/.github/recovery-multistage-verify.patch' | sha256sum -c -
+          git apply --check ../operator/.github/recovery-multistage-verify.patch
+          git apply ../operator/.github/recovery-multistage-verify.patch
+          cargo fmt --all
+          git add -- crates/clearra-forward-search/src/recovery_build/staged/source.rs crates/clearra-forward-search/src/recovery_build/chain_tests.rs crates/clearra-wasm/tests/recovery_build_wire.rs
+          test "$(git diff --cached --name-only | wc -l)" = 3
+          git diff --exit-code
+          git diff --cached --check
+      - name: Preserve source-only correction on an isolated branch
+        working-directory: source
+        id: commit
+        run: |
+          set -euo pipefail
+          ref=codex/recovery-multistage-checked-20260929
+          test -z "$(git ls-remote --heads origin "refs/heads/$ref")"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(recovery): accept explicit uniform stage sources without test-only dependencies'
+          sha="$(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD^)" = e8f1315b711fdc0b619fdd59a42a8f311ece097f
+          git push origin "HEAD:refs/heads/$ref"
+          echo "source=$sha" >> "$GITHUB_OUTPUT"
+          mkdir -p _local/artifacts/test/multistage
+          echo "$sha" > _local/artifacts/test/multistage/source-sha.txt
+          git archive HEAD | gzip > _local/artifacts/test/multistage/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-multistage-checked-source
+          path: source/_local/artifacts/test/multistage/
+          retention-days: 7
+  rust:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - name: Mirror, multi-stage and exact minimum host contracts
+        shell: bash
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/multistage
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$out/core.log" || result=1
+          cargo test --locked -p clearra-app recovery_solution_cover -- --nocapture 2>&1 | tee "$out/minimum.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$out/cli.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$out/wasm-wire.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$out/wasm-target.log" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-multistage-checked-rust
+          path: _local/artifacts/test/multistage/
+          retention-days: 7
+  browser:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          path: _local/operator
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Prepare finite real browser test
+        run: |
+          mkdir -p "$RUNNER_TEMP/clearra-browser-tools"
+          npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$RUNNER_TEMP/clearra-browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+          echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
+          cp _local/operator/scripts/tools/recovery-multistage-browser-acceptance.mjs _local/multistage-browser.mjs
+      - name: Real nested tabs, overwrite, removal and narrow supply wrapping
+        run: node _local/multistage-browser.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-multistage-real-browser
+          path: _local/artifacts/test/multistage-browser/
+          retention-days: 7
+  payload:
+    needs: [proposal, rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: recovery-multistage-checked-rust
+          path: _local/artifacts/test/multistage
+      - name: Check actual host output with the production UI and all stage exports
+        run: |
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync,writeFileSync} from 'node:fs';
+          import {build} from 'esbuild';
+          const out='_local/artifacts/test/multistage';
+          const line=readFileSync(`${out}/wasm-wire.log`,'utf8').split('\n').find(x=>x.startsWith('recovery_chain_payload='));
+          assert.ok(line,'real Rust host payload is required');
+          const payload=JSON.parse(line.slice('recovery_chain_payload='.length));
+          const built=await build({stdin:{contents:"export * from './packages/clearra-ui/src/lib/workspace/recoveryBuildPresentation.ts';",resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'node'});
+          const api=await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
+          assert.equal(api.validateRecoveryBuildPayload(payload),true);
+          for(const solution of payload.solutions){
+            const pages=api.recoveryBuildExamplePages(payload,solution.example,false);
+            assert.equal(pages.length,4);
+            assert.deepEqual(pages.map(p=>p.placements.length),[1,2,3,4]);
+            assert.deepEqual(api.recoveryBuildExamplePages(payload,solution.example,true),[pages[3]]);
+          }
+          writeFileSync(`${out}/validated-chain-payload.json`,JSON.stringify(payload,null,2));
+          console.log('Real four-stage host payload and cumulative exports passed');
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-multistage-cross-host-payload
+          path: _local/artifacts/test/multistage/validated-chain-payload.json
+          retention-days: 7
