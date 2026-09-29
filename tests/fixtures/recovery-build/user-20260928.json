@@ -55,6 +55,7 @@
     "middle": 28,
     "result": 28
   },
+  "result_frame": "shared",
   "first_supply": "P7",
   "second_supply": "P7",
   "hold_enabled": true,
@@ -66,5 +67,5 @@
   "spin_profile": "all-spin-plus",
   "expected_pair_count": "25401600",
   "expected_probability": null,
-  "scope": "Full input fixture; no claim of a completed 25,401,600-pair run. Result cells retain screenshot y=5..9 in the existing post-middle-clear frame."
+  "scope": "Full input fixture; no claim of a completed 25,401,600-pair run. Result cells retain screenshot y=5..9 in the shared Start/Middle frame. The UI lowers them to after-middle coordinates only at execution."
 }

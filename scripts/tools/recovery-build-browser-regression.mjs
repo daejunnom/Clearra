@@ -78,19 +78,15 @@ try {
    await expect(page.locator('.board button.reference')).toHaveCount(50);
   }
  }
- const context = page.locator('.recovery-field-editor input[type="checkbox"]');
- await context.uncheck();
- await expect(page.locator('.board button.reference')).toHaveCount(0);
- await context.check();
+ assert.equal(await page.locator('.recovery-field-editor input[type="checkbox"],.recovery-result-frame').count(),0);
  await expect(page.locator('.board button.reference')).toHaveCount(50);
- assert.deepEqual(await snapshot(), expected);
  // Editing a reference cell affects only the selected Result mask, not the
  // underlying Start/Middle drafts, even though they render at that location.
- const edited = { ...expected, result: (BigInt(expected.result) | (1n << 9n)).toString() };
+ const edited = { ...expected, start: (BigInt(expected.start) & ~(1n << 9n)).toString(), result: (BigInt(expected.result) | (1n << 9n)).toString() };
  await page.locator('.board button').nth(99).click();
  await expect.poll(snapshot).toEqual(edited);
  await page.locator('.board button').nth(99).click();
- await expect.poll(snapshot).toEqual(expected);
+ await expect.poll(snapshot).toEqual({ ...expected, start: edited.start });
  await page.screenshot({ path: resolve(out, 'result-preserves-start-middle.png'), fullPage: true });
  assert.deepEqual(errors, []);
  await writeFile(resolve(out, 'browser-result.json'), JSON.stringify({ status: 'passed', fixture: fixture.id,

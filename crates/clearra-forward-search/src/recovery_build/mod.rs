@@ -1,5 +1,6 @@
 //! Stage-factorized paired Build coverage with demand-driven boundary repair.
 //! The original weighted supply universe is preserved without pair expansion.
+mod catalog;
 mod field;
 mod parallel;
 mod population;
@@ -14,7 +15,9 @@ mod search;
 #[cfg(test)]
 mod tests;
 pub use field::RecoveryBuildFields;
-pub use population::{RecoveryBuildExample, RecoveryBuildPopulation, RecoveryBuildQuery};
+pub use population::{
+    RecoveryBuildExample, RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildSolution,
+};
 pub use search::{
     RecoveryBuildFixedQuery, RecoveryBuildFixedReport, RecoveryBuildStatus, RecoveryBuildStep,
 };

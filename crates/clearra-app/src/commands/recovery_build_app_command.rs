@@ -12,7 +12,7 @@ use clearra_forward_search::{
 };
 use clearra_host_contract::{
     ProductResultPayload, ProductResultPayloadContent, RecoveryBuildExamplePayload,
-    RecoveryBuildPayload, RecoveryBuildStepPayload,
+    RecoveryBuildPayload, RecoveryBuildSolutionPayload, RecoveryBuildStepPayload,
 };
 use clearra_output::model::RenderField;
 use sha2::{Digest, Sha256};
@@ -75,19 +75,72 @@ impl RunnableAppCommand for RecoveryBuildAppCommand {
                 );
             }
         };
-        recovery_build_response(&self.query, report)
+        recovery_build_response(&self.query, report, context.execution_control)
     }
 }
 
 pub(crate) fn recovery_build_response(
     query: &RecoveryBuildQuery,
     report: RecoveryBuildPopulation,
+    control: &clearra_core_domain::execution_cancellation::ExecutionControl,
 ) -> AppResponse {
+    let mut identity_query = query.clone();
+    identity_query.all_solutions = false;
+    identity_query.minimum_solutions = false;
+    identity_query.required_solution_keys.clear();
+    identity_query.minimum_source_identity = None;
+    let digest: [u8; 32] =
+        Sha256::digest(format!("recovery-build.v3:{identity_query:?}").as_bytes()).into();
     let identity = format!(
         "{:x}",
-        Sha256::digest(format!("recovery-build.v2:{query:?}").as_bytes())
+        Sha256::digest(format!("recovery-build.v3:{identity_query:?}").as_bytes())
     );
+    let selected = if query.minimum_solutions {
+        if query
+            .minimum_source_identity
+            .as_ref()
+            .is_some_and(|expected| expected != &identity)
+        {
+            return AppResponse::failed(
+                AppStatus::ValidationFailed,
+                AppError::new(
+                    AppErrorCode::InvalidInput,
+                    "Recovery minimum source changed",
+                ),
+            );
+        }
+        match crate::recovery_solution_cover::select_recovery_minimum(
+            query, &report, digest, control,
+        ) {
+            Ok(keys) => keys,
+            Err(error) => {
+                return AppResponse::failed(
+                    AppStatus::ExecutionFailed,
+                    AppError::new(
+                        AppErrorCode::ExecutionFailed,
+                        format!("Recovery minimum: {error:?}"),
+                    ),
+                )
+            }
+        }
+    } else {
+        Vec::new()
+    };
     let public = RecoveryBuildPayload {
+        minimum_proven: query.minimum_solutions,
+        selected_solution_keys: selected,
+        required_solution_keys: query.required_solution_keys.clone(),
+        solutions_complete: report.solutions_complete,
+        solutions: report
+            .solutions
+            .iter()
+            .map(|s| RecoveryBuildSolutionPayload {
+                key: s.key.clone(),
+                covered_count: s.covered_count.to_string(),
+                probability: s.probability.to_string(),
+                example: example(&s.example),
+            })
+            .collect(),
         input_identity: identity,
         height: query.fields.height,
         start_board_mask: mask(query.fields.initial.words()),
@@ -173,6 +226,7 @@ fn example(value: &RecoveryBuildExample) -> RecoveryBuildExamplePayload {
         }
         .into(),
         terminal_board_mask: mask(path.terminal_board),
+        result_target_mask: mask(path.result_target),
         effective_max_early: path.effective_max_early.to_string(),
         actual_early: path.actual_early.to_string(),
         exchange_balance: path.exchange_balance.to_vec(),

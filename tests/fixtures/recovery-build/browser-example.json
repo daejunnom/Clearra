@@ -33,7 +33,7 @@
       "status": "recovery",
       "terminal_board_mask": "0x30483f07f3f8f",
       "effective_max_early": "7",
-      "actual_early": "1",
+      "actual_early": "5",
       "exchange_balance": [
         -1,
         1,

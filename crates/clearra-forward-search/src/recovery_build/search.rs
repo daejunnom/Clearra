@@ -69,6 +69,7 @@ pub struct RecoveryBuildFixedReport {
     pub exchange_balance: [i16; 7],
     pub steps: Vec<RecoveryBuildStep>,
     pub terminal_board: [u64; 4],
+    pub result_target: [u64; 4],
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Token {
@@ -153,7 +154,7 @@ impl RecoveryBuildFixedQuery {
         let field = self.fields.prepare()?;
         let max = self
             .early_limit
-            .effective_max(self.first_supply.len(), field.result_pieces);
+            .effective_max(field.result_pieces, field.result_pieces);
         let mut states = 0_usize;
         for maximum in [0, max] {
             if maximum == 0 && states != 0 {
@@ -176,6 +177,7 @@ impl RecoveryBuildFixedQuery {
                     exchange_balance: terminal.exchange,
                     steps,
                     terminal_board: field.terminal.words(),
+                    result_target: self.fields.result.words(),
                 });
             }
         }
@@ -187,6 +189,7 @@ impl RecoveryBuildFixedQuery {
             exchange_balance: [0; 7],
             steps: Vec::new(),
             terminal_board: field.terminal.words(),
+            result_target: self.fields.result.words(),
         })
     }
     fn run_pass(
@@ -314,7 +317,7 @@ impl RecoveryBuildFixedQuery {
                 if second && maximum == 0 && before_checkpoint {
                     continue;
                 }
-                let early = second && first_source && before_checkpoint;
+                let early = second && before_checkpoint;
                 if early && state.early_count == maximum {
                     continue;
                 }

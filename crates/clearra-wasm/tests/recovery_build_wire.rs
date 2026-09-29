@@ -127,3 +127,95 @@ fn recovery_build_distributed_protocol_matches_serial_and_requires_all_pairs() {
         }
     }
 }
+
+#[test]
+fn recovery_build_all_minimum_and_mandatory_minimum_use_complete_coverage() {
+    // A centered O is self-mirrored. Use a left O so the two distinct
+    // drawings cover the same single queue and require one unpinned solution.
+    let command = "clearra recovery build --start-mask 0x3f0 --middle-mask 0xf --result-mask 0xc03 --height 8 --first-supply I --second-supply O --no-hold --max-early 0 --all-solutions";
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
+    let all = runtime.run_command_text(command).unwrap();
+    assert_eq!(all.app_response().status(), AppStatus::Success);
+    let ProductResultPayloadContent::RecoveryBuild(report) = all
+        .app_response()
+        .product_result_payload()
+        .unwrap()
+        .content()
+    else {
+        panic!("catalog payload")
+    };
+    assert!(report.solutions_complete);
+    assert_eq!(
+        report.solutions.len(),
+        2,
+        "empty boundary permits original O and mirrored O; not two probability events"
+    );
+    assert_eq!(report.normal_count, "1");
+    assert!(report.solutions.iter().all(|s| s.covered_count == "1"));
+    let minimum = runtime
+        .run_command_text(&format!("{command} --minimum-solutions"))
+        .unwrap();
+    let ProductResultPayloadContent::RecoveryBuild(min) = minimum
+        .app_response()
+        .product_result_payload()
+        .unwrap()
+        .content()
+    else {
+        panic!("minimum")
+    };
+    assert!(min.minimum_proven);
+    assert_eq!(min.selected_solution_keys.len(), 1);
+    assert_eq!(min.input_identity, report.input_identity);
+    let pins = report
+        .solutions
+        .iter()
+        .map(|s| {
+            format!(
+                " --required-solution {}",
+                serde_json::to_string(&s.key).unwrap()
+            )
+        })
+        .collect::<String>();
+    let pinned = runtime
+        .run_command_text(&format!(
+            "{command} --minimum-solutions --minimum-source {}{pins}",
+            report.input_identity
+        ))
+        .unwrap();
+    let ProductResultPayloadContent::RecoveryBuild(p) = pinned
+        .app_response()
+        .product_result_payload()
+        .unwrap()
+        .content()
+    else {
+        panic!("pinned")
+    };
+    assert!(p.minimum_proven);
+    assert_eq!(p.selected_solution_keys.len(), 2);
+    assert_eq!(p.required_solution_keys.len(), 2);
+    assert_eq!(p.normal_count, "1");
+    let expected =
+        serde_json::to_value(pinned.app_response().product_result_payload().unwrap()).unwrap();
+    let wire: serde_json::Value =
+        serde_json::from_str(&serialize_distributed_final_events(11, &pinned).unwrap()).unwrap();
+    let terminal = wire
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["event"] == "final_response")
+        .unwrap();
+    assert_eq!(terminal["response"]["product_result_payload"], expected);
+    let stale = runtime
+        .run_command_text(&format!(
+            "{command} --minimum-solutions --minimum-source stale{pins}"
+        ))
+        .unwrap();
+    assert_ne!(stale.app_response().status(), AppStatus::Success);
+    let missing = runtime
+        .run_command_text(&format!(
+            "{command} --minimum-solutions --required-solution unknown"
+        ))
+        .unwrap();
+    assert_ne!(missing.app_response().status(), AppStatus::Success);
+}

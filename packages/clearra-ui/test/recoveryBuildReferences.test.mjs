@@ -20,13 +20,15 @@ test('user screenshot result selection preserves original start and middle, incl
  for(const field of ['startMask','middleMask','resultMask','middleMask','resultMask','startMask']){
   const refs=api.recoveryFieldReferences(request,field,true);
   assert.ok(refs.every(ref=>ref.field!==field));
+  assert.equal(refs.length,2);
+  if(field!=='resultMask') assert.equal(refs.find(r=>r.field==='resultMask').mask,request.resultMask);
   if(field==='resultMask'){
    assert.deepEqual(refs.map(ref=>[ref.field,ref.mask]),[['startMask',request.startMask],['middleMask',request.middleMask]]);
    assert.equal(api.countRecoveryCells(refs[0].mask),22);assert.equal(api.countRecoveryCells(refs[1].mask),28);
   }
   assert.deepEqual(request,before);
  }
- assert.deepEqual(api.recoveryFieldReferences(request,'resultMask',false),[]);
+ assert.equal(api.recoveryFieldReferences(request,'resultMask',false).length,2,'legacy false cannot hide context');
  const restored=api.recoveryFieldReferences(request,'resultMask',true);assert.equal(restored.length,2);
 });
 test('literal screenshot coordinates and complete product are not shifted or sampled',()=>{
@@ -55,4 +57,21 @@ test('all-processor opt-in reaches both browser and desktop command paths',()=>{
  assert.equal(args[args.indexOf('--workers')+1],'12');
  assert.deepEqual(api.recoveryBuildDesktopRequest(full,'ko',12).arguments,args);
  assert.ok(!api.recoveryBuildArguments(request,11).includes('--use-all-cpu-threads'));
+});
+
+
+test('painting and imports transfer cell ownership instead of overlapping layers',()=>{
+ let current=request;
+ for(const field of ['startMask','middleMask','resultMask','startMask']) {
+  const before={...current};
+  current=api.overwriteRecoveryField(current,field,current[field]|(1n<<9n));
+  assert.ok(current[field]&(1n<<9n));
+  for(const other of ['startMask','middleMask','resultMask']) if(other!==field) assert.equal(current[other]&(1n<<9n),0n);
+  assert.equal(current.startMask&current.middleMask,0n);
+  assert.equal(current.resultMask&(current.startMask|current.middleMask),0n);
+  assert.deepEqual(current.firstSupply,before.firstSupply);
+ }
+ const erased=api.overwriteRecoveryField(current,'startMask',current.startMask&~(1n<<9n));
+ assert.equal((erased.startMask|erased.middleMask|erased.resultMask)&(1n<<9n),0n,'erase does not resurrect overwritten cells');
+ assert.throws(()=>api.overwriteRecoveryField(current,'resultMask',1n<<240n,24));
 });

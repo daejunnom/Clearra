@@ -1,7 +1,5 @@
 //! Two separately parsed canonical supply universes. Stage coverage languages
 //! count their product without traversing all pairs or counting paths twice.
-#[cfg(test)]
-use super::RecoveryBuildFixedQuery;
 use super::{RecoveryBuildError, RecoveryBuildFields, RecoveryBuildFixedReport};
 use crate::CrossStageEarlyLimit;
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
@@ -14,6 +12,10 @@ use clearra_supply::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryBuildQuery {
+    pub all_solutions: bool,
+    pub minimum_solutions: bool,
+    pub required_solution_keys: Vec<String>,
+    pub minimum_source_identity: Option<String>,
     pub fields: RecoveryBuildFields,
     pub first_supply: String,
     pub second_supply: String,
@@ -34,7 +36,20 @@ pub struct RecoveryBuildExample {
     pub path: RecoveryBuildFixedReport,
 }
 #[derive(Clone, Debug, PartialEq)]
+pub struct RecoveryBuildSolution {
+    /// Exact logical placement identity, not a representative queue identity.
+    pub key: String,
+    pub covered_count: u128,
+    pub probability: f64,
+    pub example: RecoveryBuildExample,
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct RecoveryBuildPopulation {
+    pub solutions: Vec<RecoveryBuildSolution>,
+    pub solutions_complete: bool,
+    /// Each class is a distinct nonempty set of solutions accepting an input.
+    /// It is exact for minimum cover, not a probability weight or sampled queue.
+    pub coverage_classes: Option<Vec<Vec<usize>>>,
     pub possible: u128,
     pub evaluated: u128,
     pub normal_count: u128,
@@ -64,6 +79,19 @@ impl Sum {
 impl RecoveryBuildQuery {
     pub fn validate(&self) -> Result<(), RecoveryBuildError> {
         self.fields.prepare()?;
+        if (self.minimum_solutions && !self.all_solutions)
+            || (!self.required_solution_keys.is_empty() && !self.minimum_solutions)
+            || self.required_solution_keys.iter().any(|k| k.is_empty())
+            || self
+                .required_solution_keys
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.required_solution_keys.len()
+        {
+            return Err(RecoveryBuildError::InvalidSupplyPattern);
+        }
+
         for input in [&self.first_supply, &self.second_supply] {
             let parsed = QueuePatternExpression::parse(input, 0)
                 .map_err(|_| RecoveryBuildError::InvalidSupplyPattern)?;
@@ -116,37 +144,6 @@ impl PreparedPopulation {
             possible,
         })
     }
-    pub fn indices(&self, index: u128) -> Result<(usize, usize), RecoveryBuildError> {
-        if index >= self.possible {
-            return Err(RecoveryBuildError::PatternDomainUnavailable);
-        }
-        let width = self.second.pattern_count() as u128;
-        Ok(((index / width) as usize, (index % width) as usize))
-    }
-    #[cfg(test)]
-    pub fn evaluate(
-        &self,
-        index: u128,
-        control: &ExecutionControl,
-    ) -> Result<RecoveryBuildFixedReport, RecoveryBuildError> {
-        if control.is_cancelled() {
-            return Err(RecoveryBuildError::Cancelled);
-        }
-        let (i, j) = self.indices(index)?;
-        RecoveryBuildFixedQuery {
-            fields: self.query.fields.clone(),
-            first_supply: self.first.sequence_at(i).to_vec(),
-            second_supply: self.second.sequence_at(j).to_vec(),
-            early_limit: self.query.early_limit,
-            allow_piece_exchange: self.query.allow_piece_exchange,
-            hold_enabled: self.query.hold_enabled,
-            preserve_b2b: self.query.preserve_b2b,
-            initial_b2b: self.query.initial_b2b,
-            rule_profile: self.query.rule_profile,
-            spin_profile: self.query.spin_profile,
-        }
-        .search(control)
-    }
     pub fn progress(&self, completed: u128, control: &ExecutionControl) {
         const MAX_EXACT: u128 = 9_007_199_254_740_991;
         if completed <= MAX_EXACT {
@@ -167,6 +164,9 @@ impl PopulationAccumulator {
     pub fn new(possible: u128) -> Self {
         Self {
             report: RecoveryBuildPopulation {
+                solutions: Vec::new(),
+                solutions_complete: false,
+                coverage_classes: None,
                 possible,
                 evaluated: 0,
                 normal_count: 0,

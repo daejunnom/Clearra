@@ -51,6 +51,12 @@
     <WorkspaceToggle label={standard('preserveB2B')} checked={request.preserveB2B}
       on:change={(event) => patch({ preserveB2B: event.detail })} />
     <p class="workspace-field-help">{label('b2bHelp')}</p>
+    <WorkspaceToggle label={standard('minimumSolutions')} checked={request.minimumSolutions ?? false}
+      on:change={(event) => patch({ minimumSolutions: event.detail })} />
+    <WorkspaceToggle label={label('perSolutionProbability')} checked={request.solutionProbabilities ?? false}
+      on:change={(event) => patch({ solutionProbabilities: event.detail })} />
+    <WorkspaceToggle label={label('pngRender')} checked={request.pngRender ?? false}
+      on:change={(event) => patch({ pngRender: event.detail })} />
     <div class="workspace-field-grid">
       <RuleProfileSelect value={request.rule} {language} on:change={(event) => patch({ rule: event.detail })} />
       <SpinProfileSelect value={request.spinProfile} {language} on:change={(event) => patch({ spinProfile: event.detail })} />

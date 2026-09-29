@@ -23,12 +23,21 @@ export type RecoveryBuildExamplePayload = {
   second_queue: string;
   status: string;
   terminal_board_mask: string;
+  result_target_mask?: string;
   effective_max_early: string;
   actual_early: string;
   exchange_balance: number[];
   steps: RecoveryBuildStepPayload[];
 };
+export type RecoveryBuildSolutionPayload = {
+  key: string; covered_count: string; probability: string; example: RecoveryBuildExamplePayload;
+};
 export type RecoveryBuildPayload = {
+  solutions_complete?: boolean;
+  solutions?: RecoveryBuildSolutionPayload[];
+  minimum_proven?: boolean;
+  selected_solution_keys?: string[];
+  required_solution_keys?: string[];
   input_identity: string;
   height: number;
   start_board_mask: string;

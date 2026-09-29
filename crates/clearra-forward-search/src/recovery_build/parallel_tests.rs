@@ -8,6 +8,10 @@ use clearra_scoring::profile::SpinProfileId;
 
 fn query() -> RecoveryBuildQuery {
     RecoveryBuildQuery {
+        all_solutions: false,
+        minimum_solutions: false,
+        required_solution_keys: Vec::new(),
+        minimum_source_identity: None,
         fields: RecoveryBuildFields {
             height: 8,
             initial: Board256Mask::EMPTY,
@@ -136,7 +140,7 @@ fn recovery_build_parallel_p7_product_is_lazy_and_reorder_window_is_bounded() {
         assert!(issued <= 8);
     }
     assert_eq!(issued, 8);
-    assert_eq!(c.progress().issued, 256 * 5040);
+    assert_eq!(c.progress().issued, 8 * 5040);
     assert_eq!(c.progress().completed, 0);
     assert!(c.finish(&control).is_err());
 }
@@ -169,4 +173,63 @@ fn recovery_build_parallel_worker_yields_within_stage_language_without_repeating
     assert!(yields > 0);
     assert_eq!(w.progress().completed, 49);
     assert_eq!(c.finish(&control).unwrap(), expected);
+}
+
+#[test]
+fn recovery_build_finished_out_of_order_work_releases_dispatch_capacity() {
+    let control = ExecutionControl::default();
+    let mut q = query();
+    q.first_supply = "*".into();
+    q.second_supply = "*".into();
+    let mut c = RecoveryBuildParallelCoordinator::new(q, 1).unwrap();
+    let init = c.worker_initialization();
+    let mut tasks = Vec::new();
+    for _ in 0..4 {
+        let (state, bytes) = c.produce(1, &control).unwrap();
+        assert_eq!(state, RecoveryBuildParallelProduce::Batch);
+        tasks.push(bytes);
+    }
+    assert_eq!(
+        c.produce(1, &control).unwrap().0,
+        RecoveryBuildParallelProduce::Pending
+    );
+    let mut w = RecoveryBuildParallelWorker::new(&init).unwrap();
+    let mut result = w.consume(&tasks[1], &control).unwrap();
+    while result.is_none() {
+        result = w.advance(&control).unwrap();
+    }
+    c.absorb(&result.unwrap(), &control).unwrap();
+    // Task zero remains outstanding. Previously all slots stayed occupied.
+    assert_eq!(
+        c.produce(1, &control).unwrap().0,
+        RecoveryBuildParallelProduce::Batch
+    );
+}
+
+#[test]
+fn recovery_build_slow_first_shard_does_not_starve_idle_workers() {
+    let mut q = query();
+    q.first_supply = "*".into();
+    q.second_supply = "[IO]".into();
+    let control = ExecutionControl::default();
+    let mut c = RecoveryBuildParallelCoordinator::new(q.clone(), 1).unwrap();
+    let mut w = RecoveryBuildParallelWorker::new(&c.worker_initialization()).unwrap();
+    let (_, first) = c.produce(1, &control).unwrap();
+    // Leave rank zero outstanding and complete later ranks. Each completion
+    // must release a live slot, even though probability merge waits for zero.
+    for _ in 1..7 {
+        let (status, task) = c.produce(1, &control).unwrap();
+        assert_eq!(status, RecoveryBuildParallelProduce::Batch);
+        let result = complete(&mut w, &task, &control);
+        c.absorb(&result, &control).unwrap();
+        assert!(c.absorb(&result, &control).is_err());
+    }
+    assert_eq!(c.progress().completed, 12);
+    assert_eq!(
+        c.produce(1, &control).unwrap().0,
+        RecoveryBuildParallelProduce::Pending
+    );
+    c.absorb(&complete(&mut w, &first, &control), &control)
+        .unwrap();
+    assert_eq!(c.finish(&control).unwrap(), q.search(&control).unwrap());
 }

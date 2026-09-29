@@ -1,15 +1,22 @@
 import { boardMaskHex, type RuleProfile, type SpinProfile } from './solverWorkspaceModel';
 import { cliCommandRequestForDesktop, serializeCliCommandArguments } from './cliCommandModel';
 import type { WorkspaceLanguage } from './workspaceI18n';
+import { recoveryResultFrame, recoveryResultMaskForEngine, type RecoveryResultFrame } from './recoveryResultFrame';
+export { changeRecoveryResultFrame, recoveryResultFrame, recoveryResultMaskForEngine } from './recoveryResultFrame';
+export type { RecoveryResultFrame } from './recoveryResultFrame';
 export type RecoveryBuildRequest = {
   startMask: bigint; middleMask: bigint; resultMask: bigint; height: number;
   firstSupply: string; secondSupply: string;
   maxEarly: 'auto' | number; allowPieceExchange: boolean; holdEnabled: boolean;
   preserveB2B: boolean; rule: RuleProfile; spinProfile: SpinProfile;
   useAllLogicalProcessors: boolean;
+  resultFrame?: RecoveryResultFrame;
+  pngRender?: boolean;
+  minimumSolutions?: boolean;
+  solutionProbabilities?: boolean;
 };
 export function createRecoveryBuildRequest(): RecoveryBuildRequest {
-  return { startMask: 0n, middleMask: 0n, resultMask: 0n, height: 8,
+  return { startMask: 0n, middleMask: 0n, resultMask: 0n, height: 8, resultFrame: 'shared', pngRender: false,
     firstSupply: '', secondSupply: '', maxEarly: 'auto', allowPieceExchange: false,
     holdEnabled: true, preserveB2B: false, useAllLogicalProcessors: false, rule: 'srs-plus', spinProfile: 'all-spin-plus' };
 }
@@ -45,26 +52,40 @@ export function validateRecoveryBuildRequest(request: RecoveryBuildRequest): str
   const errors: string[] = [];
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 24) return ['height'];
   const limit = 1n << BigInt(request.height * 10);
-  if ([request.startMask, request.middleMask, request.resultMask].some(mask => mask < 0n || mask >= limit)) errors.push('board');
-  if ((request.startMask & request.middleMask) !== 0n || (recoveryMiddleBase(request) & request.resultMask) !== 0n) errors.push('overlap');
+  if ([request.startMask, request.middleMask, request.resultMask].some(mask => mask < 0n || mask >= limit)) return ['board'];
+  try { recoveryResultFrame(request); } catch { return ['result-frame']; }
+  const occupied = recoveryResultFrame(request) === 'shared' ? request.startMask | request.middleMask : recoveryMiddleBase(request);
+  if ((request.startMask & request.middleMask) !== 0n || (occupied & request.resultMask) !== 0n) errors.push('overlap');
   if ([request.middleMask, request.resultMask].some(mask => mask === 0n || countRecoveryCells(mask) % 4 !== 0)) errors.push('target-area');
   if (!request.firstSupply.trim() || !request.secondSupply.trim()) errors.push('supply');
   if (request.maxEarly !== 'auto' && (!Number.isSafeInteger(request.maxEarly) || request.maxEarly < 0)) errors.push('early');
   return errors;
 }
-export function recoveryBuildArguments(request: RecoveryBuildRequest, workers?: number): string[] {
+export type RecoveryMinimumSelection = { sourceIdentity: string; keys: string[] };
+export function recoveryBuildArguments(request: RecoveryBuildRequest, workers?: number, selection?: RecoveryMinimumSelection): string[] {
   if (workers !== undefined && (!Number.isSafeInteger(workers) || workers < 1 || workers > 65535)) {
     throw new RangeError('recovery worker count must be an integer in 1..65535');
   }
+  // Lower the editor frame once. CLI, WASM, native search and replay continue
+  // to receive the same established after-middle coordinate contract.
+  const resultMask = recoveryResultMaskForEngine(request);
   return ['clearra', 'recovery', 'build', '--start-mask', boardMaskHex(request.startMask),
-    '--middle-mask', boardMaskHex(request.middleMask), '--result-mask', boardMaskHex(request.resultMask),
+    '--middle-mask', boardMaskHex(request.middleMask), '--result-mask', boardMaskHex(resultMask),
     '--height', String(request.height), '--first-supply', request.firstSupply.trim(),
     '--second-supply', request.secondSupply.trim(), '--max-early', String(request.maxEarly),
     request.allowPieceExchange ? '--allow-piece-exchange' : '--no-piece-exchange',
     request.holdEnabled ? '--hold' : '--no-hold', request.preserveB2B ? '--preserve-b2b' : '--no-preserve-b2b',
     '--initial-b2b', '1', '--rule', request.rule, '--spin-profile', request.spinProfile,
+    '--all-solutions',
+    ...((request.minimumSolutions || selection) ? ['--minimum-solutions'] : []),
+    ...(selection ? ['--minimum-source',selection.sourceIdentity,...selection.keys.flatMap(key=>['--required-solution',key])] : []),
     ...(request.useAllLogicalProcessors ? ['--use-all-cpu-threads'] : []),
     ...(workers === undefined ? [] : ['--workers', String(workers)])];
 }
-export const recoveryBuildCommand = (request: RecoveryBuildRequest, workers?: number): string => serializeCliCommandArguments(recoveryBuildArguments(request, workers));
-export const recoveryBuildDesktopRequest = (request: RecoveryBuildRequest, language: WorkspaceLanguage, workers?: number) => cliCommandRequestForDesktop(recoveryBuildArguments(request, workers), language);
+export const recoveryBuildCommand = (request: RecoveryBuildRequest, workers?: number, selection?: RecoveryMinimumSelection): string => serializeCliCommandArguments(recoveryBuildArguments(request, workers, selection));
+export const recoveryBuildDesktopRequest = (request: RecoveryBuildRequest, language: WorkspaceLanguage, workers?: number, selection?: RecoveryMinimumSelection) => cliCommandRequestForDesktop(recoveryBuildArguments(request, workers, selection), language);
+
+/** Physics-only request binding for result actions. Display toggles do not invalidate pins. */
+export function recoveryBuildInputKey(request: RecoveryBuildRequest): string {
+  return recoveryBuildCommand({...request,minimumSolutions:false,useAllLogicalProcessors:false});
+}

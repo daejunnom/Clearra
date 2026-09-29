@@ -113,6 +113,10 @@ fn recovery_build_b2b_applies_to_deferred_middle_clears() {
 fn recovery_build_pattern_product_has_one_event_per_supply_pair() {
     let q = query();
     let p = RecoveryBuildQuery {
+        all_solutions: false,
+        minimum_solutions: false,
+        required_solution_keys: Vec::new(),
+        minimum_source_identity: None,
         fields: q.fields,
         first_supply: "I".into(),
         second_supply: "O".into(),
@@ -190,7 +194,16 @@ fn recovery_build_user_image_pair_keeps_fragmented_logical_s_and_z() {
         .search_with_filter(&ExecutionControl::default(), &accept)
         .unwrap();
     assert_eq!(result.status, RecoveryBuildStatus::Recovery);
-    assert_eq!(result.actual_early, 1);
+    assert_eq!(result.actual_early, 5);
+    assert_eq!(
+        result.actual_early,
+        result
+            .steps
+            .iter()
+            .take_while(|s| !s.middle_complete)
+            .filter(|s| s.result_target)
+            .count()
+    );
     assert_eq!(result.exchange_balance, [-1, 1, 0, 0, 0, 0, 0]);
     assert_eq!(result.steps.len(), 14);
     assert_eq!(

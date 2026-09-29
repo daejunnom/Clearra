@@ -112,6 +112,18 @@ async function paint(page, index, mask, height) {
     if ((mask & (1n << BigInt(y * 10 + x))) !== 0n) await board.locator('button').nth((height - 1 - y) * 10 + x).click();
   }
 }
+// Read only the selected draft, not the gray reference layers. The button
+// order is top-down, whereas field masks use bottom-up bit indices.
+async function readPaintedMask(page, index, height) {
+  const cells = page.locator('.board-tool .board').nth(index).locator('button');
+  assert.equal(await cells.count(), height * 10);
+  const selected = await cells.evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-pressed') === 'true'));
+  let mask = 0n;
+  for (let i = 0; i < selected.length; i++) {
+    if (selected[i]) mask |= 1n << BigInt((height - 1 - Math.floor(i / 10)) * 10 + i % 10);
+  }
+  return mask;
+}
 try {
   const manifest = JSON.parse(await readFile(resolve(root, 'wasm/clearra_wasm.manifest.json'), 'utf8'));
   assert.equal(manifest.build.runtime_identity.source_commit, process.env.CLEARRA_SOURCE_COMMIT);
@@ -173,20 +185,34 @@ try {
         await fields.filter({ hasText: /^Middle$/ }).click();
         await paint(page, 0, 0xfn, 4);
         await fields.filter({ hasText: /^Result$/ }).click();
-        await paint(page, 0, 0xc030n, 4);
+        assert.equal(await recovery.locator('.recovery-result-frame').count(), 0, 'editor coordinates are fixed');
+        // Start + Middle completes row 0. The same physical O must therefore
+        // be drawn one row higher in the shared frame, not over that full row.
+        // These are independent fixture coordinates, not output from the
+        // production projection helper under test.
+        const sharedResult = 0x300c000n;
+        const afterMiddleResult = 0xc030n;
+        await paint(page, 0, sharedResult, 4);
+        assert.equal(await readPaintedMask(page, 0, 4), sharedResult);
+        assert.equal(await recovery.getByRole('button', { name: 'Run search', exact: true }).isEnabled(), true,
+          'the shared-frame normal fixture must be accepted before execution');
         const runRecovery = label => completeRun(page,
           () => page.getByRole('button', { name: 'Run search', exact: true }).click(), label);
         const paths = recovery.locator('.recovery-path-gallery');
         await runRecovery('paired Build normal, with an actual line clear');
         await paths.locator('[data-recovery-path="normal"]').waitFor();
-        assert.equal(await paths.locator('ol>li').count(), 2);
+        assert.equal(await paths.locator('.pc-path-replay-gif img').count(), 1);
+        assert.equal(await paths.locator('details,code,.frame-count').count(), 0);
         assert.equal(await recovery.locator('.invalid-evidence,.invalid-replay').count(), 0);
         assert.equal(await recovery.locator('.solution-toolbar .copy-format').count(), 1);
-
+        assert.deepEqual(await recovery.locator('.recovery-metrics strong').allTextContents(), ['100%', '0%', '0%']);
         // Empty base, middle I and result O: supplies O then I need different-
         // kind repayment. This exercises the actual new parser, solver and wire.
         await fields.filter({ hasText: /^Start$/ }).click();
         await paint(page, 0, 0x3f0n, 4);
+        await fields.filter({ hasText: /^Result$/ }).click();
+        await paint(page, 0, sharedResult, 4);
+        await paint(page, 0, afterMiddleResult, 4);
         await supplies.nth(0).fill('O'); await supplies.nth(1).fill('I');
         const exchange = recovery.getByRole('checkbox', { name: 'Allow different-piece repayment', exact: true });
         assert.equal(await exchange.isChecked(), false);
@@ -196,14 +222,15 @@ try {
         await exchange.check();
         await runRecovery('different-piece repayment enabled');
         await paths.locator('[data-recovery-path="recovery"]').waitFor();
-        assert.equal(await paths.locator('ol>li').count(), 2);
-        assert.match(await paths.locator('code').innerText(), /O.*I/);
+        assert.equal(await paths.locator('.pc-path-replay-gif img').count(), 1);
+        assert.equal(await paths.locator('details,code,.frame-count').count(), 0);
+        assert.equal(await paths.locator('code').count(), 0);
         assert.equal(await recovery.locator('.invalid-evidence,.invalid-replay').count(), 0);
         await early.selectOption('0');
         await runRecovery('zero early placements disables the same exchange route');
         assert.equal(await recovery.locator('.recovery-path-gallery>li').count(), 0);
         assert.equal(await recovery.locator('.invalid-evidence').count(), 0);
-        console.log('surface_recovery_build=passed normal=true exchange=true quota=true');
+        console.log('surface_recovery_build=passed normal=true shared_frame=true after_middle_frame=true exchange=true quota=true');
 
         const build = await navigateWorkspace(page, 'build-probability');
         await page.locator('.recovery-field-editor').waitFor({ state: 'detached' });

@@ -35,8 +35,8 @@ test('blank height drafts never erase independent gray fields',()=>{
  const grown=api.resizeRecoveryBuild(input,12);assert.equal(grown.startMask,input.startMask);
  const smaller=api.resizeRecoveryBuild(input,4);assert.equal(smaller.startMask,0n);assert.equal(smaller.middleMask,2n);assert.equal(smaller.resultMask,4n);
 });
-test('image start and middle clear five rows; result preview uses the emptied board',()=>{
- const input={...api.createRecoveryBuildRequest(),startMask:BigInt(fixture.start_board_mask),middleMask:BigInt(fixture.middle_target_mask),resultMask:BigInt(fixture.result_target_mask),firstSupply:'P7',secondSupply:'P7'};
+test('legacy after-middle image target uses the emptied board',()=>{
+ const input={...api.createRecoveryBuildRequest(),startMask:BigInt(fixture.start_board_mask),middleMask:BigInt(fixture.middle_target_mask),resultMask:BigInt(fixture.result_target_mask),resultFrame:'after-middle',firstSupply:'P7',secondSupply:'P7'};
  assert.equal(api.countRecoveryCells(input.startMask),22);assert.equal(api.countRecoveryCells(input.middleMask),28);assert.equal(api.countRecoveryCells(input.resultMask),28);
  assert.equal(api.recoveryMiddleBase(input),0n);assert.deepEqual(api.validateRecoveryBuildRequest(input),[]);
 });
@@ -60,12 +60,26 @@ test('missing clears, wrong target ownership and fake exhaustive counts are reje
   const p=structuredClone(fixture);mutate(p);assert.equal(api.validateRecoveryBuildPayload(p),false);
  }
 });
-test('CTK3 and Fumen export every actual lock snapshot, not overlapping static piece masks',()=>{
- const pages=api.recoveryBuildExportPages(fixture);assert.equal(pages.length,14);
- assert.equal(pages[0].initialMask,BigInt(fixture.start_board_mask));assert.equal(pages[11].placements[0].piece,'I');
- const ctk=api.encodeSolutionPages(pages,'ctk');const fumen=api.encodeSolutionPages(pages,'fumen');
- assert.match(ctk,/^ctk3_/);assert.match(fumen,/v115@/);
+test('copy exports two cumulative checkpoints, or all 14 placements on one result page',()=>{
+ const pages=api.recoveryBuildExportPages(fixture);assert.equal(pages.length,2);
+ assert.equal(pages[0].initialMask,BigInt(fixture.start_board_mask));
+ assert.equal(pages[0].placements.length,7);assert.equal(pages[1].placements.length,14);
+ assert.deepEqual(pages[1].placements.slice(0,7),pages[0].placements);
+ const result=api.recoveryBuildExportPages(fixture,true);assert.deepEqual(result,[pages[1]]);
+ for(const page of pages) {
+  let occupied=page.initialMask;
+  for(const placement of page.placements){assert.equal(placement.mask&occupied,0n);occupied|=placement.mask;}
+ }
+ assert.match(api.encodeSolutionPages(pages,'ctk'),/^ctk3_/);
+ assert.match(api.encodeSolutionPages(pages,'fumen'),/v115@/);
 });
+
+test('early count includes every result placement before middle completion, regardless of hold source',()=>{
+ assert.equal(api.validateRecoveryBuildPayload(fixture),true);
+ const early=structuredClone(fixture);early.early_limit='1';early.examples[0].effective_max_early='1';early.examples[0].actual_early='1';
+ assert.equal(api.validateRecoveryBuildPayload(early),false);
+});
+
 
 
 test('paired Build progress reports actual pair work rather than phantom geometry phases',()=>{
@@ -93,4 +107,53 @@ test('explicit 256-bit recovery replay preserves high cells while default PC mas
  const witness=api.recoveryBuildWitness(p,p.examples[0]);
  assert.equal(api.buildPcPathReplayFrames(witness,12,api.recoveryBuildTerminalMask(p.examples[0])).at(-1).cells.filter(x=>x!==null).length,24);
  assert.throws(()=>api.buildPcPathReplayFrames({...witness,maskHexDigits:16},12,api.recoveryBuildTerminalMask(p.examples[0])));
+});
+
+test('complete catalog rows, minimum keys and pinned identities survive without counting samples as all solutions',()=>{
+ const p=structuredClone(fixture);
+ p.solutions_complete=true;
+ p.solutions=[{key:'first',covered_count:'1',probability:'1',example:structuredClone(p.examples[0])},
+  {key:'second',covered_count:'1',probability:'1',example:structuredClone(p.examples[0])}];
+ assert.ok(api.validateRecoveryBuildPayload(p));
+ assert.equal(api.recoveryBuildExportPages(p).length,4);
+ p.minimum_proven=true;p.selected_solution_keys=['second'];p.required_solution_keys=['second'];
+ assert.ok(api.validateRecoveryBuildPayload(p));
+ assert.equal(api.recoveryBuildExportPages(p).length,2);
+ assert.equal(api.recoveryBuildExportPages(p,true).length,1);
+ p.required_solution_keys=['first'];assert.equal(api.validateRecoveryBuildPayload(p),false);
+ p.required_solution_keys=['second'];p.solutions_complete=false;assert.equal(api.validateRecoveryBuildPayload(p),false);
+});
+test('ordinary and mandatory minimum use native solver arguments and a stale-source binding, not a renderer subset',()=>{
+ const q={...api.createRecoveryBuildRequest(),firstSupply:'I',secondSupply:'O',middleMask:15n,resultMask:0xc030n};
+ const ordinary=api.recoveryBuildArguments({...q,minimumSolutions:true});
+ assert.ok(ordinary.includes('--minimum-solutions'));assert.ok(ordinary.includes('--all-solutions'));
+ const selected={sourceIdentity:'1'.repeat(64),keys:['recovery-tiling.v1:0|m0:a','recovery-tiling.v1:1|r0:b']};
+ const args=api.recoveryBuildArguments(q,4,selected);
+ assert.equal(args[args.indexOf('--minimum-source')+1],selected.sourceIdentity);
+ assert.deepEqual(args.flatMap((v,i)=>v==='--required-solution'?[args[i+1]]:[]),selected.keys);
+ assert.equal(api.recoveryBuildInputKey(q),api.recoveryBuildInputKey({...q,pngRender:true,solutionProbabilities:true,minimumSolutions:true}));
+ assert.notEqual(api.recoveryBuildInputKey(q),api.recoveryBuildInputKey({...q,maxEarly:0}));
+});
+
+
+test('first export checkpoint follows original supply ownership through a terminal hold',()=>{
+ const p=structuredClone(fixture), h=n=>'0x'+n.toString(16);
+ p.height=4;p.first_supply='I';p.second_supply='O';p.hold_enabled=true;
+ p.allow_piece_exchange=false;p.preserve_b2b=false;p.early_limit=null;
+ p.start_board_mask='0x0';p.middle_target_mask='0xf';p.result_target_mask='0xc030';
+ p.normal_count='0';p.recovery_count='1';p.no_path_count='0';
+ p.normal_probability='0';p.recovery_probability='1';p.no_path_probability='0';
+ const step=(source,piece,lock,before,after,target,hold,middle)=>({source_index:String(source),piece,
+  result_target:target,rotation:0,x:target?4:1,y:0,hold_decision:hold,
+  board_before_mask:h(before),placement_mask:h(lock),board_after_mask:h(after),
+  cleared_rows:0,cleared_lines:0,recognized_spin:false,b2b_active:true,middle_complete:middle});
+ p.examples=[{first_pattern:'0',second_pattern:'0',first_queue:'I',second_queue:'O',status:'recovery',
+  effective_max_early:'1',actual_early:'1',exchange_balance:[0,0,0,0,0,0,0],terminal_board_mask:'0xc03f',
+  steps:[step(1,'O',0xc030n,0n,0xc030n,true,'store',false),
+    step(0,'I',0xfn,0xc030n,0xc03fn,false,'release-held-at-terminal',true)]}];
+ assert.ok(api.validateRecoveryBuildPayload(p));
+ const [first,final]=api.recoveryBuildExportPages(p);
+ assert.equal(first.placements.length,1);
+ assert.deepEqual(first.placements,[final.placements[1]],'held first-supply I, not the chronologically first O');
+ assert.equal(final.placements.length,2);
 });

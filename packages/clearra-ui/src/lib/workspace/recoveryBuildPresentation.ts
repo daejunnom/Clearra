@@ -1,6 +1,6 @@
 import type { RecoveryBuildPayload, RecoveryBuildExamplePayload } from './recoveryBuildPayloadTypes';
 import type { PathReplayGeometryWitness } from './pcPathReplayPresentation';
-import { buildPcPathReplayFrames } from './pcPathReplayPresentation';
+import { buildPcPathReplayFrames, pcPathWitnessExportPage } from './pcPathReplayPresentation';
 import { compactRecoveryBoard, countRecoveryCells } from './recoveryBuildModel';
 import type { SolutionExportPage, SolutionPiece } from './solutionExport';
 
@@ -10,6 +10,13 @@ const piece = (x: unknown): x is string => typeof x === 'string' && /^[IJLOSTZ]$
 const number = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x);
 const flag = (x: unknown): x is boolean => typeof x === 'boolean';
 const probability = (x: unknown): x is string => typeof x === 'string' && /^(?:0(?:\.[0-9]+)?|1(?:\.0+)?|[0-9]+(?:\.[0-9]+)?e-[0-9]+)$/u.test(x) && Number(x) >= 0 && Number(x) <= 1;
+function mirror(mask: bigint, height: number): bigint {
+  let result = 0n;
+  for (let y = 0; y < height; y++) for (let x = 0; x < 10; x++) {
+    if (mask & (1n << BigInt(y*10+x))) result |= 1n << BigInt(y*10+9-x);
+  }
+  return result;
+}
 function require(ok: unknown): asserts ok { if (!ok) throw new Error('invalid recovery-build evidence'); }
 
 export const recoveryBuildTerminalMask = (example: RecoveryBuildExamplePayload): string => `0x${BigInt(example.terminal_board_mask).toString(16).padStart(64,'0')}`;
@@ -54,13 +61,33 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
     require(Array.isArray(p.examples) && p.examples.length <= 2 && new Set(p.examples.map(e => e.status)).size === p.examples.length);
     require(p.examples.some(e => e.status === 'normal') === (BigInt(p.normal_count)>0n));
     require(p.examples.some(e => e.status === 'recovery') === (BigInt(p.recovery_count)>0n));
-    for (const e of p.examples) {
+    const solutions = p.solutions ?? [];
+    require(Array.isArray(solutions));
+    require(p.solutions_complete === undefined || flag(p.solutions_complete));
+    require(p.minimum_proven === undefined || flag(p.minimum_proven));
+    const keys = new Set<string>();
+    for (const row of solutions) {
+      require(typeof row.key === 'string' && row.key.length > 0 && !keys.has(row.key));
+      keys.add(row.key);
+      require(decimal(row.covered_count) && BigInt(row.covered_count)>0n && BigInt(row.covered_count)<=BigInt(p.pattern_count));
+      require(probability(row.probability));
+    }
+    const selected = p.selected_solution_keys ?? [], pinned = p.required_solution_keys ?? [];
+    for (const list of [selected,pinned]) require(Array.isArray(list) && new Set(list).size === list.length && list.every(key=>keys.has(key)));
+    require(!p.minimum_proven || (p.solutions_complete && pinned.every(key=>selected.includes(key)) && (solutions.length===0 || selected.length>0)));
+    require(p.minimum_proven || (selected.length===0 && pinned.length===0));
+    require(!p.solutions_complete || ((solutions.length>0)===(BigInt(p.normal_count)+BigInt(p.recovery_count)>0n)));
+    for (const e of [...p.examples, ...solutions.map(s=>s.example)]) {
+      const resultHex = e.result_target_mask ?? p.result_target_mask;
+      require(hex(resultHex) && BigInt(resultHex) < bound);
+      const targetResult = BigInt(resultHex);
+      require(targetResult === result || (base === mirror(base,p.height) && targetResult === mirror(result,p.height)));
       require(['normal','recovery'].includes(e.status) && decimal(e.first_pattern) && decimal(e.second_pattern));
       require(/^[IJLOSTZ]+$/u.test(e.first_queue) && /^[IJLOSTZ]+$/u.test(e.second_queue));
       require(decimal(e.effective_max_early) && decimal(e.actual_early));
-      const effective = Math.min(e.first_queue.length,m,p.early_limit === null ? Infinity : Number(p.early_limit));
+      const effective = Math.min(m,p.early_limit === null ? Infinity : Number(p.early_limit));
       require(e.effective_max_early === String(effective) && BigInt(e.actual_early) <= BigInt(e.effective_max_early));
-      require(hex(e.terminal_board_mask) && BigInt(e.terminal_board_mask) === compactRecoveryBoard(base|result,p.height));
+      require(hex(e.terminal_board_mask) && BigInt(e.terminal_board_mask) === compactRecoveryBoard(base|targetResult,p.height));
       require(Array.isArray(e.exchange_balance) && e.exchange_balance.length === 7 && e.exchange_balance.every(number));
       require(Array.isArray(e.steps) && e.steps.length === n+m);
       const combined = e.first_queue+e.second_queue;
@@ -72,7 +99,7 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
       for(let y=0;y<p.height;y++) if((((start|middle)>>BigInt(y*10))&1023n)===1023n) completeRows.add(y);
       let liftedResult=0n, physical=0;
       for(let logical=0;physical<p.height;logical++) if(!completeRows.has(logical)) {
-        liftedResult |= ((result>>BigInt(physical*10))&1023n)<<BigInt(logical*10);physical++;
+        liftedResult |= ((targetResult>>BigInt(physical*10))&1023n)<<BigInt(logical*10);physical++;
       }
       const usedSources = new Set<number>();
       for(const step of e.steps) {
@@ -92,7 +119,7 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
         let logical=0n;for(let y=0;y<p.height;y++)logical|=((lock>>BigInt(y*10))&1023n)<<BigInt(map[y]*10);
         const target=step.result_target?liftedResult:middle, used=step.result_target?usedResult:usedMiddle;
         require((logical&target)===logical && !(logical&used));
-        if(step.result_target && usedMiddle!==middle && source<e.first_queue.length)early++;
+        if(step.result_target && usedMiddle!==middle)early++;
         if(e.status==='normal' && step.result_target)require(usedMiddle===middle);
         if(step.result_target)usedResult|=logical;else usedMiddle|=logical;
         if(source<e.first_queue.length)firstUsed++;
@@ -115,13 +142,27 @@ export function validateRecoveryBuildPayload(value: unknown): value is RecoveryB
   } catch { return false; }
 }
 
-/** One page per real lock, preserving order/clears even when cumulative logical
- * history exceeds Fumen's field height. Never clip or overlap a static packing. */
-export function recoveryBuildExportPages(report: RecoveryBuildPayload): SolutionExportPage[] {
-  if(!validateRecoveryBuildPayload(report)) throw new Error('invalid recovery-build output');
-  return report.examples.flatMap((e,exampleIndex)=>e.steps.map((step,index)=>({
-    height:report.height, initialMask:BigInt(step.board_before_mask),
-    placements:[{piece:step.piece as SolutionPiece,mask:BigInt(step.placement_mask)}],
-    comment:`${exampleIndex+1} / ${index+1} · ${e.first_queue} | ${e.second_queue} · ${step.result_target?'→ result':'→ middle'}`
-  })));
+/** Cumulative logical ownership snapshots. The first page contains placements
+ * originating in the first supply, even when held tokens cross the boundary.
+ * The final page contains every placement. Decode row history once, before
+ * selecting source owners; removing steps first would corrupt clear offsets. */
+export function recoveryBuildExamplePages(
+  report: RecoveryBuildPayload, example: RecoveryBuildExamplePayload, resultOnly = false
+): SolutionExportPage[] {
+  const witness = recoveryBuildWitness(report, example);
+  const final = pcPathWitnessExportPage(witness, report.height, recoveryBuildTerminalMask(example));
+  if (!final || final.placements.length !== example.steps.length) throw new Error('recovery history exceeds export geometry');
+  if (resultOnly) return [final];
+  const placements = final.placements.filter((_, index) => Number(example.steps[index].source_index) < example.first_queue.length);
+  if (placements.length !== countRecoveryCells(BigInt(report.middle_target_mask)) / 4) throw new Error('missing recovery source checkpoint');
+  const first: SolutionExportPage = { ...final, placements };
+  return [first, final];
+}
+export function recoveryBuildExportPages(report: RecoveryBuildPayload, resultOnly = false): SolutionExportPage[] {
+  if (!validateRecoveryBuildPayload(report)) throw new Error('invalid recovery-build output');
+  const selected = report.minimum_proven ? new Set(report.selected_solution_keys) : null;
+  const examples = report.solutions_complete
+    ? (report.solutions ?? []).filter(s=>!selected || selected.has(s.key)).map(s=>s.example)
+    : report.examples;
+  return examples.flatMap(example => recoveryBuildExamplePages(report, example, resultOnly));
 }

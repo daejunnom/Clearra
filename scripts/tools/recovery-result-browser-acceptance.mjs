@@ -21,6 +21,7 @@ const fixture = `<script>
   import Result from './packages/clearra-ui/src/lib/workspace/RecoveryBuildResult.svelte';
   import payload from './tests/fixtures/recovery-build/browser-example.json';
   let language = 'en';
+  let pngRender = false;
   const view = { kind:'web',status:'completed',terminationReason:null,jobId:1,
     progressLabel:'',progressDone:1,progressTotal:1,forwardPatternDone:0,forwardPatternTotal:0,
     progressTelemetry:null,publicFailures:[],developerDiagnostics:[],searchReport:null,
@@ -30,7 +31,8 @@ const fixture = `<script>
 </script>
 <p data-fixture-notice>UI fixture from an independently reconstructed path; not a Rust engine execution.</p>
 <div data-fixture-language>{#each ['en','ko','ja'] as value}<button on:click={() => language=value}>{value}</button>{/each}</div>
-<Result {view} {language} elapsedMs={0} />`;
+<button data-fixture-png on:click={() => pngRender=!pngRender}>PNG</button>
+<Result {view} {language} elapsedMs={0} {pngRender} />`;
 async function component(source, path) {
   const processed = await preprocess(source, preprocessor, { filename: path });
   return { contents: compile(processed.code, { filename: path, generate: 'client', css: 'injected' }).js.code,
@@ -95,11 +97,14 @@ try {
       assert.equal(await page.locator('.result-heading').count(),1);
       assert.equal(await page.locator('.solution-toolbar .copy-format').count(),1);
       assert.equal(await page.locator('.recovery-path-gallery>li').count(),1);
-      assert.equal(await page.locator('.representative-note').count(),1,'do not claim one representative means all solutions');
-      await page.locator('.recovery-path-gallery details summary').click();
-      assert.equal(await page.locator('.recovery-path-gallery ol>li').count(),14);
-      assert.match(await page.locator('.recovery-path-gallery code').innerText(),/ITOLSZJ.*JTOSILZ/);
-      await page.locator('.recovery-path-gallery details summary').click();
+      assert.equal(await page.locator('.solution-count').count(),1,'do not claim one representative means all solutions');
+      assert.equal(await page.locator('.recovery-path-gallery details,.recovery-path-gallery code,.frame-count').count(),0);
+      assert.equal(await page.locator('.solution-toolbar input[type="checkbox"]').count(),1);
+      await page.locator('[data-fixture-png]').click();
+      const png = page.locator('.recovery-path-gallery>li img'); await png.waitFor(); await png.evaluate(node=>node.decode());
+      assert.equal(await png.evaluate(async node=>(await fetch(node.src)).headers.get('content-type')),'image/png');
+      await page.locator('[data-fixture-png]').click();
+      await img.waitFor(); await img.evaluate(node=>node.decode());
       const [download]=await Promise.all([page.waitForEvent('download'),page.locator('.download-action button').click()]);
       assert.equal(await download.failure(),null);
       const destination=resolve(reportRoot,`${spec.language}-${spec.width}.ctk3`);await download.saveAs(destination);

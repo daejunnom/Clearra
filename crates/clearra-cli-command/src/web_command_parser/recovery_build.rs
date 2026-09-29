@@ -8,6 +8,10 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
     let mut height = 8;
     let mut workers = None;
     let mut use_all = false;
+    let mut all_solutions = false;
+    let mut minimum_solutions = false;
+    let mut required_solution_keys = Vec::new();
+    let mut minimum_source_identity = None;
     let mut initial = Board256Mask::EMPTY;
     let mut middle = None;
     let mut result = None;
@@ -32,7 +36,7 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
             "--no-preserve-b2b" => "--preserve-b2b",
             other => other,
         };
-        if !seen.insert(identity) {
+        if identity != "--required-solution" && !seen.insert(identity) {
             return Err(fail("recovery-build option occurs more than once"));
         }
         match option {
@@ -79,6 +83,21 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
                 };
             }
             "--use-all-cpu-threads" | "--use-all-logical-processors" => use_all = true,
+            "--all-solutions" => all_solutions = true,
+            "--minimum-solutions" => {
+                all_solutions = true;
+                minimum_solutions = true;
+            }
+            "--required-solution" => {
+                let key = next_value(tokens, &mut cursor, option)?.to_owned();
+                if key.is_empty() || required_solution_keys.contains(&key) {
+                    return Err(fail("invalid or duplicate required solution"));
+                }
+                required_solution_keys.push(key);
+            }
+            "--minimum-source" => {
+                minimum_source_identity = Some(next_value(tokens, &mut cursor, option)?.to_owned())
+            }
             "--allow-piece-exchange" => exchange = true,
             "--no-piece-exchange" => exchange = false,
             "--hold" => hold = true,
@@ -109,6 +128,10 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
         }
     }
     let query = RecoveryBuildQuery {
+        all_solutions,
+        minimum_solutions,
+        required_solution_keys,
+        minimum_source_identity,
         fields: RecoveryBuildFields {
             height,
             initial,

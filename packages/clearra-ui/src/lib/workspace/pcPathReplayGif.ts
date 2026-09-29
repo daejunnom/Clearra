@@ -67,6 +67,17 @@ export function encodePcPathReplayGif(frames: readonly PcPathReplayFrame[]): Uin
   return writer.finish();
 }
 
+/** Shared bounded raster output for a static PNG preview. */
+export function rasterizePcPathReplayFrame(frame: PcPathReplayFrame): { width: number; height: number; rgba: Uint8ClampedArray } {
+  if (frame.width !== 10 || !Number.isInteger(frame.height) || frame.height < 1 || frame.height > 24 || frame.cells.length !== frame.width * frame.height) {
+    throw new Error('invalid replay raster dimensions');
+  }
+  const indices = renderFrame(frame, TILE_SIZE);
+  const rgba = new Uint8ClampedArray(indices.length * 4);
+  indices.forEach((color, index) => { rgba.set([...PALETTE[color], 255], index * 4); });
+  return { width: frame.width * TILE_SIZE, height: frame.height * TILE_SIZE, rgba };
+}
+
 function renderFrame(frame: PcPathReplayFrame, tileSize: number): Uint8Array {
   const pixelWidth = frame.width * tileSize;
   const pixelHeight = frame.height * tileSize;

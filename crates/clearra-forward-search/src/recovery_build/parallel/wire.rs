@@ -6,61 +6,61 @@ use crate::CrossStageEarlyLimit;
 use clearra_core_domain::{board::standard_pc_board::Board256Mask, piece::piece_kind::PieceKind};
 use clearra_rules::profile::rule_profile::RuleProfileId;
 use clearra_scoring::profile::SpinProfileId;
-pub(super) const INIT: &[u8] = b"RBIN\x02";
-const TASK: &[u8] = b"RBTK\x02";
-const RESULT: &[u8] = b"RBRS\x02";
+pub(super) const INIT: &[u8] = b"RBIN\x04";
+const TASK: &[u8] = b"RBTK\x04";
+const RESULT: &[u8] = b"RBRS\x04";
 type Error = RecoveryBuildParallelError;
 fn bad() -> Error {
     Error::InvalidWire("invalid recovery-build packet")
 }
 #[derive(Default)]
-struct Writer(Vec<u8>);
+pub(in crate::recovery_build) struct Writer(pub(in crate::recovery_build) Vec<u8>);
 impl Writer {
-    fn byte(&mut self, value: u8) {
+    pub(in crate::recovery_build) fn byte(&mut self, value: u8) {
         self.0.push(value);
     }
-    fn flag(&mut self, value: bool) {
+    pub(in crate::recovery_build) fn flag(&mut self, value: bool) {
         self.byte(u8::from(value));
     }
-    fn number(&mut self, value: u128) {
+    pub(in crate::recovery_build) fn number(&mut self, value: u128) {
         self.0.extend(value.to_le_bytes());
     }
-    fn bytes(&mut self, bytes: &[u8]) {
+    pub(in crate::recovery_build) fn bytes(&mut self, bytes: &[u8]) {
         self.number(bytes.len() as u128);
         self.0.extend(bytes);
     }
-    fn text(&mut self, text: &str) {
+    pub(in crate::recovery_build) fn text(&mut self, text: &str) {
         self.bytes(text.as_bytes());
     }
-    fn words(&mut self, words: [u64; 4]) {
+    pub(in crate::recovery_build) fn words(&mut self, words: [u64; 4]) {
         for word in words {
             self.0.extend(word.to_le_bytes());
         }
     }
 }
-struct Reader<'a>(&'a [u8]);
+pub(in crate::recovery_build) struct Reader<'a>(pub(in crate::recovery_build) &'a [u8]);
 impl<'a> Reader<'a> {
-    fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
+    pub(in crate::recovery_build) fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
         let bytes = self.0.get(..len).ok_or_else(bad)?;
         self.0 = &self.0[len..];
         Ok(bytes)
     }
-    fn byte(&mut self) -> Result<u8, Error> {
+    pub(in crate::recovery_build) fn byte(&mut self) -> Result<u8, Error> {
         Ok(self.take(1)?[0])
     }
-    fn flag(&mut self) -> Result<bool, Error> {
+    pub(in crate::recovery_build) fn flag(&mut self) -> Result<bool, Error> {
         match self.byte()? {
             0 => Ok(false),
             1 => Ok(true),
             _ => Err(bad()),
         }
     }
-    fn number(&mut self) -> Result<u128, Error> {
+    pub(in crate::recovery_build) fn number(&mut self) -> Result<u128, Error> {
         Ok(u128::from_le_bytes(
             self.take(16)?.try_into().map_err(|_| bad())?,
         ))
     }
-    fn count(&mut self, max: usize) -> Result<usize, Error> {
+    pub(in crate::recovery_build) fn count(&mut self, max: usize) -> Result<usize, Error> {
         let n = usize::try_from(self.number()?).map_err(|_| bad())?;
         if n > max {
             Err(bad())
@@ -68,28 +68,28 @@ impl<'a> Reader<'a> {
             Ok(n)
         }
     }
-    fn bytes(&mut self) -> Result<&'a [u8], Error> {
+    pub(in crate::recovery_build) fn bytes(&mut self) -> Result<&'a [u8], Error> {
         let n = self.count(self.0.len())?;
         self.take(n)
     }
-    fn text(&mut self) -> Result<&'a str, Error> {
+    pub(in crate::recovery_build) fn text(&mut self) -> Result<&'a str, Error> {
         std::str::from_utf8(self.bytes()?).map_err(|_| bad())
     }
-    fn words(&mut self) -> Result<[u64; 4], Error> {
+    pub(in crate::recovery_build) fn words(&mut self) -> Result<[u64; 4], Error> {
         let mut result = [0; 4];
         for word in &mut result {
             *word = u64::from_le_bytes(self.take(8)?.try_into().map_err(|_| bad())?);
         }
         Ok(result)
     }
-    fn header(&mut self, magic: &[u8]) -> Result<(), Error> {
+    pub(in crate::recovery_build) fn header(&mut self, magic: &[u8]) -> Result<(), Error> {
         if self.take(magic.len())? != magic {
             Err(bad())
         } else {
             Ok(())
         }
     }
-    fn end(self) -> Result<(), Error> {
+    pub(in crate::recovery_build) fn end(self) -> Result<(), Error> {
         if self.0.is_empty() {
             Ok(())
         } else {
@@ -110,6 +110,16 @@ pub(super) fn encode_initialization(q: &RecoveryBuildQuery) -> Vec<u8> {
         CrossStageEarlyLimit::Auto => 0,
         CrossStageEarlyLimit::AtMost(n) => n as u128,
     });
+    w.flag(q.all_solutions);
+    w.flag(q.minimum_solutions);
+    w.number(q.required_solution_keys.len() as u128);
+    for key in &q.required_solution_keys {
+        w.text(key);
+    }
+    w.flag(q.minimum_source_identity.is_some());
+    if let Some(id) = &q.minimum_source_identity {
+        w.text(id);
+    }
     w.flag(q.allow_piece_exchange);
     w.flag(q.hold_enabled);
     w.flag(q.preserve_b2b);
@@ -142,6 +152,22 @@ pub(super) fn decode_initialization(bytes: &[u8]) -> Result<RecoveryBuildQuery, 
             CrossStageEarlyLimit::Auto
         } else {
             CrossStageEarlyLimit::AtMost(early)
+        },
+        all_solutions: r.flag()?,
+        minimum_solutions: r.flag()?,
+        required_solution_keys: {
+            let count = r.count(r.0.len() / 16)?;
+            let mut keys = Vec::new();
+            keys.try_reserve(count).map_err(|_| bad())?;
+            for _ in 0..count {
+                keys.push(r.text()?.to_owned());
+            }
+            keys
+        },
+        minimum_source_identity: if r.flag()? {
+            Some(r.text()?.to_owned())
+        } else {
+            None
         },
         allow_piece_exchange: r.flag()?,
         hold_enabled: r.flag()?,
@@ -201,7 +227,7 @@ fn status(r: &mut Reader<'_>) -> Result<RecoveryBuildStatus, Error> {
         _ => Err(bad()),
     }
 }
-fn write_path(w: &mut Writer, p: &RecoveryBuildFixedReport) {
+pub(in crate::recovery_build) fn write_path(w: &mut Writer, p: &RecoveryBuildFixedReport) {
     w.byte(status_code(p.status));
     w.number(p.states as u128);
     w.number(p.effective_max_early as u128);
@@ -210,6 +236,7 @@ fn write_path(w: &mut Writer, p: &RecoveryBuildFixedReport) {
         w.0.extend(value.to_le_bytes());
     }
     w.words(p.terminal_board);
+    w.words(p.result_target);
     w.number(p.steps.len() as u128);
     for s in &p.steps {
         w.number(s.source_index as u128);
@@ -233,7 +260,9 @@ fn write_path(w: &mut Writer, p: &RecoveryBuildFixedReport) {
         }
     }
 }
-fn read_path(r: &mut Reader<'_>) -> Result<RecoveryBuildFixedReport, Error> {
+pub(in crate::recovery_build) fn read_path(
+    r: &mut Reader<'_>,
+) -> Result<RecoveryBuildFixedReport, Error> {
     let status = status(r)?;
     let states = r.count(usize::MAX)?;
     let effective_max_early = r.count(usize::MAX)?;
@@ -243,6 +272,7 @@ fn read_path(r: &mut Reader<'_>) -> Result<RecoveryBuildFixedReport, Error> {
         *value = i16::from_le_bytes(r.take(2)?.try_into().map_err(|_| bad())?);
     }
     let terminal_board = r.words()?;
+    let result_target = r.words()?;
     let count = r.count(120)?;
     let mut steps = Vec::with_capacity(count);
     for _ in 0..count {
@@ -315,6 +345,7 @@ fn read_path(r: &mut Reader<'_>) -> Result<RecoveryBuildFixedReport, Error> {
         exchange_balance,
         steps,
         terminal_board,
+        result_target,
     })
 }
 pub(super) fn encode_result(init: &[u8], batch: &ResultBatch) -> Vec<u8> {

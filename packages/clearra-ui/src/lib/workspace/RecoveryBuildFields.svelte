@@ -2,9 +2,9 @@
   import { createEventDispatcher } from 'svelte';
   import WorkspaceBoardEditor from './WorkspaceBoardEditor.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
-  import { resizeRecoveryBuild, type RecoveryBuildRequest } from './recoveryBuildModel';
+  import { type RecoveryBuildRequest } from './recoveryBuildModel';
   import { recoveryBuildMessage, type RecoveryBuildMessage } from './recoveryBuildI18n';
-  import { recoveryFieldReferences, type RecoveryField } from './recoveryFieldReferences';
+  import { overwriteRecoveryField, recoveryFieldReferences, type RecoveryField } from './recoveryFieldReferences';
   import type { WorkspaceLanguage } from './workspaceI18n';
 
   export let request: RecoveryBuildRequest;
@@ -16,14 +16,11 @@
     { field: 'resultMask', tone: 'light', label: 'result' }
   ];
   let selected: RecoveryField = 'startMask';
-  let showReferences = true;
   $: label = (key: RecoveryBuildMessage) => recoveryBuildMessage(language, key);
-  $: references = recoveryFieldReferences(request, selected, showReferences)
+  $: references = recoveryFieldReferences(request, selected)
     .map((reference) => ({ ...reference, label: label(reference.label) }));
   function change(field: RecoveryField, mask: bigint, height = request.height) {
-    const next = resizeRecoveryBuild(request, Math.max(request.height, height));
-    const limit = (1n << BigInt(next.height * 10)) - 1n;
-    dispatch('change', { ...next, [field]: mask & limit });
+    dispatch('change', overwriteRecoveryField(request, field, mask, Math.max(request.height, height)));
   }
 
 </script>
@@ -38,13 +35,8 @@
         </button>
       {/each}
     </div>
-    <div class="workspace-switch-row">
-      <label class="workspace-switch-label">
-        <input type="checkbox" bind:checked={showReferences} />
-        <span class="workspace-switch" aria-hidden="true"></span><span>{label('context')}</span>
-      </label>
-    </div>
     <p class="workspace-field-help">{label('fieldsHelp')}</p>
+
   </WorkspaceControlPanel>
   {#each fields.filter((entry) => entry.field === selected) as entry (entry.field)}
     <WorkspaceBoardEditor mode="forward" height={request.height} existingMask={request[entry.field]}
