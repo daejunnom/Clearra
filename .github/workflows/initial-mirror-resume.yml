@@ -1,0 +1,98 @@
+name: Initial mirror source and contracts
+on:
+  push:
+    branches: [codex/verify-initial-mirror-resume-20260929]
+    paths: [.github/workflows/initial-mirror-resume.yml]
+permissions:
+  contents: write
+concurrency:
+  group: initial-mirror-resume-20260929
+  cancel-in-progress: false
+jobs:
+  contracts:
+    if: github.repository == 'daejunnom/Clearra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BASE: b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+      RESULT: codex/initial-mirror-tested-20260929
+      OUT: _local/artifacts/test/initial-mirror-resume
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+      - name: Verify and apply the reviewed patch bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = "$BASE"
+          mkdir -p "$OUT"
+          python3 - <<'PY'
+          import base64,gzip,hashlib,json,os,pathlib,urllib.request,subprocess
+          parts=['af43f7b4f4e9ce0c56038b0895cf918b2e846a42','f68b6d7fa303d2ad6bc65e816aa1d667f05bde4e','b84ee2bc2f679564c84d8362b9946b2098a7e35a','f9ef91e6a7079d8c9cd4e9894158401e6e542bbd']
+          raw=b''
+          for sha in parts:
+              req=urllib.request.Request('https://api.github.com/repos/daejunnom/Clearra/git/blobs/'+sha,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+              with urllib.request.urlopen(req,timeout=30) as response: item=json.load(response)
+              data=base64.b64decode(item['content'])
+              assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()==sha
+              raw+=data
+          patch=gzip.decompress(raw)
+          assert hashlib.sha256(patch).hexdigest()=='4a0a4bc9142217fed471bae3f2aca758465b211fe31f60fdd6ed6b91ab2215df'
+          p=pathlib.Path(os.environ['OUT'])/'initial-mirror.patch';p.write_bytes(patch)
+          subprocess.run(['git','apply','--check',str(p)],check=True)
+          subprocess.run(['git','apply',str(p)],check=True)
+          PY
+      - name: Format and preserve a source-only candidate
+        run: |
+          set -euo pipefail
+          rustup show
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          test -z "$(git ls-remote --heads origin "refs/heads/$RESULT")"
+          git add crates packages
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(recovery): include initial-symmetric target suffixes with oriented replay witnesses'
+          git push origin "HEAD:refs/heads/$RESULT"
+          git rev-parse HEAD > "$OUT/source-sha.txt"
+          git diff "$BASE" HEAD --stat > "$OUT/changed-files.txt"
+          git archive --format=tar HEAD | gzip > "$OUT/source.tar.gz"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Native and worker contract tests
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$OUT"
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$OUT/core.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$OUT/cli.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$OUT/wasm.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$OUT/wasm-target.log" || result=1
+          exit "$result"
+      - name: UI and replay contracts
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          result=0
+          pnpm install --frozen-lockfile --ignore-scripts || exit 1
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs || exit 1
+          node --test packages/clearra-ui/test/recovery*.test.mjs 2>&1 | tee "$OUT/ui.log" || result=1
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee "$OUT/types.log" || result=1
+          test -z "$(git status --porcelain --untracked-files=no)" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: initial-mirror-resume-evidence
+          path: _local/artifacts/test/initial-mirror-resume/
+          retention-days: 7
