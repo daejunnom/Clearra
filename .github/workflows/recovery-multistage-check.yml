@@ -1,0 +1,145 @@
+name: Recovery multi-stage exact-source check
+on:
+  push:
+    branches: [codex/recovery-multistage-import-20260929]
+permissions:
+  contents: read
+concurrency:
+  group: recovery-multistage-import-20260929
+  cancel-in-progress: false
+jobs:
+  proposal:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    outputs:
+      source: ${{ steps.commit.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: operator
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          path: source
+          fetch-depth: 1
+      - name: Apply exact reviewed patch to the immutable source
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REPOSITORY" = daejunnom/Clearra
+          test "$(git rev-parse HEAD)" = b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          mkdir -p _local/artifacts/test/multistage
+          python3 - <<'PY'
+          import base64, hashlib, lzma, pathlib, subprocess
+          chunks = pathlib.Path('../operator/.github/recovery-multistage')
+          encoded = ''.join((chunks / f'{i}.b64').read_text().strip() for i in range(4))
+          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '58b2709cb12a9dca0f404597b016bc0c2b3c5025059bc5c1393f921bc59735d2'
+          out = pathlib.Path('_local/artifacts/test/multistage')
+          p = out / 'reviewed.patch'
+          p.write_bytes(patch)
+          changes = subprocess.check_output(['git', 'apply', '--numstat', str(p)], text=True)
+          paths = [line.split('\t')[-1] for line in changes.splitlines()]
+          assert paths and len(paths) == len(set(paths))
+          assert all(x.startswith(('crates/', 'packages/clearra-ui/')) and '..' not in x.split('/') for x in paths)
+          (out / 'expected-paths.txt').write_text('\n'.join(sorted(paths)) + '\n')
+          subprocess.run(['git', 'apply', '--check', str(p)], check=True)
+          subprocess.run(['git', 'apply', str(p)], check=True)
+          PY
+          rustup show
+          cargo fmt --all
+          cargo fmt --all --check
+          git add -- crates packages/clearra-ui
+          git diff --cached --name-only | sort > _local/artifacts/test/multistage/actual-paths.txt
+          diff -u _local/artifacts/test/multistage/expected-paths.txt _local/artifacts/test/multistage/actual-paths.txt
+          git diff --cached --check
+      - name: Preserve source-only proposal without changing main
+        id: commit
+        working-directory: source
+        run: |
+          set -euo pipefail
+          ref=codex/recovery-multistage-20260929
+          test -z "$(git ls-remote --heads origin "refs/heads/$ref")"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(recovery): preserve initial symmetry and ordered multi-stage coverage'
+          sha="$(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD^)" = b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          git push origin "HEAD:refs/heads/$ref"
+          echo "source=$sha" >> "$GITHUB_OUTPUT"
+          echo "$sha" > _local/artifacts/test/multistage/source-sha.txt
+          git archive --format=tar HEAD | gzip > _local/artifacts/test/multistage/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-multistage-source
+          path: source/_local/artifacts/test/multistage/
+          retention-days: 7
+  rust:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - name: Exact sources, mirrors, stage boundaries and both host paths
+        shell: bash
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/multistage
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$out/core.log" || result=1
+          cargo test --locked -p clearra-app recovery_solution_cover -- --nocapture 2>&1 | tee "$out/minimum.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$out/cli.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$out/wasm-wire.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$out/wasm-target.log" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-multistage-rust
+          path: _local/artifacts/test/multistage/
+          retention-days: 7
+  ui:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Field ownership, add-remove semantics, source transport and UI types
+        shell: bash
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/multistage
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          result=0
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs 2>&1 | tee "$out/ui-prepare.log" || result=1
+          node --test packages/clearra-ui/test/recovery*.test.mjs 2>&1 | tee "$out/ui.log" || result=1
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee "$out/types.log" || result=1
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-multistage-ui
+          path: _local/artifacts/test/multistage/
+          retention-days: 7
