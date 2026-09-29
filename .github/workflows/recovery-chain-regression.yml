@@ -1,0 +1,130 @@
+name: Recovery multi-stage regression
+on:
+  push:
+    branches: [codex/converge-recovery-chain-20260929]
+permissions:
+  contents: read
+concurrency:
+  group: recovery-chain-regression-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Exact source and formatting
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          cargo fmt --all --check
+          git diff --check
+      - name: Solver, inventories, holds, minimum and WASM contracts
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/chain-contracts
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$out/core.log" || result=1
+          cargo test --locked -p clearra-forward-search --test recovery_chain_sources -- --nocapture 2>&1 | tee "$out/source-invariants.log" || result=1
+          cargo test --locked -p clearra-app recovery_solution_cover -- --nocapture 2>&1 | tee "$out/minimum.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$out/cli.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$out/wasm-wire.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$out/wasm-target.log" || result=1
+          exit "$result"
+      - name: UI and stage model contracts
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/chain-contracts
+          mkdir -p "$out"
+          pnpm install --frozen-lockfile --ignore-scripts || exit 1
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs || exit 1
+          result=0
+          node --test packages/clearra-ui/test/recovery*.test.mjs 2>&1 | tee "$out/ui.log" || result=1
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee "$out/types.log" || result=1
+          exit "$result"
+      - name: Consume actual four-stage host payload in production presentation
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync,writeFileSync} from 'node:fs';
+          import {build} from 'esbuild';
+          const out='_local/artifacts/test/chain-contracts';
+          const line=readFileSync(`${out}/wasm-wire.log`,'utf8').split('\n').find(x=>x.startsWith('recovery_chain_payload='));
+          assert.ok(line,'real Rust host payload is required');
+          const payload=JSON.parse(line.slice('recovery_chain_payload='.length));
+          const built=await build({stdin:{contents:"export * from './packages/clearra-ui/src/lib/workspace/recoveryBuildPresentation.ts';",resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'node'});
+          const api=await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
+          assert.equal(api.validateRecoveryBuildPayload(payload),true);
+          assert.ok(payload.solutions.length>0);
+          for(const solution of payload.solutions){
+            const pages=api.recoveryBuildExamplePages(payload,solution.example,false);
+            assert.equal(pages.length,4);
+            assert.deepEqual(pages.map(p=>p.placements.length),[1,2,3,4]);
+            assert.deepEqual(api.recoveryBuildExamplePages(payload,solution.example,true),[pages[3]]);
+          }
+          writeFileSync(`${out}/validated-chain-payload.json`,JSON.stringify(payload,null,2));
+          console.log('Actual four-stage host payload and cumulative source exports passed');
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-contracts
+          path: _local/artifacts/test/chain-contracts/
+          retention-days: 14
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Prepare pinned build and browser tools
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          pnpm install --frozen-lockfile --ignore-scripts
+          cargo build --locked --release -p clearra-manage
+          echo "CLEARRA_MANAGE_BIN=$GITHUB_WORKSPACE/build/cargo/default/release/clearra-manage" >> "$GITHUB_ENV"
+          cargo install --locked wasm-bindgen-cli --version 0.2.126 --root build/tools/cargo/wasm-bindgen-cli/0.2.126/linux
+          echo "$GITHUB_WORKSPACE/build/tools/cargo/wasm-bindgen-cli/0.2.126/linux/bin" >> "$GITHUB_PATH"
+          npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$RUNNER_TEMP/clearra-browser-tools/node_modules/.bin/playwright" install --with-deps chromium
+          echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
+      - name: Build the exact product web runtime once
+        run: |
+          set -euo pipefail
+          mkdir -p _local/artifacts/test/chain-e2e
+          pnpm --filter ctk3 run build
+          pnpm --filter @clearra/web run build 2>&1 | tee _local/artifacts/test/chain-e2e/build.log
+          git diff --exit-code
+          echo "$GITHUB_SHA" > _local/artifacts/test/chain-e2e/source-sha.txt
+      - name: Real UI, worker, mirrored starts, multiple boundaries and exports
+        env:
+          CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          "$CLEARRA_MANAGE_BIN" --root . runtime run --producer recovery-chain-browser --profile local-service --timeout 600 -- node scripts/tools/recovery-chain-real-browser.mjs 2>&1 | tee _local/artifacts/test/chain-e2e/browser.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-real-browser
+          path: _local/artifacts/test/chain-e2e/
+          retention-days: 14
