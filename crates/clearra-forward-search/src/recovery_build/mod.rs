@@ -1,6 +1,7 @@
 //! Stage-factorized paired Build coverage with demand-driven boundary repair.
 //! The original weighted supply universe is preserved without pair expansion.
 mod catalog;
+pub mod chain;
 mod field;
 mod parallel;
 mod population;

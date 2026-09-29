@@ -54,3 +54,8 @@ pub use recovery_build::{
     RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildSolution, RecoveryBuildStatus,
     RecoveryBuildStep,
 };
+
+pub use recovery_build::chain::{
+    RecoveryChainCoverage, RecoveryChainError, RecoveryChainQuery, RecoveryChainSession,
+    RecoveryChainStep, RecoveryChainWitness,
+};
