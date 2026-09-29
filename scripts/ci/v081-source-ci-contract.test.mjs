@@ -74,6 +74,9 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes("input === 'setup-score'"));
   assert.ok(browser.includes("assert.deepEqual(ranking(setup.activated), ranking(setup.baseline)"));
   assert.ok(browser.includes("results['srs-plus'].build = {"));
+  assert.ok(browser.includes("results[profile].buildAllSolutions = {"));
+  assert.ok(browser.includes("results['srs-plus'].buildAllSolutions = results['srs-plus'].build['all-solutions']"));
+  assert.ok(browser.includes('assert.deepEqual(compact(pair.activated), baseline,'));
   assert.ok(browser.includes("input.startsWith('build-probability:')"));
   assert.ok(browser.includes("input === 'build-minimum'"));
   for (const mode of ['all-solutions', 'complete-replay-paths', 'minimum-solutions',

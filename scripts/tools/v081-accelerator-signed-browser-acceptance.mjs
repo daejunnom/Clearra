@@ -537,6 +537,12 @@ async function browserAcceptance() {
             activated: await run(profile, true, true, input.activated)
           };
         }
+        if (profile !== 'srs-plus') {
+          results[profile].buildAllSolutions = {
+            baseline: await run(profile, false, false, 'build-probability:all-solutions'),
+            activated: await run(profile, true, true, 'build-probability:all-solutions', 'all-solutions')
+          };
+        }
       }
       results['srs-plus'].build = {};
       for (const mode of ['all-solutions', 'complete-replay-paths', 'minimum-solutions',
@@ -547,6 +553,7 @@ async function browserAcceptance() {
           activated: await run('srs-plus', true, true, input, mode)
         };
       }
+      results['srs-plus'].buildAllSolutions = results['srs-plus'].build['all-solutions'];
       // Exercise invalidation on one warm owner, not merely a fresh worker.
       // A corrupt local pointer must revoke already-admitted negative proof
       // and relation authority before the next exact search begins.
@@ -659,6 +666,18 @@ async function browserAcceptance() {
     }
     assert.deepEqual(compact(build.activated), buildBaseline,
       'installed accelerators must preserve complete Web Build probability results');
+    for (const profile of profiles) {
+      const pair = execution.results[profile].buildAllSolutions;
+      const baseline = compact(pair.baseline);
+      assert.ok(baseline.keys.length > 0,
+        `${profile}: the complete Build fixture must have real solutions`);
+      assert.deepEqual(compact(pair.activated), baseline,
+        `${profile}: signed accelerators must preserve the complete Build candidate universe`);
+      assert.equal(pair.activated.result.search_report.count_complete, true,
+        `${profile}: Build count must be complete`);
+      assert.equal(pair.activated.result.search_report.probability_complete, true,
+        `${profile}: Build probability must be complete`);
+    }
     // Lazy products may deliberately leave the generic solution family
     // unmaterialized; compare its actual meaning separately from the payload.
     const productSearchMeaning = ({ result }) => {
