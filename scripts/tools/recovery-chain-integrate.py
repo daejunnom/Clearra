@@ -31,12 +31,10 @@ edit(core/'catalog.rs','mod plan;','pub(in crate::recovery_build) mod plan;')
 for old,new in [
     ('enum TileAdvance','pub(in crate::recovery_build) enum TileAdvance'),
     ('struct Tiles','pub(in crate::recovery_build) struct Tiles'),
-    ('    fn new(mask: Mask, caps: [u8; 7])','    pub(in crate::recovery_build) fn new(mask: Mask, caps: [u8; 7])'),
+    ('    fn new(target: Mask, caps: [u8; 7])','    pub(in crate::recovery_build) fn new(target: Mask, caps: [u8; 7])'),
     ('    fn advance(\n','    pub(in crate::recovery_build) fn advance(\n'),
 ]:
-    p=core/'catalog/plan.rs'
-    # Only the Tiles methods, not the already-public Producer methods.
-    edit(p,old,new)
+    edit(core/'catalog/plan.rs',old,new)
 p=core/'staged/source.rs'
 p.write_text(p.read_text()+'''
 /// Compile a single stage at its absolute source offset. The terminal accepts
