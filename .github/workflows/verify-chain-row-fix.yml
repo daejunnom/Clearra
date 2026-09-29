@@ -1,0 +1,132 @@
+name: Recovery chain row ownership verification
+on:
+  push:
+    branches: [codex/verify-chain-row-fix-20260929]
+permissions:
+  contents: read
+jobs:
+  proposal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 0a58eb03a9cefa17c0b6a09993fb366dda6a3fb2
+      - name: Apply the exact reviewed row-mask fix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = 0a58eb03a9cefa17c0b6a09993fb366dda6a3fb2
+          mkdir -p _local/artifacts/test/chain-rows
+          python3 - <<'PY'
+          import base64,gzip,hashlib,json,os,pathlib,subprocess,urllib.request
+          sha='b377ce621452332382831beb75f0381e237868b6'
+          r=urllib.request.Request('https://api.github.com/repos/daejunnom/Clearra/git/blobs/'+sha,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          with urllib.request.urlopen(r,timeout=60) as response: item=json.load(response)
+          raw=base64.b64decode(item['content'])
+          assert hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()==sha
+          patch=gzip.decompress(raw)
+          assert hashlib.sha256(patch).hexdigest()=='0dac8e91aa3501092cf6654a9db52fcba017ab5f51947f8baf4d445ab8585862'
+          p=pathlib.Path('_local/artifacts/test/chain-rows/row-fix.patch');p.write_bytes(patch)
+          subprocess.run(['git','apply','--check',str(p)],check=True)
+          subprocess.run(['git','apply',str(p)],check=True)
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+      - name: Preserve source-only candidate
+        id: source
+        run: |
+          set -euo pipefail
+          ref=codex/recovery-chain-row-fix-20260929
+          test -z "$(git ls-remote --heads origin "refs/heads/$ref")"
+          git add -- crates/clearra-forward-search/src/recovery_build/catalog.rs crates/clearra-forward-search/src/recovery_build/search.rs crates/clearra-forward-search/src/recovery_build/chain_tests.rs
+          test "$(git diff --cached --name-only | wc -l)" = 3
+          git diff --exit-code
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(recovery): decode logical row masks when checking multi-stage witnesses'
+          git push origin "HEAD:refs/heads/$ref"
+          sha="$(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "$sha" > _local/artifacts/test/chain-rows/source-sha.txt
+          git archive HEAD | gzip > _local/artifacts/test/chain-rows/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-row-source
+          path: _local/artifacts/test/chain-rows/
+          retention-days: 7
+  contracts:
+    needs: proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.proposal.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Exact native, WASM, minimum and multi-stage contracts
+        run: |
+          set -uo pipefail
+          out=_local/artifacts/test/chain-rows
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/source-sha.txt"
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --nocapture 2>&1 | tee "$out/core.log" || result=1
+          cargo test --locked -p clearra-app recovery_solution_cover -- --nocapture 2>&1 | tee "$out/minimum.log" || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --nocapture 2>&1 | tee "$out/cli.log" || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --nocapture 2>&1 | tee "$out/wasm-wire.log" || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee "$out/wasm-target.log" || result=1
+          exit "$result"
+      - name: UI types and stage model tests
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          pnpm install --frozen-lockfile --ignore-scripts || exit 1
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs || exit 1
+          result=0
+          node --test packages/clearra-ui/test/recovery*.test.mjs 2>&1 | tee _local/artifacts/test/chain-rows/ui.log || result=1
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee _local/artifacts/test/chain-rows/types.log || result=1
+          exit "$result"
+      - name: Independently consume actual four-stage host output and exports
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync,writeFileSync} from 'node:fs';
+          import {build} from 'esbuild';
+          const out='_local/artifacts/test/chain-rows';
+          const line=readFileSync(`${out}/wasm-wire.log`,'utf8').split('\n').find(x=>x.startsWith('recovery_chain_payload='));
+          assert.ok(line,'real Rust host payload is required');
+          const payload=JSON.parse(line.slice('recovery_chain_payload='.length));
+          const built=await build({stdin:{contents:"export * from './packages/clearra-ui/src/lib/workspace/recoveryBuildPresentation.ts';",resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'node'});
+          const api=await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
+          assert.equal(api.validateRecoveryBuildPayload(payload),true);
+          for(const solution of payload.solutions){
+            const pages=api.recoveryBuildExamplePages(payload,solution.example,false);
+            assert.equal(pages.length,4);
+            assert.deepEqual(pages.map(p=>p.placements.length),[1,2,3,4]);
+            assert.deepEqual(api.recoveryBuildExamplePages(payload,solution.example,true),[pages[3]]);
+          }
+          writeFileSync(`${out}/validated-chain-payload.json`,JSON.stringify(payload,null,2));
+          console.log('Real four-stage host payload and cumulative source exports passed');
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-row-contracts
+          path: _local/artifacts/test/chain-rows/
+          retention-days: 7
