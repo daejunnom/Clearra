@@ -150,7 +150,7 @@ fn orientation_enumeration_is_cancellable_and_duplicate_free() {
     assert_eq!(values[0], q.targets);
 }
 #[test]
-fn source_automaton_counts_four_P7_spaces_without_expanding_the_product() {
+fn source_automaton_counts_four_p7_spaces_without_expanding_the_product() {
     let q = query(
         &[0xf, 0xf << 10, 0xf << 20, 0xf << 30],
         &["P7", "P7", "P7", "P7"],
@@ -523,4 +523,169 @@ fn chain_catalog_is_cooperative_and_refuses_incomplete_or_cancelled_proofs() {
         session.finish(&control),
         Err(RecoveryBuildError::Cancelled.into())
     );
+}
+
+fn parallel_catalog(q: RecoveryChainQuery, workers: usize) -> RecoveryChainCatalog {
+    let control = ExecutionControl::default();
+    let mut c = RecoveryChainCoordinator::new(q, workers, &control).unwrap();
+    let init = c.worker_initialization();
+    let mut pool = (0..workers.saturating_sub(1).max(1))
+        .map(|_| RecoveryChainWorker::new(&init).unwrap())
+        .collect::<Vec<_>>();
+    let mut pending = Vec::new();
+    let mut index = 0;
+    for _ in 0..100_000 {
+        match c.produce(17, &control).unwrap() {
+            RecoveryChainProduce::Batch(bytes) => {
+                let w = &mut pool[index % workers.saturating_sub(1).max(1)];
+                index += 1;
+                let mut result = w.consume(&bytes, &control).unwrap();
+                while w.has_pending_work() {
+                    assert!(result.is_none());
+                    result = w.advance(7, &control).unwrap();
+                }
+                pending.push(result.unwrap());
+                // Retain the oldest task while later tasks complete first.
+                if pending.len() > 2 {
+                    c.absorb(&pending.pop().unwrap(), &control).unwrap();
+                }
+            }
+            RecoveryChainProduce::Pending => {
+                if let Some(result) = pending.pop() {
+                    c.absorb(&result, &control).unwrap();
+                }
+            }
+            RecoveryChainProduce::Completed => {
+                assert!(pending.is_empty());
+                let p = c.progress();
+                assert_eq!(p.issued_plans, p.completed_plans);
+                return c.finish(&control).unwrap();
+            }
+        }
+    }
+    panic!("bounded small chain did not finish")
+}
+#[test]
+fn three_intermediate_fields_and_four_supplies_preserve_exact_catalog_across_workers() {
+    let mut q = query(
+        &[0xc03, 0x300c, 0xc030, 0x300c0],
+        &["[IO]", "[IO]", "[IO]", "[IO]"],
+    );
+    q.early_limit = CrossStageEarlyLimit::AtMost(1);
+    let control = ExecutionControl::default();
+    let expected = q.catalog(&control).unwrap();
+    assert_eq!(expected.coverage.possible, 16);
+    assert_counts(&expected.coverage, [1, 0, 15]);
+    assert_eq!(expected.solutions.len(), 2);
+    for workers in [1, 2, 4, 11] {
+        let actual = parallel_catalog(q.clone(), workers);
+        assert_eq!(actual, expected, "worker budget {workers}");
+        assert!(actual
+            .solutions
+            .iter()
+            .all(|s| s.example.steps.len() == 4 && s.example.early_by_boundary.len() == 3));
+    }
+}
+#[test]
+fn four_stage_line_clears_and_three_boundary_hold_are_preserved_over_value_packets() {
+    let mut clears = query(
+        &[0xf, 0xf << 10, 0xf << 20, 0xf << 30],
+        &["I", "I", "I", "I"],
+    );
+    clears.initial = mask(0x3f0 | (0x3f0 << 10) | (0x3f0 << 20) | (0x3f0 << 30));
+    clears.early_limit = CrossStageEarlyLimit::AtMost(0);
+    let r = parallel_catalog(clears.clone(), 4);
+    assert_counts(&r.coverage, [1, 0, 0]);
+    let w = r.coverage.normal_example.as_ref().unwrap();
+    assert_eq!(w.terminal_board, [0; 4]);
+    assert_eq!(
+        w.steps.iter().map(|s| s.cleared_lines).collect::<Vec<_>>(),
+        vec![1; 4]
+    );
+    assert_eq!(r, clears.catalog(&ExecutionControl::default()).unwrap());
+    let mut held = query(&[0xf, 0xc030, 0x300c0, 0xc0300], &["O", "I", "O", "O"]);
+    held.allow_piece_exchange = true;
+    held.early_limit = CrossStageEarlyLimit::AtMost(0);
+    let r = parallel_catalog(held.clone(), 11);
+    assert_counts(&r.coverage, [1, 0, 0]);
+    let last = r
+        .coverage
+        .normal_example
+        .as_ref()
+        .unwrap()
+        .steps
+        .last()
+        .unwrap();
+    assert_eq!(last.source_index, 0);
+    assert_eq!(last.source_stage, 0);
+    assert_eq!(last.hold_decision, "release-held-at-terminal");
+    assert_eq!(r, held.catalog(&ExecutionControl::default()).unwrap());
+}
+#[test]
+fn chain_worker_repair_and_alternative_tilings_match_serial_catalog_exactly() {
+    let mut repair = query(&[0xf << 20, 0xf << 10, 0xf], &["I", "I", "I"]);
+    repair.hold_enabled = false;
+    repair.early_limit = CrossStageEarlyLimit::AtMost(2);
+    let mut alternative = query(&[0x3c0f, 0x3c0, 0xc03 << 20], &["[IO][IO]", "I", "O"]);
+    alternative.early_limit = CrossStageEarlyLimit::AtMost(0);
+    for q in [repair, alternative] {
+        let expected = q.catalog(&ExecutionControl::default()).unwrap();
+        for workers in [2, 4, 11] {
+            assert_eq!(parallel_catalog(q.clone(), workers), expected);
+        }
+    }
+}
+#[test]
+fn chain_packets_reject_stale_query_duplicate_partial_and_incomplete_results() {
+    let q = query(&[0xc03, 0x300c, 0xc030], &["O", "O", "O"]);
+    let control = ExecutionControl::default();
+    let mut c = RecoveryChainCoordinator::new(q.clone(), 2, &control).unwrap();
+    let init = c.worker_initialization();
+    let mut worker = RecoveryChainWorker::new(&init).unwrap();
+    assert!(matches!(
+        worker.advance(1, &control),
+        Err(RecoveryChainError::InvalidState(_))
+    ));
+    let bytes = loop {
+        if let RecoveryChainProduce::Batch(b) = c.produce(17, &control).unwrap() {
+            break b;
+        }
+    };
+    for n in [0, 5, bytes.len() / 2, bytes.len() - 1] {
+        assert!(worker.consume(&bytes[..n], &control).is_err());
+    }
+    let mut different = q.clone();
+    different.hold_enabled = false;
+    let stale = RecoveryChainCoordinator::new(different, 2, &control)
+        .unwrap()
+        .worker_initialization();
+    assert!(RecoveryChainWorker::new(&stale)
+        .unwrap()
+        .consume(&bytes, &control)
+        .is_err());
+    let mut answer = worker.consume(&bytes, &control).unwrap();
+    while worker.has_pending_work() {
+        answer = worker.advance(1, &control).unwrap();
+    }
+    let answer = answer.unwrap();
+    let before = c.progress();
+    for n in [0, 5, answer.len() / 2, answer.len() - 1] {
+        assert!(c.absorb(&answer[..n], &control).is_err());
+        assert_eq!(c.progress(), before);
+    }
+    c.absorb(&answer, &control).unwrap();
+    let after = c.progress();
+    assert!(c.absorb(&answer, &control).is_err());
+    assert_eq!(c.progress(), after);
+    assert!(matches!(
+        c.finish(&control),
+        Err(RecoveryChainError::Incomplete)
+    ));
+    assert!(RecoveryChainCoordinator::new(q.clone(), 0, &control).is_err());
+    let mut c = RecoveryChainCoordinator::new(q, 2, &control).unwrap();
+    control.cancellation.handle().cancel();
+    assert!(matches!(
+        c.produce(1, &control),
+        Err(RecoveryChainError::Core(RecoveryBuildError::Cancelled))
+    ));
 }

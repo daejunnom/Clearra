@@ -4,7 +4,10 @@
 mod catalog;
 mod fields;
 mod plan;
-pub use catalog::{RecoveryChainCatalog, RecoveryChainCatalogSession, RecoveryChainSolution};
+pub use catalog::{
+    RecoveryChainCatalog, RecoveryChainCatalogSession, RecoveryChainCoordinator,
+    RecoveryChainProduce, RecoveryChainProgress, RecoveryChainSolution, RecoveryChainWorker,
+};
 mod solver;
 mod source;
 #[cfg(test)]
@@ -44,6 +47,8 @@ pub enum RecoveryChainError {
     OverlappingStage(usize),
     InvalidStageArea(usize),
     Incomplete,
+    InvalidPacket(&'static str),
+    InvalidState(&'static str),
     Core(RecoveryBuildError),
 }
 impl From<RecoveryBuildError> for RecoveryChainError {

@@ -1,6 +1,7 @@
 //! All logical tilings with exact symbolic source coverage. This is deliberately
 //! separate from the aggregate reference solver: first-witness coverage cannot
 //! be used to enumerate the solution catalog or prove a minimum portfolio.
+mod parallel;
 use super::{
     plan::{Plan, Producer},
     solver::Solver,
@@ -18,6 +19,9 @@ use crate::{
     CrossStageEarlyLimit,
 };
 use clearra_core_domain::execution_cancellation::ExecutionControl;
+pub use parallel::{
+    RecoveryChainCoordinator, RecoveryChainProduce, RecoveryChainProgress, RecoveryChainWorker,
+};
 use std::collections::{BTreeMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq)]

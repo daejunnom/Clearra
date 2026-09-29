@@ -3,9 +3,10 @@
 mod catalog;
 mod chain;
 pub use chain::{
-    RecoveryChainCatalog, RecoveryChainCatalogSession, RecoveryChainCoverage, RecoveryChainError,
+    RecoveryChainCatalog, RecoveryChainCatalogSession, RecoveryChainCoordinator,
+    RecoveryChainCoverage, RecoveryChainError, RecoveryChainProduce, RecoveryChainProgress,
     RecoveryChainQuery, RecoveryChainSession, RecoveryChainSolution, RecoveryChainStep,
-    RecoveryChainWitness,
+    RecoveryChainWitness, RecoveryChainWorker,
 };
 mod field;
 mod mirror;

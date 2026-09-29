@@ -52,7 +52,8 @@ pub use recovery_build::{
     RecoveryBuildFixedReport, RecoveryBuildParallelCoordinator, RecoveryBuildParallelError,
     RecoveryBuildParallelProduce, RecoveryBuildParallelProgress, RecoveryBuildParallelWorker,
     RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildSolution, RecoveryBuildStatus,
-    RecoveryBuildStep, RecoveryChainCatalog, RecoveryChainCatalogSession, RecoveryChainCoverage,
-    RecoveryChainError, RecoveryChainQuery, RecoveryChainSession, RecoveryChainSolution,
-    RecoveryChainStep, RecoveryChainWitness,
+    RecoveryBuildStep, RecoveryChainCatalog, RecoveryChainCatalogSession, RecoveryChainCoordinator,
+    RecoveryChainCoverage, RecoveryChainError, RecoveryChainProduce, RecoveryChainProgress,
+    RecoveryChainQuery, RecoveryChainSession, RecoveryChainSolution, RecoveryChainStep,
+    RecoveryChainWitness, RecoveryChainWorker,
 };
