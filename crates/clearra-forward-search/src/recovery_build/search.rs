@@ -57,6 +57,7 @@ pub struct RecoveryBuildStep {
     pub b2b_active: bool,
     pub middle_complete: bool,
     /// Persistent target cells, including cells already removed by line clears.
+    /// One 10-bit occupancy mask per original logical row (not cell indices).
     pub logical_cells: Vec<u16>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]

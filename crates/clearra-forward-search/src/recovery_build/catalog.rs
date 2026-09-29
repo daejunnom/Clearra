@@ -257,10 +257,26 @@ impl Coordinator {
                             return Err(ParallelError::InvalidWire("reused stage token"));
                         }
                         let mut cells = Mask::EMPTY;
-                        for &cell in &step.logical_cells {
-                            cells = cells.union(
-                                Mask::singleton(cell).map_err(|_| Error::BoardOutsideField)?,
-                            );
+                        // The established replay contract stores one 10-bit
+                        // row mask per logical row, NOT a list of cell indices.
+                        // Decode ownership in the shared pre-clear frame before
+                        // matching a middle stage or counting boundary crossings.
+                        for (y, &row) in step.logical_cells.iter().enumerate() {
+                            if row & !1023 != 0
+                                || (y >= usize::from(stage.fields.height) && row != 0)
+                            {
+                                return Err(ParallelError::InvalidWire(
+                                    "catalog logical row outside chain field",
+                                ));
+                            }
+                            for x in 0..10 {
+                                if row & (1 << x) != 0 {
+                                    cells = cells.union(
+                                        Mask::singleton((y * 10 + x) as u16)
+                                            .map_err(|_| Error::BoardOutsideField)?,
+                                    );
+                                }
+                            }
                         }
                         let owner = stage
                             .chain_targets

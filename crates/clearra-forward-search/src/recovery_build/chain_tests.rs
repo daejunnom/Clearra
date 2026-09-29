@@ -211,3 +211,63 @@ fn recovery_build_chain_preserves_per_source_inventory_and_boundary_quotas() {
     // Swap/order correction through hold still cannot change per-source inventory.
     assert_eq!(q.search(&control).unwrap().no_path_count, 1);
 }
+
+#[test]
+fn recovery_build_chain_row_ownership_survives_a_middle_line_clear() {
+    let control = ExecutionControl::default();
+    let start = cells(&[4, 5, 6, 7, 8, 9]);
+    let mut q = chain(3);
+    q.chain_stages = vec![
+        RecoveryChainStage {
+            target: cells(&[0, 1, 2, 3]),
+            supply: "I".into(),
+        },
+        RecoveryChainStage {
+            target: cells(&[10, 11, 20, 21]),
+            supply: "O".into(),
+        },
+        RecoveryChainStage {
+            target: cells(&[14, 15, 16, 17]),
+            supply: "I".into(),
+        },
+    ];
+    q.fields = RecoveryBuildFields::from_chain(8, start, &q.chain_stages).unwrap();
+    q.first_supply = "I".into();
+    q.second_supply = "I".into();
+    q.hold_enabled = false;
+    let report = super::parallel::search_serial(q, &control).unwrap();
+    assert_eq!(
+        (report.possible, report.normal_count, report.no_path_count),
+        (1, 1, 0)
+    );
+    assert_eq!(
+        report.solutions.len(),
+        2,
+        "the cleared first checkpoint enables both suffix directions"
+    );
+    for solution in report.solutions {
+        let path = solution.example.path;
+        assert_eq!(path.stage_source_lengths, vec![1, 1, 1]);
+        assert_eq!(path.stage_early_counts, vec![0, 0]);
+        assert_eq!(path.steps[0].cleared_rows, 1);
+        assert_eq!(path.steps[0].logical_cells[0], 15);
+        for (stage, step) in path.steps.iter().enumerate() {
+            // Independently form row words from the expected stage's cells.
+            // Neither a small row value nor a cleared row becomes a cell ID.
+            let expected = Mask::from_words(path.stage_targets[stage]);
+            let rows: Vec<u16> = (0..path.steps[stage].logical_cells.len())
+                .map(|y| {
+                    (0..10).fold(0, |row, x| {
+                        row | if expected.contains_index((y * 10 + x) as u16) {
+                            1 << x
+                        } else {
+                            0
+                        }
+                    })
+                })
+                .collect();
+            assert_eq!(step.logical_cells, rows);
+            assert_eq!(step.source_index, stage);
+        }
+    }
+}
