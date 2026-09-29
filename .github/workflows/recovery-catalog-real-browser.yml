@@ -1,0 +1,73 @@
+name: Recovery accepted Pages full browser
+on:
+  push:
+    branches: [codex/verify-recovery-catalog-browser-20260929]
+    paths:
+      - .github/workflows/recovery-catalog-real-browser.yml
+      - scripts/tools/recovery-catalog-real-browser.mjs
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: recovery-catalog-actual-browser-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: _local/recovery-probe-source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: accepted-pages-build-b781f6b6ef1c9ce27e0430f87663a92508e1cb7d-run-36515160162-attempt-1
+          path: _local/accepted-pages
+          repository: daejunnom/Clearra
+          run-id: 36515160162
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ctk3-accepted-b781f6b6ef1c9ce27e0430f87663a92508e1cb7d-run-36515160162-attempt-1
+          path: packages/ctk3/dist
+          repository: daejunnom/Clearra
+          run-id: 36515160162
+          github-token: ${{ github.token }}
+      - name: Verify exact accepted bytes without rebuilding
+        run: |
+          test "$(git rev-parse HEAD)" = b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          node scripts/release/accepted-pages-build.mjs --verify _local/accepted-pages --source-commit b781f6b6ef1c9ce27e0430f87663a92508e1cb7d --accepted-run-id 36515160162 --accepted-run-attempt 1 --base-path /Clearra --version 0.8.1
+          node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit b781f6b6ef1c9ce27e0430f87663a92508e1cb7d --expected-run-id 36515160162 --expected-run-attempt 1
+      - name: Prepare pinned browser
+        run: |
+          npm install --prefix _local/browser-tools --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          _local/browser-tools/node_modules/.bin/playwright install --with-deps chromium
+      - name: Full P7 pairs and actual minimum, pinned selection and source-frame exports
+        env:
+          CLEARRA_ACCEPTED_SITE: _local/accepted-pages
+          CLEARRA_BROWSER_TOOLS_ROOT: _local/browser-tools
+        run: |
+          set -o pipefail
+          mkdir -p _local/artifacts/test/recovery-catalog-browser
+          timeout --signal=TERM --kill-after=10s 1800s node _local/recovery-probe-source/scripts/tools/recovery-catalog-real-browser.mjs 2>&1 | tee _local/artifacts/test/recovery-catalog-browser/execution.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-catalog-actual-browser
+          path: _local/artifacts/test/recovery-catalog-browser
+          if-no-files-found: warn
+          retention-days: 14
