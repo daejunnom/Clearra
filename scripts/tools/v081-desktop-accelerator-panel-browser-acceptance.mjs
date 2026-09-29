@@ -115,12 +115,15 @@ async function browserAcceptance() {
         if (command === 'accelerator_asset_start_download') {
           const id = ++nextId;
           operations.set(id, { key, polls: 0, cancelled: false,
+            done: false,
+            dropTerminalReplies: args.product === 'exact-legal-board' && args.profile === 'srs',
             completeAfter: args.profile === 'srs-x' ? 1000 : 2 });
           return id;
         }
         if (command === 'accelerator_asset_cancel') {
           const operation = operations.get(args.operationId);
           if (!operation) throw new Error('unknown download operation');
+          if (operation.done) throw new Error('download operation is not active');
           operation.cancelled = true;
           return;
         }
@@ -131,7 +134,18 @@ async function browserAcceptance() {
           if (operation.cancelled) return JSON.stringify({ done: true,
             transferred_bytes: 0, total_bytes: 2 * 1024 * 1024,
             error: 'accelerator: download cancelled' });
+          if (operation.dropTerminalReplies && operation.polls <= 3) {
+            // Native work completed, but each of the first three IPC replies
+            // was lost. A terminal receipt must remain available for retry.
+            operation.done = true;
+            installed.add(operation.key);
+            throw new Error('simulated lost progress reply');
+          }
+          if (operation.done) return JSON.stringify({ done: true,
+            transferred_bytes: 2 * 1024 * 1024,
+            total_bytes: 2 * 1024 * 1024, result: '{}' });
           if (operation.polls >= operation.completeAfter) {
+            operation.done = true;
             installed.add(operation.key);
             return JSON.stringify({ done: true, transferred_bytes: 2 * 1024 * 1024,
               total_bytes: 2 * 1024 * 1024, result: '{}' });
@@ -190,6 +204,20 @@ async function browserAcceptance() {
       { command: 'accelerator_asset_action', action: 'remove',
         product: 'exact-legal-board', profile: 'srs-plus' }
     ], 'zero-byte local candidates and catalog-only files must remain removable');
+
+    await profile.selectOption('srs');
+    await page.getByRole('button', { name: 'Download displayed asset' }).click();
+    await page.getByRole('status').filter({ hasText: 'Download status could not be confirmed' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Download displayed asset' }).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: 'Check status and size' }).isDisabled(), true);
+    assert.equal(await product.isDisabled(), true);
+    assert.equal(await profile.isDisabled(), true);
+    assert.equal((await readCalls()).filter(call => call.command === 'accelerator_asset_start_download').length, 3,
+      'lost progress replies must not admit a second download');
+    await page.getByRole('button', { name: 'Retry operation status' }).click();
+    await page.getByRole('status').filter({ hasText: 'Verified asset installed' }).waitFor();
+    assert.ok((await readCalls()).filter(call => call.command === 'accelerator_asset_progress'
+      && call.operationId === 3).length >= 4, 'retry must read the retained terminal receipt');
     assert.deepEqual(errors, []);
     await page.close();
     console.log('v0.8.1 Desktop Svelte panel: explicit selection, IPC envelope, progress, remove and cancel passed');

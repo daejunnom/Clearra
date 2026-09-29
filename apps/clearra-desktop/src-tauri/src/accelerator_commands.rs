@@ -69,6 +69,50 @@ impl DownloadSlot {
     }
 }
 
+// A progress reply can be lost after the native command has already completed.
+// Keep the bounded terminal receipt so the same operation ID can be queried
+// again; only admission/reaping or the retention bound evicts it.
+fn progress_snapshot(slot: &mut DownloadSlot, operation_id: u64) -> Result<String, String> {
+    slot.reap_completed()?;
+    let (transferred, total, completion) = if let Some(completed) = slot
+        .completed
+        .iter()
+        .find(|completed| completed.id == operation_id)
+    {
+        (
+            completed.transferred,
+            completed.total,
+            Some(completed.result.clone()),
+        )
+    } else if let Some(active) = slot
+        .active
+        .as_ref()
+        .filter(|active| active.id == operation_id)
+    {
+        (
+            active.transferred.load(Ordering::Acquire),
+            active.total.load(Ordering::Acquire),
+            None,
+        )
+    } else {
+        return Err("accelerator: unknown download operation".to_owned());
+    };
+    let (result, error) = match completion {
+        Some(Ok(result)) => (Some(result), None),
+        Some(Err(error)) => (None, Some(error)),
+        None => (None, None),
+    };
+    Ok(serde_json::json!({
+        "operation_id": operation_id,
+        "done": result.is_some() || error.is_some(),
+        "transferred_bytes": transferred,
+        "total_bytes": total,
+        "result": result,
+        "error": error,
+    })
+    .to_string())
+}
+
 #[derive(Default)]
 pub struct AcceleratorState {
     slot: Arc<Mutex<DownloadSlot>>,
@@ -174,45 +218,7 @@ pub fn accelerator_asset_progress(
     operation_id: u64,
 ) -> Result<String, String> {
     let mut slot = state.slot.lock().map_err(|error| error.to_string())?;
-    slot.reap_completed()?;
-    let (transferred, total, completion) = if let Some(index) = slot
-        .completed
-        .iter()
-        .position(|completed| completed.id == operation_id)
-    {
-        let completed = slot.completed.remove(index).expect("position is in bounds");
-        (
-            completed.transferred,
-            completed.total,
-            Some(completed.result),
-        )
-    } else if let Some(active) = slot
-        .active
-        .as_ref()
-        .filter(|active| active.id == operation_id)
-    {
-        (
-            active.transferred.load(Ordering::Acquire),
-            active.total.load(Ordering::Acquire),
-            None,
-        )
-    } else {
-        return Err("accelerator: unknown download operation".to_owned());
-    };
-    let (result, error) = match completion {
-        Some(Ok(result)) => (Some(result), None),
-        Some(Err(error)) => (None, Some(error)),
-        None => (None, None),
-    };
-    Ok(serde_json::json!({
-        "operation_id": operation_id,
-        "done": result.is_some() || error.is_some(),
-        "transferred_bytes": transferred,
-        "total_bytes": total,
-        "result": result,
-        "error": error,
-    })
-    .to_string())
+    progress_snapshot(&mut slot, operation_id)
 }
 
 #[tauri::command]
@@ -310,9 +316,31 @@ mod tests {
         });
         slot.reap_completed()
             .expect("another window checks the slot");
-        assert_eq!(
-            slot.completed.pop_front().map(|completed| completed.result),
-            Some(Ok("done".to_owned()))
-        );
+        let first = progress_snapshot(&mut slot, 1).expect("first reply");
+        let second = progress_snapshot(&mut slot, 1).expect("retry after lost reply");
+        assert_eq!(first, second);
+        assert_eq!(slot.completed.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(parsed["done"], true);
+        assert_eq!(parsed["result"], "done");
+    }
+
+    #[test]
+    fn completed_error_remains_available_after_lost_progress_reply() {
+        let mut slot = DownloadSlot::default();
+        slot.active = Some(ActiveDownload {
+            id: 4,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            transferred: Arc::new(AtomicU64::new(3)),
+            total: Arc::new(AtomicU64::new(7)),
+            completion: Arc::new(Mutex::new(Some(Err("download cancelled".to_owned())))),
+        });
+        let first = progress_snapshot(&mut slot, 4).expect("first reply");
+        let second = progress_snapshot(&mut slot, 4).expect("retry after lost reply");
+        assert_eq!(first, second);
+        let parsed: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(parsed["done"], true);
+        assert_eq!(parsed["error"], "download cancelled");
+        assert_eq!(slot.completed.len(), 1);
     }
 }
