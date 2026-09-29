@@ -2,6 +2,7 @@
 //! The original weighted supply universe is preserved without pair expansion.
 mod catalog;
 mod field;
+mod mirror;
 mod parallel;
 mod population;
 mod staged;

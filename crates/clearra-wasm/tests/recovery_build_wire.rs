@@ -219,3 +219,40 @@ fn recovery_build_all_minimum_and_mandatory_minimum_use_complete_coverage() {
         .unwrap();
     assert_ne!(missing.app_response().status(), AppStatus::Success);
 }
+
+#[test]
+fn recovery_build_initial_mirror_targets_are_in_typed_and_browser_evidence() {
+    let command = "clearra recovery build --start-mask 0 --middle-mask 0x1007 --result-mask 0x300c00 --height 8 --first-supply J --second-supply O --no-hold --no-piece-exchange --max-early 0 --all-solutions --minimum-solutions";
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
+    let result = runtime.run_command_text(command).unwrap();
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    let payload = result.app_response().product_result_payload().unwrap();
+    let ProductResultPayloadContent::RecoveryBuild(report) = payload.content() else {
+        panic!("recovery evidence")
+    };
+    assert_eq!(report.normal_count, "1");
+    assert!(report.minimum_proven);
+    assert_eq!(report.selected_solution_keys.len(), 1);
+    let example = &report.examples[0];
+    assert_eq!(
+        example.middle_target_mask,
+        Some(format!("0x{:064x}", 0x20380_u64))
+    );
+    assert_eq!(
+        example.result_target_mask,
+        format!("0x{:064x}", 0x300c0000_u64)
+    );
+    let events: serde_json::Value =
+        serde_json::from_str(&serialize_distributed_final_events(19, &result).unwrap()).unwrap();
+    let terminal = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["event"] == "final_response")
+        .unwrap();
+    assert_eq!(
+        terminal["response"]["product_result_payload"],
+        serde_json::to_value(payload).unwrap()
+    );
+}

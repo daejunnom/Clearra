@@ -634,6 +634,10 @@ impl Solver {
                         exchange_balance: key.exchange,
                         steps,
                         terminal_board: pos.board.words(),
+                        middle_target: self.geometry.stages[usize::from(pos.stage)]
+                            .fields
+                            .middle
+                            .words(),
                         result_target: self.geometry.stages[usize::from(pos.stage)]
                             .fields
                             .result
