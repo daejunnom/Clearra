@@ -107,7 +107,7 @@ fn recovery_build_chain_counts_and_exact_parallel_catalog_agree() {
     let control = ExecutionControl::default();
     for n in [3, 4, 5] {
         let q = chain(n);
-        let expected = q.search(&control).unwrap();
+        let expected = super::parallel::search_serial(q.clone(), &control).unwrap();
         assert_eq!(
             (
                 expected.possible,
@@ -195,7 +195,7 @@ fn recovery_build_chain_preserves_per_source_inventory_and_boundary_quotas() {
     q.allow_piece_exchange = true;
     assert_eq!(q.search(&control).unwrap().no_path_count, 1);
     q.early_limit = CrossStageEarlyLimit::AtMost(1);
-    let result = q.search(&control).unwrap();
+    let result = super::parallel::search_serial(q.clone(), &control).unwrap();
     assert_eq!(result.recovery_count, 1);
     assert!(result
         .solutions

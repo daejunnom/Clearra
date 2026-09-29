@@ -48,7 +48,6 @@ impl Source {
         if prepared.stages.is_empty() {
             return Self::compile_all(diagram, &prepared.first, &prepared.second, control);
         }
-        use clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet;
         let mut root = ALL;
         let mut offset = 0u16;
         let mut first_counts = Some([0u8; 7]);
@@ -57,14 +56,6 @@ impl Source {
         let mut first_len = 0;
         for (i, universe) in prepared.stages.iter().enumerate() {
             cancelled(control)?;
-            // The public queue-expression materializer is a uniform finite
-            // universe. Check that contract instead of assuming weight = 1/N.
-            if universe.weights()
-                != &WeightedPatternSet::uniform(universe.pattern_count())
-                    .map_err(|_| Error::PatternDomainUnavailable)?
-            {
-                return Err(Error::PatternDomainUnavailable);
-            }
             let len =
                 u16::try_from(universe.sequence_len_at(0)).map_err(|_| Error::CounterOverflow)?;
             let end = offset.checked_add(len).ok_or(Error::CounterOverflow)?;
@@ -96,6 +87,13 @@ impl Source {
                 let mut same = true;
                 for rank in 0..universe.pattern_count() {
                     cancelled(control)?;
+                    // Explicit and compact uniform weights have distinct storage
+                    // identities. Check the actual weights, not enum equality.
+                    if universe.weight_at(rank).get().to_bits()
+                        != (1.0 / universe.pattern_count() as f64).to_bits()
+                    {
+                        return Err(Error::PatternDomainUnavailable);
+                    }
                     let queue = universe.sequence_at(rank);
                     if queue.len() != usize::from(len) {
                         return Err(Error::PatternDomainUnavailable);

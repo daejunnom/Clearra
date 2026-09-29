@@ -241,6 +241,10 @@ fn recovery_build_three_middle_sources_keep_host_wire_and_exact_minimum() {
     assert_eq!(payload.normal_count, "1");
     assert_eq!(payload.stage_supplies.len(), 4);
     assert_eq!(payload.solutions.len(), 2);
+    println!(
+        "recovery_chain_payload={}",
+        serde_json::to_string(payload).unwrap()
+    );
     let minimum = runtime
         .run_command_text(&format!("{base} --workers 1 --minimum-solutions"))
         .unwrap();
