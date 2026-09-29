@@ -335,6 +335,7 @@ mod benchmark {
             .and_then(|v| v.parse().ok())
             .unwrap_or(11);
         let query = RecoveryBuildQuery {
+            chain_stages: Vec::new(),
             all_solutions: true,
             minimum_solutions: false,
             required_solution_keys: Vec::new(),

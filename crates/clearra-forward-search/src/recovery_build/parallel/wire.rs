@@ -6,9 +6,9 @@ use crate::CrossStageEarlyLimit;
 use clearra_core_domain::{board::standard_pc_board::Board256Mask, piece::piece_kind::PieceKind};
 use clearra_rules::profile::rule_profile::RuleProfileId;
 use clearra_scoring::profile::SpinProfileId;
-pub(super) const INIT: &[u8] = b"RBIN\x04";
-const TASK: &[u8] = b"RBTK\x04";
-const RESULT: &[u8] = b"RBRS\x04";
+pub(super) const INIT: &[u8] = b"RBIN\x05";
+const TASK: &[u8] = b"RBTK\x05";
+const RESULT: &[u8] = b"RBRS\x05";
 type Error = RecoveryBuildParallelError;
 fn bad() -> Error {
     Error::InvalidWire("invalid recovery-build packet")
@@ -105,6 +105,11 @@ pub(super) fn encode_initialization(q: &RecoveryBuildQuery) -> Vec<u8> {
     w.words(q.fields.result.words());
     w.text(&q.first_supply);
     w.text(&q.second_supply);
+    w.number(q.chain_stages.len() as u128);
+    for stage in &q.chain_stages {
+        w.words(stage.target.words());
+        w.text(&stage.supply);
+    }
     w.flag(matches!(q.early_limit, CrossStageEarlyLimit::Auto));
     w.number(match q.early_limit {
         CrossStageEarlyLimit::Auto => 0,
@@ -139,12 +144,21 @@ pub(super) fn decode_initialization(bytes: &[u8]) -> Result<RecoveryBuildQuery, 
     };
     let first_supply = r.text()?.to_owned();
     let second_supply = r.text()?.to_owned();
+    let n = r.count(60)?;
+    let mut chain_stages = Vec::with_capacity(n);
+    for _ in 0..n {
+        chain_stages.push(super::super::chain::RecoveryChainStage {
+            target: Board256Mask::from_words(r.words()?),
+            supply: r.text()?.to_owned(),
+        });
+    }
     let auto = r.flag()?;
     let early = r.count(usize::MAX)?;
     if auto && early != 0 {
         return Err(bad());
     }
     let q = RecoveryBuildQuery {
+        chain_stages,
         fields,
         first_supply,
         second_supply,
@@ -237,6 +251,19 @@ pub(in crate::recovery_build) fn write_path(w: &mut Writer, p: &RecoveryBuildFix
     }
     w.words(p.terminal_board);
     w.words(p.result_target);
+    w.words(p.middle_target);
+    w.number(p.stage_targets.len() as u128);
+    for target in &p.stage_targets {
+        w.words(*target);
+    }
+    w.number(p.stage_source_lengths.len() as u128);
+    for len in &p.stage_source_lengths {
+        w.number(u128::from(*len));
+    }
+    w.number(p.stage_early_counts.len() as u128);
+    for early in &p.stage_early_counts {
+        w.byte(*early);
+    }
     w.number(p.steps.len() as u128);
     for s in &p.steps {
         w.number(s.source_index as u128);
@@ -273,6 +300,22 @@ pub(in crate::recovery_build) fn read_path(
     }
     let terminal_board = r.words()?;
     let result_target = r.words()?;
+    let middle_target = r.words()?;
+    let n = r.count(60)?;
+    let mut stage_targets = Vec::with_capacity(n);
+    for _ in 0..n {
+        stage_targets.push(r.words()?);
+    }
+    let n = r.count(60)?;
+    let mut stage_source_lengths = Vec::with_capacity(n);
+    for _ in 0..n {
+        stage_source_lengths.push(u16::try_from(r.number()?).map_err(|_| bad())?);
+    }
+    let n = r.count(59)?;
+    let mut stage_early_counts = Vec::with_capacity(n);
+    for _ in 0..n {
+        stage_early_counts.push(r.byte()?);
+    }
     let count = r.count(120)?;
     let mut steps = Vec::with_capacity(count);
     for _ in 0..count {
@@ -338,6 +381,10 @@ pub(in crate::recovery_build) fn read_path(
         });
     }
     Ok(RecoveryBuildFixedReport {
+        middle_target,
+        stage_targets,
+        stage_source_lengths,
+        stage_early_counts,
         status,
         states,
         effective_max_early,

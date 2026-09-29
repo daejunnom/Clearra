@@ -61,6 +61,10 @@ pub struct RecoveryBuildStep {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryBuildFixedReport {
+    pub middle_target: [u64; 4],
+    pub stage_targets: Vec<[u64; 4]>,
+    pub stage_source_lengths: Vec<u16>,
+    pub stage_early_counts: Vec<u8>,
     pub status: RecoveryBuildStatus,
     pub states: usize,
     pub effective_max_early: usize,
@@ -166,6 +170,10 @@ impl RecoveryBuildFixedQuery {
                 .ok_or(RecoveryBuildError::CounterOverflow)?;
             if let Some((steps, terminal)) = found {
                 return Ok(RecoveryBuildFixedReport {
+                    middle_target: self.fields.middle.words(),
+                    stage_targets: Vec::new(),
+                    stage_source_lengths: Vec::new(),
+                    stage_early_counts: Vec::new(),
                     status: if maximum == 0 {
                         RecoveryBuildStatus::Normal
                     } else {
@@ -182,6 +190,10 @@ impl RecoveryBuildFixedQuery {
             }
         }
         Ok(RecoveryBuildFixedReport {
+            middle_target: self.fields.middle.words(),
+            stage_targets: Vec::new(),
+            stage_source_lengths: Vec::new(),
+            stage_early_counts: Vec::new(),
             status: RecoveryBuildStatus::NoPath,
             states,
             effective_max_early: max,

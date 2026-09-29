@@ -5,6 +5,8 @@ use clearra_forward_search::{CrossStageEarlyLimit, RecoveryBuildFields, Recovery
 
 pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
     let fail = |message: &str| WebCommandError::new(WebCommandErrorCode::InvalidValue, message);
+    let mut stage_targets = Vec::new();
+    let mut stage_supplies = Vec::new();
     let mut height = 8;
     let mut workers = None;
     let mut use_all = false;
@@ -36,10 +38,19 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
             "--no-preserve-b2b" => "--preserve-b2b",
             other => other,
         };
-        if identity != "--required-solution" && !seen.insert(identity) {
+        if !["--required-solution", "--stage-target", "--stage-supply"].contains(&identity)
+            && !seen.insert(identity)
+        {
             return Err(fail("recovery-build option occurs more than once"));
         }
         match option {
+            "--stage-target" => stage_targets.push(Board256Mask::from_words(parse_board_words(
+                next_value(tokens, &mut cursor, option)?,
+                option,
+            )?)),
+            "--stage-supply" => {
+                stage_supplies.push(next_value(tokens, &mut cursor, option)?.to_owned())
+            }
             "--start-mask" => {
                 initial = Board256Mask::from_words(parse_board_words(
                     next_value(tokens, &mut cursor, option)?,
@@ -127,7 +138,38 @@ pub(super) fn parse(tokens: &[String]) -> Result<WebCommandRequest, WebCommandEr
             cursor += 1;
         }
     }
+    let chain_stages = if stage_targets.is_empty() && stage_supplies.is_empty() {
+        Vec::new()
+    } else {
+        if stage_targets.len() < 3
+            || stage_targets.len() != stage_supplies.len()
+            || middle.is_some()
+            || result.is_some()
+            || first.is_some()
+            || second.is_some()
+        {
+            return Err(fail(
+                "stage targets and supplies must be paired, without legacy two-stage flags",
+            ));
+        }
+        stage_targets
+            .into_iter()
+            .zip(stage_supplies)
+            .map(|(target, supply)| clearra_forward_search::RecoveryChainStage { target, supply })
+            .collect::<Vec<_>>()
+    };
+    if !chain_stages.is_empty() {
+        let compiled =
+            clearra_forward_search::RecoveryBuildFields::from_chain(height, initial, &chain_stages)
+                .map_err(|e| fail(&format!("invalid stage fields: {e:?}")))?;
+        middle = Some(compiled.middle);
+        result = Some(compiled.result);
+        first = Some(chain_stages[0].supply.clone());
+        second = Some(chain_stages.last().unwrap().supply.clone());
+        all_solutions = true;
+    }
     let query = RecoveryBuildQuery {
+        chain_stages,
         all_solutions,
         minimum_solutions,
         required_solution_keys,

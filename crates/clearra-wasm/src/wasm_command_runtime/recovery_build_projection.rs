@@ -33,6 +33,16 @@ pub(super) fn copy_example(
     ledger: &mut WasmFiniteMemoryLedger,
 ) -> Result<RecoveryBuildExamplePayload, WasmCommandRuntimeError> {
     Ok(RecoveryBuildExamplePayload {
+        middle_target_mask: try_owned_string(&source.middle_target_mask, ledger)?,
+        stage_target_masks: try_owned_vec(&source.stage_target_masks, ledger, |s, l| {
+            try_owned_string(s, l)
+        })?,
+        stage_source_lengths: try_owned_vec(&source.stage_source_lengths, ledger, |s, l| {
+            try_owned_string(s, l)
+        })?,
+        stage_early_counts: try_owned_vec(&source.stage_early_counts, ledger, |s, l| {
+            try_owned_string(s, l)
+        })?,
         first_pattern: try_owned_string(&source.first_pattern, ledger)?,
         second_pattern: try_owned_string(&source.second_pattern, ledger)?,
         first_queue: try_owned_string(&source.first_queue, ledger)?,
@@ -52,6 +62,12 @@ pub(super) fn copy_payload(
     ledger: &mut WasmFiniteMemoryLedger,
 ) -> Result<RecoveryBuildPayload, WasmCommandRuntimeError> {
     Ok(RecoveryBuildPayload {
+        stage_target_masks: try_owned_vec(&source.stage_target_masks, ledger, |s, l| {
+            try_owned_string(s, l)
+        })?,
+        stage_supplies: try_owned_vec(&source.stage_supplies, ledger, |s, l| {
+            try_owned_string(s, l)
+        })?,
         minimum_proven: source.minimum_proven,
         selected_solution_keys: try_owned_vec(&source.selected_solution_keys, ledger, |s, l| {
             try_owned_string(s, l)

@@ -23,6 +23,16 @@ pub(super) fn write_step(object: &mut JsonObject<'_>, source: &RecoveryBuildStep
 }
 
 pub(super) fn write_example(object: &mut JsonObject<'_>, source: &RecoveryBuildExamplePayload) {
+    object.string("middle_target_mask", &source.middle_target_mask);
+    object.array("stage_target_masks", |output| {
+        write_string_array(output, &source.stage_target_masks)
+    });
+    object.array("stage_source_lengths", |output| {
+        write_string_array(output, &source.stage_source_lengths)
+    });
+    object.array("stage_early_counts", |output| {
+        write_string_array(output, &source.stage_early_counts)
+    });
     object.string("first_pattern", &source.first_pattern);
     object.string("second_pattern", &source.second_pattern);
     object.string("first_queue", &source.first_queue);
@@ -41,6 +51,12 @@ pub(super) fn write_example(object: &mut JsonObject<'_>, source: &RecoveryBuildE
 }
 
 pub(super) fn write_payload(object: &mut JsonObject<'_>, source: &RecoveryBuildPayload) {
+    object.array("stage_target_masks", |output| {
+        write_string_array(output, &source.stage_target_masks)
+    });
+    object.array("stage_supplies", |output| {
+        write_string_array(output, &source.stage_supplies)
+    });
     object.boolean("solutions_complete", source.solutions_complete);
     object.boolean("minimum_proven", source.minimum_proven);
     object.array("selected_solution_keys", |output| {

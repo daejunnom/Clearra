@@ -11,6 +11,7 @@ fn mask(n: u64) -> Mask {
 }
 fn query() -> RecoveryBuildQuery {
     RecoveryBuildQuery {
+        chain_stages: Vec::new(),
         all_solutions: true,
         minimum_solutions: false,
         required_solution_keys: Vec::new(),
@@ -95,8 +96,8 @@ fn recovery_build_catalog_complements_and_hold_match_complete_source_union() {
     q.second_supply = "I".into();
     assert_eq!(
         compare(q).solutions.len(),
-        2,
-        "4x2 has two horizontal I or two O tilings under these supplies"
+        4,
+        "4x2 has two I/O tilings on each side of the symmetric initial field"
     );
 }
 #[test]

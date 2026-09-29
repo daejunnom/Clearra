@@ -48,7 +48,7 @@
   export let enableGlobalPaste = true;
   // Optional snapshot references are visual context only and never enter edits/imports.
   export let occupiedTone: 'dark' | 'medium' | 'light' | null = null;
-  export let referenceLayers: Array<{ mask: bigint; tone: 'dark' | 'medium' | 'light'; label: string }> = [];
+  export let referenceLayers: Array<{ mask: bigint; tone: 'dark' | 'medium' | 'light'; label: string; hatch?: 'forward' | 'backward' }> = [];
   const tones = { dark: '#606060', medium: '#a0a0a0', light: '#dedede' };
   // Pass every changing value explicitly so legacy Svelte tracks painted cells.
   function cellTone(x: number, y: number, currentMode: BoardEditorMode, mask: bigint,
@@ -312,6 +312,7 @@
         <button type="button" title={label('undo')} aria-label={label('undo')} disabled={!undoStack.length} on:click={undo}>
           <Undo2 size={16} strokeWidth={1.8} />
         </button>
+    <slot name="after-undo" />
         <button type="button" title={label('redo')} aria-label={label('redo')} disabled={!redoStack.length} on:click={redo}>
           <Redo2 size={16} strokeWidth={1.8} />
         </button>
@@ -414,6 +415,7 @@
             class:existing={boardCellOccupied(existingMask, x, y)}
             class:reference={mode === 'forward' && !boardCellOccupied(existingMask, x, y) && Boolean(cellTone(x, y, mode, existingMask, occupiedTone, referenceLayers))}
             style:background-color={cellTone(x, y, mode, existingMask, occupiedTone, referenceLayers)}
+            class:reverse-hatch={referenceLayers.find(layer=>boardCellOccupied(layer.mask,x,y))?.hatch==='backward'}
             title={referenceLabel(x, y, referenceLayers) || undefined}
             class:target={mode === 'build-probability' && boardCellOccupied(targetMask, x, y)}
             aria-label={`${labelOverride ?? label(mode === 'pc' ? 'field' : mode === 'forward' || activeLayer === 'existing' ? 'existingField' : 'targetBuild')} ${x + 1}, ${y + 1}`}
@@ -504,4 +506,5 @@
     .layer-help { align-items: flex-start; flex-direction: column; }
     .layer-help p { text-align: left; }
   }
+  .board button.reference.reverse-hatch { background-image: repeating-linear-gradient(45deg, transparent 0, transparent 3px, rgba(0,0,0,.28) 3px, rgba(0,0,0,.28) 5px); }
 </style>

@@ -14,10 +14,9 @@ use super::{
         solver::Solver,
         source::{cancelled, Source},
     },
-    RecoveryBuildError as Error, RecoveryBuildExample, RecoveryBuildFixedQuery,
-    RecoveryBuildParallelError as ParallelError, RecoveryBuildParallelProduce as Produce,
-    RecoveryBuildParallelProgress as Progress, RecoveryBuildPopulation, RecoveryBuildQuery,
-    RecoveryBuildStatus as Status,
+    RecoveryBuildError as Error, RecoveryBuildExample, RecoveryBuildParallelError as ParallelError,
+    RecoveryBuildParallelProduce as Produce, RecoveryBuildParallelProgress as Progress,
+    RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildStatus as Status,
 };
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 pub(in crate::recovery_build) use plan::Plan;
@@ -79,8 +78,7 @@ impl Coordinator {
         let control = ExecutionControl::default();
         let prepared = PreparedPopulation::new(query)?;
         let mut diagram = Diagram::default();
-        let source =
-            Source::compile_all(&mut diagram, &prepared.first, &prepared.second, &control)?;
+        let source = Source::for_population(&mut diagram, &prepared, &control)?;
         let producer = plan::Producer::new(&prepared.query, &source, &control)?;
         Ok(Self {
             prepared,
@@ -166,6 +164,42 @@ impl Coordinator {
                 ));
             }
             if let Some(e) = example {
+                let stage = self
+                    .producer
+                    .stage(packet.task.plan.orientation)
+                    .ok_or(Error::PatternDomainUnavailable)?;
+                let lengths = super::chain::lengths(&self.prepared.query)?;
+                let expected_targets = stage
+                    .chain_targets
+                    .iter()
+                    .map(|m| m.words())
+                    .collect::<Vec<_>>();
+                if e.path.middle_target != stage.fields.middle.words()
+                    || e.path.result_target != stage.fields.result.words()
+                    || e.path.stage_targets != expected_targets
+                    || e.path.stage_source_lengths != lengths
+                {
+                    return Err(ParallelError::InvalidWire(
+                        "catalog witness stage identity mismatch",
+                    ));
+                }
+                let future = if lengths.is_empty() {
+                    stage.prepared.result_pieces
+                } else {
+                    stage.chain_targets[1..]
+                        .iter()
+                        .map(|t| t.count_ones() as usize / 4)
+                        .sum()
+                };
+                if e.path.effective_max_early
+                    != self
+                        .prepared
+                        .query
+                        .early_limit
+                        .effective_max(future, future)
+                {
+                    return Err(ParallelError::InvalidWire("catalog early policy mismatch"));
+                }
                 if e.first_pattern >= self.prepared.first.pattern_count()
                     || e.second_pattern >= self.prepared.second.pattern_count()
                     || e.path.status != status
@@ -174,8 +208,19 @@ impl Coordinator {
                 {
                     return Err(ParallelError::InvalidWire("catalog example outside source"));
                 }
-                e.first_queue = self.prepared.first.sequence_at(e.first_pattern).to_vec();
-                e.second_queue = self.prepared.second.sequence_at(e.second_pattern).to_vec();
+                let ranked_first = self.prepared.first.sequence_at(e.first_pattern);
+                let ranked_second = self.prepared.second.sequence_at(e.second_pattern);
+                if e.first_queue.len() != usize::from(self.source.first_len)
+                    || e.second_queue.as_slice() != ranked_second.as_ref()
+                    || (self.prepared.stages.is_empty()
+                        && e.first_queue.as_slice() != ranked_first.as_ref())
+                    || (!self.prepared.stages.is_empty()
+                        && !e.first_queue.starts_with(&ranked_first))
+                {
+                    return Err(ParallelError::InvalidWire(
+                        "catalog witness source ranks differ",
+                    ));
+                }
                 let rest = self.source.follow_first(&self.diagram, id, &e.first_queue);
                 if !self
                     .source
@@ -200,7 +245,81 @@ impl Coordinator {
                     early += usize::from(before && step.result_target);
                     before &= !step.middle_complete;
                 }
-                if early != e.path.actual_early || early > e.path.effective_max_early {
+                if !lengths.is_empty() {
+                    use clearra_core_domain::board::standard_pc_board::Board256Mask as Mask;
+                    let mut boundaries = vec![0u8; lengths.len() - 1];
+                    let mut used = Mask::EMPTY;
+                    let mut source_used = vec![0usize; lengths.len()];
+                    let mut balances = vec![[0i16; 7]; lengths.len()];
+                    let mut tokens = std::collections::BTreeSet::new();
+                    for step in &e.path.steps {
+                        if !tokens.insert(step.source_index) {
+                            return Err(ParallelError::InvalidWire("reused stage token"));
+                        }
+                        let mut cells = Mask::EMPTY;
+                        for &cell in &step.logical_cells {
+                            cells = cells.union(
+                                Mask::singleton(cell).map_err(|_| Error::BoardOutsideField)?,
+                            );
+                        }
+                        let owner = stage
+                            .chain_targets
+                            .iter()
+                            .position(|target| cells.without(*target).is_empty())
+                            .ok_or(Error::PatternDomainUnavailable)?;
+                        if cells.count_ones() != 4
+                            || cells.intersects(used)
+                            || step.result_target != (owner + 1 == lengths.len())
+                        {
+                            return Err(ParallelError::InvalidWire(
+                                "catalog stage cell ownership mismatch",
+                            ));
+                        }
+                        let mut end = 0usize;
+                        let source = lengths
+                            .iter()
+                            .position(|len| {
+                                end += usize::from(*len);
+                                step.source_index < end
+                            })
+                            .ok_or(Error::PatternDomainUnavailable)?;
+                        source_used[source] += 1;
+                        let piece = super::search::piece_index(step.piece);
+                        balances[source][piece] += 1;
+                        balances[owner][piece] -= 1;
+                        let mut prefix = Mask::EMPTY;
+                        for boundary in 0..owner {
+                            prefix = prefix.union(stage.chain_targets[boundary]);
+                            if !prefix.without(used).is_empty() {
+                                boundaries[boundary] = boundaries[boundary]
+                                    .checked_add(1)
+                                    .ok_or(Error::CounterOverflow)?;
+                            }
+                        }
+                        used = used.union(cells);
+                    }
+                    early = usize::from(boundaries.iter().copied().max().unwrap_or(0));
+                    if boundaries != e.path.stage_early_counts
+                        || early != e.path.actual_early
+                        || ((status == Status::Normal) != (early == 0))
+                        || source_used
+                            .iter()
+                            .zip(&stage.chain_targets)
+                            .take(lengths.len() - 1)
+                            .any(|(&n, t)| n != t.count_ones() as usize / 4)
+                        || (!self.prepared.query.allow_piece_exchange
+                            && balances.iter().any(|b| *b != [0; 7]))
+                    {
+                        return Err(ParallelError::InvalidWire(
+                            "catalog stage boundary proof mismatch",
+                        ));
+                    }
+                } else if !e.path.stage_early_counts.is_empty() {
+                    return Err(ParallelError::InvalidWire("unexpected stage boundaries"));
+                }
+                if (self.prepared.stages.is_empty() && early != e.path.actual_early)
+                    || e.path.actual_early > e.path.effective_max_early
+                {
                     return Err(ParallelError::InvalidWire(
                         "catalog example violates early limit",
                     ));
@@ -325,68 +444,23 @@ impl Coordinator {
                 .ok_or(Error::PatternDomainUnavailable)?
                 .languages[1];
             let language = self.diagram.intersect(language, recovery)?;
-            let (i, j) = first_pair(
+            let (i, j, first, second) = first_pair(
                 &self.prepared,
                 &self.source,
                 &self.diagram,
                 language,
                 control,
             )?;
-            let fields = Geometry::new(&self.prepared.query, control)?.stages
-                [usize::from(plan.orientation)]
-            .fields
-            .clone();
-            let first = self.prepared.first.sequence_at(i).to_vec();
-            let second = self.prepared.second.sequence_at(j).to_vec();
-            let q = &self.prepared.query;
-            let fixed = RecoveryBuildFixedQuery {
-                fields: fields.clone(),
-                first_supply: first.clone(),
-                second_supply: second.clone(),
-                early_limit: q.early_limit,
-                allow_piece_exchange: q.allow_piece_exchange,
-                hold_enabled: q.hold_enabled,
-                preserve_b2b: q.preserve_b2b,
-                initial_b2b: q.initial_b2b,
-                rule_profile: q.rule_profile,
-                spin_profile: q.spin_profile,
-            };
-            // Reconstruct one already-proved witness under this plan. This is
-            // not used to manufacture or sample coverage.
-            let prepared = fields.prepare()?;
-            let mut physical_to_logical = Vec::new();
-            let mut logical = 0usize;
-            let full = crate::board::ForwardBoard::from_mask(fields.initial.union(fields.middle));
-            for _ in 0..fields.height {
-                while logical < usize::from(fields.height)
-                    && full.row_bits(10, logical as u8) == 1023
-                {
-                    logical += 1;
-                }
-                physical_to_logical.push(logical);
-                logical += 1;
-            }
-            let accepts = |piece: clearra_core_domain::piece::piece_kind::PieceKind,
-                           result: bool,
-                           rows: &[u16]| {
-                let tiles = if result { &plan.result } else { &plan.middle };
-                tiles.iter().any(|t| {
-                    t.piece as usize == super::search::piece_index(piece) && {
-                        let mask = crate::board::ForwardBoard::from_words(t.cells);
-                        let mut expected = vec![0_u16; prepared.middle.len()];
-                        for y in 0..fields.height {
-                            let logical = if result {
-                                physical_to_logical[usize::from(y)]
-                            } else {
-                                usize::from(y)
-                            };
-                            expected[logical] = mask.row_bits(10, y);
-                        }
-                        expected == rows
-                    }
-                })
-            };
-            let path = fixed.search_with_filter(control, &accepts)?;
+            let geometry = Geometry::new(&self.prepared.query, control)?;
+            let mut solver = Solver::new(
+                self.prepared.query.clone(),
+                self.source.clone(),
+                self.diagram.clone(),
+                geometry,
+            )
+            .with_plan(plan);
+            while !solver.advance(256, control)? {}
+            let path = solver.witness(&first, &second, Status::Recovery, control)?;
             if path.status != Status::Recovery {
                 return Err(Error::PatternDomainUnavailable.into());
             }
@@ -424,22 +498,50 @@ fn first_pair(
     prepared: &PreparedPopulation,
     source: &Source,
     diagram: &Diagram,
-    language: Id,
+    mut language: Id,
     control: &ExecutionControl,
-) -> Result<(usize, usize), Error> {
-    for i in 0..prepared.first.pattern_count() {
+) -> Result<
+    (
+        usize,
+        usize,
+        Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
+        Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
+    ),
+    Error,
+> {
+    use super::staged::source::PIECES;
+    let mut queue = Vec::with_capacity(usize::from(source.end));
+    for level in 0..source.end {
         cancelled(control)?;
-        let rest = source.follow_first(diagram, language, &prepared.first.sequence_at(i));
-        if rest == NONE {
-            continue;
-        }
-        for j in 0..prepared.second.pattern_count() {
-            if source.accepts_second(diagram, rest, &prepared.second.sequence_at(j)) {
-                return Ok((i, j));
-            }
-        }
+        let piece = (0..7)
+            .find(|&p| diagram.follow(language, level, p) != NONE)
+            .ok_or(Error::PatternDomainUnavailable)?;
+        language = diagram.follow(language, level, piece);
+        queue.push(PIECES[piece]);
     }
-    Err(Error::PatternDomainUnavailable)
+    if language != super::staged::diagram::ALL {
+        return Err(Error::PatternDomainUnavailable);
+    }
+    let first = queue[..usize::from(source.first_len)].to_vec();
+    let second = queue[usize::from(source.first_len)..].to_vec();
+    let first_rank_queue = if prepared.stages.is_empty() {
+        first.as_slice()
+    } else {
+        &first[..prepared.first.sequence_len_at(0)]
+    };
+    let rank = |u: &clearra_supply::pattern_universe::MaterializedPatternUniverse,
+                q: &[clearra_core_domain::piece::piece_kind::PieceKind]| {
+        // This enumerates ONE source, never the Cartesian stage product.
+        (0..u.pattern_count())
+            .find(|&i| u.sequence_at(i).as_ref() == q)
+            .ok_or(Error::PatternDomainUnavailable)
+    };
+    Ok((
+        rank(&prepared.first, first_rank_queue)?,
+        rank(&prepared.second, &second)?,
+        first,
+        second,
+    ))
 }
 fn measure(
     prepared: &PreparedPopulation,
@@ -450,6 +552,12 @@ fn measure(
 ) -> Result<(u128, f64), Error> {
     if language == NONE {
         return Ok((0, 0.0));
+    }
+    if !prepared.stages.is_empty() {
+        cancelled(control)?;
+        let valid = diagram.intersect(language, source.universe)?;
+        let count = diagram.count(valid, 0, source.end)?;
+        return Ok((count, count as f64 / prepared.possible as f64));
     }
     let mut cache = HashMap::<Id, (u128, f64)>::new();
     let mut count = 0_u128;
@@ -532,8 +640,7 @@ impl Worker {
         let task = wire::read_task(bytes, &self.init)?;
         if self.blueprint.is_none() {
             let mut d = Diagram::default();
-            let s =
-                Source::compile_all(&mut d, &self.prepared.first, &self.prepared.second, control)?;
+            let s = Source::for_population(&mut d, &self.prepared, control)?;
             self.blueprint = Some((s, d));
         }
         let geometry = match self.geometry.take() {
@@ -580,15 +687,13 @@ impl Worker {
             if language == NONE {
                 continue;
             }
-            let (i, j) = first_pair(
+            let (i, j, first, second) = first_pair(
                 &self.prepared,
                 &solver.source,
                 &solver.diagram,
                 language,
                 control,
             )?;
-            let first = self.prepared.first.sequence_at(i).to_vec();
-            let second = self.prepared.second.sequence_at(j).to_vec();
             let path = solver.witness(&first, &second, status, control)?;
             *slot = Some(RecoveryBuildExample {
                 first_pattern: i,

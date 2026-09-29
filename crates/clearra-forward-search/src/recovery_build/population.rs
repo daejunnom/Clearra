@@ -12,6 +12,7 @@ use clearra_supply::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryBuildQuery {
+    pub chain_stages: Vec<super::chain::RecoveryChainStage>,
     pub all_solutions: bool,
     pub minimum_solutions: bool,
     pub required_solution_keys: Vec<String>,
@@ -92,6 +93,9 @@ impl RecoveryBuildQuery {
             return Err(RecoveryBuildError::InvalidSupplyPattern);
         }
 
+        if !self.chain_stages.is_empty() {
+            return super::chain::validate(self);
+        }
         for input in [&self.first_supply, &self.second_supply] {
             let parsed = QueuePatternExpression::parse(input, 0)
                 .map_err(|_| RecoveryBuildError::InvalidSupplyPattern)?;
@@ -119,6 +123,7 @@ impl RecoveryBuildQuery {
 /// never an allocated list of pairs. Serial and parallel use this same kernel.
 pub(super) struct PreparedPopulation {
     pub query: RecoveryBuildQuery,
+    pub stages: Vec<clearra_supply::pattern_universe::MaterializedPatternUniverse>,
     pub first: clearra_supply::pattern_universe::MaterializedPatternUniverse,
     pub second: clearra_supply::pattern_universe::MaterializedPatternUniverse,
     pub possible: u128,
@@ -132,13 +137,28 @@ impl PreparedPopulation {
             PatternUniverseMaterializer::queue_pattern_expression(&expression, 0)
                 .map_err(|_| RecoveryBuildError::PatternDomainUnavailable)
         };
-        let first = parse(&query.first_supply)?;
-        let second = parse(&query.second_supply)?;
-        let possible = (first.pattern_count() as u128)
-            .checked_mul(second.pattern_count() as u128)
-            .ok_or(RecoveryBuildError::CounterOverflow)?;
+        let stages = query
+            .chain_stages
+            .iter()
+            .map(|s| parse(&s.supply))
+            .collect::<Result<Vec<_>, _>>()?;
+        let first = parse(stages.first().map_or(query.first_supply.as_str(), |_| {
+            query.chain_stages[0].supply.as_str()
+        }))?;
+        let second = parse(stages.last().map_or(query.second_supply.as_str(), |_| {
+            query.chain_stages.last().unwrap().supply.as_str()
+        }))?;
+        let possible = if stages.is_empty() {
+            (first.pattern_count() as u128).checked_mul(second.pattern_count() as u128)
+        } else {
+            stages
+                .iter()
+                .try_fold(1u128, |n, s| n.checked_mul(s.pattern_count() as u128))
+        }
+        .ok_or(RecoveryBuildError::CounterOverflow)?;
         Ok(Self {
             query,
+            stages,
             first,
             second,
             possible,

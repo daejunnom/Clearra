@@ -1,15 +1,15 @@
 //! Query-bound value packets; graph references are local postorder indices.
 use super::*;
 use crate::recovery_build::parallel::wire::{read_path, write_path, Reader, Writer};
-const TASK: &[u8] = b"RCATK\x02";
-const RESULT: &[u8] = b"RCATR\x02";
+const TASK: &[u8] = b"RCATK\x03";
+const RESULT: &[u8] = b"RCATR\x03";
 fn invalid() -> ParallelError {
     ParallelError::InvalidWire("invalid recovery catalog packet")
 }
 fn write_task(w: &mut Writer, init: &[u8], task: &Task) {
     w.bytes(init);
     w.number(task.ordinal);
-    w.byte(task.plan.orientation);
+    w.number(u128::from(task.plan.orientation));
     for tiles in [&task.plan.middle, &task.plan.result] {
         w.number(tiles.len() as u128);
         for tile in tiles {
@@ -23,10 +23,7 @@ fn task_read(r: &mut Reader<'_>, init: &[u8]) -> Result<Task, ParallelError> {
         return Err(invalid());
     }
     let ordinal = r.number()?;
-    let orientation = r.byte()?;
-    if orientation > 1 {
-        return Err(invalid());
-    }
+    let orientation = u32::try_from(r.number()?).map_err(|_| invalid())?;
     let mut groups = [Vec::new(), Vec::new()];
     for tiles in &mut groups {
         let count = r.count(60)?;
@@ -88,6 +85,9 @@ pub(super) fn result(init: &[u8], packet: &ResultPacket) -> Vec<u8> {
         if let Some(e) = example {
             w.number(e.first_pattern as u128);
             w.number(e.second_pattern as u128);
+            for queue in [&e.first_queue, &e.second_queue] {
+                w.text(&queue.iter().map(|p| p.as_ascii()).collect::<String>());
+            }
             write_path(&mut w, &e.path);
         }
     }
@@ -121,8 +121,8 @@ pub(super) fn read_result(bytes: &[u8], init: &[u8]) -> Result<ResultPacket, Par
             *example = Some(RecoveryBuildExample {
                 first_pattern: r.count(usize::MAX)?,
                 second_pattern: r.count(usize::MAX)?,
-                first_queue: Vec::new(),
-                second_queue: Vec::new(),
+                first_queue: read_queue(&mut r)?,
+                second_queue: read_queue(&mut r)?,
                 path: read_path(&mut r)?,
             });
         }
@@ -136,4 +136,21 @@ pub(super) fn read_result(bytes: &[u8], init: &[u8]) -> Result<ResultPacket, Par
         normal,
         recovery,
     })
+}
+
+fn read_queue(
+    r: &mut Reader<'_>,
+) -> Result<Vec<clearra_core_domain::piece::piece_kind::PieceKind>, ParallelError> {
+    let text = r.text()?;
+    if text.len() > usize::from(u16::MAX) {
+        return Err(invalid());
+    }
+    text.chars()
+        .map(|c| {
+            super::super::staged::source::PIECES
+                .into_iter()
+                .find(|p| p.as_ascii() == c)
+                .ok_or_else(invalid)
+        })
+        .collect()
 }

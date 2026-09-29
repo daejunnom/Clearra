@@ -24,14 +24,12 @@ use std::{collections::HashMap, sync::Arc};
 
 pub(in crate::recovery_build) struct Stage {
     pub fields: RecoveryBuildFields,
+    pub chain_targets: Vec<Mask>,
     pub prepared: PreparedFields,
     pub middle_domain: BuildStageDomain,
     pub result_domain: BuildStageDomain,
     pub result_to_logical: Vec<u8>,
     logical_to_result: Vec<Option<u8>>,
-}
-fn as_mask(board: ForwardBoard) -> Mask {
-    Mask::from_words(board.words())
 }
 fn field(height: u8, base: Mask, target: Mask) -> Result<BuildProbabilityField, Error> {
     BuildProbabilityField::from_words_preserving_height(height, base.words(), target.words())
@@ -102,6 +100,7 @@ impl Stage {
         let result_domain = BuildStageDomain::compile(field(h2, base2, fields.result)?, control)
             .map_err(domain_error)?;
         Ok(Self {
+            chain_targets: Vec::new(),
             fields,
             prepared,
             middle_domain,
@@ -114,7 +113,7 @@ impl Stage {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(in crate::recovery_build) struct Position {
-    pub stage: u8,
+    pub stage: u32,
     pub board: ForwardBoard,
     pub middle: Mask,
     pub result: Mask,
@@ -150,7 +149,7 @@ pub(in crate::recovery_build) struct Geometry {
     reach: ReachabilityWorkspace,
     profile: SpinProfile,
     preserve: bool,
-    coupled: HashMap<(u8, Mask, Mask, [u8; 7]), bool>,
+    coupled: HashMap<(u32, Mask, Mask, [u8; 7]), bool>,
     pub lock_queries: u128,
     pub cache_hits: u128,
 }
@@ -158,29 +157,15 @@ impl Geometry {
     pub fn new(query: &RecoveryBuildQuery, control: &ExecutionControl) -> Result<Self, Error> {
         cancelled(control)?;
         query.validate()?;
-        let mut fields = vec![query.fields.clone()];
-        let (base2, _, _) = place_and_clear(
-            10,
-            query.fields.height,
-            ForwardBoard::from_mask(query.fields.initial.union(query.fields.middle)),
-        );
-        // Exactly the existing Build mirror applicability rule, without a new
-        // user switch. Each target is actually verified on the original board;
-        // we do not presume that a kick table or a held piece is mirror-invariant.
-        let target = field(query.fields.height, as_mask(base2), query.fields.result)?
-            .with_horizontal_mirror_included(true);
-        if target.includes_applicable_horizontal_mirror() {
-            let mirrored = target.mirrored_horizontally().target();
-            if mirrored != query.fields.result {
-                let mut other = query.fields.clone();
-                other.result = mirrored;
-                fields.push(other);
-            }
-        }
-        let stages = fields
+        let variants = super::super::chain::orientations(query, control)?;
+        let stages = variants
             .into_iter()
-            .map(|f| Stage::compile(f, control))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(f, targets)| {
+                let mut s = Stage::compile(f, control)?;
+                s.chain_targets = targets;
+                Ok(s)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         let mut result = Self {
             stages,
             roots: Vec::new(),
@@ -197,7 +182,7 @@ impl Geometry {
         for i in 0..result.stages.len() {
             let p = &result.stages[i].prepared;
             let root = Position {
-                stage: i as u8,
+                stage: u32::try_from(i).map_err(|_| Error::CounterOverflow)?,
                 board: p.initial,
                 middle: Mask::EMPTY,
                 result: Mask::EMPTY,
@@ -265,7 +250,7 @@ impl Geometry {
         control: &ExecutionControl,
     ) -> Result<bool, Error> {
         let pos = self.position(id);
-        let stage = &mut self.stages[usize::from(pos.stage)];
+        let stage = &mut self.stages[pos.stage as usize];
         let middle = stage.fields.middle.without(pos.middle);
         let result = stage.fields.result.without(pos.result);
         if let Some(total) = inventory {
@@ -315,8 +300,8 @@ impl Geometry {
         }
         cancelled(control)?;
         let pos = self.position(id);
-        let height = self.stages[usize::from(pos.stage)].fields.height;
-        let logical_height = self.stages[usize::from(pos.stage)].prepared.middle.len();
+        let height = self.stages[pos.stage as usize].fields.height;
+        let logical_height = self.stages[pos.stage as usize].prepared.middle.len();
         let map = (0..logical_height)
             .filter(|&row| pos.deleted & (1 << row) == 0)
             .collect::<Vec<_>>();
@@ -328,7 +313,7 @@ impl Geometry {
         let mut output = Vec::new();
         for lock in locks {
             cancelled(control)?;
-            let stage = &self.stages[usize::from(pos.stage)];
+            let stage = &self.stages[pos.stage as usize];
             let mut middle = Mask::EMPTY;
             let mut result = Mask::EMPTY;
             let mut valid_first = true;
@@ -462,7 +447,7 @@ impl Geometry {
     ) -> RecoveryBuildStep {
         let before = self.position(from);
         let after = self.position(edge.next);
-        let stage = &self.stages[usize::from(before.stage)];
+        let stage = &self.stages[before.stage as usize];
         let mask = if edge.result {
             after.result.without(before.result)
         } else {
