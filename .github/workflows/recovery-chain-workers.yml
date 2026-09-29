@@ -1,0 +1,147 @@
+name: Recovery multi-boundary worker contracts
+on:
+  push:
+    branches: [codex/recovery-chain-workers-check-20260929]
+permissions:
+  contents: read
+concurrency:
+  group: recovery-chain-workers-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 623493d417c9618419fbba310e124beaae9f09f2
+          path: source
+          fetch-depth: 1
+      - name: Apply exact worker source to the compiled catalog
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = daejunnom/Clearra
+          test "$GITHUB_REF" = refs/heads/codex/recovery-chain-workers-check-20260929
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = 623493d417c9618419fbba310e124beaae9f09f2
+          test -z "$(git status --porcelain)"
+          python3 - <<'PY'
+          import base64,hashlib,json,lzma,pathlib,subprocess
+          root=pathlib.Path.cwd()
+          encoded=(root.parent/'transport/scripts/chain-workers-import/delta.b64').read_text()
+          data=lzma.decompress(base64.b64decode(encoded,validate=True),memlimit=256*1024*1024)
+          assert len(data)==24337
+          assert hashlib.sha256(data).hexdigest()=='8df47a0de123b219a42298554a4e9318298959f84f8077bd885f73523f7c827a'
+          manifest=json.loads(data)
+          assert manifest['base']=='623493d417c9618419fbba310e124beaae9f09f2'
+          assert len(manifest['files'])==7
+          seen=set()
+          for item in manifest['files']:
+              p=pathlib.PurePosixPath(item['path'])
+              assert not p.is_absolute() and '..' not in p.parts
+              assert str(p).startswith('crates/clearra-forward-search/src/') and p.suffix=='.rs'
+              assert str(p) not in seen
+              seen.add(str(p));path=root/p
+              assert path.resolve().is_relative_to(root) and not path.is_symlink()
+              if item['before'] is None:
+                  assert not path.exists()
+                  before=b''
+              else:
+                  before=path.read_bytes()
+                  assert hashlib.sha256(before).hexdigest()==item['before'],str(p)
+              lines=before.decode().splitlines(keepends=True);end=len(lines)
+              for start,stop,text in reversed(item['edits']):
+                  assert 0<=start<=stop<=end
+                  lines[start:stop]=text.splitlines(keepends=True);end=start
+              after=''.join(lines).encode()
+              assert hashlib.sha256(after).hexdigest()==item['after'],str(p)
+              path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(after)
+          out=root/'_local/artifacts/test/chain-workers-source';out.mkdir(parents=True)
+          (out/'delta.json').write_bytes(data)
+          (out/'paths.json').write_text(json.dumps(sorted(seen)))
+          PY
+          rustup show
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          python3 - <<'PY'
+          import json,pathlib,subprocess
+          paths=json.loads(pathlib.Path('_local/artifacts/test/chain-workers-source/paths.json').read_text())
+          assert set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())<=set(paths)
+          subprocess.run(['git','add','--',*paths],check=True)
+          assert set(subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines())==set(paths)
+          PY
+      - name: Publish the source-only candidate without changing main
+        id: commit
+        working-directory: source
+        run: |
+          set -euo pipefail
+          branch=codex/recovery-chain-workers-candidate-20260929
+          test -z "$(git ls-remote --heads origin "refs/heads/$branch")"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(recovery): distribute exact chain tilings over bounded query-bound workers'
+          test "$(git rev-parse HEAD^)" = 623493d417c9618419fbba310e124beaae9f09f2
+          git push origin "HEAD:refs/heads/$branch"
+          sha="$(git rev-parse HEAD)";echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "$sha" > _local/artifacts/test/chain-workers-source/source-sha.txt
+          git archive HEAD | gzip > _local/artifacts/test/chain-workers-source/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-workers-source
+          path: source/_local/artifacts/test/chain-workers-source/
+          retention-days: 14
+  contracts:
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Four-stage actual workers, serial parity and host compatibility
+        run: |
+          set -uo pipefail
+          mkdir -p _local/artifacts/test/chain-workers-contracts
+          git rev-parse HEAD > _local/artifacts/test/chain-workers-contracts/source-sha.txt
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --test-threads=1 --nocapture 2>&1 | tee _local/artifacts/test/chain-workers-contracts/core.log || result=1
+          cargo test --locked -p clearra-app recovery_solution_cover -- --test-threads=1 --nocapture 2>&1 | tee _local/artifacts/test/chain-workers-contracts/minimum.log || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --test-threads=1 2>&1 | tee _local/artifacts/test/chain-workers-contracts/cli.log || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1 2>&1 | tee _local/artifacts/test/chain-workers-contracts/wasm-host.log || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee _local/artifacts/test/chain-workers-contracts/wasm-target.log || result=1
+          exit "$result"
+      - name: Pinned frontend contracts
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile --ignore-scripts
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+          node --test packages/clearra-ui/test/recovery*.test.mjs 2>&1 | tee _local/artifacts/test/chain-workers-contracts/ui.log
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee _local/artifacts/test/chain-workers-contracts/types.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-workers-contracts
+          path: _local/artifacts/test/chain-workers-contracts/
+          retention-days: 14
