@@ -1,0 +1,169 @@
+name: Recovery chain draft compilation
+
+on:
+  push:
+    branches: [codex/recovery-chain-import-check-20260929]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recovery-chain-import-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  import:
+    if: github.repository == 'daejunnom/Clearra' && github.ref == 'refs/heads/codex/recovery-chain-import-check-20260929'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          path: source
+          fetch-depth: 1
+      - name: Apply exact source deltas to the preserved base
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          test -z "$(git status --porcelain)"
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, pathlib
+          root = pathlib.Path.cwd()
+          encoded = ''.join((root.parent / 'transport' / 'scripts' / 'chain-import' / f'part-{i}.b64').read_text() for i in range(5))
+          compressed = base64.b64decode(encoded, validate=True)
+          assert len(compressed) == 36024
+          data = lzma.decompress(compressed, memlimit=256 * 1024 * 1024)
+          assert len(data) == 138444
+          assert hashlib.sha256(data).hexdigest() == 'b4ee513452b2898a6096a7530b7933df846f3c51744458f132b6f4d4d4477283'
+          manifest = json.loads(data)
+          assert manifest['base'] == 'b781f6b6ef1c9ce27e0430f87663a92508e1cb7d'
+          assert len(manifest['files']) == 40
+          seen = set()
+          for item in manifest['files']:
+              path = pathlib.PurePosixPath(item['path'])
+              assert str(path) not in seen
+              seen.add(str(path))
+              assert not path.is_absolute() and '..' not in path.parts
+              assert path.parts[0] in ('crates', 'packages', 'scripts')
+              assert path.suffix in ('.rs', '.ts', '.svelte', '.mjs')
+              target = root / path
+              assert target.resolve().is_relative_to(root) and not target.is_symlink()
+              if item['before'] is None:
+                  assert not target.exists()
+                  old = b''
+              else:
+                  old = target.read_bytes()
+                  assert hashlib.sha256(old).hexdigest() == item['before'], str(path)
+              lines = old.decode('utf-8').splitlines(keepends=True)
+              end = len(lines)
+              for start, stop, text in reversed(item['edits']):
+                  assert 0 <= start <= stop <= end
+                  lines[start:stop] = text.splitlines(keepends=True)
+                  end = start
+              new = ''.join(lines).encode('utf-8')
+              assert hashlib.sha256(new).hexdigest() == item['after'], str(path)
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(new)
+          out = root / '_local' / 'artifacts' / 'test' / 'chain-import'
+          out.mkdir(parents=True)
+          (out / 'import.json').write_bytes(data)
+          (out / 'changed-paths.txt').write_text('\n'.join(sorted(seen)) + '\n')
+          PY
+      - name: Normalize with the pinned workspace formatter
+        working-directory: source
+        run: |
+          rustup show
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          python3 - <<'PY'
+          import pathlib, subprocess
+          allowed = set(pathlib.Path('_local/artifacts/test/chain-import/changed-paths.txt').read_text().splitlines())
+          tracked = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert tracked <= allowed, sorted(tracked - allowed)
+          subprocess.run(['git', 'add', '--', *sorted(allowed)], check=True)
+          actual = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
+          assert actual == allowed
+          PY
+      - name: Preserve source-only candidate on an isolated branch
+        id: source
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch=codex/recovery-chain-compile-candidate-20260929
+          test -z "$(git ls-remote --heads origin "refs/heads/$branch")"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(recovery): preserve initial-mirror and multi-boundary library draft for compilation'
+          sha="$(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD^)" = b781f6b6ef1c9ce27e0430f87663a92508e1cb7d
+          git push origin "HEAD:refs/heads/$branch"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "$sha" > _local/artifacts/test/chain-import/source-sha.txt
+          git archive HEAD | gzip > _local/artifacts/test/chain-import/source.tar.gz
+          echo "Isolated source: $sha. No main update, release approval, or deployment." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-import-source
+          path: source/_local/artifacts/test/chain-import/
+          retention-days: 14
+  contracts:
+    needs: import
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.import.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
+      - name: Compile and run the new Rust core and unchanged product contracts
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p _local/artifacts/test/chain-contracts
+          git rev-parse HEAD > _local/artifacts/test/chain-contracts/source-sha.txt
+          result=0
+          cargo test --locked -p clearra-forward-search recovery_build -- --test-threads=1 --nocapture 2>&1 | tee _local/artifacts/test/chain-contracts/core.log || result=1
+          cargo test --locked -p clearra-app recovery_solution_cover -- --test-threads=1 2>&1 | tee _local/artifacts/test/chain-contracts/minimum.log || result=1
+          cargo test --locked -p clearra-cli-command --test recovery_build -- --test-threads=1 2>&1 | tee _local/artifacts/test/chain-contracts/cli.log || result=1
+          cargo test --locked -p clearra-wasm --test recovery_build_wire -- --test-threads=1 2>&1 | tee _local/artifacts/test/chain-contracts/wasm-host.log || result=1
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown 2>&1 | tee _local/artifacts/test/chain-contracts/wasm-target.log || result=1
+          exit "$result"
+      - name: Pinned frontend contracts
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile --ignore-scripts
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+          node --test packages/clearra-ui/test/recovery*.test.mjs 2>&1 | tee _local/artifacts/test/chain-contracts/ui.log
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee _local/artifacts/test/chain-contracts/types.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-chain-compiled-contracts
+          path: _local/artifacts/test/chain-contracts/
+          retention-days: 14
