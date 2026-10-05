@@ -1,5 +1,61 @@
 # v0.8.1 resume: remote branch reconciliation and 24L boundary
 
+## Accepted five-profile Build matrix and next compact score boundary
+
+The next once-only resumed CI snapshot found all five runs for exact source
+`bd6e5a7366596b8252550108f27d1982b25700a4` completed successfully:
+
+| Workflow | Exact-source evidence |
+| --- | --- |
+| Clearra Management Policy | [37304969440](https://github.com/daejunnom/Clearra/actions/runs/37304969440) |
+| Recovery multi-stage regression | [37304969444](https://github.com/daejunnom/Clearra/actions/runs/37304969444) |
+| Recovery Build Regression | [37304969378](https://github.com/daejunnom/Clearra/actions/runs/37304969378) |
+| PC 24L Source Boundary | [37304969358](https://github.com/daejunnom/Clearra/actions/runs/37304969358) |
+| v0.8.1 Selective Source (Non-publishing) | [37304969436](https://github.com/daejunnom/Clearra/actions/runs/37304969436) |
+
+Remote `main` was fast-forwarded normally from `c2e61553` to this exact source
+after checking ancestry. The completed browser log confirms that all five
+profiles and all six Build result modes executed and rendered their production
+results. Native/Desktop/CLI-to-Discord and whole-set clipboard proofs also
+passed. This closes that narrow source-CI matrix, not release/readback or
+performance qualification. No branch rule or asset catalog was changed.
+
+The follow-up user audit confirms the important distinction: PC's 1--6L
+compact layout and 7--24L four-word layout are separate, but the latter still
+reports `ExtendedSearchStagesNotConnected`; the public scenario validator
+still admits only Board64. Build probability already selects an executable
+compact or extended session by actual normalized field height. Neither the
+layout test nor the one-placement extended Build proof enables public PC24.
+Connecting that public execution/reducer boundary remains Open. No huge 24L
+enumeration is required to keep that missing boundary visible.
+
+Candidate `eb0597a5` expands the previously 1L native score-minimum proof to
+1--6L while retaining the already-present ordinary minimum matrix. Its new
+shared CLI/Discord and Web fixtures use six existing cells per row and four
+empty cells, with exactly one I per target row; there are no initially full
+rows. Odd targets therefore exercise a valid initial-field query rather than
+an untileable empty field. Five profiles and four accelerator policies give
+205 CLI-to-Discord product requests, including the pre-existing products.
+The actual Web proof compares off/on payloads and exact one-member minima for
+all six targets and all five profiles. Expanded surface proof remains Open
+until this candidate's own CI executes.
+
+Focused Node source contracts (21 tests), three compact/extended routing
+contracts, JavaScript syntax, Rust formatting and the WASM Core compilation
+passed. Native-only complete-family Setup
+constructors and their import now have the same native compile boundary,
+removing the observed WASM warnings without changing the native adapter.
+The first local App run correctly rejected an unbound source identity at
+Setup admission; the production guard was not relaxed. A subsequent local run
+used committed candidate `eb0597a5a88b658a8b1497edd67c43b765b982f2` for both
+build identity fields and passed two real integration tests, including the
+expanded 1--6L reducer matrix and Setup execution. The third test explicitly
+requires downloaded signed assets and remained ignored locally; the exact
+source CI owns that unchanged signed-asset smoke. This is not five-profile
+browser or signed-asset proof for the expanded candidate.
+
+The sections below preserve earlier snapshots and do not override this one.
+
 ## Accepted main source and next bounded functional candidate
 
 The once-only resumed CI snapshot for exact candidate
