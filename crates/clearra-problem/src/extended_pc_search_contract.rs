@@ -6,8 +6,8 @@ use clearra_geometry::layout::standard_pc_layout::{
     StandardPcStateLayoutContract, StandardPcStateLayoutError,
 };
 use clearra_pc_graph::request::{
-    ExtendedPcScenarioBoard, ExtendedPcScenarioQuery, PcScenarioBoard, PcScenarioTargetFrame,
-    PcScenarioTargetFrameError,
+    ExtendedPcScenarioBoard, ExtendedPcScenarioBoardError, ExtendedPcScenarioQuery,
+    PcScenarioBoard, PcScenarioQuery, PcScenarioTargetFrame, PcScenarioTargetFrameError,
 };
 
 use crate::{
@@ -44,6 +44,7 @@ impl ExtendedPcExecutionProblem {
 pub struct ExtendedPcSearchContract {
     query: ExtendedPcScenarioQuery,
     state_layout: StandardPcStateLayoutContract,
+    target_frame: PcScenarioTargetFrame,
 }
 
 impl ExtendedPcSearchContract {
@@ -54,9 +55,51 @@ impl ExtendedPcSearchContract {
         if state_layout.contract_kind() != StandardPcSearchContractKind::ExtendedBoardWords {
             return Err(ExtendedPcSearchContractError::CompactBoardContractRequired);
         }
+        let board = query.initial_board();
+        let target_frame = PcScenarioBoard::standard_10_from_words(
+            u16::from(board.visible_height()),
+            board.occupied_words(),
+        )
+        .map_err(ExtendedPcSearchContractError::TargetFrame)?
+        .to_standard_target_frame(state_layout.target_lines())
+        .map_err(ExtendedPcSearchContractError::TargetFrame)?;
         Ok(Self {
             query,
             state_layout,
+            target_frame,
+        })
+    }
+
+    /// Binds the shared PC input to its explicit extended target. Input-field
+    /// height is not a substitute for target height: initial full rows may be
+    /// cleared, and a short initial field may be searched inside a taller PC.
+    /// Every non-board query policy is moved unchanged, without a compact
+    /// placeholder or a second normalization that loses the initial clear.
+    ///
+    /// This is a compiler boundary only. It does not enable public extended
+    /// reducers, certify CountAll multiplicity, or redirect the 1..=6 fast path.
+    pub fn compile_standard_query(
+        query: PcScenarioQuery,
+        target_lines: u8,
+    ) -> Result<Self, ExtendedPcSearchContractError> {
+        let state_layout = StandardPcStateLayoutContract::compile(target_lines)
+            .map_err(ExtendedPcSearchContractError::StateLayout)?;
+        if state_layout.contract_kind() != StandardPcSearchContractKind::ExtendedBoardWords {
+            return Err(ExtendedPcSearchContractError::CompactBoardContractRequired);
+        }
+        let target_frame = query
+            .initial_board()
+            .to_standard_target_frame(target_lines)
+            .map_err(ExtendedPcSearchContractError::TargetFrame)?;
+        let board = ExtendedPcScenarioBoard::standard_10_from_words(
+            target_lines,
+            target_frame.normalized_board().occupied_words(),
+        )
+        .map_err(ExtendedPcSearchContractError::ExtendedBoard)?;
+        Ok(Self {
+            query: query.map_initial_board(|_| board),
+            state_layout,
+            target_frame,
         })
     }
 
@@ -83,14 +126,7 @@ impl ExtendedPcSearchContract {
     pub fn execution_problem(
         &self,
     ) -> Result<ExtendedPcExecutionProblem, ExtendedPcSearchContractError> {
-        let input = PcScenarioBoard::standard_10_from_words(
-            u16::from(self.board().visible_height()),
-            self.board().occupied_words(),
-        )
-        .map_err(ExtendedPcSearchContractError::TargetFrame)?;
-        let target_frame = input
-            .to_standard_target_frame(self.board().visible_height())
-            .map_err(ExtendedPcSearchContractError::TargetFrame)?;
+        let target_frame = self.target_frame.clone();
         let required_pieces = target_frame.required_pieces();
         let maximum_pieces = self.query.piece_window().max_pieces();
         if maximum_pieces < required_pieces {
@@ -168,6 +204,7 @@ pub enum ExtendedPcSearchContractError {
     CompactBoardContractRequired,
     StateLayout(StandardPcStateLayoutError),
     TargetFrame(PcScenarioTargetFrameError),
+    ExtendedBoard(ExtendedPcScenarioBoardError),
     Field(BuildProbabilityFieldError),
     Problem(ProblemCompileError),
     PieceWindowTooShort {

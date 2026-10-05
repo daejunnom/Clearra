@@ -2,7 +2,7 @@ name: PC 24L Source Boundary (Non-publishing)
 
 on:
   push:
-    branches: ["codex/converge-pc24-integration-20261005", "codex/converge-main-product-fixes-20261005"]
+    branches: ["codex/converge-pc24-integration-20261005", "codex/converge-main-product-fixes-20261005", "codex/pc24-target-boundary-20261006"]
     paths:
       - ".github/workflows/pc24-source-boundary.yml"
       - "crates/clearra-pc-graph/**"
@@ -30,7 +30,7 @@ env:
 
 jobs:
   input-contract:
-    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005'
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -57,7 +57,7 @@ jobs:
         run: cargo test --locked -p clearra-problem --test extended_pc_execution -- --test-threads=1
 
   inverse-lock-clear:
-    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005'
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -68,6 +68,6 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
       - name: Compile the same four-word execution bridge for WASM
         run: cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown
-      - name: Execute one placement in a four-word twenty-four-line field without large PC enumeration
+      - name: Verify one-placement Build and forced extended PC completion without large enumeration
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-core-executor --test extended_pc_ilc -- --test-threads=1

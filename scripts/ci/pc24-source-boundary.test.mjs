@@ -7,12 +7,13 @@ const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), '
 const workflow = read('.github/workflows/pc24-source-boundary.yml');
 
 test('extended functional proofs run independently of existing release and product jobs', () => {
-  const branches = ['codex/converge-pc24-integration-20261005', 'codex/converge-main-product-fixes-20261005'];
+  const branches = ['codex/converge-pc24-integration-20261005', 'codex/converge-main-product-fixes-20261005', 'codex/pc24-target-boundary-20261006'];
   assert.ok(workflow.includes(`branches: [${branches.map((branch) => JSON.stringify(branch)).join(', ')}]`));
   for (const job of ['input-contract', 'inverse-lock-clear']) {
     const section = workflow.slice(workflow.indexOf(`\n  ${job}:`));
     assert.ok(section.includes("if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005'"));
     assert.ok(section.includes("github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005'"));
+    assert.ok(section.includes("github.ref == 'refs/heads/codex/pc24-target-boundary-20261006'"));
   }
   assert.ok(!workflow.includes('needs:'));
   assert.ok(!workflow.includes('continue-on-error:'));
@@ -45,17 +46,40 @@ test('compact and general routing stay separate without claiming disconnected pu
 
 test('the compiler bridge owns the original four-word field and invokes existing ILC', () => {
   const compiler = read('crates/clearra-problem/src/extended_pc_search_contract.rs');
-  assert.ok(compiler.includes('self.board().occupied_words()'));
-  assert.ok(compiler.includes('.to_standard_target_frame(self.board().visible_height())'));
+  assert.ok(compiler.includes('board.occupied_words()'));
+  assert.ok(compiler.includes('.to_standard_target_frame(state_layout.target_lines())'));
+  assert.ok(compiler.includes('pub fn compile_standard_query('));
+  assert.ok(compiler.includes('.to_standard_target_frame(target_lines)'));
+  assert.ok(compiler.includes('query: query.map_initial_board(|_| board)'));
+  assert.ok(compiler.includes('let target_frame = self.target_frame.clone()'));
   assert.ok(compiler.includes('BuildProbabilityField::from_words_preserving_height('));
   assert.ok(compiler.includes('.map_initial_board(|_| normalized)'));
   const proof = read('crates/clearra-core-executor/tests/extended_pc_ilc.rs');
   assert.ok(proof.includes('let height = 24_u8;'));
   assert.ok(proof.includes('field.target_piece_count(), 1'));
   assert.ok(!proof.includes('top_down_t_field'));
-  assert.ok(!proof.includes('vec![PieceKind::I; pieces]'));
+  assert.ok(proof.includes('assert!(pieces <= 6)'));
+  assert.ok(proof.includes('for height in [7_u8, 8, 12, 24]'));
+  assert.ok(proof.includes('for rule in [srs(), srs_plus(), srs_x(), jstris_180(), no_kick()]'));
+  assert.ok(proof.includes('ExtendedPcSearchContract::compile_standard_query(query, height)'));
+  assert.ok(proof.includes('result.bool_field("build_path_multiplicity_counted"),'));
   assert.ok(proof.includes('WasmBuildProbabilityBackend::execute_with_control('));
   assert.ok(proof.includes('result.normalized_solution_keys()'));
   assert.ok(proof.includes('ctk2|height={height}|initial='));
   assert.ok(proof.includes('result.path_steps()[0].cleared_lines()'));
+});
+
+test('extended input proof preserves source policies without bypassing compact or public authority', () => {
+  const cases = read('crates/clearra-problem/tests/extended_pc_execution.rs');
+  for (const name of [
+    'shared_input_bridge_leaves_every_compact_target_on_the_legacy_contract',
+    'shared_input_bridge_uses_the_explicit_target_not_the_initial_field_height',
+    'shared_input_bridge_preserves_initial_clear_and_all_nonboard_policies',
+    'shared_input_bridge_cannot_hide_occupancy_above_a_smaller_target',
+    'shared_input_bridge_allows_a_tall_initial_field_only_after_real_line_clear',
+  ]) assert.ok(cases.includes(`fn ${name}()`));
+  assert.ok(cases.includes('execution.target_frame().initial_cleared_rows(), 2'));
+  assert.ok(cases.includes('assert!(!contract.runtime_capability().connected_exact())'));
+  assert.ok(cases.includes('.with_count_policy(PcCountPolicy::CountAll)'));
+  assert.ok(cases.includes('WorkerPolicy::Fixed(11)'));
 });
