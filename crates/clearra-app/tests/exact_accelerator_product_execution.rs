@@ -430,47 +430,50 @@ fn compare_products(installed: bool) {
             }
         }
     }
-    let baseline = success(&context, minimum_request(1, false, false, true, 1));
-    let expected = baseline
-        .product_capability_result()
-        .unwrap()
-        .pc_score_portfolio_v2()
-        .unwrap();
-    assert!(expected.completeness().complete());
-    for workers in supported_worker_requests() {
-        for (legal, conditioned) in [(false, false), (false, true), (true, false), (true, true)] {
-            if workers == 1 && !legal && !conditioned {
-                continue;
-            }
-            let actual = success(
-                &context,
-                minimum_request(1, legal, conditioned, true, workers),
-            );
-            assert_relation_snapshot(&actual, conditioned, installed);
-            let report = actual
-                .product_capability_result()
-                .unwrap()
-                .pc_score_portfolio_v2()
-                .unwrap();
-            assert!(report.completeness().complete());
-            assert_eq!(report.pattern_best_scores(), expected.pattern_best_scores());
-            assert_eq!(
-                report.eligible_candidate_map_sha256(),
-                expected.eligible_candidate_map_sha256()
-            );
-            assert_eq!(
-                report.score_eligibility_sha256(),
-                expected.score_eligibility_sha256()
-            );
-            assert_eq!(
-                report.selected_solution_keys(),
-                expected.selected_solution_keys()
-            );
-            assert_eq!(
+    for height in 1..=6 {
+        let baseline = success(&context, minimum_request(height, false, false, true, 1));
+        let expected = baseline
+            .product_capability_result()
+            .unwrap()
+            .pc_score_portfolio_v2()
+            .unwrap();
+        assert!(expected.completeness().complete());
+        for workers in supported_worker_requests() {
+            for (legal, conditioned) in [(false, false), (false, true), (true, false), (true, true)]
+            {
+                if workers == 1 && !legal && !conditioned {
+                    continue;
+                }
+                let actual = success(
+                    &context,
+                    minimum_request(height, legal, conditioned, true, workers),
+                );
+                assert_relation_snapshot(&actual, conditioned, installed);
+                let report = actual
+                    .product_capability_result()
+                    .unwrap()
+                    .pc_score_portfolio_v2()
+                    .unwrap();
+                assert!(report.completeness().complete());
+                assert_eq!(report.pattern_best_scores(), expected.pattern_best_scores());
+                assert_eq!(
+                    report.eligible_candidate_map_sha256(),
+                    expected.eligible_candidate_map_sha256()
+                );
+                assert_eq!(
+                    report.score_eligibility_sha256(),
+                    expected.score_eligibility_sha256()
+                );
+                assert_eq!(
+                    report.selected_solution_keys(),
+                    expected.selected_solution_keys()
+                );
+                assert_eq!(
                 portfolio_meaning(report.portfolio_alternatives()),
                 portfolio_meaning(expected.portfolio_alternatives()),
-                "score-minimals workers={workers} legal={legal} conditioned={conditioned}"
+                "score-minimals {height}L workers={workers} legal={legal} conditioned={conditioned}"
             );
+            }
         }
     }
     let baseline = success(&context, build_request(false, false));

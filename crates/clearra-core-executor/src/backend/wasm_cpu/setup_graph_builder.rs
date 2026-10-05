@@ -171,6 +171,9 @@ impl SetupGraphBuildSession {
         Self::new_internal(query, false, Some(candidates))
     }
 
+    // Only the native complete-family adapter calls this constructor. Browser
+    // Setup uses its own distributed admission rather than this native path.
+    #[cfg(not(target_family = "wasm"))]
     pub(super) fn new_parallel_with_complete_candidates(
         query: &SetupSearchQuery,
         candidates: Arc<[StandardBoard64TilingIdentity]>,

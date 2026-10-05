@@ -67,6 +67,7 @@ test('real CLI minimum, score, replay, Setup-score and Build results survive pro
   let completed = 0;
   for (const profile of profiles) {
     let setupBaseline;
+    const scoreTargetBaselines = new Map();
     for (const input of realCliProductProjectionRequests(profile)) {
       const arguments_ = input.arguments;
       const prepared = prepareClearraArguments(arguments_, { workers: 1,
@@ -103,6 +104,31 @@ test('real CLI minimum, score, replay, Setup-score and Build results survive pro
       const directProjection = assertDiscordCanonicalOnlyResult({
         exitCode: 0, signal: null, stderr: '', stdout,
       });
+      if (input.targetLines !== undefined) {
+        const projected = JSON.parse(directProjection.stdout);
+        assert.equal(projected.kind, 'pc-score-portfolio.v2');
+        const summary = projected.summary;
+        assert.ok(summary !== null && typeof summary === 'object' && !Array.isArray(summary));
+        assert.equal(summary.capability_id, 'pc.score-minimals');
+        assert.equal(summary.result_contract, 'pc-score-portfolio.v2');
+        assert.equal(summary.payload_kind, 'coverage-portfolio');
+        assert.equal(summary.optimal_cardinality, '1');
+        assert.equal(summary.members.length, 1);
+        assert.equal(summary.score_minimals_score_equality, 'score-only');
+        assert.match(summary.score_minimals_canonical_candidate_id, /^[1-9][0-9]*$/u);
+        assert.equal(summary.members[0].candidate_id, summary.score_minimals_canonical_candidate_id);
+        assert.equal(summary.members[0].normalized_solution_key,
+          summary.score_minimals_canonical_solution_key);
+        assert.equal(projected.resource_report.count_complete, true);
+        assert.equal(projected.resource_report.probability_complete, true);
+        assert.equal(projected.resource_report.truncated, false);
+        if (!scoreTargetBaselines.has(input.targetLines)) {
+          scoreTargetBaselines.set(input.targetLines, summary);
+        } else {
+          assert.deepEqual(summary, scoreTargetBaselines.get(input.targetLines),
+            `${profile}/${input.targetLines}L/${input.policy}: score minimum policy drift`);
+        }
+      }
       const actual = await executor.execute(arguments_);
       assert.equal(actual.exitCode, 0, actual.stderr);
       assert.equal(actual.signal, null);
@@ -113,8 +139,9 @@ test('real CLI minimum, score, replay, Setup-score and Build results survive pro
         'canonical projection must remain stable across runner/direct/client hops');
       completed += 1;
     }
-    t.diagnostic(`${profile}: PC three products and Setup-score/four policies, Build default, actual CLI/Discord parity`);
+    assert.deepEqual([...scoreTargetBaselines.keys()], [1, 2, 3, 4, 5, 6]);
+    t.diagnostic(`${profile}: PC three products, 1--6L initial-field score minima and Setup-score/four policies, Build default, actual CLI/Discord parity`);
   }
-  assert.equal(completed, 85);
+  assert.equal(completed, 205);
   assert.deepEqual(installedSnapshot(), before, 'result projection must not replace asset generations');
 });

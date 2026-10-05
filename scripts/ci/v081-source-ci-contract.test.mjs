@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { prepareClearraArguments } from '../../apps/clearra-discord-bot/src/clearra/command.mjs';
-import { realCliProductProjectionRequests, realCliProjectionProfiles, realSetupScoreDocument }
+import { realCliProductProjectionRequests, realCliProjectionProfiles, realPcScoreTargetCases, realSetupScoreDocument }
   from '../../apps/clearra-discord-bot/test/support/realCliProductProjectionRequests.mjs';
 
 const workflow = readFileSync(new URL('../../.github/workflows/v081-selective-source-ci.yml', import.meta.url), 'utf8').replace(/\r\n/gu, '\n');
@@ -124,7 +124,9 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes('assert.equal(report.solution_keys_complete, true'));
   assert.ok(browser.includes('assert.deepEqual(compact(build.activated), buildBaseline'));
   assert.ok(browser.includes('realCliProductProjectionRequests(profile)'));
-  assert.ok(browser.includes("['minimum', 'score-minimum', 'replay']"));
+  assert.ok(browser.includes("['minimum', 'score-minimum', 'replay', ...realPcScoreTargetCases.map(input => input.name)]"));
+  assert.ok(browser.includes('targetLines: baseline.targetLines'));
+  assert.ok(browser.includes('payload.content.payload.members.length, 1'));
   assert.ok(browser.includes('results[profile].products[name] = {'));
   assert.ok(browser.includes('Object.entries(pcProductInputs[profile])'));
   assert.ok(browser.includes('productSearchMeaning(pair.activated)'));
@@ -441,6 +443,9 @@ test('real Discord result proof uses the existing CLI and production runner with
   assert.ok(source.includes('new ClearraDirectExecutor({'));
   assert.ok(source.includes('await executor.execute(arguments_)'));
   assert.ok(source.includes('assertDiscordCanonicalOnlyResult(actual).stdout, actual.stdout'));
+  assert.ok(source.includes("assert.equal(summary.optimal_cardinality, '1')"));
+  assert.ok(source.includes('assert.equal(summary.members.length, 1)'));
+  assert.ok(source.includes('scoreTargetBaselines.get(input.targetLines)'));
   assert.ok(!source.includes('runner:'));
   assert.ok(!source.includes('options.spawn'));
   const environment = { ...process.env, CLEARRA_REAL_COMPUTE_CLI: '',
@@ -459,7 +464,7 @@ test('every actual Discord product fixture obeys the existing closed command reg
   let count = 0;
   for (const profile of realCliProjectionProfiles) {
     const requests = realCliProductProjectionRequests(profile);
-    assert.equal(requests.length, 17);
+    assert.equal(requests.length, 41);
     for (const request of requests) {
       const prepared = prepareClearraArguments(request.arguments, { workers: 1,
         logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true });
@@ -467,8 +472,8 @@ test('every actual Discord product fixture obeys the existing closed command reg
       assert.deepEqual(prepared.slice(-3), ['--format', 'json', '--include-solution-data']);
       count += 1;
     }
-    const scoreRequests = requests.filter(request => request.name === 'score-minimum');
-    assert.equal(scoreRequests.length, 4);
+    const scoreRequests = requests.filter(request => request.kind === 'pc-score-portfolio.v2');
+    assert.equal(scoreRequests.length, 28);
     for (const request of scoreRequests) {
       for (const forbidden of ['--backend', '--no-backend-fallback', '--count', '--objective', '--max-patterns'])
         assert.ok(!request.arguments.includes(forbidden), 'score product owns its execution controls');
@@ -490,8 +495,37 @@ test('every actual Discord product fixture obeys the existing closed command reg
       assert.throws(() => prepareClearraArguments([...build.arguments, flag]), /does not expose/u);
     }
   }
-  assert.equal(count, 85);
+  assert.equal(count, 205);
   assert.throws(() => realCliProductProjectionRequests('unknown-profile'), /unknown/u);
+});
+
+test('the 1--6L score fixtures bind initial area and exact queue instead of empty odd targets', () => {
+  assert.deepEqual(realPcScoreTargetCases.map(input => input.targetLines), [1, 2, 3, 4, 5, 6]);
+  for (const input of realPcScoreTargetCases) {
+    const option = name => input.arguments[input.arguments.indexOf(name) + 1];
+    const height = input.targetLines;
+    const board = BigInt(option('--board-mask'));
+    assert.equal(option('--lines'), String(height));
+    assert.equal(option('--height'), String(height));
+    assert.equal(option('--pieces'), String(height));
+    assert.equal(option('--queue'), 'I'.repeat(height));
+    assert.equal(board >> BigInt(height * 10), 0n);
+    let cells = 0;
+    for (let row = 0; row < height; row += 1) {
+      assert.equal((board >> BigInt(row * 10)) & 0x3ffn, 0x3f0n);
+      cells += 6;
+    }
+    assert.equal(height * 10 - cells, input.requiredPieces * 4);
+    for (const profile of realCliProjectionProfiles) {
+      const requests = realCliProductProjectionRequests(profile).filter(request => request.name === input.name);
+      assert.equal(requests.length, 4);
+      assert.deepEqual(requests.map(request => request.policy),
+        ['false:false', 'true:false', 'false:true', 'true:true']);
+    }
+  }
+  const app = readFileSync(new URL('../../crates/clearra-app/tests/exact_accelerator_product_execution.rs', import.meta.url), 'utf8');
+  assert.ok(app.includes('minimum_request(height, false, false, true, 1)'));
+  assert.ok(app.includes('minimum_request(height, legal, conditioned, true, workers)'));
 });
 
 test('the shared Setup-score fixture is bound to an actual Rust decoder proof without JS dependencies', () => {

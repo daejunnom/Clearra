@@ -14,10 +14,9 @@ use std::{
     },
 };
 
-use clearra_core_domain::{
-    execution_cancellation::ExecutionControl,
-    solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
-};
+use clearra_core_domain::execution_cancellation::ExecutionControl;
+#[cfg(not(target_family = "wasm"))]
+use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
 use clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet;
 use clearra_problem::{
     compile_setup_search_condition, setup_search_condition_count, SetupSearchCondition,
@@ -97,6 +96,7 @@ impl WasmSetupParallelCoordinator {
         Self::from_builder(builder, worker_count)
     }
 
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn new_with_complete_candidates(
         query: &SetupSearchQuery,
         worker_count: usize,

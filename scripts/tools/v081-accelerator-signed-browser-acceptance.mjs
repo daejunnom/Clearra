@@ -15,7 +15,7 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import { frontendAcceleratorAssets } from './clearra-frontend-paths.mjs';
 import { createClearraWasmBuildContract, clearraWasmBuildContractsEqual }
   from './clearra-wasm-build-contract.mjs';
-import { realCliProductProjectionRequests, realSetupScoreDocument }
+import { realCliProductProjectionRequests, realPcScoreTargetCases, realSetupScoreDocument }
   from '../../apps/clearra-discord-bot/test/support/realCliProductProjectionRequests.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -30,12 +30,14 @@ const buildResultSurfaces = {
 };
 const pcProductInputs = Object.fromEntries(profiles.map(profile => {
   const requests = realCliProductProjectionRequests(profile);
-  const products = Object.fromEntries(['minimum', 'score-minimum', 'replay'].map(name => {
+  const names = ['minimum', 'score-minimum', 'replay', ...realPcScoreTargetCases.map(input => input.name)];
+  const products = Object.fromEntries(names.map(name => {
     const baseline = requests.find(request => request.name === name && request.policy === 'false:false');
     const activated = requests.find(request => request.name === name && request.policy === 'true:true');
     assert.ok(baseline && activated && baseline.kind === activated.kind,
       `${profile}/${name}: the shared real CLI fixture must supply both accelerator policies`);
-    return [name, { kind: baseline.kind, baseline: baseline.arguments, activated: activated.arguments }];
+    return [name, { kind: baseline.kind, targetLines: baseline.targetLines,
+      baseline: baseline.arguments, activated: activated.arguments }];
   }));
   return [profile, products];
 }));
@@ -738,8 +740,9 @@ async function browserAcceptance() {
           const payload = sample.result.response.product_result_payload;
           assert.equal(payload?.result_kind, input.kind);
           assert.equal(payload?.contract, {
-            minimum: 'pc.minimals', 'score-minimum': 'pc.score-minimals', replay: 'pc.path'
-          }[name]);
+            'pc-minimum-cover.v2': 'pc.minimals', 'pc-score-portfolio.v2': 'pc.score-minimals',
+            'pc-path-family.v2': 'pc.path'
+          }[input.kind]);
           assert.equal(payload?.content.payload_kind,
             name === 'replay' ? 'pc-path-family' : 'coverage-portfolio');
           assert.equal(sample.result.search_report.count_complete, true);
@@ -750,6 +753,12 @@ async function browserAcceptance() {
           } else {
             assert.equal(payload.content.payload.page_handle_available, true);
             if (profile === 'srs-plus') assert.ok(payload.content.payload.members.length > 0);
+            if (input.targetLines !== undefined) {
+              assert.equal(payload.content.payload.optimal_cardinality, '1',
+                `${profile}/${input.targetLines}L: the exact optimum must be one`);
+              assert.equal(payload.content.payload.members.length, 1,
+                `${profile}/${input.targetLines}L: the fixed I queue needs one exact minimum member`);
+            }
           }
         }
         assert.deepEqual(productSearchMeaning(pair.activated), productSearchMeaning(pair.baseline),
