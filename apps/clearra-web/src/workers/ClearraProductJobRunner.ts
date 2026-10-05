@@ -10,6 +10,8 @@ import type { SharedExecutionResourceAuthority } from './SharedExecutionResource
 import { WasmJobRunner } from './WasmJobRunner';
 import type { Pc4HostGeneration } from '../../../../scripts/release/pc4/qualify-upstream-generation.mjs';
 import type {
+  AcceleratorWorkerRelation,
+  AcceleratorWorkerSynopsis,
   ClearraWasmHostCapabilities,
   ClearraWasmModule
 } from './clearraWasmRuntime';
@@ -23,7 +25,9 @@ export class ClearraProductJobRunner {
     private readonly lifecycleOwnerId: string,
     private readonly hostCapabilities: ClearraWasmHostCapabilities,
     private readonly resourceAuthority?: SharedExecutionResourceAuthority,
-    private readonly resourceWaitTimeoutMs?: number
+    private readonly resourceWaitTimeoutMs?: number,
+    private readonly legalBoardSynopsis?: AcceleratorWorkerSynopsis | null,
+    private readonly conditionedPack?: AcceleratorWorkerRelation | null
   ) {}
 
   async run(
@@ -42,7 +46,10 @@ export class ClearraProductJobRunner {
       this.hostCapabilities,
       undefined,
       this.resourceAuthority,
-      this.resourceWaitTimeoutMs
+      this.resourceWaitTimeoutMs,
+      'auto',
+      this.legalBoardSynopsis,
+      this.conditionedPack
     );
     this.activeRunner = distributed;
     try {
@@ -92,6 +99,7 @@ export class ClearraProductJobRunner {
     this.activeRunner?.dispose();
     this.activeRunner = null;
   }
+
 }
 
 function serialExecutionProgressEvent(jobId: number): Extract<ClearraWasmWorkerEvent, { event: 'progress' }> {

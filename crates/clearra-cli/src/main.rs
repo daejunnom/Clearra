@@ -1,6 +1,8 @@
 const CLI_PRODUCT_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 fn run_cli_product() -> i32 {
+    #[cfg(feature = "local-search-ab")]
+    clearra_app::configure_local_product_search_benchmark();
     #[cfg(feature = "wasm-cpu-runtime")]
     let _native_build_probability_registration =
         clearra_app::register_system_native_build_probability_host();

@@ -17,6 +17,8 @@ pub struct SetupArgs {
     path_detail_condition_id: Option<String>,
     queue_observation_policy: QueueObservationPolicy,
     tablebase_requested: Option<bool>,
+    exact_legal_board_enabled: Option<bool>,
+    conditioned_reachability_enabled: Option<bool>,
     workers: Option<usize>,
     automatic_worker_limit: Option<usize>,
     use_all_logical_processors: bool,
@@ -39,6 +41,8 @@ impl SetupArgs {
             path_detail_condition_id: None,
             queue_observation_policy: QueueObservationPolicy::default(),
             tablebase_requested: None,
+            exact_legal_board_enabled: None,
+            conditioned_reachability_enabled: None,
             workers: None,
             automatic_worker_limit: None,
             use_all_logical_processors: false,
@@ -101,6 +105,14 @@ impl SetupArgs {
 
     pub fn tablebase_requested(&self) -> Option<bool> {
         self.tablebase_requested
+    }
+
+    pub fn exact_legal_board_enabled(&self) -> Option<bool> {
+        self.exact_legal_board_enabled
+    }
+
+    pub fn conditioned_reachability_enabled(&self) -> Option<bool> {
+        self.conditioned_reachability_enabled
     }
 
     pub fn workers(&self) -> Option<usize> {
@@ -173,6 +185,16 @@ impl SetupArgs {
 
     pub fn with_tablebase_requested(mut self, requested: Option<bool>) -> Self {
         self.tablebase_requested = requested;
+        self
+    }
+
+    pub fn with_exact_legal_board_enabled(mut self, enabled: Option<bool>) -> Self {
+        self.exact_legal_board_enabled = enabled;
+        self
+    }
+
+    pub fn with_conditioned_reachability_enabled(mut self, enabled: Option<bool>) -> Self {
+        self.conditioned_reachability_enabled = enabled;
         self
     }
 

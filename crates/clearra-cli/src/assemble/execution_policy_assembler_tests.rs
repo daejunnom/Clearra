@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn preserves_independent_exact_accelerator_flags_without_changing_execution_policy() {
+    let baseline =
+        ExecutionPolicyAssembler::from_pc_args(&PcArgs::new(4)).expect("baseline policy");
+    for legal in [false, true] {
+        for conditioned in [false, true] {
+            let args = PcArgs::new(4)
+                .with_exact_legal_board_enabled(Some(legal))
+                .with_conditioned_reachability_enabled(Some(conditioned));
+            let policy = ExecutionPolicyAssembler::from_pc_args(&args).expect("accelerator policy");
+
+            assert_eq!(policy.exact_legal_board_enabled(), legal);
+            assert_eq!(policy.conditioned_reachability_enabled(), conditioned);
+            assert_eq!(policy.workers(), baseline.workers());
+            assert_eq!(policy.worker_policy(), baseline.worker_policy());
+            assert_eq!(policy.requested_backend(), baseline.requested_backend());
+            assert_eq!(policy.max_candidates(), baseline.max_candidates());
+            assert_eq!(policy.max_memory_mib(), baseline.max_memory_mib());
+            assert_eq!(policy.tablebase_requested(), baseline.tablebase_requested());
+            assert_eq!(policy.deterministic(), baseline.deterministic());
+        }
+    }
+}
+
+#[test]
 fn assembles_execution_policy_from_raw_cli_values() {
     let workers = clearra_pc_graph::request::WorkerPolicy::default_worker_limit().min(4);
     let args = PcArgs::new(2)

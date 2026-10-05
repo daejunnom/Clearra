@@ -18,6 +18,9 @@ import {
 } from './DurableDelegationJournal';
 
 type VerifierRequest =
+  | { type: 'accelerator-pack'; profile: number | null; seed: ArrayBuffer | null; reservedBytes: number; session: number }
+  | { type: 'conditioned-reply'; profile: number; session: number; wire: ArrayBuffer }
+  | { type: 'accelerator-synopsis'; profile: number | null; wire: ArrayBuffer | null }
   | { type: 'delegation-offer'; offer: DelegationOffer }
   | {
       type: 'delegation-run';
@@ -51,6 +54,9 @@ type VerifierRequest =
 
 type VerifierResponse =
   | { type: 'prewarmed' }
+  | { type: 'accelerator-pack-ready'; applied: boolean }
+  | { type: 'conditioned-queries'; profile: number; session: number; wire: ArrayBuffer }
+  | { type: 'accelerator-synopsis-ready'; applied: boolean }
   | { type: 'delegation-accepted'; acceptance: DelegationAcceptance }
   | {
       type: 'delegation-started';
@@ -96,6 +102,9 @@ type ExecutableVerifierRequest = Extract<
 >;
 const stagedExecutables = new Map<string, ExecutableVerifierRequest>();
 let workerId = '';
+let activeConditionedProfile: number | null = null;
+let activeConditionedSession = 0;
+let activeSynopsisProfile: number | null = null;
 const VERIFIER_HOST_QUANTUM_MS = 8;
 const yieldToHost = createWorkerHostYield();
 
@@ -130,6 +139,71 @@ async function handleRequest(request: VerifierRequest) {
     }
     if (request.type === 'dispose') {
       disposeVerifierRuntime();
+      return;
+    }
+    if (request.type === 'conditioned-reply') {
+      // A prior batch/session may reply after cancellation or pool reuse.
+      if (!initialized || request.profile !== activeConditionedProfile ||
+          request.session !== activeConditionedSession) return;
+      if (!wasm?.accelerator_peer_import) throw new Error('active peer has no import export');
+      // Do not swallow this error: earlier partials may have used a relation.
+      wasm.accelerator_peer_import(request.profile, request.wire);
+      return;
+    }
+    if (request.type === 'accelerator-pack') {
+      wasm ??= await loadClearraWasmModule();
+      if (activeConditionedProfile !== null) {
+        if (!wasm.accelerator_remove) throw new Error('installed relation has no removal export');
+        wasm.accelerator_remove(1, activeConditionedProfile);
+        activeConditionedProfile = null;
+      }
+      activeConditionedSession = request.session;
+      let applied = false;
+      if (request.profile !== null && request.seed &&
+          wasm.accelerator_peer_admit && wasm.accelerator_peer_drain &&
+          wasm.accelerator_peer_import && wasm.accelerator_remove &&
+          Number.isInteger(request.profile) && request.profile >= 0 && request.profile < 5 &&
+          Number.isSafeInteger(request.reservedBytes) &&
+          request.reservedBytes >= 1024 * 1024 && request.reservedBytes <= 2 * 1024 * 1024 &&
+          request.seed.byteLength <= 256 * 1024) {
+        try {
+          // A small trusted context seed, never the full condition pack.
+          // The ABI binds it to the source-embedded qualified generation and
+          // reserves the cache AND bounded transport buffers before use.
+          wasm.accelerator_peer_admit(request.profile, request.seed, request.reservedBytes);
+          activeConditionedProfile = request.profile;
+          applied = true;
+        } catch {
+          // Invalid or missing optional data cannot reject an exact search.
+        }
+      }
+      post({ type: 'accelerator-pack-ready', applied });
+      return;
+    }
+    if (request.type === 'accelerator-synopsis') {
+      wasm ??= await loadClearraWasmModule();
+      if (activeSynopsisProfile !== null) {
+        if (!wasm.accelerator_remove) {
+          throw new Error('installed synopsis has no removal export');
+        }
+        wasm.accelerator_remove(0, activeSynopsisProfile);
+        activeSynopsisProfile = null;
+      }
+      let applied = false;
+      if (request.profile !== null && request.wire &&
+          wasm.accelerator_admit_negative_synopsis && wasm.accelerator_remove &&
+          Number.isInteger(request.profile) && request.profile >= 0 && request.profile < 5 &&
+          request.wire.byteLength <= 4 * 1024 * 1024) {
+        try {
+          wasm.accelerator_admit_negative_synopsis(request.profile, request.wire);
+          activeSynopsisProfile = request.profile;
+          applied = true;
+        } catch {
+          // A missing or invalid derivative cannot reject an exact search.
+          // The previous generation was already removed before this attempt.
+        }
+      }
+      post({ type: 'accelerator-synopsis-ready', applied });
       return;
     }
     if (request.type === 'prewarm') {
@@ -281,7 +355,9 @@ async function executeAuthorized(request: ExecutableVerifierRequest): Promise<vo
         // quantum. Yielding a nested setTimeout(0) after every tiny candidate
         // adds timer-clamping latency and leaves CPU workers mostly asleep.
         if (now - lastHostYieldAt >= VERIFIER_HOST_QUANTUM_MS) {
+          flushConditionedQueries();
           await yieldToHost();
+          if (!initialized) throw new Error('verifier relation result was invalidated during a host yield');
           lastHostYieldAt = performance.now();
         }
         consumed = wasm.distributed_verifier_continue();
@@ -302,6 +378,7 @@ async function executeAuthorized(request: ExecutableVerifierRequest): Promise<vo
         partial: consumed.partial,
         progress: wasm.distributed_verifier_progress()
       };
+      flushConditionedQueries();
       post(response, consumed.partial ? [consumed.partial] : []);
       return;
   }
@@ -309,6 +386,13 @@ async function executeAuthorized(request: ExecutableVerifierRequest): Promise<vo
   const partial = wasm.distributed_verifier_finish();
   initialized = false;
   post({ type: 'finished', requestId: request.requestId, partial }, [partial]);
+}
+
+function flushConditionedQueries() {
+  if (activeConditionedProfile === null || !wasm?.accelerator_peer_drain) return;
+  const wire = wasm.accelerator_peer_drain(activeConditionedProfile);
+  if (wire.byteLength > 0) post({ type: 'conditioned-queries',
+    profile: activeConditionedProfile, session: activeConditionedSession, wire }, [wire]);
 }
 
 async function acceptDelegationOffer(offer: DelegationOffer): Promise<void> {
@@ -419,9 +503,13 @@ function postHeartbeat(
 
 function exactTaskProgress(): ClearraDistributedVerifierProgress {
   return {
-    candidateCount: 0, buildNodes: 0, coverageChecks: 0,
-    availability: { candidateCount: false, buildNodes: false, coverageChecks: false },
-    exactness: { candidateCount: false, buildNodes: false, coverageChecks: false }
+    geometryNodes: 0, candidateCount: 0, buildNodes: 0, coverageChecks: 0,
+    availability: {
+      geometryNodes: false, candidateCount: false, buildNodes: false, coverageChecks: false
+    },
+    exactness: {
+      geometryNodes: false, candidateCount: false, buildNodes: false, coverageChecks: false
+    }
   };
 }
 
@@ -436,6 +524,8 @@ function bindLifecycleOwner(ownerId: string) {
 
 function disposeVerifierRuntime() {
   initialized = false;
+  activeConditionedProfile = null;
+  activeSynopsisProfile = null;
   try {
     wasm?.distributed_reset();
   } catch {

@@ -1,0 +1,51 @@
+[package]
+name = "clearra-pc4-qualifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Only the v0.8.1 asset generators are integrated here. The independent PC4
+# Tablebase qualifier remains on its deferred v0.9.0 branch.
+[features]
+default = ["legal-board-assets"]
+legal-board-assets = ["dep:serde_json"]
+
+[[bin]]
+name = "clearra-pc4-legal-board"
+path = "src/bin/clearra-pc4-legal-board.rs"
+required-features = ["legal-board-assets"]
+
+[[bin]]
+name = "clearra-conditioned-reachability"
+path = "src/bin/clearra-conditioned-reachability.rs"
+required-features = ["legal-board-assets"]
+
+[[bin]]
+name = "clearra-conditioned-local-relation"
+path = "src/bin/clearra-conditioned-local-relation.rs"
+required-features = ["legal-board-assets"]
+
+[[bin]]
+name = "clearra-conditioned-catalog-sign"
+path = "src/bin/clearra-conditioned-catalog-sign.rs"
+required-features = ["legal-board-assets"]
+
+[[bin]]
+name = "clearra-legal-board-catalog-sign"
+path = "src/bin/clearra-legal-board-catalog-sign.rs"
+required-features = ["legal-board-assets"]
+
+[dependencies]
+clearra-accelerator-activation = { path = "../../crates/clearra-accelerator-activation" }
+clearra-core-domain = { path = "../../crates/clearra-core-domain" }
+clearra-core-executor = { path = "../../crates/clearra-core-executor", features = ["parallel", "qualification-reference"] }
+# Only the already-existing field-hash codec is used by generation domain.rs.
+clearra-pc4-tablebase = { path = "../../crates/clearra-pc4-tablebase" }
+clearra-rules = { path = "../../crates/clearra-rules" }
+ed25519-dalek.workspace = true
+serde_json = { workspace = true, optional = true }
+sha2 = "0.10.9"
+
+[lints]
+workspace = true

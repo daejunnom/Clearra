@@ -17,6 +17,23 @@ pub(crate) fn unknown_option(command: &'static str, option: &str) -> CliParseErr
     }
 }
 
+/// Native compatibility requests retain their own grammar, but must not give
+/// the same two accelerator selectors a last-option-wins meaning.
+pub(crate) fn select_exact_accelerator_once(
+    slot: &mut Option<bool>,
+    enabled: bool,
+    option: &'static str,
+) -> Result<(), CliParseError> {
+    if slot.is_some() {
+        return Err(CliParseError::InvalidValue {
+            option,
+            value: "selected more than once".to_owned(),
+        });
+    }
+    *slot = Some(enabled);
+    Ok(())
+}
+
 pub(crate) fn parse_u8_option(
     args: &[String],
     index: usize,

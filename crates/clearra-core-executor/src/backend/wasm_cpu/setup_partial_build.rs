@@ -562,7 +562,10 @@ impl PartialBuildGraphBuilder {
         }
         let mut reachability = ReachabilityWorkspace::default();
         reachability.configure(catalog.skeleton_count());
-        reachability.configure_kick_profile(problem.kick_profile().profile_id());
+        reachability.configure_kick_profile(
+            problem.kick_profile().profile_id(),
+            problem.backend_policy().conditioned_reachability_enabled(),
+        );
         let geometry_family_count = compiled
             .candidate_family_count
             .map_or_else(|| "overflow".to_owned(), |count| count.to_string());
@@ -1714,7 +1717,13 @@ mod tests {
         let mut expected_row_ids = Vec::new();
         let mut placement_rows = 0_u128;
         reachability.configure(catalog.skeleton_count());
-        reachability.configure_kick_profile(conditions[0].problem().kick_profile().profile_id());
+        reachability.configure_kick_profile(
+            conditions[0].problem().kick_profile().profile_id(),
+            conditions[0]
+                .problem()
+                .backend_policy()
+                .conditioned_reachability_enabled(),
+        );
 
         for (depth, (piece, rotation, x, y)) in operations.into_iter().enumerate() {
             compiled

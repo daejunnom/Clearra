@@ -5,6 +5,8 @@ pub mod cli_parser;
 pub mod continue_args;
 pub mod convert_args;
 pub mod cover_args;
+#[cfg(test)]
+mod exact_accelerator_option_tests;
 mod execution_backend_aliases;
 pub mod failed_queue_args;
 pub mod inspect_args;

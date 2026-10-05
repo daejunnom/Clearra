@@ -10,6 +10,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     output
 }
 
+#[cfg(any(feature = "bitmap-render", test))]
 pub(crate) fn base64_standard(bytes: &[u8]) -> Result<String, DocumentEncodingError> {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let encoded_length = bytes
@@ -45,6 +46,7 @@ pub(crate) fn base64_standard(bytes: &[u8]) -> Result<String, DocumentEncodingEr
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(any(feature = "bitmap-render", test))]
 pub(crate) enum DocumentEncodingError {
     CapacityExceeded,
 }

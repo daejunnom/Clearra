@@ -17,13 +17,14 @@ use super::{
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
     geometry::{GeometrySearch, ParallelGeometryPlan, TargetGroup},
-    mix_digest,
     parallel_coverage::SharedCoverage,
     parallel_worker::{
         run_branch_worker, BranchSearchOutcome, ParallelBranchQueue, ParallelBranchTask,
-        ParallelWorkerResult, RepresentativeCandidate, WorkerAggregate,
+        ParallelWorkerResult, RepresentativeCandidate, SharedWorkerRequest, WorkerAggregate,
+        WorkerMemoryComponents,
     },
-    reachability::ReachabilityMetrics,
+    reachability::{ReachabilityMetrics, SharedReachabilityTemplates},
+    standard_bag_coverage::SharedStandardBagRequest,
     WasmExactSearchError,
 };
 
@@ -61,11 +62,15 @@ pub(super) struct ParallelSearchOutcome {
     pub peak_reachability_states: usize,
     pub total_reachability_states: usize,
     pub worker_retained_bytes: usize,
+    pub candidate_digest_retained_bytes: usize,
+    pub worker_memory_components: WorkerMemoryComponents,
+    pub standard_bag_memo_storage: &'static str,
     pub piece_language_cache_hits: usize,
     pub piece_language_cache_misses: usize,
     pub standard_bag_cache_hits: usize,
     pub standard_bag_cache_misses: usize,
     pub reachability_metrics: ReachabilityMetrics,
+    pub legal_board_verified_negative_prunes: usize,
     pub truncated_reason: Option<&'static str>,
     pub workers_used: usize,
     pub active_workers: usize,
@@ -175,6 +180,19 @@ fn execute_plan(
         ))?
         .pattern_count();
     let shared_coverage = Arc::new(SharedCoverage::new(pattern_count));
+    // Lazy immutable request tables are shared; language/decision IDs, mutable
+    // memo/frontier and graph scratch remain private to each worker.
+    let shared_standard_bag = (problem.objective().kind()
+        != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling)
+        .then(|| Arc::new(SharedStandardBagRequest::default()));
+    let shared_request = SharedWorkerRequest {
+        standard_bag: shared_standard_bag.clone(),
+        reachability: Arc::new(SharedReachabilityTemplates::new(
+            catalog.width(),
+            catalog.height(),
+            problem.kick_profile().profile_id(),
+        )),
+    };
     let branch_count = plan.searches.len();
     let queue = Arc::new(ParallelBranchQueue::new(branch_tasks(plan.searches)));
     let (sender, receiver) = mpsc::channel();
@@ -186,6 +204,7 @@ fn execute_plan(
         let worker_control = control.clone();
         let worker_queue = Arc::clone(&queue);
         let worker_coverage = Arc::clone(&shared_coverage);
+        let worker_request = shared_request.clone();
         let worker_sender = sender.clone();
         cpu_worker_pool::submit_cpu_job(move || {
             let result = catch_unwind(AssertUnwindSafe(|| {
@@ -196,6 +215,7 @@ fn execute_plan(
                     &worker_control,
                     &worker_queue,
                     &worker_coverage,
+                    worker_request,
                 )
             }))
             .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_parallel_worker_panicked"))
@@ -216,6 +236,7 @@ fn execute_plan(
         &control,
         &queue,
         &shared_coverage,
+        shared_request.clone(),
     );
     if caller_result.is_err() {
         queue.abort();
@@ -232,18 +253,30 @@ fn execute_plan(
     let worker_results = results
         .into_iter()
         .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
-    merge_results(
+    let mut outcome = merge_results(
         &problem,
         &catalog,
         &plan.targets,
         &control,
         &shared_coverage,
+        &shared_request,
         worker_results,
         plan.group_pattern_index_bytes,
         plan.shared_family_bytes,
         workers_used,
         branch_count,
-    )
+    )?;
+    // The execution owner is authoritative for the single immutable payload;
+    // no worker-count multiplier and no sum of overlapping exit snapshots.
+    outcome
+        .worker_memory_components
+        .shared_standard_bag_request_bytes = shared_standard_bag
+        .as_ref()
+        .map_or(0, |request| request.retained_bytes());
+    outcome
+        .worker_memory_components
+        .shared_reachability_template_bytes = shared_request.reachability.retained_bytes();
+    Ok(outcome)
 }
 
 fn branch_tasks(searches: Vec<GeometrySearch>) -> Vec<ParallelBranchTask> {
@@ -265,6 +298,7 @@ fn merge_results(
     targets: &[TargetGroup],
     control: &ExecutionControl,
     shared_coverage: &SharedCoverage,
+    shared_request: &SharedWorkerRequest,
     worker_results: Vec<ParallelWorkerResult>,
     group_pattern_index_bytes: usize,
     shared_family_bytes: usize,
@@ -310,7 +344,7 @@ fn merge_results(
     let (packing_candidate_count, packing_candidate_digest) = candidate_identity_summary(
         &branch_outcomes,
         super::uses_order_independent_pc_candidate_digest(problem),
-    );
+    )?;
     let truncated_reason = branch_outcomes
         .iter()
         .find_map(|branch| branch.truncated_reason);
@@ -328,9 +362,14 @@ fn merge_results(
         {
             (Vec::new(), None)
         }
-        Some(representative) => {
-            reverify_representative(problem, catalog, targets, representative, control)?
-        }
+        Some(representative) => reverify_representative(
+            problem,
+            catalog,
+            targets,
+            representative,
+            control,
+            shared_request,
+        )?,
         None => (Vec::new(), None),
     };
     let searches = branch_outcomes
@@ -372,11 +411,15 @@ fn merge_results(
         peak_reachability_states: merged.peak_reachability_states,
         total_reachability_states: merged.total_reachability_states,
         worker_retained_bytes: merged.worker_retained_bytes,
+        candidate_digest_retained_bytes: merged.candidate_digest_retained_bytes,
+        worker_memory_components: merged.worker_memory_components,
+        standard_bag_memo_storage: merged.standard_bag_memo_storage,
         piece_language_cache_hits: merged.piece_language_cache_hits,
         piece_language_cache_misses: merged.piece_language_cache_misses,
         standard_bag_cache_hits: merged.standard_bag_cache_hits,
         standard_bag_cache_misses: merged.standard_bag_cache_misses,
         reachability_metrics: merged.reachability_metrics,
+        legal_board_verified_negative_prunes: merged.legal_board_verified_negative_prunes,
         truncated_reason,
         workers_used,
         active_workers,
@@ -388,20 +431,16 @@ fn merge_results(
 fn candidate_identity_summary(
     branches: &[BranchSearchOutcome],
     order_independent: bool,
-) -> (usize, u64) {
+) -> Result<(usize, u64), WasmExactSearchError> {
     let mut count = 0usize;
     let mut digest = 0u64;
     for branch in branches {
         count = count.saturating_add(branch.candidate_count);
-        for candidate_hash in &branch.candidate_hashes {
-            digest = if order_independent {
-                super::mix_order_independent_candidate_digest(digest, *candidate_hash)
-            } else {
-                mix_digest(digest, *candidate_hash)
-            };
-        }
+        digest = branch
+            .candidate_digest
+            .fold_into(digest, order_independent)?;
     }
-    (count, digest)
+    Ok((count, digest))
 }
 
 fn reverify_representative(
@@ -410,12 +449,17 @@ fn reverify_representative(
     targets: &[TargetGroup],
     representative: RepresentativeCandidate,
     control: &ExecutionControl,
+    shared_request: &SharedWorkerRequest,
 ) -> Result<(Vec<CorePathStep>, Option<u32>), WasmExactSearchError> {
     let candidate = representative.candidate;
     let target = targets.get(candidate.target_index as usize).ok_or(
         WasmExactSearchError::InvalidProblem("wasm_geometry_candidate_target_out_of_range"),
     )?;
     let mut workspace = BuildUpWorkspace::default();
+    workspace.set_shared_reachability_templates(Arc::clone(&shared_request.reachability))?;
+    if let Some(supply) = &shared_request.standard_bag {
+        workspace.set_shared_standard_bag_request(Arc::clone(supply))?;
+    }
     let mut evaluator = CoverageProductEvaluator::default();
     let result = verify_candidate(
         problem,

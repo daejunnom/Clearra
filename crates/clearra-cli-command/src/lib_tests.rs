@@ -695,10 +695,73 @@ fn tiling_only_rejects_buildup_and_probability_options() {
         "--queue-knowledge visible-7",
         "--tablebase",
         "--build-dependency-dag",
+        "--legal-board",
+        "--conditioned-reachability",
     ] {
         let command = format!("clearra pc --lines 2 --queue IIOOO --tiling-only {option}");
         let error = CliCommandParser::parse(&command).expect_err(option);
         assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
+    }
+}
+
+#[test]
+fn exact_accelerator_policy_is_default_on_and_independently_disableable() {
+    let default_pc = CliCommandParser::parse("clearra pc --lines 4 --backend cpu")
+        .expect("default PC command")
+        .to_app_request()
+        .expect("default PC request");
+    assert_eq!(
+        default_pc.command().exact_accelerator_policy(),
+        Some((true, true))
+    );
+
+    for source in [
+        "clearra pc --lines 4 --backend cpu --no-legal-board --no-conditioned-reachability",
+        "clearra setup --remaining IOTSZJL --no-legal-board --no-conditioned-reachability",
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror --no-legal-board --no-conditioned-reachability",
+    ] {
+        let request = CliCommandParser::parse(source)
+            .expect(source)
+            .to_app_request()
+            .expect("accelerator policy AppRequest");
+        assert_eq!(
+            request.command().exact_accelerator_policy(),
+            Some((false, false)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn shared_parser_preserves_all_accelerator_combinations_in_pc_setup_and_build_requests() {
+    for source in [
+        "clearra pc --lines 4 --backend cpu",
+        "clearra setup --remaining IOTSZJL",
+        "clearra build-probability --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold --no-mirror",
+        "clearra build cover --base-mask 0x0 --target-mask 0xf --height 4 --queue I --no-hold",
+    ] {
+        for legal in [false, true] {
+            for conditioned in [false, true] {
+                let command = format!(
+                    "{source} {} {}",
+                    if legal { "--legal-board" } else { "--no-legal-board" },
+                    if conditioned {
+                        "--conditioned-reachability"
+                    } else {
+                        "--no-conditioned-reachability"
+                    },
+                );
+                let request = CliCommandParser::parse(&command)
+                    .expect(&command)
+                    .to_app_request()
+                    .expect("exact accelerator AppRequest");
+                assert_eq!(
+                    request.command().exact_accelerator_policy(),
+                    Some((legal, conditioned)),
+                    "{command}"
+                );
+            }
+        }
     }
 }
 
@@ -1131,6 +1194,40 @@ fn canonical_setup_score_accepts_the_two_independent_pattern_sources() {
     .to_app_request()
     .expect("typed Setup score AppRequest");
     assert!(matches!(request.command(), AppCommand::SetupScore(_)));
+}
+
+#[test]
+fn setup_score_accepts_independent_exact_accelerator_switches() {
+    let document = setup_score_ctk3_document();
+    let base = format!(
+        "clearra setup score --document-format ctk3 --document {document} --setup-queue I --solution-queue OTSJ --clear 2"
+    );
+    for (suffix, expected) in [
+        ("", (true, true)),
+        ("--no-legal-board", (false, true)),
+        ("--no-conditioned-reachability", (true, false)),
+        (
+            "--no-legal-board --no-conditioned-reachability",
+            (false, false),
+        ),
+    ] {
+        let source = format!("{base} {suffix}");
+        let request = CliCommandParser::parse(&source)
+            .expect(&source)
+            .to_app_request()
+            .expect("typed Setup score request");
+        assert_eq!(request.command().exact_accelerator_policy(), Some(expected));
+    }
+    for suffix in [
+        "--legal-board --no-legal-board",
+        "--conditioned-reachability --no-conditioned-reachability",
+    ] {
+        let source = format!("{base} {suffix}");
+        assert_eq!(
+            CliCommandParser::parse(&source).expect_err(&source).code(),
+            CliCommandErrorCode::InvalidValue
+        );
+    }
 }
 
 #[test]
