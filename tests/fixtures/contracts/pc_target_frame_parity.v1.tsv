@@ -8,5 +8,5 @@ line-4-initial-clear	4	00000003c00003ff	0000000000f00000	1	9	valid
 line-5-initial-clear	5	00000300000003ff	00000000c0000000	1	12	valid
 line-6-initial-clear	6	003c0000000003ff	00000f0000000000	1	14	valid
 target-lines-zero	0	0000000000000001	-	0	-	target-lines-invalid
-target-lines-seven	7	0000000000000001	-	0	-	target-lines-invalid
+target-lines-twenty-five	25	0000000000000001	-	0	-	target-lines-invalid
 occupied-above-target	2	0000000000100000	-	0	-	outside-target

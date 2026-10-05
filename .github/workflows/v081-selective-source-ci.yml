@@ -2,7 +2,7 @@ name: v0.8.1 Selective Source (Non-publishing)
 
 on:
   push:
-    branches: ["codex/v081-selective-source-ci-20260927", "codex/v081-main-convergence-20260928", "codex/converge-v081-linear-20260928"]
+    branches: ["codex/v081-selective-source-ci-20260927", "codex/v081-main-convergence-20260928", "codex/converge-v081-linear-20260928", "codex/converge-main-product-fixes-20261005"]
   workflow_dispatch:
 
 permissions:
@@ -24,7 +24,7 @@ env:
 
 jobs:
   core:
-    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928') && github.ref_type == 'branch'
+    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005') && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -61,7 +61,7 @@ jobs:
         run: cargo test --locked -p clearra-core-executor --lib v081_signed_conditioned_pack_owner_peer_solver_smoke --features parallel,local-search-ab,qualification-reference -- --ignored --test-threads=1
 
   native-products:
-    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928') && github.ref_type == 'branch'
+    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005') && github.ref_type == 'branch'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
@@ -244,7 +244,7 @@ jobs:
             '
 
   wasm-abi:
-    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928') && github.ref_type == 'branch'
+    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005') && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -325,7 +325,7 @@ jobs:
         run: node scripts/tools/v081-desktop-accelerator-panel-browser-acceptance.mjs
 
   surfaces:
-    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928') && github.ref_type == 'branch'
+    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005') && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -357,7 +357,7 @@ jobs:
           node ../../scripts/tools/run-typescript-contracts.mjs ./test
 
   wasm-realms:
-    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928') && github.ref_type == 'branch'
+    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005') && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:

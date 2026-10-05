@@ -15,7 +15,9 @@ pub use compile::{
     PackingProblemSpec, ProblemCompileError, ProblemCompiler, SetupConditionCompileError,
     SetupSearchCondition, SetupTerminalSupplyTarget, SpinTargetCompiler,
 };
-pub use extended_pc_search_contract::{ExtendedPcSearchContract, ExtendedPcSearchContractError};
+pub use extended_pc_search_contract::{
+    ExtendedPcExecutionProblem, ExtendedPcSearchContract, ExtendedPcSearchContractError,
+};
 pub use goal::{
     spin_target_requires_score_profile, BuildTemplateGoal, CompositeGoal, RequiredClearKind,
     RequiredClearLines, RequiredSpinKind, SearchGoal, SpinMiniPolicy, SpinPieceSelector,

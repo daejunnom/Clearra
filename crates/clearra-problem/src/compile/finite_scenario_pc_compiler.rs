@@ -336,7 +336,13 @@ fn write_finite_problem_id(
     writer.try_push_ascii('x')?;
     writer.try_push_decimal(u128::from(query.initial_board().visible_height()))?;
     writer.try_push_ascii(':')?;
-    writer.try_push_fixed_hex_u64(query.initial_board().occupied_mask())?;
+    if query.initial_board().has_extended_occupancy() {
+        for word in query.initial_board().occupied_words().into_iter().rev() {
+            writer.try_push_fixed_hex_u64(word)?;
+        }
+    } else {
+        writer.try_push_fixed_hex_u64(query.initial_board().occupied_mask())?;
+    }
     writer.try_push_ascii(':')?;
     writer.try_push_str(query.remaining_queue().mode())?;
     writer.try_push_ascii(':')?;
@@ -616,7 +622,11 @@ fn checked_problem_id_requested_bytes(
         query.remaining_queue().mode().len() as u128,
         decimal_digits(u128::from(query.initial_board().width())),
         decimal_digits(u128::from(query.initial_board().visible_height())),
-        16,
+        if query.initial_board().has_extended_occupancy() {
+            64
+        } else {
+            16
+        },
         decimal_digits(query.piece_window().max_pieces() as u128),
         decimal_digits(query.exact_pieces().unwrap_or(0) as u128),
         decimal_digits(supply_window.source_sequence_length as u128),

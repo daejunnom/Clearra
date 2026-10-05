@@ -18,9 +18,9 @@ const signedMetadata = [
   'config/conditioned-reachability-product-catalog.v1.json',
 ];
 
-test('both convergence branches run the non-publishing v0.8.1 and recovery gates', () => {
-  const branches = ['codex/v081-main-convergence-20260928', 'codex/converge-v081-linear-20260928'];
-  assert.ok(workflow.includes(`branches: ["codex/v081-selective-source-ci-20260927", "${branches[0]}", "${branches[1]}"]`));
+test('all convergence branches run the non-publishing v0.8.1 and recovery gates', () => {
+  const branches = ['codex/v081-main-convergence-20260928', 'codex/converge-v081-linear-20260928', 'codex/converge-main-product-fixes-20261005'];
+  assert.ok(workflow.includes(`branches: ["codex/v081-selective-source-ci-20260927", ${branches.map((branch) => JSON.stringify(branch)).join(', ')}]`));
   for (const job of ['core', 'native-products', 'wasm-abi', 'surfaces', 'wasm-realms']) {
     const start = workflow.indexOf(`\n  ${job}:`);
     assert.ok(start >= 0, `missing job ${job}`);
@@ -34,6 +34,22 @@ test('both convergence branches run the non-publishing v0.8.1 and recovery gates
   }
   assert.ok(recoveryWorkflow.includes('node scripts/tools/v081-accelerator-opfs-browser-acceptance.mjs'));
   assert.ok(!recoveryWorkflow.includes('deploy-pages'));
+});
+
+test('independent recovery feedback prepares dependencies even after a formatting failure', () => {
+  for (const label of ['uses: actions/setup-node@v4', 'uses: pnpm/action-setup@v4',
+    'name: Install locked frontend dependencies', 'name: Prepare external browser test tools']) {
+    assert.ok(recoveryWorkflow.includes(label + '\n        if: ${{ !cancelled() }}'));
+  }
+  assert.ok(!recoveryWorkflow.includes('continue-on-error:'));
+  const chain = readFileSync(new URL('../../.github/workflows/recovery-chain-regression.yml', import.meta.url), 'utf8')
+    .replace(/\r\n/gu, '\n');
+  assert.ok(chain.includes('codex/converge-main-product-fixes-20261005'));
+  assert.ok(chain.includes('rustup toolchain install 1.98.1'));
+  assert.ok(chain.includes('CLEARRA_SOURCE_COMMIT: ${{ github.sha }}'));
+  assert.ok(chain.includes('CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}'));
+  assert.ok(chain.includes('Solver, inventories, holds, minimum and WASM contracts\n        if: ${{ !cancelled() }}'));
+  assert.ok(!chain.includes('continue-on-error:'));
 });
 
 test('the production Web pool smoke consumes one real WASM build and unchanged signed packs', () => {

@@ -1,12 +1,19 @@
 name: Recovery multi-stage regression
 on:
   push:
-    branches: [codex/converge-recovery-chain-20260929]
+    branches: [codex/converge-recovery-chain-20260929, codex/converge-main-product-fixes-20261005]
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: recovery-chain-regression-${{ github.sha }}
+  group: recovery-chain-regression-${{ github.ref }}
   cancel-in-progress: false
+env:
+  CLEARRA_BUILD_PURPOSE: experiment
+  CARGO_BUILD_JOBS: "2"
+  RUST_MIN_STACK: "16777216"
+  CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+  CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
 jobs:
   contracts:
     runs-on: ubuntu-latest
@@ -22,12 +29,15 @@ jobs:
         with:
           version: 11.5.0
           run_install: false
+      - name: Install exact native and WASM toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --target wasm32-unknown-unknown
       - name: Exact source and formatting
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           cargo fmt --all --check
           git diff --check
       - name: Solver, inventories, holds, minimum and WASM contracts
+        if: ${{ !cancelled() }}
         run: |
           set -uo pipefail
           out=_local/artifacts/test/chain-contracts
@@ -54,6 +64,7 @@ jobs:
           pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee "$out/types.log" || result=1
           exit "$result"
       - name: Consume actual four-stage host payload in production presentation
+        if: ${{ !cancelled() }}
         run: |
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';

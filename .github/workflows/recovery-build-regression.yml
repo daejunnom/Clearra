@@ -7,6 +7,7 @@ on:
       - codex/converge-recovery-build-release-20260928
       - codex/v081-main-convergence-20260928
       - codex/converge-v081-linear-20260928
+      - codex/converge-main-product-fixes-20261005
 
 permissions:
   contents: read
@@ -64,15 +65,19 @@ jobs:
             ${{ runner.temp }}/recovery-tested-sha.txt
           retention-days: 3
       - uses: actions/setup-node@v4
+        if: ${{ !cancelled() }}
         with:
           node-version: 22.23.2
       - uses: pnpm/action-setup@v4
+        if: ${{ !cancelled() }}
         with:
           version: 11.5.0
           run_install: false
       - name: Install locked frontend dependencies
+        if: ${{ !cancelled() }}
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Prepare external browser test tools
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
