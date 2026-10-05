@@ -1,0 +1,63 @@
+name: PC 24L Source Boundary (Non-publishing)
+
+on:
+  push:
+    branches: ["codex/converge-pc24-integration-20261005"]
+    paths:
+      - ".github/workflows/pc24-source-boundary.yml"
+      - "crates/clearra-pc-graph/**"
+      - "crates/clearra-problem/**"
+      - "crates/clearra-core-executor/**"
+      - "tests/fixtures/contracts/pc_target_frame_parity.v1.tsv"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pc24-source-boundary-${{ github.ref }}
+  cancel-in-progress: true
+
+# Separate runners keep this new proof from delaying existing v0.8.1,
+# recovery, or product build owners. No release or profile qualification is
+# inferred from these finite examples and no deployment is dispatched.
+env:
+  CLEARRA_BUILD_PURPOSE: experiment
+  CARGO_BUILD_JOBS: "2"
+  RUST_MIN_STACK: "16777216"
+
+jobs:
+  input-contract:
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Check target-frame and compiler source format
+        run: cargo fmt -p clearra-pc-graph -p clearra-problem --check
+      - name: Test compact and four-word input normalization without truncation
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-pc-graph --lib request::pc_scenario_query::tests -- --test-threads=1
+      - name: Test the real full-height compiler input instead of a Board64 placeholder
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-problem --test extended_pc_execution -- --test-threads=1
+
+  inverse-lock-clear:
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned native and WASM Rust targets
+        run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
+      - name: Compile the same four-word execution bridge for WASM
+        run: cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown
+      - name: Execute twelve and twenty-four line PC fields in the existing exact ILC engine
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-core-executor --test extended_pc_ilc -- --test-threads=1

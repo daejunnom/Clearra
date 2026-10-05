@@ -1361,6 +1361,25 @@ mod problem_identity {
         supply_window: ResolvedSupplyWindow,
     ) -> SearchProblemId {
         let core = scenario.core_query();
+        if core.initial_board().has_extended_occupancy() {
+            let words = core.initial_board().occupied_words();
+            return SearchProblemId::new(format!(
+                "{}:{}:{}x{}:{:016x}{:016x}{:016x}{:016x}:{}:{}:{}:{}:{}",
+                kind.as_str(),
+                scenario.source().as_str(),
+                core.initial_board().width(),
+                core.initial_board().visible_height(),
+                words[3],
+                words[2],
+                words[1],
+                words[0],
+                core.remaining_queue().mode(),
+                core.piece_window().max_pieces(),
+                core.exact_pieces().unwrap_or(0),
+                supply_window.source_sequence_length(),
+                supply_window.projects_unplaced_lookahead()
+            ));
+        }
         SearchProblemId::new(format!(
             "{}:{}:{}x{}:{:016x}:{}:{}:{}:{}:{}",
             kind.as_str(),

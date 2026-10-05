@@ -1,4 +1,5 @@
 use clearra_core_domain::{
+    board::standard_pc_board::{Board256Mask, STANDARD_PC_MAX_LINES},
     piece::piece_kind::PieceKind, solution::StandardBoard64ColoredTilingIdentity,
 };
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
@@ -22,6 +23,7 @@ pub struct PcScenarioBoard {
     width: u16,
     visible_height: u16,
     occupied_mask: u64,
+    occupied_high_words: [u64; 3],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,6 +68,13 @@ pub enum PcScenarioTargetFrameError {
     EmptyAreaNotTetrominoAligned {
         empty_cells: u32,
     },
+    ExtendedOccupancyOutsideDeclaredInitialField {
+        occupied_words: [u64; 4],
+    },
+    ExtendedOccupancyAboveTarget {
+        target_lines: u8,
+        occupied_words: [u64; 4],
+    },
 }
 
 impl PcScenarioBoard {
@@ -74,10 +83,62 @@ impl PcScenarioBoard {
             width,
             visible_height,
             occupied_mask,
+            occupied_high_words: [0; 3],
         }
     }
 }
 impl PcScenarioBoard {
+    /// Four-word input is authoritative for 7..24L. No high occupancy bit is
+    /// truncated to satisfy the compact solver's transport.
+    pub fn standard_10_from_words(
+        visible_height: u16,
+        occupied_words: [u64; 4],
+    ) -> Result<Self, PcScenarioTargetFrameError> {
+        if visible_height > u16::from(STANDARD_PC_MAX_LINES) {
+            return Err(PcScenarioTargetFrameError::InitialFieldHeightOutsideProductDomain {
+                visible_height,
+            });
+        }
+        let mask = Board256Mask::from_words(occupied_words);
+        let fits = if visible_height == 0 {
+            mask.is_empty()
+        } else {
+            mask.fits_cell_count(visible_height * 10).unwrap_or(false)
+        };
+        if !fits {
+            return Err(
+                PcScenarioTargetFrameError::ExtendedOccupancyOutsideDeclaredInitialField {
+                    occupied_words,
+                },
+            );
+        }
+        Ok(Self {
+            width: 10,
+            visible_height,
+            occupied_mask: occupied_words[0],
+            occupied_high_words: [occupied_words[1], occupied_words[2], occupied_words[3]],
+        })
+    }
+
+    pub const fn occupied_words(&self) -> [u64; 4] {
+        [
+            self.occupied_mask,
+            self.occupied_high_words[0],
+            self.occupied_high_words[1],
+            self.occupied_high_words[2],
+        ]
+    }
+
+    pub const fn has_extended_occupancy(&self) -> bool {
+        self.occupied_high_words[0] != 0
+            || self.occupied_high_words[1] != 0
+            || self.occupied_high_words[2] != 0
+    }
+
+    pub const fn occupied_cell_count(&self) -> u32 {
+        Board256Mask::from_words(self.occupied_words()).count_ones()
+    }
+
     pub fn standard_10(visible_height: u16, occupied_mask: u64) -> Self {
         Self::new(10, visible_height, occupied_mask)
     }
@@ -94,6 +155,8 @@ impl PcScenarioBoard {
 }
 impl PcScenarioBoard {
     pub fn occupied_mask(&self) -> u64 {
+        // Existing Board64 call sites retain their allocation-free fast path.
+        // Extended callers must use occupied_words, not this compact accessor.
         self.occupied_mask
     }
 
@@ -109,7 +172,7 @@ impl PcScenarioBoard {
         target_lines: u8,
     ) -> Result<PcScenarioTargetFrame, PcScenarioTargetFrameError> {
         const STANDARD_WIDTH: u16 = 10;
-        const MAX_PRODUCT_LINES: u16 = 6;
+        const MAX_PRODUCT_LINES: u16 = STANDARD_PC_MAX_LINES as u16;
 
         if !(1..=MAX_PRODUCT_LINES as u8).contains(&target_lines) {
             return Err(
@@ -125,6 +188,10 @@ impl PcScenarioBoard {
                     visible_height: self.visible_height,
                 },
             );
+        }
+
+        if target_lines > 6 || self.visible_height > 6 || self.has_extended_occupancy() {
+            return self.to_extended_target_frame(target_lines);
         }
 
         let initial_visible_bits = u32::from(self.width) * u32::from(self.visible_height);
@@ -173,6 +240,11 @@ impl PcScenarioBoard {
     /// are removed and the remaining rows are compacted without shrinking it.
     pub fn after_initial_line_clear(&self) -> Self {
         const STANDARD_WIDTH: u16 = 10;
+        if self.width == STANDARD_WIDTH
+            && (7..=u16::from(STANDARD_PC_MAX_LINES)).contains(&self.visible_height)
+        {
+            return self.after_extended_initial_line_clear();
+        }
         if self.width != STANDARD_WIDTH
             || self.visible_height == 0
             || usize::from(self.width) * usize::from(self.visible_height) > u64::BITS as usize
@@ -206,6 +278,77 @@ impl PcScenarioBoard {
             return self.clone();
         }
         Self::standard_10(self.visible_height, compacted_mask)
+    }
+
+    fn to_extended_target_frame(
+        &self,
+        target_lines: u8,
+    ) -> Result<PcScenarioTargetFrame, PcScenarioTargetFrameError> {
+        let occupied = Board256Mask::from_words(self.occupied_words());
+        let fits = if self.visible_height == 0 {
+            occupied.is_empty()
+        } else {
+            occupied.fits_cell_count(self.visible_height * 10).unwrap_or(false)
+        };
+        if !fits {
+            return Err(
+                PcScenarioTargetFrameError::ExtendedOccupancyOutsideDeclaredInitialField {
+                    occupied_words: self.occupied_words(),
+                },
+            );
+        }
+        let initial_cleared_rows = (0..self.visible_height)
+            .filter(|row| (0..10).all(|x| occupied.contains_index(row * 10 + x)))
+            .count() as u8;
+        let normalized = self.after_initial_line_clear();
+        let normalized_mask = Board256Mask::from_words(normalized.occupied_words());
+        if !normalized_mask
+            .fits_cell_count(u16::from(target_lines) * 10)
+            .unwrap_or(false)
+        {
+            return Err(PcScenarioTargetFrameError::ExtendedOccupancyAboveTarget {
+                target_lines,
+                occupied_words: normalized.occupied_words(),
+            });
+        }
+        let empty_cells = u32::from(target_lines) * 10 - normalized_mask.count_ones();
+        if empty_cells == 0 || !empty_cells.is_multiple_of(4) {
+            return Err(PcScenarioTargetFrameError::EmptyAreaNotTetrominoAligned { empty_cells });
+        }
+        Ok(PcScenarioTargetFrame {
+            normalized_board: Self::standard_10_from_words(
+                u16::from(target_lines),
+                normalized.occupied_words(),
+            )?,
+            initial_cleared_rows,
+            required_pieces: empty_cells as usize / 4,
+        })
+    }
+
+    fn after_extended_initial_line_clear(&self) -> Self {
+        let occupied = Board256Mask::from_words(self.occupied_words());
+        if !occupied
+            .fits_cell_count(self.visible_height * 10)
+            .unwrap_or(false)
+        {
+            return self.clone();
+        }
+        let mut compacted_words = [0_u64; 4];
+        let mut destination_row = 0_u16;
+        for source_row in 0..self.visible_height {
+            if (0..10).all(|x| occupied.contains_index(source_row * 10 + x)) {
+                continue;
+            }
+            for x in 0..10 {
+                if occupied.contains_index(source_row * 10 + x) {
+                    let bit = destination_row * 10 + x;
+                    compacted_words[usize::from(bit / 64)] |= 1_u64 << (bit % 64);
+                }
+            }
+            destination_row += 1;
+        }
+        Self::standard_10_from_words(self.visible_height, compacted_words)
+            .expect("line clear preserves the declared board domain")
     }
 }
 
@@ -420,6 +563,27 @@ impl PcScenarioQuery<ExtendedPcScenarioBoard> {
 }
 
 impl<B> PcScenarioQuery<B> {
+    /// Changes only board representation at a typed compiler boundary. Every
+    /// supply, hold, rule, observation, reducer and resource policy is moved
+    /// unchanged; adding a query field must update this exhaustive transfer.
+    pub fn map_initial_board<C>(self, map: impl FnOnce(B) -> C) -> PcScenarioQuery<C> {
+        let Self {
+            initial_board, remaining_queue, hold_state, piece_set, bag, rule,
+            verified_kick_profile, piece_window, exact_pieces, min_remaining_queue,
+            allow_hold, supply_window_size, requires_180, completion_goal,
+            count_policy, retained_trace_limit, objective, solution_probability_policy,
+            queue_observation_policy, execution_policy, allowed_colored_solution_identities,
+        } = self;
+        PcScenarioQuery {
+            initial_board: map(initial_board), remaining_queue, hold_state, piece_set,
+            bag, rule, verified_kick_profile, piece_window, exact_pieces,
+            min_remaining_queue, allow_hold, supply_window_size, requires_180,
+            completion_goal, count_policy, retained_trace_limit, objective,
+            solution_probability_policy, queue_observation_policy, execution_policy,
+            allowed_colored_solution_identities,
+        }
+    }
+
     fn new_with_board(
         initial_board: B,
         remaining_queue: PcQueueInput,

@@ -7,6 +7,81 @@ use crate::request::RequestedSearchBackend;
 const TARGET_FRAME_PARITY_FIXTURE: &str =
     include_str!("../../../../tests/fixtures/contracts/pc_target_frame_parity.v1.tsv");
 
+#[test]
+fn target_frames_preserve_all_four_words_through_twenty_four_lines() {
+    for height in [6_u16, 7, 12, 13, 24] {
+        let mut words = [0_u64; 4];
+        // No completed row may normalize away the requested target. Use two
+        // missing cells per row, with two additional
+        // cells on the odd top row to keep the total divisible by four.
+        let mut empty = 0;
+        for y in 0..height {
+            let filled_columns = if height % 2 == 1 && y == height - 1 {
+                6
+            } else {
+                8
+            };
+            empty += 10 - filled_columns;
+            for x in 0..filled_columns {
+                let bit = y * 10 + x;
+                words[usize::from(bit / 64)] |= 1_u64 << (bit % 64);
+            }
+        }
+        let board = PcScenarioBoard::standard_10_from_words(height, words).unwrap();
+        let frame = board.to_standard_target_frame(height as u8).unwrap();
+        assert_eq!(frame.normalized_board().occupied_words(), words);
+        assert_eq!(frame.required_pieces(), usize::from(empty / 4));
+        assert_eq!(frame.initial_cleared_rows(), 0);
+        assert_eq!(frame.normalized_board().visible_height(), height);
+    }
+}
+
+#[test]
+fn extended_initial_clear_compacts_rows_across_word_boundaries() {
+    let mut words = [0_u64; 4];
+    for row in [0_u16, 6, 12, 19] {
+        for x in 0..10 {
+            let bit = row * 10 + x;
+            words[usize::from(bit / 64)] |= 1_u64 << (bit % 64);
+        }
+    }
+    for (x, y) in [(0_u16, 5_u16), (9, 7), (3, 13), (7, 23)] {
+        let bit = y * 10 + x;
+        words[usize::from(bit / 64)] |= 1_u64 << (bit % 64);
+    }
+    let frame = PcScenarioBoard::standard_10_from_words(24, words)
+        .unwrap()
+        .to_standard_target_frame(24)
+        .unwrap();
+    assert_eq!(frame.initial_cleared_rows(), 4);
+    assert_eq!(frame.required_pieces(), 59);
+    let normalized = Board256Mask::from_words(frame.normalized_board().occupied_words());
+    for (x, y) in [(0_u16, 4_u16), (9, 5), (3, 10), (7, 19)] {
+        assert!(normalized.contains_index(y * 10 + x));
+    }
+    assert_eq!(normalized.count_ones(), 4);
+    assert_eq!(
+        frame.normalized_board().after_initial_line_clear(),
+        *frame.normalized_board()
+    );
+}
+
+#[test]
+fn extended_input_rejects_out_of_domain_bits_without_truncation() {
+    assert!(PcScenarioBoard::standard_10_from_words(25, [0; 4]).is_err());
+    assert!(PcScenarioBoard::standard_10_from_words(24, [0, 0, 0, 1_u64 << 48]).is_err());
+    assert!(PcScenarioBoard::standard_10_from_words(6, [0, 1, 0, 0]).is_err());
+    let board = PcScenarioBoard::standard_10_from_words(24, [0, 0, 0, 1_u64 << 47]).unwrap();
+    assert!(matches!(
+        board.to_standard_target_frame(7),
+        Err(PcScenarioTargetFrameError::ExtendedOccupancyAboveTarget { .. })
+    ));
+    assert!(matches!(
+        PcScenarioBoard::standard_10(7, 1).to_standard_target_frame(7),
+        Err(PcScenarioTargetFrameError::EmptyAreaNotTetrominoAligned { empty_cells: 69 })
+    ));
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TargetFrameParityCase<'a> {
     id: &'a str,
