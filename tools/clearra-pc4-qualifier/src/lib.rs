@@ -1,0 +1,45 @@
+//! Reusable, local-only data-product generation boundaries.
+//!
+//! Product search never links these routines into a hot path. The native CLI
+//! exposes them only through explicit legal-board or reachability-pack
+//! candidate-generation and bounded coverage-proof requests.
+
+// `domain.rs` is also compiled by the full qualification binary.  The small
+// reusable legal-board library intentionally consumes only the forward/legal
+// derivations, so the binary-only validation helpers are dead in this crate
+// compilation unit.
+mod conditioned_local_candidate_validation;
+mod conditioned_local_coverage_proof;
+mod conditioned_local_product_qualification;
+mod conditioned_local_relation_generation;
+mod conditioned_reachability_generation;
+#[allow(dead_code)]
+mod domain;
+mod legal_board_candidate_validation;
+mod legal_board_generation;
+
+pub use conditioned_local_candidate_validation::{
+    validate_conditioned_local_candidate_catalog, verify_conditioned_local_cover_source,
+    ConditionedLocalCandidateSummary, VerifiedBoundedLocalCover,
+};
+pub use conditioned_local_coverage_proof::{
+    prove_conditioned_local_candidate_coverage, ConditionedLocalCoverageProofOptions,
+};
+pub use conditioned_local_product_qualification::{
+    validate_v081_conditioned_source, verify_v081_conditioned_product_candidate,
+    VerifiedV081ConditionedProductCandidate,
+};
+pub use conditioned_local_relation_generation::{
+    generate_conditioned_local_relation, structurally_valid_conditioned_local_candidate,
+    synthesize_bounded_local_relation_cover, ConditionedLocalRelationGenerationOptions,
+};
+pub use conditioned_reachability_generation::{
+    generate_conditioned_reachability, ConditionedReachabilityGenerationOptions,
+};
+pub use legal_board_candidate_validation::{
+    validate_legal_board_candidate_catalog, LegalBoardCandidateSummary,
+};
+pub use legal_board_generation::{
+    generate_legal_board, legal_board_source_chain_identity,
+    verify_legal_board_candidate_source_chain, LegalBoardGenerationOptions,
+};

@@ -16,6 +16,7 @@ import type { ClearraProductBuildIdentity } from '@clearra/ui/wasm';
 // Include the worker entry point in the contract type-check without executing
 // its browser-only self.onmessage binding in Node.
 type WorkerEntryPoint = typeof import('../src/workers/clearraVerifierWorker.ts');
+type RootWorkerEntryPoint = typeof import('../src/workers/clearraWorker.ts');
 
 const productIdentity: ClearraProductBuildIdentity = {
   source_commit: 'a'.repeat(40),

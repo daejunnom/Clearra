@@ -1051,6 +1051,59 @@ fn canonical_pc_chance_cli_json_uses_v2_while_legacy_routes_stay_generic() {
 }
 
 #[test]
+fn product_execution_failure_does_not_reclassify_explicit_runtime_refusals() {
+    let product_default = CliErrorCode::ProductRuntimeUnsupported;
+    assert_eq!(
+        cli_error_for_app_error(AppErrorCode::ExecutionFailed, product_default),
+        CliErrorCode::ProductExecutionFailed
+    );
+    for (app_code, expected) in [
+        (
+            AppErrorCode::Unsupported,
+            CliErrorCode::ProductRuntimeUnsupported,
+        ),
+        (
+            AppErrorCode::NativeCoreUnavailable,
+            CliErrorCode::NativeCoreUnavailable,
+        ),
+        (
+            AppErrorCode::BackendGpuUnavailable,
+            CliErrorCode::BackendGpuUnavailable,
+        ),
+        (
+            AppErrorCode::CliCommandUnsupported,
+            CliErrorCode::CliCommandUnsupported,
+        ),
+    ] {
+        assert_eq!(cli_error_for_app_error(app_code, product_default), expected);
+    }
+    assert_eq!(
+        cli_error_for_app_error(
+            AppErrorCode::ExecutionFailed,
+            CliErrorCode::PcSearchInternal
+        ),
+        CliErrorCode::PcSearchInternal
+    );
+
+    // A native host's verified-build refusal is still an execution failure and
+    // preserves its diagnostic cause; this presentation rule never registers
+    // a host or changes the request's workers.
+    let cause = "native_build_probability_host_provider_not_registered";
+    let output = AppResponseRenderer::render(
+        AppResponse::failed(
+            AppStatus::ExecutionFailed,
+            AppError::new(AppErrorCode::ExecutionFailed, cause),
+        ),
+        RenderFormat::Json,
+        product_default,
+    );
+    let value: serde_json::Value = serde_json::from_str(output.stdout()).unwrap();
+    assert_eq!(value["error"]["code"], "E_PRODUCT_EXECUTION_FAILED");
+    assert_eq!(value["error"]["message"], cause);
+    assert_eq!(output.exit_code(), crate::exit::ExitCode::InternalError);
+}
+
+#[test]
 fn execution_failed_json_preserves_the_typed_resource_report() {
     let availability = clearra_host_contract::ExecutionAvailabilityReport::exhausted(
         clearra_host_contract::ExecutionSurface::Native,
@@ -1083,7 +1136,8 @@ fn execution_failed_json_preserves_the_typed_resource_report() {
 
     assert_eq!(value["kind"], "execution-failed");
     assert_eq!(value["error"]["message"], "shared memory budget exhausted");
-    assert!(value["error"]["code"].as_str().is_some());
+    assert_eq!(value["error"]["code"], "E_PRODUCT_EXECUTION_FAILED");
+    assert_eq!(output.exit_code(), crate::exit::ExitCode::InternalError);
     assert_eq!(value["resource_report"]["solver_executed"], false);
     assert_eq!(
         value["resource_report"]["execution_availability"]["state"],
@@ -1156,7 +1210,7 @@ fn execution_failed_default_text_is_public_while_explicit_text_profiles_keep_aut
     );
     assert_eq!(
         default_output.stderr(),
-        "error E_PRODUCT_RUNTIME_UNSUPPORTED the operation could not be completed"
+        "error E_PRODUCT_EXECUTION_FAILED the operation could not be completed"
     );
     assert!(!default_output.stderr().contains("resource_report."));
     assert!(!default_output
@@ -1193,7 +1247,7 @@ fn execution_failed_text_does_not_fabricate_an_absent_resource_report() {
 
     assert_eq!(
         output.stderr(),
-        "error E_PRODUCT_RUNTIME_UNSUPPORTED the operation could not be completed"
+        "error E_PRODUCT_EXECUTION_FAILED the operation could not be completed"
     );
     assert!(!output.stderr().contains("resource_report."));
     assert!(!output.stderr().contains("legacy failure"));

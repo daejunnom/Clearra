@@ -1,5 +1,7 @@
 use super::{
-    parse_option_value::{option_value, parse_usize_option, unknown_option},
+    parse_option_value::{
+        option_value, parse_usize_option, select_exact_accelerator_once, unknown_option,
+    },
     CliHelpTopic, CliParseError, ParsedCliCommand, SetupArgs,
 };
 use clearra_supply::queue::queue_observation_policy::QueueObservationPolicy;
@@ -19,6 +21,8 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
     let mut path_detail_condition_id = None;
     let mut queue_observation_policy = QueueObservationPolicy::default();
     let mut tablebase_requested = None;
+    let mut exact_legal_board_enabled = None;
+    let mut conditioned_reachability_enabled = None;
     let mut workers = None;
     let mut automatic_worker_limit = None;
     let mut use_all_logical_processors = false;
@@ -123,6 +127,38 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
                 tablebase_requested = Some(false);
                 index += 1;
             }
+            "--legal-board" => {
+                select_exact_accelerator_once(
+                    &mut exact_legal_board_enabled,
+                    true,
+                    "--legal-board",
+                )?;
+                index += 1;
+            }
+            "--no-legal-board" => {
+                select_exact_accelerator_once(
+                    &mut exact_legal_board_enabled,
+                    false,
+                    "--no-legal-board",
+                )?;
+                index += 1;
+            }
+            "--conditioned-reachability" => {
+                select_exact_accelerator_once(
+                    &mut conditioned_reachability_enabled,
+                    true,
+                    "--conditioned-reachability",
+                )?;
+                index += 1;
+            }
+            "--no-conditioned-reachability" => {
+                select_exact_accelerator_once(
+                    &mut conditioned_reachability_enabled,
+                    false,
+                    "--no-conditioned-reachability",
+                )?;
+                index += 1;
+            }
             "--workers" => {
                 workers = Some(parse_usize_option(args, index, "--workers")?);
                 index += 2;
@@ -169,6 +205,8 @@ pub(crate) fn parse_setup(args: &[String]) -> Result<ParsedCliCommand, CliParseE
         .with_search_mode(search_mode)
         .with_queue_observation_policy(queue_observation_policy)
         .with_tablebase_requested(tablebase_requested)
+        .with_exact_legal_board_enabled(exact_legal_board_enabled)
+        .with_conditioned_reachability_enabled(conditioned_reachability_enabled)
         .with_workers(workers)
         .with_automatic_worker_limit(automatic_worker_limit)
         .with_use_all_logical_processors(use_all_logical_processors);

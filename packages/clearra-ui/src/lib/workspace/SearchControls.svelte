@@ -15,6 +15,7 @@
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
   import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
   import Pc4DownloadControl from './Pc4DownloadControl.svelte';
+  import AcceleratorDownloadControl from './AcceleratorDownloadControl.svelte';
   import type { WorkerAuthorityReport } from '../wasm';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
@@ -263,6 +264,34 @@
         <small class="workspace-field-help">{label('precomputeBuildDependenciesHelp')}</small>
       </div>
     {/if}
+    <div class="accelerator-control">
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.legalBoardEnabled}
+          disabled={tilingOnly}
+          on:change={(event) => patch({
+            legalBoardEnabled: (event.currentTarget as HTMLInputElement).checked
+          })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('exactLegalBoard')}</span>
+      </label>
+      <label class="workspace-switch-label">
+        <input
+          type="checkbox"
+          checked={request.conditionedReachabilityEnabled}
+          disabled={tilingOnly}
+          on:change={(event) => patch({
+            conditionedReachabilityEnabled: (event.currentTarget as HTMLInputElement).checked
+          })}
+        />
+        <span class="workspace-switch" aria-hidden="true"></span>
+        <span>{label('conditionedReachability')}</span>
+      </label>
+      <small class="workspace-field-help">{label('exactAcceleratorsHelp')}</small>
+      <AcceleratorDownloadControl {language} />
+    </div>
   </section>
 
   {#if validationCodes.length}
@@ -277,13 +306,14 @@
 <style>
   .policy-toggle { grid-template-columns: 1fr; }
   .b2b-preservation-control { display: grid; gap: 5px; }
-  .tablebase-control, .dependency-dag-control {
+  .tablebase-control, .dependency-dag-control, .accelerator-control {
     align-content: start;
     display: grid;
     gap: 5px;
     margin-top: 14px;
     min-width: 0;
   }
+  .accelerator-control { margin-top: 18px; }
   .tablebase-control + .dependency-dag-control { margin-top: 18px; }
   .tablebase-control :global(.workspace-field-help),
   .dependency-dag-control :global(.workspace-field-help) {

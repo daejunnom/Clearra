@@ -1,0 +1,170 @@
+# v0.8.1 production Web verifier pool 기능 검증 경계
+
+## 범위와 현재 권위
+
+`ebe1bb24c938ac3955975f35bee044130710adbf` 위에 실제 production Web host/pool과
+verifier worker를 연결하는 작은 기능 소비자를 추가했다. 기존 realm 검증은 실제
+WASM ABI와 독립 메모리를 사용했지만 Web pool의 준비, durable delegation,
+consume/finish 및 취소 순서를 직접 실행하지 않았다. 이번 소비자는 그 경계를
+검사한다. 추가 당시 실제 실행은 미완이었고, 아래 후속 CI 관측에서 실제 WASM
+소비자 통과를 확인했다. 브라우저 자체의 증거와는 계속 구분한다.
+
+새 검증 코드는 다음 production 경로를 그대로 사용한다.
+
+- `ClearraVerifierPool`과 `DistributedWasmJobRunner`
+- `clearraVerifierWorker.ts` 및 `loadClearraWasmModule`
+- `DurableDelegationAuthority`의 실제 offer/start/run/result 전이
+- root의 full asset admission, bounded legal synopsis와 relation query/reply ABI
+
+Node worker threads는 격리된 메시지 운송만 제공한다. 가짜 solver/WASM 함수는
+없다. `MemoryDelegationJournal`은 명시적인 기능 fixture이며 IndexedDB 내구성
+증거가 아니다. 실제 브라우저, OPFS, Tauri IPC, UI 또는 hardware worker/peak
+증거로 이 검증을 확대하지 않는다.
+
+## 검사하도록 구현된 요청
+
+다섯 qualified profile의 변경 없는 signed 자료를 재사용한다. 자료 생성·전수
+재자격은 하지 않는다. 다음 수치는 기존 기능 증거에서 가져온 검증 예상값이며,
+처음 작성한 새 Web pool 소비자의 예상값이었다. 후속 CI에서 모두 확인했다.
+
+| Profile | 초기 필드 4L / P7 / 6 pieces | empty 4L / IIOOOIIOOO / no-hold |
+| --- | ---: | ---: |
+| SRS | 245 | 159 |
+| SRS+ | 246 | 159 |
+| SRS-X | 289 | 159 |
+| Jstris 180 | 246 | 159 |
+| no-kick | 175 | 159 |
+
+각 입력은 off/off, legal-only, relation-only, combined의 네 정책을 실제
+3-worker 분산 실행으로 직렬 baseline과 대조하도록 했다. serial/ready fallback
+또는 요청과 다른 plan worker 수는 통과할 수 없다. 전체 canonical identity
+sequence, 중복 없음, result hash, coverage 분모/개수와 각 해법 확률·complete
+상태를 비교한다. 두 가속기는 적용된 peer admission을 실제 응답으로 확인하고,
+relation broker의 질의/응답 및 delegation 메시지 교환을 필수로 요구한다.
+
+전체 pack은 root에만 둔다. peer에 보내는 legal synopsis와 relation seed는 각각
+256KiB 이하이며 relation cache 예약은 peer당 1MiB다. 이는 전송 계약 검사이지
+전체 실제 peak 메모리 자격을 대신하지 않는다. natural-root topology는 control
+root와 별도로 세 compute verifier를 사용하므로 두 자산의 peer 허용 수도 3이다.
+
+추가로 실제 remote consume가 게시된 뒤 취소하고 자산을 끈 새 요청으로
+재시작한다. production runner의 취소는 Promise 거절이며, public cancelled
+이벤트는 `clearraWorker`가 소유한다. 테스트에서 그 이벤트를 만들어 내거나
+runner의 성공 terminal로 오인하지 않는다. 예상 총량은 baseline 10개와 분산
+요청 42개(정상 41개, 취소 1개)이며, 최초 작성 시 미실행이었다.
+
+## 소스·빌드·실행 정체성
+
+실행기는 정확한 두 fixture root와 현재 source/build contract를 확인한 뒤에만
+managed build owner를 연다. WASM source commit, engine identity, artifact 길이와
+SHA-256이 일치해야 한다. 허용된 file artifact만 읽으며 외부 HTTP는 없다.
+TS 기능 소비자와 worker boot만 명시적인 ESM으로 bundle하며 WASM은 만들지 않는다.
+CI의 기존 ordinary WASM 한 번을 재사용한다. profiling/benchmark feature와 포트
+4194/4195는 사용하지 않는다.
+
+로컬 일반 WASM 빌드는 감독 영수증
+`1790538720679086500-44840-runtime.json`에서 memory-pressure로 실패했다.
+return 1, automatic retry false, process tree stopped true, descendants 0이다.
+중단 당시 전체 시스템 commit available은 52,518,912바이트였고 owned peak는
+4,922,662,912바이트였다. 이를 solver 오류, 성공 build 또는 성능 측정으로
+분류하지 않는다. 자원 조건을 바꾼 재시도·WSL 전환은 하지 않았다.
+
+남아 있는 fixture는 `83cb5fdbf2f57fc481d189d72e33a53bc2d328e9`의 manifest다.
+현재 `ebe1bb24…` identity로 소비자를 호출하면 managed build owner를 열기 전에
+stale WASM을 거절하는 것을 확인했다. 이전 binary를 새 source 검증으로
+재명명하거나 fixture identity를 고치지 않았다.
+
+실제 browser 연결은 Node kernel 초기 asset 작성 단계의 OS path-not-found 오류로
+초기화되지 않았다. 탭/화면을 검사하지 않았으며 실제 browser 증거는 Open이다.
+
+## 기존 CI 관측과 read-only 실패 수정
+
+[run 36345097318](https://github.com/daejunnom/Clearra/actions/runs/36345097318)은
+exact `ebe1bb24…`에서 여섯 job 중 다섯 성공했다. native-products 안의 실제
+Desktop native job 검증도 성공했다. 유일한 실패는 read-only 재검증의
+`/tmp/Clearra/v081-compute-readonly-36345097318-1`을 Rust 저장 정책이 거절한
+것이다. 자료 검증에는 도달하지 않았으며 자산 손상이나 Desktop 실패가 아니다.
+
+새 read-only fixture는 이미 선언된 repository `_local/artifacts` 안의
+run/attempt 전용 경로를 먼저 검증한다. 동일 CLI, public production adapter,
+서명 자료와 이미 사용한 정확한 Node runtime/library bytes만 준비한다. runner
+home/전체 checkout 권한 또는 manager 정책은 넓히지 않는다.
+
+이 bundle만 읽기 전용 bind mount로 공개 Ubuntu 24.04의 resolved image ID에
+제공한다. 기존 CLI를 빌드한 job도 Ubuntu 24.04로 고정한다. nobody UID/GID,
+read-only root, network none, no-new-privileges, capability 제거와 finite 4GiB/
+64-PID 경계 안에서 실제 production `verify`를 실행한다. 기존 container 이름은
+거절하고 owned run/attempt container만 종료 trap으로 정리한다. Bash pipefail로
+의존 library 복사 중 실패도 유지한다.
+
+이는 읽기 전용 기능 sandbox이며 accepted Bookworm Cloud Run image나 배포
+증거가 아니다. image build/push, release receipt 또는 traffic 변경은 없다.
+[Docker 실행 제한](https://docs.docker.com/engine/containers/run/)과
+[읽기 전용 bind mount](https://docs.docker.com/engine/storage/bind-mounts/)의
+별도 계약을 사용한다. 새 Linux 검사 실제 통과는 후속 비게시 CI의 Open 항목이다.
+
+## 이 단계에서 확인한 것과 남은 것
+
+- CI 소스 계약 12개: passed 12, failed 0, skipped 0.
+- 새 세 Node 파일 syntax 검사: 통과.
+- actual production consumer/worker의 in-memory bundle: 통과, 출력 파일 없음.
+- 오래된 WASM의 preflight 거절: 통과, build owner 시작 없음.
+- 실제 새 Web pool 실행 및 Linux read-only 실행: 후속 CI에서 확인할 것.
+- 실제 browser/OPFS/IndexedDB, strict lint, whole-copy surface parity,
+  accepted compute image, aggregate shared peak와 release/readback: 계속 Open.
+
+벤치마크/ABBA, 자산 재생성, v0.9.0 업그레이드, main 병합과 배포는 하지 않았다.
+
+## 후속 실제 CI 관측: `bff8ebac`
+
+[run 36347628083](https://github.com/daejunnom/Clearra/actions/runs/36347628083)은
+exact `bff8ebacf01cfc04d64bf2a28427255613b6c721`에서 여섯 job 중 다섯 성공했다.
+`wasm-realms`의 한 ordinary WASM으로 독립 realm 검사와 실제 production Web
+pool/worker 소비자가 모두 통과했다. 소비자는 정상 41건, 취소 1건, 실제 relation
+교환 189건을 기록했다. serial baseline 10건과 다섯 profile·두 입력·네 정책의
+complete identity/coverage/probability parity 및 취소 후 재시작 검사가 통과했다.
+
+native-products의 실제 CLI/compute adapter 및 Desktop native job 검사도 통과했다.
+단, 마지막 read-only 단계가 library staging 중 실패했으므로 전체 CI는 failure다.
+두 바이너리를 함께 전달한 `ldd` 출력의 절 제목을 기존 awk의 절대경로 규칙이
+library로 오인하는 소스 경로를 확인했다. Docker 실행 이전에 중단됐으며 실제
+read-only 자산 검증의 성공 또는 실패는 아직 관측하지 못했다.
+
+새 source는 별도 dependency parser에서 바이너리 제목과 vDSO를 제외하고,
+실제 해석된 host library 경로만 정렬·중복 제거한다. 미해결 의존성·허용 범위 밖
+경로·traversal·알 수 없는 출력은 실패를 유지한다. 정확한 parser 테스트 3개와
+CI 연결 계약 13개가 로컬에서 모두 통과했다. 새 Linux read-only 기능 실행은
+후속 CI에서 검증할 Open 항목이다. accepted Cloud Run image, 실제 browser/
+OPFS/IndexedDB, Tauri IPC, active-session peak와 릴리스 권위로 확대하지 않는다.
+
+## 후속 read-only 실제 CI 통과: `26630d24`
+
+[run 36349394915](https://github.com/daejunnom/Clearra/actions/runs/36349394915)은
+exact `26630d246e54642875c3486a5d95bccb1cd53e3d`에서 다섯 job이 성공했다.
+`native-products`도 success이며 동일 signed data의 native adapter, 실제
+Desktop job과 마지막 Linux read-only 비특권 `verify` step 모두 통과했다.
+dependency parser 수정 후 실제 resolved Ubuntu fixture를 사용했으며 Docker
+실행의 network-none/read-only/nobody/capability 제거 경계를 유지했다.
+
+여섯 번째 `product-wire-ui` job은 compiled identity와 입력 이름의 동명 변수로
+잘못 비교한 새 소비자 오류로 실패했다. 이 실패는 그대로 failure이며 read-only
+통과를 전체 CI 성공으로 바꾸지 않는다. 수정 소비자는 동일 CI의 실제 source-bound
+자료로 로컬 통과했고 [다중 member 기록](v081-multi-member-copy-source-bound-2026-09-28.md)에
+분리했다. 새 source CI, accepted Bookworm/Cloud Run image, 실제 browser/IPC,
+shared peak·성능 및 release 권위는 여전히 별도 Open이다.
+
+## 후속 동일 기능 경계 관측: `e1db5ba8`
+
+[run 36352731057](https://github.com/daejunnom/Clearra/actions/runs/36352731057)의
+exact `e1db5ba87b86df98fb6e8ca39b246c0596d58e5f`에서 `wasm-realms`는 success다.
+ordinary WASM 하나로 실제 relation owner/두 peer realm과 다섯 legal-board
+owner/synopsis peer 테스트 두 개가 통과했다(`failed=0`, `skipped=0`). 같은
+WASM을 소비한 생산 Web pool/worker도 다섯 profile·두 입력·네 정책에서 complete
+결과를 보존했고 정상 41건·취소 1건·relation 교환 190건을 기록했다.
+
+교환 수가 이전 189건과 다른 것은 기능 실행의 관측값이며 처리량·속도 이득 또는
+실제 공유 peak로 해석하지 않는다. 같은 CI의 `surfaces`는 의존성 설치 전 새
+소스 테스트의 `esbuild` import 때문에 실패했다. 독립 작업의 성공으로 이 실패나
+Web pointer 복구의 실제 browser readback을 닫지 않는다. 후속 수정은 실제
+CTK3 검사를 기존 Rust target으로 옮겨 빠른 Node 검사의 외부 의존성을 없앤다.
+현재 native 작업과 다음 exact-source CI 및 release는 별도 상태로 유지한다.

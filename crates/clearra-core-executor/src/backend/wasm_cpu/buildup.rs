@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use clearra_core_domain::{
     board::board_size::BoardSize,
@@ -31,8 +32,18 @@ use clearra_supply::{
 };
 
 use crate::{
+    conditioned_local_relation::LocalRelationRowFrame,
+    legal_board::{
+        legal_board_negative_snapshot, CompletionCapability, LegalBoardNegativeOwner,
+        LegalBoardNegativeQueryCache, LegalBoardQuery,
+    },
     performance::{ExecutorSearchStage, SearchStageSpan},
     CorePathStep,
+};
+
+#[cfg(any(feature = "parallel", test))]
+use super::{
+    reachability::SharedReachabilityTemplates, standard_bag_coverage::StandardBagMemoAccounting,
 };
 
 use super::{
@@ -46,13 +57,20 @@ use super::{
     },
     reachability::{checked_reachability_retained_upper_bound, ReachabilityWorkspace},
     realization_feasibility::{RealizationFeasibility, RealizationFeasibilityWorkspace},
-    standard_bag_coverage::{StandardBagCoverage, StandardBagCoverageResult},
+    standard_bag_coverage::{
+        SharedStandardBagRequest, StandardBagCoverage, StandardBagCoverageResult,
+    },
     WasmExactSearchError,
 };
 
 // Keep the low-volume symbolic fast path intact, but recycle accelerator
 // arenas before wasm32's fixed address space is exhausted on full searches.
 const SYMBOLIC_CACHE_LIVE_LIMIT: usize = 256 * 1024 * 1024;
+// Candidate subset count is bounded by MAX_BOARD64_PIECES (15). These tags
+// reuse existing generation-stamped graph storage, never a second per-worker
+// table, and cannot alias a real node index.
+const LEGAL_BOARD_PENDING_NODE: u32 = u32::MAX - 1;
+const LEGAL_BOARD_REJECTED_NODE: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct BuildEdge {
@@ -491,12 +509,23 @@ impl BuildCompletion {
     }
 }
 
+#[cfg(any(feature = "parallel", test))]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct BuildUpMemoryComponents {
+    pub piece_language_bytes: usize,
+    pub standard_bag_bytes: usize,
+    pub reachability_bytes: usize,
+    pub graph_projection_bytes: usize,
+    pub other_bytes: usize,
+}
+
 #[derive(Default)]
 pub(super) struct BuildUpWorkspace {
     realization_feasibility: RealizationFeasibilityWorkspace,
     piece_order_languages: PieceOrderLanguageCache,
     standard_bag_coverage: Option<StandardBagCoverage>,
     standard_bag_coverage_initialized: bool,
+    shared_standard_bag_request: Option<Arc<SharedStandardBagRequest>>,
     observation_language_roots: Vec<u32>,
     reachability: ReachabilityWorkspace,
     graph_nodes: Vec<BuildNode>,
@@ -511,18 +540,70 @@ pub(super) struct BuildUpWorkspace {
     projection_physical_boards: Vec<u64>,
     projection_state_generations: Vec<u32>,
     projection_generation: u32,
+    legal_board: Option<LegalBoardNegativeOwner>,
+    legal_board_profile: Option<clearra_rules::kicks::KickTableProfileId>,
+    legal_board_enabled: Option<bool>,
+    legal_board_policy_enabled: Option<bool>,
+    legal_board_query_cache: LegalBoardNegativeQueryCache,
+    legal_board_verified_negative_prunes: usize,
 }
 
 impl BuildUpWorkspace {
-    pub fn retained_bytes(&self) -> usize {
-        self.realization_feasibility.retained_bytes()
-            + self.piece_order_languages.retained_bytes()
-            + self
-                .standard_bag_coverage
-                .as_ref()
-                .map_or(0, StandardBagCoverage::retained_bytes)
-            + self.reachability.retained_bytes()
-            + self.graph_nodes.capacity() * core::mem::size_of::<BuildNode>()
+    #[cfg(any(feature = "parallel", test))]
+    pub fn set_shared_reachability_templates(
+        &mut self,
+        templates: Arc<SharedReachabilityTemplates>,
+    ) -> Result<(), WasmExactSearchError> {
+        self.reachability
+            .set_shared_templates(templates)
+            .map_err(WasmExactSearchError::InvalidProblem)
+    }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub fn set_shared_standard_bag_request(
+        &mut self,
+        request: Arc<SharedStandardBagRequest>,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.standard_bag_coverage_initialized {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_standard_bag_shared_request_already_initialized",
+            ));
+        }
+        self.shared_standard_bag_request = Some(request);
+        Ok(())
+    }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub fn shared_standard_bag_request_retained_bytes(&self) -> usize {
+        if self.shared_standard_bag_request.is_none() {
+            return 0;
+        }
+        self.standard_bag_coverage
+            .as_ref()
+            .map_or(0, StandardBagCoverage::shared_request_retained_bytes)
+    }
+
+    /// Final worker snapshot only; no timer or allocation on solver hot paths.
+    #[cfg(any(feature = "parallel", test))]
+    pub fn memory_components(&self) -> BuildUpMemoryComponents {
+        let piece_language_bytes = self.piece_order_languages.retained_bytes();
+        let standard_bag_bytes = self
+            .standard_bag_coverage
+            .as_ref()
+            .map_or(0, StandardBagCoverage::retained_bytes);
+        let reachability_bytes = self.reachability.private_retained_bytes();
+        let graph_projection_bytes = self.graph_projection_retained_bytes();
+        BuildUpMemoryComponents {
+            piece_language_bytes,
+            standard_bag_bytes,
+            reachability_bytes,
+            graph_projection_bytes,
+            other_bytes: self.other_retained_bytes(),
+        }
+    }
+
+    fn graph_projection_retained_bytes(&self) -> usize {
+        self.graph_nodes.capacity() * core::mem::size_of::<BuildNode>()
             + (self.graph_edges.capacity()
                 + self.graph_piece_edges.capacity()
                 + self.graph_edge_scratch.capacity())
@@ -533,7 +614,71 @@ impl BuildUpWorkspace {
             + self.graph_reachable_generations.capacity() * core::mem::size_of::<u32>()
             + self.graph_subset_node_ids.capacity() * core::mem::size_of::<u32>()
             + self.graph_subset_queue.capacity() * core::mem::size_of::<u16>()
+    }
+
+    fn other_retained_bytes(&self) -> usize {
+        // Count private components directly, never subtract two snapshots of
+        // a shared OnceLock which another worker may initialize in between.
+        self.realization_feasibility.retained_bytes()
             + self.observation_language_roots.capacity() * core::mem::size_of::<u32>()
+            + self.legal_board_query_cache.retained_bytes()
+    }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub fn standard_bag_memo_storage_label(&self) -> &'static str {
+        self.standard_bag_coverage
+            .as_ref()
+            .map_or("not-used", StandardBagCoverage::memo_storage_label)
+    }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub fn standard_bag_memo_retained_payload_bytes(&self) -> usize {
+        self.standard_bag_coverage
+            .as_ref()
+            .map_or(0, StandardBagCoverage::memo_retained_payload_bytes)
+    }
+
+    #[cfg(any(feature = "parallel", test))]
+    pub fn standard_bag_memo_accounting(&self) -> StandardBagMemoAccounting {
+        self.standard_bag_coverage.as_ref().map_or_else(
+            StandardBagMemoAccounting::default,
+            StandardBagCoverage::memo_accounting,
+        )
+    }
+
+    fn configure_legal_board(
+        &mut self,
+        profile: clearra_rules::kicks::KickTableProfileId,
+        enabled: bool,
+    ) {
+        // A workspace is one execution-session owner. Snapshot the immutable
+        // generation once so a concurrent install can never mix generations
+        // between candidates in the same result.
+        let policy_enabled = crate::search_prune_policy::legal_board_enabled();
+        if self.legal_board_profile == Some(profile)
+            && self.legal_board_enabled == Some(enabled)
+            && self.legal_board_policy_enabled == Some(policy_enabled)
+        {
+            return;
+        }
+        self.legal_board = enabled
+            .then(|| legal_board_negative_snapshot(profile))
+            .flatten();
+        self.legal_board_profile = Some(profile);
+        self.legal_board_enabled = Some(enabled);
+        self.legal_board_policy_enabled = Some(policy_enabled);
+        self.legal_board_query_cache.reset(profile);
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.other_retained_bytes()
+            + self.piece_order_languages.retained_bytes()
+            + self
+                .standard_bag_coverage
+                .as_ref()
+                .map_or(0, StandardBagCoverage::retained_bytes)
+            + self.reachability.retained_bytes()
+            + self.graph_projection_retained_bytes()
     }
 
     pub const fn piece_language_coverage_hits(&self) -> usize {
@@ -567,6 +712,10 @@ impl BuildUpWorkspace {
 
     pub const fn reachability_metrics(&self) -> super::reachability::ReachabilityMetrics {
         self.reachability.metrics()
+    }
+
+    pub const fn legal_board_verified_negative_prunes(&self) -> usize {
+        self.legal_board_verified_negative_prunes
     }
 
     pub fn merge_standard_bag_coverage(&mut self, root: u32) -> Result<(), WasmExactSearchError> {
@@ -664,12 +813,21 @@ impl BuildUpWorkspace {
             let universe = problem.piece_source().materialized_universe().ok_or(
                 WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
             )?;
-            self.standard_bag_coverage = StandardBagCoverage::for_universe(
-                universe,
-                problem.initial_hold(),
-                problem.supply().hold_enabled(),
-                problem.supply().projects_unplaced_lookahead(),
-            )?;
+            self.standard_bag_coverage = match self.shared_standard_bag_request.as_deref() {
+                Some(shared) => StandardBagCoverage::for_universe_with_shared(
+                    universe,
+                    problem.initial_hold(),
+                    problem.supply().hold_enabled(),
+                    problem.supply().projects_unplaced_lookahead(),
+                    shared,
+                )?,
+                None => StandardBagCoverage::for_universe(
+                    universe,
+                    problem.initial_hold(),
+                    problem.supply().hold_enabled(),
+                    problem.supply().projects_unplaced_lookahead(),
+                )?,
+            };
             self.standard_bag_coverage_initialized = true;
         }
         let Some(coverage) = self.standard_bag_coverage.as_mut() else {
@@ -741,6 +899,67 @@ impl BuildUpWorkspace {
             self.graph_generation = 1;
         }
         Ok(self.graph_generation)
+    }
+
+    /// A previously rejected child needs no realization or asset lookup. The
+    /// candidate generation also prevents a prior candidate's tag from pruning.
+    #[inline]
+    fn legal_board_child_is_rejected(&self, child: usize, graph_generation: u32) -> bool {
+        self.graph_reachable_generations[child] == graph_generation
+            && self.graph_subset_node_ids[child] == LEGAL_BOARD_REJECTED_NODE
+    }
+
+    /// A child has one exact projected board regardless of its predecessor
+    /// operation or concrete rotation. Query it only after finding a valid
+    /// concrete edge, before exact lock traversal. Positive admission alone
+    /// remains no evidence of reachability.
+    fn legal_board_child_allows(
+        &mut self,
+        catalog: &GeometryCatalog,
+        profile: clearra_rules::kicks::KickTableProfileId,
+        projection: &mut CandidateProjection,
+        child: usize,
+        graph_generation: u32,
+    ) -> bool {
+        if self.graph_reachable_generations[child] == graph_generation {
+            return self.graph_subset_node_ids[child] != LEGAL_BOARD_REJECTED_NODE;
+        }
+        let (board, deleted_rows) = projection.state(child);
+        let owner = self.legal_board.as_ref();
+        let allowed = self.legal_board_query_cache.allows(
+            LegalBoardQuery {
+                width: catalog.width(),
+                height: catalog.height(),
+                initial_board: catalog.initial_board(),
+                kick_profile: profile,
+                physical_board: board,
+                deleted_original_rows: deleted_rows,
+                placed_piece_count: child.count_ones() as usize,
+                completion: CompletionCapability::ClearToEmpty,
+            },
+            || {
+                crate::search_prune_policy::local_pc4_legal_board_allows(
+                    owner,
+                    catalog.width(),
+                    catalog.height(),
+                    catalog.initial_board(),
+                    profile,
+                    true,
+                    board,
+                    deleted_rows,
+                    child.count_ones() as usize,
+                )
+            },
+        );
+        self.graph_reachable_generations[child] = graph_generation;
+        self.graph_subset_node_ids[child] = if allowed {
+            LEGAL_BOARD_PENDING_NODE
+        } else {
+            self.legal_board_verified_negative_prunes =
+                self.legal_board_verified_negative_prunes.saturating_add(1);
+            LEGAL_BOARD_REJECTED_NODE
+        };
+        allowed
     }
 }
 
@@ -829,6 +1048,7 @@ pub(super) fn checked_candidate_verification_peak_upper_bound(
         .checked_add(trace_bytes)?
         .checked_add(reachability_bytes)?
         .checked_add(standard_bag_cursor_bytes)?
+        .checked_add(crate::legal_board::NEGATIVE_QUERY_CACHE_BYTES as u128)?
         .checked_add(core::mem::size_of::<CandidateBuildResult>() as u128)?
         .checked_mul(2)
 }
@@ -1217,9 +1437,24 @@ fn verify_candidate_for_completion_mode(
         return Ok(infeasible_candidate_result(0));
     }
     workspace.reachability.configure(candidate.row_ids().len());
+    workspace.reachability.configure_kick_profile(
+        kick_profile_id,
+        problem.backend_policy().conditioned_reachability_enabled(),
+    );
     workspace
         .reachability
-        .configure_kick_profile(kick_profile_id);
+        .configure_conditioned_boolean_shortcuts(
+            problem.count_policy() == PcCountPolicy::CountUnique
+                && !retain_trace
+                && !witness_mode.enabled()
+                && !finesse_requested
+                && !finesse_spin_coverage_requested
+                && !problem.objective().execution_constraints().requested(),
+        );
+    workspace.configure_legal_board(
+        kick_profile_id,
+        problem.backend_policy().exact_legal_board_enabled(),
+    );
     let projection_span =
         SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmCandidateProjection, profile_scale);
     let mut projection = CandidateProjection::compile(catalog, candidate, workspace, completion)?;
@@ -2511,11 +2746,12 @@ fn witness_transition(
         if board & lock_mask != 0 {
             continue;
         }
-        if !workspace.reachability.lock_reachable_instantiated(
+        if !workspace.reachability.lock_reachable_instantiated_in_frame(
             catalog,
             board,
             row.piece,
             realization,
+            LocalRelationRowFrame::new(catalog.height(), deleted_rows),
         ) {
             continue;
         }
@@ -2714,7 +2950,7 @@ impl BuildOrderGraph {
     // Graph construction keeps admission, projection, and reachability policy explicit.
     #[allow(clippy::too_many_arguments)]
     fn build(
-        _problem: &SearchProblem,
+        problem: &SearchProblem,
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
         projection: &mut CandidateProjection,
@@ -2723,6 +2959,41 @@ impl BuildOrderGraph {
         completion: BuildCompletion,
         feasibility: Option<RealizationFeasibility>,
         reachability_mode: BuildReachabilityMode,
+    ) -> Result<Self, WasmExactSearchError> {
+        let legal_board_eligible = catalog.width() == 10
+            && catalog.height() == 4
+            && catalog.initial_board() == 0
+            && matches!(completion, BuildCompletion::ClearToEmpty)
+            && (workspace.legal_board.is_some() || cfg!(feature = "local-search-ab"))
+            && crate::search_prune_policy::legal_board_enabled();
+        Self::build_with_legal_board_admission(
+            problem,
+            catalog,
+            candidate,
+            projection,
+            workspace,
+            piece_language_projection_only,
+            completion,
+            feasibility,
+            reachability_mode,
+            legal_board_eligible,
+        )
+    }
+
+    // The normal entry point owns eligibility. Bounded tests can exercise the
+    // admission control flow without a global registry or a qualified asset.
+    #[allow(clippy::too_many_arguments)]
+    fn build_with_legal_board_admission(
+        problem: &SearchProblem,
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        projection: &mut CandidateProjection,
+        workspace: &mut BuildUpWorkspace,
+        piece_language_projection_only: bool,
+        completion: BuildCompletion,
+        feasibility: Option<RealizationFeasibility>,
+        reachability_mode: BuildReachabilityMode,
+        legal_board_eligible: bool,
     ) -> Result<Self, WasmExactSearchError> {
         if candidate.row_ids().len() > 15 {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -2812,6 +3083,16 @@ impl BuildOrderGraph {
                 {
                     continue;
                 }
+                if legal_board_eligible
+                    && workspace.legal_board_child_is_rejected(child, graph_generation)
+                {
+                    continue;
+                }
+                // Reuse the stamped decision across all realizations and
+                // predecessors. Unseen children stay unseen when no concrete
+                // placement survives cheap physical/projection checks.
+                let mut legal_admission_checked = !legal_board_eligible
+                    || workspace.graph_reachable_generations[child] == graph_generation;
                 let row_id = candidate.row_ids()[operation_index];
                 let row = catalog.skeleton(row_id);
                 if reachability_mode == BuildReachabilityMode::GeometryOnly {
@@ -2826,6 +3107,18 @@ impl BuildOrderGraph {
                             deleted_rows,
                             realization,
                         ) {
+                            if !legal_admission_checked {
+                                if !workspace.legal_board_child_allows(
+                                    catalog,
+                                    problem.kick_profile().profile_id(),
+                                    projection,
+                                    child,
+                                    graph_generation,
+                                ) {
+                                    break;
+                                }
+                                legal_admission_checked = true;
+                            }
                             try_push_build_edge(&mut edge_scratch, edge)?;
                         }
                     }
@@ -2833,6 +3126,13 @@ impl BuildOrderGraph {
                     let scratch_start = edge_scratch.len();
                     let mut harddrop_edge = None;
                     for realization in catalog.instantiations(row_id, deleted_rows) {
+                        // A normal lock must touch the floor or an occupied
+                        // cell directly below it. This is the same necessary
+                        // physical predicate used by exact reachability; it
+                        // does not apply to GeometryOnly/finesse candidates.
+                        if !placement_is_grounded(catalog.width(), board, realization.lock_mask) {
+                            continue;
+                        }
                         let Some(edge) = geometric_build_edge(
                             catalog,
                             projection,
@@ -2845,6 +3145,18 @@ impl BuildOrderGraph {
                         ) else {
                             continue;
                         };
+                        if !legal_admission_checked {
+                            if !workspace.legal_board_child_allows(
+                                catalog,
+                                problem.kick_profile().profile_id(),
+                                projection,
+                                child,
+                                graph_generation,
+                            ) {
+                                break;
+                            }
+                            legal_admission_checked = true;
+                        }
                         try_push_build_edge(&mut edge_scratch, edge)?;
                         if workspace.reachability.lock_harddrop_reachable_instantiated(
                             catalog.width(),
@@ -2857,18 +3169,26 @@ impl BuildOrderGraph {
                     }
                     let selected = if let Some(edge) = harddrop_edge {
                         Some(edge)
+                    } else if edge_scratch.len() == scratch_start {
+                        // No grounded concrete edge (or verified negative):
+                        // do not initialize a template merely to visit none.
+                        None
                     } else {
                         workspace.reachability.prepare_template(catalog, row.piece);
                         let mut reachable = None;
                         for edge in edge_scratch[scratch_start..].iter().copied() {
-                            if workspace.reachability.lock_reachable_after_harddrop_miss(
-                                catalog,
-                                board,
-                                row.piece,
-                                edge.rotation,
-                                edge.x,
-                                edge.y,
-                            ) {
+                            if workspace
+                                .reachability
+                                .lock_reachable_after_harddrop_miss_in_frame(
+                                    catalog,
+                                    board,
+                                    row.piece,
+                                    edge.rotation,
+                                    edge.x,
+                                    edge.y,
+                                    LocalRelationRowFrame::new(catalog.height(), deleted_rows),
+                                )
+                            {
                                 reachable = Some(edge);
                                 break;
                             }
@@ -2881,6 +3201,9 @@ impl BuildOrderGraph {
                     }
                 } else {
                     for realization in catalog.instantiations(row_id, deleted_rows) {
+                        if !placement_is_grounded(catalog.width(), board, realization.lock_mask) {
+                            continue;
+                        }
                         let Some(edge) = geometric_build_edge(
                             catalog,
                             projection,
@@ -2893,11 +3216,24 @@ impl BuildOrderGraph {
                         ) else {
                             continue;
                         };
-                        if workspace.reachability.lock_reachable_instantiated(
+                        if !legal_admission_checked {
+                            if !workspace.legal_board_child_allows(
+                                catalog,
+                                problem.kick_profile().profile_id(),
+                                projection,
+                                child,
+                                graph_generation,
+                            ) {
+                                break;
+                            }
+                            legal_admission_checked = true;
+                        }
+                        if workspace.reachability.lock_reachable_instantiated_in_frame(
                             catalog,
                             board,
                             row.piece,
                             realization,
+                            LocalRelationRowFrame::new(catalog.height(), deleted_rows),
                         ) {
                             try_push_build_edge(&mut edge_scratch, edge)?;
                         }
@@ -2918,7 +3254,9 @@ impl BuildOrderGraph {
             edge_scratch.dedup();
             for edge in &mut edge_scratch {
                 let child_subset = edge.to as usize;
-                if workspace.graph_reachable_generations[child_subset] != graph_generation {
+                if workspace.graph_reachable_generations[child_subset] != graph_generation
+                    || workspace.graph_subset_node_ids[child_subset] == LEGAL_BOARD_PENDING_NODE
+                {
                     workspace.graph_reachable_generations[child_subset] = graph_generation;
                     let child_node = u32::try_from(nodes.len()).map_err(|_| {
                         WasmExactSearchError::InvalidProblem("wasm_build_order_node_index_overflow")
@@ -3516,9 +3854,10 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
     }
 
     workspace.reachability.configure(candidate.row_ids().len());
-    workspace
-        .reachability
-        .configure_kick_profile(problem.kick_profile().profile_id());
+    workspace.reachability.configure_kick_profile(
+        problem.kick_profile().profile_id(),
+        problem.backend_policy().conditioned_reachability_enabled(),
+    );
     let mut projection = CandidateProjection::compile(catalog, &candidate, workspace, completion)?;
     let graph = match BuildOrderGraph::build(
         problem,
@@ -4121,6 +4460,483 @@ fn occupied_rows(width: u8, mut cells: u64) -> u16 {
         rows |= 1_u16 << (cell / width as usize);
     }
     rows
+}
+
+#[cfg(test)]
+mod v081_legal_child_admission_tests {
+    use super::*;
+    use clearra_core_domain::pc::pc_target::PcTarget;
+    use clearra_pc_graph::request::{OpeningPcSearchQuery, PcQueueInput};
+    use clearra_problem::ProblemCompiler;
+    use clearra_rules::kicks::KickTableProfileId;
+
+    const PROFILES: [KickTableProfileId; 5] = [
+        KickTableProfileId::Srs90,
+        KickTableProfileId::SrsPlus,
+        KickTableProfileId::SrsX,
+        KickTableProfileId::Jstris180,
+        KickTableProfileId::NoKick,
+    ];
+
+    fn fixture() -> (GeometryCatalog, GeometryCandidate) {
+        o_fixture(10, 4)
+    }
+
+    fn o_fixture(width: u8, height: u8) -> (GeometryCatalog, GeometryCandidate) {
+        let full = (1_u64 << (u32::from(width) * u32::from(height))) - 1;
+        let catalog =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(width, height, 0, full)
+                .unwrap();
+        let mut rows = Vec::new();
+        for y in (0..height).step_by(2) {
+            for x in (0..width).step_by(2) {
+                let cells = 3_u64 << (y * width + x) | 3_u64 << ((y + 1) * width + x);
+                rows.push(catalog.skeleton_id(PieceKind::O, cells).unwrap());
+            }
+        }
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+        (catalog, candidate)
+    }
+
+    fn horizontal_i_fixture() -> (GeometryCatalog, GeometryCandidate) {
+        let catalog =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(4, 4, 0, (1 << 16) - 1)
+                .unwrap();
+        let rows = (0..4)
+            .map(|y| catalog.skeleton_id(PieceKind::I, 15 << (y * 4)).unwrap())
+            .collect::<Vec<_>>();
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+        (catalog, candidate)
+    }
+
+    fn problem_for(profile: KickTableProfileId) -> SearchProblem {
+        use clearra_rules::profile::builtin_rules;
+        let rule = match profile {
+            KickTableProfileId::Srs90 => builtin_rules::srs(),
+            KickTableProfileId::SrsPlus => builtin_rules::srs_plus(),
+            KickTableProfileId::SrsX => builtin_rules::srs_x(),
+            KickTableProfileId::Jstris180 => builtin_rules::jstris_180(),
+            KickTableProfileId::NoKick => builtin_rules::no_kick(),
+            _ => unreachable!(),
+        };
+        ProblemCompiler::compile_opening_pc(
+            &OpeningPcSearchQuery::new(PcTarget::four_lines())
+                .with_queue(PcQueueInput::standard_7_bag())
+                .with_rule(rule),
+        )
+        .unwrap()
+    }
+
+    // Deliberately independent cell-wise physics; no product collision,
+    // compiled transition, or harddrop-path helper is reused here.
+    fn primitive_grounded(width: u8, board: u64, mut placement: u64) -> bool {
+        while placement != 0 {
+            let cell = placement.trailing_zeros();
+            placement &= placement - 1;
+            if cell < u32::from(width) || board & (1_u64 << (cell - u32::from(width))) != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn primitive_harddrop(width: u8, height: u8, board: u64, placement: u64) -> bool {
+        primitive_grounded(width, board, placement)
+            && (1..=height).all(|distance| {
+                board & (placement << (u32::from(distance) * u32::from(width))) == 0
+            })
+    }
+
+    #[test]
+    fn v081_legal_child_admission_uses_existing_generation_storage_without_claiming_reachability() {
+        let (catalog, candidate) = fixture();
+        let mut workspace = BuildUpWorkspace::default();
+        let mut projection = CandidateProjection::compile(
+            &catalog,
+            &candidate,
+            &mut workspace,
+            BuildCompletion::ClearToEmpty,
+        )
+        .unwrap();
+        let generation = workspace
+            .begin_graph_generation(projection.state_count())
+            .unwrap();
+        let table_bytes = workspace.graph_reachable_generations.capacity() * 4
+            + workspace.graph_subset_node_ids.capacity() * 4;
+        let profile = clearra_rules::kicks::KickTableProfileId::SrsPlus;
+        workspace.legal_board_query_cache.reset(profile);
+        assert!(workspace.legal_board_child_allows(
+            &catalog,
+            profile,
+            &mut projection,
+            1,
+            generation,
+        ));
+        assert_eq!(workspace.graph_subset_node_ids[1], LEGAL_BOARD_PENDING_NODE);
+        assert!(!workspace.legal_board_child_is_rejected(1, generation));
+        assert!(workspace.graph_nodes.is_empty());
+        assert!(workspace.graph_edges.is_empty());
+        assert_eq!(workspace.reachability.generated_state_count(), 0);
+        assert_eq!(
+            workspace.graph_reachable_generations.capacity() * 4
+                + workspace.graph_subset_node_ids.capacity() * 4,
+            table_bytes
+        );
+
+        // The actual edge verifier, not admission, assigns a concrete node.
+        workspace.graph_subset_node_ids[1] = 7;
+        assert!(workspace.legal_board_child_allows(
+            &catalog,
+            profile,
+            &mut projection,
+            1,
+            generation,
+        ));
+        assert_eq!(workspace.graph_subset_node_ids[1], 7);
+    }
+
+    #[test]
+    fn v081_legal_child_negative_is_counted_once_and_cannot_cross_candidate_generations() {
+        let (catalog, candidate) = fixture();
+        let mut workspace = BuildUpWorkspace::default();
+        let mut projection = CandidateProjection::compile(
+            &catalog,
+            &candidate,
+            &mut workspace,
+            BuildCompletion::ClearToEmpty,
+        )
+        .unwrap();
+        let profile = clearra_rules::kicks::KickTableProfileId::SrsPlus;
+        workspace.legal_board_query_cache.reset(profile);
+        let generation = workspace
+            .begin_graph_generation(projection.state_count())
+            .unwrap();
+        let (board, deleted_rows) = projection.state(1);
+        // Only the memo's stamped control flow is under test; this synthetic
+        // closure is not a production asset or a completeness certificate.
+        assert!(!workspace.legal_board_query_cache.allows(
+            LegalBoardQuery {
+                width: 10,
+                height: 4,
+                initial_board: 0,
+                kick_profile: profile,
+                physical_board: board,
+                deleted_original_rows: deleted_rows,
+                placed_piece_count: 1,
+                completion: CompletionCapability::ClearToEmpty,
+            },
+            || false,
+        ));
+        for _ in 0..2 {
+            assert!(!workspace.legal_board_child_allows(
+                &catalog,
+                profile,
+                &mut projection,
+                1,
+                generation,
+            ));
+        }
+        assert_eq!(
+            workspace.graph_subset_node_ids[1],
+            LEGAL_BOARD_REJECTED_NODE
+        );
+        assert_eq!(workspace.legal_board_verified_negative_prunes(), 1);
+        assert!(workspace.legal_board_child_is_rejected(1, generation));
+        assert!(!workspace.legal_board_child_is_rejected(1, generation.wrapping_add(1)));
+        assert_eq!(workspace.reachability.generated_state_count(), 0);
+        workspace.legal_board_query_cache.reset(profile);
+        let next_generation = workspace
+            .begin_graph_generation(projection.state_count())
+            .unwrap();
+        assert!(workspace.legal_board_child_allows(
+            &catalog,
+            profile,
+            &mut projection,
+            1,
+            next_generation,
+        ));
+        assert_eq!(workspace.graph_subset_node_ids[1], LEGAL_BOARD_PENDING_NODE);
+        assert_eq!(workspace.legal_board_verified_negative_prunes(), 1);
+    }
+
+    #[test]
+    fn v081_legal_admission_does_not_query_floating_children_but_keeps_geometry_only() {
+        let (catalog, candidate) = fixture();
+        let problem = problem_for(KickTableProfileId::SrsPlus);
+        let floating_operation = candidate
+            .row_ids()
+            .iter()
+            .position(|&row| catalog.skeleton(row).cells & full_row_mask(10) == 0)
+            .unwrap();
+        let grounded_operation = candidate
+            .row_ids()
+            .iter()
+            .position(|&row| catalog.skeleton(row).cells & full_row_mask(10) != 0)
+            .unwrap();
+        for (mode, unique) in [
+            (BuildReachabilityMode::Existing, true),
+            (BuildReachabilityMode::Existing, false),
+            (BuildReachabilityMode::GeometryOnly, true),
+        ] {
+            let mut workspace = BuildUpWorkspace::default();
+            workspace
+                .legal_board_query_cache
+                .reset(KickTableProfileId::SrsPlus);
+            let mut projection = CandidateProjection::compile(
+                &catalog,
+                &candidate,
+                &mut workspace,
+                BuildCompletion::ClearToEmpty,
+            )
+            .unwrap();
+            // This is a deterministic scheduling seam, not asset qualification.
+            // The missing asset must fail open for every queried concrete edge.
+            let graph = BuildOrderGraph::build_with_legal_board_admission(
+                &problem,
+                &catalog,
+                &candidate,
+                &mut projection,
+                &mut workspace,
+                unique,
+                BuildCompletion::ClearToEmpty,
+                None,
+                mode,
+                true,
+            )
+            .unwrap();
+            let generation = workspace.graph_generation;
+            assert_eq!(
+                workspace.graph_reachable_generations[1 << grounded_operation],
+                generation
+            );
+            assert_eq!(
+                workspace.graph_reachable_generations[1 << floating_operation] == generation,
+                mode == BuildReachabilityMode::GeometryOnly,
+                "floating singleton must not cause a normal-lock asset query"
+            );
+            assert!(graph.is_live());
+            assert_eq!(workspace.legal_board_verified_negative_prunes(), 0);
+        }
+    }
+
+    #[test]
+    fn v081_concrete_edge_negative_stops_before_harddrop_or_exact_template_work() {
+        let (catalog, _) = fixture();
+        let row = catalog.skeleton_id(PieceKind::O, 3 | (3 << 10)).unwrap();
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &[row]).unwrap();
+        let profile = KickTableProfileId::SrsPlus;
+        let problem = problem_for(profile);
+        for (mode, unique) in [
+            (BuildReachabilityMode::Existing, true),
+            (BuildReachabilityMode::Existing, false),
+            (BuildReachabilityMode::GeometryOnly, true),
+        ] {
+            let mut workspace = BuildUpWorkspace::default();
+            workspace.legal_board_query_cache.reset(profile);
+            let mut projection = CandidateProjection::compile(
+                &catalog,
+                &candidate,
+                &mut workspace,
+                BuildCompletion::ClearToEmpty,
+            )
+            .unwrap();
+            let (physical_board, deleted_original_rows) = projection.state(1);
+            // Synthetic memo control-flow only: this is neither a complete
+            // PC candidate nor evidence that a legal-board asset rejects it.
+            assert!(!workspace.legal_board_query_cache.allows(
+                LegalBoardQuery {
+                    width: 10,
+                    height: 4,
+                    initial_board: 0,
+                    kick_profile: profile,
+                    physical_board,
+                    deleted_original_rows,
+                    placed_piece_count: 1,
+                    completion: CompletionCapability::ClearToEmpty,
+                },
+                || false,
+            ));
+            let graph = BuildOrderGraph::build_with_legal_board_admission(
+                &problem,
+                &catalog,
+                &candidate,
+                &mut projection,
+                &mut workspace,
+                unique,
+                BuildCompletion::ClearToEmpty,
+                None,
+                mode,
+                true,
+            )
+            .unwrap();
+            assert_eq!(graph.nodes.len(), 1);
+            assert!(graph.edges(0).is_empty());
+            assert!(workspace.legal_board_child_is_rejected(1, workspace.graph_generation));
+            assert_eq!(workspace.legal_board_verified_negative_prunes(), 1);
+            assert_eq!(workspace.reachability.generated_state_count(), 0);
+            assert_eq!(workspace.reachability.metrics().harddrop_queries, 0);
+            assert_eq!(workspace.reachability.metrics().lock_queries, 0);
+        }
+    }
+
+    #[test]
+    fn v081_concrete_edge_order_and_multiplicity_match_independent_primitive_locks() {
+        use crate::reachability_reference::reference_spawn_lock_anchors;
+        for (catalog, candidate) in [o_fixture(4, 4), horizontal_i_fixture()] {
+            let piece = catalog.skeleton(candidate.row_ids()[0]).piece;
+            for profile in PROFILES {
+                let problem = problem_for(profile);
+                for (mode, unique) in [
+                    (BuildReachabilityMode::Existing, true),
+                    (BuildReachabilityMode::Existing, false),
+                    (BuildReachabilityMode::GeometryOnly, true),
+                ] {
+                    let mut workspace = BuildUpWorkspace::default();
+                    workspace
+                        .reachability
+                        .configure_kick_profile(profile, false);
+                    workspace.legal_board_query_cache.reset(profile);
+                    let mut projection = CandidateProjection::compile(
+                        &catalog,
+                        &candidate,
+                        &mut workspace,
+                        BuildCompletion::ClearToEmpty,
+                    )
+                    .unwrap();
+                    let graph = BuildOrderGraph::build_with_legal_board_admission(
+                        &problem,
+                        &catalog,
+                        &candidate,
+                        &mut projection,
+                        &mut workspace,
+                        unique,
+                        BuildCompletion::ClearToEmpty,
+                        None,
+                        mode,
+                        true,
+                    )
+                    .unwrap();
+                    // Invert only reached IDs; pending admission is not a node.
+                    let mut node_subsets = vec![0; graph.nodes.len()];
+                    for subset in 0..projection.state_count() {
+                        let node = workspace.graph_subset_node_ids[subset] as usize;
+                        if workspace.graph_reachable_generations[subset]
+                            == workspace.graph_generation
+                            && node < graph.nodes.len()
+                        {
+                            node_subsets[node] = subset;
+                        }
+                    }
+                    for (node, &subset) in node_subsets.iter().enumerate() {
+                        let (board, deleted_rows) = projection.state(subset);
+                        let mut expected = Vec::new();
+                        let locks = reference_spawn_lock_anchors(4, 4, board, piece, profile)
+                            .expect("bounded independent primitive BFS");
+                        for (operation, &row_id) in candidate.row_ids().iter().enumerate() {
+                            let bit = 1 << operation;
+                            if subset & bit != 0 {
+                                continue;
+                            }
+                            let mut concrete = Vec::new();
+                            for realization in catalog.instantiations(row_id, deleted_rows) {
+                                if let Some(edge) = geometric_build_edge(
+                                    &catalog,
+                                    &mut projection,
+                                    subset | bit,
+                                    operation,
+                                    piece,
+                                    board,
+                                    deleted_rows,
+                                    realization,
+                                ) {
+                                    concrete.push((edge, realization));
+                                }
+                            }
+                            let reference_reachable = |edge: &BuildEdge| {
+                                let anchor = edge.y as usize * 4 + edge.x as usize;
+                                locks[edge.rotation.quarter_turns() as usize] & (1_u64 << anchor)
+                                    != 0
+                            };
+                            if mode == BuildReachabilityMode::GeometryOnly {
+                                expected.extend(concrete.iter().map(|(edge, _)| *edge));
+                            } else if unique {
+                                let first = concrete.iter().find(|(_, realization)| {
+                                    primitive_harddrop(4, 4, board, realization.lock_mask)
+                                });
+                                let selected = first.or_else(|| {
+                                    concrete.iter().find(|(edge, _)| reference_reachable(edge))
+                                });
+                                if let Some((edge, _)) = selected {
+                                    expected.push(*edge);
+                                }
+                            } else {
+                                expected.extend(concrete.iter().filter_map(|(edge, _)| {
+                                    reference_reachable(edge).then_some(*edge)
+                                }));
+                            }
+                        }
+                        let mut actual = graph.edges(node).to_vec();
+                        for edge in &mut actual {
+                            edge.to = node_subsets[edge.to as usize] as u32;
+                        }
+                        actual.sort_unstable_by_key(BuildEdge::canonical_key);
+                        expected.sort_unstable_by_key(BuildEdge::canonical_key);
+                        expected.dedup();
+                        assert_eq!(
+                            actual, expected,
+                            "{profile:?} {piece:?} {mode:?} unique={unique} subset={subset}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v081_grounded_guard_preserves_every_independent_primitive_lock_in_all_profiles() {
+        use crate::reachability_reference::reference_spawn_lock_anchors;
+        for height in [1, 4, 6] {
+            let full = (1_u64 << (height * 4)) - 1;
+            let catalog =
+                GeometryCatalog::compile_for_required_cells_on_dimensions(4, height, 0, full)
+                    .unwrap();
+            for profile in PROFILES {
+                for board in [0, 1, 1 << (height * 4 - 1)] {
+                    for piece in PieceKind::STANDARD_TETROMINOES {
+                        let locks = reference_spawn_lock_anchors(4, height, board, piece, profile)
+                            .expect("bounded independent primitive BFS");
+                        for row in 0..catalog.skeleton_count() as u32 {
+                            if catalog.skeleton(row).piece != piece {
+                                continue;
+                            }
+                            for realization in catalog.instantiations(row, 0) {
+                                if board & realization.lock_mask != 0 {
+                                    continue;
+                                }
+                                let grounded =
+                                    placement_is_grounded(4, board, realization.lock_mask);
+                                assert_eq!(
+                                    grounded,
+                                    primitive_grounded(4, board, realization.lock_mask)
+                                );
+                                let anchor =
+                                    realization.lock_y as usize * 4 + realization.x as usize;
+                                if locks[realization.rotation.quarter_turns() as usize]
+                                    & (1_u64 << anchor)
+                                    != 0
+                                {
+                                    assert!(
+                                        grounded,
+                                        "{profile:?} {piece:?} {height}L board={board:#x}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

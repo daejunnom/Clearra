@@ -1,4 +1,4 @@
-use clearra_problem::{BuildProbabilityQuery, ProblemCompiler};
+use clearra_problem::{BuildProbabilityQuery, ProblemCompileError, ProblemCompiler, SearchProblem};
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_executor::{CoreExecutionError, CoreExecutionResult};
@@ -78,6 +78,19 @@ impl BuildProbabilityAppCommand {
 
     pub const fn result_mode(&self) -> BuildProbabilityResultMode {
         self.result_mode
+    }
+
+    /// The Build product owns replay evidence independently of score and the
+    /// PC-only path policy. Direct, cooperative, and distributed execution
+    /// must compile through this same boundary.
+    pub(crate) fn compile_problem(&self) -> Result<SearchProblem, ProblemCompileError> {
+        ProblemCompiler::compile_scenario_pc(self.query.core_query()).map(|problem| {
+            if self.result_mode == BuildProbabilityResultMode::CompleteReplayPaths {
+                problem.with_build_replay_evidence()
+            } else {
+                problem
+            }
+        })
     }
 
     pub(crate) fn set_product_retention_budget(
@@ -265,7 +278,7 @@ impl RunnableAppCommand for BuildProbabilityAppCommand {
                 AppError::new(AppErrorCode::InvalidInput, reason),
             );
         }
-        let problem = match ProblemCompiler::compile_scenario_pc(self.query.core_query()) {
+        let problem = match self.compile_problem() {
             Ok(problem) => problem,
             Err(error) => {
                 return AppResponse::failed(
@@ -556,12 +569,21 @@ mod tests {
     fn complete_replay_uses_path_materialization_without_requesting_score() {
         let query = one_piece_query();
         assert!(!query.core_query().objective().score().requested());
+        let replay = super::BuildProbabilityAppCommand::new(query.clone())
+            .with_result_mode(BuildProbabilityResultMode::CompleteReplayPaths);
+        assert_eq!(replay.invalid_reason(), None);
+        let replay_problem = replay.compile_problem().unwrap();
+        assert!(replay_problem.build_replay_evidence_requested());
+        assert!(!replay_problem.objective().score().requested());
         assert_eq!(
-            super::BuildProbabilityAppCommand::new(query.clone())
-                .with_result_mode(BuildProbabilityResultMode::CompleteReplayPaths)
-                .invalid_reason(),
-            None
+            replay_problem.pc_chance_evidence_policy(),
+            clearra_problem::PcChanceEvidencePolicy::Disabled
         );
+        let ordinary_problem = super::BuildProbabilityAppCommand::new(query.clone())
+            .compile_problem()
+            .unwrap();
+        assert!(!ordinary_problem.build_replay_evidence_requested());
+        assert_ne!(replay_problem.problem_id(), ordinary_problem.problem_id());
 
         for mode in [
             BuildProbabilityResultMode::FieldAverageScore,

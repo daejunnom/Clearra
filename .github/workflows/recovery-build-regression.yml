@@ -5,6 +5,8 @@ on:
     branches:
       - codex/recovery-build-fields-parallel-20260928
       - codex/converge-recovery-build-release-20260928
+      - codex/v081-main-convergence-20260928
+      - codex/converge-v081-linear-20260928
 
 permissions:
   contents: read
@@ -107,6 +109,7 @@ jobs:
           pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json 2>&1 | tee build/recovery-regression/ui-types.log || result=1
           node scripts/tools/recovery-build-browser-regression.mjs 2>&1 | tee build/recovery-regression/browser.log || result=1
           node scripts/tools/recovery-workspace-browser-acceptance.mjs 2>&1 | tee build/recovery-regression/workspace-browser.log || result=1
+          node scripts/tools/v081-accelerator-opfs-browser-acceptance.mjs 2>&1 | tee build/recovery-regression/v081-opfs-browser.log || result=1
           exit "$result"
       - uses: actions/upload-artifact@v4
         if: always()

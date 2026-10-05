@@ -5,7 +5,7 @@ use clearra_i18n::LanguageId;
 use super::*;
 
 #[test]
-fn top_level_help_lists_both_finesse_modes_and_build_probability_entry() {
+fn top_level_help_lists_search_and_explicit_data_lifecycle_entries() {
     let output = CliHelpTopic::TopLevel.into_output(LanguageId::En);
 
     assert!(output
@@ -17,6 +17,12 @@ fn top_level_help_lists_both_finesse_modes_and_build_probability_entry() {
     assert!(output
         .stdout()
         .contains("build-probability finesse: add --finesse inputs"));
+    for command in ["tablebase", "legal-board", "reachability-pack"] {
+        assert!(
+            output.stdout().contains(command),
+            "top-level help omitted {command}"
+        );
+    }
 }
 
 #[test]
@@ -49,6 +55,7 @@ fn ordinary_help_never_exposes_versioned_contracts_or_internal_identity_terms() 
         CliHelpTopic::Product(ProductHelpTopic::PcAllSpinSolution),
         CliHelpTopic::Product(ProductHelpTopic::PcAllSpinPreservationChance),
         CliHelpTopic::Product(ProductHelpTopic::BuildV2),
+        CliHelpTopic::Product(ProductHelpTopic::SetupScore),
         CliHelpTopic::Product(ProductHelpTopic::BuildProbability),
         CliHelpTopic::Product(ProductHelpTopic::Finesse),
         CliHelpTopic::Product(ProductHelpTopic::Damage),
@@ -157,7 +164,28 @@ fn build_v2_routes_to_the_product_boundary_and_owns_closed_help() {
         "--solution-format ctk3|fumen",
         "--objective all|unique|min-cover|max-probability-minimum|max-score-cover",
         "--score-profile tetrio|guideline|jstris-ultra",
+        "--legal-board|--no-legal-board",
+        "--conditioned-reachability|--no-conditioned-reachability",
         "rejects --max-memory-mib",
+    ] {
+        assert!(help.stdout().contains(marker), "missing marker: {marker}");
+    }
+}
+
+#[test]
+fn setup_score_help_describes_its_exact_accelerator_switches() {
+    assert_eq!(
+        CliParser::parse(["clearra", "setup", "score", "--help"])
+            .expect("Setup score help")
+            .into_command(),
+        ParsedCliCommand::Help(CliHelpTopic::Product(ProductHelpTopic::SetupScore))
+    );
+    let help = CliHelpTopic::Product(ProductHelpTopic::SetupScore).into_output(LanguageId::En);
+    for marker in [
+        "--setup-queue",
+        "--solution-queue",
+        "--legal-board|--no-legal-board",
+        "--conditioned-reachability|--no-conditioned-reachability",
     ] {
         assert!(help.stdout().contains(marker), "missing marker: {marker}");
     }
@@ -709,6 +737,48 @@ fn build_dependency_dag_is_explicit_for_pc() {
         panic!("expected pc command");
     };
     assert_eq!(disabled_pc.precompute_build_dependencies(), Some(false));
+}
+
+#[test]
+fn exact_accelerators_default_on_and_can_be_disabled_independently() {
+    let ParsedCliCommand::Pc(default_pc) = CliParser::parse(["clearra", "pc", "--lines", "4"])
+        .expect("default PC invocation")
+        .into_command()
+    else {
+        panic!("expected pc command");
+    };
+    assert_eq!(default_pc.exact_legal_board_enabled(), None);
+    assert_eq!(default_pc.conditioned_reachability_enabled(), None);
+
+    let ParsedCliCommand::Pc(disabled_pc) = CliParser::parse([
+        "clearra",
+        "pc",
+        "--lines",
+        "4",
+        "--no-legal-board",
+        "--no-conditioned-reachability",
+    ])
+    .expect("disabled accelerator invocation")
+    .into_command() else {
+        panic!("expected pc command");
+    };
+    assert_eq!(disabled_pc.exact_legal_board_enabled(), Some(false));
+    assert_eq!(disabled_pc.conditioned_reachability_enabled(), Some(false));
+}
+
+#[test]
+fn tiling_only_rejects_enabled_exact_accelerators() {
+    for option in ["--legal-board", "--conditioned-reachability"] {
+        let error = CliParser::parse(["clearra", "pc", "--lines", "4", "--tiling-only", option])
+            .expect_err("tiling-only accelerator must fail closed");
+        assert_eq!(
+            error,
+            CliParseError::InvalidValue {
+                option,
+                value: "not available with tiling-only search".to_owned(),
+            }
+        );
+    }
 }
 
 #[test]
@@ -2364,4 +2434,39 @@ fn spin_structure_help_freezes_the_three_closed_route_contracts() {
         "Queue/pattern, hold, GPU, tablebase, and explicit memory options are unavailable"
     ));
     assert!(help.contains("every equal-cardinality optimum"));
+}
+
+#[test]
+fn legal_board_lifecycle_routes_to_the_native_management_boundary() {
+    let invocation = CliParser::parse(["clearra", "legal-board", "check", "--profile", "srs-plus"])
+        .expect("legal-board lifecycle command");
+
+    assert_eq!(
+        invocation.into_command(),
+        ParsedCliCommand::LegalBoard(vec![
+            "check".to_string(),
+            "--profile".to_string(),
+            "srs-plus".to_string(),
+        ])
+    );
+}
+
+#[test]
+fn reachability_pack_lifecycle_routes_to_the_native_management_boundary() {
+    let invocation = CliParser::parse([
+        "clearra",
+        "reachability-pack",
+        "check",
+        "--profile",
+        "srs-plus",
+    ])
+    .expect("conditioned reachability lifecycle command");
+    assert_eq!(
+        invocation.into_command(),
+        ParsedCliCommand::ReachabilityPack(vec![
+            "check".to_string(),
+            "--profile".to_string(),
+            "srs-plus".to_string(),
+        ])
+    );
 }

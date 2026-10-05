@@ -7,14 +7,17 @@ publish = false
 
 [features]
 default = []
-stage-profiling = ["clearra-wasm/stage-profiling", "dep:serde_json"]
+stage-profiling = ["clearra-wasm/stage-profiling"]
 minimum-hotfix-ab = ["dep:clearra-coverage", "clearra-coverage/minimum-hotfix-ab"]
 
 [dependencies]
 clearra-coverage = { path = "../clearra-coverage", optional = true }
 clearra-pc-graph = { path = "../clearra-pc-graph" }
+clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
+clearra-core-executor = { path = "../clearra-core-executor" }
+clearra-rules = { path = "../clearra-rules" }
 clearra-wasm = { path = "../clearra-wasm", features = ["webgpu-search"] }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"

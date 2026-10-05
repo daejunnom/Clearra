@@ -7,13 +7,19 @@
 //! reachability engine instead of interpreting an edge as one preferred move.
 
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
+use clearra_piece_registry::registry::piece_registry::PieceRotationShape;
+use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_rules::kicks::KickTableProfileId;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::{
     buildup::{compact_target_board, place_and_clear},
     catalog::GeometryCatalog,
     kick_profiles::builtin_kick_profile,
-    reachability::ReachabilityWorkspace,
+    reachability::{
+        search_reachable_any_desired_lock, search_reachable_locks, ReachabilityScratch,
+        ReachabilityTemplate, ReachabilityWorkspace, ReachableLocks,
+    },
 };
 
 const WIDTH: u8 = 10;
@@ -147,7 +153,11 @@ pub fn materialize_pc4_ilc_transition(
     let expected_board = compact_target_board(WIDTH, HEIGHT, target_cells, target_deleted);
     let mut reachability = ReachabilityWorkspace::default();
     reachability.configure(1);
-    reachability.configure_kick_profile(kick_profile);
+    // Tablebase edge materialization is an independent qualification boundary.
+    // Do not make it silently depend on the separately versioned conditioned-
+    // reachability product; product search may opt into that accelerator only
+    // through its typed execution policy.
+    reachability.configure_kick_profile(kick_profile, false);
 
     let mut placements = Vec::new();
     // Reverse the target's normalization for every possible set of physical
@@ -220,6 +230,452 @@ pub fn materialize_pc4_ilc_transition(
     Ok(placements)
 }
 
+/// Enumerates every normalized four-row target produced by one exact forward
+/// lock from `source_cells` under the selected rule profile.
+///
+/// This is the independent forward side of the local graph-qualification
+/// tool. It deliberately does not read a graph, map a target to a graph ID, or
+/// mint profile/completeness authority. The qualification owner must still
+/// bind the returned set to an immutable field index and compare it with the
+/// complete encoded adjacency for the same source and piece.
+pub fn enumerate_pc4_ilc_target_fields(
+    source_cells: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+) -> Result<Vec<u64>, Pc4IlcMaterializationError> {
+    let mut targets = BTreeSet::new();
+    visit_pc4_ilc_target_fields(source_cells, piece, kick_profile, |target| {
+        targets.insert(target);
+        false
+    })?;
+    Ok(targets.into_iter().collect())
+}
+
+/// Generator-local reuse of rule-only templates and the traversal queue.
+/// The workspace is owned by one validation worker and never shared across
+/// threads or used as a product asset. The board and result are not cached.
+#[derive(Default)]
+pub struct Pc4IlcForwardMembershipWorkspace {
+    templates: HashMap<(u8, PieceKind, KickTableProfileId), ReachabilityTemplate>,
+    scratch: ReachabilityScratch,
+}
+
+/// Tests exact forward membership without an exhaustive reachability traversal
+/// when no geometric lock leads into the requested set. The predicate sees
+/// normalized four-row Board64 masks for collision-free *geometric* locks,
+/// including some that may not be reachable. Its result must therefore depend
+/// only on target membership, not on a presumed reachability witness. A true
+/// function result means that the exact ordered-kick search reached at least
+/// one matching grounded lock; this does not qualify a graph.
+pub fn any_pc4_ilc_target_field(
+    source_cells: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+    matches: impl FnMut(u64) -> bool,
+) -> Result<bool, Pc4IlcMaterializationError> {
+    Pc4IlcForwardMembershipWorkspace::default().any_target(
+        source_cells,
+        piece,
+        kick_profile,
+        matches,
+    )
+}
+
+impl Pc4IlcForwardMembershipWorkspace {
+    pub fn any_target(
+        &mut self,
+        source_cells: u64,
+        piece: PieceKind,
+        kick_profile: KickTableProfileId,
+        mut matches: impl FnMut(u64) -> bool,
+    ) -> Result<bool, Pc4IlcMaterializationError> {
+        if source_cells & !FIELD_MASK != 0 {
+            return Err(Pc4IlcMaterializationError::SourceOutsideFourRows);
+        }
+        if builtin_kick_profile(kick_profile).is_none() {
+            return Err(Pc4IlcMaterializationError::UnsupportedKickProfile);
+        }
+        let source_deleted = bottom_full_row_prefix(source_cells)
+            .ok_or(Pc4IlcMaterializationError::SourceClearedRowsNotBottomPrefix)?;
+        let source_prefix = source_deleted.count_ones() as u8;
+        let physical_height = HEIGHT - source_prefix;
+        if physical_height == 0 {
+            return Ok(false);
+        }
+        let current_board = compact_target_board(WIDTH, HEIGHT, source_cells, source_deleted);
+        let definition = standard_tetromino_registry().get(piece).ok_or(
+            Pc4IlcMaterializationError::Geometry("pc4_forward_piece_definition_missing"),
+        )?;
+        let mut wanted = ReachableLocks::default();
+        let mut has_geometric_target = false;
+        for rotation in RotationState::ALL {
+            let shape = definition.shape(rotation);
+            if shape.height() > physical_height {
+                continue;
+            }
+            for y in 0..=(physical_height - shape.height()) {
+                for x in 0..=(WIDTH - shape.width()) {
+                    let Some(target) = normalized_forward_lock_target(
+                        current_board,
+                        physical_height,
+                        source_prefix,
+                        shape,
+                        x,
+                        y,
+                    )?
+                    else {
+                        continue;
+                    };
+                    if matches(target) {
+                        wanted.insert(WIDTH, rotation, x as i8, y as i8);
+                        has_geometric_target = true;
+                    }
+                }
+            }
+        }
+        if !has_geometric_target {
+            return Ok(false);
+        }
+        let template = self
+            .templates
+            .entry((physical_height, piece, kick_profile))
+            .or_insert_with(|| {
+                ReachabilityTemplate::compile(WIDTH, physical_height, piece, kick_profile)
+            });
+        let result =
+            search_reachable_any_desired_lock(template, current_board, &mut self.scratch, wanted);
+        Ok(!result.exhaustive)
+    }
+}
+
+fn normalized_forward_lock_target(
+    current_board: u64,
+    physical_height: u8,
+    source_prefix: u8,
+    shape: PieceRotationShape,
+    x: u8,
+    y: u8,
+) -> Result<Option<u64>, Pc4IlcMaterializationError> {
+    let mut lock = 0_u64;
+    for cell in shape.cells() {
+        lock |= 1_u64
+            << ((u32::from(y) + cell.y() as u32) * u32::from(WIDTH)
+                + u32::from(x)
+                + cell.x() as u32);
+    }
+    if lock & current_board != 0 {
+        return Ok(None);
+    }
+    let (next_board, cleared_rows, _) =
+        place_and_clear(WIDTH, physical_height, current_board | lock);
+    let target_prefix = source_prefix + cleared_rows.count_ones() as u8;
+    if target_prefix > HEIGHT {
+        return Err(Pc4IlcMaterializationError::Geometry(
+            "pc4_forward_cleared_prefix_outside_domain",
+        ));
+    }
+    let shift = u32::from(target_prefix) * u32::from(WIDTH);
+    let cleared_prefix = if shift == 0 { 0 } else { (1_u64 << shift) - 1 };
+    let normalized = (next_board << shift) | cleared_prefix;
+    if normalized & !FIELD_MASK != 0 {
+        return Err(Pc4IlcMaterializationError::Geometry(
+            "pc4_forward_target_outside_four_rows",
+        ));
+    }
+    Ok(Some(normalized))
+}
+
+fn visit_pc4_ilc_target_fields(
+    source_cells: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+    mut visit: impl FnMut(u64) -> bool,
+) -> Result<bool, Pc4IlcMaterializationError> {
+    if source_cells & !FIELD_MASK != 0 {
+        return Err(Pc4IlcMaterializationError::SourceOutsideFourRows);
+    }
+    if builtin_kick_profile(kick_profile).is_none() {
+        return Err(Pc4IlcMaterializationError::UnsupportedKickProfile);
+    }
+
+    let source_deleted = bottom_full_row_prefix(source_cells)
+        .ok_or(Pc4IlcMaterializationError::SourceClearedRowsNotBottomPrefix)?;
+    let source_prefix = source_deleted.count_ones() as u8;
+    let physical_height = HEIGHT - source_prefix;
+    if physical_height == 0 {
+        return Ok(false);
+    }
+    let current_board = compact_target_board(WIDTH, HEIGHT, source_cells, source_deleted);
+    let template = ReachabilityTemplate::compile(WIDTH, physical_height, piece, kick_profile);
+    let reachable = search_reachable_locks(
+        &template,
+        current_board,
+        &mut ReachabilityScratch::default(),
+        None,
+    );
+    if !reachable.exhaustive {
+        return Err(Pc4IlcMaterializationError::Geometry(
+            "pc4_forward_reachability_not_exhaustive",
+        ));
+    }
+
+    let definition =
+        standard_tetromino_registry()
+            .get(piece)
+            .ok_or(Pc4IlcMaterializationError::Geometry(
+                "pc4_forward_piece_definition_missing",
+            ))?;
+    for rotation in RotationState::ALL {
+        let shape = definition.shape(rotation);
+        if shape.height() > physical_height {
+            continue;
+        }
+        for y in 0..=(physical_height - shape.height()) {
+            for x in 0..=(WIDTH - shape.width()) {
+                if !reachable.locks.contains(WIDTH, rotation, x as i8, y as i8) {
+                    continue;
+                }
+                let normalized = normalized_forward_lock_target(
+                    current_board,
+                    physical_height,
+                    source_prefix,
+                    shape,
+                    x,
+                    y,
+                )?
+                .ok_or(Pc4IlcMaterializationError::Geometry(
+                    "pc4_forward_reachable_lock_collides",
+                ))?;
+                if visit(normalized) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Enumerates every geometric predecessor candidate that could produce
+/// `target_cells` after one lock and line clear.
+///
+/// Unlike [`enumerate_pc4_ilc_predecessor_fields`], this function deliberately
+/// does not claim that the removed piece can reach the reconstructed lock. It
+/// exists for the local qualification producer, which unions candidates across
+/// an entire target layer and then performs one exact forward reachability
+/// search per unique `(source, piece)` pair. Callers must never treat this set
+/// as graph, reachability, or product authority on its own.
+pub fn enumerate_pc4_ilc_geometric_predecessor_fields(
+    target_cells: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+) -> Result<Vec<u64>, Pc4IlcMaterializationError> {
+    if target_cells & !FIELD_MASK != 0 {
+        return Err(Pc4IlcMaterializationError::TargetOutsideFourRows);
+    }
+    if builtin_kick_profile(kick_profile).is_none() {
+        return Err(Pc4IlcMaterializationError::UnsupportedKickProfile);
+    }
+    let target_deleted = bottom_full_row_prefix(target_cells)
+        .ok_or(Pc4IlcMaterializationError::TargetClearedRowsNotBottomPrefix)?;
+    let target_prefix = target_deleted.count_ones() as u8;
+    let expected_board = compact_target_board(WIDTH, HEIGHT, target_cells, target_deleted);
+    let definition =
+        standard_tetromino_registry()
+            .get(piece)
+            .ok_or(Pc4IlcMaterializationError::Geometry(
+                "pc4_reverse_piece_definition_missing",
+            ))?;
+    let mut candidates = BTreeSet::new();
+
+    for source_prefix in 0..=target_prefix {
+        let physical_height = HEIGHT - source_prefix;
+        if physical_height == 0 {
+            continue;
+        }
+        let newly_cleared = target_prefix - source_prefix;
+        for clear_rows in 0_u16..(1_u16 << physical_height) {
+            if clear_rows.count_ones() != u32::from(newly_cleared) {
+                continue;
+            }
+            let mut before_clear = 0_u64;
+            let mut surviving_row = 0_u8;
+            for row in 0..physical_height {
+                let cells = if clear_rows & (1 << row) != 0 {
+                    ROW_MASK
+                } else {
+                    let cells = (expected_board >> (surviving_row * WIDTH)) & ROW_MASK;
+                    surviving_row += 1;
+                    cells
+                };
+                before_clear |= cells << (row * WIDTH);
+            }
+            for rotation in RotationState::ALL {
+                let shape = definition.shape(rotation);
+                if shape.height() > physical_height {
+                    continue;
+                }
+                for y in 0..=(physical_height - shape.height()) {
+                    for x in 0..=(WIDTH - shape.width()) {
+                        let mut lock = 0_u64;
+                        for cell in shape.cells() {
+                            lock |= 1_u64
+                                << ((u32::from(y) + cell.y() as u32) * u32::from(WIDTH)
+                                    + u32::from(x)
+                                    + cell.x() as u32);
+                        }
+                        if lock & !before_clear != 0 {
+                            continue;
+                        }
+                        let current_board = before_clear & !lock;
+                        if (0..physical_height)
+                            .any(|row| (current_board >> (row * WIDTH)) & ROW_MASK == ROW_MASK)
+                        {
+                            continue;
+                        }
+                        let (next_board, actual_clears, _) =
+                            place_and_clear(WIDTH, physical_height, current_board | lock);
+                        if actual_clears != clear_rows || next_board != expected_board {
+                            continue;
+                        }
+                        let shift = u32::from(source_prefix) * u32::from(WIDTH);
+                        let cleared_prefix = if shift == 0 { 0 } else { (1_u64 << shift) - 1 };
+                        let source = (current_board << shift) | cleared_prefix;
+                        if source.count_ones() + 4 != target_cells.count_ones() {
+                            return Err(Pc4IlcMaterializationError::Geometry(
+                                "pc4_reverse_predecessor_area_mismatch",
+                            ));
+                        }
+                        candidates.insert(source);
+                    }
+                }
+            }
+        }
+    }
+    Ok(candidates.into_iter().collect())
+}
+
+/// Enumerates every normalized predecessor field from which one exact lock of
+/// `piece` reaches `target_cells`.
+///
+/// This is the reverse half of independent PC-completable-domain generation.
+/// It reconstructs every possible physical clear mask, removes one standard
+/// tetromino, and then performs exact forward reachability on the reconstructed
+/// predecessor. As with the forward enumerator, it grants no graph or product
+/// authority by itself.
+pub fn enumerate_pc4_ilc_predecessor_fields(
+    target_cells: u64,
+    piece: PieceKind,
+    kick_profile: KickTableProfileId,
+) -> Result<Vec<u64>, Pc4IlcMaterializationError> {
+    if target_cells & !FIELD_MASK != 0 {
+        return Err(Pc4IlcMaterializationError::TargetOutsideFourRows);
+    }
+    if builtin_kick_profile(kick_profile).is_none() {
+        return Err(Pc4IlcMaterializationError::UnsupportedKickProfile);
+    }
+    let target_deleted = bottom_full_row_prefix(target_cells)
+        .ok_or(Pc4IlcMaterializationError::TargetClearedRowsNotBottomPrefix)?;
+    let target_prefix = target_deleted.count_ones() as u8;
+    let expected_board = compact_target_board(WIDTH, HEIGHT, target_cells, target_deleted);
+    let definition =
+        standard_tetromino_registry()
+            .get(piece)
+            .ok_or(Pc4IlcMaterializationError::Geometry(
+                "pc4_reverse_piece_definition_missing",
+            ))?;
+    let mut predecessors = BTreeSet::new();
+
+    for source_prefix in 0..=target_prefix {
+        let physical_height = HEIGHT - source_prefix;
+        if physical_height == 0 {
+            continue;
+        }
+        let newly_cleared = target_prefix - source_prefix;
+        let template = ReachabilityTemplate::compile(WIDTH, physical_height, piece, kick_profile);
+        let mut scratch = ReachabilityScratch::default();
+        let mut reachable_by_board = BTreeMap::new();
+        for clear_rows in 0_u16..(1_u16 << physical_height) {
+            if clear_rows.count_ones() != u32::from(newly_cleared) {
+                continue;
+            }
+            let mut before_clear = 0_u64;
+            let mut surviving_row = 0_u8;
+            for row in 0..physical_height {
+                let cells = if clear_rows & (1 << row) != 0 {
+                    ROW_MASK
+                } else {
+                    let cells = (expected_board >> (surviving_row * WIDTH)) & ROW_MASK;
+                    surviving_row += 1;
+                    cells
+                };
+                before_clear |= cells << (row * WIDTH);
+            }
+            for rotation in RotationState::ALL {
+                let shape = definition.shape(rotation);
+                if shape.height() > physical_height {
+                    continue;
+                }
+                for y in 0..=(physical_height - shape.height()) {
+                    for x in 0..=(WIDTH - shape.width()) {
+                        let mut lock = 0_u64;
+                        for cell in shape.cells() {
+                            lock |= 1_u64
+                                << ((u32::from(y) + cell.y() as u32) * u32::from(WIDTH)
+                                    + u32::from(x)
+                                    + cell.x() as u32);
+                        }
+                        if lock & !before_clear != 0 {
+                            continue;
+                        }
+                        let current_board = before_clear & !lock;
+                        if (0..physical_height)
+                            .any(|row| (current_board >> (row * WIDTH)) & ROW_MASK == ROW_MASK)
+                        {
+                            continue;
+                        }
+                        let reachable = if let Some(locks) = reachable_by_board.get(&current_board)
+                        {
+                            *locks
+                        } else {
+                            let result = search_reachable_locks(
+                                &template,
+                                current_board,
+                                &mut scratch,
+                                None,
+                            );
+                            if !result.exhaustive {
+                                return Err(Pc4IlcMaterializationError::Geometry(
+                                    "pc4_reverse_reachability_not_exhaustive",
+                                ));
+                            }
+                            reachable_by_board.insert(current_board, result.locks);
+                            result.locks
+                        };
+                        if !reachable.contains(WIDTH, rotation, x as i8, y as i8) {
+                            continue;
+                        }
+                        let (next_board, actual_clears, _) =
+                            place_and_clear(WIDTH, physical_height, current_board | lock);
+                        if actual_clears != clear_rows || next_board != expected_board {
+                            continue;
+                        }
+                        let shift = u32::from(source_prefix) * u32::from(WIDTH);
+                        let cleared_prefix = if shift == 0 { 0 } else { (1_u64 << shift) - 1 };
+                        let source = (current_board << shift) | cleared_prefix;
+                        if source.count_ones() + 4 != target_cells.count_ones() {
+                            return Err(Pc4IlcMaterializationError::Geometry(
+                                "pc4_reverse_predecessor_area_mismatch",
+                            ));
+                        }
+                        predecessors.insert(source);
+                    }
+                }
+            }
+        }
+    }
+    Ok(predecessors.into_iter().collect())
+}
+
 fn bottom_full_row_prefix(cells: u64) -> Option<u16> {
     let mut deleted = 0_u16;
     let mut saw_non_full = false;
@@ -248,6 +704,123 @@ mod completion_proof_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_forward_membership_matches_complete_targets_across_profiles() {
+        let post_clear_source = 0b11000000 | (0b111111 << 10);
+        for profile in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
+            KickTableProfileId::Jstris180,
+            KickTableProfileId::NoKick,
+        ] {
+            for source in [0, post_clear_source, FIELD_MASK] {
+                for piece in [PieceKind::I, PieceKind::J, PieceKind::L, PieceKind::T] {
+                    let targets = enumerate_pc4_ilc_target_fields(source, piece, profile).unwrap();
+                    for selected in [targets.first(), targets.last()].into_iter().flatten() {
+                        assert!(
+                            any_pc4_ilc_target_field(source, piece, profile, |target| {
+                                target == *selected
+                            })
+                            .unwrap(),
+                            "profile={profile:?} source={source} piece={piece:?} target={selected}"
+                        );
+                    }
+                    assert!(!any_pc4_ilc_target_field(source, piece, profile, |target| {
+                        target == u64::MAX
+                    })
+                    .unwrap());
+                    let matched =
+                        any_pc4_ilc_target_field(source, piece, profile, |_| true).unwrap();
+                    assert_eq!(matched, !targets.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_forward_membership_rejects_the_same_invalid_source_contract() {
+        for (source, profile) in [
+            (1_u64 << 40, KickTableProfileId::Srs90),
+            (ROW_MASK << WIDTH, KickTableProfileId::Srs90),
+            (0, KickTableProfileId::Custom),
+        ] {
+            assert_eq!(
+                any_pc4_ilc_target_field(source, PieceKind::J, profile, |_| true),
+                enumerate_pc4_ilc_target_fields(source, PieceKind::J, profile)
+                    .map(|targets| !targets.is_empty())
+            );
+        }
+    }
+
+    #[test]
+    fn geometric_target_behind_a_narrow_roof_is_not_a_reachable_lock() {
+        // The one-wide roof opening cannot admit O into the open lower rows.
+        // Geometric placement alone must not turn into a positive certificate.
+        let source = (ROW_MASK ^ 1) << (2 * WIDTH);
+        let shape = standard_tetromino_registry()
+            .get(PieceKind::O)
+            .unwrap()
+            .shape(RotationState::Zero);
+        let target = normalized_forward_lock_target(source, HEIGHT, 0, shape, 4, 0)
+            .unwrap()
+            .unwrap();
+        for profile in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
+            KickTableProfileId::Jstris180,
+            KickTableProfileId::NoKick,
+        ] {
+            let complete = enumerate_pc4_ilc_target_fields(source, PieceKind::O, profile).unwrap();
+            assert!(!complete.contains(&target), "profile={profile:?}");
+            assert!(
+                !any_pc4_ilc_target_field(source, PieceKind::O, profile, |candidate| {
+                    candidate == target
+                })
+                .unwrap(),
+                "profile={profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_forward_membership_matches_every_geometric_target_on_small_fields() {
+        let roof = (ROW_MASK ^ 1) << (2 * WIDTH);
+        let post_clear_source = 0b11000000 | (0b111111 << 10);
+        for profile in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
+            KickTableProfileId::Jstris180,
+            KickTableProfileId::NoKick,
+        ] {
+            let mut workspace = Pc4IlcForwardMembershipWorkspace::default();
+            for source in [0, roof, post_clear_source] {
+                for piece in [PieceKind::J, PieceKind::L, PieceKind::T, PieceKind::O] {
+                    let expected = enumerate_pc4_ilc_target_fields(source, piece, profile).unwrap();
+                    let mut geometric = BTreeSet::new();
+                    assert!(!workspace
+                        .any_target(source, piece, profile, |target| {
+                            geometric.insert(target);
+                            false
+                        })
+                        .unwrap());
+                    assert!(expected.iter().all(|target| geometric.contains(target)));
+                    for target in geometric {
+                        assert_eq!(
+                            workspace
+                                .any_target(source, piece, profile, |candidate| candidate == target)
+                                .unwrap(),
+                            expected.binary_search(&target).is_ok(),
+                            "profile={profile:?} source={source} piece={piece:?} target={target}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn observed_hf_root_edges_equal_independent_empty_board_placements() {
@@ -312,9 +885,61 @@ mod tests {
                 }
             }
             assert_eq!(observed, expected, "HF vs local root set for {name}");
+            assert_eq!(
+                enumerate_pc4_ilc_target_fields(0, piece, KickTableProfileId::Jstris180)
+                    .unwrap()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                observed,
+                "forward qualification enumerator for {name}"
+            );
+            for &target in &observed {
+                assert!(
+                    enumerate_pc4_ilc_predecessor_fields(
+                        target,
+                        piece,
+                        KickTableProfileId::Jstris180
+                    )
+                    .unwrap()
+                    .binary_search(&0)
+                    .is_ok(),
+                    "reverse qualification enumerator for {name} target={target}"
+                );
+            }
             total += rows.len();
         }
         assert_eq!(total, 162);
+    }
+
+    #[test]
+    fn reverse_terminal_domain_step_is_exactly_forward_replayable() {
+        let terminal = FIELD_MASK;
+        let mut predecessors = BTreeSet::new();
+        for piece in PieceKind::STANDARD_TETROMINOES {
+            let geometric = enumerate_pc4_ilc_geometric_predecessor_fields(
+                terminal,
+                piece,
+                KickTableProfileId::Jstris180,
+            )
+            .unwrap();
+            for source in
+                enumerate_pc4_ilc_predecessor_fields(terminal, piece, KickTableProfileId::Jstris180)
+                    .unwrap()
+            {
+                assert_eq!(source.count_ones(), 36);
+                assert!(geometric.binary_search(&source).is_ok());
+                assert!(enumerate_pc4_ilc_target_fields(
+                    source,
+                    piece,
+                    KickTableProfileId::Jstris180
+                )
+                .unwrap()
+                .binary_search(&terminal)
+                .is_ok());
+                predecessors.insert(source);
+            }
+        }
+        assert!(!predecessors.is_empty());
     }
 
     #[test]
