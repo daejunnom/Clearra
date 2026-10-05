@@ -8,6 +8,7 @@ on:
       - "crates/clearra-pc-graph/**"
       - "crates/clearra-problem/**"
       - "crates/clearra-core-executor/**"
+      - "crates/clearra-geometry/**"
       - "scripts/ci/pc24-source-boundary.test.mjs"
       - "tests/fixtures/contracts/pc_target_frame_parity.v1.tsv"
   workflow_dispatch:
@@ -44,7 +45,10 @@ jobs:
       - name: Verify the bounded non-publishing feedback contract
         run: node --test scripts/ci/pc24-source-boundary.test.mjs
       - name: Check target-frame and compiler source format
-        run: cargo fmt -p clearra-pc-graph -p clearra-problem --check
+        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry --check
+      - name: Verify the compact six-line and extended twenty-four-line layout boundary without enumeration
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-geometry --lib layout::standard_pc_layout::tests -- --test-threads=1
       - name: Test compact and four-word input normalization without truncation
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-pc-graph --lib request::pc_scenario_query::tests -- --test-threads=1

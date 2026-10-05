@@ -89,9 +89,11 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes("results[profile].setup = {"));
   assert.ok(browser.includes("input === 'setup-score'"));
   assert.ok(browser.includes("assert.deepEqual(ranking(setup.activated), ranking(setup.baseline)"));
-  assert.ok(browser.includes("results['srs-plus'].build = {"));
-  assert.ok(browser.includes("results[profile].buildAllSolutions = {"));
-  assert.ok(browser.includes("results['srs-plus'].buildAllSolutions = results['srs-plus'].build['all-solutions']"));
+  assert.ok(browser.includes('results[profile].build = {};'));
+  assert.ok(browser.includes('for (const mode of Object.keys(buildResultSurfaces))'));
+  assert.ok(browser.includes("results[profile].buildAllSolutions = results[profile].build['all-solutions']"));
+  assert.ok(!browser.includes("if (profile !== 'srs-plus')"));
+  assert.ok(!browser.includes("results['srs-plus'].build = {}"));
   assert.ok(browser.includes('assert.deepEqual(compact(pair.activated), baseline,'));
   assert.ok(browser.includes("input.startsWith('build-probability:')"));
   assert.ok(browser.includes("input === 'build-minimum'"));
@@ -99,7 +101,8 @@ test('signed browser acceptance searches qualified profiles and fails open after
     'field-average-score', 'fixed-queue-maximum-score', 'highest-score-minimum-set']) {
     assert.ok(browser.includes(`'${mode}'`), `${mode}: real browser execution must remain covered`);
   }
-  assert.ok(browser.includes("execution.results['srs-plus'].build[mode]"));
+  assert.ok(browser.includes('execution.results[profile].build[mode]'));
+  assert.ok(browser.includes('Object.keys(execution.results[profile].build), Object.keys(buildResultSurfaces)'));
   assert.ok(browser.includes('assert.deepEqual(productSearchMeaning(pair.activated), productSearchMeaning(pair.baseline)'));
   assert.ok(browser.includes('BuildProbabilityResult.svelte'));
   assert.ok(browser.includes('projectWorkspaceSearchReport('));
@@ -114,7 +117,7 @@ test('signed browser acceptance searches qualified profiles and fails open after
   assert.ok(browser.includes("snapshot.wasmTransferByteCap !== 16 * 1024 * 1024"));
   assert.ok(browser.includes("compact(execution.results['srs-x'].eligible.baseline)"));
   assert.ok(browser.includes('the oversized asset must not silently claim a negative proof'));
-  assert.ok(browser.includes("activated: await run('srs-plus', true, true, input, mode)"));
+  assert.ok(browser.includes('activated: await run(profile, true, true, input, mode)'));
   assert.ok(browser.includes('releasePages: () => rootWorker.postMessage({ type: \'release_product_pages\' })'));
   assert.ok(browser.includes("? '.path-representative' : 'li[data-solution-key]'"));
   assert.ok(browser.includes('document.querySelector(`${surfaceSelector} ${visibleResultSelector}`)'));

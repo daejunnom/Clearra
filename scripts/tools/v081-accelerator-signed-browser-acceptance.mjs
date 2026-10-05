@@ -488,7 +488,7 @@ async function browserAcceptance() {
               const timeout = setTimeout(() => {
                 finish();
                 const surface = document.querySelector(surfaceSelector);
-                reject(new Error(`${renderMode}: production Build result did not show ${visibleResultSelector}; ` +
+                reject(new Error(`${profile}/${renderMode}: production Build result did not show ${visibleResultSelector}; ` +
                   `surface_present=${Boolean(surface)}; response_solutions=${output.result.search_report?.unique_solution_count ?? 'typed'}; ` +
                   `resource_state=${output.result.response.resource_report?.execution_availability?.state ?? 'missing'}; ` +
                   `completeness=${output.result.response.resource_report?.result_completeness ?? 'missing'}; ` +
@@ -504,7 +504,7 @@ async function browserAcceptance() {
                 ['portfolio', 'score-portfolio'].includes(productContent.payload.kind)
                 ? productContent.payload.page_source_available : false;
             if (lazyBuildPage && completedProductPages < 1) {
-              throw new Error(`${renderMode}: production renderer did not consume a real worker product page`);
+              throw new Error(`${profile}/${renderMode}: production renderer did not consume a real worker product page`);
             }
           }
           return output;
@@ -537,23 +537,16 @@ async function browserAcceptance() {
             activated: await run(profile, true, true, input.activated)
           };
         }
-        if (profile !== 'srs-plus') {
-          results[profile].buildAllSolutions = {
-            baseline: await run(profile, false, false, 'build-probability:all-solutions'),
-            activated: await run(profile, true, true, 'build-probability:all-solutions', 'all-solutions')
+        results[profile].build = {};
+        for (const mode of Object.keys(buildResultSurfaces)) {
+          const input = mode === 'minimum-solutions' ? 'build-minimum' : `build-probability:${mode}`;
+          results[profile].build[mode] = {
+            baseline: await run(profile, false, false, input),
+            activated: await run(profile, true, true, input, mode)
           };
         }
+        results[profile].buildAllSolutions = results[profile].build['all-solutions'];
       }
-      results['srs-plus'].build = {};
-      for (const mode of ['all-solutions', 'complete-replay-paths', 'minimum-solutions',
-        'field-average-score', 'fixed-queue-maximum-score', 'highest-score-minimum-set']) {
-        const input = mode === 'minimum-solutions' ? 'build-minimum' : `build-probability:${mode}`;
-        results['srs-plus'].build[mode] = {
-          baseline: await run('srs-plus', false, false, input),
-          activated: await run('srs-plus', true, true, input, mode)
-        };
-      }
-      results['srs-plus'].buildAllSolutions = results['srs-plus'].build['all-solutions'];
       // Exercise invalidation on one warm owner, not merely a fresh worker.
       // A corrupt local pointer must revoke already-admitted negative proof
       // and relation authority before the next exact search begins.
@@ -704,31 +697,36 @@ async function browserAcceptance() {
       'fixed-queue-maximum-score': ['build.fixed-queue-maximum-score', 'build-fixed-score-witness.v1'],
       'highest-score-minimum-set': ['build.highest-score-minimum-set', 'build-probability-score-minimum.v1']
     };
-    for (const [mode, [contract, resultKind]] of Object.entries(buildProducts)) {
-      const pair = execution.results['srs-plus'].build[mode];
-      for (const sample of Object.values(pair)) {
-        assert.equal(sample.result.event, 'final_response', `${mode}: complete execution`);
-        assert.equal(sample.result.response.status, 'success', `${mode}: successful execution`);
-        assert.deepEqual(sample.result.response.runtime_identity, manifest.build.runtime_identity);
-        const payload = sample.result.response.product_result_payload;
-        assert.equal(payload?.contract, contract);
-        assert.equal(payload?.result_kind, resultKind);
-        if (mode === 'minimum-solutions') {
-          // Typed Build cover owns its result without a legacy SearchReport.
-          assert.equal(payload.content.payload.completeness.exact_minimum_proven, true);
-          assert.equal(payload.content.payload.page_source_available, true);
-        } else {
-          assert.equal(sample.result.search_report.count_complete, true, `${mode}: complete source count`);
-          assert.equal(sample.result.search_report.resource_truncated, false, `${mode}: no truncation`);
+    for (const profile of profiles) {
+      assert.deepEqual(Object.keys(execution.results[profile].build), Object.keys(buildResultSurfaces),
+        `${profile}: every Build result mode must execute, not inherit another profile's result`);
+      for (const [mode, [contract, resultKind]] of Object.entries(buildProducts)) {
+        const pair = execution.results[profile].build[mode];
+        const context = `${profile}/${mode}`;
+        for (const sample of Object.values(pair)) {
+          assert.equal(sample.result.event, 'final_response', `${context}: complete execution`);
+          assert.equal(sample.result.response.status, 'success', `${context}: successful execution`);
+          assert.deepEqual(sample.result.response.runtime_identity, manifest.build.runtime_identity);
+          const payload = sample.result.response.product_result_payload;
+          assert.equal(payload?.contract, contract, context);
+          assert.equal(payload?.result_kind, resultKind, context);
+          if (mode === 'minimum-solutions') {
+            // Typed Build cover owns its result without a legacy SearchReport.
+            assert.equal(payload.content.payload.completeness.exact_minimum_proven, true, context);
+            assert.equal(payload.content.payload.page_source_available, true, context);
+          } else {
+            assert.equal(sample.result.search_report.count_complete, true, `${context}: complete source count`);
+            assert.equal(sample.result.search_report.resource_truncated, false, `${context}: no truncation`);
+          }
         }
+        if (mode !== 'minimum-solutions') {
+          assert.deepEqual(productSearchMeaning(pair.activated), productSearchMeaning(pair.baseline),
+            `${context}: signed assets must preserve the Build search meaning`);
+        }
+        assert.deepEqual(pair.activated.result.response.product_result_payload,
+          pair.baseline.result.response.product_result_payload,
+          `${context}: signed assets must preserve the complete Build product result`);
       }
-      if (mode !== 'minimum-solutions') {
-        assert.deepEqual(productSearchMeaning(pair.activated), productSearchMeaning(pair.baseline),
-          `${mode}: signed assets must preserve the Build search meaning`);
-      }
-      assert.deepEqual(pair.activated.result.response.product_result_payload,
-        pair.baseline.result.response.product_result_payload,
-        `${mode}: signed assets must preserve the complete Build product result`);
     }
     for (const profile of profiles) {
       for (const [name, input] of Object.entries(pcProductInputs[profile])) {
@@ -857,7 +855,7 @@ async function browserAcceptance() {
       await lowMemoryPage.close();
     }
     await context.close();
-    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score/minimum/score-minimum/replay parity, plus SRS+ Build result-mode and production renderer parity passed');
+    console.log('v0.8.1 signed browser UI and product pool: five profiles, OPFS, cross-tab read, actual verifier workers, warm corrupt-pointer fail-open and complete PC/Setup-score/minimum/score-minimum/replay parity, plus all five profiles and six Build result-mode/production renderer pairs passed');
   } finally {
     await browser?.close();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

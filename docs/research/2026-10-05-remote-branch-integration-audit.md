@@ -1,5 +1,47 @@
 # v0.8.1 resume: remote branch reconciliation and 24L boundary
 
+## Accepted main source and next bounded functional candidate
+
+The once-only resumed CI snapshot for exact candidate
+`c2e61553d59bbb3bd2af194a834db51f9af156b0` found all four runs completed
+successfully:
+
+| Workflow | Exact-source evidence |
+| --- | --- |
+| Clearra Management Policy | [37299036438](https://github.com/daejunnom/Clearra/actions/runs/37299036438) |
+| Recovery multi-stage regression | [37299036517](https://github.com/daejunnom/Clearra/actions/runs/37299036517) |
+| Recovery Build Regression | [37299036468](https://github.com/daejunnom/Clearra/actions/runs/37299036468) |
+| v0.8.1 Selective Source (Non-publishing) | [37299036447](https://github.com/daejunnom/Clearra/actions/runs/37299036447) |
+
+An ancestry check and a normal non-force push fast-forwarded remote `main`
+from `b781f6b6ef1c9ce27e0430f87663a92508e1cb7d` to that exact candidate.
+Linear-history and required-check rules were not changed. Static completed
+source-CI logs confirm five-profile signed browser admission/search,
+whole-set clipboard, native App/Desktop and CLI-to-Discord functional proofs.
+This is accepted **source**, not release acceptance or production readback.
+
+The user's compact/general-path question is resolved at the boundaries shown
+below: Build probability has an executable general path, while public PC
+still has disconnected extended stages. The next bounded candidate adds a
+1--24L layout regression and a source-routing guard, without enabling that
+unsupported PC capability or enumerating a huge 24L search.
+
+The source CI's browser matrix previously executed all-solutions Build for
+five profiles, but its other five Build result modes only for SRS+. The next
+candidate executes and checks all six modes for each profile, including
+complete payload, exact minimum proof, real lazy pages and visible production
+result cards. It reuses the existing one-I fixture, ordinary product WASM and
+unchanged signed assets. It is neither a benchmark nor asset requalification.
+The expanded actual-browser result remains Open until its own exact CI runs.
+
+Local candidate checks passed: 23 focused Node source/workflow tests, the
+native 1--24L layout test, JavaScript syntax and Rust formatting. No timing or
+memory-adoption gate was inferred from those functional tests. No new CI
+result was polled, 4194 was not replaced, and v0.9.0 remains frozen.
+
+The following follow-up is historical evidence for the earlier failed
+`6e3c692e` candidate; its pending-main statements do not override this update.
+
 ## Follow-up: compact/extended routing and independent browser failures
 
 The once-only CI readback for candidate

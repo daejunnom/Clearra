@@ -19,8 +19,28 @@ test('extended functional proofs run independently of existing release and produ
   assert.ok(!workflow.includes('contents: write'));
   assert.ok(!workflow.includes('gh workflow run'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-problem --test extended_pc_execution'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-geometry --lib layout::standard_pc_layout::tests'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-core-executor --test extended_pc_ilc'));
   assert.ok(workflow.includes('--target wasm32-unknown-unknown'));
+});
+
+test('compact and general routing stay separate without claiming disconnected public PC support', () => {
+  const normalization = read('crates/clearra-pc-graph/src/request/pc_scenario_query.rs');
+  assert.ok(normalization.includes('target_lines > 6 || self.visible_height > 6 || self.has_extended_occupancy()'));
+  assert.ok(normalization.includes('return self.to_extended_target_frame(target_lines)'));
+  const probability = read('crates/clearra-core-executor/src/backend/wasm_cpu/build_probability.rs');
+  const start = probability.indexOf('fn build_probability_session_for_field(');
+  const route = probability.slice(start, probability.indexOf('pub(super) fn merge_symmetry_results(', start));
+  assert.ok(route.includes('if field.is_compact()'));
+  assert.ok(route.includes('BuildProbabilitySessionKind::Compact(session)'));
+  assert.ok(route.includes('BuildProbabilitySessionKind::Extended(session)'));
+  const stage = read('crates/clearra-core-executor/src/backend/wasm_cpu/build_stage_domain.rs');
+  assert.ok(stage.includes('if field.height() <= 6'));
+  assert.ok(stage.includes('ExtendedInverseCatalog::compile(field)'));
+  const layout = read('crates/clearra-geometry/src/layout/standard_pc_layout.rs');
+  assert.ok(layout.includes('one_to_six_lines_keep_the_compact_fast_path_and_larger_layouts_keep_every_cell'));
+  assert.ok(layout.includes('for lines in 1..=24'));
+  assert.ok(layout.includes('StandardPcRuntimeUnsupportedReason::ExtendedSearchStagesNotConnected'));
 });
 
 test('the compiler bridge owns the original four-word field and invokes existing ILC', () => {

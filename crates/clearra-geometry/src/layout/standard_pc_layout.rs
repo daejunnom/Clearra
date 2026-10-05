@@ -163,3 +163,43 @@ pub enum StandardPcStateLayoutError {
 pub const fn standard_pc_max_lines() -> u8 {
     STANDARD_PC_MAX_LINES
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_to_six_lines_keep_the_compact_fast_path_and_larger_layouts_keep_every_cell() {
+        for lines in 1..=24 {
+            let layout = StandardPcStateLayoutContract::compile(lines).unwrap();
+            let compact = lines <= 6;
+            assert_eq!(layout.uses_legacy_board64_fast_path(), compact);
+            assert_eq!(
+                layout.contract_kind(),
+                if compact {
+                    StandardPcSearchContractKind::CompactBoard64
+                } else {
+                    StandardPcSearchContractKind::ExtendedBoardWords
+                }
+            );
+            let cells = u16::from(lines) * 10;
+            assert!(u16::from(layout.cpu_board_word_count()) * 64 >= cells);
+            assert!(u16::from(layout.gpu_board_word_count()) * 32 >= cells);
+            assert_eq!(layout.maximum_placement_count(), (cells / 4) as u8);
+            // The shared Build engine smoke is not public PC reducer authority.
+            assert_eq!(
+                layout.runtime_capability(),
+                if compact {
+                    StandardPcRuntimeCapability::ConnectedExact
+                } else {
+                    StandardPcRuntimeCapability::Unsupported(
+                        StandardPcRuntimeUnsupportedReason::ExtendedSearchStagesNotConnected,
+                    )
+                }
+            );
+        }
+        for invalid in [0, 25, u8::MAX] {
+            assert!(StandardPcStateLayoutContract::compile(invalid).is_err());
+        }
+    }
+}
