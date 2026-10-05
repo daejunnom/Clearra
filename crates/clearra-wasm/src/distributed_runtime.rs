@@ -1891,6 +1891,11 @@ impl WasmDistributedCoordinator {
         matches!(self.producer, Some(DistributedCandidateProducer::Setup(_)))
     }
 
+    pub fn producer_waiting_for_results(&self) -> bool {
+        matches!(self.producer.as_ref(), Some(DistributedCandidateProducer::Recovery(producer))
+            if producer.waiting_for_results())
+    }
+
     pub fn progress(&self) -> WasmDistributedProgress {
         if let Some(producer) = &self.producer {
             return producer.progress();

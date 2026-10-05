@@ -115,8 +115,20 @@ try {
       await supplies.nth(0).fill('P7'); await supplies.nth(1).fill('P7');
       const left = await supplies.nth(0).boundingBox();
       const right = await supplies.nth(1).boundingBox();
-      assert.ok(left && right && Math.abs(left.y - right.y) < 2 && left.x + left.width <= right.x,
-        'both supply inputs remain side by side, even on narrow viewports');
+      assert.ok(left && right, 'both independent supply inputs remain visible');
+      for (const box of [left, right]) {
+        assert.ok(box.x >= -1 && box.x + box.width <= spec.width + 1,
+          'responsive supply inputs must fit inside the viewport');
+      }
+      if (spec.width >= 600) {
+        assert.ok(Math.abs(left.y - right.y) < 2 && left.x + left.width <= right.x + 1,
+          'desktop supply inputs remain side by side');
+      } else {
+        assert.ok(left.y + left.height <= right.y + 1,
+          'narrow supply inputs wrap in stage order without overlap');
+      }
+      assert.equal(await supplies.nth(0).inputValue(), 'P7');
+      assert.equal(await supplies.nth(1).inputValue(), 'P7');
       assert.equal(await page.locator('input[type="number"]').count(), 1, 'only outer field height remains numeric');
       assert.equal(await page.locator('.placement-constraints,.recovery-required-pieces,.board-stats').count(), 0);
       const fields = page.locator('.field-palette button');

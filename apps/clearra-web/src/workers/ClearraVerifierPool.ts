@@ -1303,6 +1303,18 @@ export class ClearraVerifierPool {
     this.assertActive(generation);
   }
 
+  /** Backpressure is not more producer work. Suspend until one exact result
+   * is committed, without joining slower siblings or running an idle hot loop. */
+  async waitForTaskProgress(): Promise<void> {
+    const generation = this.generation;
+    this.assertActive(generation);
+    if (this.inFlight.size === 0) {
+      throw new Error('producer awaits a result without an in-flight verifier task');
+    }
+    await Promise.race([...this.inFlight]);
+    this.assertActive(generation);
+  }
+
   /** Every atomic task already emitted and durably committed its own receipt.
    * This is a transport lifetime boundary, never an exact-proof conclusion. */
   async completeAtomicTasks(): Promise<number> {

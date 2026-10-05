@@ -118,6 +118,16 @@ impl RecoveryBuildParallelCoordinator {
     pub fn has_pending_preparation(&self) -> bool {
         self.catalog.as_ref().is_some_and(|c| !c.enumeration_done())
     }
+    /// No local quantum can advance until an issued worker result is merged.
+    /// Keep this distinct from a catalog that still has Geometry to enumerate.
+    pub fn waiting_for_results(&self) -> bool {
+        if let Some(catalog) = &self.catalog {
+            return catalog.waiting_for_results();
+        }
+        !self.issued.is_empty()
+            && (self.next == self.source.first.pattern_count() as u128
+                || self.issued.len() >= self.capacity)
+    }
     pub fn worker_initialization(&self) -> Vec<u8> {
         self.initialization.clone()
     }

@@ -272,3 +272,92 @@ fn recovery_build_three_middle_sources_keep_host_wire_and_exact_minimum() {
         serde_json::to_value(all.app_response().product_result_payload().unwrap()).unwrap()
     );
 }
+
+#[test]
+fn recovery_build_four_stage_catalog_distributed_workers_match_serial() {
+    use clearra_wasm::{
+        WasmDistributedCoordinator, WasmDistributedPreparation, WasmDistributedProducerAdvance,
+        WasmDistributedVerifierRuntime,
+    };
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(12, false, false));
+    let command = "clearra recovery build --start-mask 0 --height 12 --stage-target 0xc03 --stage-supply [IO] --stage-target 0xc0300000 --stage-supply [IO] --stage-target 0xc030000000000 --stage-supply [IO] --stage-target 0xc03000000000000000 --stage-supply [IO] --max-early 0 --no-piece-exchange --hold --all-solutions";
+    let expected = runtime
+        .run_command_text(&format!("{command} --workers 1"))
+        .unwrap();
+    assert_eq!(expected.app_response().status(), AppStatus::Success);
+    for requested in [2, 11] {
+        let WasmDistributedPreparation::Coordinator(mut coordinator) =
+            WasmDistributedCoordinator::prepare(
+                &runtime,
+                &format!("{command} --workers {requested}"),
+            )
+            .unwrap()
+        else {
+            panic!("multi-stage catalog must enter the distributed path")
+        };
+        assert_eq!(coordinator.worker_count(), requested);
+        let initialization = coordinator.worker_initialization().unwrap();
+        let mut workers = (0..requested - 1)
+            .map(|_| {
+                WasmDistributedVerifierRuntime::prepare_forward(&runtime, &initialization).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut tasks = 0;
+        let mut completed = false;
+        let mut partials = Vec::new();
+        let mut waited_for_results = false;
+        for _ in 0..10_000 {
+            match coordinator.advance_producer(64, 32).unwrap() {
+                WasmDistributedProducerAdvance::Batch(bytes) => {
+                    let worker = &mut workers[tasks % (requested - 1)];
+                    tasks += 1;
+                    let mut part = worker.consume(&bytes).unwrap();
+                    let mut slices = 0;
+                    while part.has_pending_work {
+                        if let Some(partial) = part.partial.take() {
+                            coordinator.absorb_partial(&partial).unwrap();
+                        }
+                        slices += 1;
+                        assert!(slices < 10_000, "catalog worker must make bounded progress");
+                        part = worker.continue_work().unwrap();
+                    }
+                    partials.push(part.partial.unwrap());
+                }
+                WasmDistributedProducerAdvance::Pending => {
+                    if coordinator.producer_waiting_for_results() {
+                        assert!(!partials.is_empty(), "backpressure needs an issued result");
+                        waited_for_results = true;
+                        for partial in partials.drain(..).rev() {
+                            coordinator.absorb_partial(&partial).unwrap();
+                        }
+                    }
+                }
+                WasmDistributedProducerAdvance::Completed => {
+                    completed = true;
+                    break;
+                }
+                _ => panic!("unexpected distributed catalog state"),
+            }
+        }
+        assert!(
+            completed,
+            "catalog producer must not wait forever for already merged work"
+        );
+        assert_eq!(tasks, 2, "two mirrored candidates are separate exact tasks");
+        assert!(
+            waited_for_results,
+            "host distinguishes result wait from local Geometry work"
+        );
+        assert!(!coordinator.producer_waiting_for_results());
+        for worker in &mut workers {
+            assert!(worker.finish().unwrap().is_empty());
+        }
+        let actual = coordinator.finish(requested).unwrap();
+        assert_eq!(actual.app_response().status(), AppStatus::Success);
+        assert_eq!(
+            actual.app_response().product_result_payload(),
+            expected.app_response().product_result_payload()
+        );
+    }
+}

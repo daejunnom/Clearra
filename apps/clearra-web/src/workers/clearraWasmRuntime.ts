@@ -151,7 +151,8 @@ export type ClearraDistributedVerifierConsume = {
 };
 
 export type ClearraDistributedProducerResult =
-  | { status: 'pending' | 'completed' | 'cancelled' }
+  | { status: 'pending'; waitingForResults?: boolean }
+  | { status: 'completed' | 'cancelled' }
   | { status: 'initialization'; initialization: ArrayBuffer }
   | { status: 'batch'; batch: ArrayBuffer };
 
@@ -265,6 +266,7 @@ type ClearraRawWasmExports = {
     workBudget: number,
     batchCapacity: number
   ) => number;
+  clearra_wasm_distributed_producer_waiting_for_results?: () => number;
   clearra_wasm_distributed_progress_geometry_nodes: () => number;
   clearra_wasm_distributed_progress_available: () => number;
   clearra_wasm_distributed_progress_geometry_nodes_exact: () => number;
@@ -1248,7 +1250,10 @@ function wrapRawModule(
         return { status: 'initialization', initialization: outputBytes() };
       }
       if (status !== 0) throw new Error(`invalid distributed producer status: ${status}`);
-      return { status: 'pending' };
+      return {
+        status: 'pending',
+        waitingForResults: raw.clearra_wasm_distributed_producer_waiting_for_results?.() === 1
+      };
     },
     distributed_progress() {
       const available = raw.clearra_wasm_distributed_progress_available() !== 0;

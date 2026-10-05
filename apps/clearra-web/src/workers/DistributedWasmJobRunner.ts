@@ -524,6 +524,16 @@ export class DistributedWasmJobRunner {
         }
         if (produced.status === 'completed') break;
         if (produced.status === 'cancelled') throw new Error('distributed search cancelled');
+        if (produced.status === 'pending' && produced.waitingForResults) {
+          // Recovery catalog enumeration has drained or reached its bounded
+          // dispatch capacity. Repeated scheduler.yield continuations perform
+          // no useful work and compete with the journal/message callbacks that
+          // must merge the outstanding result. Wait for one actual commit.
+          await this.pool.waitForTaskProgress();
+          lastHostYield = performance.now();
+          this.requireActive();
+          continue;
+        }
         if (performance.now() - lastHostYield < HOST_YIELD_BUDGET_MS) continue;
         await yieldToWorkerHost();
         lastHostYield = performance.now();

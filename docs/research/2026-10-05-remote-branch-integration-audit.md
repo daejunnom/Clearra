@@ -1,5 +1,57 @@
 # v0.8.1 resume: remote branch reconciliation and 24L boundary
 
+## Follow-up: compact/extended routing and independent browser failures
+
+The once-only CI readback for candidate
+`6e3c692e70cb7d562004ca6664776d529b896564` found successful Management Policy,
+PC24 Source Boundary and v0.8.1 Selective Source runs. Recovery Build Regression
+and Recovery multi-stage regression failed. These are not ignored merely
+because the required management check succeeded.
+
+- The workspace input fixture still required a two-column supply row at
+  320/390 pixels, whereas the imported multi-stage product deliberately wraps
+  its independent supply inputs. The test now checks visibility, retained
+  values, viewport containment, desktop columns and narrow nonoverlapping
+  stage-order wrapping. The product layout is unchanged.
+- The four-stage real browser completed all five serial cases, then timed out
+  in the advertised-12-logical-processor case, showing 1/11 active workers
+  and no merged work. A new tiny native distributed catalog test reproduces
+  the exact four-stage `[IO]` universe, holds issued results, merges them in
+  reverse order and compares 2/11-worker payloads with serial. It passes in
+  0.09 seconds; this is a bounded functional test, not a benchmark.
+- Recovery now distinguishes remaining local Geometry from result
+  backpressure. The existing coordinator/ABI/host path can suspend on one
+  actual committed verifier result rather than repeatedly scheduling a
+  producer that cannot progress. It neither joins all workers nor changes the
+  requested worker count, durable commit authority or exact candidate order.
+  Actual browser confirmation remains Open until the new exact-source CI
+  finishes. Failure evidence now retains the last 64 root progress events,
+  command and worker errors rather than only a screenshot and page text.
+- Locally the three affected TypeScript worker contracts, Web contract
+  typecheck, Rust ABI compilation, 41 focused Node source/UI tests, formatting
+  and diff checks passed. The new Rust test passed as a direct bounded run.
+  Its earlier supervised invocation again returned the separate
+  `E_CLEARRA_PROCESS_TREE_NOT_STOPPED` after the test passed; no supervisor
+  policy was changed to hide that observation.
+
+The user's request to avoid a large 24L enumeration is preserved. Source
+routing currently has the following separate authorities:
+
+| Boundary | 1--6L | 7--24L | Current product authority |
+| --- | --- | --- | --- |
+| PC target-frame normalization (`pc_scenario_query.rs`) | Legacy compact normalization if initial occupancy also fits | Four-word normalization, also used for tall/high-word initial fields | Input/area/identity only |
+| PC state layout (`standard_pc_layout.rs`) | `CompactBoard64`, `ConnectedExact` | `ExtendedBoardWords`, `ExtendedSearchStagesNotConnected` | Public extended PC stages are still Open |
+| Build probability (`build_probability.rs`) | Compact session selected by `field.is_compact()` | Existing extended ILC/BuildUp session | A real executable general path |
+| Shared Build-stage domain (`build_stage_domain.rs`) | Compact Geometry catalog | Extended inverse catalog | A real executable geometry primitive, not every PC reducer |
+
+The wider PC compiler owns its original four-word field and can invoke that
+shared engine; it does **not** yet give the public 24L PC command/reducers the
+same connected capability as Build probability. The small one-placement smoke
+must not be reported as complete PC24 surface support. No large PC24 search,
+asset requalification, performance benchmark or v0.9 TB upgrade was run in
+this follow-up. Main promotion remains a normal exact-SHA fast-forward after
+the repaired candidate's relevant CI, without a protection bypass.
+
 ## Current reconciliation, after the user's retirement and small-24L approval
 
 The sections below this update preserve the earlier `810f1486` audit, not the

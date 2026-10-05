@@ -416,6 +416,43 @@ const progressiveWasm = {
       : { status: 'completed' as const };
   }
 } as unknown as ClearraWasmModule;
+
+let committedCatalogResult = false;
+let catalogProduceCalls = 0;
+let catalogResultWaits = 0;
+const catalogBackpressurePool = {
+  ...progressivePool,
+  async initialize() {},
+  async enqueue() {},
+  async waitForTaskProgress() {
+    catalogResultWaits += 1;
+    assert.equal(catalogProduceCalls, 2, 'the producer must not spin while its result is pending');
+    // A durable commit can be delivered by a different task source.
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    assert.equal(catalogProduceCalls, 2);
+    committedCatalogResult = true;
+  }
+};
+const catalogBackpressureWasm = {
+  ...wasm,
+  distributed_produce() {
+    catalogProduceCalls += 1;
+    if (catalogProduceCalls === 1) return { status: 'batch' as const, batch: new ArrayBuffer(0) };
+    if (!committedCatalogResult) return { status: 'pending' as const, waitingForResults: true };
+    return { status: 'completed' as const };
+  }
+} as unknown as ClearraWasmModule;
+await new DistributedWasmJobRunner(
+  catalogBackpressureWasm, 43, 'catalog-backpressure-owner', {
+    logicalProcessorCount: 2,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  },
+  catalogBackpressurePool as never
+).run('clearra recovery build --workers 2', plan, () => undefined);
+assert.equal(catalogResultWaits, 1, 'catalog backpressure suspends on an actual result');
+assert.equal(catalogProduceCalls, 3, 'the result resumes the existing producer exactly once');
 const progressiveRun = new DistributedWasmJobRunner(
   progressiveWasm,
   42,

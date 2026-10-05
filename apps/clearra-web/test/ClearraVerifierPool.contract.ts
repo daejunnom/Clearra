@@ -555,6 +555,57 @@ class ProgressiveInitializationVerifierWorker extends FakeVerifierWorker {
   }
 }
 
+class GatedResultVerifierWorker extends FakeVerifierWorker {
+  readonly started = signal();
+  private held: WorkerMessage | null = null;
+  constructor() { super(false); }
+  protected override handleExecutable(message: WorkerMessage) {
+    if (message.type === 'consume') {
+      this.held = message;
+      this.started.resolve();
+      return;
+    }
+    super.handleExecutable(message);
+  }
+  releaseResult() {
+    assert.ok(this.held);
+    const message = this.held;
+    this.held = null;
+    super.handleExecutable(message);
+  }
+}
+const progressWorkers: GatedResultVerifierWorker[] = [];
+const resultProgressPool = new ClearraVerifierPool(() => {
+  const worker = new GatedResultVerifierWorker();
+  progressWorkers.push(worker);
+  return worker as unknown as Worker;
+});
+await bounded('result wait initialization', resultProgressPool.initialize(new ArrayBuffer(0), 2));
+await resultProgressPool.enqueue(Uint8Array.of(5).buffer, () => undefined);
+await resultProgressPool.enqueue(Uint8Array.of(9).buffer, () => undefined);
+await bounded('both result tasks started', Promise.all(progressWorkers.map(w => w.started.promise)));
+let resultProgressObserved = false;
+const resultProgress = resultProgressPool.waitForTaskProgress().then(() => { resultProgressObserved = true; });
+await Promise.resolve();
+assert.equal(resultProgressObserved, false, 'result wait cannot complete before a committed reply');
+progressWorkers[1].releaseResult();
+await bounded('first result commits without slow sibling', resultProgress);
+assert.equal(resultProgressPool.progressSnapshot().candidatesVerified, 1);
+assert.equal(resultProgressPool.progressSnapshot().activeWorkers, 1);
+progressWorkers[0].releaseResult();
+await bounded('remaining result commits', resultProgressPool.waitForIdle());
+await assert.rejects(resultProgressPool.waitForTaskProgress(), /without an in-flight/);
+await bounded('result wait pool finishes', resultProgressPool.finish(() => undefined));
+
+const cancelledProgressWorker = new GatedResultVerifierWorker();
+const cancelledProgressPool = new ClearraVerifierPool(() => cancelledProgressWorker as unknown as Worker);
+await bounded('cancelled result wait initialize', cancelledProgressPool.initialize(new ArrayBuffer(0), 1));
+await cancelledProgressPool.enqueue(Uint8Array.of(1).buffer, () => undefined);
+await bounded('cancelled result task starts', cancelledProgressWorker.started.promise);
+const cancelledProgress = assert.rejects(cancelledProgressPool.waitForTaskProgress(), /terminated|inactive|cancel/i);
+cancelledProgressPool.cancel();
+await bounded('cancellation wakes result wait', cancelledProgress);
+
 const progressiveInitializationWorkers: ProgressiveInitializationVerifierWorker[] = [];
 const progressiveInitializationPool = new ClearraVerifierPool(() => {
   const worker = new ProgressiveInitializationVerifierWorker(

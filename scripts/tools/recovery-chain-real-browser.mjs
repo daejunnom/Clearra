@@ -36,9 +36,9 @@ try{
  for(const advertised of [1,12]){
   const ctx=await browser.newContext({locale:'en-US',viewport:{width:1440,height:1100},permissions:['clipboard-read','clipboard-write']});
   await ctx.addInitScript(logical=>{
-   window.observed={finals:[],commands:[]};Object.defineProperty(navigator,'hardwareConcurrency',{configurable:true,get:()=>logical});
+   window.observed={finals:[],commands:[],progress:[],workerErrors:[]};Object.defineProperty(navigator,'hardwareConcurrency',{configurable:true,get:()=>logical});
    const Original=window.Worker;window.Worker=class extends Original{
-    constructor(...a){super(...a);this.addEventListener('message',e=>{if(['final_response','failed','terminated','cancelled'].includes(e.data?.event))window.observed.finals.push(e.data);});}
+    constructor(...a){super(...a);this.addEventListener('message',e=>{if(['final_response','failed','terminated','cancelled'].includes(e.data?.event))window.observed.finals.push(e.data);if(e.data?.event==='progress'){window.observed.progress.push(e.data);if(window.observed.progress.length>64)window.observed.progress.shift();}});this.addEventListener('error',e=>window.observed.workerErrors.push(String(e.message)));}
     postMessage(...a){if(a[0]?.type==='run_command_text')window.observed.commands.push(a[0].commandText);return super.postMessage(...a);}
    };
   },advertised);
@@ -111,5 +111,5 @@ try{
   assert.deepEqual(errors,[]);await ctx.close();page=null;
  }
  summary.status='passed';
-}catch(error){summary.status='failed';summary.error=String(error.stack??error);if(page){await page.screenshot({path:resolve(out,'failure.png'),fullPage:true}).catch(()=>{});await writeFile(resolve(out,'failure.txt'),await page.locator('body').innerText().catch(()=>''));}process.exitCode=1;
+}catch(error){summary.status='failed';summary.error=String(error.stack??error);if(page){await page.screenshot({path:resolve(out,'failure.png'),fullPage:true}).catch(()=>{});await writeFile(resolve(out,'failure.txt'),await page.locator('body').innerText().catch(()=>''));await save('failure-worker-events.json',await page.evaluate(()=>window.observed).catch(()=>null));}process.exitCode=1;
 }finally{await save('summary.json',summary);await browser.close();await new Promise(ok=>server.close(ok));console.log(JSON.stringify(summary));}

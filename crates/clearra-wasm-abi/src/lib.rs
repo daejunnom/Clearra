@@ -1508,6 +1508,18 @@ pub extern "C" fn clearra_wasm_distributed_produce(work_budget: u32, batch_capac
 }
 
 #[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_producer_waiting_for_results() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .is_some_and(WasmDistributedCoordinator::producer_waiting_for_results)
+            .into()
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_merge_partial() -> i32 {
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();

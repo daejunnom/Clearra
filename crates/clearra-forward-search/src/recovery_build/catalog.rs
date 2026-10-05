@@ -99,6 +99,9 @@ impl Coordinator {
     pub fn enumeration_done(&self) -> bool {
         self.producer.done
     }
+    pub fn waiting_for_results(&self) -> bool {
+        !self.issued.is_empty() && (self.producer.done || self.issued.len() >= self.capacity)
+    }
     pub fn progress(&self) -> Progress {
         // The catalog work unit is a geometric candidate. Pair probabilities
         // stay in the final report; a candidate is never counted as a queue.
