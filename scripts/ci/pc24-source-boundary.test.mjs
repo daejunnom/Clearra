@@ -6,6 +6,30 @@ const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), '
   .replace(/\r\n/gu, '\n');
 const workflow = read('.github/workflows/pc24-source-boundary.yml');
 
+function assertSafePlainRunScalars(source) {
+  for (const match of source.matchAll(/^\s+run:\s+([^\n]+)$/gmu)) {
+    const value = match[1].trim();
+    if (/^[|>"']/u.test(value)) continue;
+    assert.doesNotMatch(value, /:\s/u,
+      'run commands containing colon-space must use a quoted or block YAML scalar');
+  }
+}
+
+test('workflow run commands do not introduce unquoted YAML mapping delimiters', () => {
+  assertSafePlainRunScalars(workflow);
+  assert.ok(workflow.includes('run: |\n          cargo test --locked -p clearra-core-domain --lib solution:: -- --test-threads=1'));
+});
+
+test('the scalar guard rejects the actual pre-job CTK2 workflow regression', () => {
+  const invalidWorkflow = workflow.replace(
+    'run: |\n          cargo test --locked -p clearra-core-domain --lib solution:: -- --test-threads=1',
+    'run: cargo test --locked -p clearra-core-domain --lib solution:: -- --test-threads=1',
+  );
+  assert.notEqual(invalidWorkflow, workflow);
+  assert.throws(() => assertSafePlainRunScalars(invalidWorkflow), /colon-space/u);
+  assertSafePlainRunScalars('        run: "printf \'value: other\'"\n');
+});
+
 test('extended functional proofs run independently of existing release and product jobs', () => {
   const branches = ['codex/converge-pc24-integration-20261005', 'codex/converge-main-product-fixes-20261005', 'codex/pc24-target-boundary-20261006', 'codex/converge-pc24-family-20261006'];
   assert.ok(workflow.includes(`branches: [${branches.map((branch) => JSON.stringify(branch)).join(', ')}]`));

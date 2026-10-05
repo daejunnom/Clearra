@@ -58,7 +58,8 @@ jobs:
         run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-output -p clearra-cli-command -p clearra-app --check
       - name: Test allocation-free CTK2 identities and unchanged compact identities
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p clearra-core-domain --lib solution:: -- --test-threads=1
+        run: |
+          cargo test --locked -p clearra-core-domain --lib solution:: -- --test-threads=1
       - name: Test native CTK3 publication from the same four-word identities
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-output --no-default-features --lib artifact::solution_document::tests -- --test-threads=1
