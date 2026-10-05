@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
+use clearra_core_domain::{
+    execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind,
+    solution::ExtendedTilingSolutionKey,
+};
 use clearra_coverage::{
     pattern::pattern_bitset::PatternBitSet,
     reducer::pattern_coverage_aggregation::{
@@ -1358,70 +1361,28 @@ impl ExtendedBuildProbabilitySession {
         key: &str,
         family: &PackingMultisetFamily,
     ) -> Result<(), WasmExactSearchError> {
-        let rest = key
-            .strip_prefix("ctk2|height=")
-            .ok_or(WasmExactSearchError::InvalidProblem(
-                "wasm_extended_finesse_solution_key_header_invalid",
-            ))?;
-        let (height, rest) =
-            rest.split_once("|initial=")
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_header_invalid",
-                ))?;
-        if !canonical_u8_text_matches(height, self.field.height()) {
+        let identity = ExtendedTilingSolutionKey::parse_canonical(key).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_extended_finesse_solution_key_encoding_invalid",
+            )
+        })?;
+        if identity.height() != self.field.height() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_extended_finesse_solution_key_header_invalid",
             ));
         }
-        let (initial, placements) =
-            rest.split_once("|placements=")
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_sections_invalid",
-                ))?;
-        if !is_canonical_extended_board_hex(initial)
-            || parse_extended_board_hex(initial)? != self.catalog.initial_board()
-        {
+        if identity.initial_board().words() != self.catalog.initial_board().words() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_extended_finesse_solution_key_initial_board_mismatch",
             ));
         }
 
         let mut covered = super::extended_board::ExtendedBoard::EMPTY;
-        let mut previous = None::<(PieceKind, super::extended_board::ExtendedBoard)>;
         let mut piece_counts = [0_u8; 7];
         let mut piece_count = 0_usize;
-        for placement in placements.split(',').filter(|_| !placements.is_empty()) {
-            if placement.is_empty() {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_placement_invalid",
-                ));
-            }
-            let (piece, cells) =
-                placement
-                    .split_once(':')
-                    .ok_or(WasmExactSearchError::InvalidProblem(
-                        "wasm_extended_finesse_solution_key_placement_invalid",
-                    ))?;
-            let mut characters = piece.chars();
-            let piece_character = characters
-                .next()
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_piece_missing",
-                ))?;
-            let piece = PieceKind::from_ascii(piece_character).map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_piece_invalid",
-                )
-            })?;
-            if piece_character != piece.as_ascii()
-                || characters.next().is_some()
-                || !is_canonical_extended_board_hex(cells)
-            {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_piece_invalid",
-                ));
-            }
-            let cells = parse_extended_board_hex(cells)?;
+        for placement in identity.placements() {
+            let piece = placement.piece();
+            let cells = super::extended_board::ExtendedBoard::from_words(placement.cells().words());
             let mut matches = self
                 .catalog
                 .skeletons()
@@ -1438,11 +1399,6 @@ impl ExtendedBuildProbabilitySession {
                     "wasm_extended_finesse_solution_key_catalog_collision",
                 ));
             }
-            if previous.is_some_and(|previous| previous >= (piece, cells)) {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_distributed_solution_key_reconstruction_mismatch",
-                ));
-            }
             if covered.intersects(row.cells)
                 || !row.cells.is_subset_of(self.catalog.required_cells())
             {
@@ -1451,7 +1407,6 @@ impl ExtendedBuildProbabilitySession {
                 ));
             }
             covered = covered.union(row.cells);
-            previous = Some((piece, cells));
             let count = piece_counts
                 .get_mut(super::piece_index(piece))
                 .expect("every standard tetromino has a count slot");
@@ -1467,9 +1422,7 @@ impl ExtendedBuildProbabilitySession {
                         "wasm_extended_distributed_solution_key_piece_count_mismatch",
                     ))?;
         }
-        if placements.is_empty() != (piece_count == 0)
-            || piece_count != self.field.target_piece_count()
-        {
+        if piece_count != self.field.target_piece_count() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_extended_distributed_solution_key_piece_count_mismatch",
             ));
@@ -2496,60 +2449,31 @@ fn extended_row_ids_from_canonical_key(
     expected_height: u8,
     catalog: &ExtendedInverseCatalog,
 ) -> Result<Vec<u32>, WasmExactSearchError> {
-    let prefix = format!("ctk2|height={expected_height}|initial=");
-    let rest = key
-        .strip_prefix(&prefix)
-        .ok_or(WasmExactSearchError::InvalidProblem(
+    let identity = ExtendedTilingSolutionKey::parse_canonical(key).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_extended_finesse_solution_key_encoding_invalid")
+    })?;
+    if identity.height() != expected_height {
+        return Err(WasmExactSearchError::InvalidProblem(
             "wasm_extended_finesse_solution_key_header_invalid",
-        ))?;
-    let (initial, placements) =
-        rest.split_once("|placements=")
-            .ok_or(WasmExactSearchError::InvalidProblem(
-                "wasm_extended_finesse_solution_key_sections_invalid",
-            ))?;
-    if !is_canonical_extended_board_hex(initial)
-        || parse_extended_board_hex(initial)? != catalog.initial_board()
-    {
+        ));
+    }
+    if identity.initial_board().words() != catalog.initial_board().words() {
         return Err(WasmExactSearchError::InvalidProblem(
             "wasm_extended_finesse_solution_key_initial_board_mismatch",
         ));
     }
     let mut row_ids = Vec::new();
-    if !placements.is_empty() {
+    if identity.placement_count() != 0 {
         row_ids
-            .try_reserve_exact(placements.split(',').count())
+            .try_reserve_exact(identity.placement_count())
             .map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
                     "wasm_extended_finesse_solution_key_storage_unavailable",
                 )
             })?;
-        for placement in placements.split(',') {
-            let (piece, cells) =
-                placement
-                    .split_once(':')
-                    .ok_or(WasmExactSearchError::InvalidProblem(
-                        "wasm_extended_finesse_solution_key_placement_invalid",
-                    ))?;
-            let mut characters = piece.chars();
-            let piece_character = characters
-                .next()
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_piece_missing",
-                ))?;
-            let piece = PieceKind::from_ascii(piece_character).map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_piece_invalid",
-                )
-            })?;
-            if piece_character != piece.as_ascii()
-                || characters.next().is_some()
-                || !is_canonical_extended_board_hex(cells)
-            {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_piece_invalid",
-                ));
-            }
-            let cells = parse_extended_board_hex(cells)?;
+        for placement in identity.placements() {
+            let piece = placement.piece();
+            let cells = super::extended_board::ExtendedBoard::from_words(placement.cells().words());
             let mut matches = catalog
                 .skeletons()
                 .iter()
@@ -2573,38 +2497,6 @@ fn extended_row_ids_from_canonical_key(
     Ok(row_ids)
 }
 
-fn parse_extended_board_hex(
-    value: &str,
-) -> Result<super::extended_board::ExtendedBoard, WasmExactSearchError> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(WasmExactSearchError::InvalidProblem(
-            "wasm_extended_finesse_solution_key_mask_invalid",
-        ));
-    }
-    let mut words = [0_u64; 4];
-    for (chunk, word_index) in [3_usize, 2, 1, 0].into_iter().enumerate() {
-        let start = chunk * 16;
-        words[word_index] = u64::from_str_radix(&value[start..start + 16], 16).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_extended_finesse_solution_key_mask_invalid")
-        })?;
-    }
-    Ok(super::extended_board::ExtendedBoard::from_words(words))
-}
-
-fn canonical_u8_text_matches(value: &str, expected: u8) -> bool {
-    !value.is_empty()
-        && (value == "0" || !value.starts_with('0'))
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-        && value.parse::<u8>() == Ok(expected)
-}
-
-fn is_canonical_extended_board_hex(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
     (key.into(), value.to_string())
 }
@@ -2619,6 +2511,63 @@ mod tests {
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
     use super::*;
+
+    #[test]
+    fn shared_extended_identity_resolves_only_matching_full_height_catalog_rows() {
+        use clearra_core_domain::board::standard_pc_board::Board256Mask;
+        let height = 24;
+        let base = Board256Mask::singleton(190)
+            .unwrap()
+            .union(Board256Mask::singleton(239).unwrap());
+        let target = [200, 210, 220, 230]
+            .into_iter()
+            .fold(Board256Mask::EMPTY, |mask, bit| {
+                mask.union(Board256Mask::singleton(bit).unwrap())
+            });
+        let field = BuildProbabilityField::from_words_preserving_height(
+            height,
+            base.words(),
+            target.words(),
+        )
+        .unwrap();
+        let catalog = ExtendedInverseCatalog::compile(field).unwrap();
+        let mask_hex = |mask: Board256Mask| {
+            let words = mask.words();
+            format!(
+                "{:016x}{:016x}{:016x}{:016x}",
+                words[3], words[2], words[1], words[0]
+            )
+        };
+        let key = format!(
+            "ctk2|height=24|initial={}|placements=I:{}",
+            mask_hex(base),
+            mask_hex(target)
+        );
+        let rows = extended_row_ids_from_canonical_key(&key, height, &catalog).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(catalog.skeleton(rows[0]).cells.words(), target.words());
+        assert!(extended_row_ids_from_canonical_key(&key, 23, &catalog).is_err());
+        let wrong_initial = key.replace(&mask_hex(base), &mask_hex(Board256Mask::EMPTY));
+        assert!(extended_row_ids_from_canonical_key(&wrong_initial, height, &catalog).is_err());
+        assert!(extended_row_ids_from_canonical_key(
+            &key.replace("placements=I:", "placements=O:"),
+            height,
+            &catalog
+        )
+        .is_err());
+        assert!(extended_row_ids_from_canonical_key(
+            &key.replace("height=24", "height=024"),
+            height,
+            &catalog
+        )
+        .is_err());
+        assert!(extended_row_ids_from_canonical_key(
+            &format!("{key},I:{}", mask_hex(target)),
+            height,
+            &catalog
+        )
+        .is_err());
+    }
 
     #[test]
     fn extended_retained_bytes_count_owned_problem_nested_heap_once() {

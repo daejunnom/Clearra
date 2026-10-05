@@ -1,4 +1,5 @@
 pub mod build_variant;
+pub mod extended_tiling_solution;
 pub mod normalized_tiling_solution;
 pub mod shape_family;
 pub mod tiling_variant;
@@ -6,6 +7,9 @@ pub mod tiling_variant;
 pub use build_variant::{
     BuildVariant, BuildVariantId, HoldDecision, LineClearEvent, OperationSetKey, PatternId,
     ReachabilityEvidence,
+};
+pub use extended_tiling_solution::{
+    ExtendedPiecePlacementMask, ExtendedTilingSolutionKey, EXTENDED_TILING_MAX_PLACEMENTS,
 };
 pub use normalized_tiling_solution::{
     normalized_tiling_solution_key_set_hash_from_sorted_strings,

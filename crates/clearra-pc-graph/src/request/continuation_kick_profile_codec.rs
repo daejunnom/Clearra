@@ -64,7 +64,9 @@ pub(crate) fn hex_decode(value: &str) -> Result<Vec<u8>, PcContinuationTokenErro
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = hex_nibble(pair[0])?;
             let low = hex_nibble(pair[1])?;
@@ -81,5 +83,28 @@ fn hex_nibble(byte: u8) -> Result<u8, PcContinuationTokenError> {
         _ => Err(PcContinuationTokenError::new(
             "scenario continuation kick profile hex contains invalid characters",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hex_decode, hex_encode};
+
+    #[test]
+    fn fixed_pairs_preserve_empty_all_bytes_and_uppercase_compatibility() {
+        let bytes: Vec<u8> = (0..=255).collect();
+        assert_eq!(hex_decode(&hex_encode(&bytes)).unwrap(), bytes);
+        assert_eq!(
+            hex_decode(&hex_encode(&bytes).to_uppercase()).unwrap(),
+            bytes
+        );
+        assert!(hex_decode("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn fixed_pairs_never_ignore_a_tail_or_invalid_character() {
+        for value in ["0", "001", "xz", "é", "🙂"] {
+            assert!(hex_decode(value).is_err(), "{value}");
+        }
     }
 }

@@ -188,7 +188,15 @@ fn extended_pc_compiler_and_existing_ilc_complete_small_forced_pcs_in_every_prof
                 "ctk2|height={height}|initial={}|placements={placements}",
                 board_hex(initial.words())
             );
-            assert_eq!(result.normalized_solution_keys(), [expected]);
+            assert_eq!(result.normalized_solution_keys(), [expected.as_str()]);
+            let identity =
+                clearra_core_domain::solution::ExtendedTilingSolutionKey::parse_canonical(
+                    &result.normalized_solution_keys()[0],
+                )
+                .unwrap();
+            assert_eq!(identity.height(), height);
+            assert_eq!(identity.initial_board(), initial);
+            assert_eq!(identity.placement_count(), pieces);
             // Existing Build family evidence is deliberately not relabelled
             // as public PC CountAll, minimum, score or distributed authority.
             assert_eq!(

@@ -138,6 +138,7 @@ export function parseSolutionKey(key: string): SolutionExportPage | null {
 
   const height = extended ? Number(extended[1]) : 1;
   if (!Number.isInteger(height) || height < 1 || height > 24) return null;
+  if (extended && extended[1] !== String(height)) return null;
   const initialHex = compact ? compact[1] : extended![2];
   const encoded = compact ? compact[2] : extended![3];
   const bitLimit = compact ? 64 : height * BOARD_WIDTH;
@@ -164,14 +165,33 @@ export function parseSolutionKey(key: string): SolutionExportPage | null {
     ) {
       return null;
     }
+    const decoded = { mask, piece: placement[1] as SolutionPiece };
+    const previous = placements.at(-1);
+    if (extended && previous && compareExtendedPlacements(previous, decoded) >= 0) return null;
     occupied |= mask;
-    placements.push({ mask, piece: placement[1] as SolutionPiece });
+    placements.push(decoded);
   }
   return {
     height: compact ? Math.max(1, highestOccupiedRow(occupied) + 1) : height,
     initialMask,
     placements
   };
+}
+
+// The Rust producer sorts `(piece, [low_word, ..., high_word])`. Whole-BigInt
+// ordering is different and must not silently reorder the canonical family.
+// CTK1 retains its existing presentation compatibility independently.
+function compareExtendedPlacements(left: SolutionExportPlacement, right: SolutionExportPlacement): number {
+  const pieces = 'IOTSZJL';
+  const pieceOrder = pieces.indexOf(left.piece) - pieces.indexOf(right.piece);
+  if (pieceOrder !== 0) return pieceOrder;
+  const wordMask = (1n << 64n) - 1n;
+  for (let shift = 0n; shift < 256n; shift += 64n) {
+    const a = (left.mask >> shift) & wordMask;
+    const b = (right.mask >> shift) & wordMask;
+    if (a !== b) return a < b ? -1 : 1;
+  }
+  return 0;
 }
 
 export function renderSolutionBoard(

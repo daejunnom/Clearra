@@ -115,6 +115,10 @@ impl NormalizedTilingSolutionKey {
     }
 
     pub fn parse_canonical(value: &str) -> Result<Self, NormalizedTilingSolutionError> {
+        if value.starts_with("ctk2|") {
+            super::ExtendedTilingSolutionKey::parse_canonical(value)?;
+            return Ok(Self(value.to_owned()));
+        }
         let identity = parse_standard_board64_identity(value)?;
         let key = Self::from_standard_board64_identity(identity);
         if key.as_str() != value {
@@ -130,6 +134,14 @@ impl NormalizedTilingSolutionKey {
         &self,
     ) -> Result<StandardBoard64TilingIdentity, NormalizedTilingSolutionError> {
         parse_standard_board64_identity(self.as_str())
+    }
+
+    /// Borrowed four-word identity. The compact accessor intentionally rejects
+    /// CTK2 instead of discarding high words or inventing Board64 authority.
+    pub fn extended_identity(
+        &self,
+    ) -> Result<super::ExtendedTilingSolutionKey<'_>, NormalizedTilingSolutionError> {
+        super::ExtendedTilingSolutionKey::parse_canonical(self.as_str())
     }
 }
 

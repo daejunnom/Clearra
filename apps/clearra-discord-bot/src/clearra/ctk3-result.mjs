@@ -1157,6 +1157,9 @@ function parseSolutionKey(key, path) {
   if (!Number.isInteger(height) || height < 1 || height > 24) {
     fail("invalid-solution-key", path, "declared height is outside 1..24");
   }
+  if (extended && extended[1] !== String(height)) {
+    fail("invalid-solution-key", path, "declared height is not canonical");
+  }
   const initialHex = compact ? compact[1] : extended[2];
   const encodedPlacements = compact ? compact[2] : extended[3];
   const bitLimit = compact ? 64 : height * BOARD_WIDTH;
@@ -1197,10 +1200,30 @@ function parseSolutionKey(key, path) {
         "placement mask is out of bounds, overlapping, or not four cells",
       );
     }
+    const decoded = { piece: match[1], mask };
+    const previous = placements.at(-1);
+    if (extended && previous && compareExtendedPlacements(previous, decoded) >= 0) {
+      fail("invalid-solution-key", path, "placement order is not canonical");
+    }
     occupied |= mask;
-    placements.push({ piece: match[1], mask });
+    placements.push(decoded);
   }
   return { height, initialMask, placements };
+}
+
+// Match the producer's piece rank and little-endian word-array ordering.
+// Numeric BigInt order differs; the compact presentation contract is unchanged.
+function compareExtendedPlacements(left, right) {
+  const pieces = "IOTSZJL";
+  const pieceOrder = pieces.indexOf(left.piece) - pieces.indexOf(right.piece);
+  if (pieceOrder !== 0) return pieceOrder;
+  const wordMask = (1n << 64n) - 1n;
+  for (let shift = 0n; shift < 256n; shift += 64n) {
+    const a = (left.mask >> shift) & wordMask;
+    const b = (right.mask >> shift) & wordMask;
+    if (a !== b) return a < b ? -1 : 1;
+  }
+  return 0;
 }
 
 function finesseSearchPages(witness, solutionPath, comment) {

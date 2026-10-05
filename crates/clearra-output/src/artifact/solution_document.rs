@@ -3,10 +3,12 @@ use core::convert::Infallible;
 use core::fmt;
 
 use clearra_core_domain::{
+    board::standard_pc_board::Board256Mask,
     piece::piece_kind::PieceKind,
     solution::normalized_tiling_solution::{
         NormalizedTilingSolutionKey, StandardBoard64ColoredTilingIdentity,
     },
+    solution::ExtendedTilingSolutionKey,
 };
 use clearra_ctk3::{
     encode_ctk3_compact, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece, CTK3_BUNDLE_PREFIX,
@@ -136,6 +138,25 @@ pub(super) fn encode_fumen_solution_set_checked<E>(
 }
 
 fn ctk3_page(entry: &SolutionArtifactEntry) -> Result<Ctk3Page, SolutionDocumentError> {
+    if entry.key().starts_with("ctk2|") {
+        let identity = ExtendedTilingSolutionKey::parse_canonical(entry.key())
+            .map_err(|_| SolutionDocumentError::InvalidCanonicalKey)?;
+        let height = usize::from(identity.height());
+        let mut cells = vec![Ctk3Color::Empty; height * STANDARD_WIDTH];
+        paint_extended_ctk3_mask(&mut cells, identity.initial_board(), Ctk3Color::Gray);
+        for placement in identity.placements() {
+            paint_extended_ctk3_mask(
+                &mut cells,
+                placement.cells(),
+                Ctk3Color::Piece(ctk3_piece(placement.piece())),
+            );
+        }
+        let mut page = Ctk3Page::new(height, cells);
+        if let Some(comment) = SolutionCommentLayout::render(entry.annotation()) {
+            page = page.with_comment(comment);
+        }
+        return Ok(page);
+    }
     let identity = canonical_colored_identity(entry)?;
     let piece_masks = identity.piece_masks();
     let height = semantic_height(identity.initial_board_mask(), &piece_masks);
@@ -275,6 +296,17 @@ fn paint_ctk3_mask(cells: &mut [Ctk3Color], mut mask: u64, color: Ctk3Color) {
     }
 }
 
+fn paint_extended_ctk3_mask(cells: &mut [Ctk3Color], mask: Board256Mask, color: Ctk3Color) {
+    for (word_index, mut word) in mask.words().into_iter().enumerate() {
+        while word != 0 {
+            let bit = word_index * 64 + word.trailing_zeros() as usize;
+            word &= word - 1;
+            // The shared codec validated the complete height before allocation.
+            cells[bit] = color;
+        }
+    }
+}
+
 const fn ctk3_piece(piece: PieceKind) -> Ctk3Piece {
     match piece {
         PieceKind::I => Ctk3Piece::I,
@@ -336,6 +368,70 @@ mod tests {
     use crate::artifact::{SolutionArtifactAnnotation, SolutionArtifactEntry};
 
     const SOURCE: &str = "normalized-tiling-set";
+
+    #[test]
+    fn shared_extended_wire_keys_export_without_dropping_high_words_or_colors() {
+        let cases =
+            include_str!("../../../../tests/fixtures/contracts/extended_solution_keys.v1.tsv");
+        for line in cases
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let fields: Vec<_> = line.split('\t').collect();
+            let [name, validity, key] = fields.as_slice() else {
+                panic!("invalid test row")
+            };
+            let entry =
+                SolutionArtifactEntry::try_new(*key, SolutionArtifactAnnotation::new()).unwrap();
+            if *validity != "valid" {
+                assert_eq!(
+                    ctk3_page(&entry),
+                    Err(SolutionDocumentError::InvalidCanonicalKey),
+                    "{name}"
+                );
+                continue;
+            }
+            let identity = ExtendedTilingSolutionKey::parse_canonical(key).unwrap();
+            let source_key = NormalizedTilingSolutionKey::parse_canonical(key).unwrap();
+            let mut hasher = NormalizedTilingSolutionSetHasher::default();
+            hasher.update_canonical_key(&source_key);
+            let artifact = SolutionSetArtifact::try_new(
+                SOURCE,
+                NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
+                NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
+                hasher.finish(),
+                1,
+                vec![entry],
+            )
+            .unwrap();
+            let source = encode_ctk3_solution_set(&artifact).unwrap();
+            let decoded = clearra_ctk3::decode_ctk3(&source).unwrap();
+            assert_eq!(decoded.pages.len(), 1, "{name}");
+            let page = &decoded.pages[0];
+            // CTK3 normalization trims empty rows, never occupied high words.
+            assert!(page.height <= usize::from(identity.height()), "{name}");
+            for bit in 0..u16::from(identity.height()) * 10 {
+                let expected = if identity.initial_board().contains_index(bit) {
+                    Ctk3Color::Gray
+                } else {
+                    identity
+                        .placements()
+                        .find(|placement| placement.cells().contains_index(bit))
+                        .map_or(Ctk3Color::Empty, |placement| {
+                            Ctk3Color::Piece(ctk3_piece(placement.piece()))
+                        })
+                };
+                assert_eq!(
+                    page.cells
+                        .get(usize::from(bit))
+                        .copied()
+                        .unwrap_or(Ctk3Color::Empty),
+                    expected,
+                    "{name} bit={bit}"
+                );
+            }
+        }
+    }
 
     fn artifact() -> SolutionSetArtifact {
         let key = NormalizedTilingSolutionKey::parse_canonical(

@@ -57,10 +57,11 @@ pub(crate) fn validate_pinned_minimum_keys(
     if keys.iter().collect::<std::collections::BTreeSet<_>>().len() != keys.len() {
         return Err("pinned solutions must be unique");
     }
-    if keys
-        .iter()
-        .any(|key| NormalizedTilingSolutionKey::parse_canonical(key).is_err())
-    {
+    if keys.iter().any(|key| {
+        NormalizedTilingSolutionKey::parse_canonical(key)
+            .and_then(|key| key.standard_board64_identity())
+            .is_err()
+    }) {
         return Err("pinned PC solution key is invalid");
     }
     Ok(())

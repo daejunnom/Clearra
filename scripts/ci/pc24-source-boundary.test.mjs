@@ -7,13 +7,14 @@ const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), '
 const workflow = read('.github/workflows/pc24-source-boundary.yml');
 
 test('extended functional proofs run independently of existing release and product jobs', () => {
-  const branches = ['codex/converge-pc24-integration-20261005', 'codex/converge-main-product-fixes-20261005', 'codex/pc24-target-boundary-20261006'];
+  const branches = ['codex/converge-pc24-integration-20261005', 'codex/converge-main-product-fixes-20261005', 'codex/pc24-target-boundary-20261006', 'codex/converge-pc24-family-20261006'];
   assert.ok(workflow.includes(`branches: [${branches.map((branch) => JSON.stringify(branch)).join(', ')}]`));
-  for (const job of ['input-contract', 'inverse-lock-clear']) {
+  for (const job of ['input-contract', 'inverse-lock-clear', 'document-wire']) {
     const section = workflow.slice(workflow.indexOf(`\n  ${job}:`));
     assert.ok(section.includes("if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005'"));
     assert.ok(section.includes("github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005'"));
     assert.ok(section.includes("github.ref == 'refs/heads/codex/pc24-target-boundary-20261006'"));
+    assert.ok(section.includes("github.ref == 'refs/heads/codex/converge-pc24-family-20261006'"));
   }
   assert.ok(!workflow.includes('needs:'));
   assert.ok(!workflow.includes('continue-on-error:'));
@@ -23,6 +24,21 @@ test('extended functional proofs run independently of existing release and produ
   assert.ok(workflow.includes('cargo test --locked -p clearra-geometry --lib layout::standard_pc_layout::tests'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-core-executor --test extended_pc_ilc'));
   assert.ok(workflow.includes('--target wasm32-unknown-unknown'));
+});
+
+test('shared four-word codec and projections are tested without enabling compact PC authority', () => {
+  assert.ok(workflow.includes('cargo test --locked -p clearra-core-domain --lib solution::'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-output --no-default-features --lib artifact::solution_document::tests'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-cli-command --test pinned_pc'));
+  assert.ok(workflow.includes('packages/clearra-ui/test/extendedSolutionKey.contract.ts'));
+  assert.ok(workflow.includes('apps/clearra-discord-bot/test/extended-solution-key.test.mjs'));
+  assert.ok(workflow.includes('tests/fixtures/contracts/extended_solution_keys.v1.tsv'));
+  const execution = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
+  assert.ok(execution.includes('ExtendedTilingSolutionKey::parse_canonical(key)'));
+  assert.ok(!execution.includes('fn parse_extended_board_hex('));
+  for (const path of ['crates/clearra-app/src/pc_minimum_cover_result.rs', 'crates/clearra-cli-command/src/web_command_request.rs']) {
+    assert.ok(read(path).includes('.and_then(|key| key.standard_board64_identity())'));
+  }
 });
 
 test('compact and general routing stay separate without claiming disconnected public PC support', () => {

@@ -101,6 +101,9 @@ impl ExtendedTilingKey {
             .expect("writing to String cannot fail");
         }
         debug_assert_eq!(key.len(), self.canonical_key_len(height));
+        debug_assert!(
+            clearra_core_domain::solution::ExtendedTilingSolutionKey::parse_canonical(&key).is_ok()
+        );
         key
     }
 

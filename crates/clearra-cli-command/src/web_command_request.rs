@@ -716,12 +716,14 @@ impl WebCommandRequest {
             ));
         }
         for key in &keys {
-            NormalizedTilingSolutionKey::parse_canonical(key).map_err(|_| {
-                WebCommandError::new(
-                    WebCommandErrorCode::InvalidValue,
-                    "invalid normalized PC solution key",
-                )
-            })?;
+            NormalizedTilingSolutionKey::parse_canonical(key)
+                .and_then(|key| key.standard_board64_identity())
+                .map_err(|_| {
+                    WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        "invalid normalized PC solution key",
+                    )
+                })?;
         }
         let mut seen = std::collections::BTreeSet::new();
         keys.retain(|key| seen.insert(key.clone()));

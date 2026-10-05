@@ -2,15 +2,25 @@ name: PC 24L Source Boundary (Non-publishing)
 
 on:
   push:
-    branches: ["codex/converge-pc24-integration-20261005", "codex/converge-main-product-fixes-20261005", "codex/pc24-target-boundary-20261006"]
+    branches: ["codex/converge-pc24-integration-20261005", "codex/converge-main-product-fixes-20261005", "codex/pc24-target-boundary-20261006", "codex/converge-pc24-family-20261006"]
     paths:
       - ".github/workflows/pc24-source-boundary.yml"
       - "crates/clearra-pc-graph/**"
       - "crates/clearra-problem/**"
       - "crates/clearra-core-executor/**"
+      - "crates/clearra-core-domain/**"
+      - "crates/clearra-output/**"
+      - "crates/clearra-app/src/pc_minimum_cover_result.rs"
+      - "crates/clearra-cli-command/src/web_command_request.rs"
+      - "crates/clearra-cli-command/tests/pinned_pc.rs"
+      - "packages/clearra-ui/src/lib/workspace/solutionExport.ts"
+      - "packages/clearra-ui/test/extendedSolutionKey.contract.ts"
+      - "apps/clearra-discord-bot/src/clearra/ctk3-result.mjs"
+      - "apps/clearra-discord-bot/test/extended-solution-key.test.mjs"
       - "crates/clearra-geometry/**"
       - "scripts/ci/pc24-source-boundary.test.mjs"
       - "tests/fixtures/contracts/pc_target_frame_parity.v1.tsv"
+      - "tests/fixtures/contracts/extended_solution_keys.v1.tsv"
   workflow_dispatch:
 
 permissions:
@@ -30,7 +40,7 @@ env:
 
 jobs:
   input-contract:
-    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006'
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -45,7 +55,19 @@ jobs:
       - name: Verify the bounded non-publishing feedback contract
         run: node --test scripts/ci/pc24-source-boundary.test.mjs
       - name: Check target-frame and compiler source format
-        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry --check
+        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-output -p clearra-cli-command -p clearra-app --check
+      - name: Test allocation-free CTK2 identities and unchanged compact identities
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-core-domain --lib solution:: -- --test-threads=1
+      - name: Test native CTK3 publication from the same four-word identities
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-output --no-default-features --lib artifact::solution_document::tests -- --test-threads=1
+      - name: Test compact minimum ingress does not acquire unsupported extended authority
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-cli-command --test pinned_pc -- --test-threads=1
+      - name: Test fixed-width kick codec without changing its wire semantics
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-pc-graph --lib request::continuation_kick_profile_codec::tests -- --test-threads=1
       - name: Verify the compact six-line and extended twenty-four-line layout boundary without enumeration
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-geometry --lib layout::standard_pc_layout::tests -- --test-threads=1
@@ -57,7 +79,7 @@ jobs:
         run: cargo test --locked -p clearra-problem --test extended_pc_execution -- --test-threads=1
 
   inverse-lock-clear:
-    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006'
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -71,3 +93,34 @@ jobs:
       - name: Verify one-placement Build and forced extended PC completion without large enumeration
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-core-executor --test extended_pc_ilc -- --test-threads=1
+      - name: Verify CTK2 catalog reconstruction keeps the full source board and target height
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-core-executor --lib shared_extended_identity_resolves_only_matching_full_height_catalog_rows -- --test-threads=1
+
+  document-wire:
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Bind pinned pnpm and install without lifecycle scripts
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+          git diff --exit-code
+      - name: Build only the CTK3 test dependency
+        run: node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+      - name: Check shared UI contracts and whole-set clipboard publication
+        if: ${{ !cancelled() }}
+        run: |
+          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json
+          node scripts/tools/run-typescript-contracts.mjs packages/clearra-ui/test/extendedSolutionKey.contract.ts packages/clearra-ui/test/solutionExport.contract.ts
+      - name: Check Discord CTK3 projection against the same wire cases
+        if: ${{ !cancelled() }}
+        run: node --test apps/clearra-discord-bot/test/extended-solution-key.test.mjs apps/clearra-discord-bot/test/ctk3-result.test.mjs
