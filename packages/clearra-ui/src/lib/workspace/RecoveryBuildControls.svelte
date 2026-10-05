@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { recoveryStageEntries, updateRecoverySupply } from './recoveryStages';
   import { Database, Gauge } from '@lucide/svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
   import WorkspaceSupplyInput from './WorkspaceSupplyInput.svelte';
@@ -16,6 +17,7 @@
   const dispatch = createEventDispatcher<{ change: RecoveryBuildRequest }>();
   $: label = (key: Parameters<typeof recoveryBuildMessage>[1]) => recoveryBuildMessage(language, key);
   $: standard = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
+  $: stages = recoveryStageEntries(request);
   $: options = recoveryEarlyChoices(request);
   function patch(value: Partial<RecoveryBuildRequest>) { dispatch('change', { ...request, ...value }); }
 </script>
@@ -23,10 +25,12 @@
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading"><Database size={16} />{standard('source')}</h2>
     <div class="recovery-supplies">
-      <div><WorkspaceSupplyInput value={request.firstSupply} {language} qualifier={label('first')} hint={label('firstHelp')}
-        on:value={(event) => patch({ firstSupply: event.detail })} /></div>
-      <div><WorkspaceSupplyInput value={request.secondSupply} {language} qualifier={label('second')} hint={label('secondHelp')}
-        on:value={(event) => patch({ secondSupply: event.detail })} /></div>
+      {#each stages as stage, index (stage.field)}
+        <div><WorkspaceSupplyInput value={stage.supply} {language}
+          qualifier={stages.length===2 ? label(index===0 ? 'first' : 'second') : `${index===0 ? label('start') : `${label('middle')} ${index}`} → ${index===stages.length-1 ? label('result') : `${label('middle')} ${index+1}`}`}
+          hint={label(index===0 ? 'firstHelp' : 'secondHelp')}
+          on:value={(event)=>dispatch('change',updateRecoverySupply(request,stage.field,event.detail))}/></div>
+      {/each}
     </div>
     <QueuePatternHelp {language} />
     <div class="workspace-switch-row"><WorkspaceToggle label={standard('hold')} checked={request.holdEnabled}
@@ -65,6 +69,6 @@
   {#if validation.length > 0}<p class="workspace-validation" role="alert">{label('invalid')}</p>{/if}
 </WorkspaceControlPanel>
 <style>
-  .recovery-supplies { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .recovery-supplies { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 12px; }
   .recovery-supplies > div { min-width: 0; }
 </style>

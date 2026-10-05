@@ -1,6 +1,8 @@
 //! Stage-factorized paired Build coverage with demand-driven boundary repair.
 //! The original weighted supply universe is preserved without pair expansion.
 mod catalog;
+mod chain;
+pub use chain::RecoveryChainStage;
 mod field;
 mod parallel;
 mod population;
@@ -37,3 +39,6 @@ pub enum RecoveryBuildError {
     UnsupportedRuleProfile,
     Cancelled,
 }
+
+#[cfg(test)]
+mod chain_tests;

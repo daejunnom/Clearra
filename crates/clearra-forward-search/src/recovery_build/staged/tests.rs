@@ -14,6 +14,7 @@ fn mask(n: u64) -> Mask {
 }
 fn query() -> RecoveryBuildQuery {
     RecoveryBuildQuery {
+        chain_stages: Vec::new(),
         all_solutions: false,
         minimum_solutions: false,
         required_solution_keys: Vec::new(),
@@ -47,19 +48,36 @@ fn reflected(mask: Mask, height: u8) -> Mask {
     result
 }
 fn orientations(q: &RecoveryBuildQuery) -> Vec<RecoveryBuildFields> {
+    // Independent fixed-field oracle: enumerate whole-target and final-only
+    // reflections, retaining actual inputs and re-running the old lock search.
     let mut result = vec![q.fields.clone()];
-    let (base, _, _) = place_and_clear(
+    let (start, _, _) = place_and_clear(
         10,
         q.fields.height,
-        ForwardBoard::from_mask(q.fields.initial.union(q.fields.middle)),
+        ForwardBoard::from_mask(q.fields.initial),
     );
-    let base = Mask::from_words(base.words());
-    if reflected(base, q.fields.height) == base {
-        let mirror = reflected(q.fields.result, q.fields.height);
-        if mirror != q.fields.result {
-            let mut f = q.fields.clone();
-            f.result = mirror;
+    if reflected(Mask::from_words(start.words()), q.fields.height)
+        == Mask::from_words(start.words())
+    {
+        let mut f = q.fields.clone();
+        f.middle = reflected(f.middle, f.height);
+        f.result = reflected(f.result, f.height);
+        if !result.contains(&f) {
             result.push(f);
+        }
+    }
+    for f in result.clone() {
+        let (base, _, _) = place_and_clear(
+            10,
+            f.height,
+            ForwardBoard::from_mask(f.initial.union(f.middle)),
+        );
+        if reflected(Mask::from_words(base.words()), f.height) == Mask::from_words(base.words()) {
+            let mut next = f;
+            next.result = reflected(next.result, next.height);
+            if !result.contains(&next) {
+                result.push(next);
+            }
         }
     }
     result
@@ -458,6 +476,7 @@ fn recovery_build_early_limit_counts_second_source_placements_before_checkpoint(
     assert_eq!(result.status, RecoveryBuildStatus::Recovery);
     assert_eq!(result.actual_early, 2);
     let query = RecoveryBuildQuery {
+        chain_stages: Vec::new(),
         all_solutions: false,
         minimum_solutions: false,
         required_solution_keys: Vec::new(),

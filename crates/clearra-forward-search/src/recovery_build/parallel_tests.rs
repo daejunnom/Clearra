@@ -8,6 +8,7 @@ use clearra_scoring::profile::SpinProfileId;
 
 fn query() -> RecoveryBuildQuery {
     RecoveryBuildQuery {
+        chain_stages: Vec::new(),
         all_solutions: false,
         minimum_solutions: false,
         required_solution_keys: Vec::new(),

@@ -219,3 +219,56 @@ fn recovery_build_all_minimum_and_mandatory_minimum_use_complete_coverage() {
         .unwrap();
     assert_ne!(missing.app_response().status(), AppStatus::Success);
 }
+
+#[test]
+fn recovery_build_three_middle_sources_keep_host_wire_and_exact_minimum() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(12, false, false));
+    let base = "clearra recovery build --start-mask 0 --height 12 --stage-target 0xc03 --stage-supply O --stage-target 0xc0300000 --stage-supply O --stage-target 0xc030000000000 --stage-supply O --stage-target 0xc03000000000000000 --stage-supply O --max-early 0 --no-piece-exchange --hold --all-solutions";
+    let all = runtime
+        .run_command_text(&format!("{base} --workers 1"))
+        .unwrap();
+    assert_eq!(all.app_response().status(), AppStatus::Success);
+    let ProductResultPayloadContent::RecoveryBuild(payload) = all
+        .app_response()
+        .product_result_payload()
+        .unwrap()
+        .content()
+    else {
+        panic!("recovery output")
+    };
+    assert_eq!(payload.pattern_count, "1");
+    assert_eq!(payload.normal_count, "1");
+    assert_eq!(payload.stage_supplies.len(), 4);
+    assert_eq!(payload.solutions.len(), 2);
+    println!(
+        "recovery_chain_payload={}",
+        serde_json::to_string(payload).unwrap()
+    );
+    let minimum = runtime
+        .run_command_text(&format!("{base} --workers 1 --minimum-solutions"))
+        .unwrap();
+    assert_eq!(minimum.app_response().status(), AppStatus::Success);
+    let ProductResultPayloadContent::RecoveryBuild(selected) = minimum
+        .app_response()
+        .product_result_payload()
+        .unwrap()
+        .content()
+    else {
+        panic!("recovery output")
+    };
+    assert!(selected.minimum_proven);
+    assert_eq!(selected.selected_solution_keys.len(), 1);
+    let encoded = serialize_distributed_final_events(77, &all).unwrap();
+    let wire: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    let terminal = wire
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["event"] == "final_response")
+        .unwrap();
+    assert_eq!(
+        terminal["response"]["product_result_payload"],
+        serde_json::to_value(all.app_response().product_result_payload().unwrap()).unwrap()
+    );
+}

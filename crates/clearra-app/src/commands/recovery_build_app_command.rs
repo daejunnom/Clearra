@@ -127,6 +127,16 @@ pub(crate) fn recovery_build_response(
         Vec::new()
     };
     let public = RecoveryBuildPayload {
+        stage_target_masks: query
+            .chain_stages
+            .iter()
+            .map(|s| mask(s.target.words()))
+            .collect(),
+        stage_supplies: query
+            .chain_stages
+            .iter()
+            .map(|s| s.supply.clone())
+            .collect(),
         minimum_proven: query.minimum_solutions,
         selected_solution_keys: selected,
         required_solution_keys: query.required_solution_keys.clone(),
@@ -207,6 +217,18 @@ fn mask(words: [u64; 4]) -> String {
 fn example(value: &RecoveryBuildExample) -> RecoveryBuildExamplePayload {
     let path = &value.path;
     RecoveryBuildExamplePayload {
+        middle_target_mask: mask(path.middle_target),
+        stage_target_masks: path.stage_targets.iter().map(|&w| mask(w)).collect(),
+        stage_source_lengths: path
+            .stage_source_lengths
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        stage_early_counts: path
+            .stage_early_counts
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         first_pattern: value.first_pattern.to_string(),
         second_pattern: value.second_pattern.to_string(),
         first_queue: value

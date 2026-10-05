@@ -35,6 +35,14 @@ impl RecoveryBuildStepPayload {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoveryBuildExamplePayload {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub middle_target_mask: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_target_masks: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_source_lengths: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_early_counts: Vec<String>,
     pub first_pattern: String,
     pub second_pattern: String,
     pub first_queue: String,
@@ -49,7 +57,19 @@ pub struct RecoveryBuildExamplePayload {
 }
 impl RecoveryBuildExamplePayload {
     pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
-        let mut bytes = 0_u128;
+        let mut bytes = self.middle_target_mask.capacity() as u128;
+        for values in [
+            &self.stage_target_masks,
+            &self.stage_source_lengths,
+            &self.stage_early_counts,
+        ] {
+            bytes = bytes.checked_add(
+                (values.capacity() as u128).checked_mul(core::mem::size_of::<String>() as u128)?,
+            )?;
+            for value in values {
+                bytes = bytes.checked_add(value.capacity() as u128)?;
+            }
+        }
         bytes = bytes.checked_add(self.first_pattern.capacity() as u128)?;
         bytes = bytes.checked_add(self.second_pattern.capacity() as u128)?;
         bytes = bytes.checked_add(self.first_queue.capacity() as u128)?;
@@ -94,6 +114,10 @@ impl RecoveryBuildSolutionPayload {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoveryBuildPayload {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_target_masks: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_supplies: Vec<String>,
     #[cfg_attr(feature = "serde", serde(default))]
     pub minimum_proven: bool,
     #[cfg_attr(feature = "serde", serde(default))]
@@ -141,6 +165,14 @@ impl RecoveryBuildPayload {
             )?;
             for key in keys {
                 bytes = bytes.checked_add(key.capacity() as u128)?;
+            }
+        }
+        for values in [&self.stage_target_masks, &self.stage_supplies] {
+            bytes = bytes.checked_add(
+                (values.capacity() as u128).checked_mul(core::mem::size_of::<String>() as u128)?,
+            )?;
+            for value in values {
+                bytes = bytes.checked_add(value.capacity() as u128)?;
             }
         }
         for solution in &self.solutions {

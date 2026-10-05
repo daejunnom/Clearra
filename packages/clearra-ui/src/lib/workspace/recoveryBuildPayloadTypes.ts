@@ -17,6 +17,10 @@ export type RecoveryBuildStepPayload = {
   middle_complete: boolean;
 };
 export type RecoveryBuildExamplePayload = {
+  middle_target_mask?: string;
+  stage_target_masks?: string[];
+  stage_source_lengths?: string[];
+  stage_early_counts?: string[];
   first_pattern: string;
   second_pattern: string;
   first_queue: string;
@@ -33,6 +37,8 @@ export type RecoveryBuildSolutionPayload = {
   key: string; covered_count: string; probability: string; example: RecoveryBuildExamplePayload;
 };
 export type RecoveryBuildPayload = {
+  stage_target_masks?: string[];
+  stage_supplies?: string[];
   solutions_complete?: boolean;
   solutions?: RecoveryBuildSolutionPayload[];
   minimum_proven?: boolean;

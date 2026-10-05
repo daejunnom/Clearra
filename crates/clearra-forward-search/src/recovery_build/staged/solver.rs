@@ -27,6 +27,7 @@ enum Mode {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Key {
     geometry: u32,
+    chain: u32,
     source: Id,
     allowed: Id,
     depth: u16,
@@ -98,6 +99,9 @@ pub(in crate::recovery_build) struct Solver {
     pub geometry: Geometry,
     query: RecoveryBuildQuery,
     maximum: usize,
+    chain_lengths: Vec<u16>,
+    chain_states: Vec<super::super::chain::Progress>,
+    chain_unique: HashMap<super::super::chain::Progress, u32>,
     memo: HashMap<Key, Id>,
     machine: Option<Machine>,
     root: Option<Key>,
@@ -121,11 +125,21 @@ impl Solver {
         diagram: Diagram,
         geometry: Geometry,
     ) -> Self {
-        let maximum = query.early_limit.effective_max(
-            geometry.stages[0].prepared.result_pieces,
-            geometry.stages[0].prepared.result_pieces,
-        );
+        let chain_lengths = super::super::chain::lengths(&query).expect("validated chain lengths");
+        let future = if query.chain_stages.is_empty() {
+            geometry.stages[0].prepared.result_pieces
+        } else {
+            query.chain_stages[1..]
+                .iter()
+                .map(|s| s.target.count_ones() as usize / 4)
+                .sum()
+        };
+        let maximum = query.early_limit.effective_max(future, future);
+        let initial_progress = super::super::chain::Progress::new(query.chain_stages.len());
         Self {
+            chain_lengths,
+            chain_states: vec![initial_progress.clone()],
+            chain_unique: HashMap::from([(initial_progress, 0)]),
             plan: None,
             diagram,
             source,
@@ -164,7 +178,7 @@ impl Solver {
         self.geometry.roots[self
             .plan
             .as_ref()
-            .map_or(self.orientation, |p| usize::from(p.orientation))]
+            .map_or(self.orientation, |p| p.orientation as usize)]
     }
     /// A finite amount of solver work, not one monolithic fixed queue pair.
     pub fn advance(&mut self, fuel: usize, control: &ExecutionControl) -> Result<bool, Error> {
@@ -194,6 +208,7 @@ impl Solver {
                 }
                 let key = Key {
                     geometry: self.geometry_root(),
+                    chain: 0,
                     source: self.source.universe,
                     allowed,
                     depth: 0,
@@ -336,18 +351,24 @@ impl Solver {
             return Ok(Prepared::Terminal(NONE));
         }
         let pos = self.geometry.position(key.geometry);
-        let stage = &self.geometry.stages[usize::from(pos.stage)];
+        let stage = &self.geometry.stages[pos.stage as usize];
         let middle_pieces = stage.prepared.middle_pieces;
         let result_pieces = stage.prepared.result_pieces;
         if pos.middle_count() == middle_pieces && pos.result_count() == result_pieces {
             let valid = pos.board == stage.prepared.terminal
                 && usize::from(key.first_used) == middle_pieces
                 && (self.query.allow_piece_exchange || key.exchange == [0; 7])
-                && (key.mode != Mode::Repair || key.early > 0);
+                && (key.mode != Mode::Repair
+                    || key.early > 0
+                    || self.chain_states[key.chain as usize].has_early())
+                && self.chain_terminal(key);
             return Ok(Prepared::Terminal(if valid { limit } else { NONE }));
         }
         if pos.middle_count() == middle_pieces && key.mode != Mode::Tail {
-            if key.mode == Mode::Repair && key.early == 0 {
+            if key.mode == Mode::Repair
+                && key.early == 0
+                && !self.chain_states[key.chain as usize].has_early()
+            {
                 return Ok(Prepared::Terminal(NONE));
             }
             // Reuse the exact second-stage continuation independently of which
@@ -526,7 +547,7 @@ impl Solver {
         control: &ExecutionControl,
     ) -> Result<(), Error> {
         let pos = self.geometry.position(key.geometry);
-        let middle_pieces = self.geometry.stages[usize::from(pos.stage)]
+        let middle_pieces = self.geometry.stages[pos.stage as usize]
             .prepared
             .middle_pieces;
         let first = token.index < self.source.first_len;
@@ -555,7 +576,11 @@ impl Solver {
             if early && usize::from(key.early) >= self.maximum {
                 continue;
             }
+            let Some(chain) = self.chain_placement(key, edge, token)? else {
+                continue;
+            };
             let mut child = Key {
+                chain,
                 geometry: edge.next,
                 active: None,
                 hold: held,
@@ -585,6 +610,95 @@ impl Solver {
             });
         }
         Ok(())
+    }
+    fn chain_terminal(&self, key: Key) -> bool {
+        if self.query.chain_stages.is_empty() {
+            return true;
+        }
+        let p = &self.chain_states[key.chain as usize];
+        self.query
+            .chain_stages
+            .iter()
+            .enumerate()
+            .all(|(i, stage)| {
+                (i + 1 == p.used.len()
+                    || usize::from(p.used[i]) == stage.target.count_ones() as usize / 4)
+                    && (self.query.allow_piece_exchange || p.balance[i] == [0; 7])
+            })
+    }
+    fn chain_placement(
+        &mut self,
+        key: Key,
+        edge: Edge,
+        token: Token,
+    ) -> Result<Option<u32>, Error> {
+        if self.query.chain_stages.is_empty() {
+            return Ok(Some(0));
+        }
+        let pos = self.geometry.position(key.geometry);
+        let next = self.geometry.position(edge.next);
+        let targets = &self.geometry.stages[pos.stage as usize].chain_targets;
+        let owner = if edge.result {
+            targets.len() - 1
+        } else {
+            let cells = next.middle.without(pos.middle);
+            let Some(owner) = targets[..targets.len() - 1]
+                .iter()
+                .position(|t| cells.without(*t).is_empty())
+            else {
+                return Ok(None);
+            };
+            owner
+        };
+        let mut offset = 0u16;
+        let mut source = None;
+        for (i, len) in self.chain_lengths.iter().enumerate() {
+            offset = offset.checked_add(*len).ok_or(Error::CounterOverflow)?;
+            if token.index < offset {
+                source = Some(i);
+                break;
+            }
+        }
+        let source = source.ok_or(Error::PatternDomainUnavailable)?;
+        let mut p = self.chain_states[key.chain as usize].clone();
+        p.used[source] = p.used[source]
+            .checked_add(1)
+            .ok_or(Error::CounterOverflow)?;
+        if source + 1 < targets.len()
+            && usize::from(p.used[source]) > targets[source].count_ones() as usize / 4
+        {
+            return Ok(None);
+        }
+        p.balance[source][usize::from(token.piece)] += 1;
+        p.balance[owner][usize::from(token.piece)] -= 1;
+        let mut prefix = clearra_core_domain::board::standard_pc_board::Board256Mask::EMPTY;
+        for boundary in 0..owner {
+            prefix = prefix.union(targets[boundary]);
+            if !prefix.without(pos.middle).is_empty() {
+                if key.mode == Mode::Middle {
+                    return Ok(None);
+                }
+                p.early[boundary] = p.early[boundary]
+                    .checked_add(1)
+                    .ok_or(Error::CounterOverflow)?;
+                if usize::from(p.early[boundary]) > self.maximum {
+                    return Ok(None);
+                }
+            }
+        }
+        if let Some(id) = self.chain_unique.get(&p) {
+            return Ok(Some(*id));
+        }
+        let id = u32::try_from(self.chain_states.len()).map_err(|_| Error::CounterOverflow)?;
+        self.chain_unique
+            .try_reserve(1)
+            .map_err(|_| Error::MemoryUnavailable)?;
+        self.chain_states
+            .try_reserve(1)
+            .map_err(|_| Error::MemoryUnavailable)?;
+        self.chain_unique.insert(p.clone(), id);
+        self.chain_states.push(p);
+        Ok(Some(id))
     }
     fn accepts(&self, mut id: Id, depth: u16, queue: &[PieceKind]) -> bool {
         for (level, &piece) in queue.iter().enumerate().skip(usize::from(depth)) {
@@ -626,7 +740,17 @@ impl Solver {
                         }
                         before &= !step.middle_complete;
                     }
+                    let stage = &self.geometry.stages[pos.stage as usize];
+                    let chain_progress = &self.chain_states[key.chain as usize];
+                    if !self.chain_lengths.is_empty() {
+                        actual_early =
+                            chain_progress.early.iter().copied().max().unwrap_or(0) as usize;
+                    }
                     return Ok(RecoveryBuildFixedReport {
+                        middle_target: stage.fields.middle.words(),
+                        stage_targets: stage.chain_targets.iter().map(|m| m.words()).collect(),
+                        stage_source_lengths: self.chain_lengths.clone(),
+                        stage_early_counts: chain_progress.early.clone(),
                         status,
                         states: usize::try_from(self.states).map_err(|_| Error::CounterOverflow)?,
                         effective_max_early: self.maximum,
@@ -634,7 +758,7 @@ impl Solver {
                         exchange_balance: key.exchange,
                         steps,
                         terminal_board: pos.board.words(),
-                        result_target: self.geometry.stages[usize::from(pos.stage)]
+                        result_target: self.geometry.stages[pos.stage as usize]
                             .fields
                             .result
                             .words(),

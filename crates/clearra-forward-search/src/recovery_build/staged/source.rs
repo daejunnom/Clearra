@@ -40,6 +40,110 @@ pub(in crate::recovery_build) struct Source {
     pub compact_second: bool,
 }
 impl Source {
+    pub fn for_population(
+        diagram: &mut Diagram,
+        prepared: &super::super::population::PreparedPopulation,
+        control: &ExecutionControl,
+    ) -> Result<Self, Error> {
+        if prepared.stages.is_empty() {
+            return Self::compile_all(diagram, &prepared.first, &prepared.second, control);
+        }
+        let mut root = ALL;
+        let mut offset = 0u16;
+        let mut first_counts = Some([0u8; 7]);
+        let mut final_root = NONE;
+        let mut final_counts = None;
+        let mut first_len = 0;
+        for (i, universe) in prepared.stages.iter().enumerate() {
+            cancelled(control)?;
+            let len =
+                u16::try_from(universe.sequence_len_at(0)).map_err(|_| Error::CounterOverflow)?;
+            let end = offset.checked_add(len).ok_or(Error::CounterOverflow)?;
+            let (part, counts) = if let Some(atoms) = compact_atoms(universe) {
+                let part = compile_atoms(
+                    diagram,
+                    &atoms,
+                    0,
+                    atoms[0].mask,
+                    atoms[0].draws,
+                    offset,
+                    &mut HashMap::new(),
+                    control,
+                )?;
+                let mut counts = [0u8; 7];
+                let mut fixed = true;
+                for atom in atoms {
+                    fixed &= u32::from(atom.draws) == atom.mask.count_ones();
+                    for (p, n) in counts.iter_mut().enumerate() {
+                        *n = n
+                            .checked_add(u8::from(atom.mask & (1 << p) != 0))
+                            .ok_or(Error::CounterOverflow)?;
+                    }
+                }
+                (part, fixed.then_some(counts))
+            } else {
+                let mut part = NONE;
+                let mut counts = None;
+                let mut same = true;
+                for rank in 0..universe.pattern_count() {
+                    cancelled(control)?;
+                    // Explicit and compact uniform weights have distinct storage
+                    // identities. Check the actual weights, not enum equality.
+                    if universe.weight_at(rank).get().to_bits()
+                        != (1.0 / universe.pattern_count() as f64).to_bits()
+                    {
+                        return Err(Error::PatternDomainUnavailable);
+                    }
+                    let queue = universe.sequence_at(rank);
+                    if queue.len() != usize::from(len) {
+                        return Err(Error::PatternDomainUnavailable);
+                    }
+                    let branch = encode_queue(diagram, &queue, offset, ALL)?;
+                    part = diagram.union(part, branch)?;
+                    let inventory = inventory(&queue)?;
+                    if let Some(old) = counts {
+                        same &= old == inventory;
+                    } else {
+                        counts = Some(inventory);
+                    }
+                }
+                (part, if same { counts } else { None })
+            };
+            if diagram.count(part, offset, end)? != universe.pattern_count() as u128 {
+                return Err(Error::PatternDomainUnavailable);
+            }
+            root = diagram.intersect(root, part)?;
+            if i + 1 == prepared.stages.len() {
+                first_len = offset;
+                final_root = part;
+                final_counts = counts;
+            } else {
+                first_counts = match first_counts.zip(counts) {
+                    Some((a, b)) => {
+                        let mut sum = [0u8; 7];
+                        for p in 0..7 {
+                            sum[p] = a[p].checked_add(b[p]).ok_or(Error::CounterOverflow)?;
+                        }
+                        Some(sum)
+                    }
+                    None => None,
+                };
+            }
+            offset = end;
+        }
+        if diagram.count(root, 0, offset)? != prepared.possible {
+            return Err(Error::PatternDomainUnavailable);
+        }
+        Ok(Self {
+            first_len,
+            end: offset,
+            universe: root,
+            second: final_root,
+            first_counts,
+            second_counts: final_counts,
+            compact_second: true,
+        })
+    }
     pub fn compile_all(
         diagram: &mut Diagram,
         first: &MaterializedPatternUniverse,

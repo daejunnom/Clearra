@@ -11,7 +11,7 @@ pub(in crate::recovery_build) struct Tile {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::recovery_build) struct Plan {
-    pub orientation: u8,
+    pub orientation: u32,
     pub middle: Vec<Tile>,
     pub result: Vec<Tile>,
 }
@@ -84,8 +84,17 @@ impl Plan {
     pub fn validate(&self, g: &Geometry) -> Result<(), Error> {
         let stage = g
             .stages
-            .get(usize::from(self.orientation))
+            .get(self.orientation as usize)
             .ok_or(Error::PatternDomainUnavailable)?;
+        for tile in &self.middle {
+            if !stage.chain_targets.is_empty()
+                && !stage.chain_targets[..stage.chain_targets.len() - 1]
+                    .iter()
+                    .any(|target| Mask::from_words(tile.cells).without(*target).is_empty())
+            {
+                return Err(Error::PatternDomainUnavailable);
+            }
+        }
         for (tiles, target) in [
             (&self.middle, stage.fields.middle),
             (&self.result, stage.fields.result),
@@ -147,6 +156,7 @@ impl Tiles {
     fn advance(
         &mut self,
         domain: &mut BuildStageDomain,
+        owners: &[Mask],
         control: &ExecutionControl,
     ) -> Result<TileAdvance, Error> {
         cancelled(control)?;
@@ -181,6 +191,9 @@ impl Tiles {
         };
         self.path.truncate(depth - 1);
         if let Some((piece, cells)) = frame.choices.next() {
+            if !owners.is_empty() && !owners.iter().any(|owner| cells.without(*owner).is_empty()) {
+                return Ok(TileAdvance::Pending);
+            }
             let mut caps = frame.caps;
             let Some(next) = caps[usize::from(piece)].checked_sub(1) else {
                 return Ok(TileAdvance::Pending);
@@ -262,6 +275,9 @@ impl Producer {
             done: false,
         })
     }
+    pub(super) fn stage(&self, orientation: u32) -> Option<&super::super::staged::geometry::Stage> {
+        self.geometry.stages.get(orientation as usize)
+    }
     pub fn advance(&mut self, control: &ExecutionControl) -> Result<Option<Plan>, Error> {
         for _ in 0..256 {
             cancelled(control)?;
@@ -271,10 +287,10 @@ impl Producer {
             }
             let stage = &mut self.geometry.stages[self.orientation];
             if let Some(result) = &mut self.result {
-                match result.advance(&mut stage.result_domain, control)? {
+                match result.advance(&mut stage.result_domain, &[], control)? {
                     TileAdvance::Found(tiles) => {
                         return Ok(Some(Plan {
-                            orientation: self.orientation as u8,
+                            orientation: self.orientation as u32,
                             middle: self.current.clone(),
                             result: tiles,
                         }))
@@ -289,7 +305,11 @@ impl Producer {
             let middle = self
                 .middle
                 .get_or_insert_with(|| Tiles::new(stage.fields.middle, self.first_caps));
-            match middle.advance(&mut stage.middle_domain, control)? {
+            match middle.advance(
+                &mut stage.middle_domain,
+                &stage.chain_targets[..stage.chain_targets.len().saturating_sub(1)],
+                control,
+            )? {
                 TileAdvance::Done => {
                     self.middle = None;
                     self.orientation += 1;
