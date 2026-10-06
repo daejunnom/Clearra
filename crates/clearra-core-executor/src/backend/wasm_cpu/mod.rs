@@ -19,6 +19,7 @@ mod extended_geometry_component;
 mod extended_geometry_dense;
 mod extended_geometry_domain;
 mod extended_inverse_catalog;
+mod extended_pc_search;
 mod extended_pc_tiling;
 mod extended_reachability;
 mod finesse_score;
@@ -76,6 +77,7 @@ pub use distributed::{
     WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
     WasmDistributedResultMerger, WasmDistributedVerifier,
 };
+pub(crate) use extended_pc_search::ExtendedPcSearchSession;
 pub(crate) use extended_pc_tiling::ExtendedPcTilingSession;
 pub use pc4_graph_materializer::{
     any_pc4_ilc_target_field, enumerate_pc4_ilc_geometric_predecessor_fields,

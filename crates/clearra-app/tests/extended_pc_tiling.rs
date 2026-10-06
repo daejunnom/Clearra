@@ -10,8 +10,8 @@ use clearra_core_domain::{
 };
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
-    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
-    RequestedSearchBackend,
+    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+    PcSolutionProbabilityPolicy, PieceWindow, RequestedSearchBackend,
 };
 use clearra_rules::profile::{
     builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x},
@@ -238,5 +238,86 @@ fn extended_tiling_keeps_the_fixed_trace_contract_at_admission() {
             .unwrap_err()
             .to_string()
             .contains("fixed unused retained-trace limit"));
+    }
+}
+
+fn ordinary_request(height: u8, probabilities: bool) -> (AppRequest, Board256Mask, usize) {
+    let (tiling, initial, pieces) = forced_request(height, srs_plus());
+    let AppCommand::Scenario(command) = tiling.command() else {
+        unreachable!()
+    };
+    let query = command
+        .query()
+        .clone()
+        .with_objective(ObjectivePolicy::all())
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_solution_probability_policy(if probabilities {
+            PcSolutionProbabilityPolicy::Include
+        } else {
+            PcSolutionProbabilityPolicy::Omit
+        });
+    (
+        AppRequest::new(AppCommand::Scenario(ScenarioAppCommand::new(query))),
+        initial,
+        pieces,
+    )
+}
+
+#[test]
+fn full_height_ordinary_pc_reaches_app_presentation_after_actual_buildup() {
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for height in [7, 8, 12, 24] {
+        let (request, initial, pieces) = ordinary_request(height, false);
+        let response = context.run(request);
+        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+        let result = response.render_model().unwrap().core_result().unwrap();
+        assert_eq!(result.field("actual_backend"), Some("wasm-cpu-pc-extended"));
+        assert_eq!(result.bool_field("buildup_executed"), Some(true));
+        assert_eq!(result.bool_field("build_variant_count_exact"), Some(true));
+        assert_eq!(result.normalized_solution_keys().len(), 1);
+        let identity =
+            ExtendedTilingSolutionKey::parse_canonical(&result.normalized_solution_keys()[0])
+                .unwrap();
+        assert_eq!(identity.initial_board(), initial);
+        assert_eq!(identity.placement_count(), pieces);
+        assert_eq!(
+            result
+                .path_steps()
+                .iter()
+                .map(|step| u16::from(step.cleared_lines()))
+                .sum::<u16>(),
+            u16::from(height)
+        );
+        assert!(result.pc_tiling_memory_admission_evidence().is_none());
+    }
+}
+
+#[test]
+fn full_height_ordinary_pc_optional_probabilities_keep_the_same_complete_family() {
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for height in [7, 8, 12, 24] {
+        let (without, _, _) = ordinary_request(height, false);
+        let (with, _, _) = ordinary_request(height, true);
+        let baseline = context.run(without);
+        let included = context.run(with);
+        assert_eq!(included.status(), AppStatus::Success, "{included:?}");
+        let baseline = baseline.render_model().unwrap().core_result().unwrap();
+        let result = included.render_model().unwrap().core_result().unwrap();
+        assert_eq!(
+            result.normalized_solution_keys(),
+            baseline.normalized_solution_keys()
+        );
+        assert_eq!(result.solution_probabilities().len(), 1);
+        assert_eq!(
+            result.solution_probabilities()[0].solution_key(),
+            &result.normalized_solution_keys()[0]
+        );
+        assert_eq!(result.solution_probabilities()[0].probability(), "1");
+        assert!(result.solution_probabilities()[0].probability_complete());
+        assert!(result.exact_scoring_execution_batches().is_empty());
     }
 }

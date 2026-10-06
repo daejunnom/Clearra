@@ -50,6 +50,7 @@ use super::{
 
 pub(super) struct ExtendedBuildProbabilitySession {
     problem: SearchProblem,
+    purpose: ExtendedFamilyPurpose,
     aggregation: BuildProbabilityAggregation,
     field: BuildProbabilityField,
     catalog: ExtendedInverseCatalog,
@@ -72,6 +73,8 @@ pub(super) struct ExtendedBuildProbabilitySession {
     total_build_order_nodes: usize,
     peak_build_scratch_bytes: usize,
     witnessed_pattern_count: u128,
+    pc_build_variant_count: u128,
+    pc_build_variant_count_complete: bool,
     representative_path: Vec<CorePathStep>,
     representative_pattern_id: Option<u32>,
     representative_rank: Option<u64>,
@@ -92,6 +95,14 @@ pub(super) struct ExtendedBuildProbabilitySession {
     memory_bound: ExecutionMemoryBound,
     coexisting_retained_bytes: u128,
     finished: bool,
+}
+
+/// The geometry/reachability/language engine is shared, not its product result.
+/// PC completion has its own finalizer and cannot acquire Build evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExtendedFamilyPurpose {
+    Build,
+    Pc,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,7 +136,15 @@ impl ExtendedBuildProbabilitySession {
         aggregation: BuildProbabilityAggregation,
         memory_bound: ExecutionMemoryBound,
     ) -> Result<Self, WasmExactSearchError> {
-        Self::new_mode(problem, field, aggregation, false, memory_bound, 0)
+        Self::new_mode(
+            problem,
+            field,
+            aggregation,
+            false,
+            memory_bound,
+            0,
+            ExtendedFamilyPurpose::Build,
+        )
     }
 
     #[cfg(any(test, not(target_arch = "wasm32")))]
@@ -145,7 +164,15 @@ impl ExtendedBuildProbabilitySession {
         aggregation: BuildProbabilityAggregation,
         memory_bound: ExecutionMemoryBound,
     ) -> Result<Self, WasmExactSearchError> {
-        Self::new_mode(problem, field, aggregation, true, memory_bound, 0)
+        Self::new_mode(
+            problem,
+            field,
+            aggregation,
+            true,
+            memory_bound,
+            0,
+            ExtendedFamilyPurpose::Build,
+        )
     }
 
     pub(super) fn new_with_memory_bound_and_coexisting_retained_bytes(
@@ -163,9 +190,47 @@ impl ExtendedBuildProbabilitySession {
             finesse_requested,
             memory_bound,
             coexisting_retained_bytes,
+            ExtendedFamilyPurpose::Build,
         )
     }
 
+    /// Ordinary full-height PC family producer. Typed minimum, score and replay
+    /// evidence deliberately remain outside this constructor until their
+    /// four-word reducers are connected; no Build result is relabelled as PC.
+    pub(super) fn new_pc_family(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        memory_bound: ExecutionMemoryBound,
+        coexisting_retained_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
+        super::extended_pc_search::validate_pc_family_problem(problem)?;
+        let initial = clearra_core_domain::board::standard_pc_board::Board256Mask::from_words(
+            problem.initial_board().occupied_words(),
+        );
+        let full = clearra_core_domain::board::standard_pc_board::Board256Mask::all_cells(
+            problem.visible_height() * 10,
+        )
+        .map_err(|_| WasmExactSearchError::InvalidProblem("extended_pc_height_invalid"))?;
+        if u16::from(field.height()) != problem.visible_height()
+            || field.base_words() != initial.words()
+            || field.target_words() != full.without(initial).words()
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_family_field_binding_mismatch",
+            ));
+        }
+        Self::new_mode(
+            problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            false,
+            memory_bound,
+            coexisting_retained_bytes,
+            ExtendedFamilyPurpose::Pc,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn new_mode(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -173,6 +238,7 @@ impl ExtendedBuildProbabilitySession {
         finesse_requested: bool,
         memory_bound: ExecutionMemoryBound,
         coexisting_retained_bytes: u128,
+        purpose: ExtendedFamilyPurpose,
     ) -> Result<Self, WasmExactSearchError> {
         super::ensure_connected_kick_profile(problem)?;
         if aggregation.is_tiling_only() && problem.solution_probability_policy().requested() {
@@ -218,7 +284,34 @@ impl ExtendedBuildProbabilitySession {
                 "wasm_supply_has_no_reachable_piece_multiset",
             ));
         }
-        let catalog = ExtendedInverseCatalog::compile(field)?;
+        let catalog = if purpose == ExtendedFamilyPurpose::Pc {
+            // Reject catalog growth at allocation time rather than discovering
+            // it after an unbounded compile. This is the same conservative
+            // realization credit used by the full-height Tiling producer.
+            let fixed = coexisting_retained_bytes
+                .checked_add(super::build_probability::checked_build_probability_problem_nested_retained_bytes(problem)
+                    .ok_or(WasmExactSearchError::InvalidProblem("extended_pc_memory_projection_unavailable"))?)
+                .and_then(|bytes| bytes.checked_add(core::mem::size_of::<Self>() as u128 + 32 * 1024))
+                .ok_or(WasmExactSearchError::InvalidProblem("extended_pc_memory_projection_unavailable"))?;
+            memory_bound
+                .ensure(fixed, 0)
+                .map_err(WasmExactSearchError::resource_admission)?;
+            let credit = memory_bound.cap_bytes() - fixed;
+            let max_realizations = usize::try_from(credit / 2048).unwrap_or(usize::MAX);
+            ExtendedInverseCatalog::compile_bounded(field, max_realizations).map_err(|error| {
+                if error.reason() == "extended_catalog_memory_budget_exceeded" {
+                    WasmExactSearchError::resource_admission(
+                        memory_bound
+                            .ensure(fixed, credit.saturating_add(2048))
+                            .expect_err("catalog exceeded its finite realization credit"),
+                    )
+                } else {
+                    error
+                }
+            })?
+        } else {
+            ExtendedInverseCatalog::compile(field)?
+        };
         let supply_projection_complete = universe.complete()
             || family.membership_kind() == PackingPatternMembershipKind::ExactSymbolicStandardBag;
         let geometry = ExtendedGeometrySearch::new(universe, &family, &catalog)?;
@@ -234,6 +327,7 @@ impl ExtendedBuildProbabilitySession {
         };
         let session = Self {
             problem: problem.clone(),
+            purpose,
             aggregation,
             field,
             catalog,
@@ -258,6 +352,8 @@ impl ExtendedBuildProbabilitySession {
             total_build_order_nodes: 0,
             peak_build_scratch_bytes: 0,
             witnessed_pattern_count: 0,
+            pc_build_variant_count: 0,
+            pc_build_variant_count_complete: true,
             representative_path: Vec::new(),
             representative_pattern_id: None,
             representative_rank: None,
@@ -324,6 +420,7 @@ impl ExtendedBuildProbabilitySession {
             false,
             memory_bound,
             coexisting_retained_bytes,
+            ExtendedFamilyPurpose::Build,
         )?;
         if !session.geometry.prepare_external() {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -520,6 +617,7 @@ impl ExtendedBuildProbabilitySession {
                 if !graph.is_live() {
                     return Ok(());
                 }
+                let count_pc_paths = self.count_pc_build_paths();
                 let product = if let Some(language) = finesse_language.as_ref() {
                     self.coverage_evaluator.evaluate_with_finesse(
                         &graph,
@@ -528,7 +626,7 @@ impl ExtendedBuildProbabilitySession {
                         self.problem.supply().hold_enabled(),
                         self.problem.supply().projects_unplaced_lookahead(),
                         self.problem.supply().projects_standard_bag_lookahead(),
-                        false,
+                        count_pc_paths,
                         false,
                         &language.nodes,
                         self.problem.spawn_profile(),
@@ -542,7 +640,7 @@ impl ExtendedBuildProbabilitySession {
                         self.problem.supply().hold_enabled(),
                         self.problem.supply().projects_unplaced_lookahead(),
                         self.problem.supply().projects_standard_bag_lookahead(),
-                        false,
+                        count_pc_paths,
                         false,
                         control,
                     )?
@@ -562,6 +660,12 @@ impl ExtendedBuildProbabilitySession {
                 self.witnessed_pattern_count = self
                     .witnessed_pattern_count
                     .saturating_add(u128::from(product.coverage_bits.count_ones()));
+                if self.count_pc_build_paths() {
+                    let next = self.pc_build_variant_count.checked_add(product.path_count);
+                    self.pc_build_variant_count = next.unwrap_or(u128::MAX);
+                    self.pc_build_variant_count_complete &=
+                        next.is_some() && product.count_complete;
+                }
                 let rank = external_ordinal
                     .unwrap_or_else(|| self.processed_candidate_count.saturating_sub(1) as u64);
                 if self
@@ -1611,6 +1715,9 @@ impl ExtendedBuildProbabilitySession {
     }
 
     fn build_result(&mut self) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        if self.purpose == ExtendedFamilyPurpose::Pc {
+            return self.build_pc_family_result();
+        }
         let tiling_only = self.aggregation.is_tiling_only();
         let universe = self
             .problem
@@ -2117,6 +2224,194 @@ impl ExtendedBuildProbabilitySession {
         })
     }
 
+    fn count_pc_build_paths(&self) -> bool {
+        self.purpose == ExtendedFamilyPurpose::Pc
+            && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountAll
+    }
+
+    fn build_pc_family_result(&self) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        let universe = self.problem.piece_source().materialized_universe().ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+        )?;
+        let mut keys = self
+            .buildable_tilings
+            .iter()
+            .map(|tiling| tiling.canonical_key(self.catalog.initial_board(), self.field.height()))
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys.dedup();
+        let coverages = self
+            .solution_coverage
+            .as_ref()
+            .map(|rows| {
+                let mut rows = rows
+                    .iter()
+                    .map(|(key, bits)| NormalizedSolutionCoverage::new(key.clone(), bits.clone()))
+                    .collect::<Vec<_>>();
+                rows.sort_unstable_by(|left, right| left.solution_key().cmp(right.solution_key()));
+                rows
+            })
+            .unwrap_or_default();
+        let count_complete = self.supply_projection_complete
+            && self.truncated_reason.is_none()
+            && self.pc_build_variant_count_complete;
+        let probability_complete = universe.complete() && self.truncated_reason.is_none();
+        let probabilities = if self.problem.solution_probability_policy().requested() {
+            crate::solution_probability::normalized_solution_probability_reports(
+                &keys,
+                &coverages,
+                universe.weights(),
+                probability_complete && count_complete,
+            )
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("extended_pc_solution_probability_mismatch")
+            })?
+        } else {
+            Vec::new()
+        };
+        let hash = super::build_probability::normalized_string_solution_set_hash(&keys);
+        let probability = universe
+            .weights()
+            .covered_weight(&self.covered_patterns)
+            .ok_or_else(|| {
+                WasmExactSearchError::InvalidProblem("extended_pc_coverage_universe_mismatch")
+            })?;
+        let fields = vec![
+            field("problem_preset", "scenario-pc"),
+            field("compiled_goal", "clear-to-empty"),
+            field("search_kind", "pc"),
+            field(
+                "objective",
+                if self.problem.objective().kind()
+                    == clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique
+                {
+                    "unique"
+                } else {
+                    "all"
+                },
+            ),
+            field(
+                "search_output_policy",
+                self.problem.output_policy().as_str(),
+            ),
+            field("actual_solution_set_contract", "normalized-tiling-set"),
+            field(
+                "backend_requested",
+                self.problem.backend_policy().requested_backend().as_str(),
+            ),
+            field("backend_selected", "wasm-cpu-pc-extended"),
+            field("actual_backend", "wasm-cpu-pc-extended"),
+            field("backend_fallback_used", false),
+            field("board_height", self.field.height()),
+            field("board_storage", "board256-canonical"),
+            field("workers_requested", self.problem.backend_policy().workers()),
+            field("workers_used", self.workers_used),
+            field("cpu_parallel_execution", false),
+            field("cpu_parallel_decision_reason", "direct-extended-pc-family"),
+            field("solution_found", !keys.is_empty()),
+            field("solution_set_materialized", true),
+            field("solution_keys_materialized_count", keys.len()),
+            field("solution_keys_complete", count_complete),
+            // This producer returns the complete family inline; it does not
+            // expose the separate partial-page store used by Tiling.
+            field("solution_page_available", false),
+            field("unique_solution_count", keys.len()),
+            field("total_solution_count", keys.len()),
+            field("normalized_unique_solution_count", keys.len()),
+            field("actual_normalized_unique_solution_count", keys.len()),
+            field(
+                "normalized_solution_key_algorithm",
+                clearra_core_domain::solution::NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
+            ),
+            field(
+                "normalized_solution_set_hash_algorithm",
+                clearra_core_domain::solution::NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
+            ),
+            field("normalized_solution_set_hash", &hash),
+            field("actual_normalized_solution_set_hash", &hash),
+            field("solution_count_calculated", true),
+            field("count_complete", count_complete),
+            field("objective_complete", count_complete && probability_complete),
+            field("build_variant_count", self.pc_build_variant_count),
+            field(
+                "build_variant_count_exact",
+                self.count_pc_build_paths() && count_complete,
+            ),
+            field("buildup_executed", true),
+            field("buildability_verified", true),
+            field("coverage_calculated", true),
+            field("probability_calculated", true),
+            field("covered_pattern_count", self.covered_patterns.count_ones()),
+            field("coverage_pattern_count", universe.pattern_count()),
+            field("piece_source_id", self.problem.piece_source().id().get()),
+            field("pattern_universe_id", universe.pattern_universe_id().get()),
+            field(
+                "pattern_weight_model_id",
+                universe.pattern_weight_model_id().get(),
+            ),
+            field("materialized_pattern_count", universe.pattern_count()),
+            field(
+                "total_possible_pattern_count",
+                universe.total_possible_pattern_count(),
+            ),
+            field(
+                "materialized_probability_mass",
+                universe.materialized_probability_mass().get(),
+            ),
+            field("coverage_probability", probability.get()),
+            field("probability_complete", probability_complete),
+            field("supply_probability_complete", universe.complete()),
+            field(
+                "resource_probability_complete",
+                self.truncated_reason.is_none(),
+            ),
+            field(
+                "solution_probabilities_requested",
+                self.problem.solution_probability_policy().requested(),
+            ),
+            field("solution_probability_count", probabilities.len()),
+            field(
+                "solution_probability_complete",
+                !self.problem.solution_probability_policy().requested()
+                    || probability_complete && count_complete,
+            ),
+            field("packing_candidate_count", self.geometry.candidate_count()),
+            field("searched_geometry_nodes", self.geometry.expanded_nodes()),
+            field("searched_build_nodes", self.searched_build_nodes),
+            field("total_reachability_states", self.reachability_states),
+            field(
+                "coverage_product_edge_checks",
+                self.coverage_product_edge_checks,
+            ),
+            field("resource_peak_cpu_bytes", self.retained_bytes()),
+            field("resource_truncated", self.truncated_reason.is_some()),
+            field(
+                "resource_truncation_reason",
+                self.truncated_reason.unwrap_or("none"),
+            ),
+            field(
+                "count_truncated_reason",
+                self.truncated_reason.unwrap_or("none"),
+            ),
+        ];
+        // No Tiling/score/minimum/replay producer evidence is manufactured here.
+        let result = CoreExecutionResult::new(fields, self.representative_path.clone())
+            .with_normalized_solution_keys(keys)
+            .with_normalized_solution_coverages(coverages)
+            .with_solution_probabilities(probabilities)
+            .with_coverage_pattern_words(self.covered_patterns.to_owned_words());
+        Ok(if self.problem.solution_probability_policy().requested() {
+            // Canonical weights are denominator evidence only. An empty,
+            // incomplete replay batch grants no score/path execution authority.
+            let weights = (0..universe.pattern_count())
+                .map(|index| universe.weight_at(index).get().to_string())
+                .collect();
+            result.with_postprocess_execution_batch(Vec::new(), false, weights)
+        } else {
+            result
+        })
+    }
+
     pub(super) fn finesse_search_material(
         &self,
     ) -> Result<FinesseSearchMaterial, WasmExactSearchError> {
@@ -2383,6 +2678,21 @@ impl ExtendedBuildProbabilitySession {
         future = future.checked_add(
             super::build_probability::checked_build_probability_fixed_result_surface_bytes()?,
         )?;
+        if self.purpose == ExtendedFamilyPurpose::Pc
+            && self.problem.solution_probability_policy().requested()
+        {
+            future = future
+                .checked_add((key_count as u128).checked_mul(
+                    core::mem::size_of::<crate::SolutionProbabilityReport>() as u128 + 128,
+                )?)?
+                .checked_add(key_bytes)?;
+            future = future.checked_add(
+                (self.covered_patterns.pattern_count() as u128).checked_mul(
+                    core::mem::size_of::<String>() as u128
+                        + super::build_probability::MAX_CANONICAL_PROBABILITY_TEXT_BYTES,
+                )?,
+            )?;
+        }
         if self.trivial_target && self.solution_coverage.is_some() {
             future = future.checked_add(
                 PatternBitSet::checked_all_projection(self.covered_patterns.pattern_count())?

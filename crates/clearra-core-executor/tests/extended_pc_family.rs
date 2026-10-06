@@ -1,0 +1,172 @@
+//! Bounded actual PC completion, not an empty 24L/sixty-piece enumeration.
+use clearra_core_domain::{
+    board::standard_pc_board::Board256Mask, execution_cancellation::ExecutionControl,
+    piece::piece_kind::PieceKind, solution::ExtendedTilingSolutionKey,
+};
+use clearra_core_executor::backend::{
+    WasmCpuSearchAdvance, WasmCpuSearchBackend, WasmCpuSearchSession,
+};
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+use clearra_pc_graph::request::{
+    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    RequestedSearchBackend,
+};
+use clearra_problem::ProblemCompiler;
+use clearra_rules::profile::{
+    builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x},
+    rule_profile::RuleProfile,
+};
+use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+fn forced_query(height: u8, rule: RuleProfile) -> (PcScenarioQuery, Board256Mask, usize) {
+    let starts = if height == 7 {
+        vec![0, 3]
+    } else {
+        (0..u16::from(height)).step_by(4).collect()
+    };
+    let pieces = starts.len();
+    let mut holes = Board256Mask::EMPTY;
+    for (column, start) in starts.into_iter().enumerate() {
+        for row in start..start + 4 {
+            holes = holes.union(Board256Mask::singleton(row * 10 + column as u16).unwrap());
+        }
+    }
+    let initial = Board256Mask::all_cells(u16::from(height) * 10)
+        .unwrap()
+        .without(holes);
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10_from_words(u16::from(height), initial.words()).unwrap(),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; pieces])),
+        PieceWindow::new(pieces),
+    )
+    .with_rule(rule)
+    .with_exact_pieces(Some(pieces))
+    .with_allow_hold(false)
+    .with_min_remaining_queue(0)
+    .with_count_policy(PcCountPolicy::CountAll)
+    .with_execution_policy(
+        PcExecutionPolicy::default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_workers(1)
+            .with_allow_backend_fallback(false),
+    );
+    (query, initial, pieces)
+}
+
+#[test]
+fn full_height_pc_family_runs_buildup_and_clears_the_whole_board_in_all_profiles() {
+    for rule in [srs(), srs_plus(), srs_x(), jstris_180(), no_kick()] {
+        for height in [7, 8, 12, 24] {
+            let (query, initial, pieces) = forced_query(height, rule);
+            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            let result =
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .unwrap();
+            assert_eq!(result.field("actual_backend"), Some("wasm-cpu-pc-extended"));
+            assert_eq!(result.bool_field("buildup_executed"), Some(true));
+            assert_eq!(result.bool_field("count_complete"), Some(true));
+            assert_eq!(result.bool_field("build_variant_count_exact"), Some(true));
+            assert_eq!(result.field("coverage_probability"), Some("1"));
+            let availability = result.execution_report().solution_set_availability();
+            assert!(availability.uses_explicit_contract());
+            assert!(availability.contract_valid());
+            assert!(availability.solution_keys_complete());
+            assert!(!availability.solution_page_available());
+            assert!(availability.materialized_key_count_matches(1));
+            assert_eq!(result.normalized_solution_keys().len(), 1);
+            let identity =
+                ExtendedTilingSolutionKey::parse_canonical(&result.normalized_solution_keys()[0])
+                    .unwrap();
+            assert_eq!(identity.height(), height);
+            assert_eq!(identity.initial_board(), initial);
+            assert_eq!(identity.placement_count(), pieces);
+            assert_eq!(result.path_steps().len(), pieces);
+            assert_eq!(
+                result
+                    .path_steps()
+                    .iter()
+                    .map(|step| u16::from(step.cleared_lines()))
+                    .sum::<u16>(),
+                u16::from(height)
+            );
+            // An ordinary PC family cannot masquerade as a typed Tiling or
+            // minimum/score/replay producer.
+            assert!(result.tiling_solution_page_store().is_none());
+            assert!(result.pc_chance_coverage_evidence().is_none());
+            assert!(result.exact_scoring_execution_batches().is_empty());
+        }
+    }
+}
+
+#[test]
+fn full_height_cooperative_and_direct_pc_families_match() {
+    for height in [7, 8, 12, 24] {
+        let (query, _, _) = forced_query(height, srs_plus());
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let control = ExecutionControl::default();
+        let direct = WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap();
+        let mut session = WasmCpuSearchSession::new(&problem).unwrap();
+        let mut result = None;
+        for _ in 0..4096 {
+            match session.advance(1, &control).unwrap() {
+                WasmCpuSearchAdvance::Pending => {}
+                WasmCpuSearchAdvance::Completed(completed) => {
+                    result = Some(completed);
+                    break;
+                }
+                WasmCpuSearchAdvance::Cancelled => panic!("no cancellation was requested"),
+            }
+        }
+        let result = result.expect("a bounded forced PC must complete");
+        assert_eq!(
+            result.normalized_solution_keys(),
+            direct.normalized_solution_keys()
+        );
+        assert_eq!(result.path_steps(), direct.path_steps());
+        assert_eq!(
+            result.field("build_variant_count"),
+            direct.field("build_variant_count")
+        );
+        assert_eq!(
+            result.coverage_pattern_words(),
+            direct.coverage_pattern_words()
+        );
+    }
+}
+
+#[test]
+fn full_height_pc_never_silently_lowers_the_worker_request_or_invents_product_authority() {
+    let (query, _, _) = forced_query(24, srs_plus());
+    for workers in [2, 11] {
+        let parallel = query.clone().with_execution_policy(
+            query
+                .execution_policy()
+                .clone()
+                .with_workers(workers)
+                .with_worker_hardware_limit(workers + 1),
+        );
+        let problem = ProblemCompiler::compile_scenario_pc(&parallel).unwrap();
+        let error =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .unwrap_err();
+        assert_eq!(error.reason(), "extended_pc_family_parallel_not_connected");
+    }
+    let minimum = ProblemCompiler::compile_scenario_pc(
+        &query.with_objective(ObjectivePolicy::minimum_cover()),
+    )
+    .unwrap()
+    .with_pc_minimum_cover_v2_evidence();
+    let error = WasmCpuSearchBackend::execute_with_control(&minimum, &ExecutionControl::default())
+        .unwrap_err();
+    assert_eq!(error.reason(), "extended_pc_family_contract_not_connected");
+}
+
+#[test]
+fn full_height_pc_cancellation_precedes_result_publication() {
+    let (query, _, _) = forced_query(24, srs_plus());
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    let control = ExecutionControl::default();
+    control.cancellation.handle().cancel();
+    let error = WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap_err();
+    assert_eq!(error.reason(), "wasm_cpu_search_cancelled");
+}

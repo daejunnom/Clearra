@@ -168,3 +168,30 @@ test('extended input proof preserves source policies without bypassing compact o
   assert.ok(cases.includes('.with_count_policy(PcCountPolicy::CountAll)'));
   assert.ok(cases.includes('WorkerPolicy::Fixed(11)'));
 });
+
+test('ordinary extended PC evaluates the existing BuildUp language and owns a separate result boundary', () => {
+  const backend = read('crates/clearra-core-executor/src/backend/wasm_cpu_search_backend.rs');
+  const session = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_search.rs');
+  const engine = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
+  const workflow = read('.github/workflows/pc24-source-boundary.yml');
+  assert.ok(backend.includes('ExtendedPcSearchSession::new(problem)'));
+  assert.ok(session.includes('new_pc_family('));
+  assert.ok(session.includes('extended_pc_family_parallel_not_connected'));
+  assert.ok(session.includes('PcChanceEvidencePolicy::Disabled'));
+  assert.ok(engine.includes('ExtendedFamilyPurpose::Pc'));
+  assert.ok(engine.includes('self.build_pc_family_result()'));
+  assert.ok(engine.includes('let count_pc_paths = self.count_pc_build_paths()'));
+  assert.ok(engine.includes('product.path_count'));
+  assert.ok(engine.includes('field("buildup_executed", true)'));
+  assert.ok(engine.includes('field("solution_page_available", false)'));
+  assert.ok(workflow.includes('--test extended_pc_family'));
+  const tests = read('crates/clearra-core-executor/tests/extended_pc_family.rs');
+  assert.ok(tests.includes('full_height_pc_family_runs_buildup_and_clears_the_whole_board_in_all_profiles'));
+  assert.ok(tests.includes('step.cleared_lines()'));
+  assert.ok(tests.includes('availability.contract_valid()'));
+  assert.ok(tests.includes('availability.materialized_key_count_matches(1)'));
+  assert.ok(tests.includes('full_height_pc_never_silently_lowers_the_worker_request_or_invents_product_authority'));
+  const cli = read('crates/clearra-cli/tests/extended_pc_tiling.rs');
+  assert.ok(cli.includes('extended_ordinary_pc_real_cli_verifies_buildup_without_truncating_the_field'));
+  assert.ok(cli.includes('json["summary"]["buildup_executed"], "true"'));
+});

@@ -14,7 +14,8 @@ use crate::{resource::WasmCpuTerminalResourceAuthority, CoreExecutionError, Core
 #[cfg(feature = "webgpu-search")]
 use super::wasm_cpu::WasmWebGpuSearchSession;
 use super::wasm_cpu::{
-    ExactSearchAdvance, ExtendedPcTilingSession, WasmExactSearchError, WasmExactSearchSession,
+    ExactSearchAdvance, ExtendedPcSearchSession, ExtendedPcTilingSession, WasmExactSearchError,
+    WasmExactSearchSession,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -153,6 +154,7 @@ impl WasmCpuSearchTerminalAuthority<'_> {
 #[allow(clippy::large_enum_variant)]
 enum WasmSearchSessionInner {
     Cpu(WasmExactSearchSession),
+    ExtendedPc(ExtendedPcSearchSession),
     ExtendedPcTiling(ExtendedPcTilingSession),
     #[cfg(feature = "webgpu-search")]
     WebGpu(WasmWebGpuSearchSession),
@@ -160,6 +162,21 @@ enum WasmSearchSessionInner {
 
 impl WasmCpuSearchSession {
     pub fn new(problem: &SearchProblem) -> Result<Self, WasmCpuSearchError> {
+        if problem.visible_height() > 6 {
+            if !matches!(
+                problem.backend_policy().requested_backend().as_str(),
+                "cpu" | "auto"
+            ) {
+                return Err(WasmCpuSearchError::Unsupported {
+                    reason: "extended_pc_family_requires_cpu_backend",
+                });
+            }
+            return Ok(Self {
+                inner: WasmSearchSessionInner::ExtendedPc(
+                    ExtendedPcSearchSession::new(problem).map_err(map_error)?,
+                ),
+            });
+        }
         if let Some(unavailable_reason) = explicit_gpu_unavailable_reason(problem) {
             if !problem.backend_policy().allow_backend_fallback() {
                 return Err(WasmCpuSearchError::Unsupported {
@@ -257,6 +274,7 @@ impl WasmCpuSearchSession {
     ) -> Result<WasmCpuSearchAdvance, WasmCpuSearchError> {
         let advance = match &mut self.inner {
             WasmSearchSessionInner::Cpu(session) => session.advance(work_budget, control),
+            WasmSearchSessionInner::ExtendedPc(session) => session.advance(work_budget, control),
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 session.advance(work_budget, control)
             }
@@ -292,6 +310,9 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::Cpu(session) => {
                 session.validate_public_result_memory_with_future(result, checked_future_bytes)
             }
+            WasmSearchSessionInner::ExtendedPc(session) => {
+                session.validate_public_result_memory_with_future(result, checked_future_bytes)
+            }
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 session.validate_public_result_memory_with_future(result, checked_future_bytes)
             }
@@ -307,6 +328,9 @@ impl WasmCpuSearchSession {
     fn admitted_memory_cap_bytes(&self) -> u128 {
         match &self.inner {
             WasmSearchSessionInner::Cpu(session) => session.admitted_memory_cap_bytes(),
+            WasmSearchSessionInner::ExtendedPc(_) => {
+                unreachable!("ordinary PC family has no typed terminal authority")
+            }
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 session.admitted_memory_cap_bytes()
             }
@@ -321,6 +345,7 @@ impl WasmCpuSearchSession {
     fn shares_problem_arc(&self, problem: &Arc<SearchProblem>) -> bool {
         match &self.inner {
             WasmSearchSessionInner::Cpu(session) => session.shares_problem_arc(problem),
+            WasmSearchSessionInner::ExtendedPc(_) => false,
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 session.shares_problem_arc(problem)
             }
@@ -333,6 +358,7 @@ impl WasmCpuSearchSession {
     fn checked_terminal_retained_bytes(&self, result: &CoreExecutionResult) -> Option<u128> {
         match &self.inner {
             WasmSearchSessionInner::Cpu(session) => session.checked_terminal_retained_bytes(result),
+            WasmSearchSessionInner::ExtendedPc(_) => None,
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 session.checked_terminal_retained_bytes(result)
             }
@@ -351,7 +377,9 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::Cpu(session) => session
                 .execute_parallel_if_worthwhile(worker_count, control)
                 .map_err(map_error),
-            WasmSearchSessionInner::ExtendedPcTiling(_) => Ok(None),
+            WasmSearchSessionInner::ExtendedPc(_) | WasmSearchSessionInner::ExtendedPcTiling(_) => {
+                Ok(None)
+            }
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(_) => Ok(None),
         }
@@ -454,6 +482,9 @@ impl WasmCpuSearchBackend {
             WasmSearchSessionInner::ExtendedPcTiling(_) => {
                 unreachable!("explicit compact candidate verifier")
             }
+            WasmSearchSessionInner::ExtendedPc(_) => {
+                unreachable!("explicit compact candidate verifier")
+            }
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(_) => unreachable!("explicit CPU candidate verifier"),
         };
@@ -531,6 +562,9 @@ impl WasmCpuSearchBackend {
             Option<WasmCpuSearchTerminalAuthority<'_>>,
         ) -> R,
     ) -> R {
+        if control.is_cancelled() {
+            return terminal(Err(WasmCpuSearchError::Cancelled), None);
+        }
         let worker_count = runtime_worker_count(problem.backend_policy().workers());
         #[cfg(not(feature = "parallel"))]
         let gpu_selected = cfg!(feature = "webgpu-search") && should_use_webgpu(problem);
