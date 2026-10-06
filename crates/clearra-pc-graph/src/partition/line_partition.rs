@@ -57,20 +57,36 @@ pub enum LinePartitionError {
 }
 
 pub fn partitions_for_target(target: PcTarget) -> Result<Vec<LinePartition>, LinePartitionError> {
-    match target.lines() {
-        2 => Ok(vec![LinePartition::new(&[2])?]),
-        4 => Ok(vec![
-            LinePartition::new(&[4])?,
-            LinePartition::new(&[2, 2])?,
-        ]),
-        6 => Ok(vec![
-            LinePartition::new(&[6])?,
-            LinePartition::new(&[2, 4])?,
-            LinePartition::new(&[4, 2])?,
-            LinePartition::new(&[2, 2, 2])?,
-        ]),
-        lines => Err(LinePartitionError::UnsupportedTarget { lines }),
+    // This is bounded label metadata, not execution of intermediate PCs.
+    // Compositions of n half-lines number 2^(n-1), at most 2048 for 24L.
+    // Length-then-lexicographic order preserves every legacy 2/4/6L label.
+    let mut partitions = Vec::with_capacity(1 << (target.lines() / 2 - 1));
+    let mut prefix = Vec::with_capacity(usize::from(target.lines() / 2));
+    append_partitions(target.lines(), &mut prefix, &mut partitions)?;
+    partitions.sort_unstable_by(|left, right| {
+        left.increments
+            .len()
+            .cmp(&right.increments.len())
+            .then_with(|| left.increments.cmp(&right.increments))
+    });
+    Ok(partitions)
+}
+
+fn append_partitions(
+    remaining: u8,
+    prefix: &mut Vec<u8>,
+    partitions: &mut Vec<LinePartition>,
+) -> Result<(), LinePartitionError> {
+    if remaining == 0 {
+        partitions.push(LinePartition::new(prefix)?);
+        return Ok(());
     }
+    for lines in (2..=remaining).step_by(2) {
+        prefix.push(lines);
+        append_partitions(remaining - lines, prefix, partitions)?;
+        prefix.pop();
+    }
+    Ok(())
 }
 
 fn checked_count_bytes(count: u128, item_size: u128) -> Option<u128> {

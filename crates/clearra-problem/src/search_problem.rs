@@ -743,6 +743,41 @@ mod retained_capacity {
             self.checked_pc_terminal_pointee_retained_bytes()
         }
 
+        /// Allocation-capacity projection for an ordinary PC family, including
+        /// Opening's second queue owner, checkpoint schedule and labels. This
+        /// is a memory projection only, not typed minimum/score/path authority.
+        /// Build's Scenario-only projection remains a separate contract.
+        pub fn checked_pc_family_pointee_retained_bytes(&self) -> Option<u128> {
+            use clearra_core_domain::objective::objective_kind::ObjectiveKind;
+
+            if self.scenario.setup_query().is_some()
+                || self.scenario.build_query().is_some()
+                || self.scenario.core_query().verified_kick_profile().is_some()
+                || self.rule_profile.verified_kick_profile().is_some()
+                || self.allowed_colored_solution_identities.is_some()
+                || !matches!(self.search_goal, SearchGoal::ClearToEmpty)
+                || !matches!(
+                    self.output_policy,
+                    SearchOutputPolicy::Summary | SearchOutputPolicy::Trace
+                )
+                || !matches!(
+                    self.objective.kind(),
+                    ObjectiveKind::All | ObjectiveKind::Unique
+                )
+                || self.objective.score().requested()
+                || self.objective.execution_constraints().requested()
+                || self.pc_chance_evidence_policy != PcChanceEvidencePolicy::Disabled
+                || self
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || self.backend_policy().tablebase_requested()
+                || self.backend_policy().precompute_build_dependencies()
+            {
+                return None;
+            }
+            self.checked_pc_terminal_pointee_retained_bytes()
+        }
+
         fn checked_pc_terminal_pointee_retained_bytes(&self) -> Option<u128> {
             match (self.preset, self.problem_kind, self.scenario.source()) {
                 (
@@ -985,6 +1020,53 @@ mod retained_capacity {
                 .expect("canonical finite BuildProbability shape is supported");
 
             assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn ordinary_pc_family_memory_projection_counts_opening_and_scenario_owners() {
+            for lines in [2, 6, 8, 24] {
+                let opening = ProblemCompiler::compile_opening_pc(
+                    &OpeningPcSearchQuery::new(PcTarget::new(lines).unwrap())
+                        .with_queue(fixed_queue(96))
+                        .with_objective(ObjectivePolicy::all()),
+                )
+                .unwrap();
+                assert_eq!(
+                    opening.checked_pc_family_pointee_retained_bytes(),
+                    manual_expected(&opening)
+                );
+                assert!(opening.checked_pc_family_pointee_retained_bytes().is_some());
+                // A PC projection never widens the Build-owned memory domain.
+                assert!(opening
+                    .checked_build_probability_pointee_retained_bytes()
+                    .is_none());
+            }
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, 0),
+                fixed_queue(32),
+                PieceWindow::new(4),
+            )
+            .with_exact_pieces(Some(4))
+            .with_allow_hold(false);
+            let scenario = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            assert_eq!(
+                scenario.checked_pc_family_pointee_retained_bytes(),
+                manual_expected(&scenario)
+            );
+            for objective in [
+                ObjectivePolicy::tiling(),
+                ObjectivePolicy::minimum_cover(),
+                ObjectivePolicy::all().with_score_summary(),
+            ] {
+                let problem =
+                    ProblemCompiler::compile_scenario_pc(&query.clone().with_objective(objective))
+                        .unwrap();
+                assert!(problem.checked_pc_family_pointee_retained_bytes().is_none());
+            }
+            assert!(scenario
+                .with_pc_minimum_cover_v2_evidence()
+                .checked_pc_family_pointee_retained_bytes()
+                .is_none());
         }
 
         #[test]
@@ -1483,7 +1565,16 @@ mod search_height_policy {
         match preset {
             SearchProblemPreset::OpeningPc => scenario
                 .pc_query()
-                .map(|query| query.board().size().height())
+                // The standard spawn profile is twenty rows, not a maximum
+                // target height. Keep legacy compact spawn space, but never
+                // clip a 22/24L opening to that profile's default height.
+                .map(|query| {
+                    query
+                        .board()
+                        .size()
+                        .height()
+                        .max(scenario.initial_board().visible_height())
+                })
                 .unwrap_or_else(|| scenario.initial_board().visible_height()),
             SearchProblemPreset::ScenarioPc => scenario.initial_board().visible_height(),
             SearchProblemPreset::Setup => scenario

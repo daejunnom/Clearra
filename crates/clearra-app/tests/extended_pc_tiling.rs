@@ -1,23 +1,104 @@
 //! Small real product requests, never an empty 24L/sixty-piece enumeration.
 use clearra_app::{
     AppCommand, AppContext, AppCoreExecutorService, AppRequest, AppResponse, AppServices,
-    AppStatus, CooperativeAppAdvance, PcResultProjection, PcTilingIngressOrigin,
+    AppStatus, CooperativeAppAdvance, PcAppCommand, PcResultProjection, PcTilingIngressOrigin,
     ProductCapabilityContract, ScenarioAppCommand,
 };
 use clearra_core_domain::{
     board::standard_pc_board::Board256Mask, execution_cancellation::ExecutionControl,
-    piece::piece_kind::PieceKind, solution::ExtendedTilingSolutionKey,
+    pc::pc_target::PcTarget, piece::piece_kind::PieceKind, solution::ExtendedTilingSolutionKey,
 };
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
-    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
-    PcSolutionProbabilityPolicy, PieceWindow, RequestedSearchBackend,
+    OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
+    PcScenarioBoard, PcScenarioQuery, PcSolutionProbabilityPolicy, PieceWindow,
+    RequestedSearchBackend,
 };
 use clearra_rules::profile::{
     builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x},
     rule_profile::RuleProfile,
 };
 use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+#[test]
+fn full_height_tiling_opening_keeps_a_distinct_typed_ingress_without_enumeration() {
+    for lines in (8..=24).step_by(2) {
+        let query = OpeningPcSearchQuery::new(PcTarget::new(lines).unwrap())
+            .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I;
+                usize::from(lines) * 10 / 4
+            ])))
+            .with_hold_policy(PcHoldPolicy::Disabled)
+            .with_objective(ObjectivePolicy::tiling())
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_execution_policy(
+                PcExecutionPolicy::default()
+                    .with_requested_backend(RequestedSearchBackend::Cpu)
+                    .with_workers(1),
+            );
+        let command = PcAppCommand::new(query).with_result_projection(
+            PcResultProjection::TilingFamilyV1(PcTilingIngressOrigin::CanonicalPcTiling),
+        );
+        assert_eq!(command.validate_result_projection(), Ok(()));
+        assert!(AppRequest::new(AppCommand::Pc(command))
+            .with_product_capability_contract(ProductCapabilityContract::PcTiling)
+            .is_ok());
+    }
+}
+
+#[test]
+fn empty_extended_app_opening_reports_finite_memory_failure_not_unsupported_or_success() {
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for lines in [8, 24] {
+        for tiling in [false, true] {
+            let query = OpeningPcSearchQuery::new(PcTarget::new(lines).unwrap())
+                .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                    PieceKind::I;
+                    usize::from(lines) * 10 / 4
+                ])))
+                .with_hold_policy(PcHoldPolicy::Disabled)
+                .with_count_policy(PcCountPolicy::CountUnique)
+                .with_objective(if tiling {
+                    ObjectivePolicy::tiling()
+                } else {
+                    ObjectivePolicy::all()
+                })
+                .with_execution_policy(
+                    PcExecutionPolicy::default()
+                        .with_requested_backend(RequestedSearchBackend::Cpu)
+                        .with_workers(1)
+                        .with_max_memory_mib(Some(1)),
+                );
+            let mut command = PcAppCommand::new(query);
+            if tiling {
+                command = command.with_result_projection(PcResultProjection::TilingFamilyV1(
+                    PcTilingIngressOrigin::CanonicalPcTiling,
+                ));
+            }
+            let mut request = AppRequest::new(AppCommand::Pc(command));
+            if tiling {
+                request = request
+                    .with_product_capability_contract(ProductCapabilityContract::PcTiling)
+                    .unwrap();
+            }
+            let response = context.run(request);
+            assert_eq!(
+                response.status(),
+                AppStatus::ExecutionFailed,
+                "{response:?}"
+            );
+            assert!(response
+                .resource_report()
+                .execution_availability()
+                .reason()
+                .is_some());
+            assert!(response.render_model().is_none());
+            assert!(response.product_capability_result().is_none());
+        }
+    }
+}
 
 fn forced_request(height: u8, rule: RuleProfile) -> (AppRequest, Board256Mask, usize) {
     let starts = if height == 7 {

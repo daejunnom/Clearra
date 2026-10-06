@@ -32,12 +32,31 @@ fn two_four_six_line_targets_are_supported() {
 }
 
 #[test]
-fn eight_line_target_is_outside_mvp() {
-    let target = PcTarget::new(8).expect("valid target but outside MVP");
-    let report = validate_pc_target(target);
+fn extended_even_targets_keep_the_full_empty_field_input_contract() {
+    for lines in (8..=24).step_by(2) {
+        let report = validate_pc_target(PcTarget::new(lines).unwrap());
+        assert!(!report.has_errors(), "target {lines}: {report:?}");
+        assert!(report.contains_code(DiagnosticCode::IPcTargetMvpSupported));
+    }
+}
 
-    assert!(report.has_errors());
-    assert!(report.contains_code(DiagnosticCode::EPcTargetUnsupportedMvp));
+#[test]
+fn extended_opening_input_validation_does_not_claim_a_result_product_capability() {
+    for lines in (8..=24).step_by(2) {
+        let query = OpeningPcSearchQuery::new(PcTarget::new(lines).unwrap())
+            .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I;
+                usize::from(lines) * 10 / 4
+            ])))
+            .with_hold_policy(PcHoldPolicy::Disabled)
+            .with_execution_policy(
+                PcExecutionPolicy::default()
+                    .with_requested_backend(RequestedSearchBackend::Cpu)
+                    .with_workers(1),
+            );
+        let report = validate_opening_pc_search_query(&query);
+        assert!(!report.has_errors(), "target {lines}: {report:?}");
+    }
 }
 
 #[test]

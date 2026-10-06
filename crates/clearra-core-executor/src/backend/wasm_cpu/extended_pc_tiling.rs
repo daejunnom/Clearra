@@ -48,7 +48,11 @@ impl ExtendedPcTilingSession {
         external_retained_bytes: u128,
         authority: &WasmCpuTerminalResourceAuthority,
     ) -> Result<Self, WasmExactSearchError> {
-        if problem.preset() != SearchProblemPreset::ScenarioPc
+        if !matches!(
+            problem.preset(),
+            SearchProblemPreset::ScenarioPc | SearchProblemPreset::OpeningPc
+        ) || (problem.preset() == SearchProblemPreset::OpeningPc
+            && problem.initial_board().occupied_words() != [0; 4])
             || problem.output_policy() != SearchOutputPolicy::TilingOnly
             || problem.objective().kind() != ObjectiveKind::Tiling
             || problem.goal().as_str() != "clear-to-empty"
@@ -232,7 +236,7 @@ impl ExtendedPcTilingSession {
         let mut fields = Vec::new();
         let mut set = |key: &str, value: String| fields.push((key.to_owned(), value));
         for (key, value) in [
-            ("problem_preset", "scenario-pc"),
+            ("problem_preset", self.problem.preset().as_str()),
             ("compiled_goal", "clear-to-empty"),
             ("search_output_policy", "tiling-only"),
             ("objective", "tiling"),

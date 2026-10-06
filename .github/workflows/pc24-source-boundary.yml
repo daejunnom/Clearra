@@ -99,6 +99,10 @@ jobs:
       - name: Test fixed-width kick codec without changing its wire semantics
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-pc-graph --lib request::continuation_kick_profile_codec::tests -- --test-threads=1
+      - name: Test bounded full-height Opening labels without enumerating PC solutions
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p clearra-pc-graph --lib partition:: -- --test-threads=1
       - name: Verify the compact six-line and extended twenty-four-line layout boundary without enumeration
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-geometry --lib layout::standard_pc_layout::tests -- --test-threads=1
@@ -108,6 +112,12 @@ jobs:
       - name: Test the real full-height compiler input instead of a Board64 placeholder
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-problem --test extended_pc_execution -- --test-threads=1
+      - name: Verify even empty-origin targets without enabling unconnected result products
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-validation --lib validators::pc_query_validator::tests -- --test-threads=1
+      - name: Verify ordinary PC memory owners without widening Build or typed reducer authority
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-problem --lib ordinary_pc_family_memory_projection_counts_opening_and_scenario_owners -- --test-threads=1
 
   inverse-lock-clear:
     if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006' || github.ref == 'refs/heads/codex/converge-v081-document-frame-20261006' || github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007'

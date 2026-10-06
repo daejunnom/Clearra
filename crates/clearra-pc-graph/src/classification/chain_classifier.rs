@@ -5,6 +5,7 @@ pub enum ChainClass {
     Opening2L,
     Opening4L,
     Opening6L,
+    OpeningExtended { lines: u8 },
     Scenario,
     UnsupportedOpening,
 }
@@ -15,6 +16,7 @@ impl ChainClass {
             Self::Opening2L => "opening-2l",
             Self::Opening4L => "opening-4l",
             Self::Opening6L => "opening-6l",
+            Self::OpeningExtended { .. } => "opening-extended",
             Self::Scenario => "scenario",
             Self::UnsupportedOpening => "unsupported-opening",
         }
@@ -30,6 +32,7 @@ impl ChainClassifier {
             2 => ChainClass::Opening2L,
             4 => ChainClass::Opening4L,
             6 => ChainClass::Opening6L,
+            lines @ 8..=24 => ChainClass::OpeningExtended { lines },
             _ => ChainClass::UnsupportedOpening,
         }
     }
@@ -53,5 +56,11 @@ mod tests {
             "opening-2l"
         );
         assert_eq!(ChainClassifier::scenario().as_str(), "scenario");
+        for lines in (8..=24).step_by(2) {
+            assert_eq!(
+                ChainClassifier::opening(PcTarget::new(lines).unwrap()),
+                ChainClass::OpeningExtended { lines }
+            );
+        }
     }
 }

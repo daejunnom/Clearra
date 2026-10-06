@@ -3,6 +3,29 @@ use clearra_cli::{exit::ExitCode, run_with_args};
 use clearra_core_domain::board::standard_pc_board::Board256Mask;
 
 #[test]
+fn empty_extended_cli_opening_preserves_resource_failure_without_large_enumeration() {
+    for height in [8, 24] {
+        for product in ["pc", "pc tiling"] {
+            let command = format!(
+                "clearra --format json {product} --lines {height} --queue {} --workers 1 --backend cpu --no-hold --max-memory-mib 1",
+                "I".repeat(height * 10 / 4),
+            );
+            let output = run_with_args(command.split_whitespace().map(str::to_owned));
+            assert_eq!(output.exit_code(), ExitCode::InternalError, "{output:?}");
+            let json: serde_json::Value = serde_json::from_str(output.stdout()).unwrap();
+            assert_eq!(json["kind"], "execution-failed");
+            assert_eq!(json["error"]["code"], "E_PRODUCT_EXECUTION_FAILED");
+            assert_eq!(
+                json["resource_report"]["execution_availability"]["reason"],
+                "memory-budget-exceeded"
+            );
+            assert!(json.get("summary").is_none());
+            assert!(json.get("solution_data").is_none());
+        }
+    }
+}
+
+#[test]
 fn extended_tiling_real_cli_keeps_full_height_results() {
     for height in [7_u8, 8, 12, 24] {
         let starts = if height == 7 {

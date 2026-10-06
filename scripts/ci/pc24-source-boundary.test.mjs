@@ -195,3 +195,25 @@ test('ordinary extended PC evaluates the existing BuildUp language and owns a se
   assert.ok(cli.includes('extended_ordinary_pc_real_cli_verifies_buildup_without_truncating_the_field'));
   assert.ok(cli.includes('json["summary"]["buildup_executed"], "true"'));
 });
+
+test('Opening inputs retain the whole target rather than a six-line or twenty-line frame', () => {
+  const preset = read('crates/clearra-problem/src/preset/opening_preset.rs');
+  assert.ok(preset.includes('STANDARD_PC_MAX_LINES'));
+  assert.ok(!preset.includes('matches!(query.target().lines(), 2 | 4 | 6)'));
+  assert.ok(read('crates/clearra-problem/src/search_problem.rs')
+    .includes('.max(scenario.initial_board().visible_height())'));
+  assert.ok(read('crates/clearra-problem/tests/extended_pc_execution.rs')
+    .includes('opening_compiler_preserves_even_targets_and_spawn_height_without_enumeration'));
+  assert.ok(read('crates/clearra-core-executor/tests/extended_pc_family.rs')
+    .includes('empty_extended_opening_reaches_finite_catalog_admission_instead_of_a_false_capability'));
+  for (const path of [
+    'crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_search.rs',
+    'crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_tiling.rs',
+  ]) assert.ok(read(path).includes('SearchProblemPreset::ScenarioPc | SearchProblemPreset::OpeningPc'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-validation --lib validators::pc_query_validator::tests'));
+  assert.ok(workflow.includes('--lib ordinary_pc_family_memory_projection_counts_opening_and_scenario_owners'));
+  assert.ok(read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_search.rs')
+    .includes('.checked_pc_family_pointee_retained_bytes()?'));
+  assert.match(read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs'),
+    /checked_pc_family_problem_nested_retained_bytes\(\s*&self\.problem/u);
+});

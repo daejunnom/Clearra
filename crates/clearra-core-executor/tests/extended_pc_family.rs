@@ -1,15 +1,15 @@
 //! Bounded actual PC completion, not an empty 24L/sixty-piece enumeration.
 use clearra_core_domain::{
     board::standard_pc_board::Board256Mask, execution_cancellation::ExecutionControl,
-    piece::piece_kind::PieceKind, solution::ExtendedTilingSolutionKey,
+    pc::pc_target::PcTarget, piece::piece_kind::PieceKind, solution::ExtendedTilingSolutionKey,
 };
 use clearra_core_executor::backend::{
-    WasmCpuSearchAdvance, WasmCpuSearchBackend, WasmCpuSearchSession,
+    WasmCpuSearchAdvance, WasmCpuSearchBackend, WasmCpuSearchError, WasmCpuSearchSession,
 };
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
-    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
-    RequestedSearchBackend,
+    OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
+    PcScenarioBoard, PcScenarioQuery, PieceWindow, RequestedSearchBackend,
 };
 use clearra_problem::ProblemCompiler;
 use clearra_rules::profile::{
@@ -169,4 +169,33 @@ fn full_height_pc_cancellation_precedes_result_publication() {
     control.cancellation.handle().cancel();
     let error = WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap_err();
     assert_eq!(error.reason(), "wasm_cpu_search_cancelled");
+}
+
+#[test]
+fn empty_extended_opening_reaches_finite_catalog_admission_instead_of_a_false_capability() {
+    for lines in [8, 24] {
+        let query = OpeningPcSearchQuery::new(PcTarget::new(lines).unwrap())
+            .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I;
+                usize::from(lines) * 10 / 4
+            ])))
+            .with_hold_policy(PcHoldPolicy::Disabled)
+            .with_execution_policy(
+                PcExecutionPolicy::default()
+                    .with_requested_backend(RequestedSearchBackend::Cpu)
+                    .with_workers(1)
+                    .with_max_memory_mib(Some(1)),
+            );
+        let problem = ProblemCompiler::compile_opening_pc(&query).unwrap();
+        // Deliberately censor this enormous empty-origin family at a finite
+        // catalog boundary. A resource refusal is NOT a completed PC proof.
+        let error = match WasmCpuSearchSession::new(&problem) {
+            Ok(_) => panic!("a one-MiB empty-origin catalog must not be admitted"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, WasmCpuSearchError::ResourceAdmission { .. }),
+            "target {lines}: {error:?}"
+        );
+    }
 }

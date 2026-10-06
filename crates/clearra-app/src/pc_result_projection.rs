@@ -733,8 +733,8 @@ pub(crate) fn validate_pc_tiling_opening_request_contract(
 ) -> Result<(), &'static str> {
     validate_pc_tiling_origin(origin)?;
     validate_pc_tiling_execution_policy(query.execution_policy())?;
-    if !matches!(query.target().lines(), 2 | 4 | 6) {
-        return Err("pc tiling opening target must be exactly 2, 4, or 6 lines");
+    if !(2..=24).contains(&query.target().lines()) || !query.target().lines().is_multiple_of(2) {
+        return Err("pc tiling opening target must be an even line count in 2..=24");
     }
     if query.verified_kick_profile().is_some() {
         return Err("pc tiling does not accept an imported kick-table profile");

@@ -12,11 +12,9 @@ use clearra_problem::{
 };
 
 use super::{
-    build_probability::{
-        checked_build_probability_problem_nested_retained_bytes, BuildProbabilityAdvance,
-    },
-    extended_build_probability::ExtendedBuildProbabilitySession,
-    ExactSearchAdvance, WasmExactSearchError,
+    build_probability::BuildProbabilityAdvance,
+    extended_build_probability::ExtendedBuildProbabilitySession, ExactSearchAdvance,
+    WasmExactSearchError,
 };
 use crate::{
     resource::{admit_budget_bound_search_execution, ExecutionAdmission},
@@ -31,7 +29,11 @@ pub(crate) struct ExtendedPcSearchSession {
 pub(super) fn validate_pc_family_problem(
     problem: &SearchProblem,
 ) -> Result<(), WasmExactSearchError> {
-    if problem.preset() != SearchProblemPreset::ScenarioPc
+    if !matches!(
+        problem.preset(),
+        SearchProblemPreset::ScenarioPc | SearchProblemPreset::OpeningPc
+    ) || (problem.preset() == SearchProblemPreset::OpeningPc
+        && problem.initial_board().occupied_words() != [0; 4])
         || problem.goal().as_str() != "clear-to-empty"
         || problem.initial_board().width() != 10
         || !(7..=24).contains(&problem.visible_height())
@@ -62,6 +64,16 @@ pub(super) fn validate_pc_family_problem(
         ));
     }
     super::ensure_connected_kick_profile(problem)
+}
+
+pub(super) fn checked_pc_family_problem_nested_retained_bytes(
+    problem: &SearchProblem,
+) -> Option<u128> {
+    // Constructor validation owns execution compatibility. This projection
+    // only counts owners and does not revalidate kicks in the solver loop.
+    problem
+        .checked_pc_family_pointee_retained_bytes()?
+        .checked_sub(core::mem::size_of::<SearchProblem>() as u128)
 }
 
 impl ExtendedPcSearchSession {
@@ -96,7 +108,7 @@ impl ExtendedPcSearchSession {
             .map_err(WasmExactSearchError::resource_admission)?;
         // The legacy ordinary execution API borrows a caller-owned problem;
         // both that input and the engine's owned snapshot coexist.
-        let external = checked_build_probability_problem_nested_retained_bytes(problem)
+        let external = checked_pc_family_problem_nested_retained_bytes(problem)
             .and_then(|bytes| {
                 bytes.checked_add(
                     core::mem::size_of::<Self>() as u128

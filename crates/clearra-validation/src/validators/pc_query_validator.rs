@@ -66,11 +66,14 @@ impl PcQueryValidator {
 impl PcQueryValidator {
     pub fn validate_target(target: PcTarget) -> DiagnosticReport {
         let mut report = DiagnosticReport::new();
-        if matches!(target.lines(), 2 | 4 | 6) {
+        if (2..=clearra_core_domain::board::standard_pc_board::STANDARD_PC_MAX_LINES)
+            .contains(&target.lines())
+            && target.lines().is_multiple_of(2)
+        {
             report.push(
                 Diagnostic::new(
                     DiagnosticCode::IPcTargetMvpSupported,
-                    "PC target is supported by the MVP1 checkpoint DAG",
+                    "PC target satisfies the empty-field line and area contract",
                 )
                 .with_location(EvidenceLocation::new("pc.target"))
                 .with_evidence(ValidationEvidence::new("lines", target.lines().to_string())),
@@ -79,12 +82,12 @@ impl PcQueryValidator {
             report.push(
                 Diagnostic::new(
                     DiagnosticCode::EPcTargetUnsupportedMvp,
-                    "only 2L, 4L, and 6L PC targets are supported in MVP1",
+                    "empty-field PC targets must have an even line count in 2..=24",
                 )
                 .with_location(EvidenceLocation::new("pc.target"))
                 .with_evidence(ValidationEvidence::new("lines", target.lines().to_string()))
                 .with_suggested_next_step(SuggestedNextStep::new(
-                    "Use a 2-line, 4-line, or 6-line PC target.",
+                    "Use an even target in 2..=24; initial-field scenarios may also use odd targets.",
                 )),
             );
         }

@@ -121,9 +121,8 @@ impl PcQuery {
 }
 impl PcQuery {
     pub fn opening_labels(&self) -> Vec<String> {
-        [2_u8, 4, 6]
-            .into_iter()
-            .filter(|lines| *lines <= self.target.lines())
+        (2..=self.target.lines())
+            .step_by(2)
             .map(|lines| format!("{lines}L"))
             .collect()
     }

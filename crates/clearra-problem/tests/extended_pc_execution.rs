@@ -1,11 +1,13 @@
-use clearra_core_domain::{board::standard_pc_board::Board256Mask, piece::piece_kind::PieceKind};
+use clearra_core_domain::{
+    board::standard_pc_board::Board256Mask, pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
+};
 use clearra_pc_graph::request::{
-    ExtendedPcScenarioBoard, PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
-    PcScenarioQuery, PieceWindow, WorkerPolicy,
+    ExtendedPcScenarioBoard, OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy,
+    PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow, WorkerPolicy,
 };
 use clearra_problem::{
     ExtendedPcSearchContract, ExtendedPcSearchContractError, FiniteScenarioPcCompileBudget,
-    ProblemCompiler,
+    ProblemCompiler, SearchOutputPolicy, SearchProblemPreset,
 };
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
@@ -18,6 +20,44 @@ fn words_with_two_open_columns(height: u8) -> [u64; 4] {
         }
     }
     words
+}
+
+#[test]
+fn opening_compiler_preserves_even_targets_and_spawn_height_without_enumeration() {
+    for lines in (2..=24).step_by(2) {
+        let pieces = usize::from(lines) * 10 / 4;
+        let query = OpeningPcSearchQuery::new(PcTarget::new(lines).unwrap())
+            .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I;
+                pieces
+            ])))
+            .with_hold_policy(PcHoldPolicy::Disabled);
+        for problem in [
+            ProblemCompiler::compile_opening_pc(&query).unwrap(),
+            ProblemCompiler::compile_opening_pc_tiling(&query).unwrap(),
+        ] {
+            assert_eq!(problem.preset(), SearchProblemPreset::OpeningPc);
+            assert_eq!(problem.initial_board().occupied_words(), [0; 4]);
+            assert_eq!(problem.visible_height(), u16::from(lines));
+            assert_eq!(problem.search_height(), u16::from(lines).max(20));
+            assert_eq!(problem.exact_pieces(), Some(pieces));
+            assert_eq!(problem.piece_window().max_pieces(), pieces);
+            assert_eq!(problem.labels().last().unwrap(), &format!("{lines}L"));
+            assert_eq!(problem.labels().len(), usize::from(lines / 2));
+            let schedule = problem
+                .checkpoint_schedule()
+                .expect("Opening metadata is never silently dropped");
+            assert_eq!(schedule.target().lines(), lines);
+            assert_eq!(schedule.partitions().len(), 1 << (lines / 2 - 1));
+            if lines > 6 {
+                assert!(problem.initial_occupancy().is_none());
+            } else {
+                assert_eq!(problem.initial_occupancy().unwrap().height, lines);
+            }
+        }
+        let tiling = ProblemCompiler::compile_opening_pc_tiling(&query).unwrap();
+        assert_eq!(tiling.output_policy(), SearchOutputPolicy::TilingOnly);
+    }
 }
 
 #[test]

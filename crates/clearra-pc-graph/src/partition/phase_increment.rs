@@ -5,10 +5,10 @@ pub struct PhaseIncrement {
 
 impl PhaseIncrement {
     pub fn new(lines: u8) -> Result<Self, PhaseIncrementError> {
-        match lines {
-            2 | 4 | 6 => Ok(Self { lines }),
-            _ => Err(PhaseIncrementError::UnsupportedLineCount { lines }),
-        }
+        // Empty-to-empty phases have the same area invariant as a PcTarget.
+        clearra_core_domain::pc::pc_target::PcTarget::new(lines)
+            .map(|_| Self { lines })
+            .map_err(|_| PhaseIncrementError::UnsupportedLineCount { lines })
     }
 }
 impl PhaseIncrement {

@@ -7,6 +7,33 @@ use clearra_core_domain::{
 };
 
 #[test]
+fn extended_empty_opening_cli_keeps_its_target_and_typed_ingress_without_search() {
+    for lines in (8..=24).step_by(2) {
+        for product in ["pc", "pc tiling"] {
+            let request = CliCommandParser::parse(&format!(
+                "clearra {product} --lines {lines} --queue {} --workers 1 --backend cpu --no-hold",
+                "I".repeat(lines * 10 / 4),
+            ))
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+            let AppCommand::Pc(command) = request.command() else {
+                panic!("empty opening must retain its own query authority");
+            };
+            assert_eq!(usize::from(command.query().target().lines()), lines);
+            assert_eq!(command.query().execution_policy().workers(), 1);
+            if product == "pc tiling" {
+                assert_eq!(
+                    command.result_projection(),
+                    PcResultProjection::TilingFamilyV1(PcTilingIngressOrigin::CanonicalPcTiling)
+                );
+            }
+            command.validate_result_projection().unwrap();
+        }
+    }
+}
+
+#[test]
 fn extended_tiling_cli_keeps_the_actual_target_board_and_explicit_worker_policy() {
     for height in [7_u8, 8, 12, 24] {
         let starts = if height == 7 {

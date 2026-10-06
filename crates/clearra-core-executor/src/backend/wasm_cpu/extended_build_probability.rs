@@ -289,10 +289,20 @@ impl ExtendedBuildProbabilitySession {
             // it after an unbounded compile. This is the same conservative
             // realization credit used by the full-height Tiling producer.
             let fixed = coexisting_retained_bytes
-                .checked_add(super::build_probability::checked_build_probability_problem_nested_retained_bytes(problem)
-                    .ok_or(WasmExactSearchError::InvalidProblem("extended_pc_memory_projection_unavailable"))?)
-                .and_then(|bytes| bytes.checked_add(core::mem::size_of::<Self>() as u128 + 32 * 1024))
-                .ok_or(WasmExactSearchError::InvalidProblem("extended_pc_memory_projection_unavailable"))?;
+                .checked_add(
+                    super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                        problem,
+                    )
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_pc_memory_projection_unavailable",
+                    ))?,
+                )
+                .and_then(|bytes| {
+                    bytes.checked_add(core::mem::size_of::<Self>() as u128 + 32 * 1024)
+                })
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "extended_pc_memory_projection_unavailable",
+                ))?;
             memory_bound
                 .ensure(fixed, 0)
                 .map_err(WasmExactSearchError::resource_admission)?;
@@ -2277,7 +2287,7 @@ impl ExtendedBuildProbabilitySession {
                 WasmExactSearchError::InvalidProblem("extended_pc_coverage_universe_mismatch")
             })?;
         let fields = vec![
-            field("problem_preset", "scenario-pc"),
+            field("problem_preset", self.problem.preset().as_str()),
             field("compiled_goal", "clear-to-empty"),
             field("search_kind", "pc"),
             field(
@@ -2516,10 +2526,19 @@ impl ExtendedBuildProbabilitySession {
     }
 
     pub(super) fn checked_retained_bytes(&self) -> Option<u128> {
-        super::build_probability::checked_build_probability_problem_nested_retained_bytes(
-            &self.problem,
-        )?
-        .checked_add(self.checked_non_problem_retained_bytes()?)
+        let problem_bytes = match self.purpose {
+            ExtendedFamilyPurpose::Build => {
+                super::build_probability::checked_build_probability_problem_nested_retained_bytes(
+                    &self.problem,
+                )
+            }
+            ExtendedFamilyPurpose::Pc => {
+                super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                    &self.problem,
+                )
+            }
+        }?;
+        problem_bytes.checked_add(self.checked_non_problem_retained_bytes()?)
     }
 
     fn checked_non_problem_retained_bytes(&self) -> Option<u128> {

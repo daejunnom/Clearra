@@ -14,7 +14,14 @@ pub struct OpeningPreset {
 
 impl OpeningPreset {
     pub fn try_from_pc_query(query: PcQuery) -> Result<Self, OpeningPresetError> {
-        if matches!(query.target().lines(), 2 | 4 | 6) {
+        // PcTarget already enforces the empty-origin area invariant: ten
+        // columns can be filled by tetrominoes only for an even line count.
+        // Runtime product capabilities are checked separately; this input
+        // compiler must not replace a full-height target with a six-line one.
+        if (2..=clearra_core_domain::board::standard_pc_board::STANDARD_PC_MAX_LINES)
+            .contains(&query.target().lines())
+            && query.target().lines().is_multiple_of(2)
+        {
             Ok(Self { query })
         } else {
             Err(OpeningPresetError::UnsupportedTarget {

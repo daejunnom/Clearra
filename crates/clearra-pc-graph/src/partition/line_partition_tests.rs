@@ -27,11 +27,20 @@ fn creates_expected_six_line_partitions() {
 }
 
 #[test]
-fn rejects_non_mvp_target() {
-    let target = PcTarget::new(8).expect("core-domain allows even positive target");
-
-    assert_eq!(
-        partitions_for_target(target),
-        Err(LinePartitionError::UnsupportedTarget { lines: 8 })
-    );
+fn full_height_opening_partitions_are_complete_bounded_and_canonical_metadata() {
+    for lines in (2..=24).step_by(2) {
+        let partitions = partitions_for_target(PcTarget::new(lines).unwrap()).unwrap();
+        assert_eq!(partitions.len(), 1 << (lines / 2 - 1));
+        assert_eq!(partitions[0].label(), lines.to_string());
+        assert!(partitions
+            .iter()
+            .all(|partition| partition.total_lines() == lines));
+        assert!(partitions.windows(2).all(|pair| {
+            (pair[0].increments.len(), &pair[0].increments)
+                < (pair[1].increments.len(), &pair[1].increments)
+        }));
+    }
+    for invalid in [0, 1, 3, 7, 23, 25, 26] {
+        assert!(PhaseIncrement::new(invalid).is_err());
+    }
 }
