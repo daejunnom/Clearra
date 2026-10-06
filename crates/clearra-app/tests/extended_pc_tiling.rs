@@ -152,30 +152,73 @@ fn extended_direct_tiling_never_reduces_an_explicit_multiworker_request() {
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     );
     for workers in [2, 11] {
-        let (request, _, _) = forced_request(24, srs_plus());
-        let AppCommand::Scenario(command) = request.command() else {
-            unreachable!()
-        };
-        let query = command.query().clone().with_execution_policy(
-            command
-                .query()
-                .execution_policy()
-                .clone()
-                .with_workers(workers),
-        );
-        let request = AppRequest::new(AppCommand::Scenario(
-            ScenarioAppCommand::new(query).with_result_projection(command.result_projection()),
-        ))
-        .with_product_capability_contract(ProductCapabilityContract::PcTiling)
-        .unwrap();
+        // The hosted runner may expose only two logical processors. Inject a
+        // sufficient declared limit to reach the terminal's fixed-worker
+        // guard, not the independent request-admission hardware guard. This
+        // request is rejected before any worker is started.
+        let request = forced_worker_request(workers, workers + 1, false);
         let response = context.run(request);
-        assert_ne!(response.status(), AppStatus::Success);
+        assert_eq!(response.status(), AppStatus::Unsupported, "{response:?}");
         assert!(response
             .error()
-            .unwrap()
+            .expect("the terminal guard must return a typed runtime error")
             .message()
             .contains("shared_terminal_memory_authority_requires_single_worker"));
         assert!(response.product_capability_result().is_none());
+        assert!(response.render_model().is_none());
+        assert!(!response.resource_report().solver_executed());
+    }
+}
+
+fn forced_worker_request(workers: usize, hardware_limit: usize, all_cpu: bool) -> AppRequest {
+    let (request, _, _) = forced_request(24, srs_plus());
+    let AppCommand::Scenario(command) = request.command() else {
+        unreachable!()
+    };
+    let query = command.query().clone().with_execution_policy(
+        command
+            .query()
+            .execution_policy()
+            .clone()
+            .with_workers(workers)
+            .with_worker_hardware_limit(hardware_limit)
+            .with_use_all_logical_processors(all_cpu),
+    );
+    AppRequest::new(AppCommand::Scenario(
+        ScenarioAppCommand::new(query).with_result_projection(command.result_projection()),
+    ))
+    .with_product_capability_contract(ProductCapabilityContract::PcTiling)
+    .unwrap()
+}
+
+#[test]
+fn extended_tiling_hardware_admission_is_distinct_from_terminal_admission() {
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for (workers, all_cpu, reason) in [
+        (2, false, "execution_workers_require_all_cpu_opt_in"),
+        (11, true, "execution_workers_exceed_hardware"),
+    ] {
+        let response = context.run(forced_worker_request(workers, 2, all_cpu));
+        assert_eq!(
+            response.status(),
+            AppStatus::ValidationFailed,
+            "{response:?}"
+        );
+        assert!(response
+            .diagnostics()
+            .validation()
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic
+                .evidence()
+                .iter()
+                .any(|evidence| evidence.key() == "reason" && evidence.value() == reason)));
+        assert!(response.error().is_none());
+        assert!(response.product_capability_result().is_none());
+        assert!(response.render_model().is_none());
+        assert!(!response.resource_report().solver_executed());
     }
 }
 
