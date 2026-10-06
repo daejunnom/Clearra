@@ -2,7 +2,7 @@ name: PC 24L Source Boundary (Non-publishing)
 
 on:
   push:
-    branches: ["codex/converge-pc24-integration-20261005", "codex/converge-main-product-fixes-20261005", "codex/pc24-target-boundary-20261006", "codex/converge-pc24-family-20261006"]
+    branches: ["codex/converge-pc24-integration-20261005", "codex/converge-main-product-fixes-20261005", "codex/pc24-target-boundary-20261006", "codex/converge-pc24-family-20261006", "codex/converge-v081-document-frame-20261006"]
     paths:
       - ".github/workflows/pc24-source-boundary.yml"
       - "crates/clearra-pc-graph/**"
@@ -10,10 +10,17 @@ on:
       - "crates/clearra-core-executor/**"
       - "crates/clearra-core-domain/**"
       - "crates/clearra-output/**"
+      - "crates/clearra-fumen/**"
+      - "crates/clearra-host-contract/src/solution_set_artifact_payload.rs"
+      - "crates/clearra-cli/src/output/solution_artifact_output.rs"
+      - "crates/clearra-app/src/app_response/solution_set_artifact.rs"
       - "crates/clearra-app/src/pc_minimum_cover_result.rs"
       - "crates/clearra-cli-command/src/web_command_request.rs"
       - "crates/clearra-cli-command/tests/pinned_pc.rs"
       - "packages/clearra-ui/src/lib/workspace/solutionExport.ts"
+      - "packages/clearra-ui/src/lib/workspace/productResultPager.ts"
+      - "packages/clearra-ui/src/lib/wasm/wasmCommandClient.ts"
+      - "packages/clearra-ui/test/productResultPager.contract.ts"
       - "packages/clearra-ui/test/extendedSolutionKey.contract.ts"
       - "apps/clearra-discord-bot/src/clearra/ctk3-result.mjs"
       - "apps/clearra-discord-bot/test/extended-solution-key.test.mjs"
@@ -40,9 +47,9 @@ env:
 
 jobs:
   input-contract:
-    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006'
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006' || github.ref == 'refs/heads/codex/converge-v081-document-frame-20261006'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,7 +62,7 @@ jobs:
       - name: Verify the bounded non-publishing feedback contract
         run: node --test scripts/ci/pc24-source-boundary.test.mjs
       - name: Check target-frame and compiler source format
-        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-output -p clearra-cli-command -p clearra-app --check
+        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-output -p clearra-fumen -p clearra-host-contract -p clearra-cli -p clearra-cli-command -p clearra-app --check
       - name: Test allocation-free CTK2 identities and unchanged compact identities
         if: ${{ !cancelled() }}
         run: |
@@ -63,6 +70,19 @@ jobs:
       - name: Test native CTK3 publication from the same four-word identities
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-output --no-default-features --lib artifact::solution_document::tests -- --test-threads=1
+      - name: Test four-word Fumen fields without changing compact search identities
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p clearra-fumen --lib adapter:: -- --test-threads=1
+      - name: Test typed twenty-four-line export refusal without truncating CTK3
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-output --no-default-features --lib full_height_document_keeps_ctk3_and_reports_fumens_real_limit -- --test-threads=1
+      - name: Test the public App and CLI height-limit reasons
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p clearra-host-contract --lib solution_set_artifact_payload -- --test-threads=1
+          cargo test --locked -p clearra-app --lib extended_document_error_tests -- --test-threads=1
+          cargo test --locked -p clearra-cli --lib unsupported_fumen_height_preserves_its_explicit_cli_error -- --test-threads=1
       - name: Test compact minimum ingress does not acquire unsupported extended authority
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli-command --test pinned_pc -- --test-threads=1
@@ -80,7 +100,7 @@ jobs:
         run: cargo test --locked -p clearra-problem --test extended_pc_execution -- --test-threads=1
 
   inverse-lock-clear:
-    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006'
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006' || github.ref == 'refs/heads/codex/converge-v081-document-frame-20261006'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -90,7 +110,9 @@ jobs:
       - name: Install pinned native and WASM Rust targets
         run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
       - name: Compile the same four-word execution bridge for WASM
-        run: cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown
+        run: |
+          cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown
+          cargo check --locked -p clearra-output --no-default-features --target wasm32-unknown-unknown
       - name: Verify one-placement Build and forced extended PC completion without large enumeration
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-core-executor --test extended_pc_ilc -- --test-threads=1
@@ -99,7 +121,7 @@ jobs:
         run: cargo test --locked -p clearra-core-executor --lib shared_extended_identity_resolves_only_matching_full_height_catalog_rows -- --test-threads=1
 
   document-wire:
-    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006'
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006' || github.ref == 'refs/heads/codex/converge-v081-document-frame-20261006'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -121,7 +143,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json
-          node scripts/tools/run-typescript-contracts.mjs packages/clearra-ui/test/extendedSolutionKey.contract.ts packages/clearra-ui/test/solutionExport.contract.ts
+          node scripts/tools/run-typescript-contracts.mjs packages/clearra-ui/test/extendedSolutionKey.contract.ts packages/clearra-ui/test/solutionExport.contract.ts packages/clearra-ui/test/productResultPager.contract.ts
       - name: Check Discord CTK3 projection against the same wire cases
         if: ${{ !cancelled() }}
         run: node --test apps/clearra-discord-bot/test/extended-solution-key.test.mjs apps/clearra-discord-bot/test/ctk3-result.test.mjs

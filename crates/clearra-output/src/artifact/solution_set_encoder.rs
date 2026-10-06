@@ -573,6 +573,9 @@ fn map_document_stream_error(
             SolutionDocumentError::FumenEncodingFailed => {
                 SolutionArtifactEncodingError::FumenEncodingFailed
             }
+            SolutionDocumentError::FumenHeightUnsupported { height } => {
+                SolutionArtifactEncodingError::FumenHeightUnsupported { height }
+            }
             SolutionDocumentError::FumenPageLimitExceeded => {
                 SolutionArtifactEncodingError::FumenPageLimitExceeded
             }
@@ -1123,6 +1126,7 @@ pub enum SolutionArtifactEncodingError {
     Ctk3EncodingFailed,
     Ctk3PageLimitExceeded,
     FumenEncodingFailed,
+    FumenHeightUnsupported { height: u8 },
     FumenPageLimitExceeded,
 }
 
@@ -1149,6 +1153,7 @@ impl SolutionArtifactEncodingError {
             Self::Ctk3EncodingFailed => "artifact-ctk3-encoding-failed",
             Self::Ctk3PageLimitExceeded => "artifact-ctk3-page-limit-exceeded",
             Self::FumenEncodingFailed => "artifact-fumen-encoding-failed",
+            Self::FumenHeightUnsupported { .. } => "artifact-fumen-height-unsupported",
             Self::FumenPageLimitExceeded => "artifact-fumen-page-limit-exceeded",
         }
     }
@@ -1181,6 +1186,9 @@ impl fmt::Display for SolutionArtifactEncodingError {
             Self::Ctk3EncodingFailed => "native CTK3 solution document encoding failed",
             Self::Ctk3PageLimitExceeded => "native CTK3 logical page limit exceeded",
             Self::FumenEncodingFailed => "native Fumen solution document encoding failed",
+            Self::FumenHeightUnsupported { .. } => {
+                "Fumen supports at most 23 rows; use CTK3 to preserve the full field"
+            }
             Self::FumenPageLimitExceeded => "native Fumen page limit exceeded",
         })
     }
@@ -1440,6 +1448,32 @@ mod tests {
             entries,
         )
         .expect("native document artifact")
+    }
+
+    #[test]
+    fn full_height_document_keeps_ctk3_and_reports_fumens_real_limit() {
+        let key = "ctk2|height=24|initial=0000800000000000000000000000000000000000000000000000000000000000|placements=";
+        let artifact = SolutionSetArtifact::try_new(
+            "test-native-document-set",
+            "test-native-key-v1",
+            "test-native-hash-v1",
+            "height-24",
+            1,
+            vec![SolutionArtifactEntry::try_new(key, SolutionArtifactAnnotation::new()).unwrap()],
+        )
+        .unwrap();
+        let error = FumenSolutionSetEncoder.encode(&artifact).unwrap_err();
+        assert_eq!(
+            error,
+            SolutionArtifactEncodingError::FumenHeightUnsupported { height: 24 }
+        );
+        assert_eq!(error.as_str(), "artifact-fumen-height-unsupported");
+        assert!(error.to_string().contains("CTK3"));
+        let ctk3 = Ctk3SolutionSetEncoder.encode(&artifact).unwrap();
+        let decoded =
+            clearra_ctk3::decode_ctk3_exact(std::str::from_utf8(ctk3.bytes()).unwrap()).unwrap();
+        assert_eq!(decoded.pages[0].height, 24);
+        assert_eq!(decoded.pages[0].cells[239], clearra_ctk3::Ctk3Color::Gray);
     }
 
     #[test]

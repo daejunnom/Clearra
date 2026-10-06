@@ -488,10 +488,76 @@ fn format_unavailable_reason(error: SolutionArtifactEncodingError) -> &'static s
     match error {
         SolutionArtifactEncodingError::EmptyDocument => "empty-solution-set",
         SolutionArtifactEncodingError::InvalidDocumentSolutionKey => "unsupported-solution-key",
+        SolutionArtifactEncodingError::FumenHeightUnsupported { .. } => "fumen-height-unsupported",
         SolutionArtifactEncodingError::Ctk3PageLimitExceeded
         | SolutionArtifactEncodingError::FumenPageLimitExceeded => "page-limit-exceeded",
         SolutionArtifactEncodingError::CapacityExceeded => "transport-byte-limit-exceeded",
         _ => "encoding-failed",
+    }
+}
+
+#[cfg(test)]
+mod extended_document_error_tests {
+    use clearra_core_domain::solution::{
+        NormalizedTilingSolutionKey, NormalizedTilingSolutionSetHasher,
+    };
+
+    use super::*;
+
+    #[test]
+    fn full_height_native_payload_preserves_ctk3_when_fumen_is_unavailable() {
+        // This exercises document publication only, not public extended PC
+        // reducers or the reachability of an arbitrary CTK2 key.
+        let key = NormalizedTilingSolutionKey::parse_canonical(
+            "ctk2|height=24|initial=0000800000000000000000000000000000000000000000000000000000000000|placements=",
+        )
+        .unwrap();
+        let mut hasher = NormalizedTilingSolutionSetHasher::default();
+        hasher.update_canonical_key(&key);
+        let artifact = SolutionSetArtifact::try_new(
+            NORMALIZED_TILING_SOURCE_CONTRACT,
+            NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
+            NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
+            hasher.finish(),
+            1,
+            vec![
+                SolutionArtifactEntry::try_new(key.as_str(), SolutionArtifactAnnotation::new())
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let source = BoundSolutionSetArtifact {
+            artifact,
+            source_result_kind: "build-path-family.v1".to_owned(),
+            selection_kind: "solution-family",
+            selection_id: "height-24".to_owned(),
+            page_source_identity_sha256: None,
+        };
+        let payload = encode_bound_payload(source, HOST_SOLUTION_SET_ARTIFACT_MAX_BYTES).unwrap();
+        let ctk3 = &payload.formats()[0];
+        assert!(ctk3.available());
+        let decoded = clearra_output::decode_ctk3_exact(ctk3.document().unwrap()).unwrap();
+        assert_eq!(decoded.pages[0].height, 24);
+        assert_eq!(decoded.pages[0].cells[239], clearra_output::Ctk3Color::Gray);
+        let fumen = &payload.formats()[1];
+        assert!(!fumen.available());
+        assert_eq!(fumen.unavailable_reason(), Some("fumen-height-unsupported"));
+        assert_eq!(fumen.document(), None);
+        assert_eq!(fumen.byte_length(), None);
+    }
+
+    #[test]
+    fn native_fumen_height_limit_has_the_same_explicit_surface_reason_as_web() {
+        assert_eq!(
+            format_unavailable_reason(SolutionArtifactEncodingError::FumenHeightUnsupported {
+                height: 24,
+            }),
+            "fumen-height-unsupported",
+        );
+        assert_eq!(
+            format_unavailable_reason(SolutionArtifactEncodingError::InvalidDocumentSolutionKey),
+            "unsupported-solution-key",
+        );
     }
 }
 

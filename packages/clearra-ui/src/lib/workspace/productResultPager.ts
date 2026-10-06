@@ -894,13 +894,16 @@ function validSolutionSetArtifactFormat(
   if (format.state === 'unavailable') {
     return (
       format.unavailable_reason !== null &&
-      [
-        'empty-solution-set',
-        'unsupported-solution-key',
-        'page-limit-exceeded',
-        'encoding-failed',
-        'transport-byte-limit-exceeded'
-      ].includes(format.unavailable_reason) &&
+      (
+        [
+          'empty-solution-set',
+          'unsupported-solution-key',
+          'page-limit-exceeded',
+          'encoding-failed',
+          'transport-byte-limit-exceeded'
+        ].includes(format.unavailable_reason) ||
+        (format.format === 'fumen' && format.unavailable_reason === 'fumen-height-unsupported')
+      ) &&
       format.media_type === null &&
       format.filename === null &&
       format.byte_length === null &&

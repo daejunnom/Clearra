@@ -7,7 +7,7 @@ pub mod transform;
 
 pub use adapter::{
     ColoredSolutionFumenError, ColoredSolutionFumenExporter, ColoredSolutionPage,
-    ColoredSolutionPlacement,
+    ColoredSolutionPlacement, ExtendedColoredSolutionPage, ExtendedColoredSolutionPlacement,
 };
 pub use codec::{
     ActualFumenPageParityObservation, ActualFumenParityDocument, ActualFumenParityDocumentError,

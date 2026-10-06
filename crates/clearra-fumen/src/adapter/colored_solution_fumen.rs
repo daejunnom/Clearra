@@ -1,8 +1,9 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use fumen::{CellColor, Fumen, Page};
 
-const FUMEN_WIDTH: u8 = 10;
-const FUMEN_HEIGHT: u8 = 23;
+pub(super) const FUMEN_WIDTH: u8 = 10;
+pub(super) const FUMEN_HEIGHT: u8 = 23;
+pub(super) type ColoredFumenField = [[CellColor; FUMEN_WIDTH as usize]; FUMEN_HEIGHT as usize];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ColoredSolutionPlacement {
@@ -77,37 +78,45 @@ pub struct ColoredSolutionFumenExporter;
 
 impl ColoredSolutionFumenExporter {
     pub fn encode(pages: &[ColoredSolutionPage]) -> Result<String, ColoredSolutionFumenError> {
-        if pages.is_empty() {
-            return Err(ColoredSolutionFumenError::EmptyDocument);
-        }
-
-        let expected_fields = pages
-            .iter()
-            .map(page_field)
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut document = Fumen::default();
-        for (source, field) in pages.iter().zip(expected_fields.iter().copied()) {
-            document.pages.push(Page {
-                field,
-                comment: source.comment.clone(),
-                ..Page::default()
-            });
-        }
-
-        let encoded = document.encode();
-        let decoded = Fumen::decode(&encoded)
-            .map_err(|_| ColoredSolutionFumenError::RoundTripDecodeFailed)?;
-        if decoded.pages.len() != expected_fields.len()
-            || decoded
-                .pages
+        encode_field_pages(
+            pages
                 .iter()
-                .zip(expected_fields)
-                .any(|(page, expected)| page.field != expected)
-        {
-            return Err(ColoredSolutionFumenError::RoundTripFieldMismatch);
-        }
-        Ok(encoded)
+                .map(|page| Ok((page_field(page)?, page.comment.as_deref()))),
+        )
     }
+}
+
+/// Shared document publication only. The compact and four-word page types
+/// retain independent validation and never acquire one another's identity or
+/// search authority. The encoded source is checked before it leaves this crate.
+pub(super) fn encode_field_pages<'a>(
+    pages: impl Iterator<Item = Result<(ColoredFumenField, Option<&'a str>), ColoredSolutionFumenError>>,
+) -> Result<String, ColoredSolutionFumenError> {
+    let mut document = Fumen::default();
+    for source in pages {
+        let (field, comment) = source?;
+        document.pages.push(Page {
+            field,
+            comment: comment.map(str::to_owned),
+            ..Page::default()
+        });
+    }
+    if document.pages.is_empty() {
+        return Err(ColoredSolutionFumenError::EmptyDocument);
+    }
+    let encoded = document.encode();
+    let decoded =
+        Fumen::decode(&encoded).map_err(|_| ColoredSolutionFumenError::RoundTripDecodeFailed)?;
+    if decoded.pages.len() != document.pages.len()
+        || decoded
+            .pages
+            .iter()
+            .zip(&document.pages)
+            .any(|(page, expected)| page.field != expected.field)
+    {
+        return Err(ColoredSolutionFumenError::RoundTripFieldMismatch);
+    }
+    Ok(encoded)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,7 +214,7 @@ fn paint_mask(
     }
 }
 
-const fn piece_color(piece: PieceKind) -> CellColor {
+pub(super) const fn piece_color(piece: PieceKind) -> CellColor {
     match piece {
         PieceKind::I => CellColor::I,
         PieceKind::O => CellColor::O,

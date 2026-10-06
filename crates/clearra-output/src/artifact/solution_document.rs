@@ -15,7 +15,8 @@ use clearra_ctk3::{
     CTK3_MAX_BUNDLE_PAGES, CTK3_MAX_SEGMENT_PAGES, CTK3_PREFIX,
 };
 use clearra_fumen::{
-    ColoredSolutionFumenExporter, ColoredSolutionPage, ColoredSolutionPlacement, FUMEN_MAX_PAGES,
+    ColoredSolutionFumenError, ColoredSolutionFumenExporter, ExtendedColoredSolutionPage,
+    ExtendedColoredSolutionPlacement, FUMEN_MAX_PAGES,
 };
 
 use super::{
@@ -131,7 +132,7 @@ pub(super) fn encode_fumen_solution_set_checked<E>(
         checkpoint(index).map_err(SolutionDocumentStreamError::Sink)?;
         pages.push(fumen_page(entry)?);
     }
-    let document = ColoredSolutionFumenExporter::encode(&pages)
+    let document = ColoredSolutionFumenExporter::encode_extended(&pages)
         .map_err(|_| SolutionDocumentError::FumenEncodingFailed)?;
     checkpoint(artifact.entries().len()).map_err(SolutionDocumentStreamError::Sink)?;
     Ok(document)
@@ -177,7 +178,30 @@ fn ctk3_page(entry: &SolutionArtifactEntry) -> Result<Ctk3Page, SolutionDocument
     Ok(page)
 }
 
-fn fumen_page(entry: &SolutionArtifactEntry) -> Result<ColoredSolutionPage, SolutionDocumentError> {
+fn fumen_page(
+    entry: &SolutionArtifactEntry,
+) -> Result<ExtendedColoredSolutionPage, SolutionDocumentError> {
+    if entry.key().starts_with("ctk2|") {
+        let identity = ExtendedTilingSolutionKey::parse_canonical(entry.key())
+            .map_err(|_| SolutionDocumentError::InvalidCanonicalKey)?;
+        let placements = identity
+            .placements()
+            .map(|placement| {
+                ExtendedColoredSolutionPlacement::new(placement.piece(), placement.cells())
+            })
+            .collect();
+        let mut page = ExtendedColoredSolutionPage::new(
+            STANDARD_WIDTH as u8,
+            identity.height(),
+            identity.initial_board(),
+            placements,
+        )
+        .map_err(fumen_page_error)?;
+        if let Some(comment) = SolutionCommentLayout::render(entry.annotation()) {
+            page = page.with_comment(comment);
+        }
+        return Ok(page);
+    }
     let identity = canonical_colored_identity(entry)?;
     let piece_masks = identity.piece_masks();
     let height = semantic_height(identity.initial_board_mask(), &piece_masks).max(1);
@@ -186,19 +210,33 @@ fn fumen_page(entry: &SolutionArtifactEntry) -> Result<ColoredSolutionPage, Solu
         .copied()
         .zip(piece_masks)
         .filter(|(_, cells_mask)| *cells_mask != 0)
-        .map(|(piece, cells_mask)| ColoredSolutionPlacement::new(piece, cells_mask))
+        .map(|(piece, cells_mask)| {
+            ExtendedColoredSolutionPlacement::new(
+                piece,
+                Board256Mask::from_words([cells_mask, 0, 0, 0]),
+            )
+        })
         .collect();
-    let mut page = ColoredSolutionPage::new(
+    let mut page = ExtendedColoredSolutionPage::new(
         STANDARD_WIDTH as u8,
         height as u8,
-        identity.initial_board_mask(),
+        Board256Mask::from_words([identity.initial_board_mask(), 0, 0, 0]),
         placements,
     )
-    .map_err(|_| SolutionDocumentError::FumenEncodingFailed)?;
+    .map_err(fumen_page_error)?;
     if let Some(comment) = SolutionCommentLayout::render(entry.annotation()) {
         page = page.with_comment(comment);
     }
     Ok(page)
+}
+
+fn fumen_page_error(error: ColoredSolutionFumenError) -> SolutionDocumentError {
+    match error {
+        ColoredSolutionFumenError::UnsupportedHeight { height } => {
+            SolutionDocumentError::FumenHeightUnsupported { height }
+        }
+        _ => SolutionDocumentError::FumenEncodingFailed,
+    }
 }
 
 fn canonical_colored_identity(
@@ -327,6 +365,7 @@ pub(super) enum SolutionDocumentError {
     Ctk3EncodingFailed,
     Ctk3PageLimitExceeded,
     FumenEncodingFailed,
+    FumenHeightUnsupported { height: u8 },
     FumenPageLimitExceeded,
 }
 
@@ -339,6 +378,9 @@ impl fmt::Display for SolutionDocumentError {
             Self::Ctk3EncodingFailed => "native CTK3 encoding failed",
             Self::Ctk3PageLimitExceeded => "native CTK3 logical page limit exceeded",
             Self::FumenEncodingFailed => "native Fumen encoding failed",
+            Self::FumenHeightUnsupported { .. } => {
+                "Fumen supports at most 23 rows; use CTK3 to preserve the full field"
+            }
             Self::FumenPageLimitExceeded => "native Fumen page limit exceeded",
         })
     }
@@ -362,7 +404,7 @@ mod tests {
         NormalizedTilingSolutionSetHasher, NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
         NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
     };
-    use clearra_fumen::SourceFumenDiagramSet;
+    use clearra_fumen::{ActualFumenRenderColor, ActualFumenRenderDocument, SourceFumenDiagramSet};
 
     use super::*;
     use crate::artifact::{SolutionArtifactAnnotation, SolutionArtifactEntry};
@@ -386,6 +428,11 @@ mod tests {
             if *validity != "valid" {
                 assert_eq!(
                     ctk3_page(&entry),
+                    Err(SolutionDocumentError::InvalidCanonicalKey),
+                    "{name}"
+                );
+                assert_eq!(
+                    fumen_page(&entry),
                     Err(SolutionDocumentError::InvalidCanonicalKey),
                     "{name}"
                 );
@@ -430,6 +477,110 @@ mod tests {
                     "{name} bit={bit}"
                 );
             }
+            if identity.height() == 24 {
+                assert_eq!(
+                    encode_fumen_solution_set(&artifact),
+                    Err(SolutionDocumentError::FumenHeightUnsupported { height: 24 }),
+                    "{name}"
+                );
+            } else {
+                let source = encode_fumen_solution_set(&artifact).unwrap();
+                let decoded = ActualFumenRenderDocument::decode(&source).unwrap();
+                assert_eq!(decoded.pages().len(), 1, "{name}");
+                for bit in 0..230_u16 {
+                    let expected = if identity.initial_board().contains_index(bit) {
+                        ActualFumenRenderColor::Garbage
+                    } else {
+                        identity
+                            .placements()
+                            .find(|placement| placement.cells().contains_index(bit))
+                            .map_or(ActualFumenRenderColor::Empty, |placement| {
+                                fumen_render_color(placement.piece())
+                            })
+                    };
+                    assert_eq!(
+                        decoded.pages()[0].cells_bottom_up()[usize::from(bit)],
+                        expected,
+                        "{name} fumen bit={bit}"
+                    );
+                }
+            }
+        }
+    }
+
+    const fn fumen_render_color(piece: PieceKind) -> ActualFumenRenderColor {
+        match piece {
+            PieceKind::I => ActualFumenRenderColor::I,
+            PieceKind::O => ActualFumenRenderColor::O,
+            PieceKind::T => ActualFumenRenderColor::T,
+            PieceKind::S => ActualFumenRenderColor::S,
+            PieceKind::Z => ActualFumenRenderColor::Z,
+            PieceKind::J => ActualFumenRenderColor::J,
+            PieceKind::L => ActualFumenRenderColor::L,
+        }
+    }
+
+    #[test]
+    fn mixed_compact_and_extended_pages_preserve_order_and_annotations() {
+        let cases =
+            include_str!("../../../../tests/fixtures/contracts/extended_solution_keys.v1.tsv");
+        let extended = cases
+            .lines()
+            .find(|line| line.starts_with("last-fumen-row\t"))
+            .unwrap()
+            .split('\t')
+            .nth(2)
+            .unwrap();
+        let keys = [
+            "ctk1|initial=0000000000000300|placements=I:000000000000000f",
+            extended,
+        ];
+        let mut hasher = NormalizedTilingSolutionSetHasher::default();
+        let entries = keys
+            .into_iter()
+            .zip(["0.5", "0.25"])
+            .map(|(key, probability)| {
+                hasher.update_canonical_key(
+                    &NormalizedTilingSolutionKey::parse_canonical(key).unwrap(),
+                );
+                SolutionArtifactEntry::try_new(
+                    key,
+                    SolutionArtifactAnnotation::new()
+                        .with_pc_probability(probability)
+                        .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let artifact = SolutionSetArtifact::try_new(
+            SOURCE,
+            NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
+            NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
+            hasher.finish(),
+            2,
+            entries,
+        )
+        .unwrap();
+        let encoded = encode_fumen_solution_set(&artifact).unwrap();
+        let decoded = ActualFumenRenderDocument::decode(&encoded).unwrap();
+        assert_eq!(decoded.pages().len(), 2);
+        assert_eq!(
+            decoded.pages()[0].cells_bottom_up()[0],
+            ActualFumenRenderColor::I
+        );
+        assert_eq!(
+            decoded.pages()[0].cells_bottom_up()[229],
+            ActualFumenRenderColor::Empty
+        );
+        assert_eq!(
+            decoded.pages()[1].cells_bottom_up()[229],
+            ActualFumenRenderColor::I
+        );
+        for (page, entry) in decoded.pages().iter().zip(artifact.entries()) {
+            assert_eq!(
+                page.comment(),
+                SolutionCommentLayout::render(entry.annotation()).unwrap()
+            );
         }
     }
 

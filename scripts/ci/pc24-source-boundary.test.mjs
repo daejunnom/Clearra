@@ -31,7 +31,7 @@ test('the scalar guard rejects the actual pre-job CTK2 workflow regression', () 
 });
 
 test('extended functional proofs run independently of existing release and product jobs', () => {
-  const branches = ['codex/converge-pc24-integration-20261005', 'codex/converge-main-product-fixes-20261005', 'codex/pc24-target-boundary-20261006', 'codex/converge-pc24-family-20261006'];
+  const branches = ['codex/converge-pc24-integration-20261005', 'codex/converge-main-product-fixes-20261005', 'codex/pc24-target-boundary-20261006', 'codex/converge-pc24-family-20261006', 'codex/converge-v081-document-frame-20261006'];
   assert.ok(workflow.includes(`branches: [${branches.map((branch) => JSON.stringify(branch)).join(', ')}]`));
   for (const job of ['input-contract', 'inverse-lock-clear', 'document-wire']) {
     const section = workflow.slice(workflow.indexOf(`\n  ${job}:`));
@@ -39,6 +39,7 @@ test('extended functional proofs run independently of existing release and produ
     assert.ok(section.includes("github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005'"));
     assert.ok(section.includes("github.ref == 'refs/heads/codex/pc24-target-boundary-20261006'"));
     assert.ok(section.includes("github.ref == 'refs/heads/codex/converge-pc24-family-20261006'"));
+    assert.ok(section.includes("github.ref == 'refs/heads/codex/converge-v081-document-frame-20261006'"));
   }
   assert.ok(!workflow.includes('needs:'));
   assert.ok(!workflow.includes('continue-on-error:'));
@@ -48,6 +49,30 @@ test('extended functional proofs run independently of existing release and produ
   assert.ok(workflow.includes('cargo test --locked -p clearra-geometry --lib layout::standard_pc_layout::tests'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-core-executor --test extended_pc_ilc'));
   assert.ok(workflow.includes('--target wasm32-unknown-unknown'));
+});
+
+test('extended document publication preserves full words and the explicit format limit', () => {
+  assert.ok(workflow.includes('cargo test --locked -p clearra-fumen --lib adapter::'));
+  assert.ok(workflow.includes('full_height_document_keeps_ctk3_and_reports_fumens_real_limit'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-host-contract --lib solution_set_artifact_payload'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-app --lib extended_document_error_tests'));
+  assert.ok(workflow.includes('unsupported_fumen_height_preserves_its_explicit_cli_error'));
+  assert.ok(workflow.includes('crates/clearra-fumen/**'));
+  const projection = read('crates/clearra-output/src/artifact/solution_document.rs');
+  assert.ok(projection.includes('ColoredSolutionFumenExporter::encode_extended(&pages)'));
+  assert.ok(projection.includes('identity.initial_board()'));
+  assert.ok(projection.includes('FumenHeightUnsupported { height }'));
+  assert.ok(!projection.includes('initial_board().words()[0]'));
+  assert.ok(read('packages/clearra-ui/test/extendedSolutionKey.contract.ts').includes('cell < 230'));
+  assert.ok(workflow.includes('packages/clearra-ui/test/productResultPager.contract.ts'));
+  assert.ok(read('packages/clearra-ui/src/lib/workspace/productResultPager.ts')
+    .includes("format.format === 'fumen' && format.unavailable_reason === 'fumen-height-unsupported'"));
+  assert.ok(read('crates/clearra-host-contract/src/solution_set_artifact_payload.rs')
+    .includes('self.unavailable_reason.as_deref() == Some("fumen-height-unsupported")'));
+  assert.ok(read('crates/clearra-app/src/app_response/solution_set_artifact.rs')
+    .includes('fn full_height_native_payload_preserves_ctk3_when_fumen_is_unavailable()'));
+  assert.ok(read('packages/clearra-ui/src/lib/wasm/wasmCommandClient.ts')
+    .includes("| 'fumen-height-unsupported'"));
 });
 
 test('shared four-word codec and projections are tested without enabling compact PC authority', () => {

@@ -127,7 +127,7 @@ impl SolutionSetArtifactFormatPayload {
                 }
             }
             "unavailable" => {
-                if !matches!(
+                let valid_reason = matches!(
                     self.unavailable_reason.as_deref(),
                     Some(
                         "empty-solution-set"
@@ -136,7 +136,10 @@ impl SolutionSetArtifactFormatPayload {
                             | "encoding-failed"
                             | "transport-byte-limit-exceeded"
                     )
-                ) || self.media_type.is_some()
+                ) || (self.format == "fumen"
+                    && self.unavailable_reason.as_deref() == Some("fumen-height-unsupported"));
+                if !valid_reason
+                    || self.media_type.is_some()
                     || self.filename.is_some()
                     || self.byte_length.is_some()
                     || self.sha256.is_some()
@@ -467,6 +470,42 @@ mod tests {
                 vec![available("ctk3"), available("fumen")],
             ),
             Err(SolutionSetArtifactPayloadError::SolutionCountInvalid)
+        );
+    }
+
+    #[test]
+    fn height_refusal_is_fumen_only_and_keeps_an_available_ctk3_sidecar() {
+        let fumen =
+            SolutionSetArtifactFormatPayload::try_unavailable("fumen", "fumen-height-unsupported")
+                .unwrap();
+        let payload = SolutionSetArtifactPayload::try_new(
+            "build-path-family.v1",
+            "build-path-family",
+            "solution-family",
+            "height-24",
+            None,
+            "document-key-v1",
+            "document-set-hash-v1",
+            "height-24",
+            1,
+            vec![available("ctk3"), fumen.clone()],
+        )
+        .unwrap();
+        assert!(payload.formats()[0].available());
+        assert!(!payload.formats()[1].available());
+        assert_eq!(
+            SolutionSetArtifactFormatPayload::try_unavailable("ctk3", "fumen-height-unsupported"),
+            Err(SolutionSetArtifactPayloadError::AvailabilityInvalid),
+        );
+        assert_eq!(
+            SolutionSetArtifactFormatPayload::try_unavailable("fumen", "unknown-reason"),
+            Err(SolutionSetArtifactPayloadError::AvailabilityInvalid),
+        );
+        let mut forged = fumen;
+        forged.document = Some("v115@partial".to_owned());
+        assert_eq!(
+            forged.validate(),
+            Err(SolutionSetArtifactPayloadError::AvailabilityInvalid),
         );
     }
 

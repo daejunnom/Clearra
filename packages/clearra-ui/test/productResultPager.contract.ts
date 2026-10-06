@@ -228,6 +228,33 @@ assert.equal(
 
 const artifact = solutionSetArtifactPayload();
 assert.equal(validateSolutionSetArtifactPayload(artifact), null);
+const heightLimitedArtifact = structuredClone(artifact);
+heightLimitedArtifact.formats[1]!.unavailable_reason = 'fumen-height-unsupported';
+assert.equal(validateSolutionSetArtifactPayload(heightLimitedArtifact), null,
+  'the native Fumen height refusal must not hide the available full-height CTK3');
+const unknownArtifactReason = structuredClone(heightLimitedArtifact);
+(unknownArtifactReason.formats[1] as unknown as { unavailable_reason: string })
+  .unavailable_reason = 'unknown-reason';
+assert.equal(validateSolutionSetArtifactPayload(unknownArtifactReason),
+  'invalid solution-set artifact payload');
+const wrongFormatHeightReason = structuredClone(heightLimitedArtifact);
+wrongFormatHeightReason.formats[0] = {
+  ...unavailableArtifactFormat('ctk3'),
+  unavailable_reason: 'fumen-height-unsupported'
+};
+wrongFormatHeightReason.formats[1] = {
+  format: 'fumen', state: 'available', unavailable_reason: null,
+  media_type: 'text/plain;charset=utf-8', filename: 'clearra-solutions.fumen',
+  byte_length: 9, sha256: '0'.repeat(64), page_count: 1, document: 'v115@test'
+};
+assert.equal(validateSolutionSetArtifactPayload(wrongFormatHeightReason),
+  'invalid solution-set artifact payload',
+  'a Fumen-specific refusal cannot authorize an unavailable CTK3');
+const partialHeightLimitedArtifact = structuredClone(heightLimitedArtifact);
+partialHeightLimitedArtifact.formats[1]!.document = 'v115@partial';
+assert.equal(validateSolutionSetArtifactPayload(partialHeightLimitedArtifact),
+  'invalid solution-set artifact payload',
+  'an unavailable format still cannot carry a partial document');
 const forgedArtifactLength = structuredClone(artifact);
 forgedArtifactLength.formats[0]!.byte_length = 1;
 assert.equal(

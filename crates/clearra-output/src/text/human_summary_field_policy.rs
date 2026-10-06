@@ -82,7 +82,7 @@ impl HumanSummaryFieldPolicy {
         }
     }
 
-    pub fn human_facing_kind<'a>(kind: &'a str) -> &'a str {
+    pub fn human_facing_kind(kind: &str) -> &str {
         match kind {
             "pc-tiling-family.v1" => "perfect-clear solutions",
             "pc-save-groups.v2" => "save groups",

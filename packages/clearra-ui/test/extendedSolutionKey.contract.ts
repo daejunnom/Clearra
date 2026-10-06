@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { decoder } from 'tetris-fumen';
 
 import { decodeCtk3 } from '../src/lib/workspace/ctk3Codec';
 import { parseSolutionKey, SolutionExportError } from '../src/lib/workspace/solutionExport';
@@ -29,6 +30,17 @@ for (const line of cases.split(/\r?\n/u).filter(line => line && !line.startsWith
   if (page.height === 24) {
     await assert.rejects(() => encodeSolutionKeysForClipboard([key], 'fumen'),
       (error: unknown) => error instanceof SolutionExportError && error.code === 'fumen-height-unsupported');
+  } else {
+    const fumen = await encodeSolutionKeysForClipboard([key], 'fumen');
+    const decodedFumen = decoder.decode(fumen);
+    assert.equal(decodedFumen.length, 1, name);
+    for (let cell = 0; cell < 230; cell += 1) {
+      const bit = 1n << BigInt(cell);
+      const expected = (page.initialMask & bit) !== 0n ? 'X'
+        : page.placements.find(placement => (placement.mask & bit) !== 0n)?.piece ?? '_';
+      assert.equal(decodedFumen[0].field.at(cell % 10, Math.floor(cell / 10)), expected,
+        `${name} fumen cell=${cell}`);
+    }
   }
 }
 

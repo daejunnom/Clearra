@@ -180,6 +180,9 @@ fn map_document_encoding_error(
         SolutionArtifactEncodingError::FumenEncodingFailed => {
             SolutionArtifactOutputError::FumenEncodingFailed
         }
+        SolutionArtifactEncodingError::FumenHeightUnsupported { .. } => {
+            SolutionArtifactOutputError::FumenHeightUnsupported
+        }
         SolutionArtifactEncodingError::FumenPageLimitExceeded => {
             SolutionArtifactOutputError::FumenPageLimitExceeded
         }
@@ -1143,6 +1146,7 @@ pub(crate) enum SolutionArtifactOutputError {
     Ctk3EncodingFailed,
     Ctk3PageLimitExceeded,
     FumenEncodingFailed,
+    FumenHeightUnsupported,
     FumenPageLimitExceeded,
     TilingFamilyPageUnavailable,
     StdoutFormatUnsupported,
@@ -1181,6 +1185,7 @@ impl SolutionArtifactOutputError {
             Self::Ctk3EncodingFailed => "artifact-ctk3-encoding-failed",
             Self::Ctk3PageLimitExceeded => "artifact-ctk3-page-limit-exceeded",
             Self::FumenEncodingFailed => "artifact-fumen-encoding-failed",
+            Self::FumenHeightUnsupported => "artifact-fumen-height-unsupported",
             Self::FumenPageLimitExceeded => "artifact-fumen-page-limit-exceeded",
             Self::TilingFamilyPageUnavailable => "artifact-tiling-family-page-unavailable",
             Self::StdoutFormatUnsupported => "artifact-stdout-format-unsupported",
@@ -1226,6 +1231,20 @@ mod tests {
     };
 
     static NEXT_BUILD_ARTIFACT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn unsupported_fumen_height_preserves_its_explicit_cli_error() {
+        assert_eq!(
+            map_document_encoding_error(SolutionArtifactEncodingError::FumenHeightUnsupported {
+                height: 24,
+            }),
+            SolutionArtifactOutputError::FumenHeightUnsupported,
+        );
+        assert_eq!(
+            SolutionArtifactOutputError::FumenHeightUnsupported.as_str(),
+            "artifact-fumen-height-unsupported"
+        );
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct TestMetricRow {

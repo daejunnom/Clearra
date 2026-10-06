@@ -250,6 +250,7 @@ export type ClearraSolutionSetArtifactFormatPayload = {
   unavailable_reason:
     | 'empty-solution-set'
     | 'unsupported-solution-key'
+    | 'fumen-height-unsupported'
     | 'page-limit-exceeded'
     | 'encoding-failed'
     | 'transport-byte-limit-exceeded'
