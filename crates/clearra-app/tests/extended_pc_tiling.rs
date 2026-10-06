@@ -46,6 +46,7 @@ fn forced_request(height: u8, rule: RuleProfile) -> (AppRequest, Board256Mask, u
     .with_min_remaining_queue(0)
     .with_count_policy(PcCountPolicy::CountUnique)
     .with_objective(ObjectivePolicy::tiling())
+    .with_retained_trace_limit(1)
     .with_execution_policy(
         PcExecutionPolicy::default()
             .with_requested_backend(RequestedSearchBackend::Cpu)
@@ -175,5 +176,24 @@ fn extended_direct_tiling_never_reduces_an_explicit_multiworker_request() {
             .message()
             .contains("shared_terminal_memory_authority_requires_single_worker"));
         assert!(response.product_capability_result().is_none());
+    }
+}
+
+#[test]
+fn extended_tiling_keeps_the_fixed_trace_contract_at_admission() {
+    let (request, _, _) = forced_request(7, srs_plus());
+    let AppCommand::Scenario(command) = request.command() else {
+        unreachable!()
+    };
+    for limit in [0, 2] {
+        let query = command.query().clone().with_retained_trace_limit(limit);
+        let rejected = AppRequest::new(AppCommand::Scenario(
+            ScenarioAppCommand::new(query).with_result_projection(command.result_projection()),
+        ))
+        .with_product_capability_contract(ProductCapabilityContract::PcTiling);
+        assert!(rejected
+            .unwrap_err()
+            .to_string()
+            .contains("fixed unused retained-trace limit"));
     }
 }

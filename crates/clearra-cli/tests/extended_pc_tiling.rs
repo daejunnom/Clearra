@@ -33,8 +33,13 @@ fn extended_tiling_real_cli_keeps_full_height_results() {
         assert_eq!(output.exit_code(), ExitCode::Success, "{output:?}");
         let json: serde_json::Value = serde_json::from_str(output.stdout()).unwrap();
         assert_eq!(json["summary"]["unique_solution_count"], 1);
-        assert_eq!(json["summary"]["buildup_executed"], false);
+        // The explicit summary schema renders this diagnostic as a string;
+        // probability_calculated is a separately registered boolean field.
+        assert_eq!(json["summary"]["buildup_executed"], "false");
         assert_eq!(json["summary"]["probability_calculated"], false);
+        assert_eq!(json["summary"]["tiling_family_complete"], true);
+        assert_eq!(json["summary"]["count_complete"], true);
+        assert_eq!(json["summary"]["workers_used"], 1);
         assert!(output.stdout().contains(&format!(
             "ctk2|height={height}|initial={board_hex}|placements="
         )));
