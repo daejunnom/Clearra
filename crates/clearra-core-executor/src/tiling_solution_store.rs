@@ -5,6 +5,9 @@ use clearra_core_domain::solution::normalized_tiling_solution::{
     NormalizedTilingSolutionKey, NormalizedTilingSolutionSetHasher, PiecePlacementMask,
     StandardBoard64TilingIdentity, STANDARD_BOARD64_TILING_MAX_PLACEMENTS,
 };
+use clearra_core_domain::{
+    board::standard_pc_board::Board256Mask, solution::ExtendedTilingSolutionKey,
+};
 
 pub(crate) const PACKED_TILING_ROW_BITS: usize = 12;
 pub(crate) const PACKED_TILING_ROW_MASK: u64 = (1_u64 << PACKED_TILING_ROW_BITS) - 1;
@@ -132,6 +135,8 @@ pub(crate) fn pack_canonical_tiling_row_ids(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TilingSolutionPageStore {
+    // Cold, extended products never widen the compact packed-row identity.
+    extended: Option<Box<ExtendedTilingPageKeys>>,
     initial_board_mask: u64,
     catalog_rows: Arc<[PiecePlacementMask]>,
     identity_runs: Vec<Vec<PackedTilingRows>>,
@@ -141,7 +146,80 @@ pub struct TilingSolutionPageStore {
     normalized_hash: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExtendedTilingPageKeys {
+    keys: Vec<String>,
+}
+
 impl TilingSolutionPageStore {
+    /// Retains a complete four-word family by moving its existing key owner.
+    /// Completeness comes from the exact producer, not from this codec. Every
+    /// identity must nevertheless be a full partition of this same target.
+    pub(crate) fn from_extended_keys(
+        height: u8,
+        initial: Board256Mask,
+        keys: Vec<String>,
+    ) -> Result<Self, &'static str> {
+        if !(7..=24).contains(&height) {
+            return Err("tiling_page_extended_height_invalid");
+        }
+        let full = Board256Mask::all_cells(u16::from(height) * 10)
+            .map_err(|_| "tiling_page_extended_height_invalid")?;
+        if !initial
+            .fits_cell_count(u16::from(height) * 10)
+            .unwrap_or(false)
+            || keys.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err("tiling_page_extended_domain_or_order_invalid");
+        }
+        let mut hasher = NormalizedTilingSolutionSetHasher::default();
+        for key in &keys {
+            let identity = ExtendedTilingSolutionKey::parse_canonical(key)
+                .map_err(|_| "tiling_page_extended_identity_invalid")?;
+            if identity.height() != height || identity.initial_board() != initial {
+                return Err("tiling_page_extended_initial_board_mismatch");
+            }
+            let occupied = identity
+                .placements()
+                .fold(initial, |board, placement| board.union(placement.cells()));
+            if occupied != full {
+                return Err("tiling_page_extended_partition_incomplete");
+            }
+            hasher.update_extended_canonical_key(identity);
+        }
+        let identity_count = keys.len();
+        Ok(Self {
+            extended: Some(Box::new(ExtendedTilingPageKeys { keys })),
+            initial_board_mask: 0,
+            catalog_rows: Arc::from([]),
+            identity_runs: Vec::new(),
+            composite_children: Vec::new(),
+            merge_index: None,
+            identity_count,
+            normalized_hash: hasher.finish(),
+        })
+    }
+
+    /// A borrowed CTK2 page for wire encoders. Compact callers continue using
+    /// `for_each_page_identity`; extended keys must never be truncated to it.
+    pub fn for_each_extended_page_key(
+        &self,
+        offset: usize,
+        limit: usize,
+        mut visit: impl FnMut(&str),
+    ) -> Result<(), &'static str> {
+        let extended = self.extended.as_ref().ok_or("tiling_page_not_extended")?;
+        let begin = offset.min(self.len());
+        let end = begin.saturating_add(limit).min(self.len());
+        for key in &extended.keys[begin..end] {
+            visit(key);
+        }
+        Ok(())
+    }
+
+    pub const fn is_extended(&self) -> bool {
+        self.extended.is_some()
+    }
     /// Conservative allocation peak for constructing one canonical store from
     /// compact identities that are already retained by the search session.
     ///
@@ -348,6 +426,7 @@ impl TilingSolutionPageStore {
             identity_count,
         )?;
         Ok(Self {
+            extended: None,
             initial_board_mask,
             catalog_rows,
             identity_runs,
@@ -367,6 +446,7 @@ impl TilingSolutionPageStore {
         }
         if stores.is_empty() {
             return Ok(Arc::new(Self {
+                extended: None,
                 initial_board_mask: 0,
                 catalog_rows: Arc::from([]),
                 identity_runs: Vec::new(),
@@ -375,6 +455,10 @@ impl TilingSolutionPageStore {
                 identity_count: 0,
                 normalized_hash: NormalizedTilingSolutionSetHasher::default().finish(),
             }));
+        }
+
+        if stores.iter().any(|store| store.is_extended()) {
+            return Err("tiling_page_extended_composite_merge_unsupported");
         }
 
         let maximum_run_len = stores.iter().map(|store| store.len()).max().unwrap_or(0);
@@ -417,6 +501,7 @@ impl TilingSolutionPageStore {
         }
 
         Ok(Arc::new(Self {
+            extended: None,
             initial_board_mask: 0,
             catalog_rows: Arc::from([]),
             identity_runs: Vec::new(),
@@ -440,6 +525,21 @@ impl TilingSolutionPageStore {
     }
 
     pub fn page_keys(&self, offset: usize, limit: usize) -> Result<Vec<String>, &'static str> {
+        if let Some(extended) = &self.extended {
+            let begin = offset.min(self.len());
+            let end = begin.saturating_add(limit).min(self.len());
+            let mut keys = Vec::new();
+            keys.try_reserve_exact(end - begin)
+                .map_err(|_| "wasm_tiling_solution_page_storage_unavailable")?;
+            for key in &extended.keys[begin..end] {
+                let mut copy = String::new();
+                copy.try_reserve_exact(key.len())
+                    .map_err(|_| "wasm_tiling_solution_page_storage_unavailable")?;
+                copy.push_str(key);
+                keys.push(copy);
+            }
+            return Ok(keys);
+        }
         self.page_identities(offset, limit)?
             .into_iter()
             .map(|identity| {
@@ -457,6 +557,9 @@ impl TilingSolutionPageStore {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<StandardBoard64TilingIdentity>, &'static str> {
+        if self.is_extended() {
+            return Err("tiling_page_extended_requires_four_word_identity");
+        }
         let begin = offset.min(self.identity_count);
         let end = begin.saturating_add(limit).min(self.identity_count);
         let mut identities = Vec::new();
@@ -481,6 +584,9 @@ impl TilingSolutionPageStore {
         limit: usize,
         mut visit: impl FnMut(StandardBoard64TilingIdentity),
     ) -> Result<(), &'static str> {
+        if self.is_extended() {
+            return Err("tiling_page_extended_requires_four_word_identity");
+        }
         let begin = offset.min(self.identity_count);
         let end = begin.saturating_add(limit).min(self.identity_count);
         for index in begin..end {
@@ -493,6 +599,9 @@ impl TilingSolutionPageStore {
     /// key strings. This is used by the publication gate after the page has
     /// already been materialized under the terminal memory authority.
     pub(crate) fn initial_page_keys_match(&self, keys: &[String]) -> bool {
+        if let Some(extended) = &self.extended {
+            return extended.keys.get(..keys.len()) == Some(keys);
+        }
         keys.len() <= self.identity_count
             && keys.iter().enumerate().all(|(index, key)| {
                 self.identity_at(index)
@@ -594,6 +703,16 @@ impl TilingSolutionPageStore {
             visited_len += 1;
 
             bytes = bytes.checked_add(core::mem::size_of::<Self>() as u128)?;
+            if let Some(extended) = &store.extended {
+                bytes = bytes.checked_add(core::mem::size_of::<ExtendedTilingPageKeys>() as u128)?;
+                bytes = bytes.checked_add(
+                    (extended.keys.capacity() as u128)
+                        .checked_mul(core::mem::size_of::<String>() as u128)?,
+                )?;
+                for key in &extended.keys {
+                    bytes = bytes.checked_add(key.capacity() as u128)?;
+                }
+            }
             bytes = bytes.checked_add(
                 (store.identity_runs.capacity() as u128)
                     .checked_mul(core::mem::size_of::<Vec<PackedTilingRows>>() as u128)?,
@@ -1350,6 +1469,7 @@ mod tests {
         let mut identity_runs = Vec::with_capacity(3);
         identity_runs.push(run);
         let leaf = Arc::new(TilingSolutionPageStore {
+            extended: None,
             initial_board_mask: 0,
             catalog_rows,
             identity_runs,
@@ -1365,6 +1485,7 @@ mod tests {
         children.push(Arc::clone(&leaf));
         children.push(Arc::clone(&leaf));
         let root = TilingSolutionPageStore {
+            extended: None,
             initial_board_mask: 0,
             catalog_rows: Arc::from([]),
             identity_runs: Vec::new(),
@@ -1395,6 +1516,7 @@ mod tests {
     #[test]
     fn retained_projection_visits_duplicate_dag_nodes_once_and_bounds_unique_nodes() {
         let mut store = Arc::new(TilingSolutionPageStore {
+            extended: None,
             initial_board_mask: 0,
             catalog_rows: Arc::from([]),
             identity_runs: Vec::new(),
@@ -1409,6 +1531,7 @@ mod tests {
             expected += core::mem::size_of::<TilingSolutionPageStore>()
                 + children.capacity() * core::mem::size_of::<Arc<TilingSolutionPageStore>>();
             store = Arc::new(TilingSolutionPageStore {
+                extended: None,
                 initial_board_mask: 0,
                 catalog_rows: Arc::from([]),
                 identity_runs: Vec::new(),
@@ -1425,6 +1548,7 @@ mod tests {
 
         for _ in 20..MAX_TILING_PROJECTION_UNIQUE_NODES {
             store = Arc::new(TilingSolutionPageStore {
+                extended: None,
                 initial_board_mask: 0,
                 catalog_rows: Arc::from([]),
                 identity_runs: Vec::new(),
@@ -1453,5 +1577,59 @@ mod tests {
             Some(exact)
         );
         assert!(exact > exact - 1);
+    }
+
+    #[test]
+    fn extended_pages_preserve_the_whole_partition_and_refuse_compact_projection() {
+        use clearra_core_domain::board::standard_pc_board::Board256Mask;
+        use clearra_core_domain::solution::NormalizedTilingSolutionSetHasher;
+        let height = 24;
+        let mut cells = Board256Mask::EMPTY;
+        for row in 20..24 {
+            cells = cells.union(Board256Mask::singleton(row * 10).unwrap());
+        }
+        let initial = Board256Mask::all_cells(240).unwrap().without(cells);
+        let hex = |board: Board256Mask| {
+            let words = board.words();
+            format!(
+                "{:016x}{:016x}{:016x}{:016x}",
+                words[3], words[2], words[1], words[0]
+            )
+        };
+        let key = format!(
+            "ctk2|height=24|initial={}|placements=I:{}",
+            hex(initial),
+            hex(cells)
+        );
+        let store = TilingSolutionPageStore::from_extended_keys(height, initial, vec![key.clone()])
+            .unwrap();
+        assert_eq!(store.page_keys(0, usize::MAX).unwrap(), [key.clone()]);
+        assert!(store.initial_page_keys_match(&[key.clone()]));
+        let mut hasher = NormalizedTilingSolutionSetHasher::default();
+        hasher.update_canonical_key(&NormalizedTilingSolutionKey::parse_canonical(&key).unwrap());
+        assert_eq!(store.normalized_hash(), hasher.finish());
+        assert!(store.page_identities(0, 1).is_err());
+        let bytes = store.checked_retained_capacity_bytes().unwrap();
+        assert!(
+            bytes >= key.len() as u128 + core::mem::size_of::<TilingSolutionPageStore>() as u128
+        );
+        assert!(TilingSolutionPageStore::from_extended_keys(
+            height,
+            initial,
+            vec![key.clone(), key]
+        )
+        .is_err());
+        assert!(
+            TilingSolutionPageStore::from_extended_keys(
+                height,
+                initial,
+                vec![format!(
+                    "ctk2|height=24|initial={}|placements=",
+                    hex(initial)
+                )]
+            )
+            .is_err(),
+            "a codec-valid partial partition is not a complete PC tiling"
+        );
     }
 }

@@ -13,7 +13,9 @@ use crate::{resource::WasmCpuTerminalResourceAuthority, CoreExecutionError, Core
 
 #[cfg(feature = "webgpu-search")]
 use super::wasm_cpu::WasmWebGpuSearchSession;
-use super::wasm_cpu::{ExactSearchAdvance, WasmExactSearchError, WasmExactSearchSession};
+use super::wasm_cpu::{
+    ExactSearchAdvance, ExtendedPcTilingSession, WasmExactSearchError, WasmExactSearchSession,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WasmCpuSearchError {
@@ -151,6 +153,7 @@ impl WasmCpuSearchTerminalAuthority<'_> {
 #[allow(clippy::large_enum_variant)]
 enum WasmSearchSessionInner {
     Cpu(WasmExactSearchSession),
+    ExtendedPcTiling(ExtendedPcTilingSession),
     #[cfg(feature = "webgpu-search")]
     WebGpu(WasmWebGpuSearchSession),
 }
@@ -214,6 +217,27 @@ impl WasmCpuSearchSession {
         let allow_native_parallel =
             cfg!(not(target_family = "wasm")) && problem.objective().score().requested();
         validate_shared_terminal_problem(problem.as_ref(), true, allow_native_parallel)?;
+        if problem.visible_height() > 6 && problem.output_policy() == SearchOutputPolicy::TilingOnly
+        {
+            if !matches!(
+                problem.backend_policy().worker_policy(),
+                clearra_pc_graph::request::WorkerPolicy::Fixed(1)
+            ) {
+                return Err(WasmCpuSearchError::Unsupported {
+                    reason: "extended_pc_tiling_requires_explicit_single_worker",
+                });
+            }
+            return Ok(Self {
+                inner: WasmSearchSessionInner::ExtendedPcTiling(
+                    ExtendedPcTilingSession::new_under_authority(
+                        problem,
+                        checked_external_retained_upper_bound_bytes,
+                        authority,
+                    )
+                    .map_err(map_error)?,
+                ),
+            });
+        }
         Ok(Self {
             inner: WasmSearchSessionInner::Cpu(
                 WasmExactSearchSession::new_shared_under_authority(
@@ -233,6 +257,9 @@ impl WasmCpuSearchSession {
     ) -> Result<WasmCpuSearchAdvance, WasmCpuSearchError> {
         let advance = match &mut self.inner {
             WasmSearchSessionInner::Cpu(session) => session.advance(work_budget, control),
+            WasmSearchSessionInner::ExtendedPcTiling(session) => {
+                session.advance(work_budget, control)
+            }
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(session) => session.advance(work_budget, control),
         }
@@ -265,6 +292,9 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::Cpu(session) => {
                 session.validate_public_result_memory_with_future(result, checked_future_bytes)
             }
+            WasmSearchSessionInner::ExtendedPcTiling(session) => {
+                session.validate_public_result_memory_with_future(result, checked_future_bytes)
+            }
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(session) => {
                 session.validate_public_result_memory_with_future(result, checked_future_bytes)
@@ -277,6 +307,9 @@ impl WasmCpuSearchSession {
     fn admitted_memory_cap_bytes(&self) -> u128 {
         match &self.inner {
             WasmSearchSessionInner::Cpu(session) => session.admitted_memory_cap_bytes(),
+            WasmSearchSessionInner::ExtendedPcTiling(session) => {
+                session.admitted_memory_cap_bytes()
+            }
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(_) => {
                 unreachable!("test memory-cap probe requires the explicitly selected CPU backend")
@@ -288,6 +321,9 @@ impl WasmCpuSearchSession {
     fn shares_problem_arc(&self, problem: &Arc<SearchProblem>) -> bool {
         match &self.inner {
             WasmSearchSessionInner::Cpu(session) => session.shares_problem_arc(problem),
+            WasmSearchSessionInner::ExtendedPcTiling(session) => {
+                session.shares_problem_arc(problem)
+            }
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(_) => false,
         }
@@ -297,6 +333,9 @@ impl WasmCpuSearchSession {
     fn checked_terminal_retained_bytes(&self, result: &CoreExecutionResult) -> Option<u128> {
         match &self.inner {
             WasmSearchSessionInner::Cpu(session) => session.checked_terminal_retained_bytes(result),
+            WasmSearchSessionInner::ExtendedPcTiling(session) => {
+                session.checked_terminal_retained_bytes(result)
+            }
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(_) => None,
         }
@@ -312,6 +351,7 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::Cpu(session) => session
                 .execute_parallel_if_worthwhile(worker_count, control)
                 .map_err(map_error),
+            WasmSearchSessionInner::ExtendedPcTiling(_) => Ok(None),
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(_) => Ok(None),
         }
@@ -328,6 +368,11 @@ impl WasmCpuSearchBackend {
     }
 
     pub fn distributed_execution_is_worthwhile(problem: &SearchProblem) -> bool {
+        // The compact packed-row worker protocol must not receive four-word
+        // identities. Extended direct typed tiling has its own exact owner.
+        if problem.visible_height() > 6 {
+            return false;
+        }
         if problem
             .queue_observation_policy()
             .requires_observation_policy()
@@ -405,6 +450,9 @@ impl WasmCpuSearchBackend {
         let result = match &mut session.inner {
             WasmSearchSessionInner::Cpu(exact) => {
                 Self::reduce_complete_precomputed_candidates(exact, candidates, control)
+            }
+            WasmSearchSessionInner::ExtendedPcTiling(_) => {
+                unreachable!("explicit compact candidate verifier")
             }
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(_) => unreachable!("explicit CPU candidate verifier"),

@@ -10,8 +10,7 @@ use clearra_rules::profile::rule_profile::RuleProfile;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebPcScenarioInput {
-    board_mask: u64,
-    visible_height: u16,
+    initial_board: PcScenarioBoard,
     piece_window: usize,
     hold_piece: Option<PieceKind>,
     allow_hold: bool,
@@ -23,9 +22,18 @@ pub struct WebPcScenarioInput {
 
 impl WebPcScenarioInput {
     pub fn new(board_mask: u64, visible_height: u16, piece_window: usize) -> Self {
+        Self::from_board(
+            PcScenarioBoard::standard_10(visible_height, board_mask),
+            piece_window,
+        )
+    }
+
+    /// Preserve the canonical typed field across the CLI/Web/App boundary.
+    /// In particular, a full-height initial field must not be reconstructed
+    /// from only its compact low-word accessor.
+    pub fn from_board(initial_board: PcScenarioBoard, piece_window: usize) -> Self {
         Self {
-            board_mask,
-            visible_height,
+            initial_board,
             piece_window,
             hold_piece: None,
             allow_hold: true,
@@ -78,7 +86,7 @@ impl WebPcScenarioInput {
         objective: ObjectivePolicy,
     ) -> PcScenarioQuery {
         let mut query = PcScenarioQuery::new(
-            PcScenarioBoard::standard_10(self.visible_height, self.board_mask),
+            self.initial_board.clone(),
             queue,
             PieceWindow::new(self.piece_window),
         )
@@ -109,12 +117,17 @@ impl WebPcScenarioInput {
         query
     }
 
-    pub const fn board_mask(&self) -> u64 {
-        self.board_mask
+    /// Compact compatibility accessor. Full-height consumers use initial_board.
+    pub fn board_mask(&self) -> u64 {
+        self.initial_board.occupied_mask()
     }
 
-    pub const fn visible_height(&self) -> u16 {
-        self.visible_height
+    pub fn initial_board(&self) -> &PcScenarioBoard {
+        &self.initial_board
+    }
+
+    pub fn visible_height(&self) -> u16 {
+        self.initial_board.visible_height()
     }
 
     pub const fn piece_window(&self) -> usize {

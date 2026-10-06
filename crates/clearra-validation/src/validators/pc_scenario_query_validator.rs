@@ -54,6 +54,26 @@ pub fn validate_pc_scenario_query(query: &PcScenarioQuery) -> DiagnosticReport {
 
 fn validate_scenario_board(query: &PcScenarioQuery, report: &mut DiagnosticReport) {
     let board = query.initial_board();
+    if board.width() == 10
+        && (7..=24).contains(&board.visible_height())
+        && query.objective().kind()
+            == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
+    {
+        let occupied = clearra_core_domain::board::standard_pc_board::Board256Mask::from_words(
+            board.occupied_words(),
+        );
+        if !occupied
+            .fits_cell_count(board.visible_height() * 10)
+            .unwrap_or(false)
+        {
+            report.push(invalid_pc_query(
+                "pc.scenario.initial_board",
+                "PC scenario occupied mask must fit inside the scenario board",
+                "scenario_board_mask_outside_layout",
+            ));
+        }
+        return;
+    }
     match BoardSize::new(board.width(), board.visible_height()) {
         Ok(size) if size.area() <= 64 => {
             let layout_mask = if size.area() == 64 {

@@ -8,6 +8,8 @@ import {
   createDefaultWorkspaceRequest,
   normalizeWorkspaceInitialField,
   scenarioPieceWindow,
+  clearCompletedRows,
+  trimBoardMask,
   workspaceValidationCodes,
   workspaceRequestForDesktop
 } from '../src/lib/workspace/solverWorkspaceModel.ts';
@@ -39,6 +41,34 @@ const canonicalGuiPcFullSolutionArguments = readFileSync(
   new URL('../../../tests/fixtures/contracts/gui_pc_full_solution_argv.tsv', import.meta.url),
   'utf8'
 ).trimEnd().split('\t');
+
+test('extended codecs keep cell 239 and real area without enabling disconnected workspace terminals', () => {
+  const full = (1n << 240n) - 1n;
+  let holes = 0n;
+  for (let column = 0; column < 6; column += 1) {
+    for (let row = column * 4; row < column * 4 + 4; row += 1) {
+      holes |= 1n << BigInt(row * 10 + column);
+    }
+  }
+  const boardMask = full ^ holes;
+  const request = {
+    ...createDefaultWorkspaceRequest(), lines: 24, boardMask,
+    queue: 'IIIIII', holdEnabled: false, scoreMode: 'tiling', workers: 1
+  };
+  assert.equal(trimBoardMask(boardMask, 24), boardMask);
+  assert.equal(clearCompletedRows(boardMask, 24).boardMask, boardMask);
+  assert.equal(scenarioPieceWindow(request), 6);
+  assert.ok(workspaceValidationCodes(request, 'web').includes('target_lines_invalid'));
+  assert.ok(workspaceValidationCodes(request, 'desktop').includes('target_lines_invalid'));
+  const args = buildWorkspaceCommandArguments(request);
+  assert.deepEqual(args.slice(0, 3), ['clearra', 'pc', 'tiling']);
+  assert.equal(args[args.indexOf('--height') + 1], '24');
+  assert.equal(args[args.indexOf('--pieces') + 1], '6');
+  assert.equal(BigInt(args[args.indexOf('--board-mask') + 1]), boardMask);
+  assert.ok(workspaceValidationCodes({ ...request, scoreMode: 'minimum-cover' }, 'web')
+    .includes('target_lines_invalid'), 'not-yet-connected reducers must not acquire extended authority');
+  assert.equal(clearCompletedRows(full, 24).clearedRows, 24);
+});
 
 test('boundary recovery keeps one fixed queue and independent bag B2B choices across browser and Desktop', () => {
   const request = {

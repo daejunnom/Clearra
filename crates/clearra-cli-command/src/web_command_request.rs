@@ -22,8 +22,8 @@ use clearra_objectives::policy::{
 };
 use clearra_pc_graph::request::{
     GpuDeviceSelection, OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy,
-    PcQueueInput, PcScenarioBoard, PcScenarioQuery, PcSolutionProbabilityPolicy,
-    RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
+    PcQueueInput, PcScenarioQuery, PcSolutionProbabilityPolicy, RequestedSearchBackend,
+    SupplyWindowSize, WorkerPolicy,
 };
 use clearra_problem::{
     BuildSolutionProbabilityPolicy, SetupCandidatePriority, SetupCycleResetBorrowPolicy,
@@ -1381,7 +1381,8 @@ impl WebCommandRequest {
                 "PC scenario target lines must equal the declared initial-field height".to_owned(),
             ));
         }
-        let frame = PcScenarioBoard::standard_10(scenario.visible_height(), scenario.board_mask())
+        let frame = scenario
+            .initial_board()
             .to_standard_target_frame(self.lines)
             .map_err(|error| invalid(format!("invalid PC scenario target frame: {error:?}")))?;
         if scenario.piece_window() != frame.required_pieces() {

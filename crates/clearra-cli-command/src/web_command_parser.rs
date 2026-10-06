@@ -4964,7 +4964,7 @@ fn parse_pc_command(
     let mut backend_fallback = BackendFallbackOverride::default();
     let mut queue: Option<String> = None;
     let mut patterns: Option<String> = None;
-    let mut board_mask: Option<u64> = None;
+    let mut board_mask: Option<[u64; 4]> = None;
     let mut visible_height: Option<u16> = None;
     let mut piece_window: Option<usize> = None;
     let mut hold_piece: Option<Option<PieceKind>> = None;
@@ -5045,7 +5045,7 @@ fn parse_pc_command(
             }
             "--board-mask" => {
                 let value = next_value(tokens, &mut cursor, "--board-mask")?;
-                board_mask = Some(parse_u64(value, "--board-mask")?);
+                board_mask = Some(parse_board_words(value, "--board-mask")?);
             }
             "--height" => {
                 let value = next_value(tokens, &mut cursor, "--height")?;
@@ -5459,7 +5459,14 @@ fn parse_pc_command(
         let board_mask = board_mask.ok_or_else(|| missing_scenario_option("--board-mask"))?;
         let visible_height = visible_height.ok_or_else(|| missing_scenario_option("--height"))?;
         let piece_window = piece_window.ok_or_else(|| missing_scenario_option("--pieces"))?;
-        let mut scenario = WebPcScenarioInput::new(board_mask, visible_height, piece_window)
+        let initial_board = PcScenarioBoard::standard_10_from_words(visible_height, board_mask)
+            .map_err(|error| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    format!("invalid PC initial field: {error:?}"),
+                )
+            })?;
+        let mut scenario = WebPcScenarioInput::from_board(initial_board, piece_window)
             .with_hold_piece(hold_piece.unwrap_or(None))
             .with_allow_hold(hold_enabled)
             .with_count_policy(count_policy)
@@ -5565,22 +5572,6 @@ fn parse_objective(value: &str) -> Result<ObjectivePolicy, WebCommandError> {
             format!("invalid --objective value '{value}'"),
         )),
     }
-}
-
-fn parse_u64(value: &str, option: &str) -> Result<u64, WebCommandError> {
-    let parsed = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"));
-    let result = match parsed {
-        Some(hex) => u64::from_str_radix(hex, 16),
-        None => value.parse::<u64>(),
-    };
-    result.map_err(|_| {
-        WebCommandError::new(
-            WebCommandErrorCode::InvalidValue,
-            format!("invalid {option} value '{value}'"),
-        )
-    })
 }
 
 fn parse_nonnegative_usize(value: &str, option: &str) -> Result<usize, WebCommandError> {

@@ -1,9 +1,55 @@
-use clearra_app::AppCommand;
+use clearra_app::{AppCommand, PcResultProjection, PcTilingIngressOrigin};
 use clearra_cli_command::CliCommandParser;
 use clearra_core_domain::{
+    board::standard_pc_board::Board256Mask,
     piece::piece_kind::PieceKind,
     solution::normalized_tiling_solution::{NormalizedTilingSolutionKey, PiecePlacementMask},
 };
+
+#[test]
+fn extended_tiling_cli_keeps_the_actual_target_board_and_explicit_worker_policy() {
+    for height in [7_u8, 8, 12, 24] {
+        let starts = if height == 7 {
+            vec![0, 3]
+        } else {
+            (0..u16::from(height)).step_by(4).collect()
+        };
+        let pieces = starts.len();
+        let mut holes = Board256Mask::EMPTY;
+        for (column, start) in starts.into_iter().enumerate() {
+            for row in start..start + 4 {
+                holes = holes.union(Board256Mask::singleton(row * 10 + column as u16).unwrap());
+            }
+        }
+        let initial = Board256Mask::all_cells(u16::from(height) * 10)
+            .unwrap()
+            .without(holes);
+        let words = initial.words();
+        let command = format!(
+            "clearra pc tiling --lines {height} --height {height} --board-mask 0x{:016x}{:016x}{:016x}{:016x} --pieces {pieces} --queue {} --workers 1 --backend cpu --no-hold",
+            words[3], words[2], words[1], words[0], "I".repeat(pieces)
+        );
+        let request = CliCommandParser::parse(&command)
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+        let AppCommand::Scenario(command) = request.command() else {
+            panic!("expected full-height PC scenario");
+        };
+        assert_eq!(
+            command.result_projection(),
+            PcResultProjection::TilingFamilyV1(PcTilingIngressOrigin::CanonicalPcTiling)
+        );
+        assert_eq!(
+            command.query().initial_board().visible_height(),
+            u16::from(height)
+        );
+        assert_eq!(command.query().initial_board().occupied_words(), words);
+        assert_eq!(command.query().exact_pieces(), Some(pieces));
+        assert_eq!(command.query().execution_policy().workers(), 1);
+        command.validate_result_projection().unwrap();
+    }
+}
 
 #[test]
 fn pc_minimals_accepts_a_second_canonical_solution_selection() {
@@ -65,4 +111,16 @@ fn common_extended_codec_does_not_enable_compact_pc_minimum_pins() {
         .with_pinned_minimum_keys(vec![key])
         .validate_result_projection()
         .is_err());
+}
+
+#[test]
+fn pc_tiling_rejects_high_words_outside_the_declared_target_instead_of_truncating_them() {
+    for (height, invalid_cell) in [(7, 70), (24, 240)] {
+        let words = Board256Mask::singleton(invalid_cell).unwrap().words();
+        let command = format!(
+            "clearra pc tiling --lines {height} --height {height} --board-mask 0x{:016x}{:016x}{:016x}{:016x} --pieces 1 --queue I --workers 1 --backend cpu --no-hold",
+            words[3], words[2], words[1], words[0]
+        );
+        assert!(CliCommandParser::parse(&command).is_err());
+    }
 }

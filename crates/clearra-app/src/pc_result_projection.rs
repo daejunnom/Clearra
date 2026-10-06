@@ -783,16 +783,25 @@ pub(crate) fn validate_pc_tiling_scenario_request_contract(
     }
 
     let board = query.initial_board();
-    if board.width() != 10 || !(1..=6).contains(&board.visible_height()) {
-        return Err("pc tiling scenario requires a 10-column board with height in 1..=6");
+    if board.width() != 10 || !(1..=24).contains(&board.visible_height()) {
+        return Err("pc tiling scenario requires a 10-column board with height in 1..=24");
     }
     let visible_bits = u32::from(board.width()) * u32::from(board.visible_height());
-    let visible_mask = (1_u64 << visible_bits) - 1;
-    if board.occupied_mask() & !visible_mask != 0 {
+    let occupied = clearra_core_domain::board::standard_pc_board::Board256Mask::from_words(
+        board.occupied_words(),
+    );
+    if !occupied
+        .fits_cell_count(visible_bits as u16)
+        .unwrap_or(false)
+    {
         return Err("pc tiling scenario contains cells above its declared height");
     }
     let normalized_board = board.after_initial_line_clear();
-    let empty_cells = visible_bits - (normalized_board.occupied_mask() & visible_mask).count_ones();
+    let empty_cells = visible_bits
+        - clearra_core_domain::board::standard_pc_board::Board256Mask::from_words(
+            normalized_board.occupied_words(),
+        )
+        .count_ones();
     if empty_cells == 0 || !empty_cells.is_multiple_of(4) {
         return Err("pc tiling scenario empty-cell count must be a positive multiple of four");
     }

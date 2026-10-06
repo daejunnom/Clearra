@@ -31,7 +31,7 @@ test('the scalar guard rejects the actual pre-job CTK2 workflow regression', () 
 });
 
 test('extended functional proofs run independently of existing release and product jobs', () => {
-  const branches = ['codex/converge-pc24-integration-20261005', 'codex/converge-main-product-fixes-20261005', 'codex/pc24-target-boundary-20261006', 'codex/converge-pc24-family-20261006', 'codex/converge-v081-document-frame-20261006'];
+  const branches = ['codex/converge-pc24-integration-20261005', 'codex/converge-main-product-fixes-20261005', 'codex/pc24-target-boundary-20261006', 'codex/converge-pc24-family-20261006', 'codex/converge-v081-document-frame-20261006', 'codex/converge-v081-extended-pc-products-20261007'];
   assert.ok(workflow.includes(`branches: [${branches.map((branch) => JSON.stringify(branch)).join(', ')}]`));
   for (const job of ['input-contract', 'inverse-lock-clear', 'document-wire']) {
     const section = workflow.slice(workflow.indexOf(`\n  ${job}:`));
@@ -40,6 +40,7 @@ test('extended functional proofs run independently of existing release and produ
     assert.ok(section.includes("github.ref == 'refs/heads/codex/pc24-target-boundary-20261006'"));
     assert.ok(section.includes("github.ref == 'refs/heads/codex/converge-pc24-family-20261006'"));
     assert.ok(section.includes("github.ref == 'refs/heads/codex/converge-v081-document-frame-20261006'"));
+    assert.ok(section.includes("github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007'"));
   }
   assert.ok(!workflow.includes('needs:'));
   assert.ok(!workflow.includes('continue-on-error:'));
@@ -49,6 +50,25 @@ test('extended functional proofs run independently of existing release and produ
   assert.ok(workflow.includes('cargo test --locked -p clearra-geometry --lib layout::standard_pc_layout::tests'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-core-executor --test extended_pc_ilc'));
   assert.ok(workflow.includes('--target wasm32-unknown-unknown'));
+});
+
+test('extended Tiling has its own typed exact producer without relabelling Build coverage', () => {
+  const source = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_tiling.rs');
+  assert.ok(source.includes('ExtendedGeometrySearch::new(universe, &family, &catalog)'));
+  assert.ok(source.includes('ExtendedInverseCatalog::compile_bounded'));
+  assert.ok(source.includes('admit_budget_bound_search_execution_under_terminal_authority'));
+  assert.ok(source.includes('pc_tiling_family_publication_contract_is_valid'));
+  assert.ok(!source.includes('WasmBuildProbabilitySession'));
+  assert.ok(workflow.includes('--test extended_pc_tiling'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --test extended_pc_tiling'));
+  assert.ok(/let frame = scenario\s*\.initial_board\(\)\s*\.to_standard_target_frame/u
+    .test(read('crates/clearra-cli-command/src/web_command_request.rs')),
+    'target-frame validation must consume the complete typed initial field');
+  assert.ok(read('crates/clearra-cli-command/src/web_pc_scenario_input.rs').includes('self.initial_board.clone()'));
+  assert.ok(read('crates/clearra-core-executor/src/backend/wasm_cpu_search_backend.rs')
+    .includes('extended_pc_tiling_requires_explicit_single_worker'));
+  assert.ok(workflow.includes('cargo check --locked -p clearra-wasm-abi --target wasm32-unknown-unknown'));
+  assert.ok(workflow.includes('node --test packages/clearra-ui/test/workspaceCommandSerialization.test.mjs'));
 });
 
 test('extended document publication preserves full words and the explicit format limit', () => {

@@ -43,6 +43,11 @@ path = "tests/canonical_witness_contract.rs"
 required-features = ["wasm-cpu-runtime"]
 
 [[test]]
+name = "extended_pc_tiling"
+path = "tests/extended_pc_tiling.rs"
+required-features = ["wasm-cpu-runtime"]
+
+[[test]]
 name = "desktop_signed_accelerator_execution"
 path = "tests/desktop_signed_accelerator_execution.rs"
 required-features = ["wasm-cpu-runtime"]

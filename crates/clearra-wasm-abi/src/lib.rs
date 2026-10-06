@@ -2247,21 +2247,41 @@ fn write_tiling_solution_page_json(
         .map_err(|_| "wasm_tiling_solution_page_serialize_failed")?;
     let mut first = true;
     let mut write_failed = false;
-    store.for_each_page_identity(offset, limit, |identity| {
-        if write_failed {
-            return;
-        }
-        let result = (|| {
-            if !first {
-                output.write_char(',')?;
+    if store.is_extended() {
+        store.for_each_extended_page_key(offset, limit, |key| {
+            if write_failed {
+                return;
             }
-            first = false;
-            output.write_char('"')?;
-            identity.write_canonical(output)?;
-            output.write_char('"')
-        })();
-        write_failed = result.is_err();
-    })?;
+            // Validated CTK2 contains only ASCII labels, digits and separators.
+            // No quotes, slashes or control characters need JSON escaping.
+            let result = (|| {
+                if !first {
+                    output.write_char(',')?;
+                }
+                first = false;
+                output.write_char('"')?;
+                output.write_str(key)?;
+                output.write_char('"')
+            })();
+            write_failed = result.is_err();
+        })?;
+    } else {
+        store.for_each_page_identity(offset, limit, |identity| {
+            if write_failed {
+                return;
+            }
+            let result = (|| {
+                if !first {
+                    output.write_char(',')?;
+                }
+                first = false;
+                output.write_char('"')?;
+                identity.write_canonical(output)?;
+                output.write_char('"')
+            })();
+            write_failed = result.is_err();
+        })?;
+    }
     if write_failed {
         return Err("wasm_tiling_solution_page_serialize_failed");
     }

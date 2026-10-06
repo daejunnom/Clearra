@@ -254,7 +254,12 @@ impl fmt::Debug for PcTilingCompiledAuthority {
 
 impl PcTilingCompiledAuthority {
     pub(crate) const fn execution_evidence_retained_upper_bound_bytes() -> u128 {
-        (PC_TILING_INITIAL_PAGE_LIMIT as u128) * ((size_of::<String>() as u128) + 512) + 128
+        // One page can now carry sixty four-word placements per CTK2 key.
+        // This credit covers the retained evidence page before copying it;
+        // the immutable complete-family owner remains shared with Core.
+        let key_bytes =
+            128 + clearra_core_domain::solution::EXTENDED_TILING_MAX_PLACEMENTS as u128 * 67;
+        (PC_TILING_INITIAL_PAGE_LIMIT as u128) * ((size_of::<String>() as u128) + key_bytes) + 512
     }
 
     pub(crate) fn compile_opening(

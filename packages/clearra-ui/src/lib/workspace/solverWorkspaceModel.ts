@@ -360,8 +360,7 @@ export function setBoardCell(mask: bigint, x: number, y: number, occupied: boole
 }
 
 export function trimBoardMask(mask: bigint, height: number): bigint {
-  const cells = Math.max(0, Math.min(64, height * 10));
-  if (cells === 64) return mask & ((1n << 64n) - 1n);
+  const cells = Math.max(0, Math.min(240, Math.trunc(height) * 10));
   return mask & ((1n << BigInt(cells)) - 1n);
 }
 
@@ -371,7 +370,7 @@ export type CompletedRowClear = {
 };
 
 export function clearCompletedRows(mask: bigint, height: number): CompletedRowClear {
-  const boundedHeight = Math.max(0, Math.min(6, Math.trunc(height)));
+  const boundedHeight = Math.max(0, Math.min(24, Math.trunc(height)));
   const trimmed = trimBoardMask(mask, boundedHeight);
   const fullRow = (1n << 10n) - 1n;
   let boardMask = 0n;
@@ -446,7 +445,7 @@ export function automaticPcTargetLines(
   queue: string,
   maxLines = 4
 ): number | null {
-  const boundedMaxLines = Math.max(1, Math.min(6, Math.trunc(maxLines)));
+  const boundedMaxLines = Math.max(1, Math.min(24, Math.trunc(maxLines)));
   const parsedQueue = parseBrowserQueueInput(queue);
   if (!parsedQueue) return null;
 
@@ -473,6 +472,9 @@ export function workspaceValidationCodes(
 ): WorkspaceValidationCode[] {
   assertGuiScoreMode(request.scoreMode);
   const errors: WorkspaceValidationCode[] = [];
+  // The direct extended Tiling terminal requires an explicit single worker.
+  // Do not expose it through this automatic multiworker workspace before the
+  // full-height worker protocol and Desktop terminal have been connected.
   const targetLinesValid = Number.isInteger(request.lines) && request.lines >= 1 && request.lines <= 6;
   if (!targetLinesValid) {
     errors.push('target_lines_invalid');

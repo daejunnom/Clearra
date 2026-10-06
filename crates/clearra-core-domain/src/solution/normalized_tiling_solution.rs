@@ -506,6 +506,13 @@ impl NormalizedTilingSolutionSetHasher {
         self.hasher.write(&[0]);
     }
 
+    /// The four-word codec has already validated this borrowed identity. Do
+    /// not allocate an owned key merely to hash a complete extended family.
+    pub fn update_extended_canonical_key(&mut self, key: super::ExtendedTilingSolutionKey<'_>) {
+        self.hasher.write(key.as_str().as_bytes());
+        self.hasher.write(&[0]);
+    }
+
     pub fn begin_canonical_identity(&mut self, initial_board_mask: u64) {
         self.hasher.write(b"ctk1|initial=");
         write_hex_u64(&mut self.hasher, initial_board_mask);

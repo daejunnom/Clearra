@@ -1,0 +1,179 @@
+//! Small real product requests, never an empty 24L/sixty-piece enumeration.
+use clearra_app::{
+    AppCommand, AppContext, AppCoreExecutorService, AppRequest, AppResponse, AppServices,
+    AppStatus, CooperativeAppAdvance, PcResultProjection, PcTilingIngressOrigin,
+    ProductCapabilityContract, ScenarioAppCommand,
+};
+use clearra_core_domain::{
+    board::standard_pc_board::Board256Mask, execution_cancellation::ExecutionControl,
+    piece::piece_kind::PieceKind, solution::ExtendedTilingSolutionKey,
+};
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+use clearra_pc_graph::request::{
+    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    RequestedSearchBackend,
+};
+use clearra_rules::profile::{
+    builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x},
+    rule_profile::RuleProfile,
+};
+use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+fn forced_request(height: u8, rule: RuleProfile) -> (AppRequest, Board256Mask, usize) {
+    let starts = if height == 7 {
+        vec![0, 3]
+    } else {
+        (0..u16::from(height)).step_by(4).collect()
+    };
+    let count = starts.len();
+    let mut holes = Board256Mask::EMPTY;
+    for (column, start) in starts.into_iter().enumerate() {
+        for row in start..start + 4 {
+            holes = holes.union(Board256Mask::singleton(row * 10 + column as u16).unwrap());
+        }
+    }
+    let initial = Board256Mask::all_cells(u16::from(height) * 10)
+        .unwrap()
+        .without(holes);
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10_from_words(u16::from(height), initial.words()).unwrap(),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; count])),
+        PieceWindow::new(count),
+    )
+    .with_rule(rule)
+    .with_exact_pieces(Some(count))
+    .with_allow_hold(false)
+    .with_min_remaining_queue(0)
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_objective(ObjectivePolicy::tiling())
+    .with_execution_policy(
+        PcExecutionPolicy::default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_workers(1)
+            .with_allow_backend_fallback(false),
+    );
+    let command = ScenarioAppCommand::new(query).with_result_projection(
+        PcResultProjection::TilingFamilyV1(PcTilingIngressOrigin::CanonicalPcTiling),
+    );
+    (
+        AppRequest::new(AppCommand::Scenario(command))
+            .with_product_capability_contract(ProductCapabilityContract::PcTiling)
+            .unwrap(),
+        initial,
+        count,
+    )
+}
+
+fn assert_family(
+    response: &AppResponse,
+    height: u8,
+    initial: Board256Mask,
+    pieces: usize,
+) -> Vec<String> {
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    let result = response
+        .product_capability_result()
+        .unwrap()
+        .pc_tiling_family_v1()
+        .unwrap();
+    assert!(result.completeness().family_complete());
+    assert_eq!(result.normalized_solution_count(), 1);
+    let keys = result.page_keys(0, 100).unwrap();
+    assert_eq!(keys, result.initial_page_keys());
+    assert!(result.page_keys(1, usize::MAX).unwrap().is_empty());
+    let identity = ExtendedTilingSolutionKey::parse_canonical(&keys[0]).unwrap();
+    assert_eq!(identity.height(), height);
+    assert_eq!(identity.initial_board(), initial);
+    assert_eq!(identity.placement_count(), pieces);
+    let full = identity
+        .placements()
+        .fold(initial, |board, placement| board.union(placement.cells()));
+    assert_eq!(
+        full,
+        Board256Mask::all_cells(u16::from(height) * 10).unwrap()
+    );
+    keys
+}
+
+#[test]
+fn full_height_tiling_uses_the_real_app_product_in_all_profiles() {
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for rule in [srs(), srs_plus(), srs_x(), jstris_180(), no_kick()] {
+        for height in [7, 8, 12, 24] {
+            let (request, initial, pieces) = forced_request(height, rule);
+            let response = context.run(request);
+            assert_family(&response, height, initial, pieces);
+            let core = response.render_model().unwrap().core_result().unwrap();
+            assert!(core.pc_tiling_family_publication_contract_is_valid());
+            assert_eq!(core.bool_field("buildup_executed"), Some(false));
+            assert_eq!(core.bool_field("probability_calculated"), Some(false));
+            assert!(core.tiling_solution_page_store().unwrap().is_extended());
+            assert!(core
+                .tiling_solution_page_store()
+                .unwrap()
+                .page_identities(0, 1)
+                .is_err());
+        }
+    }
+}
+
+#[test]
+fn full_height_cooperative_tiling_and_direct_product_have_the_same_family() {
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for height in [7, 8, 12, 24] {
+        let (request, initial, pieces) = forced_request(height, srs_plus());
+        let direct = context.run(request.clone());
+        let expected = assert_family(&direct, height, initial, pieces);
+        let mut execution = context.start_cooperative_execution(request);
+        let mut completed = false;
+        for _ in 0..4096 {
+            match execution.advance(256, &ExecutionControl::default()) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                CooperativeAppAdvance::Completed(response) => {
+                    assert_eq!(assert_family(&response, height, initial, pieces), expected);
+                    completed = true;
+                    break;
+                }
+                other => panic!("unexpected full-height PC outcome: {other:?}"),
+            }
+        }
+        assert!(completed, "bounded forced PC must complete");
+    }
+}
+
+#[test]
+fn extended_direct_tiling_never_reduces_an_explicit_multiworker_request() {
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for workers in [2, 11] {
+        let (request, _, _) = forced_request(24, srs_plus());
+        let AppCommand::Scenario(command) = request.command() else {
+            unreachable!()
+        };
+        let query = command.query().clone().with_execution_policy(
+            command
+                .query()
+                .execution_policy()
+                .clone()
+                .with_workers(workers),
+        );
+        let request = AppRequest::new(AppCommand::Scenario(
+            ScenarioAppCommand::new(query).with_result_projection(command.result_projection()),
+        ))
+        .with_product_capability_contract(ProductCapabilityContract::PcTiling)
+        .unwrap();
+        let response = context.run(request);
+        assert_ne!(response.status(), AppStatus::Success);
+        assert!(response
+            .error()
+            .unwrap()
+            .message()
+            .contains("shared_terminal_memory_authority_requires_single_worker"));
+        assert!(response.product_capability_result().is_none());
+    }
+}

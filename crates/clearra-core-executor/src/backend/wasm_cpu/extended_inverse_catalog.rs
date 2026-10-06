@@ -145,6 +145,18 @@ impl ExtendedInverseCatalog {
         Self::compile_with_clear_row_pruning(field, true)
     }
 
+    /// Bounded producer for a request that already owns finite memory. The
+    /// caller credits 2048 bytes per realization (including geometric Vec
+    /// growth, its skeleton, at most four APDP partials/twelve parent entries,
+    /// support lists, projection scratch and simultaneous catalog owners),
+    /// plus a 32KiB fixed carrier, before catalog construction starts.
+    pub fn compile_bounded(
+        field: BuildProbabilityField,
+        maximum_realizations: usize,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::compile_with_realization_limit(field, true, maximum_realizations)
+    }
+
     #[cfg(test)]
     pub(super) fn compile_unpruned(
         field: BuildProbabilityField,
@@ -155,6 +167,14 @@ impl ExtendedInverseCatalog {
     fn compile_with_clear_row_pruning(
         field: BuildProbabilityField,
         prune: bool,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::compile_with_realization_limit(field, prune, usize::MAX)
+    }
+
+    fn compile_with_realization_limit(
+        field: BuildProbabilityField,
+        prune: bool,
+        maximum_realizations: usize,
     ) -> Result<Self, WasmExactSearchError> {
         let width = field.width();
         let height = field.height();
@@ -239,7 +259,8 @@ impl ExtendedInverseCatalog {
                         row_filter.as_ref(),
                         clear_rows,
                         &mut realizations,
-                    );
+                        maximum_realizations,
+                    )?;
                 }
             }
         }
@@ -472,6 +493,37 @@ fn occupied_rows(width: u8, cells: ExtendedBoard) -> impl Iterator<Item = u8> {
     (0..32).filter(move |row| rows & (1_u32 << row) != 0)
 }
 
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+    use clearra_core_domain::board::standard_pc_board::Board256Mask;
+
+    #[test]
+    fn bounded_catalog_keeps_exact_identity_and_refuses_before_growth() {
+        let mut holes = Board256Mask::EMPTY;
+        for row in 0..8 {
+            holes = holes.union(Board256Mask::singleton(row * 10 + row / 4).unwrap());
+        }
+        let base = Board256Mask::all_cells(80).unwrap().without(holes);
+        let field =
+            BuildProbabilityField::from_words_preserving_height(8, base.words(), holes.words())
+                .unwrap();
+        assert_eq!(
+            ExtendedInverseCatalog::compile_bounded(field, 0)
+                .err()
+                .unwrap()
+                .reason(),
+            "extended_catalog_memory_budget_exceeded"
+        );
+        let reference = ExtendedInverseCatalog::compile(field).unwrap();
+        let bounded = ExtendedInverseCatalog::compile_bounded(field, 1024).unwrap();
+        assert_eq!(bounded.identity_digest(), reference.identity_digest());
+        assert_eq!(bounded.skeletons(), reference.skeletons());
+        assert_eq!(bounded.realizations, reference.realizations);
+        assert!(bounded.retained_bytes() <= 32 * 1024 + 2048 * 1024);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn enumerate_row_projections(
     width: u8,
@@ -488,7 +540,8 @@ fn enumerate_row_projections(
     row_filter: Option<&ProjectionRowFilter>,
     clear_rows: ClearRowDomain,
     output: &mut Vec<ExtendedRealization>,
-) {
+    maximum_realizations: usize,
+) -> Result<(), WasmExactSearchError> {
     if row_index == local_rows.len() {
         let mut mask = ExtendedBoard::EMPTY;
         for cell in cells {
@@ -498,12 +551,12 @@ fn enumerate_row_projections(
             let target_y = target_rows[local_row_index];
             let target_x = x + cell.x();
             if target_x < 0 || target_x >= width as i8 {
-                return;
+                return Ok(());
             }
             mask.insert(u16::from(target_y) * u16::from(width) + target_x as u16);
         }
         if mask.intersects(initial_board) || !mask.is_subset_of(required_cells) {
-            return;
+            return Ok(());
         }
         let mut required_deleted_rows = 0_u32;
         for index in 1..local_rows.len() {
@@ -514,8 +567,16 @@ fn enumerate_row_projections(
             }
         }
         if !clear_rows.allows_required_rows(required_deleted_rows) {
-            return;
+            return Ok(());
         }
+        if output.len() == maximum_realizations {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_catalog_memory_budget_exceeded",
+            ));
+        }
+        output.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("extended_catalog_storage_unavailable")
+        })?;
         output.push(ExtendedRealization {
             piece,
             cells: mask,
@@ -524,7 +585,7 @@ fn enumerate_row_projections(
             x,
             target_anchor_y: target_rows[0] as i8,
         });
-        return;
+        return Ok(());
     }
 
     let local_row = local_rows[row_index];
@@ -536,7 +597,7 @@ fn enumerate_row_projections(
     };
     let remaining_span = local_last - local_row;
     if remaining_span >= height {
-        return;
+        return Ok(());
     }
     let maximum = if row_index != 0 && clear_rows.is_empty() {
         minimum.min(height - 1 - remaining_span)
@@ -566,6 +627,8 @@ fn enumerate_row_projections(
             row_filter,
             clear_rows,
             output,
-        );
+            maximum_realizations,
+        )?;
     }
+    Ok(())
 }
