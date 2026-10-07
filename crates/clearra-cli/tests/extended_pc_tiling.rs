@@ -3,6 +3,37 @@ use clearra_cli::{exit::ExitCode, run_with_args};
 use clearra_core_domain::board::standard_pc_board::Board256Mask;
 
 #[test]
+fn full_height_failed_queue_real_cli_executes_instead_of_relabelling_an_unsupported_request() {
+    for height in [8_u8, 24] {
+        let starts = (0..u16::from(height)).step_by(4).collect::<Vec<_>>();
+        let pieces = starts.len();
+        let mut holes = Board256Mask::EMPTY;
+        for (column, start) in starts.into_iter().enumerate() {
+            for row in start..start + 4 {
+                holes = holes.union(Board256Mask::singleton(row * 10 + column as u16).unwrap());
+            }
+        }
+        let initial = Board256Mask::all_cells(u16::from(height) * 10)
+            .unwrap()
+            .without(holes);
+        let words = initial.words();
+        let board_hex = format!(
+            "{:016x}{:016x}{:016x}{:016x}",
+            words[3], words[2], words[1], words[0]
+        );
+        for (piece, failed) in [("I", 0), ("O", 1)] {
+            let queue = piece.repeat(pieces);
+            let command = format!("clearra --format json pc failed-queue --lines {height} --height {height} --board-mask 0x{board_hex} --pieces {pieces} --queue {queue} --workers 1 --backend cpu --no-hold --failed-count 1");
+            let output = run_with_args(command.split_whitespace().map(str::to_owned));
+            assert_eq!(output.exit_code(), ExitCode::Success, "{output:?}");
+            let json: serde_json::Value = serde_json::from_str(output.stdout()).unwrap();
+            assert_eq!(json["kind"], "pc-failed-queue.v2");
+            assert_eq!(json["summary"]["failed_pattern_count"], failed);
+        }
+    }
+}
+
+#[test]
 fn empty_extended_cli_opening_preserves_resource_failure_without_large_enumeration() {
     for height in [8, 24] {
         for product in ["pc", "pc tiling"] {

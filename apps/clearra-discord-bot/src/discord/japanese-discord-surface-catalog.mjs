@@ -524,6 +524,8 @@ export const JAPANESE_HELP_TEXT = Object.freeze({
   "`field` is a 1–6-row initial PC board or one static document; `next` must be one exact IOTSZJL queue, never a pattern.": "`field`には1〜6行の初期PC盤面または静的なドキュメントを指定します。`next`にはパターンではなく、IOTSZJLの固定キューが必要です。",
   "`lines` accepts 1–6; omission evaluates feasible targets serially.": "`lines`は1〜6です。省略すると可能な目標を順に評価します。",
   "`lines` accepts 1–24; omission evaluates feasible targets serially.": "`lines`は1〜24です。省略すると可能な目標を順に評価します。",
+  "Failed-queue search returns patterns that cannot satisfy the target. `failed-count` bounds returned failures.": "失敗キュー探索は目標を達成できないパターンを返します。`failed-count`は返す失敗例の数を制限します。",
+  "`lines` accepts 1–24. Above 6 lines, queue knowledge must be oracle and B2B preservation must be off.": "`lines`は1〜24です。6行を超える場合、キューの公開範囲はoracle、B2B維持はoffに設定する必要があります。",
   "Note: Results may contain tilings that cannot be built.": "補足: 実際には構築できない敷き詰めが結果に含まれることがあります。",
   "Queue knowledge and B2B preservation are named; a spin profile requires preservation. Scoring, tiling, and per-solution probabilities are unavailable.": "キューの公開範囲とB2B維持は個別のオプションです。スピン判定にはB2B維持が必要です。スコア計算、敷き詰め、解法別確率は使えません。",
   "Note: Score equality and ordering are score-only. Discord selects the first result in deterministic order and never uses informational attack as a selector.": "補足: 同順位の判定と並び順はスコアだけで決まります。Discordは決められた順序の先頭を選び、参考表示の火力を選択基準には使いません。",

@@ -728,7 +728,7 @@ function registrationOptions(input, capabilityId = null) {
       return Object.freeze([
         nextOption(false),
         fieldOption(input),
-        linesOption(),
+        linesOption(discordPcMaxRows(input)),
         pcHoldOption(),
         kicktableOption(true),
         pcQueueKnowledgeOption(),
@@ -1874,7 +1874,7 @@ function syntax(entry, locale = "en") {
       case "pc-tiling-v2":
         return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>]`;
       case "pc-failed-v2":
-        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [failed-count:1..4294967295]`;
+        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [failed-count:1..4294967295]`;
       case "cover":
         return `/${path} next:<패턴> base:<기존 필드> target:<추가할 칸> [kicktable:<내장 프로필>] [options:hold=use]`;
       case "build-cover":
@@ -1963,7 +1963,7 @@ function syntax(entry, locale = "en") {
     case "pc-tiling-v2":
       return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>]`;
     case "pc-failed-v2":
-      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [failed-count:1..4294967295]`;
+      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [failed-count:1..4294967295]`;
     case "cover":
       return `/${path} next:<pattern> base:<field> target:<delta> [kicktable:<built-in>] [options:hold=use]`;
     case "build-cover":
@@ -2134,7 +2134,8 @@ function inputHelp(entry, locale = "en") {
       ];
     case "pc-failed-v2":
       return [
-        "Failed-queue search uses the native reverse PC contract and returns patterns that cannot satisfy the target. `failed-count` bounds returned failures.",
+        "Failed-queue search returns patterns that cannot satisfy the target. `failed-count` bounds returned failures.",
+        `\`lines\` accepts 1–${discordPcMaxRows(entry.input)}. Above 6 lines, queue knowledge must be oracle and B2B preservation must be off.`,
         "Queue knowledge and B2B preservation are named; a spin profile requires preservation. Scoring, tiling, and per-solution probabilities are unavailable.",
         nativeKickHelp,
       ];
@@ -2443,7 +2444,8 @@ function koreanInputHelp(entry) {
       ];
     case "pc-failed-v2":
       return [
-        "실패 큐 탐색은 native 역방향 PC 계약으로 목표를 달성하지 못하는 패턴을 반환하며 `failed-count`가 반환 수를 제한합니다.",
+        "실패 큐 탐색은 목표를 달성하지 못하는 패턴을 반환하며 `failed-count`가 반환 수를 제한합니다.",
+        `\`lines\`는 1–${discordPcMaxRows(entry.input)}입니다. 6줄 초과에서는 큐 공개 범위를 oracle로, B2B 보존을 off로 지정해야 합니다.`,
         "큐 공개 범위와 B2B 보존은 명명 옵션이고, 스핀 프로필은 보존을 필요로 합니다. 점수·타일링·해법별 확률은 사용할 수 없습니다.",
         nativeKickHelp,
       ];

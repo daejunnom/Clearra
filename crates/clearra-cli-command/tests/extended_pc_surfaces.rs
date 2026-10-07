@@ -74,6 +74,75 @@ fn context() -> AppContext {
 }
 
 #[test]
+fn canonical_full_height_failed_queue_uses_the_same_direct_and_gui_completion() {
+    let context = context();
+    for input in inputs() {
+        let command = format!(
+            "clearra pc failed-queue --lines {} --board-mask 0x{} --height {} --pieces {} --queue {} --no-hold --rule srs-plus --backend cpu --workers 1 --failed-count 1",
+            input[1], input[2], input[1], input[3], input[4],
+        );
+        let request = CliCommandParser::parse(&command)
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+        let direct = context.run(request.clone());
+        assert_eq!(
+            direct.status(),
+            AppStatus::Success,
+            "{}: {direct:?}",
+            input[0]
+        );
+        let expected = direct
+            .product_capability_result()
+            .unwrap()
+            .pc_failed_queue_v2()
+            .unwrap();
+        assert_eq!(expected.success_pattern_count(), 1);
+        assert_eq!(expected.failed_pattern_count(), 0);
+        assert!(expected.examples().is_empty());
+        let mut execution = context.start_cooperative_execution(request);
+        let mut response = None;
+        for _ in 0..4096 {
+            match execution.advance(1, &ExecutionControl::default()) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                CooperativeAppAdvance::Completed(completed) => {
+                    response = Some(completed);
+                    break;
+                }
+                other => panic!("unexpected GUI failed-queue outcome: {other:?}"),
+            }
+        }
+        let response = response.expect("bounded full-height failed queue");
+        assert_eq!(
+            response.status(),
+            AppStatus::Success,
+            "{}: {response:?}",
+            input[0]
+        );
+        let actual = response
+            .product_capability_result()
+            .unwrap()
+            .pc_failed_queue_v2()
+            .unwrap();
+        assert_eq!(actual.problem_id(), expected.problem_id());
+        assert_eq!(actual.pattern_universe_id(), expected.pattern_universe_id());
+        assert_eq!(
+            actual.failed_probability_bits(),
+            expected.failed_probability_bits()
+        );
+        assert_eq!(
+            actual.success_pattern_count(),
+            expected.success_pattern_count()
+        );
+        assert_eq!(
+            actual.failed_pattern_count(),
+            expected.failed_pattern_count()
+        );
+        assert_eq!(actual.examples(), expected.examples());
+    }
+}
+
+#[test]
 fn canonical_full_height_chance_preserves_four_word_authority_and_exact_probability() {
     let context = context();
     for input in inputs() {

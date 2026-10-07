@@ -1087,7 +1087,7 @@ impl AppCoreExecutorService {
         Ok(result)
     }
 
-    /// Native-only closed execution seam for `pc.failed-queue`. The Core
+    /// Closed execution seam for `pc.failed-queue`. The Core
     /// service produces the result and its evidence from one execution. App
     /// post-processing runs only after that producer has returned, and the raw
     /// evidence never crosses the command boundary.
@@ -1096,6 +1096,34 @@ impl AppCoreExecutorService {
         authority: &PcFailedQueueCompiledAuthority,
         control: &ExecutionControl,
     ) -> Result<(CoreExecutionResult, PcFailedQueueEvidence), AppPcFailedQueueExecutionError> {
+        if matches!(self.backend, AppCoreExecutorBackend::WasmCpu)
+            && authority.uses_extended_family()
+        {
+            let mut session =
+                clearra_core_executor::WasmPcFailedQueueSession::new(authority.problem_arc())
+                    .map_err(|error| {
+                        AppPcFailedQueueExecutionError::Core(error.into_core_execution_error())
+                    })?;
+            loop {
+                match session.advance(2048, control).map_err(|error| {
+                    AppPcFailedQueueExecutionError::Core(error.into_core_execution_error())
+                })? {
+                    clearra_core_executor::WasmPcFailedQueueAdvance::Pending => {}
+                    clearra_core_executor::WasmPcFailedQueueAdvance::Cancelled => {
+                        return Err(AppPcFailedQueueExecutionError::Core(
+                            CoreExecutionError::Cancelled,
+                        ))
+                    }
+                    clearra_core_executor::WasmPcFailedQueueAdvance::Completed(
+                        result,
+                        evidence,
+                    ) => {
+                        return self
+                            .postprocess_pc_failed_queue_completion(result, evidence, control)
+                    }
+                }
+            }
+        }
         if !matches!(self.backend, AppCoreExecutorBackend::NativeCore) {
             return Err(AppPcFailedQueueExecutionError::Core(
                 CoreExecutionError::RuntimeUnavailable {
@@ -1120,6 +1148,20 @@ impl AppCoreExecutorService {
             ));
         }
         let (result, evidence) = execution.into_parts();
+        self.postprocess_pc_failed_queue_completion(result, evidence, control)
+    }
+
+    pub(crate) fn postprocess_pc_failed_queue_completion(
+        &self,
+        result: CoreExecutionResult,
+        evidence: PcFailedQueueEvidence,
+        control: &ExecutionControl,
+    ) -> Result<(CoreExecutionResult, PcFailedQueueEvidence), AppPcFailedQueueExecutionError> {
+        if control.is_cancelled() {
+            return Err(AppPcFailedQueueExecutionError::Core(
+                CoreExecutionError::Cancelled,
+            ));
+        }
         control.report_progress("postprocess", 0, Some(1));
         let result = self
             .postprocess_search_result(result, control)

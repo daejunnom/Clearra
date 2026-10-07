@@ -10,8 +10,9 @@ use minimum_finalize::{
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_executor::{
-    CoreExecutionError, WasmBuildProbabilityAdvance, WasmBuildProbabilitySession,
-    WasmCpuSearchAdvance, WasmCpuSearchError, WasmCpuSearchSession, WasmSetupSearchAdvance,
+    CoreExecutionError, PcFailedQueueEvidence, WasmBuildProbabilityAdvance,
+    WasmBuildProbabilitySession, WasmCpuSearchAdvance, WasmCpuSearchError, WasmCpuSearchSession,
+    WasmPcFailedQueueAdvance, WasmPcFailedQueueSession, WasmSetupSearchAdvance,
     WasmSetupSearchSession,
 };
 use clearra_forward_search::{
@@ -45,6 +46,7 @@ use crate::{
     },
     pc_allspin_result::project_pc_allspin_result,
     pc_chance_probability_result::PcChanceCompiledAuthority,
+    pc_failed_queue_result::PcFailedQueueCompiledAuthority,
     pc_result_projection::{PcResultProjection, ValidatedPcResultProjection},
     pc_save_result::{PcSaveCompiledAuthority, PcSaveCompiledAuthorityError, PcSaveResultMode},
     pc_score_postprocess::PcScoreDerivation,
@@ -346,6 +348,7 @@ impl FiniteBuildCompileRemainder {
 #[allow(clippy::large_enum_variant)]
 enum CooperativeSearchSession {
     Pc(WasmCpuSearchSession),
+    PcFailedQueue(WasmPcFailedQueueSession),
     Setup(WasmSetupSearchSession),
     BuildProbability(WasmBuildProbabilitySession),
     Forward(ForwardSearchSession),
@@ -706,6 +709,9 @@ impl CooperativePcScoreProduct {
 
 pub(crate) enum CooperativeSearchResponseKind {
     Pc(ValidatedPcResultProjection),
+    PcFailedQueue {
+        authority: PcFailedQueueCompiledAuthority,
+    },
     PcChance {
         authority: PcChanceCompiledAuthority,
         expected_problem: Arc<clearra_problem::SearchProblem>,
@@ -1478,6 +1484,10 @@ impl AppContext {
                 }
             };
         let session = match &response_kind {
+            CooperativeSearchResponseKind::PcFailedQueue { .. } => {
+                WasmPcFailedQueueSession::new(Arc::clone(&problem))
+                    .map(CooperativeSearchSession::PcFailedQueue)
+            }
             CooperativeSearchResponseKind::BuildCover {
                 request,
                 expected_problem,
@@ -2804,6 +2814,56 @@ impl CooperativeAppExecution {
                         None => advance_search_session(&mut search.session, work_budget, control),
                     };
                     match backend_advance {
+                        Ok(CooperativeBackendAdvance::CompletedPcFailedQueue(result, evidence)) => {
+                            let response = match search.response_kind {
+                                CooperativeSearchResponseKind::PcFailedQueue { authority } => {
+                                    match self
+                                        .context()
+                                        .services()
+                                        .core_executor()
+                                        .postprocess_pc_failed_queue_completion(
+                                            result, evidence, control,
+                                        ) {
+                                        Ok((result, evidence)) => match authority
+                                            .validate_and_decorate(result, evidence)
+                                        {
+                                            Ok((result, evidence)) => AppResponse::success(
+                                                AppRenderModel::Percent(result),
+                                            )
+                                            .with_pc_failed_queue_execution_evidence(evidence),
+                                            Err(error) => AppResponse::failed(
+                                                AppStatus::ExecutionFailed,
+                                                AppError::new(
+                                                    AppErrorCode::ExecutionFailed,
+                                                    error.reason(),
+                                                ),
+                                            ),
+                                        },
+                                        Err(error) => error.into_response(),
+                                    }
+                                }
+                                _ => AppResponse::failed(
+                                    AppStatus::ExecutionFailed,
+                                    AppError::new(
+                                        AppErrorCode::ExecutionFailed,
+                                        "pc_failed_queue_cooperative_authority_mismatch",
+                                    ),
+                                ),
+                            };
+                            let response = if search.validation_report.is_empty() {
+                                response
+                            } else {
+                                response.with_validation_diagnostics(search.validation_report)
+                            };
+                            CooperativeAppAdvance::Completed(
+                                self.context().finalize_response_with_product_capability(
+                                    response,
+                                    search.command_kind,
+                                    &search.output_policy,
+                                    search.product_capability_contract,
+                                ),
+                            )
+                        }
                         Ok(CooperativeBackendAdvance::Pending) => {
                             self.state = CooperativeExecutionState::Search(search);
                             CooperativeAppAdvance::Pending
@@ -3698,6 +3758,54 @@ pub(crate) fn compile_search_command(
     AppResponse,
 > {
     let compiled = match command {
+        AppCommand::Percent(command) if command.pc_failed_queue_origin().is_some() => {
+            let origin = command
+                .pc_failed_queue_origin()
+                .expect("matched typed failed queue");
+            let authority = match (command.opening_query(), command.query()) {
+                (Some(query), None) => PcFailedQueueCompiledAuthority::opening(
+                    query,
+                    origin,
+                    command.failed_pattern_limit(),
+                ),
+                (None, Some(query)) => PcFailedQueueCompiledAuthority::scenario(
+                    query,
+                    origin,
+                    command.failed_pattern_limit(),
+                ),
+                _ => {
+                    return Err(AppResponse::failed(
+                        AppStatus::ValidationFailed,
+                        AppError::new(
+                            AppErrorCode::InvalidInput,
+                            "pc_failed_queue_query_unavailable",
+                        ),
+                    ))
+                }
+            };
+            let authority = match authority {
+                Ok(authority) if authority.uses_extended_family() => authority,
+                Ok(_) => {
+                    return Err(AppResponse::failed(
+                        AppStatus::ExecutionFailed,
+                        AppError::new(
+                            AppErrorCode::ExecutionFailed,
+                            "pc_failed_queue_compact_cooperative_not_connected",
+                        ),
+                    ))
+                }
+                Err(error) => {
+                    return Err(AppResponse::failed(
+                        AppStatus::ExecutionFailed,
+                        AppError::new(AppErrorCode::ProblemCompileFailed, error.reason()),
+                    ))
+                }
+            };
+            return Ok((
+                authority.problem_arc(),
+                CooperativeSearchResponseKind::PcFailedQueue { authority },
+            ));
+        }
         AppCommand::Pc(command) => {
             let (query, result_projection) = match command.into_validated_search_parts() {
                 Ok(parts) => parts,
@@ -4084,6 +4192,13 @@ pub(crate) fn response_from_search_with_build_score_derivation(
     build_score_derivation: Option<PcScoreDerivation>,
 ) -> AppResponse {
     match response_kind {
+        CooperativeSearchResponseKind::PcFailedQueue { .. } => AppResponse::failed(
+            AppStatus::ExecutionFailed,
+            AppError::new(
+                AppErrorCode::ExecutionFailed,
+                "pc_failed_queue_owned_producer_required",
+            ),
+        ),
         CooperativeSearchResponseKind::Pc(result_projection) => AppResponse::success(
             AppRenderModel::Pc(project_pc_allspin_result(result, result_projection)),
         ),
@@ -4261,6 +4376,10 @@ fn pc_save_response(
 #[allow(clippy::large_enum_variant)]
 enum CooperativeBackendAdvance {
     Pending,
+    CompletedPcFailedQueue(
+        clearra_core_executor::CoreExecutionResult,
+        PcFailedQueueEvidence,
+    ),
     CompletedCore(clearra_core_executor::CoreExecutionResult),
     CompletedForward(ForwardSearchReport),
     Cancelled,
@@ -4272,6 +4391,15 @@ fn advance_search_session(
     control: &ExecutionControl,
 ) -> Result<CooperativeBackendAdvance, WasmCpuSearchError> {
     match session {
+        CooperativeSearchSession::PcFailedQueue(session) => {
+            match session.advance(work_budget, control)? {
+                WasmPcFailedQueueAdvance::Pending => Ok(CooperativeBackendAdvance::Pending),
+                WasmPcFailedQueueAdvance::Completed(result, evidence) => Ok(
+                    CooperativeBackendAdvance::CompletedPcFailedQueue(result, evidence),
+                ),
+                WasmPcFailedQueueAdvance::Cancelled => Ok(CooperativeBackendAdvance::Cancelled),
+            }
+        }
         CooperativeSearchSession::Pc(session) => match session.advance(work_budget, control)? {
             WasmCpuSearchAdvance::Pending => Ok(CooperativeBackendAdvance::Pending),
             WasmCpuSearchAdvance::Completed(result) => {

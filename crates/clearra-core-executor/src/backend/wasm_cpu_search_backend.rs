@@ -854,7 +854,7 @@ fn runtime_worker_count(requested: usize) -> usize {
     }
 }
 
-fn map_error(error: WasmExactSearchError) -> WasmCpuSearchError {
+pub(super) fn map_error(error: WasmExactSearchError) -> WasmCpuSearchError {
     match error {
         WasmExactSearchError::InvalidProblem(reason) => {
             WasmCpuSearchError::InvalidProblem { reason }

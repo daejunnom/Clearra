@@ -238,6 +238,11 @@ mod pc_chance_evidence_policy {
         #[default]
         Disabled,
         PcProbabilityV2,
+        /// Complete PC coverage, consumed only by the request-owned failed
+        /// queue producer. The example bound is part of execution identity.
+        PcFailedQueueV2 {
+            example_limit: usize,
+        },
         PcMinimumCoverV2,
         /// Purpose-separated private evidence for the typed
         /// `pc.score-minimals` producer. This is not interchangeable with
@@ -261,8 +266,18 @@ mod pc_chance_evidence_policy {
         pub const fn retains_pc_coverage_evidence(self) -> bool {
             matches!(
                 self,
-                Self::PcProbabilityV2 | Self::PcMinimumCoverV2 | Self::PcScorePortfolioV2
+                Self::PcProbabilityV2
+                    | Self::PcFailedQueueV2 { .. }
+                    | Self::PcMinimumCoverV2
+                    | Self::PcScorePortfolioV2
             )
+        }
+
+        pub const fn pc_failed_queue_example_limit(self) -> Option<usize> {
+            match self {
+                Self::PcFailedQueueV2 { example_limit } => Some(example_limit),
+                _ => None,
+            }
         }
 
         pub const fn retains_pc_minimum_cover_v2_evidence(self) -> bool {

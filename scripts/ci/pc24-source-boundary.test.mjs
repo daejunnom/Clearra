@@ -269,11 +269,11 @@ test('the connected twenty-four-line surfaces retain whole fields and an exporta
   const editor = read('packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte');
   assert.ok(model.includes('WORKSPACE_PC_MAX_LINES = 24'));
   assert.ok(model.includes("runtime === 'web' && execution.workers !== 1"));
-  assert.ok(model.includes("!['tiling', 'off', 'minimum-cover'].includes(execution.scoreMode)"));
+  assert.ok(model.includes("!['tiling', 'off', 'minimum-cover', 'failed-queue'].includes(execution.scoreMode)"));
   assert.ok(workspace.includes('dimensionMax={WORKSPACE_PC_MAX_LINES}'));
   assert.ok(editor.includes('decodeInterchangeField(source, 24)'));
   assert.ok(read('apps/clearra-discord-bot/src/discord/field-limits.mjs')
-    .includes("['pc-tiling-v2', 'pc-v2', 'pc-chance-v2'].includes(input)"));
+    .includes("['pc-tiling-v2', 'pc-v2', 'pc-chance-v2', 'pc-failed-v2'].includes(input)"));
   const executor = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
   const pcTerminal = executor.slice(executor.indexOf('fn build_pc_family_result('),
     executor.indexOf('pub(super) fn finesse_search_material('));
@@ -314,4 +314,28 @@ test('full-height chance retains its independent four-word authority and admits 
   assert.ok(memory.includes('size_of::<CoverageRow>()'));
   assert.ok(memory.includes('.div_ceil(64) as u128'));
   assert.ok(workflow.includes('--lib pc_family_evidence_admits_snapshot_row_slots_and_owned_bitsets_before_construction'));
+});
+
+test('full-height failed queue consumes only request-owned complete coverage and preserves cancellation', () => {
+  const producer = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_failed_queue.rs');
+  const authority = read('crates/clearra-app/src/pc_failed_queue_result.rs');
+  const app = read('crates/clearra-app/src/app_services.rs');
+  const cooperative = read('crates/clearra-app/src/cooperative_execution.rs');
+  assert.ok(producer.includes('pub fn new(problem: Arc<SearchProblem>)'));
+  assert.ok(producer.includes('pc_failed_queue_example_limit()'));
+  assert.ok(producer.includes('source.complete()'));
+  assert.ok(producer.includes('.matches_search_problem(self.authority.problem())'));
+  assert.ok(producer.includes('PcFailedQueueEvidenceProducer::produce('));
+  assert.ok(producer.includes('result.without_pc_chance_transient_evidence()'));
+  assert.ok(producer.includes('WasmPcFailedQueueAdvance::Cancelled'));
+  assert.ok(authority.includes('.with_pc_failed_queue_v2_evidence(failed_pattern_limit)'));
+  assert.ok(app.includes('WasmPcFailedQueueSession::new('));
+  assert.ok(cooperative.includes('CompletedPcFailedQueue('));
+  assert.ok(cooperative.includes('postprocess_pc_failed_queue_completion('));
+  const tests = read('crates/clearra-core-executor/tests/extended_pc_family.rs');
+  for (const name of [
+    'full_height_failed_queue_owns_the_executed_problem_and_never_borrows_chance_authority',
+    'full_height_failed_queue_cancellation_never_returns_unsat_or_a_failure_list',
+    'full_height_native_parallel_failed_queue_keeps_complete_source_coverage_and_worker_identity',
+  ]) assert.ok(tests.includes(`fn ${name}()`));
 });

@@ -428,6 +428,20 @@ mod execution_accessors {
             self
         }
 
+        /// Purpose-separated complete coverage for the typed failed-queue
+        /// producer. A chance or minimum request cannot borrow this authority.
+        pub fn with_pc_failed_queue_v2_evidence(mut self, example_limit: usize) -> Self {
+            let policy = PcChanceEvidencePolicy::PcFailedQueueV2 { example_limit };
+            if self.pc_chance_evidence_policy != policy {
+                self.pc_chance_evidence_policy = policy;
+                self.problem_id = SearchProblemId::new(format!(
+                    "{}:pc-failed-queue-v2:{example_limit}",
+                    self.problem_id.as_str()
+                ));
+            }
+            self
+        }
+
         /// Opts an already compiled problem into the private
         /// `pc-minimum-cover.v2` execution-evidence contract.
         pub fn with_pc_minimum_cover_v2_evidence(mut self) -> Self {
@@ -770,6 +784,17 @@ mod retained_capacity {
                 && self.count_policy == CountPolicy::CountUnique
                 && self.output_policy == SearchOutputPolicy::CoverageSummary
                 && !self.solution_probability_policy().requested();
+            let failed_source = self
+                .pc_chance_evidence_policy
+                .pc_failed_queue_example_limit()
+                .is_some()
+                && matches!(
+                    (self.objective.kind(), self.count_policy),
+                    (ObjectiveKind::All, CountPolicy::CountAll)
+                        | (ObjectiveKind::Unique, CountPolicy::CountUnique)
+                )
+                && self.output_policy == SearchOutputPolicy::CoverageSummary
+                && !self.solution_probability_policy().requested();
             if self.scenario.setup_query().is_some()
                 || self.scenario.build_query().is_some()
                 || self.scenario.core_query().verified_kick_profile().is_some()
@@ -779,8 +804,9 @@ mod retained_capacity {
                 || !(matches!(
                     self.output_policy,
                     SearchOutputPolicy::Summary | SearchOutputPolicy::Trace
-                ) || chance_source)
-                || !(ordinary_source || minimum_source || chance_source)
+                ) || chance_source
+                    || failed_source)
+                || !(ordinary_source || minimum_source || chance_source || failed_source)
                 || self.objective.score().requested()
                 || self.objective.execution_constraints().requested()
                 || self

@@ -62,11 +62,12 @@ pub use backend::{
     WasmCpuSearchBackend, WasmCpuSearchError, WasmCpuSearchSession, WasmCpuSearchTerminalAuthority,
     WasmCpuTerminalResourceAuthority, WasmDistributedBackendExecution,
     WasmDistributedGeometrySummary, WasmDistributedProgress, WasmDistributedResultMerger,
-    WasmDistributedVerifier, WasmPackedTilingIdentity, WasmPcRootProducer, WasmPcRootResultMerger,
-    WasmProductSearchBackend, WasmSetupParallelCoordinator, WasmSetupParallelProduce,
-    WasmSetupParallelWorker, WasmSetupParallelWorkerStep, WasmSetupSearchAdvance,
-    WasmSetupSearchBackend, WasmSetupSearchSession, WasmTilingRootAdvance, WasmTilingRootChunk,
-    WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
+    WasmDistributedVerifier, WasmPackedTilingIdentity, WasmPcFailedQueueAdvance,
+    WasmPcFailedQueueSession, WasmPcRootProducer, WasmPcRootResultMerger, WasmProductSearchBackend,
+    WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
+    WasmSetupParallelWorkerStep, WasmSetupSearchAdvance, WasmSetupSearchBackend,
+    WasmSetupSearchSession, WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer,
+    WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
 pub use buildup::{
     BuildUpEvent, BuildUpReducerReport, BuildUpRunResult, BuildUpRunner, BuildUpState,

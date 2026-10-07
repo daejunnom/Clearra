@@ -48,6 +48,20 @@ pub(super) fn validate_pc_family_problem(
         && problem.count_policy() == PcCountPolicy::CountUnique
         && problem.output_policy() == SearchOutputPolicy::CoverageSummary
         && !problem.solution_probability_policy().requested();
+    // The canonical failed-queue command deliberately retains its existing
+    // All + CountAll input contract. Its complement proof is purpose-separated
+    // from chance; do not normalize the user's query into a different source.
+    let failed_source = problem
+        .pc_chance_evidence_policy()
+        .pc_failed_queue_example_limit()
+        .is_some()
+        && matches!(
+            (problem.objective().kind(), problem.count_policy()),
+            (ObjectiveKind::All, PcCountPolicy::CountAll)
+                | (ObjectiveKind::Unique, PcCountPolicy::CountUnique)
+        )
+        && problem.output_policy() == SearchOutputPolicy::CoverageSummary
+        && !problem.solution_probability_policy().requested();
     if !matches!(
         problem.preset(),
         SearchProblemPreset::ScenarioPc | SearchProblemPreset::OpeningPc
@@ -56,7 +70,7 @@ pub(super) fn validate_pc_family_problem(
         || problem.goal().as_str() != "clear-to-empty"
         || problem.initial_board().width() != 10
         || !(7..=24).contains(&problem.visible_height())
-        || !(ordinary_source || minimum_source || chance_source)
+        || !(ordinary_source || minimum_source || chance_source || failed_source)
         || !matches!(
             problem.count_policy(),
             PcCountPolicy::CountAll | PcCountPolicy::CountUnique
@@ -64,7 +78,8 @@ pub(super) fn validate_pc_family_problem(
         || !(matches!(
             problem.output_policy(),
             SearchOutputPolicy::Summary | SearchOutputPolicy::Trace
-        ) || chance_source)
+        ) || chance_source
+            || failed_source)
         || problem.objective().score().requested()
         || problem.objective().execution_constraints().requested()
         || problem.allowed_colored_solution_identities().is_some()
@@ -92,7 +107,22 @@ pub(super) fn checked_pc_family_problem_nested_retained_bytes(
 }
 
 impl ExtendedPcSearchSession {
+    pub(super) fn failed_queue_memory_bound(&self) -> crate::resource::ExecutionMemoryBound {
+        self._admission.memory_bound()
+    }
+
+    pub(super) fn checked_failed_queue_retained_bytes(&self) -> Option<u128> {
+        self.engine.checked_retained_bytes_with_coexisting_owners()
+    }
+
     pub fn new(problem: &SearchProblem) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_coexisting_retained_bytes(problem, 0)
+    }
+
+    pub(super) fn new_with_coexisting_retained_bytes(
+        problem: &SearchProblem,
+        additional_coexisting_retained_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
         validate_pc_family_problem(problem)?;
         // Do not silently turn a multiworker product into a serial search.
         if problem.backend_policy().workers() != 1
@@ -135,6 +165,7 @@ impl ExtendedPcSearchSession {
         // The legacy ordinary execution API borrows a caller-owned problem;
         // both that input and the engine's owned snapshot coexist.
         let external = checked_pc_family_problem_nested_retained_bytes(problem)
+            .and_then(|bytes| bytes.checked_add(additional_coexisting_retained_bytes))
             .and_then(|bytes| {
                 bytes.checked_add(
                     core::mem::size_of::<Self>() as u128

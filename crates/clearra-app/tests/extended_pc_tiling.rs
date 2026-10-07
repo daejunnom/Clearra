@@ -21,6 +21,76 @@ use clearra_rules::profile::{
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 #[test]
+fn full_height_failed_queue_direct_and_cooperative_products_share_the_same_source() {
+    use clearra_app::{PcFailedQueueIngressOrigin, PercentAppCommand};
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for height in [7, 8, 12, 24] {
+        let (source, _, _) = forced_request(height, srs_plus());
+        let AppCommand::Scenario(source) = source.command() else {
+            panic!("scenario fixture");
+        };
+        let request = AppRequest::new(AppCommand::Percent(
+            PercentAppCommand::pc_failed_queue(
+                source
+                    .query()
+                    .clone()
+                    .with_objective(ObjectivePolicy::all())
+                    .with_count_policy(PcCountPolicy::CountAll),
+                PcFailedQueueIngressOrigin::CanonicalFailedQueue,
+            )
+            .with_failed_pattern_limit(1),
+        ))
+        .with_product_capability_contract(ProductCapabilityContract::PcFailedQueue)
+        .unwrap();
+        let direct = context.run(request.clone());
+        assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
+        let direct_report = direct
+            .product_capability_result()
+            .unwrap()
+            .pc_failed_queue_v2()
+            .unwrap();
+        assert_eq!(direct_report.success_pattern_count(), 1);
+        assert_eq!(direct_report.failed_pattern_count(), 0);
+        let mut execution = context.start_cooperative_execution(request);
+        let control = ExecutionControl::default();
+        let mut response = None;
+        for _ in 0..4096 {
+            match execution.advance(1, &control) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                CooperativeAppAdvance::Completed(completed) => {
+                    response = Some(completed);
+                    break;
+                }
+                other => panic!("unexpected cooperative failed queue: {other:?}"),
+            }
+        }
+        let response = response.expect("bounded cooperative request");
+        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+        let report = response
+            .product_capability_result()
+            .unwrap()
+            .pc_failed_queue_v2()
+            .unwrap();
+        assert_eq!(report.problem_id(), direct_report.problem_id());
+        assert_eq!(
+            report.success_pattern_count(),
+            direct_report.success_pattern_count()
+        );
+        assert_eq!(
+            report.failed_probability_bits(),
+            direct_report.failed_probability_bits()
+        );
+        assert_eq!(
+            report.pattern_universe_id(),
+            direct_report.pattern_universe_id()
+        );
+        assert_eq!(report.examples(), direct_report.examples());
+    }
+}
+
+#[test]
 fn full_height_tiling_opening_keeps_a_distinct_typed_ingress_without_enumeration() {
     for lines in (8..=24).step_by(2) {
         let query = OpeningPcSearchQuery::new(PcTarget::new(lines).unwrap())

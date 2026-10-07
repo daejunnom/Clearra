@@ -368,6 +368,7 @@ impl ExtendedBuildProbabilitySession {
                     problem.pc_chance_evidence_policy(),
                     PcChanceEvidencePolicy::PcMinimumCoverV2
                         | PcChanceEvidencePolicy::PcProbabilityV2
+                        | PcChanceEvidencePolicy::PcFailedQueueV2 { .. }
                 ))
             .then(HashMap::new),
             spin_execution_graphs: Vec::new(),
@@ -2264,8 +2265,14 @@ impl ExtendedBuildProbabilitySession {
     fn build_pc_family_result(&self) -> Result<CoreExecutionResult, WasmExactSearchError> {
         let minimum_source =
             self.problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::PcMinimumCoverV2;
-        let chance_source =
-            self.problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::PcProbabilityV2;
+        let failed_source = self
+            .problem
+            .pc_chance_evidence_policy()
+            .pc_failed_queue_example_limit()
+            .is_some();
+        let chance_source = self.problem.pc_chance_evidence_policy()
+            == PcChanceEvidencePolicy::PcProbabilityV2
+            || failed_source;
         let universe = self.problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
@@ -2544,6 +2551,16 @@ impl ExtendedBuildProbabilitySession {
         } else {
             None
         };
+        if failed_source {
+            fields.extend([
+                field("status", "percent-executed"),
+                field("pattern_count", universe.pattern_count()),
+                field("c_buildup_coverage_row_count", coverages.len()),
+                field("probability", probability.get()),
+                field("weighted_probability", probability.get()),
+                field("truncated", self.truncated_reason.is_some()),
+            ]);
+        }
         // Minimum evidence comes from this PC producer's verified language,
         // not from Build result fields. The common exact reducer runs in App.
         let mut result = CoreExecutionResult::new(fields, self.representative_path.clone())
@@ -2688,6 +2705,11 @@ impl ExtendedBuildProbabilitySession {
             problem_bytes.checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32)?
         };
         owned_problem_bytes.checked_add(self.checked_non_problem_retained_bytes()?)
+    }
+
+    pub(super) fn checked_retained_bytes_with_coexisting_owners(&self) -> Option<u128> {
+        self.checked_retained_bytes()?
+            .checked_add(self.coexisting_retained_bytes)
     }
 
     fn checked_non_problem_retained_bytes(&self) -> Option<u128> {
@@ -2853,7 +2875,9 @@ impl ExtendedBuildProbabilitySession {
         if self.purpose == ExtendedFamilyPurpose::Pc
             && matches!(
                 self.problem.pc_chance_evidence_policy(),
-                PcChanceEvidencePolicy::PcMinimumCoverV2 | PcChanceEvidencePolicy::PcProbabilityV2
+                PcChanceEvidencePolicy::PcMinimumCoverV2
+                    | PcChanceEvidencePolicy::PcProbabilityV2
+                    | PcChanceEvidencePolicy::PcFailedQueueV2 { .. }
             )
         {
             future = future

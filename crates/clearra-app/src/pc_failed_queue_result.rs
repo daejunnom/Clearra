@@ -286,6 +286,15 @@ impl PcFailedQueueCompiledAuthority {
         failed_pattern_limit: usize,
         problem: Arc<SearchProblem>,
     ) -> Result<Self, PcFailedQueueExecutionValidationError> {
+        let problem = if problem.visible_height() > 6 {
+            Arc::new(
+                (*problem)
+                    .clone()
+                    .with_pc_failed_queue_v2_evidence(failed_pattern_limit),
+            )
+        } else {
+            problem
+        };
         if problem.preset() != query.problem_preset().search_problem_preset() {
             return Err(rejected(
                 "compiled problem preset does not match the failed-queue query",
@@ -309,6 +318,10 @@ impl PcFailedQueueCompiledAuthority {
 
     pub(crate) fn problem_arc(&self) -> Arc<SearchProblem> {
         Arc::clone(&self.problem)
+    }
+
+    pub(crate) fn uses_extended_family(&self) -> bool {
+        self.problem.visible_height() > 6
     }
 
     pub(crate) const fn failed_pattern_limit(&self) -> usize {

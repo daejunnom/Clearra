@@ -6,6 +6,7 @@ use clearra_core_domain::{
 use clearra_core_executor::backend::{
     WasmCpuSearchAdvance, WasmCpuSearchBackend, WasmCpuSearchError, WasmCpuSearchSession,
 };
+use clearra_core_executor::{WasmPcFailedQueueAdvance, WasmPcFailedQueueSession};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
@@ -17,6 +18,7 @@ use clearra_rules::profile::{
     rule_profile::RuleProfile,
 };
 use clearra_supply::queue::fixed_sequence::FixedSequence;
+use std::sync::Arc;
 
 fn forced_query(height: u8, rule: RuleProfile) -> (PcScenarioQuery, Board256Mask, usize) {
     let starts = if height == 7 {
@@ -264,6 +266,92 @@ fn full_height_chance_uses_complete_problem_bound_build_coverage_without_replay_
     }
 }
 
+#[test]
+fn full_height_failed_queue_owns_the_executed_problem_and_never_borrows_chance_authority() {
+    for height in [7, 8, 12, 24] {
+        let (query, initial, pieces) = forced_query(height, srs_plus());
+        for succeeds in [true, false] {
+            let query = if succeeds {
+                query.clone()
+            } else {
+                PcScenarioQuery::new(
+                    PcScenarioBoard::standard_10_from_words(u16::from(height), initial.words())
+                        .unwrap(),
+                    PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O; pieces])),
+                    PieceWindow::new(pieces),
+                )
+                .with_rule(srs_plus())
+                .with_exact_pieces(Some(pieces))
+                .with_allow_hold(false)
+                .with_min_remaining_queue(0)
+                .with_execution_policy(query.execution_policy().clone())
+            };
+            let query = query
+                .with_objective(ObjectivePolicy::all())
+                .with_count_policy(PcCountPolicy::CountAll);
+            let bare = ProblemCompiler::compile_scenario_percent(&query).unwrap();
+            assert!(WasmPcFailedQueueSession::new(Arc::new(
+                bare.clone().with_pc_chance_probability_v2_evidence()
+            ))
+            .is_err());
+            let problem = Arc::new(bare.with_pc_failed_queue_v2_evidence(1));
+            let mut session = WasmPcFailedQueueSession::new(Arc::clone(&problem)).unwrap();
+            let control = ExecutionControl::default();
+            let mut completed = None;
+            for _ in 0..4096 {
+                match session.advance(1, &control).unwrap() {
+                    WasmPcFailedQueueAdvance::Pending => {}
+                    WasmPcFailedQueueAdvance::Completed(result, evidence) => {
+                        completed = Some((result, evidence));
+                        break;
+                    }
+                    WasmPcFailedQueueAdvance::Cancelled => panic!("not cancelled"),
+                }
+            }
+            let (result, evidence) = completed.expect("bounded full-height request");
+            assert!(evidence.matches_problem_owner(&problem));
+            assert_eq!(evidence.success_pattern_count(), usize::from(succeeds));
+            assert_eq!(evidence.failed_pattern_count(), usize::from(!succeeds));
+            assert_eq!(evidence.examples().len(), usize::from(!succeeds));
+            assert_eq!(
+                result.coverage_pattern_words(),
+                evidence.success_coverage().words()
+            );
+            assert_eq!(result.field("status"), Some("percent-executed"));
+            assert!(
+                result.pc_chance_coverage_evidence().is_none(),
+                "the consumed private source must not escape"
+            );
+            assert!(result.exact_scoring_execution_batches().is_empty());
+            assert!(evidence.memory_report().admitted_producer_peak_bytes() > 0);
+            assert!(
+                session.advance(1, &control).is_err(),
+                "terminal must be one-shot"
+            );
+        }
+    }
+}
+
+#[test]
+fn full_height_failed_queue_cancellation_never_returns_unsat_or_a_failure_list() {
+    let (query, _, _) = forced_query(24, srs_plus());
+    let query = query
+        .with_objective(ObjectivePolicy::all())
+        .with_count_policy(PcCountPolicy::CountAll);
+    let problem = Arc::new(
+        ProblemCompiler::compile_scenario_percent(&query)
+            .unwrap()
+            .with_pc_failed_queue_v2_evidence(1),
+    );
+    let mut session = WasmPcFailedQueueSession::new(problem).unwrap();
+    let control = ExecutionControl::default();
+    control.cancellation.handle().cancel();
+    assert!(matches!(
+        session.advance(1, &control).unwrap(),
+        WasmPcFailedQueueAdvance::Cancelled
+    ));
+}
+
 #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 fn branching_query(height: u8, rule: RuleProfile) -> PcScenarioQuery {
     let mut holes = Board256Mask::EMPTY;
@@ -296,6 +384,59 @@ fn branching_query(height: u8, rule: RuleProfile) -> PcScenarioQuery {
             .with_workers(1)
             .with_allow_backend_fallback(false),
     )
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_native_parallel_failed_queue_keeps_complete_source_coverage_and_worker_identity() {
+    let hardware = std::thread::available_parallelism().map_or(1, usize::from);
+    if hardware < 2 {
+        return;
+    }
+    for height in [8, 24] {
+        let query = branching_query(height, srs_plus())
+            .with_objective(ObjectivePolicy::all())
+            .with_count_policy(PcCountPolicy::CountAll);
+        let mut serial_coverage = None;
+        for workers in [1, 2] {
+            let query = query.clone().with_execution_policy(
+                query
+                    .execution_policy()
+                    .clone()
+                    .with_workers(workers)
+                    .with_use_all_logical_processors(hardware == 2),
+            );
+            let problem = Arc::new(
+                ProblemCompiler::compile_scenario_percent(&query)
+                    .unwrap()
+                    .with_pc_failed_queue_v2_evidence(1),
+            );
+            let mut session = WasmPcFailedQueueSession::new(Arc::clone(&problem)).unwrap();
+            let control = ExecutionControl::default();
+            let mut completed = None;
+            for _ in 0..4096 {
+                match session.advance(1, &control).unwrap() {
+                    WasmPcFailedQueueAdvance::Pending => {}
+                    WasmPcFailedQueueAdvance::Completed(result, evidence) => {
+                        completed = Some((result, evidence));
+                        break;
+                    }
+                    WasmPcFailedQueueAdvance::Cancelled => panic!("not cancelled"),
+                }
+            }
+            let (result, evidence) = completed.expect("bounded branching PC request");
+            assert_eq!(result.usize_field("workers_used"), Some(workers));
+            assert!(evidence.matches_problem_owner(&problem));
+            assert_eq!(evidence.success_pattern_count(), 1);
+            assert_eq!(evidence.failed_pattern_count(), 0);
+            let coverage = evidence.success_coverage().words().to_vec();
+            if let Some(serial) = &serial_coverage {
+                assert_eq!(&coverage, serial);
+            } else {
+                serial_coverage = Some(coverage);
+            }
+        }
+    }
 }
 
 #[test]

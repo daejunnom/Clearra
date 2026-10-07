@@ -52,8 +52,8 @@ function compactGridFromMask(mask) {
   return `grid:${rows.join("/")}`;
 }
 
-test("Discord 7..24L Tiling, Minimum and Chance retain all field words and normalize the explicit or automatic target once", () => {
-  for (const product of ["tiling", "minimals", "chance"]) {
+test("Discord 7..24L Tiling, Minimum, Chance and Failed Queue retain all field words and normalize the explicit or automatic target once", () => {
+  for (const product of ["tiling", "minimals", "chance", "failed-queue"]) {
   const command = findSlashCommand("pc").subcommands[product];
   const rows = readFileSync(new URL("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv", import.meta.url), "utf8")
     .split(/\r?\n/u).filter(line => line && !line.startsWith("#"));
@@ -89,6 +89,18 @@ test("24L Minimum refuses disconnected B2B semantics without changing the reques
     { name: "field", value: "grid:__________" }, { name: "next", value: "I".repeat(20) },
     { name: "lines", value: 8 }, { name: "preserve-b2b", value: "on" },
   ]), /B2B preservation above 6 PC lines/u);
+});
+
+test("24L Failed Queue refuses disconnected observation and B2B semantics instead of dropping them", () => {
+  const command = findSlashCommand("pc").subcommands["failed-queue"];
+  const options = [
+    { name: "field", value: "grid:__________" }, { name: "next", value: "I".repeat(20) },
+    { name: "lines", value: 8 },
+  ];
+  assert.throws(() => buildSlashCommandArguments(command,
+    [...options, { name: "queue-knowledge", value: "visible-7" }]), /Visible-7 evaluation above 6 PC lines/u);
+  assert.throws(() => buildSlashCommandArguments(command,
+    [...options, { name: "preserve-b2b", value: "on" }]), /B2B preservation above 6 PC lines/u);
 });
 
 test("Discord PC input shares the 1..6L target-frame and initial-clear corpus", () => {

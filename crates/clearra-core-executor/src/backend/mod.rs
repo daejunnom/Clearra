@@ -35,6 +35,7 @@ pub(crate) use wasm_cpu::exact_local_relation;
 #[cfg(any(test, feature = "qualification-reference"))]
 pub(crate) use wasm_cpu::exact_solver_local_relation_spawn_entries;
 pub(crate) use wasm_cpu::exact_spawn_lock_anchors;
+pub use wasm_cpu::{WasmPcFailedQueueAdvance, WasmPcFailedQueueSession};
 pub mod wasm_cpu_search_backend;
 pub mod wasm_setup_parallel_backend;
 pub mod wasm_setup_search_backend;
