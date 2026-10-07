@@ -77,6 +77,14 @@ fn full_height_pc_family_runs_buildup_and_clears_the_whole_board_in_all_profiles
             let identity =
                 ExtendedTilingSolutionKey::parse_canonical(&result.normalized_solution_keys()[0])
                     .unwrap();
+            let mut hasher =
+                clearra_core_domain::solution::NormalizedTilingSolutionSetHasher::default();
+            hasher.update_extended_canonical_key(identity);
+            assert_eq!(
+                result.field("normalized_solution_set_hash"),
+                Some(hasher.finish().as_str()),
+                "the complete PC family must be exportable with the public semantic hash"
+            );
             assert_eq!(identity.height(), height);
             assert_eq!(identity.initial_board(), initial);
             assert_eq!(identity.placement_count(), pieces);
@@ -137,6 +145,7 @@ fn full_height_cooperative_and_direct_pc_families_match() {
 #[test]
 fn full_height_pc_never_silently_lowers_the_worker_request_or_invents_product_authority() {
     let (query, _, _) = forced_query(24, srs_plus());
+    #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
     for workers in [2, 11] {
         let parallel = query.clone().with_execution_policy(
             query
@@ -159,6 +168,169 @@ fn full_height_pc_never_silently_lowers_the_worker_request_or_invents_product_au
     let error = WasmCpuSearchBackend::execute_with_control(&minimum, &ExecutionControl::default())
         .unwrap_err();
     assert_eq!(error.reason(), "extended_pc_family_contract_not_connected");
+}
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn branching_query(height: u8, rule: RuleProfile) -> PcScenarioQuery {
+    let mut holes = Board256Mask::EMPTY;
+    for row in 0..4 {
+        for column in 0..4 {
+            holes = holes.union(Board256Mask::singleton(row * 10 + column).unwrap());
+        }
+    }
+    let tail = if height == 7 { 3 } else { 4 };
+    for row in tail..u16::from(height) {
+        let column = 5 + (row - tail) / 4;
+        holes = holes.union(Board256Mask::singleton(row * 10 + column).unwrap());
+    }
+    let pieces = holes.count_ones() as usize / 4;
+    let initial = Board256Mask::all_cells(u16::from(height) * 10)
+        .unwrap()
+        .without(holes);
+    PcScenarioQuery::new(
+        PcScenarioBoard::standard_10_from_words(u16::from(height), initial.words()).unwrap(),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; pieces])),
+        PieceWindow::new(pieces),
+    )
+    .with_rule(rule)
+    .with_exact_pieces(Some(pieces))
+    .with_allow_hold(false)
+    .with_min_remaining_queue(0)
+    .with_execution_policy(
+        PcExecutionPolicy::default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_workers(1)
+            .with_allow_backend_fallback(false),
+    )
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_native_parallel_pc_preserves_buildup_counts_coverage_and_canonical_witness() {
+    use clearra_pc_graph::request::PcSolutionProbabilityPolicy;
+    let logical_processors = std::thread::available_parallelism().map_or(1, usize::from);
+    if logical_processors < 2 {
+        return;
+    }
+    for rule in [srs(), srs_plus(), srs_x(), jstris_180(), no_kick()] {
+        for height in [7, 8, 12, 24] {
+            for count_policy in [PcCountPolicy::CountAll, PcCountPolicy::CountUnique] {
+                let base = branching_query(height, rule)
+                    .with_count_policy(count_policy)
+                    .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
+                let serial_problem = ProblemCompiler::compile_scenario_pc(&base).unwrap();
+                let serial = WasmCpuSearchBackend::execute_with_control(
+                    &serial_problem,
+                    &ExecutionControl::default(),
+                )
+                .unwrap();
+                let parallel_query = base.clone().with_execution_policy(
+                    base.execution_policy()
+                        .clone()
+                        .with_workers(2)
+                        .with_use_all_logical_processors(logical_processors == 2),
+                );
+                let parallel_problem =
+                    ProblemCompiler::compile_scenario_pc(&parallel_query).unwrap();
+                let parallel = WasmCpuSearchBackend::execute_with_control(
+                    &parallel_problem,
+                    &ExecutionControl::default(),
+                )
+                .unwrap();
+                assert_eq!(parallel.field("workers_requested"), Some("2"));
+                assert_eq!(parallel.usize_field("workers_used"), Some(2));
+                assert_eq!(parallel.usize_field("cpu_parallel_active_workers"), Some(2));
+                assert_eq!(parallel.bool_field("cpu_parallel_execution"), Some(true));
+                for name in [
+                    "normalized_solution_set_hash",
+                    "build_variant_count",
+                    "build_variant_count_exact",
+                    "packing_candidate_count",
+                    "packing_candidate_digest",
+                    "count_complete",
+                    "probability_complete",
+                    "coverage_probability",
+                ] {
+                    assert_eq!(parallel.field(name), serial.field(name), "{height} {name}");
+                }
+                assert_eq!(
+                    parallel.normalized_solution_keys(),
+                    serial.normalized_solution_keys()
+                );
+                assert_eq!(
+                    parallel.normalized_solution_coverages(),
+                    serial.normalized_solution_coverages()
+                );
+                assert_eq!(
+                    parallel.solution_probabilities(),
+                    serial.solution_probabilities()
+                );
+                assert_eq!(
+                    parallel.coverage_pattern_words(),
+                    serial.coverage_pattern_words()
+                );
+                assert_eq!(parallel.path_steps(), serial.path_steps());
+                assert!(parallel.tiling_solution_page_store().is_none());
+                assert!(parallel.pc_chance_coverage_evidence().is_none());
+                assert!(parallel.exact_scoring_execution_batches().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_native_parallel_cooperative_path_does_not_become_a_serial_one() {
+    let logical_processors = std::thread::available_parallelism().map_or(1, usize::from);
+    if logical_processors < 2 {
+        return;
+    }
+    let base = branching_query(24, srs_plus()).with_count_policy(PcCountPolicy::CountAll);
+    let query = base.clone().with_execution_policy(
+        base.execution_policy()
+            .clone()
+            .with_workers(2)
+            .with_use_all_logical_processors(logical_processors == 2),
+    );
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    let expected =
+        WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default()).unwrap();
+    let mut session = WasmCpuSearchSession::new(&problem).unwrap();
+    match session.advance(1, &ExecutionControl::default()).unwrap() {
+        WasmCpuSearchAdvance::Completed(result) => {
+            assert_eq!(result.usize_field("workers_used"), Some(2));
+            assert_eq!(
+                result.normalized_solution_keys(),
+                expected.normalized_solution_keys()
+            );
+            assert_eq!(result.path_steps(), expected.path_steps());
+        }
+        other => {
+            panic!("native parallel execution must use the admitted caller/pool path: {other:?}")
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_parallel_node_budget_is_not_duplicated_per_worker() {
+    let base = branching_query(24, srs_plus());
+    let query = base.clone().with_execution_policy(
+        base.execution_policy()
+            .clone()
+            .with_workers(2)
+            .with_worker_hardware_limit(3)
+            .with_max_nodes(1),
+    );
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    let error = match WasmCpuSearchSession::new(&problem) {
+        Ok(_) => panic!("finite node credit is not yet a per-worker allowance"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.reason(),
+        "extended_pc_family_parallel_node_budget_not_connected"
+    );
 }
 
 #[test]

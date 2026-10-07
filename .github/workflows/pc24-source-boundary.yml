@@ -14,6 +14,9 @@ on:
       - "packages/clearra-ui/src/lib/workspace/solverWorkspaceModel.ts"
       - "packages/clearra-ui/src/lib/workspace/SolverWorkspace.svelte"
       - "packages/clearra-ui/test/workspaceCommandSerialization.test.mjs"
+      - "packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte"
+      - "packages/clearra-ui/src/lib/workspace/workspaceI18n.ts"
+      - "packages/clearra-ui/src/lib/i18n/japaneseWorkspaceCatalog.ts"
       - "crates/clearra-core-domain/**"
       - "crates/clearra-output/**"
       - "crates/clearra-fumen/**"
@@ -30,17 +33,26 @@ on:
       - "crates/clearra-cli-command/src/web_command_parser.rs"
       - "crates/clearra-cli-command/src/web_pc_scenario_input.rs"
       - "crates/clearra-cli-command/tests/pinned_pc.rs"
+      - "crates/clearra-cli-command/tests/extended_pc_surfaces.rs"
       - "packages/clearra-ui/src/lib/workspace/solutionExport.ts"
       - "packages/clearra-ui/src/lib/workspace/productResultPager.ts"
       - "packages/clearra-ui/src/lib/wasm/wasmCommandClient.ts"
       - "packages/clearra-ui/test/productResultPager.contract.ts"
       - "packages/clearra-ui/test/extendedSolutionKey.contract.ts"
       - "apps/clearra-discord-bot/src/clearra/ctk3-result.mjs"
+      - "apps/clearra-discord-bot/src/discord/field-limits.mjs"
+      - "apps/clearra-discord-bot/src/discord/field-modal.mjs"
+      - "apps/clearra-discord-bot/src/discord/slash-command-input.mjs"
+      - "apps/clearra-discord-bot/src/discord/slash-command-catalog.mjs"
+      - "apps/clearra-discord-bot/src/discord/japanese-discord-*.mjs"
+      - "apps/clearra-discord-bot/test/slash-command-input.test.mjs"
+      - "apps/clearra-discord-bot/test/field-modal.test.mjs"
       - "apps/clearra-discord-bot/test/extended-solution-key.test.mjs"
       - "crates/clearra-geometry/**"
       - "scripts/ci/pc24-source-boundary.test.mjs"
       - "tests/fixtures/contracts/pc_target_frame_parity.v1.tsv"
       - "tests/fixtures/contracts/extended_solution_keys.v1.tsv"
+      - "tests/fixtures/contracts/extended_pc_surface_input.v1.tsv"
   workflow_dispatch:
 
 permissions:
@@ -146,6 +158,9 @@ jobs:
       - name: Verify canonical full-height CLI execution without a native-C or tablebase fallback
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --test extended_pc_tiling -- --test-threads=1
+      - name: Verify GUI and Discord canonical argv execute and publish the complete full-height family
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-cli-command --test extended_pc_surfaces -- --test-threads=1
       - name: Verify native CLI assembly retains the shared full-height Opening input contract
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --lib assemble::pc_query_assembler::tests -- --test-threads=1
@@ -153,6 +168,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_geometry::parallel::tests -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- --test-threads=1
           cargo test --locked -p clearra-app --no-default-features --features parallel --test extended_pc_tiling -- --test-threads=1
           cargo clippy --locked -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings
       - name: Verify immutable compact and extended page owners and bounded catalog admission
@@ -190,8 +206,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json
+          pnpm --filter @clearra/ui exec node --input-type=module -e "import { readFileSync } from 'node:fs'; import { parse } from 'svelte/compiler'; for (const path of ['src/lib/workspace/SolverWorkspace.svelte','src/lib/workspace/WorkspaceBoardEditor.svelte']) parse(readFileSync(path, 'utf8'), { filename: path, modern: true });"
           node scripts/tools/run-typescript-contracts.mjs packages/clearra-ui/test/extendedSolutionKey.contract.ts packages/clearra-ui/test/solutionExport.contract.ts packages/clearra-ui/test/productResultPager.contract.ts
           node --test packages/clearra-ui/test/workspaceCommandSerialization.test.mjs
       - name: Check Discord CTK3 projection against the same wire cases
         if: ${{ !cancelled() }}
-        run: node --test apps/clearra-discord-bot/test/extended-solution-key.test.mjs apps/clearra-discord-bot/test/ctk3-result.test.mjs
+        run: node --test apps/clearra-discord-bot/test/extended-solution-key.test.mjs apps/clearra-discord-bot/test/ctk3-result.test.mjs apps/clearra-discord-bot/test/slash-command-input.test.mjs apps/clearra-discord-bot/test/field-modal.test.mjs

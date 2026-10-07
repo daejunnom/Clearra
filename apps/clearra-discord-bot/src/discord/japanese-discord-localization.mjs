@@ -67,6 +67,8 @@ export function japaneseDiscordModalText(text) {
   if (Object.hasOwn(JAPANESE_NAMES, text)) return JAPANESE_NAMES[text];
   if (Object.hasOwn(JAPANESE_DESCRIPTIONS, text)) return JAPANESE_DESCRIPTIONS[text];
   if (text === "Japanese") return "日本語";
+  const rowLabel = /^(\d+) rows?$/u.exec(text);
+  if (rowLabel && Number(rowLabel[1]) >= 1 && Number(rowLabel[1]) <= 24) return `${rowLabel[1]}行`;
   if (text === "" || /^[\d_\n]+$/u.test(text) || text === "IOTSZJL") return text;
   throw new Error(`Missing Japanese Discord modal text: ${text}`);
 }

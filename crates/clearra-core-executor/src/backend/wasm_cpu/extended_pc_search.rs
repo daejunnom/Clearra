@@ -80,9 +80,19 @@ impl ExtendedPcSearchSession {
     pub fn new(problem: &SearchProblem) -> Result<Self, WasmExactSearchError> {
         validate_pc_family_problem(problem)?;
         // Do not silently turn a multiworker product into a serial search.
-        if problem.backend_policy().workers() != 1 {
+        if problem.backend_policy().workers() != 1
+            && !cfg!(all(feature = "parallel", not(target_family = "wasm")))
+        {
             return Err(WasmExactSearchError::InvalidProblem(
                 "extended_pc_family_parallel_not_connected",
+            ));
+        }
+        // A finite node cap is shared across Geometry and all BuildUp graphs.
+        // Until that global credit is connected, refuse rather than grant each
+        // worker a duplicate cap or silently downgrade the request.
+        if problem.backend_policy().workers() > 1 && problem.backend_request().max_nodes() != 0 {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_family_parallel_node_budget_not_connected",
             ));
         }
         let height = problem.visible_height() as u8;
@@ -104,8 +114,9 @@ impl ExtendedPcSearchSession {
             required.words(),
         )
         .map_err(|_| WasmExactSearchError::InvalidProblem("extended_pc_field_invalid"))?;
-        let admission = admit_budget_bound_search_execution(problem, 1)
-            .map_err(WasmExactSearchError::resource_admission)?;
+        let admission =
+            admit_budget_bound_search_execution(problem, problem.backend_policy().workers())
+                .map_err(WasmExactSearchError::resource_admission)?;
         // The legacy ordinary execution API borrows a caller-owned problem;
         // both that input and the engine's owned snapshot coexist.
         let external = checked_pc_family_problem_nested_retained_bytes(problem)
@@ -135,6 +146,14 @@ impl ExtendedPcSearchSession {
         budget: usize,
         control: &ExecutionControl,
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        if self.requested_workers() > 1 {
+            let parallel_result =
+                self.execute_parallel_if_worthwhile(self.requested_workers(), control)?;
+            if let Some(result) = parallel_result {
+                return Ok(ExactSearchAdvance::Completed(result));
+            }
+        }
         let advance = self.engine.advance(budget, control)?;
         let progress = self.engine.distributed_progress();
         control.report_progress("geometry", progress.geometry_nodes as u64, None);
@@ -144,6 +163,21 @@ impl ExtendedPcSearchSession {
             BuildProbabilityAdvance::Completed(result) => ExactSearchAdvance::Completed(result),
             BuildProbabilityAdvance::Cancelled => ExactSearchAdvance::Cancelled,
         })
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    fn requested_workers(&self) -> usize {
+        self.engine.requested_pc_workers()
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub fn execute_parallel_if_worthwhile(
+        &mut self,
+        requested_workers: usize,
+        control: &ExecutionControl,
+    ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
+        self.engine
+            .execute_pc_family_parallel(requested_workers, control)
     }
 
     pub fn validate_public_result_memory_with_future(

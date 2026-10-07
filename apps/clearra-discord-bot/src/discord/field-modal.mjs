@@ -18,6 +18,7 @@ import {
   requiresDiscordFieldModal,
 } from "./slash-command-input.mjs";
 import { translateJapaneseModalNode } from "./japanese-discord-localization.mjs";
+import { discordPcMaxRows } from "./field-limits.mjs";
 
 const APPLICATION_COMMAND_INTERACTION = 2;
 const MODAL_SUBMIT_INTERACTION = 5;
@@ -749,17 +750,19 @@ function modalSelectSpec(command, name, locale = "en") {
         })),
       );
     }
+    const maxRows = discordPcMaxRows(input);
+    const targetRows = Array.from({ length: maxRows }, (_, index) => index + 1);
     return selectSpec(
       "auto",
       korean ? "PC 목표 줄 선택" : "Choose PC target rows",
       [
         {
           label: korean
-            ? `자동 — 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 전체 판정`
-            : `Auto — evaluate rows 1–${DISCORD_PC_FIELD_MAX_ROWS}`,
+            ? `자동 — 1–${maxRows}줄 전체 판정`
+            : `Auto — evaluate rows 1–${maxRows}`,
           value: "auto",
         },
-        ...PC_TARGET_ROWS.map((value) => ({
+        ...targetRows.map((value) => ({
           label: korean ? `${value}줄` : `${value} row${value === 1 ? "" : "s"}`,
           value: String(value),
         })),
@@ -1112,7 +1115,7 @@ function modalDescription(input, name, locale = "en") {
       ? `1–${DISCORD_PC_FIELD_MAX_ROWS}줄 퍼펙트 클리어 목표 높이 중 하나를 선택합니다.`
       : input === "spin-structure"
         ? "마지막 스핀이 지우는 줄 수이며 기본값은 최소 1줄입니다."
-      : `자동은 필드와 넥스트로 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 전체를 판정하고 성립하는 목표를 탐색합니다.`;
+      : `자동은 필드와 넥스트로 1–${discordPcMaxRows(input)}줄 전체를 판정하고 성립하는 목표를 탐색합니다.`;
     if (name === "kicktable") return "내장 프로필만 지원하며 사용자 킥 JSON은 지원하지 않습니다.";
     if (name === "options") return input === "spin"
       ? "TSM은 지원하지 않습니다."
@@ -1154,7 +1157,7 @@ function modalDescription(input, name, locale = "en") {
     ? `Choose any perfect-clear target height from 1 through ${DISCORD_PC_FIELD_MAX_ROWS} rows.`
     : input === "spin-structure"
       ? "Lines cleared by the terminal spin; the default is at least one."
-    : `Auto evaluates rows 1–${DISCORD_PC_FIELD_MAX_ROWS} from the field and next, then searches valid targets.`;
+    : `Auto evaluates rows 1–${discordPcMaxRows(input)} from the field and next, then searches valid targets.`;
   if (name === "kicktable") return "Built-in profiles only; custom kick JSON remains intentionally unavailable.";
   if (name === "hold") return "Choose disabled hold, empty hold, or one occupied IOTSZJL piece.";
   if (name === "options") return input === "spin"
@@ -1189,6 +1192,7 @@ function defaultBoardRows(input) {
 }
 
 function maximumBoardRows(input) {
+  if (input === "pc-tiling-v2") return discordPcMaxRows(input);
   return ["pc", "pc-v2", "pc-path-v2", "pc-chance-v2", "pc-save-v2", "pc-score-v2", "pc-tiling-v2", "pc-failed-v2", "pc-score-finder-v2", "pc-allspin-exact-v1", "pc-allspin-pattern-v1", "score-fixed-next", "score-fixed-next-v2"].includes(input)
     ? DISCORD_PC_FIELD_MAX_ROWS
     : DISCORD_WIDE_FIELD_MAX_ROWS;

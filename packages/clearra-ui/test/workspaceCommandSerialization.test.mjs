@@ -42,7 +42,26 @@ const canonicalGuiPcFullSolutionArguments = readFileSync(
   'utf8'
 ).trimEnd().split('\t');
 
-test('extended codecs keep cell 239 and real area without enabling disconnected workspace terminals', () => {
+test('GUI and Desktop canonical argv retain the shared bounded 7..24L surface inputs', () => {
+  const rows = readFileSync(new URL('../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv', import.meta.url), 'utf8')
+    .split(/\r?\n/u).filter(line => line && !line.startsWith('#'));
+  for (const row of rows) {
+    const [id, height, hex, pieces, queue] = row.split('\t');
+    for (const scoreMode of ['off', 'tiling']) {
+      const request = { ...createDefaultWorkspaceRequest(), lines: Number(height),
+        boardMask: BigInt(`0x${hex}`), queue, holdEnabled: false, workers: 1, scoreMode };
+      assert.deepEqual(workspaceValidationCodes(request, 'web'), [], id);
+      assert.deepEqual(workspaceValidationCodes(request, 'desktop'), [], id);
+      const args = buildWorkspaceCommandArguments(request);
+      assert.equal(args[args.indexOf('--height') + 1], height, id);
+      assert.equal(args[args.indexOf('--pieces') + 1], pieces, id);
+      assert.equal(BigInt(args[args.indexOf('--board-mask') + 1]), BigInt(`0x${hex}`), id);
+      assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args, id);
+    }
+  }
+});
+
+test('connected extended workspace terminals keep cell 239, area and explicit worker policy', () => {
   const full = (1n << 240n) - 1n;
   let holes = 0n;
   for (let column = 0; column < 6; column += 1) {
@@ -58,16 +77,43 @@ test('extended codecs keep cell 239 and real area without enabling disconnected 
   assert.equal(trimBoardMask(boardMask, 24), boardMask);
   assert.equal(clearCompletedRows(boardMask, 24).boardMask, boardMask);
   assert.equal(scenarioPieceWindow(request), 6);
-  assert.ok(workspaceValidationCodes(request, 'web').includes('target_lines_invalid'));
-  assert.ok(workspaceValidationCodes(request, 'desktop').includes('target_lines_invalid'));
+  assert.deepEqual(workspaceValidationCodes(request, 'web'), []);
+  assert.deepEqual(workspaceValidationCodes(request, 'desktop'), []);
   const args = buildWorkspaceCommandArguments(request);
   assert.deepEqual(args.slice(0, 3), ['clearra', 'pc', 'tiling']);
   assert.equal(args[args.indexOf('--height') + 1], '24');
   assert.equal(args[args.indexOf('--pieces') + 1], '6');
   assert.equal(BigInt(args[args.indexOf('--board-mask') + 1]), boardMask);
+  assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args);
+  assert.deepEqual(workspaceValidationCodes({ ...request, scoreMode: 'off' }, 'web'), []);
   assert.ok(workspaceValidationCodes({ ...request, scoreMode: 'minimum-cover' }, 'web')
-    .includes('target_lines_invalid'), 'not-yet-connected reducers must not acquire extended authority');
+    .includes('pc_extended_result_unavailable'), 'not-yet-connected reducers must not acquire extended authority');
+  assert.deepEqual(workspaceValidationCodes({ ...request, workers: 11 }, 'desktop'), []);
+  assert.ok(workspaceValidationCodes({ ...request, workers: 11 }, 'web')
+    .includes('pc_extended_browser_workers_unavailable'));
+  assert.equal(buildWorkspaceCommandArguments({ ...request, workers: 11 })[
+    args.indexOf('--workers') + 1], '11', 'validation must not silently reduce requested workers');
   assert.equal(clearCompletedRows(full, 24).clearedRows, 24);
+});
+
+test('extended workspace guards result and option capabilities separately from the 24L field range', () => {
+  const base = { ...createDefaultWorkspaceRequest(), lines: 24, workers: 1 };
+  for (const scoreMode of ['path', 'minimum-cover', 'summary', 'score-finder', 'score-minimals', 'failed-queue']) {
+    assert.ok(workspaceValidationCodes({ ...base, queue: 'I', scoreMode }, 'desktop')
+      .includes('pc_extended_result_unavailable'), scoreMode);
+  }
+  for (const change of [{ preserveB2B: true }, { queueKnowledge: 'visible-7' },
+    { tablebaseEnabled: true }, { precomputeBuildDependencies: true }, { backend: 'hybrid' }]) {
+    assert.ok(workspaceValidationCodes({ ...base, ...change }, 'web')
+      .includes('pc_extended_options_unavailable'));
+  }
+  for (const lines of [0, 25, 1.5]) {
+    assert.ok(workspaceValidationCodes({ ...base, lines }, 'web').includes('target_lines_invalid'));
+  }
+  for (const lines of [1, 3, 5, 6]) {
+    assert.ok(!workspaceValidationCodes({ ...base, lines, workers: 11, scoreMode: 'minimum-cover' }, 'web')
+      .some(code => code.startsWith('pc_extended_')), 'compact product semantics stay unchanged');
+  }
 });
 
 test('boundary recovery keeps one fixed queue and independent bag B2B choices across browser and Desktop', () => {

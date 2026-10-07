@@ -382,7 +382,19 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::Cpu(session) => session
                 .execute_parallel_if_worthwhile(worker_count, control)
                 .map_err(map_error),
-            WasmSearchSessionInner::ExtendedPc(_) => Ok(None),
+            WasmSearchSessionInner::ExtendedPc(session) => {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    session
+                        .execute_parallel_if_worthwhile(worker_count, control)
+                        .map_err(map_error)
+                }
+                #[cfg(target_family = "wasm")]
+                {
+                    let _ = session;
+                    Ok(None)
+                }
+            }
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 #[cfg(not(target_family = "wasm"))]
                 {

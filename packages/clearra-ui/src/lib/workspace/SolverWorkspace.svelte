@@ -37,6 +37,7 @@
   import WorkspaceShell from './WorkspaceShell.svelte';
   import {
     buildWorkspaceCommand,
+    WORKSPACE_PC_MAX_LINES,
     createDefaultWorkspaceRequest,
     normalizeWorkspaceInitialField,
     normalizeWorkspaceRequest,
@@ -216,7 +217,7 @@
   }
 
   function setLines(lines: number) {
-    const bounded = Math.max(1, Math.min(6, Math.trunc(lines || 1)));
+    const bounded = Math.max(1, Math.min(WORKSPACE_PC_MAX_LINES, Math.trunc(lines || 1)));
     clearedRowsWarning = 0;
     updateRequest({
       ...request,
@@ -292,7 +293,7 @@
   }
 
   function importBoard(event: CustomEvent<{ boardMask: bigint; lines: number }>) {
-    const lines = Math.max(1, Math.min(6, event.detail.lines));
+    const lines = Math.max(1, Math.min(WORKSPACE_PC_MAX_LINES, event.detail.lines));
     clearedRowsWarning = 0;
     updateRequest({
       ...request,
@@ -317,7 +318,7 @@
     dimensionLabel={label('targetLines')}
     dimensionValue={request.lines}
     dimensionMin={1}
-    dimensionMax={6}
+    dimensionMax={WORKSPACE_PC_MAX_LINES}
     cancelLabel={label('cancel')}
     runLabel={label('run')}
     runDisabled={validationCodes.length > 0 || tablebaseBlocked}

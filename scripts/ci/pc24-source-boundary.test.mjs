@@ -248,3 +248,37 @@ test('native extended Tiling shares exact family owners and joins jobs inside on
   assert.ok(read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_geometry_parallel_tests.rs')
     .includes('extended_parallel_product_splits_preserve_sixty_row_prefix_and_continuations'));
 });
+
+test('ordinary native extended PC shares owners but retains its own exact BuildUp terminal', () => {
+  const runner = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_family_parallel.rs');
+  assert.ok(runner.includes('new_shared_pc_verifier'));
+  assert.ok(runner.includes('Arc::ptr_eq(&self.problem, &worker.problem)'));
+  assert.ok(runner.includes('Arc::ptr_eq(&self.catalog, &worker.catalog)'));
+  assert.ok(runner.includes('for _ in 0..submitted'));
+  assert.ok(runner.includes('segment.first_ordinal != ordinal'));
+  assert.ok(runner.includes('self.merge_pc_verifier(worker.engine)'));
+  assert.ok(runner.includes('self.complete()'));
+  assert.ok(!runner.includes('CoreExecutionResult::new'));
+  assert.ok(!runner.includes('terminal_authority'));
+  assert.ok(workflow.includes('--features parallel --test extended_pc_family'));
+});
+
+test('the connected twenty-four-line surfaces retain whole fields and an exportable PC hash', () => {
+  const model = read('packages/clearra-ui/src/lib/workspace/solverWorkspaceModel.ts');
+  const workspace = read('packages/clearra-ui/src/lib/workspace/SolverWorkspace.svelte');
+  const editor = read('packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte');
+  assert.ok(model.includes('WORKSPACE_PC_MAX_LINES = 24'));
+  assert.ok(model.includes("runtime === 'web' && execution.workers !== 1"));
+  assert.ok(model.includes("execution.scoreMode !== 'tiling' && execution.scoreMode !== 'off'"));
+  assert.ok(workspace.includes('dimensionMax={WORKSPACE_PC_MAX_LINES}'));
+  assert.ok(editor.includes('decodeInterchangeField(source, 24)'));
+  assert.ok(read('apps/clearra-discord-bot/src/discord/field-limits.mjs')
+    .includes("input === 'pc-tiling-v2'"));
+  const executor = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
+  const pcTerminal = executor.slice(executor.indexOf('fn build_pc_family_result('),
+    executor.indexOf('pub(super) fn finesse_search_material('));
+  assert.ok(pcTerminal.includes('hasher.update_extended_canonical_key(identity)'));
+  assert.ok(!pcTerminal.includes('normalized_string_solution_set_hash'));
+  assert.ok(workflow.includes('--test extended_pc_surfaces'));
+  assert.ok(workflow.includes('tests/fixtures/contracts/extended_pc_surface_input.v1.tsv'));
+});

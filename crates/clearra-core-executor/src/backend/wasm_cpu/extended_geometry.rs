@@ -648,6 +648,29 @@ impl ExtendedGeometrySearch {
         true
     }
 
+    /// A native verifier consumes only candidates from the parent's admitted
+    /// exact family. It owns no compiler, target index or enumeration DAG.
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub fn private_verifier_placeholder() -> Self {
+        Self {
+            dense_compiler: None,
+            compiler: None,
+            enumerator: None,
+            external_targets: None,
+            pattern_index_bytes: 0,
+            expanded_nodes: 0,
+            domain_pruned_states: 0,
+            hall_pruned_states: 0,
+            column_pruned_states: 0,
+            component_pruned_states: 0,
+            component_compositions: 0,
+            peak_frontier: 0,
+            candidate_count: 0,
+            candidate_family_count: None,
+            dense_static_geometry: false,
+        }
+    }
+
     #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     pub fn is_compiling(&self) -> bool {
         self.dense_compiler.is_some() || self.compiler.is_some()

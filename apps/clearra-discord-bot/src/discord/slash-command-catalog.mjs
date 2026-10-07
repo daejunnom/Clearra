@@ -6,6 +6,7 @@ import {
 import {
   DISCORD_PC_FIELD_MAX_ROWS,
   DISCORD_WIDE_FIELD_MAX_ROWS,
+  discordPcMaxRows,
 } from "./field-limits.mjs";
 import {
   formatJapaneseDiscordHelp,
@@ -720,7 +721,7 @@ function registrationOptions(input, capabilityId = null) {
       return Object.freeze([
         nextOption(false),
         fieldOption(input),
-        linesOption(),
+        linesOption(discordPcMaxRows(input)),
         pcHoldOption(),
       ]);
     case "pc-failed-v2":
@@ -1255,7 +1256,7 @@ function allspinRegistrationOptions(exactQueue) {
 
 function fieldOption(input) {
   const description = ["pc", "pc-v2", "pc-path-v2", "pc-chance-v2", "pc-save-v2", "pc-score-v2", "pc-score-finder-v2", "pc-tiling-v2", "pc-failed-v2", "pc-allspin-exact-v1", "pc-allspin-pattern-v1", "score-fixed-next", "score-fixed-next-v2"].includes(input)
-    ? `PC field (1–${DISCORD_PC_FIELD_MAX_ROWS} rows): CTK3/Fumen/URL or grid:row/row; omit for multiline form`
+    ? `PC field (1–${discordPcMaxRows(input)} rows): CTK3/Fumen/URL or grid:row/row; omit for multiline form`
     : input === "colored"
       ? `Target (1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows): CTK3/Fumen/URL or grid:row/row; omit for multiline form`
       : `Field (1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows): CTK3/Fumen/URL or grid:row/row; omit for multiline form`;
@@ -1302,20 +1303,20 @@ function boardOption(name, description) {
   return stringOption(name, description, false, FIELD_MAX_LENGTH);
 }
 
-function linesOption() {
+function linesOption(maxRows = DISCORD_PC_FIELD_MAX_ROWS) {
   return Object.freeze({
     type: INTEGER_OPTION,
     name: "lines",
-    description: `PC target height 1–${DISCORD_PC_FIELD_MAX_ROWS}; omit to evaluate every height through ${DISCORD_PC_FIELD_MAX_ROWS}`,
+    description: `PC target height 1–${maxRows}; omit to evaluate every height through ${maxRows}`,
     required: false,
     min_value: 1,
-    max_value: DISCORD_PC_FIELD_MAX_ROWS,
-    choices: Object.freeze(
+    max_value: maxRows,
+    ...(maxRows <= DISCORD_PC_FIELD_MAX_ROWS ? { choices: Object.freeze(
       Array.from(
         { length: DISCORD_PC_FIELD_MAX_ROWS },
         (_, index) => index + 1,
       ).map((value) => Object.freeze({ name: `${value} line`, value })),
-    ),
+    ) } : {}),
   });
 }
 
@@ -1871,7 +1872,7 @@ function syntax(entry, locale = "en") {
       case "pc-score-finder-v2":
         return `/${path} next:<정확한 IOTSZJL 큐> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [initial-b2b:<on|off>]`;
       case "pc-tiling-v2":
-        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>]`;
+        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>]`;
       case "pc-failed-v2":
         return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [failed-count:1..4294967295]`;
       case "cover":
@@ -1960,7 +1961,7 @@ function syntax(entry, locale = "en") {
     case "pc-score-finder-v2":
       return `/${path} next:<exact IOTSZJL queue> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [initial-b2b:<on|off>]`;
     case "pc-tiling-v2":
-      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>]`;
+      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>]`;
     case "pc-failed-v2":
       return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [failed-count:1..4294967295]`;
     case "cover":
@@ -2128,7 +2129,7 @@ function inputHelp(entry, locale = "en") {
     case "pc-tiling-v2":
       return [
         "Geometry-only tiling preserves the native field, queue/pattern, and initial hold supply, but intentionally has no kick, score, observation, probability, or B2B options.",
-        `\`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS}; omission evaluates feasible targets serially.`,
+        `\`lines\` accepts 1–${discordPcMaxRows(entry.input)}; omission evaluates feasible targets serially.`,
       ];
     case "pc-failed-v2":
       return [
@@ -2436,7 +2437,7 @@ function koreanInputHelp(entry) {
     case "pc-tiling-v2":
       return [
         "기하 타일링은 필드·큐/패턴·초기 홀드 공급을 보존하지만 킥·점수·관측·확률·B2B 옵션은 의도적으로 제공하지 않습니다.",
-        `\`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}이며 생략하면 가능한 목표를 순서대로 판정합니다.`,
+        `\`lines\`는 1–${discordPcMaxRows(entry.input)}이며 생략하면 가능한 목표를 순서대로 판정합니다.`,
       ];
     case "pc-failed-v2":
       return [

@@ -13,7 +13,7 @@ import {
   isStandardBagQueue,
   parseQueuePatternSource,
 } from "./queue-pattern-source.mjs";
-import { DISCORD_PC_FIELD_MAX_ROWS, DISCORD_WIDE_FIELD_MAX_ROWS } from "./field-limits.mjs";
+import { DISCORD_PC_FIELD_MAX_ROWS, DISCORD_WIDE_FIELD_MAX_ROWS, discordPcMaxRows } from "./field-limits.mjs";
 export { DISCORD_PC_FIELD_MAX_ROWS, DISCORD_WIDE_FIELD_MAX_ROWS } from "./field-limits.mjs";
 import {
   booleanSetting,
@@ -313,11 +313,13 @@ export function buildSlashCommandArgumentPlan(command, rawOptions = []) {
   ].includes(command?.input)) {
     const values = optionValues(rawOptions, allowedOptionNames(command));
     if (!values.has("lines")) {
-      const field = normalizeSearchField(values.get("field"));
+      const maxRows = discordPcMaxRows(command.input);
+      const field = normalizeSearchField(values.get("field"), { maxRows, maxBits: maxRows * 10 });
       const next = requiredText(values, "next", NEXT_MAX_LENGTH);
       const lines = automaticPcLines({
         occupied: field.occupied,
         pieceCount: queuePatternPieceCount(next),
+        maxLines: maxRows,
       });
       return Object.freeze({
         argumentSets: Object.freeze(lines.map((lineCount) => Object.freeze(
@@ -759,9 +761,10 @@ function nativePcArguments(command, values, mode = {}) {
   const typedScoreProduct = typedScoreSummary || typedScoreMinimals;
   const typedMinimumCover = command.capabilityId === "pc.minimals";
   const typedSave = mode.save === true;
-  const field = normalizeSearchField(values.get("field"));
+  const maxRows = discordPcMaxRows(command.input);
+  const field = normalizeSearchField(values.get("field"), { maxRows, maxBits: maxRows * 10 });
   const next = validatedNext(values, false);
-  const lines = optionalInteger(values, "lines", 1, DISCORD_PC_FIELD_MAX_ROWS);
+  const lines = optionalInteger(values, "lines", 1, maxRows);
   if (lines === null) {
     throw new Error("Native PC search requires one exact lines value after automatic target planning.");
   }
@@ -2341,7 +2344,10 @@ function clearCompletedPcRows(occupied, height) {
   return boardMask;
 }
 
-export function automaticPcLines({ occupied, pieceCount }) {
+export function automaticPcLines({ occupied, pieceCount, maxLines = DISCORD_PC_FIELD_MAX_ROWS }) {
+  if (![DISCORD_PC_FIELD_MAX_ROWS, DISCORD_WIDE_FIELD_MAX_ROWS].includes(maxLines)) {
+    throw new Error("Clearra received an invalid PC target domain.");
+  }
   if (typeof occupied !== "bigint" || occupied < 0n) {
     throw new Error("Clearra received an invalid PC field mask.");
   }
@@ -2349,9 +2355,11 @@ export function automaticPcLines({ occupied, pieceCount }) {
   if (
     !Number.isSafeInteger(inputHeight) ||
     inputHeight < 0 ||
-    inputHeight > DISCORD_PC_FIELD_MAX_ROWS
+    inputHeight > maxLines
   ) {
-    throw new Error("Automatic PC search supports fields up to six rows high.");
+    throw new Error(maxLines === DISCORD_PC_FIELD_MAX_ROWS
+      ? "Automatic PC search supports fields up to six rows high."
+      : `Automatic PC search supports fields up to ${maxLines} rows high.`);
   }
   if (!Number.isSafeInteger(pieceCount) || pieceCount < 1) {
     throw new Error("Automatic PC search requires a finite next-pattern length.");
@@ -2359,7 +2367,7 @@ export function automaticPcLines({ occupied, pieceCount }) {
   const initialBoard = clearCompletedPcRows(occupied, inputHeight);
   const height = occupiedHeight(initialBoard);
   const lines = Array.from(
-    { length: DISCORD_PC_FIELD_MAX_ROWS },
+    { length: maxLines },
     (_, index) => index + 1,
   ).filter((lineCount) => {
     if (lineCount < height) return false;
@@ -2372,7 +2380,9 @@ export function automaticPcLines({ occupied, pieceCount }) {
   });
   if (lines.length === 0) {
     throw new Error(
-      "The field and next length produce no valid automatic PC target from one through six lines.",
+      maxLines === DISCORD_PC_FIELD_MAX_ROWS
+        ? "The field and next length produce no valid automatic PC target from one through six lines."
+        : `The field and next length produce no valid automatic PC target from one through ${maxLines} lines.`,
     );
   }
   return Object.freeze(lines);

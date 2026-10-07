@@ -1,0 +1,5 @@
+# id	target_lines	initial_board_words_hex	exact_pieces	queue
+forced-7L	7	00000000000000000000000000000000000000000000003fdff7fdff3feffbfe	2	II
+forced-8L	8	00000000000000000000000000000000000000000000ff7fdff7fdffbfeffbfe	2	II
+forced-12L	12	0000000000000000000000000000000000feffbfeffbff7fdff7fdffbfeffbfe	3	III
+forced-24L	24	0000f7fdff7fdffbfeffbfeffdff7fdff7feffbfeffbff7fdff7fdffbfeffbfe	6	IIIIII

@@ -263,7 +263,7 @@
 
   function importField(source = importInput) {
     try {
-      const imported = decodeInterchangeField(source, mode === 'pc' ? 6 : 24);
+      const imported = decodeInterchangeField(source, 24);
       importError = false;
       importFailureKey = 'fieldImportInvalid';
       dispatch('import', {

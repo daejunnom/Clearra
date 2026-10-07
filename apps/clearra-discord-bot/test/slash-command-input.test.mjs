@@ -52,6 +52,36 @@ function compactGridFromMask(mask) {
   return `grid:${rows.join("/")}`;
 }
 
+test("Discord 7..24L Tiling retains all field words and normalizes the explicit or automatic target once", () => {
+  const command = findSlashCommand("pc").subcommands.tiling;
+  const rows = readFileSync(new URL("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv", import.meta.url), "utf8")
+    .split(/\r?\n/u).filter(line => line && !line.startsWith("#"));
+  for (const row of rows) {
+    const [id, height, hex, pieces, queue] = row.split("\t");
+    const field = compactGridFromMask(BigInt(`0x${hex}`));
+    const options = [{ name: "field", value: field }, { name: "next", value: queue },
+      { name: "lines", value: Number(height) }, { name: "hold", value: "disabled" }];
+    const args = buildSlashCommandArguments(command, options);
+    assert.deepEqual(args.slice(0, 2), ["pc", "tiling"]);
+    assert.equal(args[args.indexOf("--height") + 1], height, id);
+    assert.equal(args[args.indexOf("--pieces") + 1], pieces, id);
+    assert.equal(BigInt(args[args.indexOf("--board-mask") + 1]), BigInt(`0x${hex}`), id);
+    const automatic = buildSlashCommandArgumentPlan(command, options.filter(option => option.name !== "lines"));
+    assert.equal(automatic.automaticPcTargets, true);
+    assert.deepEqual(automatic.argumentSets, [args], `${id}: only the whole target fits this supply`);
+    assert.throws(() => buildSlashCommandArguments(findSlashCommand("pc").subcommands.path, options),
+      /rows|lines|Board64/u, "unconnected replay authority remains compact");
+  }
+  assert.deepEqual(automaticPcLines({ occupied: 0n, pieceCount: 60, maxLines: 24 }),
+    Array.from({ length: 12 }, (_, index) => 2 + index * 2));
+  assert.throws(() => buildSlashCommandArguments(command, [
+    { name: "field", value: "grid:__________" }, { name: "next", value: "I" }, { name: "lines", value: 25 },
+  ]), /1 through 24/u);
+  for (const locale of ["en", "ko", "ja"]) {
+    assert.match(formatSlashCommandHelp("pc tiling", locale), /1(?:–|〜|\.\.)24/u);
+  }
+});
+
 test("Discord PC input shares the 1..6L target-frame and initial-clear corpus", () => {
   const command = findSlashCommand("pc").subcommands.path;
   const expectedError = Object.freeze({

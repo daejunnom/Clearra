@@ -1,4 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[path = "extended_pc_family_parallel.rs"]
+mod pc_parallel;
 
 use clearra_core_domain::{
     execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind,
@@ -49,11 +56,15 @@ use super::{
 };
 
 pub(super) struct ExtendedBuildProbabilitySession {
-    problem: SearchProblem,
+    problem: Arc<SearchProblem>,
     purpose: ExtendedFamilyPurpose,
     aggregation: BuildProbabilityAggregation,
     field: BuildProbabilityField,
-    catalog: ExtendedInverseCatalog,
+    catalog: Arc<ExtendedInverseCatalog>,
+    // Root accounting owns the complete immutable input/catalog allocation.
+    // Native verifier workers borrow those exact owners and account only their
+    // private workspace/reducer state, never Arc::strong_count snapshots.
+    shared_immutable_owners: bool,
     geometry: ExtendedGeometrySearch,
     build_order_workspace: ExtendedBuildOrderWorkspace,
     coverage_evaluator: CoverageProductEvaluator,
@@ -89,6 +100,7 @@ pub(super) struct ExtendedBuildProbabilitySession {
     parallel_minimum_worker_candidates: usize,
     parallel_maximum_worker_candidates: usize,
     distributed_worker_memory_bytes: usize,
+    native_parallel_peak_bytes: u128,
     distributed_execution_constraint_materialized: bool,
     finesse_requested: bool,
     finesse_languages: Vec<(String, PreparedFinesseLanguage)>,
@@ -336,11 +348,12 @@ impl ExtendedBuildProbabilitySession {
             PatternBitSet::new(universe.pattern_count())
         };
         let session = Self {
-            problem: problem.clone(),
+            problem: Arc::new(problem.clone()),
             purpose,
             aggregation,
             field,
-            catalog,
+            catalog: Arc::new(catalog),
+            shared_immutable_owners: false,
             geometry,
             build_order_workspace,
             coverage_evaluator: CoverageProductEvaluator::default(),
@@ -378,6 +391,7 @@ impl ExtendedBuildProbabilitySession {
             parallel_minimum_worker_candidates: 0,
             parallel_maximum_worker_candidates: 0,
             distributed_worker_memory_bytes: 0,
+            native_parallel_peak_bytes: 0,
             distributed_execution_constraint_materialized: false,
             finesse_requested,
             finesse_languages: Vec::new(),
@@ -2279,7 +2293,19 @@ impl ExtendedBuildProbabilitySession {
         } else {
             Vec::new()
         };
-        let hash = super::build_probability::normalized_string_solution_set_hash(&keys);
+        // The public PC document contract uses the semantic `cts1` hash,
+        // not Build's private string-owner `ctks1` envelope. Use the borrowed
+        // four-word codec so exporting the same family neither truncates the
+        // field nor acquires compact Board64 reducer authority.
+        let mut hasher =
+            clearra_core_domain::solution::NormalizedTilingSolutionSetHasher::default();
+        for key in &keys {
+            let identity = ExtendedTilingSolutionKey::parse_canonical(key).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("extended_pc_solution_identity_invalid")
+            })?;
+            hasher.update_extended_canonical_key(identity);
+        }
+        let hash = hasher.finish();
         let probability = universe
             .weights()
             .covered_weight(&self.covered_patterns)
@@ -2316,8 +2342,24 @@ impl ExtendedBuildProbabilitySession {
             field("board_storage", "board256-canonical"),
             field("workers_requested", self.problem.backend_policy().workers()),
             field("workers_used", self.workers_used),
-            field("cpu_parallel_execution", false),
-            field("cpu_parallel_decision_reason", "direct-extended-pc-family"),
+            field("cpu_parallel_execution", self.workers_used > 1),
+            field(
+                "cpu_parallel_decision_reason",
+                if self.workers_used > 1 {
+                    "extended-pc-shared-family-private-verifiers"
+                } else {
+                    "direct-extended-pc-family"
+                },
+            ),
+            field("cpu_parallel_active_workers", self.parallel_active_workers),
+            field(
+                "cpu_parallel_minimum_worker_candidates",
+                self.parallel_minimum_worker_candidates,
+            ),
+            field(
+                "cpu_parallel_maximum_worker_candidates",
+                self.parallel_maximum_worker_candidates,
+            ),
             field("solution_found", !keys.is_empty()),
             field("solution_set_materialized", true),
             field("solution_keys_materialized_count", keys.len()),
@@ -2386,6 +2428,10 @@ impl ExtendedBuildProbabilitySession {
                     || probability_complete && count_complete,
             ),
             field("packing_candidate_count", self.geometry.candidate_count()),
+            field(
+                "packing_candidate_digest",
+                format!("{:016x}", self.candidate_digest),
+            ),
             field("searched_geometry_nodes", self.geometry.expanded_nodes()),
             field("searched_build_nodes", self.searched_build_nodes),
             field("total_reachability_states", self.reachability_states),
@@ -2393,7 +2439,14 @@ impl ExtendedBuildProbabilitySession {
                 "coverage_product_edge_checks",
                 self.coverage_product_edge_checks,
             ),
-            field("resource_peak_cpu_bytes", self.retained_bytes()),
+            field(
+                "resource_peak_cpu_bytes",
+                (self.retained_bytes() as u128).max(self.native_parallel_peak_bytes),
+            ),
+            field(
+                "resource_peak_cpu_bytes_kind",
+                "checked-retained-projection",
+            ),
             field("resource_truncated", self.truncated_reason.is_some()),
             field(
                 "resource_truncation_reason",
@@ -2538,13 +2591,22 @@ impl ExtendedBuildProbabilitySession {
                 )
             }
         }?;
-        problem_bytes.checked_add(self.checked_non_problem_retained_bytes()?)
+        let owned_problem_bytes = if self.shared_immutable_owners {
+            0
+        } else {
+            problem_bytes.checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32)?
+        };
+        owned_problem_bytes.checked_add(self.checked_non_problem_retained_bytes()?)
     }
 
     fn checked_non_problem_retained_bytes(&self) -> Option<u128> {
         let mut total = 0_u128;
         for bytes in [
-            self.catalog.retained_bytes(),
+            if self.shared_immutable_owners {
+                0
+            } else {
+                self.catalog.retained_bytes() + core::mem::size_of::<ExtendedInverseCatalog>() + 32
+            },
             self.geometry.retained_bytes(),
             self.build_order_workspace.retained_bytes(),
             self.coverage_evaluator.retained_bytes(),

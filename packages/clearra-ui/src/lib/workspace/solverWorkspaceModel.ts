@@ -33,6 +33,8 @@ export type SpinProfile =
 export type QueueKnowledge = 'oracle' | 'visible-7';
 export type SolverHoldPiece = 'empty' | 'I' | 'O' | 'T' | 'S' | 'Z' | 'J' | 'L';
 
+export const WORKSPACE_PC_MAX_LINES = 24;
+
 export type SolverWorkspaceRequest = {
   lines: number;
   boardMask: bigint;
@@ -69,6 +71,9 @@ export type WorkspaceValidationCode =
   | 'visible-seven-minimum-cover-unsupported'
   | 'pc-score-finder-fixed-queue-required'
   | 'target_lines_invalid'
+  | 'pc_extended_result_unavailable'
+  | 'pc_extended_browser_workers_unavailable'
+  | 'pc_extended_options_unavailable'
   | 'scenario_outside_target'
   | 'scenario_not_tileable'
   | 'scenario_supply_mismatch'
@@ -468,16 +473,30 @@ export function automaticPcTargetLines(
 
 export function workspaceValidationCodes(
   request: SolverWorkspaceRequest,
-  _runtime: 'web' | 'desktop'
+  runtime: 'web' | 'desktop'
 ): WorkspaceValidationCode[] {
   assertGuiScoreMode(request.scoreMode);
   const errors: WorkspaceValidationCode[] = [];
-  // The direct extended Tiling terminal requires an explicit single worker.
-  // Do not expose it through this automatic multiworker workspace before the
-  // full-height worker protocol and Desktop terminal have been connected.
-  const targetLinesValid = Number.isInteger(request.lines) && request.lines >= 1 && request.lines <= 6;
+  const targetLinesValid = Number.isInteger(request.lines) && request.lines >= 1 && request.lines <= WORKSPACE_PC_MAX_LINES;
   if (!targetLinesValid) {
     errors.push('target_lines_invalid');
+  }
+  if (targetLinesValid && request.lines > 6) {
+    // These are execution capabilities, not a board-height validation rule.
+    // Never silently lower workers, change the result mode, or erase options
+    // to turn a not-yet-connected product into a different successful search.
+    const execution = normalizeWorkspaceRequest(request);
+    if (execution.scoreMode !== 'tiling' && execution.scoreMode !== 'off') {
+      errors.push('pc_extended_result_unavailable');
+    }
+    if (runtime === 'web' && execution.workers !== 1) {
+      errors.push('pc_extended_browser_workers_unavailable');
+    }
+    if (!['cpu', 'auto'].includes(execution.backend) || execution.tablebaseEnabled ||
+        execution.precomputeBuildDependencies || execution.queueKnowledge !== 'oracle' ||
+        execution.preserveB2B) {
+      errors.push('pc_extended_options_unavailable');
+    }
   }
   if (request.queue.trim() !== '' && !parseBrowserQueueInput(request.queue)) {
     errors.push('queue_invalid');

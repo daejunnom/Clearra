@@ -450,7 +450,7 @@ fn conditioned_pattern_count(
 }
 
 fn standard_bag_continuation_count(prefix_len: usize, mut draws: usize) -> Option<usize> {
-    let mut available = if prefix_len % 7 == 0 {
+    let mut available = if prefix_len.is_multiple_of(7) {
         7
     } else {
         7 - prefix_len % 7
