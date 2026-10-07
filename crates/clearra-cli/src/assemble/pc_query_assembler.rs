@@ -65,11 +65,9 @@ pub struct PcQueryAssembler;
 impl PcQueryAssembler {
     pub fn assemble(args: &PcArgs) -> Result<OpeningPcSearchQuery, PcQueryAssemblyError> {
         let target = PcTarget::new(args.lines()).map_err(PcQueryAssemblyError::InvalidTarget)?;
-        if !matches!(target.lines(), 2 | 4 | 6) {
-            return Err(PcQueryAssemblyError::UnsupportedMvpTarget {
-                lines: target.lines(),
-            });
-        }
+        // PcTarget owns the same even 2..=24 empty-origin input contract as
+        // the shared command parser. Result/runtime capabilities belong to App
+        // and Core, not a second, stale six-line limit at CLI assembly.
         let mut objective = parse_objective(args.objective())?;
         validate_pc_observation_objective(args.queue_observation_policy(), objective.kind())
             .map_err(PcQueryAssemblyError::SearchContract)?;

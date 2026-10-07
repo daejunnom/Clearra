@@ -837,8 +837,8 @@ mod retained_capacity {
         };
         use clearra_objectives::policy::objective_policy::ObjectivePolicy;
         use clearra_pc_graph::request::{
-            OpeningPcSearchQuery, PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
-            PieceWindow,
+            OpeningPcSearchQuery, PcCountPolicy, PcHoldPolicy, PcQueueInput, PcScenarioBoard,
+            PcScenarioQuery, PieceWindow,
         };
         use clearra_supply::queue::{
             fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression,
@@ -1025,9 +1025,15 @@ mod retained_capacity {
         #[test]
         fn ordinary_pc_family_memory_projection_counts_opening_and_scenario_owners() {
             for lines in [2, 6, 8, 24] {
+                // The old capacity helper retains four pieces; it is not a
+                // full Opening supply. Keep spare allocation capacity while
+                // supplying the actual target area, including the 24L owner.
+                let mut pieces = Vec::with_capacity(96);
+                pieces.resize(usize::from(lines) * 10 / 4, PieceKind::I);
                 let opening = ProblemCompiler::compile_opening_pc(
                     &OpeningPcSearchQuery::new(PcTarget::new(lines).unwrap())
-                        .with_queue(fixed_queue(96))
+                        .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(pieces)))
+                        .with_hold_policy(PcHoldPolicy::Disabled)
                         .with_objective(ObjectivePolicy::all()),
                 )
                 .unwrap();

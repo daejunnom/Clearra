@@ -74,11 +74,25 @@ fn rejects_visible_seven_minimum_cover_before_query_execution() {
 }
 
 #[test]
-fn rejects_unsupported_even_target() {
-    assert_eq!(
-        PcQueryAssembler::assemble(&PcArgs::new(8)),
-        Err(PcQueryAssemblyError::UnsupportedMvpTarget { lines: 8 })
-    );
+fn full_height_even_targets_preserve_the_native_cli_input_contract() {
+    for lines in (8..=24).step_by(2) {
+        let args = PcArgs::new(lines)
+            .with_queue("I".repeat(usize::from(lines) * 10 / 4), true)
+            .with_hold_enabled(false)
+            .with_backend(Some("cpu".to_owned()))
+            .with_workers(Some(1));
+        let query = PcQueryAssembler::assemble(&args).unwrap();
+        assert_eq!(query.target().lines(), lines);
+        assert_eq!(query.queue().len(), usize::from(lines) * 10 / 4);
+        assert!(!query.hold_policy().is_enabled());
+        assert_eq!(query.execution_policy().workers(), 1);
+    }
+    for lines in [0, 1, 3, 7, 25, 26] {
+        assert!(matches!(
+            PcQueryAssembler::assemble(&PcArgs::new(lines)),
+            Err(PcQueryAssemblyError::InvalidTarget(_))
+        ));
+    }
 }
 
 #[test]

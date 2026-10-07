@@ -151,12 +151,12 @@ fn pc_command_routes_non_two_line_targets_to_generic_search() {
 
 #[test]
 fn pc_command_reports_unsupported_target() {
-    let output = PcCommand::run(PcArgs::new(8), RenderFormat::Text);
+    let output = PcCommand::run(PcArgs::new(26), RenderFormat::Text);
 
     assert_eq!(output.exit_code(), ExitCode::ValidationFailed);
     assert!(output
         .stderr()
-        .contains(CliErrorCode::PcTargetUnsupportedMvp.as_str()));
+        .contains(CliErrorCode::PcTargetInvalid.as_str()));
 }
 
 #[test]

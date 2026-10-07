@@ -217,3 +217,12 @@ test('Opening inputs retain the whole target rather than a six-line or twenty-li
   assert.match(read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs'),
     /checked_pc_family_problem_nested_retained_bytes\(\s*&self\.problem/u);
 });
+
+test('native CLI assembly does not reintroduce a six-line limit before App', () => {
+  const assembler = read('crates/clearra-cli/src/assemble/pc_query_assembler.rs');
+  assert.ok(assembler.includes('PcTarget::new(args.lines())'));
+  assert.ok(!assembler.includes('!matches!(target.lines(), 2 | 4 | 6)'));
+  assert.ok(read('crates/clearra-cli/src/assemble/pc_query_assembler_tests.rs')
+    .includes('full_height_even_targets_preserve_the_native_cli_input_contract'));
+  assert.ok(workflow.includes('--lib assemble::pc_query_assembler::tests'));
+});

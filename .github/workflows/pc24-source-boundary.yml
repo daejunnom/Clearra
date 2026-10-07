@@ -20,6 +20,9 @@ on:
       - "crates/clearra-host-contract/src/solution_set_artifact_payload.rs"
       - "crates/clearra-cli/src/output/solution_artifact_output.rs"
       - "crates/clearra-cli/Cargo.toml"
+      - "crates/clearra-cli/src/assemble/pc_query_assembler.rs"
+      - "crates/clearra-cli/src/assemble/pc_query_assembler_tests.rs"
+      - "crates/clearra-cli/src/commands/pc_command_tests.rs"
       - "crates/clearra-cli/tests/extended_pc_tiling.rs"
       - "crates/clearra-app/src/app_response/solution_set_artifact.rs"
       - "crates/clearra-app/src/pc_minimum_cover_result.rs"
@@ -143,6 +146,9 @@ jobs:
       - name: Verify canonical full-height CLI execution without a native-C or tablebase fallback
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --test extended_pc_tiling -- --test-threads=1
+      - name: Verify native CLI assembly retains the shared full-height Opening input contract
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --lib assemble::pc_query_assembler::tests -- --test-threads=1
       - name: Verify immutable compact and extended page owners and bounded catalog admission
         if: ${{ !cancelled() }}
         run: |
