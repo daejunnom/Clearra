@@ -336,9 +336,26 @@ impl PcTilingCompiledAuthority {
                 "pc_tiling_query_retained_envelope_exceeded",
             ));
         }
+        let compute_units = if !clearra_core_executor::backend::WasmCpuSearchBackend::supports_extended_native_tiling_workers() {
+            1
+        } else {
+            match query.as_ref() {
+                PcTilingQuerySnapshot::Opening(query) if query.target().lines() > 6 => {
+                    query.execution_policy().workers()
+                }
+                PcTilingQuerySnapshot::Scenario(query)
+                    if query.initial_board().visible_height() > 6 =>
+                {
+                    query.execution_policy().workers()
+                }
+                _ => 1,
+            }
+        };
         let terminal_resource_authority =
-            WasmCpuTerminalResourceAuthority::try_acquire_full_capacity()
-                .map_err(PcTilingCompiledAuthorityError::resource_admission)?;
+            WasmCpuTerminalResourceAuthority::try_acquire_full_capacity_with_compute_units(
+                compute_units,
+            )
+            .map_err(PcTilingCompiledAuthorityError::resource_admission)?;
         let problem = match query.as_ref() {
             PcTilingQuerySnapshot::Opening(query) => {
                 ProblemCompiler::compile_opening_pc_tiling(query.as_ref())

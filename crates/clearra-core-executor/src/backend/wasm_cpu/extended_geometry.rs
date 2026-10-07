@@ -1,5 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[path = "extended_geometry_parallel.rs"]
+mod parallel;
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+pub(super) use parallel::ExtendedParallelGeometryBranch;
+
 use clearra_supply::pattern_universe::{
     piece_multiset_group::PackingMultisetFamily, MaterializedPatternUniverse,
     PatternPiecePositionIndex,
@@ -385,6 +391,10 @@ struct ExtendedFamilyEnumerator {
     tasks: Vec<TraversalTask>,
     rows: [u32; MAX_EXTENDED_PIECES],
     target_depth: u8,
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    task_memory_limit: Option<u128>,
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    refused_task_bytes: Option<u128>,
 }
 
 impl ExtendedFamilyEnumerator {
@@ -409,6 +419,10 @@ impl ExtendedFamilyEnumerator {
             tasks,
             rows: [0; MAX_EXTENDED_PIECES],
             target_depth,
+            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+            task_memory_limit: None,
+            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+            refused_task_bytes: None,
         }
     }
 
@@ -447,10 +461,7 @@ impl ExtendedFamilyEnumerator {
                     FamilyNodeKind::Union => {
                         let mut right = task;
                         right.family = node.right;
-                        if self.tasks.try_reserve(1).is_err() {
-                            return Err(());
-                        }
-                        self.tasks.push(right);
+                        self.push_task(right)?;
                         task.family = node.left;
                     }
                     FamilyNodeKind::Product => {
@@ -466,6 +477,25 @@ impl ExtendedFamilyEnumerator {
             }
         }
         Ok(None)
+    }
+
+    fn push_task(&mut self, task: TraversalTask) -> Result<(), ()> {
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        if let Some(limit) = self.task_memory_limit {
+            let future_capacity = if self.tasks.len() == self.tasks.capacity() {
+                self.tasks.len().saturating_add(1).saturating_mul(2).max(4)
+            } else {
+                self.tasks.capacity()
+            };
+            let bytes = future_capacity as u128 * core::mem::size_of::<TraversalTask>() as u128;
+            if bytes > limit {
+                self.refused_task_bytes = Some(bytes);
+                return Err(());
+            }
+        }
+        self.tasks.try_reserve(1).map_err(|_| ())?;
+        self.tasks.push(task);
+        Ok(())
     }
 
     fn candidate(
@@ -616,6 +646,28 @@ impl ExtendedGeometrySearch {
         };
         self.external_targets = Some(targets.into());
         true
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub fn is_compiling(&self) -> bool {
+        self.dense_compiler.is_some() || self.compiler.is_some()
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub fn complete_parallel_enumeration(
+        &mut self,
+        candidate_count: usize,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.enumerator.is_some()
+            || self.is_compiling()
+            || self.candidate_family_count != Some(candidate_count as u128)
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_parallel_geometry_family_count_mismatch",
+            ));
+        }
+        self.candidate_count = candidate_count;
+        Ok(())
     }
 
     pub fn advance(&mut self, catalog: &ExtendedInverseCatalog) -> ExtendedGeometryAdvance {

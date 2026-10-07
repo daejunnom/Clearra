@@ -226,3 +226,25 @@ test('native CLI assembly does not reintroduce a six-line limit before App', () 
     .includes('full_height_even_targets_preserve_the_native_cli_input_contract'));
   assert.ok(workflow.includes('--lib assemble::pc_query_assembler::tests'));
 });
+
+test('native extended Tiling shares exact family owners and joins jobs inside one admitted request', () => {
+  const backend = read('crates/clearra-core-executor/src/backend/wasm_cpu_search_backend.rs');
+  const authority = read('crates/clearra-app/src/pc_tiling_family_result.rs');
+  const plan = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_geometry_parallel.rs');
+  const runner = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_tiling_parallel.rs');
+  assert.ok(backend.includes('supports_extended_native_tiling_workers'));
+  assert.match(authority, /try_acquire_full_capacity_with_compute_units\(\s*compute_units,?\s*\)/u);
+  assert.ok(plan.includes('seeds.insert(index + 1, right)'));
+  assert.ok(plan.includes('first_ordinal: ordinal'));
+  assert.ok(plan.includes('checked_live_retained_bytes, future'));
+  assert.ok(runner.includes('submitted += 1'));
+  assert.ok(runner.includes('for _ in 0..submitted'));
+  assert.ok(runner.includes('complete_parallel_enumeration(count)'));
+  assert.ok(!runner.includes('build_extended_order_graph'));
+  assert.ok(workflow.includes('--features parallel --lib extended_geometry::parallel::tests'));
+  assert.ok(workflow.includes('--features parallel --test extended_pc_tiling'));
+  assert.ok(read('crates/clearra-cli/tests/extended_pc_tiling.rs')
+    .includes('extended_parallel_tiling_real_cli_keeps_complete_keys_and_full_height'));
+  assert.ok(read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_geometry_parallel_tests.rs')
+    .includes('extended_parallel_product_splits_preserve_sixty_row_prefix_and_continuations'));
+});

@@ -152,9 +152,15 @@ fn b2b_preservation_without_an_explicit_spin_profile_uses_the_pc_default() {
 
 #[test]
 fn assembles_execution_policy_into_pc_query() {
+    // This fixture checks assembly, not the machine's CPU topology. Keep the
+    // public n-1 reservation intact on small hosted runners as well as desktops.
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .saturating_sub(1)
+        .clamp(1, 4);
     let args = PcArgs::new(2)
         .with_backend(Some("cpu".to_owned()))
-        .with_workers(Some(4))
+        .with_workers(Some(workers))
         .with_max_frontier_states(Some(256))
         .with_allow_backend_fallback(Some(false));
 
@@ -164,7 +170,7 @@ fn assembles_execution_policy_into_pc_query() {
         query.execution_policy().requested_backend(),
         clearra_pc_graph::request::RequestedSearchBackend::Cpu
     );
-    assert_eq!(query.execution_policy().workers(), 4);
+    assert_eq!(query.execution_policy().workers(), workers);
     assert_eq!(query.execution_policy().max_frontier_states(), 256);
     assert!(!query.execution_policy().allow_backend_fallback());
 }

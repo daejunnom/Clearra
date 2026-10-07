@@ -231,15 +231,20 @@ impl WasmCpuSearchSession {
         checked_external_retained_upper_bound_bytes: u128,
         authority: &WasmCpuTerminalResourceAuthority,
     ) -> Result<Self, WasmCpuSearchError> {
-        let allow_native_parallel =
-            cfg!(not(target_family = "wasm")) && problem.objective().score().requested();
+        let allow_native_parallel = cfg!(not(target_family = "wasm"))
+            && (problem.objective().score().requested()
+                || (cfg!(feature = "parallel")
+                    && problem.visible_height() > 6
+                    && problem.output_policy() == SearchOutputPolicy::TilingOnly));
         validate_shared_terminal_problem(problem.as_ref(), true, allow_native_parallel)?;
         if problem.visible_height() > 6 && problem.output_policy() == SearchOutputPolicy::TilingOnly
         {
-            if !matches!(
-                problem.backend_policy().worker_policy(),
-                clearra_pc_graph::request::WorkerPolicy::Fixed(1)
-            ) {
+            if !allow_native_parallel
+                && !matches!(
+                    problem.backend_policy().worker_policy(),
+                    clearra_pc_graph::request::WorkerPolicy::Fixed(1)
+                )
+            {
                 return Err(WasmCpuSearchError::Unsupported {
                     reason: "extended_pc_tiling_requires_explicit_single_worker",
                 });
@@ -377,8 +382,19 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::Cpu(session) => session
                 .execute_parallel_if_worthwhile(worker_count, control)
                 .map_err(map_error),
-            WasmSearchSessionInner::ExtendedPc(_) | WasmSearchSessionInner::ExtendedPcTiling(_) => {
-                Ok(None)
+            WasmSearchSessionInner::ExtendedPc(_) => Ok(None),
+            WasmSearchSessionInner::ExtendedPcTiling(session) => {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    session
+                        .execute_parallel_if_worthwhile(worker_count, control)
+                        .map_err(map_error)
+                }
+                #[cfg(target_family = "wasm")]
+                {
+                    let _ = session;
+                    Ok(None)
+                }
             }
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(_) => Ok(None),
@@ -387,6 +403,12 @@ impl WasmCpuSearchSession {
 }
 
 impl WasmCpuSearchBackend {
+    /// This capability describes only the native four-word Tiling worker
+    /// runner, not browser distribution or ordinary PC product reducers.
+    pub const fn supports_extended_native_tiling_workers() -> bool {
+        cfg!(all(feature = "parallel", not(target_family = "wasm")))
+    }
+
     pub fn selected_product_backend(problem: &SearchProblem) -> WasmProductSearchBackend {
         if cfg!(feature = "webgpu-search") && should_use_webgpu(problem) {
             WasmProductSearchBackend::WebGpu
@@ -651,8 +673,11 @@ impl WasmCpuSearchBackend {
         ) -> R,
     ) -> R {
         let worker_count = runtime_worker_count(problem.backend_policy().workers());
-        let native_score_parallel_authorized =
-            cfg!(not(target_family = "wasm")) && problem.objective().score().requested();
+        let native_score_parallel_authorized = cfg!(not(target_family = "wasm"))
+            && (problem.objective().score().requested()
+                || (cfg!(feature = "parallel")
+                    && problem.visible_height() > 6
+                    && problem.output_policy() == SearchOutputPolicy::TilingOnly));
         #[cfg(not(feature = "parallel"))]
         if native_score_parallel_authorized
             && worker_count > 1
@@ -668,13 +693,13 @@ impl WasmCpuSearchBackend {
             Ok(session) => session,
             Err(error) => return terminal(Err(error), None),
         };
-        // For native typed score, this is the same deterministic exact-family
+        // For native typed score and extended Tiling, this is a deterministic exact-family
         // decomposition used by ordinary native PC search. The one request-
         // scoped child lease owns all N compute slots, so this does not create
         // nested resource owners: parallel_search submits N-1 pool jobs, runs
         // one branch on the caller, then restores canonical branch order before
-        // the terminal callback. Typed tiling and WASM shared sessions retain
-        // their existing one-compute-slot serial authority.
+        // the terminal callback. Compact typed Tiling and WASM shared sessions
+        // retain their existing one-compute-slot serial authority.
         #[cfg(feature = "parallel")]
         if native_score_parallel_authorized && worker_count > 1 {
             match session.execute_parallel_if_worthwhile(worker_count, control) {

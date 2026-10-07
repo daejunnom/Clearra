@@ -116,6 +116,83 @@ fn extended_tiling_real_cli_keeps_full_height_results() {
 }
 
 #[test]
+fn extended_parallel_tiling_real_cli_keeps_complete_keys_and_full_height() {
+    const HEIGHT: u8 = 24;
+    let mut holes = Board256Mask::EMPTY;
+    for row in 0..4 {
+        for column in 0..4 {
+            holes = holes.union(Board256Mask::singleton(row * 10 + column).unwrap());
+        }
+    }
+    // No complete initial row, and one forced column per remaining block.
+    // This leaves exactly two small families rather than a large 24L search.
+    for row in 4..u16::from(HEIGHT) {
+        let column = 5 + (row - 4) / 4;
+        holes = holes.union(Board256Mask::singleton(row * 10 + column).unwrap());
+    }
+    let pieces = holes.count_ones() as usize / 4;
+    let initial = Board256Mask::all_cells(u16::from(HEIGHT) * 10)
+        .unwrap()
+        .without(holes);
+    let words = initial.words();
+    let board_hex = format!(
+        "{:016x}{:016x}{:016x}{:016x}",
+        words[3], words[2], words[1], words[0]
+    );
+    let logical_processors = std::thread::available_parallelism().map_or(1, usize::from);
+    let all_cpu_opt_in = if logical_processors < 3 {
+        " --use-all-cpu-threads"
+    } else {
+        ""
+    };
+    let mut baseline = None;
+    for workers in [1, 2] {
+        let command = format!(
+            "clearra --format json --include-solution-data pc tiling --lines {HEIGHT} --height {HEIGHT} --board-mask 0x{board_hex} --pieces {pieces} --queue {} --workers {workers}{all_cpu_opt_in} --backend cpu --no-hold",
+            "I".repeat(pieces)
+        );
+        let output = run_with_args(command.split_whitespace().map(str::to_owned));
+        if workers > logical_processors {
+            assert_eq!(output.exit_code(), ExitCode::ValidationFailed, "{output:?}");
+            assert!(
+                baseline.is_some(),
+                "the valid one-worker baseline completed"
+            );
+            continue;
+        }
+        assert_eq!(output.exit_code(), ExitCode::Success, "{output:?}");
+        let json: serde_json::Value = serde_json::from_str(output.stdout()).unwrap();
+        assert_eq!(json["summary"]["unique_solution_count"], 2);
+        assert_eq!(json["summary"]["workers_requested"], workers);
+        assert_eq!(json["summary"]["workers_used"], workers);
+        assert_eq!(json["summary"]["tiling_family_complete"], true);
+        assert_eq!(json["summary"]["count_complete"], true);
+        assert_eq!(json["summary"]["buildup_executed"], "false");
+        assert_eq!(json["contract"]["solution_data"]["status"], "complete");
+        let keys = &json["contract"]["artifacts"]["solution_keys"];
+        assert_eq!(keys.as_array().unwrap().len(), 2);
+        for key in keys.as_array().unwrap() {
+            let identity =
+                clearra_core_domain::solution::ExtendedTilingSolutionKey::parse_canonical(
+                    key.as_str().unwrap(),
+                )
+                .unwrap();
+            assert_eq!(identity.height(), HEIGHT);
+            assert_eq!(identity.initial_board(), initial);
+            assert_eq!(identity.placement_count(), pieces);
+        }
+        let hash = &json["summary"]["normalized_solution_set_hash"];
+        assert!(hash.as_str().is_some());
+        let snapshot = (hash.clone(), keys.clone());
+        if let Some(expected) = baseline.as_ref() {
+            assert_eq!(&snapshot, expected);
+        } else {
+            baseline = Some(snapshot);
+        }
+    }
+}
+
+#[test]
 fn extended_ordinary_pc_real_cli_verifies_buildup_without_truncating_the_field() {
     for height in [7_u8, 8, 12, 24] {
         let starts = if height == 7 {

@@ -131,7 +131,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pinned native and WASM Rust targets
-        run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy --target wasm32-unknown-unknown
       - name: Compile the same four-word execution bridge for WASM
         run: |
           cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown
@@ -149,6 +149,12 @@ jobs:
       - name: Verify native CLI assembly retains the shared full-height Opening input contract
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --lib assemble::pc_query_assembler::tests -- --test-threads=1
+      - name: Verify exact extended family splits and bounded native Tiling workers
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_geometry::parallel::tests -- --test-threads=1
+          cargo test --locked -p clearra-app --no-default-features --features parallel --test extended_pc_tiling -- --test-threads=1
+          cargo clippy --locked -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings
       - name: Verify immutable compact and extended page owners and bounded catalog admission
         if: ${{ !cancelled() }}
         run: |

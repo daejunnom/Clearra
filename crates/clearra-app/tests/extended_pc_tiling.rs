@@ -228,6 +228,7 @@ fn full_height_cooperative_tiling_and_direct_product_have_the_same_family() {
 }
 
 #[test]
+#[cfg(not(feature = "parallel"))]
 fn extended_direct_tiling_never_reduces_an_explicit_multiworker_request() {
     let context = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
@@ -248,6 +249,122 @@ fn extended_direct_tiling_never_reduces_an_explicit_multiworker_request() {
         assert!(response.product_capability_result().is_none());
         assert!(response.render_model().is_none());
         assert!(!response.resource_report().solver_executed());
+    }
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn extended_native_parallel_tiling_keeps_the_real_complete_family_and_terminal_authority() {
+    use clearra_core_domain::board::standard_pc_board::Board256Mask;
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for height in [7_u8, 8, 12, 24] {
+        let mut holes = Board256Mask::EMPTY;
+        for row in 0..4 {
+            for col in 0..4 {
+                holes = holes.union(Board256Mask::singleton(row * 10 + col).unwrap());
+            }
+        }
+        // Keep every initial row incomplete: importing completed rows would
+        // clear them before Geometry and change the scenario's piece count.
+        // Each remaining four-row block has its own forced-I column, so no
+        // column develops a large family of inverse row selections.
+        let tail_start = if height == 7 { 3 } else { 4 };
+        for row in tail_start..u16::from(height) {
+            let column = 5 + (row - tail_start) / 4;
+            holes = holes.union(Board256Mask::singleton(row * 10 + column).unwrap());
+        }
+        let pieces = holes.count_ones() as usize / 4;
+        let initial = Board256Mask::all_cells(u16::from(height) * 10)
+            .unwrap()
+            .without(holes);
+        let mut baseline = None;
+        for workers in [1, 2] {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10_from_words(u16::from(height), initial.words())
+                    .unwrap(),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; pieces])),
+                PieceWindow::new(pieces),
+            )
+            .with_rule(srs_plus())
+            .with_exact_pieces(Some(pieces))
+            .with_allow_hold(false)
+            .with_min_remaining_queue(0)
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_objective(ObjectivePolicy::tiling())
+            .with_retained_trace_limit(1)
+            .with_execution_policy(
+                PcExecutionPolicy::default()
+                    .with_requested_backend(RequestedSearchBackend::Cpu)
+                    .with_workers(workers)
+                    .with_worker_hardware_limit(3),
+            );
+            let request = AppRequest::new(AppCommand::Scenario(
+                ScenarioAppCommand::new(query).with_result_projection(
+                    PcResultProjection::TilingFamilyV1(PcTilingIngressOrigin::CanonicalPcTiling),
+                ),
+            ))
+            .with_product_capability_contract(ProductCapabilityContract::PcTiling)
+            .unwrap();
+            let response = context.run(request.clone());
+            assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+            let core = response.render_model().unwrap().core_result().unwrap();
+            assert_eq!(core.usize_field("workers_requested"), Some(workers));
+            assert_eq!(core.usize_field("workers_used"), Some(workers));
+            assert_eq!(core.bool_field("cpu_parallel_execution"), Some(workers > 1));
+            assert!(core.pc_tiling_family_publication_contract_is_valid());
+            assert_eq!(core.bool_field("buildup_executed"), Some(false));
+            let family = response
+                .product_capability_result()
+                .unwrap()
+                .pc_tiling_family_v1()
+                .unwrap();
+            assert_eq!(
+                family.normalized_solution_count(),
+                2,
+                "height={height}, workers={workers}"
+            );
+            let snapshot = (
+                family.normalized_solution_set_hash().to_owned(),
+                family.page_keys(0, 100).unwrap(),
+            );
+            if let Some(expected) = baseline.as_ref() {
+                assert_eq!(&snapshot, expected);
+            } else {
+                baseline = Some(snapshot.clone());
+            }
+            let mut cooperative = context.start_cooperative_execution(request);
+            let mut complete = false;
+            for _ in 0..4096 {
+                match cooperative.advance(256, &ExecutionControl::default()) {
+                    CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                    CooperativeAppAdvance::Completed(response) => {
+                        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+                        let core = response.render_model().unwrap().core_result().unwrap();
+                        assert_eq!(core.usize_field("workers_used"), Some(workers));
+                        assert!(core.pc_tiling_family_publication_contract_is_valid());
+                        let family = response
+                            .product_capability_result()
+                            .unwrap()
+                            .pc_tiling_family_v1()
+                            .unwrap();
+                        assert_eq!(family.normalized_solution_count(), 2);
+                        assert_eq!(
+                            (
+                                family.normalized_solution_set_hash().to_owned(),
+                                family.page_keys(0, 100).unwrap(),
+                            ),
+                            snapshot
+                        );
+                        complete = true;
+                        break;
+                    }
+                    other => panic!("unexpected extended parallel PC outcome: {other:?}"),
+                }
+            }
+            assert!(complete, "bounded parallel Tiling must complete");
+        }
     }
 }
 
