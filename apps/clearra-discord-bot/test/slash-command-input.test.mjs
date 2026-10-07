@@ -52,8 +52,9 @@ function compactGridFromMask(mask) {
   return `grid:${rows.join("/")}`;
 }
 
-test("Discord 7..24L Tiling retains all field words and normalizes the explicit or automatic target once", () => {
-  const command = findSlashCommand("pc").subcommands.tiling;
+test("Discord 7..24L Tiling, Minimum and Chance retain all field words and normalize the explicit or automatic target once", () => {
+  for (const product of ["tiling", "minimals", "chance"]) {
+  const command = findSlashCommand("pc").subcommands[product];
   const rows = readFileSync(new URL("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv", import.meta.url), "utf8")
     .split(/\r?\n/u).filter(line => line && !line.startsWith("#"));
   for (const row of rows) {
@@ -62,7 +63,7 @@ test("Discord 7..24L Tiling retains all field words and normalizes the explicit 
     const options = [{ name: "field", value: field }, { name: "next", value: queue },
       { name: "lines", value: Number(height) }, { name: "hold", value: "disabled" }];
     const args = buildSlashCommandArguments(command, options);
-    assert.deepEqual(args.slice(0, 2), ["pc", "tiling"]);
+    assert.deepEqual(args.slice(0, 2), ["pc", product]);
     assert.equal(args[args.indexOf("--height") + 1], height, id);
     assert.equal(args[args.indexOf("--pieces") + 1], pieces, id);
     assert.equal(BigInt(args[args.indexOf("--board-mask") + 1]), BigInt(`0x${hex}`), id);
@@ -78,8 +79,16 @@ test("Discord 7..24L Tiling retains all field words and normalizes the explicit 
     { name: "field", value: "grid:__________" }, { name: "next", value: "I" }, { name: "lines", value: 25 },
   ]), /1 through 24/u);
   for (const locale of ["en", "ko", "ja"]) {
-    assert.match(formatSlashCommandHelp("pc tiling", locale), /1(?:–|〜|\.\.)24/u);
+    assert.match(formatSlashCommandHelp(`pc ${product}`, locale), /1(?:–|〜|\.\.)24/u);
   }
+  }
+});
+
+test("24L Minimum refuses disconnected B2B semantics without changing the requested target", () => {
+  assert.throws(() => buildSlashCommandArguments(findSlashCommand("pc").subcommands.minimals, [
+    { name: "field", value: "grid:__________" }, { name: "next", value: "I".repeat(20) },
+    { name: "lines", value: 8 }, { name: "preserve-b2b", value: "on" },
+  ]), /B2B preservation above 6 PC lines/u);
 });
 
 test("Discord PC input shares the 1..6L target-frame and initial-clear corpus", () => {

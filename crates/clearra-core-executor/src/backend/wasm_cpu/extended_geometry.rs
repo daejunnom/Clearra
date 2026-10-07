@@ -799,10 +799,8 @@ impl ExtendedGeometrySearch {
             compiler.targets.as_slice()
         } else if let Some(enumerator) = self.enumerator.as_ref() {
             enumerator.targets.as_ref()
-        } else if let Some(targets) = self.external_targets.as_ref() {
-            targets.as_ref()
         } else {
-            return None;
+            self.external_targets.as_ref()?.as_ref()
         };
         let target = targets
             .binary_search_by_key(&counts, |target| target.counts)

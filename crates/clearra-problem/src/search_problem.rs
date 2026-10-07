@@ -750,23 +750,39 @@ mod retained_capacity {
         pub fn checked_pc_family_pointee_retained_bytes(&self) -> Option<u128> {
             use clearra_core_domain::objective::objective_kind::ObjectiveKind;
 
+            let minimum_source = self.pc_chance_evidence_policy
+                == PcChanceEvidencePolicy::PcMinimumCoverV2
+                && self.objective.kind() == ObjectiveKind::MinimumCover
+                && matches!(
+                    self.count_policy,
+                    CountPolicy::CountAll | CountPolicy::CountUnique
+                )
+                && self.output_policy == SearchOutputPolicy::Trace;
+            let ordinary_source = self.pc_chance_evidence_policy
+                == PcChanceEvidencePolicy::Disabled
+                && matches!(
+                    self.objective.kind(),
+                    ObjectiveKind::All | ObjectiveKind::Unique
+                );
+            let chance_source = self.pc_chance_evidence_policy
+                == PcChanceEvidencePolicy::PcProbabilityV2
+                && self.objective.kind() == ObjectiveKind::Unique
+                && self.count_policy == CountPolicy::CountUnique
+                && self.output_policy == SearchOutputPolicy::CoverageSummary
+                && !self.solution_probability_policy().requested();
             if self.scenario.setup_query().is_some()
                 || self.scenario.build_query().is_some()
                 || self.scenario.core_query().verified_kick_profile().is_some()
                 || self.rule_profile.verified_kick_profile().is_some()
                 || self.allowed_colored_solution_identities.is_some()
                 || !matches!(self.search_goal, SearchGoal::ClearToEmpty)
-                || !matches!(
+                || !(matches!(
                     self.output_policy,
                     SearchOutputPolicy::Summary | SearchOutputPolicy::Trace
-                )
-                || !matches!(
-                    self.objective.kind(),
-                    ObjectiveKind::All | ObjectiveKind::Unique
-                )
+                ) || chance_source)
+                || !(ordinary_source || minimum_source || chance_source)
                 || self.objective.score().requested()
                 || self.objective.execution_constraints().requested()
-                || self.pc_chance_evidence_policy != PcChanceEvidencePolicy::Disabled
                 || self
                     .queue_observation_policy()
                     .requires_observation_policy()
@@ -1073,6 +1089,15 @@ mod retained_capacity {
                 .with_pc_minimum_cover_v2_evidence()
                 .checked_pc_family_pointee_retained_bytes()
                 .is_none());
+            let minimum = ProblemCompiler::compile_scenario_pc(
+                &query.with_objective(ObjectivePolicy::minimum_cover()),
+            )
+            .unwrap()
+            .with_pc_minimum_cover_v2_evidence();
+            assert_eq!(
+                minimum.checked_pc_family_pointee_retained_bytes(),
+                manual_expected(&minimum)
+            );
         }
 
         #[test]

@@ -831,6 +831,8 @@ pub(crate) struct BuildScoreMinimumPreparation {
     portfolio: CoveragePortfolioAlternativeSetPreparation,
 }
 
+// Terminal ownership moves once; keep its existing inline memory accounting.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BuildScoreMinimumPreparationAdvance {
     Pending { work_steps: u64 },
     Completed((ProductResultPayload, ProductPageSourceOwner)),

@@ -578,6 +578,8 @@ impl BuildCoveragePortfolioProjection {
     }
 }
 
+// Terminal ownership moves once; keep its existing inline memory accounting.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BuildCoveragePortfolioV2PreparationAdvance {
     Pending { work_steps: u64 },
     Completed(BuildCoveragePortfolioV2Result),

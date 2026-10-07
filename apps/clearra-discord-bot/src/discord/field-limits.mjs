@@ -5,7 +5,7 @@ export const DISCORD_PC_FIELD_MAX_ROWS = 6;
 export const DISCORD_WIDE_FIELD_MAX_ROWS = 24;
 
 // Height is a per-product capability, never an implicit widening of score,
-// minimum, replay, or legacy document inputs that still own compact evidence.
+// replay, or legacy document inputs that still own compact evidence.
 export function discordPcMaxRows(input) {
-  return input === 'pc-tiling-v2' ? DISCORD_WIDE_FIELD_MAX_ROWS : DISCORD_PC_FIELD_MAX_ROWS;
+  return ['pc-tiling-v2', 'pc-v2', 'pc-chance-v2'].includes(input) ? DISCORD_WIDE_FIELD_MAX_ROWS : DISCORD_PC_FIELD_MAX_ROWS;
 }

@@ -446,7 +446,7 @@ fn hall_impossible(
         let residual: [u8; 7] = core::array::from_fn(|piece| target[piece] - used_counts[piece]);
         let mut sums = [0_u8; 128];
         for subset in 1_u8..128 {
-            let lowest = subset & subset.wrapping_neg();
+            let lowest = subset.isolate_lowest_one();
             let piece = lowest.trailing_zeros() as usize;
             sums[subset as usize] = sums[(subset ^ lowest) as usize] + residual[piece];
             maximum_by_subset[subset as usize] =

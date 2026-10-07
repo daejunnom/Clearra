@@ -672,8 +672,8 @@ impl Solver {
         p.balance[source][usize::from(token.piece)] += 1;
         p.balance[owner][usize::from(token.piece)] -= 1;
         let mut prefix = clearra_core_domain::board::standard_pc_board::Board256Mask::EMPTY;
-        for boundary in 0..owner {
-            prefix = prefix.union(targets[boundary]);
+        for (boundary, target) in targets.iter().enumerate().take(owner) {
+            prefix = prefix.union(*target);
             if !prefix.without(pos.middle).is_empty() {
                 if key.mode == Mode::Middle {
                     return Ok(None);

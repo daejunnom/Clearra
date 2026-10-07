@@ -810,6 +810,9 @@ function nativePcArguments(command, values, mode = {}) {
     );
   }
   const preserveB2b = onOffValue(values, "preserve-b2b", false);
+  if (lines > DISCORD_PC_FIELD_MAX_ROWS && typedMinimumCover && preserveB2b) {
+    throw invalidOption("preserve-b2b", "B2B preservation above 6 PC lines is not connected yet.");
+  }
   const requestedSpinProfile = optionalText(values, "spin-profile", 32);
   const spinProfile = requestedSpinProfile === null
     ? null

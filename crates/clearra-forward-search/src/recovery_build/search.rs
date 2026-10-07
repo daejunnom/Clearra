@@ -205,6 +205,8 @@ impl RecoveryBuildFixedQuery {
             result_target: self.fields.result.words(),
         })
     }
+    // Keep the existing exact path/state and search-counter return contract.
+    #[allow(clippy::type_complexity)]
     fn run_pass(
         &self,
         field: &PreparedFields,

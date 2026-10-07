@@ -307,12 +307,12 @@ impl Coordinator {
                         balances[source][piece] += 1;
                         balances[owner][piece] -= 1;
                         let mut prefix = Mask::EMPTY;
-                        for boundary in 0..owner {
+                        for (boundary, early_count) in boundaries.iter_mut().enumerate().take(owner)
+                        {
                             prefix = prefix.union(stage.chain_targets[boundary]);
                             if !prefix.without(used).is_empty() {
-                                boundaries[boundary] = boundaries[boundary]
-                                    .checked_add(1)
-                                    .ok_or(Error::CounterOverflow)?;
+                                *early_count =
+                                    early_count.checked_add(1).ok_or(Error::CounterOverflow)?;
                             }
                         }
                         used = used.union(cells);

@@ -629,6 +629,8 @@ impl ReachabilityWorkspace {
         self.lock_reachable_cached(catalog, board, piece, rotation, x, y, frame)
     }
 
+    // The cache key binds the complete pose and original-row frame together.
+    #[allow(clippy::too_many_arguments)]
     fn lock_reachable_cached(
         &mut self,
         catalog: &GeometryCatalog,

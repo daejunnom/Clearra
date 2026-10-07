@@ -173,7 +173,7 @@ fn decode_ctk85(encoded: &str) -> Result<Vec<u8>, Ctk3CodecError> {
     validate_exact_alphabet(encoded, Transport::Ctk85)?;
     let complete_length = encoded.len() - encoded.len() % 5;
     let mut bytes = Vec::with_capacity(encoded.len() * 4 / 5);
-    for block in encoded.as_bytes()[..complete_length].chunks_exact(5) {
+    for block in encoded.as_bytes()[..complete_length].as_chunks::<5>().0 {
         let value = decode_ctk85_value(block)?;
         if value > u64::from(u32::MAX) {
             return Err(Ctk3CodecError::invalid("CTK85 block overflows 32 bits"));

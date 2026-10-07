@@ -89,6 +89,7 @@ mod pc_candidate_page_boundary;
 mod pc_chance_probability_result;
 mod pc_failed_queue_result;
 mod pc_minimum_cover_result;
+mod pc_minimum_cover_source_identities;
 mod pc_path_result;
 mod pc_replay_page_error;
 mod pc_replay_page_source;

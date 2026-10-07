@@ -656,7 +656,7 @@ function registrationOptions(input, capabilityId = null) {
       return Object.freeze([
         nextOption(false),
         fieldOption(input),
-        linesOption(),
+        linesOption(discordPcMaxRows(input)),
         pcHoldOption(),
         kicktableOption(true),
         pcQueueKnowledgeOption(),
@@ -678,7 +678,7 @@ function registrationOptions(input, capabilityId = null) {
       return Object.freeze([
         nextOption(false),
         fieldOption(input),
-        linesOption(),
+        linesOption(discordPcMaxRows(input)),
         pcHoldOption(),
         kicktableOption(true),
       ]);
@@ -1854,7 +1854,7 @@ function syntax(entry, locale = "en") {
       case "pc":
         return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<내장 프로필>] [options:hold=use]`;
       case "pc-v2":
-        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [solution-probabilities:<on|off>]`;
+        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [solution-probabilities:<on|off>]`;
       case "pc-path-v2":
         return `/${path} next:<큐|패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [spin-profile:<프로필>] [preserve-b2b:<on|off>]`;
       case "pc-chance-v2":
@@ -1943,11 +1943,11 @@ function syntax(entry, locale = "en") {
     case "pc":
       return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<built-in>] [options:hold=use]`;
     case "pc-v2":
-      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [solution-probabilities:<on|off>]`;
+      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [solution-probabilities:<on|off>]`;
     case "pc-path-v2":
       return `/${path} next:<queue|pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [spin-profile:<profile>] [preserve-b2b:<on|off>]`;
     case "pc-chance-v2":
-      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>]`;
+      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>]`;
     case "pc-save-v2":
       return `/${path} next:<fixed-bag-boundary pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>]`;
     case "pc-allspin-exact-v1":
@@ -2054,9 +2054,10 @@ function inputHelp(entry, locale = "en") {
       ];
     case "pc-v2":
       return [
-        `\`field\` is a top-first 10-column grid of 1–${DISCORD_PC_FIELD_MAX_ROWS} rows or one static CTK3/v115 Fumen/URL; \`next\` accepts the supported fixed/group/bag pattern grammar.`,
-        `\`lines\` accepts every height 1–${DISCORD_PC_FIELD_MAX_ROWS}; omitting it evaluates all feasible heights serially. \`hold\` is disabled, empty, or one occupied piece.`,
+        `\`field\` is a top-first 10-column grid of 1–${discordPcMaxRows(entry.input)} rows or one static CTK3/v115 Fumen/URL; \`next\` accepts the supported fixed/group/bag pattern grammar.`,
+        `\`lines\` accepts every height 1–${discordPcMaxRows(entry.input)}; omitting it evaluates all feasible heights serially. \`hold\` is disabled, empty, or one occupied piece.`,
         "`queue-knowledge`, `spin-profile`, B2B preservation, and per-solution probabilities are named. A spin profile requires preservation on unscored PC objectives; visible-7 is unavailable with minimum-cover.",
+        "Above 6 PC lines, B2B preservation is not connected yet.",
         nativeKickHelp,
       ];
     case "pc-path-v2":
@@ -2068,8 +2069,8 @@ function inputHelp(entry, locale = "en") {
       ];
     case "pc-chance-v2":
       return [
-        `\`field\` is a top-first 10-column grid of 1–${DISCORD_PC_FIELD_MAX_ROWS} rows or one static CTK3/v115 Fumen/URL; \`next\` defines the full-oracle queue-pattern universe.`,
-        `\`lines\` accepts every height 1–${DISCORD_PC_FIELD_MAX_ROWS}; omitting it evaluates all feasible heights serially. \`hold\` is disabled, empty, or one occupied piece.`,
+        `\`field\` is a top-first 10-column grid of 1–${discordPcMaxRows(entry.input)} rows or one static CTK3/v115 Fumen/URL; \`next\` defines the full-oracle queue-pattern universe.`,
+        `\`lines\` accepts every height 1–${discordPcMaxRows(entry.input)}; omitting it evaluates all feasible heights serially. \`hold\` is disabled, empty, or one occupied piece.`,
         "This typed probability route owns unique/full-oracle semantics and exposes no objective, queue-knowledge, spin, B2B-preservation, or per-solution-probability control.",
         nativeKickHelp,
       ];
@@ -2362,9 +2363,10 @@ function koreanInputHelp(entry) {
       ];
     case "pc-v2":
       return [
-        `\`field\`에는 위쪽 줄부터 적은 10열 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력하며, \`next\`에는 지원되는 고정·그룹·가방 패턴을 사용합니다.`,
-        `\`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS} 전부를 지원하며 생략하면 가능한 높이를 순서대로 판정합니다. \`hold\`는 비활성·빈 홀드·미노 하나 중 하나입니다.`,
+        `\`field\`에는 위쪽 줄부터 적은 10열 1–${discordPcMaxRows(entry.input)}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력하며, \`next\`에는 지원되는 고정·그룹·가방 패턴을 사용합니다.`,
+        `\`lines\`는 1–${discordPcMaxRows(entry.input)} 전부를 지원하며 생략하면 가능한 높이를 순서대로 판정합니다. \`hold\`는 비활성·빈 홀드·미노 하나 중 하나입니다.`,
         "`queue-knowledge`, `spin-profile`, B2B 보존, 해법별 확률은 각각 명명 옵션입니다. 점수 없는 PC에서 스핀 프로필은 B2B 보존이 필요하고 visible-7은 minimum-cover와 함께 쓸 수 없습니다.",
+        "6L 초과 PC의 B2B 보존은 아직 연결되지 않았습니다.",
         nativeKickHelp,
       ];
     case "pc-path-v2":
@@ -2376,8 +2378,8 @@ function koreanInputHelp(entry) {
       ];
     case "pc-chance-v2":
       return [
-        `\`field\`에는 위쪽 줄부터 적은 10열 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력하며, \`next\`가 전체 큐를 아는 패턴 확률 공간을 정합니다.`,
-        `\`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS} 전부를 지원하며 생략하면 가능한 높이를 순서대로 판정합니다. \`hold\`는 비활성·빈 홀드·미노 하나 중 하나입니다.`,
+        `\`field\`에는 위쪽 줄부터 적은 10열 1–${discordPcMaxRows(entry.input)}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력하며, \`next\`가 전체 큐를 아는 패턴 확률 공간을 정합니다.`,
+        `\`lines\`는 1–${discordPcMaxRows(entry.input)} 전부를 지원하며 생략하면 가능한 높이를 순서대로 판정합니다. \`hold\`는 비활성·빈 홀드·미노 하나 중 하나입니다.`,
         "이 타입 확률 경로는 unique·전체 큐 지식 의미를 자체 소유하며 objective, queue-knowledge, 스핀, B2B 보존, 해법별 확률 옵션을 노출하지 않습니다.",
         nativeKickHelp,
       ];

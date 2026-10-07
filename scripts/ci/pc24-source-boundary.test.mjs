@@ -269,11 +269,11 @@ test('the connected twenty-four-line surfaces retain whole fields and an exporta
   const editor = read('packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte');
   assert.ok(model.includes('WORKSPACE_PC_MAX_LINES = 24'));
   assert.ok(model.includes("runtime === 'web' && execution.workers !== 1"));
-  assert.ok(model.includes("execution.scoreMode !== 'tiling' && execution.scoreMode !== 'off'"));
+  assert.ok(model.includes("!['tiling', 'off', 'minimum-cover'].includes(execution.scoreMode)"));
   assert.ok(workspace.includes('dimensionMax={WORKSPACE_PC_MAX_LINES}'));
   assert.ok(editor.includes('decodeInterchangeField(source, 24)'));
   assert.ok(read('apps/clearra-discord-bot/src/discord/field-limits.mjs')
-    .includes("input === 'pc-tiling-v2'"));
+    .includes("['pc-tiling-v2', 'pc-v2', 'pc-chance-v2'].includes(input)"));
   const executor = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
   const pcTerminal = executor.slice(executor.indexOf('fn build_pc_family_result('),
     executor.indexOf('pub(super) fn finesse_search_material('));
@@ -281,4 +281,37 @@ test('the connected twenty-four-line surfaces retain whole fields and an exporta
   assert.ok(!pcTerminal.includes('normalized_string_solution_set_hash'));
   assert.ok(workflow.includes('--test extended_pc_surfaces'));
   assert.ok(workflow.includes('tests/fixtures/contracts/extended_pc_surface_input.v1.tsv'));
+});
+
+test('full-height minimum uses source-bound coverage proof and the common canonical lazy reducer', () => {
+  const producer = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
+  const evidence = read('crates/clearra-core-executor/src/pc_chance_coverage_evidence.rs');
+  const reducer = read('crates/clearra-app/src/pc_minimum_cover_result.rs');
+  const identities = read('crates/clearra-app/src/pc_minimum_cover_source_identities.rs');
+  assert.ok(producer.includes('bind_extended_minimum_source_keys(&keys)'));
+  assert.ok(producer.includes('"deferred-to-coordinator"'));
+  assert.ok(evidence.includes('minimum_source_keys_sha256: Option<[u8; 32]>'));
+  assert.ok(evidence.includes('keys.windows(2).any(|pair| pair[0] >= pair[1])'));
+  assert.ok(reducer.includes('PcMinimumCoverSourceIdentities::validate('));
+  assert.ok(identities.includes('producer.matches_extended_minimum_source_keys(keys)'));
+  assert.ok(identities.includes('evidence.coverage_bits() != row.covered_patterns()'));
+  assert.ok(identities.includes('ExtendedTilingSolutionKey::parse_canonical(key)'));
+  assert.ok(identities.includes('Self::Extended { .. } => Some(0)'));
+  const integration = read('crates/clearra-cli-command/tests/extended_pc_surfaces.rs');
+  assert.ok(integration.includes('extended_minimum_publishes_first_canonical_set_and_keeps_equal_minima_lazy'));
+  assert.ok(integration.includes('set.open_store()'));
+});
+
+test('full-height chance retains its independent four-word authority and admits evidence memory first', () => {
+  const app = read('crates/clearra-app/src/pc_chance_probability_result.rs');
+  const memory = read('crates/clearra-core-executor/src/pc_chance_coverage_evidence.rs');
+  const ingress = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_search.rs');
+  assert.ok(app.includes('compiled_board_occupied_words: [u64; 4]'));
+  assert.ok(app.includes('compiled_board_occupied_mask(&self) -> Option<u64>'));
+  assert.ok(ingress.includes('PcChanceEvidencePolicy::PcProbabilityV2'));
+  assert.ok(ingress.includes('problem.output_policy() == SearchOutputPolicy::CoverageSummary'));
+  assert.ok(memory.includes('checked_pc_family_creation_future_bytes'));
+  assert.ok(memory.includes('size_of::<CoverageRow>()'));
+  assert.ok(memory.includes('.div_ceil(64) as u128'));
+  assert.ok(workflow.includes('--lib pc_family_evidence_admits_snapshot_row_slots_and_owned_bitsets_before_construction'));
 });

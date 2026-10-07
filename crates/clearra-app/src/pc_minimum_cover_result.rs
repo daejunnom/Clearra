@@ -7,7 +7,6 @@
 use std::sync::Arc;
 
 use clearra_core_domain::solution::normalized_tiling_solution::{
-    normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
     NormalizedTilingSolutionKey, StandardBoard64ColoredTilingIdentity,
     StandardBoard64TilingIdentity, NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
 };
@@ -22,6 +21,7 @@ use clearra_pc_graph::request::{
 use clearra_problem::{ProblemCompiler, SearchOutputPolicy, SearchProblemPreset};
 use clearra_supply::QueueObservationPolicy;
 
+use crate::pc_minimum_cover_source_identities::PcMinimumCoverSourceIdentities;
 use crate::portfolio_alternative_store::{
     CoveragePortfolioAlternativeSet, CoveragePortfolioAlternativeSetPreparation,
     CoveragePortfolioAlternativeSetPreparationAdvance, PortfolioAlternativeSetIdentity,
@@ -310,7 +310,7 @@ pub(crate) struct ValidatedPcMinimumCoverSource {
     candidate_keys: Vec<String>,
     required_patterns: PatternBitSet,
     rows: Vec<PatternBitSet>,
-    source_solution_identities: Vec<StandardBoard64TilingIdentity>,
+    source_solution_identities: PcMinimumCoverSourceIdentities,
     expected_source_probabilities: Vec<SolutionProbabilityReport>,
     portfolio_identity: PortfolioAlternativeSetIdentity,
 }
@@ -350,7 +350,7 @@ pub(crate) struct PcMinimumCoverResultProjection {
     preset: PcMinimumCoverProblemPreset,
     source_solution_count: usize,
     required_pattern_count: usize,
-    source_solution_identities: Vec<StandardBoard64TilingIdentity>,
+    source_solution_identities: PcMinimumCoverSourceIdentities,
     expected_source_probabilities: Vec<SolutionProbabilityReport>,
 }
 
@@ -360,8 +360,8 @@ impl PcMinimumCoverResultProjection {
             .query
             .checked_retained_capacity_bytes()?
             .checked_add(
-                (self.source_solution_identities.capacity() as u128)
-                    .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)?,
+                self.source_solution_identities
+                    .checked_retained_capacity_bytes()?,
             )?
             .checked_add(
                 (self.expected_source_probabilities.capacity() as u128)
@@ -471,17 +471,19 @@ impl PcMinimumCoverV2Preparation {
         if drawings.is_empty() {
             return Err("pc pinned minimals requires at least one selected drawing");
         }
-        let source_hash =
-            normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
-                &source.source_solution_identities,
-            );
+        let source_identities = source
+            .source_solution_identities
+            .compact()
+            .ok_or("pc pinned drawings require a full-height drawing contract")?;
+        let source_hash = source
+            .source_solution_identities
+            .source_hash(&source.candidate_keys)?;
         if expected_source_set_hash.is_some_and(|expected| expected != source_hash) {
             return Err("pc pinned minimals source set changed; select drawings again");
         }
         let mut pins = Vec::with_capacity(drawings.len());
         for drawing in drawings {
-            let mut matched = source
-                .source_solution_identities
+            let mut matched = source_identities
                 .iter()
                 .zip(&source.candidate_keys)
                 .filter(|(identity, _)| {
@@ -816,27 +818,12 @@ pub(crate) fn validate_pc_minimum_cover_v2_source(
     // dictionary. Its provisional result fields describe that full source;
     // none of them are accepted as a minimum-cover selection authority.
     let source_solution_count = source.len();
-    if result.normalized_solution_keys() != candidate_keys.as_slice()
-        || result.normalized_solution_identities().len() != source_solution_count
-        || result.solution_coverages().len() != source_solution_count
-    {
-        return Err("pc minimals deferred source identity evidence count mismatch");
-    }
-    for (((key, normalized), identity), coverage) in candidate_keys
-        .iter()
-        .zip(source)
-        .zip(result.normalized_solution_identities())
-        .zip(result.solution_coverages())
-    {
-        let parsed = NormalizedTilingSolutionKey::parse_canonical(key)
-            .map_err(|_| "pc minimals deferred source key is not canonical")?;
-        if parsed.standard_board64_identity().ok() != Some(*identity)
-            || coverage.identity() != *identity
-            || normalized.covered_patterns() != coverage.covered_patterns()
-        {
-            return Err("pc minimals deferred source identity and coverage evidence mismatch");
-        }
-    }
+    let source_solution_identities = PcMinimumCoverSourceIdentities::validate(
+        &expected_problem,
+        result,
+        producer,
+        &candidate_keys,
+    )?;
     for key in [
         "minimum_cover_selected_solution_count",
         "unique_solution_count",
@@ -846,9 +833,7 @@ pub(crate) fn validate_pc_minimum_cover_v2_source(
         require_unique_usize(result, key, source_solution_count)?;
     }
 
-    let source_hash = normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
-        result.normalized_solution_identities(),
-    );
+    let source_hash = source_solution_identities.source_hash(&candidate_keys)?;
     require_unique_field(result, "normalized_solution_set_hash", &source_hash)?;
     require_unique_field(result, "actual_normalized_solution_set_hash", &source_hash)?;
 
@@ -902,7 +887,7 @@ pub(crate) fn validate_pc_minimum_cover_v2_source(
         candidate_keys,
         required_patterns,
         rows,
-        source_solution_identities: result.normalized_solution_identities().to_vec(),
+        source_solution_identities,
         expected_source_probabilities,
         portfolio_identity,
     })
@@ -948,11 +933,19 @@ fn finish_pc_minimum_cover_v2_result_with_memory_guard(
         .expected_source_probabilities
         .len()
         .min(selected_solution_count);
+    let compact_identity_count = if projection.source_solution_identities.compact().is_some() {
+        selected_solution_count
+    } else {
+        0
+    };
     let requested = (selected_solution_count as u128)
-        .checked_mul(
-            (core::mem::size_of::<String>() + core::mem::size_of::<StandardBoard64TilingIdentity>())
-                as u128,
-        )
+        .checked_mul(core::mem::size_of::<String>() as u128)
+        .and_then(|bytes| {
+            bytes.checked_add(
+                (compact_identity_count as u128)
+                    .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)?,
+            )
+        })
         .and_then(|bytes| {
             bytes.checked_add(
                 (probability_count as u128)
@@ -977,7 +970,7 @@ fn finish_pc_minimum_cover_v2_result_with_memory_guard(
     )?;
     let mut selected_solution_identities = Vec::<StandardBoard64TilingIdentity>::new();
     selected_solution_identities
-        .try_reserve_exact(selected_solution_count)
+        .try_reserve_exact(compact_identity_count)
         .map_err(|_| "pc_minimum_cover_memory_allocation_failed")?;
     let identity_inline = (selected_solution_identities.capacity() as u128)
         .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)
@@ -1028,12 +1021,13 @@ fn finish_pc_minimum_cover_v2_result_with_memory_guard(
             .ok_or("pc_minimum_cover_memory_projection_overflow")?;
         guard(selected_live)?;
         selected_solution_keys.push(key);
-        selected_solution_identities.push(
-            *projection
-                .source_solution_identities
-                .get(index)
-                .ok_or("pc minimals canonical identity is outside the source")?,
-        );
+        if let Some(identities) = projection.source_solution_identities.compact() {
+            selected_solution_identities.push(
+                *identities
+                    .get(index)
+                    .ok_or("pc minimals canonical identity is outside the source")?,
+            );
+        }
         if let Some(probability) = projection.expected_source_probabilities.get(index) {
             guard(
                 selected_live
@@ -1068,10 +1062,9 @@ fn finish_pc_minimum_cover_v2_result_with_memory_guard(
             .checked_add(64)
             .ok_or("pc_minimum_cover_memory_projection_overflow")?,
     )?;
-    let normalized_solution_set_hash =
-        normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
-            &selected_solution_identities,
-        );
+    let normalized_solution_set_hash = projection
+        .source_solution_identities
+        .selected_hash(&selected_solution_keys, &selected_solution_identities)?;
     guard(
         selected_live
             .checked_add(normalized_solution_set_hash.capacity() as u128)

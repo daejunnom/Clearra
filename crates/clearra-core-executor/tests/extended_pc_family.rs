@@ -11,7 +11,7 @@ use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
     PcScenarioBoard, PcScenarioQuery, PieceWindow, RequestedSearchBackend,
 };
-use clearra_problem::ProblemCompiler;
+use clearra_problem::{ProblemCompiler, SearchOutputPolicy};
 use clearra_rules::profile::{
     builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x},
     rule_profile::RuleProfile,
@@ -163,11 +163,105 @@ fn full_height_pc_never_silently_lowers_the_worker_request_or_invents_product_au
     let minimum = ProblemCompiler::compile_scenario_pc(
         &query.with_objective(ObjectivePolicy::minimum_cover()),
     )
-    .unwrap()
-    .with_pc_minimum_cover_v2_evidence();
+    .unwrap();
     let error = WasmCpuSearchBackend::execute_with_control(&minimum, &ExecutionControl::default())
         .unwrap_err();
     assert_eq!(error.reason(), "extended_pc_family_contract_not_connected");
+}
+
+#[test]
+fn full_height_minimum_source_is_problem_bound_and_deferred_to_the_common_exact_reducer() {
+    for height in [7, 8, 12, 24] {
+        let (query, _, _) = forced_query(height, srs_plus());
+        let query = query
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_objective(ObjectivePolicy::minimum_cover());
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_output_policy(SearchOutputPolicy::Trace)
+            .with_pc_minimum_cover_v2_evidence();
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .unwrap();
+        let producer = result
+            .pc_chance_coverage_evidence()
+            .expect("the actual PC producer must retain coverage proof");
+        assert!(producer.complete());
+        assert!(producer.problem().matches_search_problem(&problem));
+        assert!(producer.matches_extended_minimum_source_keys(result.normalized_solution_keys()));
+        let mut relabelled = result.normalized_solution_keys().to_vec();
+        relabelled[0].push(' ');
+        assert!(
+            !producer.matches_extended_minimum_source_keys(&relabelled),
+            "public keys may not relabel producer-owned coverage proof"
+        );
+        assert_eq!(producer.row_count(), 1);
+        assert_eq!(producer.rows()[0].candidate_id(), 1);
+        assert_eq!(
+            producer.rows()[0].coverage_bits(),
+            result.normalized_solution_coverages()[0].covered_patterns()
+        );
+        assert_eq!(
+            producer.coverage_union().words(),
+            result.coverage_pattern_words()
+        );
+        assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
+        assert_eq!(result.bool_field("objective_complete"), Some(false));
+        assert_eq!(result.bool_field("objective_search_complete"), Some(true));
+        assert_eq!(
+            result.field("minimum_cover_incomplete_reason"),
+            Some("deferred-to-coordinator")
+        );
+        assert!(
+            result.normalized_solution_identities().is_empty(),
+            "never truncate proof to Board64"
+        );
+        assert!(result.solution_coverages().is_empty());
+        let foreign = ProblemCompiler::compile_scenario_pc(&query.with_rule(srs()))
+            .unwrap()
+            .with_output_policy(SearchOutputPolicy::Trace)
+            .with_pc_minimum_cover_v2_evidence();
+        assert!(!producer.problem().matches_search_problem(&foreign));
+    }
+}
+
+#[test]
+fn full_height_chance_uses_complete_problem_bound_build_coverage_without_replay_authority() {
+    for height in [7, 8, 12, 24] {
+        let (query, _, _) = forced_query(height, srs_plus());
+        let query = query
+            .with_objective(ObjectivePolicy::unique())
+            .with_count_policy(PcCountPolicy::CountUnique);
+        let bare = ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_output_policy(SearchOutputPolicy::CoverageSummary);
+        assert_eq!(
+            WasmCpuSearchBackend::execute_with_control(&bare, &ExecutionControl::default())
+                .unwrap_err()
+                .reason(),
+            "extended_pc_family_contract_not_connected"
+        );
+        let problem = bare.with_pc_chance_probability_v2_evidence();
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .unwrap();
+        let evidence = result.pc_chance_coverage_evidence().unwrap();
+        assert!(evidence.complete());
+        assert!(evidence.problem().matches_search_problem(&problem));
+        assert_eq!(evidence.row_count(), 1);
+        assert_eq!(
+            evidence.coverage_union().words(),
+            result.coverage_pattern_words()
+        );
+        assert_eq!(result.field("coverage_probability"), Some("1"));
+        assert_eq!(
+            result.field("search_output_policy"),
+            Some("coverage-summary")
+        );
+        assert_eq!(result.bool_field("objective_complete"), Some(true));
+        assert!(result.exact_scoring_execution_batches().is_empty());
+        assert!(!evidence.matches_extended_minimum_source_keys(result.normalized_solution_keys()));
+    }
 }
 
 #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
@@ -202,6 +296,62 @@ fn branching_query(height: u8, rule: RuleProfile) -> PcScenarioQuery {
             .with_workers(1)
             .with_allow_backend_fallback(false),
     )
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_native_parallel_minimum_retains_the_same_canonical_dictionary_and_coverage_proof() {
+    let hardware = std::thread::available_parallelism().map_or(1, usize::from);
+    if hardware < 2 {
+        return;
+    }
+    for height in [8, 24] {
+        let base = branching_query(height, srs_plus())
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_objective(ObjectivePolicy::minimum_cover());
+        let serial_problem = ProblemCompiler::compile_scenario_pc(&base)
+            .unwrap()
+            .with_output_policy(SearchOutputPolicy::Trace)
+            .with_pc_minimum_cover_v2_evidence();
+        let serial = WasmCpuSearchBackend::execute_with_control(
+            &serial_problem,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+        let parallel_query = base.clone().with_execution_policy(
+            base.execution_policy()
+                .clone()
+                .with_workers(2)
+                .with_use_all_logical_processors(hardware == 2),
+        );
+        let parallel_problem = ProblemCompiler::compile_scenario_pc(&parallel_query)
+            .unwrap()
+            .with_output_policy(SearchOutputPolicy::Trace)
+            .with_pc_minimum_cover_v2_evidence();
+        let parallel = WasmCpuSearchBackend::execute_with_control(
+            &parallel_problem,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+        assert!(serial.normalized_solution_keys().len() >= 2);
+        assert_eq!(parallel.usize_field("workers_used"), Some(2));
+        assert_eq!(
+            parallel.normalized_solution_keys(),
+            serial.normalized_solution_keys()
+        );
+        assert_eq!(
+            parallel.normalized_solution_coverages(),
+            serial.normalized_solution_coverages()
+        );
+        let producer = parallel.pc_chance_coverage_evidence().unwrap();
+        assert!(producer.complete());
+        assert!(producer.problem().matches_search_problem(&parallel_problem));
+        assert!(producer.matches_extended_minimum_source_keys(serial.normalized_solution_keys()));
+        assert_eq!(
+            producer.rows(),
+            serial.pc_chance_coverage_evidence().unwrap().rows()
+        );
+    }
 }
 
 #[test]

@@ -1,6 +1,6 @@
-//! Ordinary full-height PC execution through the shared ILC/BuildUp/language
-//! primitives. Product-specific minimum, score and replay authorities are not
-//! interchangeable with an ordinary complete PC family.
+//! Full-height PC execution through the shared ILC/BuildUp/language primitives.
+//! The typed minimum producer retains coverage proof for the common reducer;
+//! score and replay authorities are not interchangeable with that family.
 use clearra_core_domain::{
     board::standard_pc_board::Board256Mask, execution_cancellation::ExecutionControl,
     objective::objective_kind::ObjectiveKind,
@@ -29,6 +29,25 @@ pub(crate) struct ExtendedPcSearchSession {
 pub(super) fn validate_pc_family_problem(
     problem: &SearchProblem,
 ) -> Result<(), WasmExactSearchError> {
+    let ordinary_source = problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::Disabled
+        && matches!(
+            problem.objective().kind(),
+            ObjectiveKind::All | ObjectiveKind::Unique
+        );
+    let minimum_source = problem.pc_chance_evidence_policy()
+        == PcChanceEvidencePolicy::PcMinimumCoverV2
+        && problem.objective().kind() == ObjectiveKind::MinimumCover
+        && matches!(
+            problem.count_policy(),
+            PcCountPolicy::CountAll | PcCountPolicy::CountUnique
+        )
+        && problem.output_policy() == SearchOutputPolicy::Trace;
+    let chance_source = problem.pc_chance_evidence_policy()
+        == PcChanceEvidencePolicy::PcProbabilityV2
+        && problem.objective().kind() == ObjectiveKind::Unique
+        && problem.count_policy() == PcCountPolicy::CountUnique
+        && problem.output_policy() == SearchOutputPolicy::CoverageSummary
+        && !problem.solution_probability_policy().requested();
     if !matches!(
         problem.preset(),
         SearchProblemPreset::ScenarioPc | SearchProblemPreset::OpeningPc
@@ -37,21 +56,17 @@ pub(super) fn validate_pc_family_problem(
         || problem.goal().as_str() != "clear-to-empty"
         || problem.initial_board().width() != 10
         || !(7..=24).contains(&problem.visible_height())
-        || !matches!(
-            problem.objective().kind(),
-            ObjectiveKind::All | ObjectiveKind::Unique
-        )
+        || !(ordinary_source || minimum_source || chance_source)
         || !matches!(
             problem.count_policy(),
             PcCountPolicy::CountAll | PcCountPolicy::CountUnique
         )
-        || !matches!(
+        || !(matches!(
             problem.output_policy(),
             SearchOutputPolicy::Summary | SearchOutputPolicy::Trace
-        )
+        ) || chance_source)
         || problem.objective().score().requested()
         || problem.objective().execution_constraints().requested()
-        || problem.pc_chance_evidence_policy() != PcChanceEvidencePolicy::Disabled
         || problem.allowed_colored_solution_identities().is_some()
         || problem
             .queue_observation_policy()

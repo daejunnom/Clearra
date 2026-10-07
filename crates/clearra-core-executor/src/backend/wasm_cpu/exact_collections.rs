@@ -43,13 +43,10 @@ impl Hasher for ExactKeyHasher {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
-        for chunk in &mut chunks {
-            self.absorb(u64::from_le_bytes(
-                chunk.try_into().expect("eight-byte chunk"),
-            ));
+        let (chunks, remainder) = bytes.as_chunks::<8>();
+        for chunk in chunks {
+            self.absorb(u64::from_le_bytes(*chunk));
         }
-        let remainder = chunks.remainder();
         if !remainder.is_empty() {
             let mut tail = [0_u8; 8];
             tail[..remainder.len()].copy_from_slice(remainder);

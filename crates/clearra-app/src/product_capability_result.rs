@@ -139,6 +139,8 @@ pub struct ProductCapabilityResult {
 }
 
 #[derive(Debug)]
+// Terminal ownership moves once; keep its existing inline memory accounting.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum PcMinimumCoverProductPreparationAdvance {
     Pending { work_steps: u64 },
     Completed(ProductCapabilityResult),

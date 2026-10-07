@@ -372,7 +372,7 @@ impl PcReplaySourceBuildSession {
         // be skipped by the fast completion path.
         self.report_progress(control);
         let quantum = CooperativeWorkQuantum::start(ADVANCE_QUANTUM_MILLIS);
-        for step in 0..work.max(1).min(MAX_ADVANCE_WORK) {
+        for step in 0..work.clamp(1, MAX_ADVANCE_WORK) {
             if control.is_cancelled() {
                 return Err("complete_replay_cancelled".into());
             }

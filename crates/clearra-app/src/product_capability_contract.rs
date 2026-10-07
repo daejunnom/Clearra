@@ -622,6 +622,7 @@ impl ValidatedProductCapabilityPayload {
         }
     }
 
+    #[allow(clippy::type_complexity)] // Purpose-separated, borrowed ingress proof fields.
     fn pc_minimum_cover_binding(
         &self,
     ) -> Option<(
@@ -940,6 +941,7 @@ impl ValidatedProductCapabilityContract {
         self.payload.pc_save_binding()
     }
 
+    #[allow(clippy::type_complexity)] // Same borrowed binding, without copying its owners.
     pub(crate) fn pc_minimum_cover_binding(
         &self,
     ) -> Option<(

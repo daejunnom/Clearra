@@ -486,7 +486,7 @@ export function workspaceValidationCodes(
     // Never silently lower workers, change the result mode, or erase options
     // to turn a not-yet-connected product into a different successful search.
     const execution = normalizeWorkspaceRequest(request);
-    if (execution.scoreMode !== 'tiling' && execution.scoreMode !== 'off') {
+    if (!['tiling', 'off', 'minimum-cover'].includes(execution.scoreMode)) {
       errors.push('pc_extended_result_unavailable');
     }
     if (runtime === 'web' && execution.workers !== 1) {

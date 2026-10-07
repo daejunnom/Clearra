@@ -1279,6 +1279,8 @@ pub(crate) struct BuildCoverV2Preparation {
     inner: BuildCoveragePortfolioV2Preparation,
 }
 
+// Terminal ownership moves once; keep its existing inline memory accounting.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BuildCoverV2PreparationAdvance {
     Pending { work_steps: u64 },
     Completed(BuildCoveragePortfolioV2),

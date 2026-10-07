@@ -589,7 +589,7 @@ export const japaneseWorkspaceMessages = Object.freeze({
   'visible-seven-minimum-cover-unsupported': '見えているミノを7個に制限した場合、最小カバー集合の選択には対応していません。すべての供給ミノ、または別の集計方法を選択してください。',
   'pc-score-finder-fixed-queue-required': '固定ミノ順の最高スコアには、明示的な1つの厳密なミノ順が必要です。パターンや空の供給は使用できません。',
   target_lines_invalid: '目標ライン数は1〜24の整数にしてください。',
-  pc_extended_result_unavailable: '6ラインを超える場合は、全解法または幾何学タイリングを選択してください。他の集計はまだ接続されていません。',
+  pc_extended_result_unavailable: '6ラインを超える場合は、全解法、最小解法または幾何学タイリングを選択してください。他の集計はまだ接続されていません。',
   pc_extended_browser_workers_unavailable: '6ラインを超えるブラウザ探索では、現在ワーカーを明示的に1つ選択してください。Desktopは複数ワーカーに対応しています。',
   pc_extended_options_unavailable: '6ラインを超える場合はCPUまたは自動、供給された全キューを使用し、テーブルベース・依存関係の事前計算・B2B維持を無効にしてください。',
   scenario_outside_target: '選択した目標ラインより上にブロックがあります。',

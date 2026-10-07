@@ -325,7 +325,7 @@ pub(super) fn hall_impossible(
             core::array::from_fn(|index| counts[index] - used_counts[index]);
         let mut sums = [0_u8; 128];
         for subset in 1_u8..128 {
-            let lowest = subset & subset.wrapping_neg();
+            let lowest = subset.isolate_lowest_one();
             let piece = lowest.trailing_zeros() as usize;
             sums[subset as usize] = sums[(subset ^ lowest) as usize] + remaining_counts[piece];
             maximum_by_subset[subset as usize] =

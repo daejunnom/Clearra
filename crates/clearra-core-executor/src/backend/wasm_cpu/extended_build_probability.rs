@@ -16,11 +16,14 @@ use clearra_coverage::{
     reducer::pattern_coverage_aggregation::{
         PatternCoverageAggregation, PatternCoverageCompleteness,
     },
+    row::{coverage_row::CoverageRow, coverage_row_kind::CoverageRowKind},
 };
 use clearra_finesse::{
     CostedGeometryEdge, CostedGeometryLanguage, GeometryLanguageNode, GeometryNodeId,
 };
-use clearra_problem::{BuildProbabilityAggregation, BuildProbabilityField, SearchProblem};
+use clearra_problem::{
+    BuildProbabilityAggregation, BuildProbabilityField, PcChanceEvidencePolicy, SearchProblem,
+};
 use clearra_replay::{SpinCoverageExecutionBatch, SpinCoverageExecutionGraph};
 use clearra_supply::pattern_universe::{
     PackingMultisetFamily, PackingPatternMembershipKind, PieceMultisetKey,
@@ -28,6 +31,7 @@ use clearra_supply::pattern_universe::{
 
 use crate::{
     resource::ExecutionMemoryBound, CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage,
+    PcChanceCoverageEvidence,
 };
 
 use super::{
@@ -206,9 +210,8 @@ impl ExtendedBuildProbabilitySession {
         )
     }
 
-    /// Ordinary full-height PC family producer. Typed minimum, score and replay
-    /// evidence deliberately remain outside this constructor until their
-    /// four-word reducers are connected; no Build result is relabelled as PC.
+    /// Full-height PC family producer, including typed minimum source coverage.
+    /// Score/replay evidence is a distinct contract; no Build result is relabelled.
     pub(super) fn new_pc_family(
         problem: &SearchProblem,
         field: BuildProbabilityField,
@@ -360,7 +363,12 @@ impl ExtendedBuildProbabilitySession {
             covered_patterns,
             buildable_tilings: HashSet::new(),
             solution_coverage: (problem.solution_probability_policy().requested()
-                || problem.objective().execution_constraints().requested())
+                || problem.objective().execution_constraints().requested()
+                || matches!(
+                    problem.pc_chance_evidence_policy(),
+                    PcChanceEvidencePolicy::PcMinimumCoverV2
+                        | PcChanceEvidencePolicy::PcProbabilityV2
+                ))
             .then(HashMap::new),
             spin_execution_graphs: Vec::new(),
             distributed_solution_keys: HashSet::new(),
@@ -2254,6 +2262,10 @@ impl ExtendedBuildProbabilitySession {
     }
 
     fn build_pc_family_result(&self) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        let minimum_source =
+            self.problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::PcMinimumCoverV2;
+        let chance_source =
+            self.problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::PcProbabilityV2;
         let universe = self.problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
@@ -2309,16 +2321,18 @@ impl ExtendedBuildProbabilitySession {
         let probability = universe
             .weights()
             .covered_weight(&self.covered_patterns)
-            .ok_or_else(|| {
-                WasmExactSearchError::InvalidProblem("extended_pc_coverage_universe_mismatch")
-            })?;
-        let fields = vec![
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_coverage_universe_mismatch",
+            ))?;
+        let mut fields = vec![
             field("problem_preset", self.problem.preset().as_str()),
             field("compiled_goal", "clear-to-empty"),
             field("search_kind", "pc"),
             field(
                 "objective",
-                if self.problem.objective().kind()
+                if minimum_source {
+                    "minimum-cover"
+                } else if self.problem.objective().kind()
                     == clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique
                 {
                     "unique"
@@ -2383,7 +2397,13 @@ impl ExtendedBuildProbabilitySession {
             field("actual_normalized_solution_set_hash", &hash),
             field("solution_count_calculated", true),
             field("count_complete", count_complete),
-            field("objective_complete", count_complete && probability_complete),
+            field("objective_search_complete", count_complete),
+            field("coverage_row_count", "not-calculated"),
+            field("renormalized", false),
+            field(
+                "objective_complete",
+                !minimum_source && count_complete && probability_complete,
+            ),
             field("build_variant_count", self.pc_build_variant_count),
             field(
                 "build_variant_count_exact",
@@ -2457,12 +2477,83 @@ impl ExtendedBuildProbabilitySession {
                 self.truncated_reason.unwrap_or("none"),
             ),
         ];
-        // No Tiling/score/minimum/replay producer evidence is manufactured here.
-        let result = CoreExecutionResult::new(fields, self.representative_path.clone())
+        let evidence = if minimum_source || chance_source {
+            let mut union = PatternBitSet::new(universe.pattern_count());
+            let mut rows = Vec::new();
+            rows.try_reserve_exact(coverages.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("extended_pc_minimum_row_allocation_failed")
+            })?;
+            let mut aligned = keys.len() == coverages.len();
+            for (index, coverage) in coverages.iter().enumerate() {
+                aligned &= keys
+                    .get(index)
+                    .is_some_and(|key| key == coverage.solution_key());
+                union.union_with(coverage.covered_patterns()).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "extended_pc_minimum_row_universe_mismatch",
+                    )
+                })?;
+                let candidate_id = u64::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_pc_minimum_candidate_index_overflow",
+                    ))?;
+                rows.push(CoverageRow::new_with_piece_source(
+                    candidate_id,
+                    CoverageRowKind::Build,
+                    self.problem.piece_source().id().get(),
+                    universe.pattern_universe_id(),
+                    universe.pattern_weight_model_id(),
+                    coverage.covered_patterns().clone(),
+                ));
+            }
+            if minimum_source {
+                fields.extend([
+                    field("minimum_cover_requested", true),
+                    field("minimum_cover_complete", false),
+                    field("minimum_cover_proven_minimum", false),
+                    field("minimum_cover_incomplete_reason", "deferred-to-coordinator"),
+                    field("objective_incomplete_reason", "deferred-to-coordinator"),
+                    field("minimum_cover_required_pattern_count", union.count_ones()),
+                    field("minimum_cover_source_solution_count", keys.len()),
+                    field("minimum_cover_selected_solution_count", keys.len()),
+                ]);
+            }
+            let evidence = PcChanceCoverageEvidence::from_problem_rows(
+                &self.problem,
+                rows,
+                aligned && count_complete && probability_complete && union == self.covered_patterns,
+            )
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "extended_pc_minimum_problem_evidence_mismatch",
+                )
+            })?;
+            Some(if minimum_source {
+                evidence
+                    .bind_extended_minimum_source_keys(&keys)
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "extended_pc_minimum_problem_evidence_mismatch",
+                        )
+                    })?
+            } else {
+                evidence
+            })
+        } else {
+            None
+        };
+        // Minimum evidence comes from this PC producer's verified language,
+        // not from Build result fields. The common exact reducer runs in App.
+        let mut result = CoreExecutionResult::new(fields, self.representative_path.clone())
             .with_normalized_solution_keys(keys)
             .with_normalized_solution_coverages(coverages)
             .with_solution_probabilities(probabilities)
             .with_coverage_pattern_words(self.covered_patterns.to_owned_words());
+        if let Some(evidence) = evidence {
+            result = result.with_pc_chance_coverage_evidence(evidence);
+        }
         Ok(if self.problem.solution_probability_policy().requested() {
             // Canonical weights are denominator evidence only. An empty,
             // incomplete replay batch grants no score/path execution authority.
@@ -2759,6 +2850,24 @@ impl ExtendedBuildProbabilitySession {
         future = future.checked_add(
             super::build_probability::checked_build_probability_fixed_result_surface_bytes()?,
         )?;
+        if self.purpose == ExtendedFamilyPurpose::Pc
+            && matches!(
+                self.problem.pc_chance_evidence_policy(),
+                PcChanceEvidencePolicy::PcMinimumCoverV2 | PcChanceEvidencePolicy::PcProbabilityV2
+            )
+        {
+            future = future
+                .checked_add(
+                    PcChanceCoverageEvidence::checked_pc_family_creation_future_bytes(
+                        &self.problem,
+                        coverage_count,
+                    )?,
+                )?
+                .checked_add(
+                    PatternBitSet::checked_all_projection(self.covered_patterns.pattern_count())?
+                        .constructor_peak_bytes,
+                )?;
+        }
         if self.purpose == ExtendedFamilyPurpose::Pc
             && self.problem.solution_probability_policy().requested()
         {

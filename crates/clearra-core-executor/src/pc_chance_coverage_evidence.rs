@@ -1174,9 +1174,55 @@ pub struct PcChanceCoverageEvidence {
     pattern_count: usize,
     rows: Vec<CoverageRow>,
     complete: bool,
+    // Producer-private binding of the full-height canonical dictionary. Public
+    // Core result key setters cannot relabel genuine coverage rows as a foreign
+    // partition. This fixed digest avoids duplicating sixty placements per key.
+    minimum_source_keys_sha256: Option<[u8; 32]>,
 }
 
 impl PcChanceCoverageEvidence {
+    /// Conservative pre-allocation credit for the finite PC-family shape.
+    /// The source projection excludes imported rules and non-PC goals. It
+    /// already counts queues, provenance, checkpoints, labels and weights;
+    /// two nested-owner credits cover the independently cloned snapshot. The
+    /// three static profile vectors below are materialized only in evidence.
+    pub(crate) fn checked_pc_family_creation_future_bytes(
+        problem: &SearchProblem,
+        row_count: usize,
+    ) -> Option<u128> {
+        let nested = problem
+            .checked_pc_family_pointee_retained_bytes()?
+            .checked_sub(core::mem::size_of::<SearchProblem>() as u128)?;
+        let piece_slots = problem
+            .piece_set()
+            .pieces()
+            .len()
+            .checked_add(problem.supply().bag().pieces_per_bag().len())?;
+        nested
+            .checked_mul(2)?
+            .checked_add(core::mem::size_of::<Self>() as u128)?
+            .checked_add(
+                (row_count as u128).checked_mul(core::mem::size_of::<CoverageRow>() as u128)?,
+            )?
+            .checked_add(
+                (row_count as u128).checked_mul(
+                    (problem
+                        .piece_source()
+                        .materialized_universe()?
+                        .pattern_count()
+                        .div_ceil(64) as u128)
+                        .checked_mul(core::mem::size_of::<u64>() as u128)?,
+                )?,
+            )?
+            .checked_add(
+                (piece_slots as u128).checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
+            )?
+            .checked_add(
+                (problem.supply().bag().entries().len() as u128)
+                    .checked_mul(core::mem::size_of::<(PieceKind, usize, u32)>() as u128)?,
+            )
+    }
+
     pub(crate) fn from_problem_rows(
         problem: &SearchProblem,
         rows: Vec<CoverageRow>,
@@ -1231,7 +1277,28 @@ impl PcChanceCoverageEvidence {
             pattern_count,
             rows,
             complete,
+            minimum_source_keys_sha256: None,
         })
+    }
+
+    pub(crate) fn bind_extended_minimum_source_keys(
+        mut self,
+        keys: &[String],
+    ) -> Result<Self, PcChanceCoverageEvidenceError> {
+        if self.problem.pc_chance_evidence_policy != PcChanceEvidencePolicy::PcMinimumCoverV2
+            || self.problem.objective.kind() != ObjectiveKind::MinimumCover
+            || !(7..=24).contains(&self.problem.board.visible_height())
+            || keys.len() != self.rows.len()
+            || keys.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(PcChanceCoverageEvidenceError::MinimumSourceContractMismatch);
+        }
+        self.minimum_source_keys_sha256 = Some(minimum_source_keys_sha256(keys));
+        Ok(self)
+    }
+
+    pub fn matches_extended_minimum_source_keys(&self, keys: &[String]) -> bool {
+        self.minimum_source_keys_sha256 == Some(minimum_source_keys_sha256(keys))
     }
 
     pub fn problem(&self) -> &PcChanceProblemEvidence {
@@ -1296,6 +1363,7 @@ impl PcChanceCoverageEvidence {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PcChanceCoverageEvidenceError {
     Problem(PcChanceProblemEvidenceError),
+    MinimumSourceContractMismatch,
     RowKindMismatch {
         row_index: usize,
     },
@@ -1319,6 +1387,18 @@ pub(crate) enum PcChanceCoverageEvidenceError {
         expected: usize,
         actual: usize,
     },
+}
+
+fn minimum_source_keys_sha256(keys: &[String]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"clearra-pc-minimum-extended-source-v1\0");
+    hash.update((keys.len() as u64).to_le_bytes());
+    for key in keys {
+        hash.update((key.len() as u64).to_le_bytes());
+        hash.update(key.as_bytes());
+    }
+    hash.finalize().into()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1680,6 +1760,64 @@ mod tests {
                 .problem_id(),
             typed.problem_id()
         );
+    }
+
+    #[test]
+    fn pc_family_evidence_admits_snapshot_row_slots_and_owned_bitsets_before_construction() {
+        let expression = QueuePatternExpression::parse("[IO]", 2).unwrap();
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0),
+            PcQueueInput::pattern_expression(expression),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_objective(ObjectivePolicy::minimum_cover());
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_output_policy(SearchOutputPolicy::Trace)
+            .with_pc_minimum_cover_v2_evidence();
+        let (source, universe, weights, count) = identity(&problem);
+        let row_count = 3;
+        let future =
+            PcChanceCoverageEvidence::checked_pc_family_creation_future_bytes(&problem, row_count)
+                .expect("the minimum source's complete owner projection");
+        let zero_rows =
+            PcChanceCoverageEvidence::checked_pc_family_creation_future_bytes(&problem, 0).unwrap();
+        assert_eq!(
+            future - zero_rows,
+            row_count as u128
+                * (core::mem::size_of::<CoverageRow>() as u128
+                    + count.div_ceil(64) as u128 * core::mem::size_of::<u64>() as u128)
+        );
+        let rows = (1..=row_count)
+            .map(|index| {
+                row(
+                    index as u64,
+                    CoverageRowKind::Build,
+                    source,
+                    universe,
+                    weights,
+                    count,
+                    &[0],
+                )
+            })
+            .collect();
+        let evidence = PcChanceCoverageEvidence::from_problem_rows(&problem, rows, true).unwrap();
+        let actual = (core::mem::size_of::<PcChanceCoverageEvidence>() as u128)
+            + evidence
+                .checked_non_pattern_storage_retained_bytes()
+                .unwrap()
+            + row_count as u128 * count.div_ceil(64) as u128 * core::mem::size_of::<u64>() as u128;
+        assert!(
+            future >= actual,
+            "pre-allocation credit {future} must cover actual retained {actual}"
+        );
+        assert!(!evidence.matches_extended_minimum_source_keys(&[]));
+        assert!(matches!(
+            evidence.bind_extended_minimum_source_keys(&[]),
+            Err(PcChanceCoverageEvidenceError::MinimumSourceContractMismatch)
+        ));
     }
 
     #[test]

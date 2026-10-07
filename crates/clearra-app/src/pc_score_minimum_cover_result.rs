@@ -423,20 +423,20 @@ pub(crate) fn validate_pc_score_portfolio_v2_result(
     preparation::complete_score_portfolio(summary, derivation)
 }
 
+type PreparedScorePortfolioInput = (
+    PcScorePortfolioProjection,
+    PortfolioAlternativeSetIdentity,
+    Vec<String>,
+    PatternBitSet,
+    Vec<PatternBitSet>,
+);
+type CanonicalScoreWinnerProjection = ((usize, u64), WinnerProjection);
+
 fn prepare_pc_score_portfolio_input(
     summary: &PcScoreSummaryV2Result,
     derivation: &PcScoreDerivation,
     memory: &mut ScorePortfolioSourceMemory<'_>,
-) -> Result<
-    (
-        PcScorePortfolioProjection,
-        PortfolioAlternativeSetIdentity,
-        Vec<String>,
-        PatternBitSet,
-        Vec<PatternBitSet>,
-    ),
-    PcScorePortfolioValidationError,
-> {
+) -> Result<PreparedScorePortfolioInput, PcScorePortfolioValidationError> {
     validate_summary_completeness(summary, derivation)?;
 
     let mut derivation_winners = canonical_winner_projection(derivation.pattern_winners(), memory)?;
@@ -756,7 +756,7 @@ fn validate_summary_completeness(
 fn canonical_winner_projection(
     winners: &[PcScorePatternWinnerV1],
     memory: &mut ScorePortfolioSourceMemory<'_>,
-) -> Result<Vec<((usize, u64), WinnerProjection)>, PcScorePortfolioValidationError> {
+) -> Result<Vec<CanonicalScoreWinnerProjection>, PcScorePortfolioValidationError> {
     let mut projected = memory.vec(winners.len())?;
     let mut candidate_identities = memory.vec(winners.len())?;
     for winner in winners {

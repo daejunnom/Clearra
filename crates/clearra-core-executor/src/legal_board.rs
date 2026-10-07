@@ -1375,7 +1375,6 @@ where
             Ok(())
         };
         visit_layer(layer, &mut emit).map_err(LegalBoardStreamEncodeError::Source)?;
-        drop(emit);
         let length = output.len() - begin;
         let digest: [u8; 32] = Sha256::digest(&output[begin..]).into();
         write_directory(

@@ -208,6 +208,9 @@ pub(crate) fn legal_board_enabled() -> bool {
 }
 
 #[inline(always)]
+// Keep every eligibility and rule-identity input explicit at this fail-open
+// boundary; no domain is inferred from a cache hit or a compact board alone.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn local_pc4_legal_board_allows(
     qualified: Option<&LegalBoardNegativeOwner>,
     width: u8,

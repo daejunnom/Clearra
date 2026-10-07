@@ -1192,7 +1192,7 @@ function defaultBoardRows(input) {
 }
 
 function maximumBoardRows(input) {
-  if (input === "pc-tiling-v2") return discordPcMaxRows(input);
+  if (["pc-tiling-v2", "pc-v2", "pc-chance-v2"].includes(input)) return discordPcMaxRows(input);
   return ["pc", "pc-v2", "pc-path-v2", "pc-chance-v2", "pc-save-v2", "pc-score-v2", "pc-tiling-v2", "pc-failed-v2", "pc-score-finder-v2", "pc-allspin-exact-v1", "pc-allspin-pattern-v1", "score-fixed-next", "score-fixed-next-v2"].includes(input)
     ? DISCORD_PC_FIELD_MAX_ROWS
     : DISCORD_WIDE_FIELD_MAX_ROWS;

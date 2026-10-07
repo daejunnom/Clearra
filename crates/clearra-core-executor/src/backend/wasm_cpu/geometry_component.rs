@@ -461,7 +461,7 @@ fn spatial_component_count(catalog: &GeometryCatalog, remaining: u64) -> usize {
     let mut count = 0;
     while unseen != 0 {
         count += 1;
-        let start = unseen & unseen.wrapping_neg();
+        let start = unseen.isolate_lowest_one();
         let mut frontier = start;
         unseen &= !start;
         while frontier != 0 {

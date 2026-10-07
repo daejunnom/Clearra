@@ -555,12 +555,12 @@ fn product_capability_report() -> CapabilityReport {
 fn runtime_render_capability_report() -> HostRenderCapabilityReport {
     #[cfg(not(feature = "bitmap-render"))]
     {
-        return HostRenderCapabilityReport::new(
+        HostRenderCapabilityReport::new(
             false,
             false,
             false,
             Some("renderer_not_in_wasm_artifact".to_owned()),
-        );
+        )
     }
     #[cfg(feature = "bitmap-render")]
     {

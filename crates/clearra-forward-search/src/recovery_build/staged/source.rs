@@ -305,6 +305,9 @@ fn encode_queue(
     }
     Ok(tail)
 }
+// Preserve the bounded recursive diagram state and explicit cancellation
+// boundary; grouping them is not required for this lint-only compatibility fix.
+#[allow(clippy::too_many_arguments)]
 fn compile_atoms(
     diagram: &mut Diagram,
     atoms: &[Atom],

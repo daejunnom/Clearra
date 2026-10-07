@@ -171,6 +171,9 @@ jobs:
           cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- --test-threads=1
           cargo test --locked -p clearra-app --no-default-features --features parallel --test extended_pc_tiling -- --test-threads=1
           cargo clippy --locked -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings
+      - name: Verify complete PC evidence memory is admitted before row and snapshot construction
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib pc_family_evidence_admits_snapshot_row_slots_and_owned_bitsets_before_construction -- --test-threads=1
       - name: Verify immutable compact and extended page owners and bounded catalog admission
         if: ${{ !cancelled() }}
         run: |

@@ -54,10 +54,11 @@ pub fn validate_pc_scenario_query(query: &PcScenarioQuery) -> DiagnosticReport {
 
 fn validate_scenario_board(query: &PcScenarioQuery, report: &mut DiagnosticReport) {
     let board = query.initial_board();
-    let ordinary_extended_pc = matches!(
+    let full_height_family = matches!(
         query.objective().kind(),
         clearra_core_domain::objective::objective_kind::ObjectiveKind::All
             | clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique
+            | clearra_core_domain::objective::objective_kind::ObjectiveKind::MinimumCover
     ) && matches!(
         query.count_policy(),
         clearra_pc_graph::request::PcCountPolicy::CountAll
@@ -72,7 +73,7 @@ fn validate_scenario_board(query: &PcScenarioQuery, report: &mut DiagnosticRepor
         && (7..=24).contains(&board.visible_height())
         && (query.objective().kind()
             == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
-            || ordinary_extended_pc)
+            || full_height_family)
     {
         let occupied = clearra_core_domain::board::standard_pc_board::Board256Mask::from_words(
             board.occupied_words(),

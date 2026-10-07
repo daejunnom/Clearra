@@ -451,7 +451,7 @@ fn parse_sha256(value: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut output = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         output[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Some(output)
@@ -922,7 +922,7 @@ fn checked_maximum_task_count(problem: &SearchProblem, worker_count: usize) -> O
         return Some(0);
     }
     let batches = maximum_candidates / NATIVE_BUILD_BATCH_CAPACITY
-        + usize::from(maximum_candidates % NATIVE_BUILD_BATCH_CAPACITY != 0);
+        + usize::from(!maximum_candidates.is_multiple_of(NATIVE_BUILD_BATCH_CAPACITY));
     batches.checked_add(worker_count.checked_mul(2)?)
 }
 

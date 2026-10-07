@@ -112,7 +112,7 @@ fn compress_bits(board: u64, mut mask: u64) -> u64 {
     let mut compressed = 0;
     let mut destination = 1;
     while mask != 0 {
-        let bit = mask & mask.wrapping_neg();
+        let bit = mask.isolate_lowest_one();
         if board & bit != 0 {
             compressed |= destination;
         }
@@ -125,7 +125,7 @@ fn compress_bits(board: u64, mut mask: u64) -> u64 {
 fn expand_bits(mut compressed: u64, mut mask: u64) -> u64 {
     let mut expanded = 0;
     while mask != 0 {
-        let bit = mask & mask.wrapping_neg();
+        let bit = mask.isolate_lowest_one();
         if compressed & 1 != 0 {
             expanded |= bit;
         }

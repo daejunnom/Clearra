@@ -152,7 +152,7 @@ pub struct PcProbabilityV2Result {
     pattern_weight_model_id: u64,
     compiled_board_width: u16,
     compiled_board_visible_height: u16,
-    compiled_board_occupied_mask: u64,
+    compiled_board_occupied_words: [u64; 4],
     compiled_search_height: u16,
     queue_mode: String,
     queue_len: usize,
@@ -213,8 +213,20 @@ impl PcProbabilityV2Result {
         self.compiled_board_visible_height
     }
 
-    pub const fn compiled_board_occupied_mask(&self) -> u64 {
-        self.compiled_board_occupied_mask
+    /// A compact view is available only when it represents the whole field.
+    pub const fn compiled_board_occupied_mask(&self) -> Option<u64> {
+        if self.compiled_board_occupied_words[1] == 0
+            && self.compiled_board_occupied_words[2] == 0
+            && self.compiled_board_occupied_words[3] == 0
+        {
+            Some(self.compiled_board_occupied_words[0])
+        } else {
+            None
+        }
+    }
+
+    pub const fn compiled_board_occupied_words(&self) -> [u64; 4] {
+        self.compiled_board_occupied_words
     }
 
     pub const fn compiled_search_height(&self) -> u16 {
@@ -301,7 +313,7 @@ pub(crate) struct PcChanceCompiledAuthority {
     weights: WeightedPatternSet,
     compiled_board_width: u16,
     compiled_board_visible_height: u16,
-    compiled_board_occupied_mask: u64,
+    compiled_board_occupied_words: [u64; 4],
     compiled_search_height: u16,
     queue_mode: String,
     queue_len: usize,
@@ -421,7 +433,7 @@ impl PcChanceCompiledAuthority {
             weights: universe.weights().clone(),
             compiled_board_width: board.width(),
             compiled_board_visible_height: board.visible_height(),
-            compiled_board_occupied_mask: board.occupied_mask(),
+            compiled_board_occupied_words: board.occupied_words(),
             compiled_search_height: problem.search_height(),
             queue_mode: supply.queue_mode().to_owned(),
             queue_len: supply.queue().len(),
@@ -615,7 +627,7 @@ impl PcChanceCompiledAuthority {
             pattern_weight_model_id: self.pattern_weight_model_id.get(),
             compiled_board_width: self.compiled_board_width,
             compiled_board_visible_height: self.compiled_board_visible_height,
-            compiled_board_occupied_mask: self.compiled_board_occupied_mask,
+            compiled_board_occupied_words: self.compiled_board_occupied_words,
             compiled_search_height: self.compiled_search_height,
             queue_mode: self.queue_mode.clone(),
             queue_len: self.queue_len,

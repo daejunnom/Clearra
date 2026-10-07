@@ -29,7 +29,7 @@ fn candidates(query: &BoundaryRecoveryQuery) -> Vec<usize> {
         .filter(|count| {
             // Four cells enter at every lock and ten leave per cleared row.
             let available = occupied + 4 * (*count as u32);
-            available >= target && (available - target) % 10 == 0
+            available >= target && (available - target).is_multiple_of(10)
         })
         .collect()
 }

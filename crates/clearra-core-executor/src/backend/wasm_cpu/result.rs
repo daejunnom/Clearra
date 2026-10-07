@@ -1101,7 +1101,7 @@ impl WasmExactSearchSession {
 
         let row_count = identity.placement_count();
         let required_cells = self.catalog.required_cells();
-        if required_cells.count_ones() % 4 != 0
+        if !required_cells.count_ones().is_multiple_of(4)
             || row_count > MAX_BOARD64_PIECES
             || row_count != required_cells.count_ones() as usize / 4
         {

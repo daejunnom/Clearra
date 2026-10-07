@@ -12,6 +12,8 @@ struct PendingPage {
 }
 
 #[derive(Debug)]
+// Terminal ownership moves once; keep its existing inline memory accounting.
+#[allow(clippy::large_enum_variant)]
 pub enum PcReplayPageAdvance {
     Pending { work_steps: u64 },
     Completed(PcReplayPagePayload),
@@ -130,7 +132,7 @@ impl PcReplayPageStore {
         let mut pending = self.pending.take().expect("installed pending page");
         let result = self.advance_pending(
             &mut pending,
-            work.max(1).min(MAX_ADVANCE_WORK),
+            work.clamp(1, MAX_ADVANCE_WORK),
             control,
             guard,
         );

@@ -1642,10 +1642,12 @@ mod precomputed_geometry_tests {
     }
 }
 
+type PreparedSetupGeometryTargets = (Arc<[TargetGroup]>, Vec<u32>, u8);
+
 fn prepare_setup_geometry_targets(
     target_keys: &mut Vec<PieceMultisetKey>,
     execution_prefixes: &mut Vec<u32>,
-) -> Result<(Arc<[TargetGroup]>, Vec<u32>, u8), WasmExactSearchError> {
+) -> Result<PreparedSetupGeometryTargets, WasmExactSearchError> {
     target_keys.sort_unstable();
     target_keys.dedup();
     if target_keys.is_empty() {
@@ -1770,6 +1772,9 @@ impl CompleteCandidateFamilyCompiler {
     }
 }
 
+// Preserve the existing completion-owner and independent proof-counter inputs;
+// this mechanical lint repair does not change Setup execution authority.
+#[allow(clippy::too_many_arguments)]
 fn finish_setup_geometry_family(
     state: GeometryCompilerState,
     targets: Arc<[TargetGroup]>,

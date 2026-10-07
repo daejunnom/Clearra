@@ -481,14 +481,16 @@ test("pc tiling Modal resolves only the canonical typed tiling authority", () =>
   assert.deepEqual(command.resultAllowlist, ["pc-tiling-family.v1"]);
 });
 
-test("24L Tiling Modal exposes exactly Auto plus 24 rows in every released locale", () => {
+test("24L Tiling, Minimum and Chance Modals expose exactly Auto plus 24 rows in every released locale", () => {
   const expected = ["auto", ...Array.from({ length: 24 }, (_, index) => String(index + 1))];
   for (const locale of ["en", "ko", "ja"]) {
-    const modal = modalForSubcommand("pc", "tiling", [], locale);
+    for (const product of ["tiling", "minimals", "chance"]) {
+    const modal = modalForSubcommand("pc", product, [], locale);
     assertStringSelect(component(modal, "lines"), expected, "auto");
     assert.equal(component(modal, "lines").options.length, 25, "Discord's 25-choice cap");
     assert.match(modal.data.components.find(({ component: input }) => input.custom_id === "field").label, /24/u);
     assert.match(component(modal, "lines").options[0].label, /24/u);
+    }
   }
 });
 

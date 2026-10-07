@@ -432,7 +432,7 @@ pub(crate) fn decode_record(
         *destination = read_u64(&base[start..start + 8])?;
     }
     let mut poses = Vec::with_capacity(entry_count + exit_count);
-    for encoded in record[RECORD_BASE_BYTES..].chunks_exact(3) {
+    for encoded in record[RECORD_BASE_BYTES..].as_chunks::<3>().0 {
         poses.push(ConditionedReachabilityEntryPose {
             rotation: RotationState::from_quarter_turns(encoded[0])
                 .map_err(|_| LocalRelationPackError::Record)?,

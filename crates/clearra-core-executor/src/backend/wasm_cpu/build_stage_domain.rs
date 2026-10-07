@@ -28,11 +28,14 @@ enum Catalog {
     Extended(ExtendedInverseCatalog),
 }
 
+type StageInventoryKey = ([u64; 4], [u8; 7]);
+type StageInventory = Arc<[[u8; 7]]>;
+
 pub struct BuildStageDomain {
     catalog: Catalog,
     extended: ExtendedDomainWorkspace,
-    memo: HashMap<([u64; 4], [u8; 7]), bool>,
-    inventories: HashMap<([u64; 4], [u8; 7]), Arc<[[u8; 7]]>>,
+    memo: HashMap<StageInventoryKey, bool>,
+    inventories: HashMap<StageInventoryKey, StageInventory>,
     inventory_slots: usize,
 }
 impl BuildStageDomain {
@@ -141,7 +144,8 @@ impl BuildStageDomain {
         control: &ExecutionControl,
     ) -> Result<bool, BuildStageDomainError> {
         let area = first_remaining.count_ones() + second_remaining.count_ones();
-        if area % 4 != 0 || u32::from(total.iter().map(|&n| u16::from(n)).sum::<u16>()) * 4 != area
+        if !area.is_multiple_of(4)
+            || u32::from(total.iter().map(|&n| u16::from(n)).sum::<u16>()) * 4 != area
         {
             return Ok(false);
         }

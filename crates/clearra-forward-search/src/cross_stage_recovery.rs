@@ -286,6 +286,8 @@ impl CrossStageRecoveryQuery {
         }
     }
 
+    // Exact path, early count and explored-state count are independent evidence.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn run_pass(
         &self,
         control: &ExecutionControl,

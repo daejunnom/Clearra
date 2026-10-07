@@ -44,7 +44,7 @@ impl ExactArmPairIndex {
             let mut partial_count = 0_usize;
             let mut cells = row.cells;
             while cells != 0 {
-                let bit = cells & cells.wrapping_neg();
+                let bit = cells.isolate_lowest_one();
                 cells &= cells - 1;
                 let partial = row.cells & !bit;
                 let kind = partial_shape_kind(width, partial);

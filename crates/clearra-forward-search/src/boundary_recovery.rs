@@ -148,8 +148,8 @@ impl BoundaryRecoveryBagRolePlan {
         reference
             .validate()
             .map_err(BoundaryRecoveryBagRoleError::InvalidReference)?;
-        if reference.queue.len() % 7 != 0
-            || reference.stage_one_queue_len % 7 != 0
+        if !reference.queue.len().is_multiple_of(7)
+            || !reference.stage_one_queue_len.is_multiple_of(7)
             || reference.required_placements != Some(reference.queue.len())
         {
             return Err(BoundaryRecoveryBagRoleError::RequiresCompleteSevenBags);
@@ -157,7 +157,7 @@ impl BoundaryRecoveryBagRolePlan {
         if Some(reference.placement_role_masks.len()) != reference.required_placements {
             return Err(BoundaryRecoveryBagRoleError::RequiresExactRoles);
         }
-        for bag in reference.queue.chunks_exact(7) {
+        for bag in reference.queue.as_chunks::<7>().0 {
             let mut seen = 0_u8;
             for piece in bag {
                 let bit = 1_u8 << piece_index(*piece);
@@ -179,7 +179,7 @@ impl BoundaryRecoveryBagRolePlan {
         let mut query = self.reference.clone();
         query.queue = queue.to_vec();
         query.placement_role_pieces = self.reference.queue.clone();
-        for (bag_index, bag) in queue.chunks_exact(7).enumerate() {
+        for (bag_index, bag) in queue.as_chunks::<7>().0.iter().enumerate() {
             let reference = &self.reference.queue[bag_index * 7..][..7];
             let mut seen = 0_u8;
             for piece in bag {
@@ -312,7 +312,7 @@ impl BoundaryRecoveryQuery {
     }
 
     fn placement_horizon(&self) -> usize {
-        self.required_placements.unwrap_or_else(|| {
+        self.required_placements.unwrap_or({
             if self.placement_role_masks.is_empty() {
                 self.queue.len()
             } else {
