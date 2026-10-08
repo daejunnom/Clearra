@@ -3325,6 +3325,54 @@ fn pc_score_bounds_pattern_and_fixed_queue_sources() {
 }
 
 #[test]
+fn pc_score_extended_source_bound_matches_target_before_and_after_translation() {
+    // Admission only: these sixty-piece requests are never enumerated here.
+    for product in ["score", "score-minimals", "score-finder"] {
+        for source_pieces in [60, 61] {
+            let queue = "I".repeat(source_pieces);
+            for target_first in [true, false] {
+                let options = if target_first {
+                    format!("--lines 24 --queue {queue}")
+                } else {
+                    format!("--queue {queue} --lines 24")
+                };
+                let command = format!(
+                    "clearra pc {product} {options} --height 24 --board-mask 0 --pieces 60 --workers 1"
+                );
+                let request = CliCommandParser::parse(&command)
+                    .expect("extended bounded pre-translation envelope")
+                    .to_app_request()
+                    .expect("the same envelope must hold at the typed App boundary");
+                let AppCommand::Scenario(command) = request.command() else {
+                    panic!("explicit full-height score board must be a scenario");
+                };
+                assert_eq!(command.query().initial_board().visible_height(), 24);
+                assert_eq!(command.query().exact_pieces(), Some(60));
+                assert_eq!(
+                    command.query().execution_policy().worker_policy(),
+                    WorkerPolicy::Fixed(1)
+                );
+            }
+        }
+        let oversized = format!(
+            "clearra pc {product} --queue {} --lines 24 --height 24 --board-mask 0 --pieces 60",
+            "I".repeat(62)
+        );
+        let error = CliCommandParser::parse(&oversized).expect_err("62 exceeds the extended cap");
+        assert!(error.message().contains("61 source pieces"));
+        let error = CliCommandParser::parse(&format!(
+            "clearra pc {product} --lines 24 --queue {} --source-pieces 62",
+            "I".repeat(61)
+        ))
+        .expect_err("the explicit source window has the same finite cap");
+        assert!(error.message().contains("61 source pieces"));
+        let compact = format!("clearra pc {product} --lines 6 --queue {}", "I".repeat(17));
+        let error = CliCommandParser::parse(&compact).expect_err("compact cap stays sixteen");
+        assert!(error.message().contains("16 source pieces"));
+    }
+}
+
+#[test]
 fn pc_score_accepts_six_line_factorized_source_with_product_cpu_policy() {
     let request = CliCommandParser::parse("clearra pc score --lines 6 --patterns P7P7P2")
         .expect("bounded six-line factorized score source")

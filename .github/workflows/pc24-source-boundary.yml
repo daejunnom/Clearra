@@ -13,6 +13,7 @@ on:
       - "crates/clearra-app/**"
       - "crates/clearra-validation/**"
       - "crates/clearra-wasm-abi/**"
+      - "crates/clearra-wasm/**"
       - "packages/clearra-ui/src/lib/workspace/solverWorkspaceModel.ts"
       - "packages/clearra-ui/src/lib/workspace/SolverWorkspace.svelte"
       - "packages/clearra-ui/test/workspaceCommandSerialization.test.mjs"
@@ -33,6 +34,7 @@ on:
       - "crates/clearra-app/src/pc_minimum_cover_result.rs"
       - "crates/clearra-cli-command/src/web_command_request.rs"
       - "crates/clearra-cli-command/src/web_command_parser.rs"
+      - "crates/clearra-cli-command/src/lib_tests.rs"
       - "crates/clearra-cli-command/src/web_pc_scenario_input.rs"
       - "crates/clearra-cli-command/tests/pinned_pc.rs"
       - "crates/clearra-cli-command/tests/extended_pc_surfaces.rs"
@@ -89,7 +91,7 @@ jobs:
       - name: Verify the bounded non-publishing feedback contract
         run: node --test scripts/ci/pc24-source-boundary.test.mjs
       - name: Check target-frame and compiler source format
-        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-core-executor -p clearra-replay -p clearra-postprocess -p clearra-output -p clearra-fumen -p clearra-host-contract -p clearra-cli -p clearra-cli-command -p clearra-app -p clearra-validation -p clearra-wasm-abi --check
+        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-core-executor -p clearra-replay -p clearra-postprocess -p clearra-output -p clearra-fumen -p clearra-host-contract -p clearra-cli -p clearra-cli-command -p clearra-app -p clearra-validation -p clearra-wasm -p clearra-wasm-abi --check
       - name: Test four-word physical replay without changing compact trk1 identities
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-replay --lib -- --test-threads=1
@@ -170,6 +172,18 @@ jobs:
       - name: Verify GUI and Discord canonical argv execute and publish the complete full-height family
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli-command --test extended_pc_surfaces -- --test-threads=1
+      - name: Verify score identities share one full-height dictionary and preserve compact rows
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p clearra-app --no-default-features --lib pc_score_solution_identity -- --test-threads=1
+          cargo test --locked -p clearra-app --no-default-features --lib pc_score_postprocess -- --test-threads=1
+          cargo test --locked -p clearra-app --no-default-features --lib pc_score_minimum_cover_contract_tests -- --test-threads=1
+      - name: Verify compact and full-height score ingress bounds without enumerating a sixty-piece PC
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-cli-command --lib pc_score_ -- --test-threads=1
+      - name: Verify actual full-height score keys survive the bounded WASM payload adapter
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-wasm --lib full_height_score_key_projection -- --test-threads=1
       - name: Verify native CLI assembly retains the shared full-height Opening input contract
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --lib assemble::pc_query_assembler::tests -- --test-threads=1

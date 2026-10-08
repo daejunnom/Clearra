@@ -698,7 +698,7 @@ function registrationOptions(input, capabilityId = null) {
       return Object.freeze(["pc.score", "pc.score-minimals"].includes(capabilityId) ? [
         nextOption(false),
         fieldOption(input),
-        linesOption(),
+        linesOption(discordPcMaxRows(input)),
         pcHoldOption(),
         kicktableOption(true),
         pcScoreProfileOption(),
@@ -707,7 +707,7 @@ function registrationOptions(input, capabilityId = null) {
       ] : [
         nextOption(false),
         fieldOption(input),
-        linesOption(),
+        linesOption(discordPcMaxRows(input)),
         pcHoldOption(),
         kicktableOption(true),
         pcQueueKnowledgeOption(),
@@ -909,7 +909,7 @@ function registrationOptions(input, capabilityId = null) {
       return Object.freeze([
         nextOption(true),
         fieldOption(input),
-        linesOption(),
+        linesOption(discordPcMaxRows(input)),
         pcHoldOption(),
         kicktableOption(true),
         boundedIntegerOption("initial-b2b", "Initial back-to-back state fixed to zero or one", 0, 1),
@@ -1867,10 +1867,10 @@ function syntax(entry, locale = "en") {
         return `/${path} field:<초기 필드> next:<큐 패턴> spin-profile:<프로필> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<on|off>] [kicktable:<내장 프로필>] [max-patterns:<개수>] [max-nodes:<개수>] [max-frontier-states:<개수>] [max-candidates:<개수>] [max-memory-mib:<MiB>]`;
       case "pc-score-v2":
         return ["pc.score", "pc.score-minimals"].includes(entry.capabilityId)
-          ? `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<프로필>] [initial-b2b:0..65535]`
-          : `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [queue-knowledge:<oracle|visible-7>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [initial-b2b:0..65535] [solution-probabilities:<on|off>]`;
+          ? `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<프로필>] [initial-b2b:0..65535]`
+          : `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [queue-knowledge:<oracle|visible-7>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [initial-b2b:0..65535] [solution-probabilities:<on|off>]`;
       case "pc-score-finder-v2":
-        return `/${path} next:<정확한 IOTSZJL 큐> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [initial-b2b:<on|off>]`;
+        return `/${path} next:<정확한 IOTSZJL 큐> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [initial-b2b:<on|off>]`;
       case "pc-tiling-v2":
         return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>]`;
       case "pc-failed-v2":
@@ -1956,10 +1956,10 @@ function syntax(entry, locale = "en") {
       return `/${path} field:<initial field> next:<queue pattern> spin-profile:<profile> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<on|off>] [kicktable:<built-in>] [max-patterns:<count>] [max-nodes:<count>] [max-frontier-states:<count>] [max-candidates:<count>] [max-memory-mib:<MiB>]`;
     case "pc-score-v2":
       return ["pc.score", "pc.score-minimals"].includes(entry.capabilityId)
-        ? `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<profile>] [initial-b2b:0..65535]`
-        : `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [queue-knowledge:<oracle|visible-7>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [initial-b2b:0..65535] [solution-probabilities:<on|off>]`;
+        ? `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<profile>] [initial-b2b:0..65535]`
+        : `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [queue-knowledge:<oracle|visible-7>] [score-profile:<tetrio|guideline|jstris-ultra>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [initial-b2b:0..65535] [solution-probabilities:<on|off>]`;
     case "pc-score-finder-v2":
-      return `/${path} next:<exact IOTSZJL queue> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [initial-b2b:<on|off>]`;
+      return `/${path} next:<exact IOTSZJL queue> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [initial-b2b:<on|off>]`;
     case "pc-tiling-v2":
       return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>]`;
     case "pc-failed-v2":
@@ -2104,27 +2104,27 @@ function inputHelp(entry, locale = "en") {
       ];
     case "pc-score-v2":
       if (entry.capabilityId === "pc.score") return [
-        `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS} and omission evaluates feasible targets serially.`,
+        `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${discordPcMaxRows(entry.input)} and omission evaluates feasible targets serially.`,
         "`score-profile` defaults to `tetrio`; use `spin-profile` and `initial-b2b` when those settings affect the score.",
         "Built-in score profiles currently provide approximate scores rather than complete game-specific scoring. The direct `/score` alias uses its existing Jstris Ultra preset.",
         nativeKickHelp,
       ];
-    case "pc-score-finder-v2":
-      return [
-        `\`field\` is a 1–${DISCORD_PC_FIELD_MAX_ROWS}-row initial PC board or one static document; \`next\` must be one exact IOTSZJL queue, never a pattern.`,
-        "Jstris Ultra scoring, T-spin recognition, all-witness search, and CPU execution are fixed by the capability. Score/profile, spin/profile, objective, queue-knowledge, worker, backend, fallback, and max-memory overrides are unavailable.",
-        "Score equality and ordering are score-only. Attack is informational and cannot select or order a witness; Discord returns only the first result in deterministic order and exposes no tie metadata.",
-        nativeKickHelp,
-      ];
       if (entry.capabilityId === "pc.score-minimals") return [
-        `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS} and omission evaluates feasible targets serially.`,
+        `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${discordPcMaxRows(entry.input)} and omission evaluates feasible targets serially.`,
         "This route fixes exact score-only minimum-cover semantics. Attack is informational only and cannot affect equality, eligibility, ordering, membership, or canonical selection.",
         "Discord returns exactly the first result in deterministic order from the canonical portfolio and exposes no tie, alternative-page, or cursor controls.",
         nativeKickHelp,
       ];
       return [
-        `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${DISCORD_PC_FIELD_MAX_ROWS} and omission evaluates feasible targets serially.`,
+        `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${discordPcMaxRows(entry.input)} and omission evaluates feasible targets serially.`,
         "`score-profile` defaults to `tetrio`; spin profile, initial/preserved B2B, queue knowledge, and per-solution probabilities are independent named options.",
+        nativeKickHelp,
+      ];
+    case "pc-score-finder-v2":
+      return [
+        `\`field\` is a 1–${discordPcMaxRows(entry.input)}-row initial PC board or one static document; \`next\` must be one exact IOTSZJL queue, never a pattern.`,
+        "Jstris Ultra scoring, T-spin recognition, all-witness search, and CPU execution are fixed by the capability. Score/profile, spin/profile, objective, queue-knowledge, worker, backend, fallback, and max-memory overrides are unavailable.",
+        "Score equality and ordering are score-only. Attack is informational and cannot select or order a witness; Discord returns only the first result in deterministic order and exposes no tie metadata.",
         nativeKickHelp,
       ];
     case "pc-tiling-v2":
@@ -2414,27 +2414,27 @@ function koreanInputHelp(entry) {
       ];
     case "pc-score-v2":
       if (entry.capabilityId === "pc.score") return [
-        `\`field\`와 \`next\`는 PC 입력 계약을 사용하며 \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}이고 생략 시 가능한 목표를 순서대로 계산합니다.`,
+        `\`field\`와 \`next\`는 PC 입력 계약을 사용하며 \`lines\`는 1–${discordPcMaxRows(entry.input)}이고 생략 시 가능한 목표를 순서대로 계산합니다.`,
         "`score-profile`의 기본값은 `tetrio`입니다. 점수에 영향을 주는 경우 `spin-profile`과 `initial-b2b`를 설정하세요.",
         "현재 내장 점수 프로필은 게임별 모든 규칙을 완전히 재현하지 않는 근사 점수를 제공합니다. 직접 `/score` 별칭은 기존 Jstris Ultra 설정을 사용합니다.",
         nativeKickHelp,
       ];
-    case "pc-score-finder-v2":
-      return [
-        `\`field\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 PC 초기 필드 또는 정적 문서이며 \`next\`에는 패턴이 아닌 정확한 IOTSZJL 큐 하나를 입력합니다.`,
-        "Jstris Ultra 점수, T-spin 판정, 전체 증거 탐색, CPU 실행은 capability가 고정합니다. 점수·스핀 프로필, objective, 큐 공개 범위, worker, backend, fallback, 최대 메모리 재정의는 사용할 수 없습니다.",
-        "점수 동등성과 순서는 score-only입니다. attack은 정보일 뿐 증거 선택·정렬에 사용할 수 없고 Discord는 결정적으로 정렬된 첫 결과 하나만 반환하며 tie 메타데이터를 노출하지 않습니다.",
-        nativeKickHelp,
-      ];
       if (entry.capabilityId === "pc.score-minimals") return [
-        `\`field\`와 \`next\`는 PC 입력 계약을 사용하며 \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}이고 생략 시 가능한 목표를 순서대로 계산합니다.`,
+        `\`field\`와 \`next\`는 PC 입력 계약을 사용하며 \`lines\`는 1–${discordPcMaxRows(entry.input)}이고 생략 시 가능한 목표를 순서대로 계산합니다.`,
         "이 경로는 정확한 score-only 최소 커버 의미를 고정합니다. 공격력은 정보일 뿐 동등성, 적격성, 순서, 해법 집합 구성, 정규 선택에 관여하지 않습니다.",
         "Discord는 정규 포트폴리오에서 결정적으로 정렬된 첫 결과 하나만 반환하며 tie, 대안 페이지, 커서 제어를 노출하지 않습니다.",
         nativeKickHelp,
       ];
       return [
-        `\`field\`와 \`next\`는 PC 입력 계약을 사용하며 \`lines\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}이고 생략 시 가능한 목표를 순서대로 계산합니다.`,
+        `\`field\`와 \`next\`는 PC 입력 계약을 사용하며 \`lines\`는 1–${discordPcMaxRows(entry.input)}이고 생략 시 가능한 목표를 순서대로 계산합니다.`,
         "`score-profile`은 기본값 `tetrio`이며 스핀 프로필, 초기/B2B 보존, 큐 공개 범위, 해법별 확률도 각각 명명 옵션입니다.",
+        nativeKickHelp,
+      ];
+    case "pc-score-finder-v2":
+      return [
+        `\`field\`는 1–${discordPcMaxRows(entry.input)}줄 PC 초기 필드 또는 정적 문서이며 \`next\`에는 패턴이 아닌 정확한 IOTSZJL 큐 하나를 입력합니다.`,
+        "Jstris Ultra 점수, T-spin 판정, 전체 증거 탐색, CPU 실행은 capability가 고정합니다. 점수·스핀 프로필, objective, 큐 공개 범위, worker, backend, fallback, 최대 메모리 재정의는 사용할 수 없습니다.",
+        "점수 동등성과 순서는 score-only입니다. attack은 정보일 뿐 증거 선택·정렬에 사용할 수 없고 Discord는 결정적으로 정렬된 첫 결과 하나만 반환하며 tie 메타데이터를 노출하지 않습니다.",
         nativeKickHelp,
       ];
     case "pc-tiling-v2":

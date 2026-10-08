@@ -66,9 +66,9 @@ impl ScorePortfolioSourceMemory<'_> {
 
     pub(super) fn canonical_key(
         &mut self,
-        identity: StandardBoard64TilingIdentity,
+        identity: &PcScoreSolutionIdentity,
     ) -> Result<String, Error> {
-        self.format(|mut output| identity.write_canonical(&mut output))
+        self.format(|output| identity.write_canonical(output))
     }
 
     pub(super) fn format(
@@ -107,7 +107,7 @@ pub(super) struct PcScorePortfolioProjection {
     pub eligible_candidates: Vec<PcScoreEligibleCandidateV2>,
     pub eligible_candidate_map_sha256: String,
     pub score_eligibility_sha256: String,
-    pub candidate_identities: Vec<(u64, StandardBoard64TilingIdentity)>,
+    pub candidate_identities: Vec<(u64, PcScoreSolutionIdentity)>,
 }
 
 impl PcScorePortfolioProjection {
@@ -135,7 +135,7 @@ impl PcScorePortfolioProjection {
             .checked_add(
                 (self.candidate_identities.capacity() as u128).checked_mul(size_of::<(
                     u64,
-                    StandardBoard64TilingIdentity,
+                    PcScoreSolutionIdentity,
                 )>()
                     as u128)?,
             )?;

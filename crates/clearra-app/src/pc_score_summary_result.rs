@@ -32,6 +32,7 @@ use crate::{
     },
     pc_score_minimum_cover_result::PcScoreMinimalsIngressOrigin,
     pc_score_postprocess::{score_profile_for_policy, PcScoreDerivation, PcScoreExecutionSource},
+    pc_score_solution_identity::PcScoreSolutionIdentity,
     pc_score_winner_result::{
         canonical_score_winner, PcScorePatternWinnerV1, PC_SCORE_CANONICAL_SELECTION,
         PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
@@ -360,7 +361,17 @@ impl PcScoreSummaryV2Result {
             .checked_add(
                 (self.solution_field_averages.capacity() as u128)
                     .checked_mul(size_of::<PcScoreSolutionFieldAverageV1>() as u128)?,
-            )
+            )?
+            .checked_add(PcScoreSolutionIdentity::checked_shared_retained_bytes(
+                self.pattern_winners
+                    .iter()
+                    .map(PcScorePatternWinnerV1::solution_identity)
+                    .chain(
+                        self.solution_field_averages
+                            .iter()
+                            .map(PcScoreSolutionFieldAverageV1::field_identity),
+                    ),
+            )?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -555,8 +566,8 @@ impl PcScoreSummaryV2Result {
     /// App-owned representative for a score-only winner family. Downstream
     /// adapters must serialize this witness and must not choose another
     /// representative themselves.
-    pub const fn canonical_winner(&self) -> Option<PcScorePatternWinnerV1> {
-        self.canonical_winner
+    pub fn canonical_winner(&self) -> Option<PcScorePatternWinnerV1> {
+        self.canonical_winner.clone()
     }
 
     pub const fn canonical_selection(&self) -> &'static str {
@@ -1012,6 +1023,17 @@ impl PcScoreCompiledAuthority {
         if !problem_evidence.matches_search_problem(self.problem.as_ref()) {
             return Err(rejected("pc_score_executed_problem_evidence_mismatch"));
         }
+        if let Some(batch) = result.full_height_scoring_execution_batch() {
+            // The batch is public execution data, not a family proof. The
+            // private executed-problem evidence above binds this check to
+            // the same App owner that requested the complete score family.
+            return self.validate_full_height_batch(
+                result,
+                batch,
+                problem_evidence.kick_table_id(),
+                problem_evidence.rule_profile_id(),
+            );
+        }
         let [batch] = result.exact_scoring_execution_batches() else {
             return Err(rejected("pc_score_exact_wasm_batch_missing_or_ambiguous"));
         };
@@ -1071,6 +1093,91 @@ impl PcScoreCompiledAuthority {
         Ok(())
     }
 
+    fn validate_full_height_batch(
+        &self,
+        result: &CoreExecutionResult,
+        batch: &clearra_replay::FullHeightExecutionBatch,
+        kick_table_id: u64,
+        rule_profile_id: u64,
+    ) -> Result<(), PcScoreExecutionError> {
+        use clearra_core_domain::board::standard_pc_board::Board256Mask;
+        let execution = batch.execution();
+        if !result.exact_scoring_execution_batches().is_empty()
+            || !result.normalized_solution_identities().is_empty()
+            || !execution.complete()
+            || !result.postprocess_execution_complete()
+        {
+            return Err(rejected(
+                "pc_score_full_height_batch_incomplete_or_ambiguous",
+            ));
+        }
+        let board = self.problem.initial_board();
+        let supply = self.problem.supply();
+        if board.width() != 10
+            || u16::from(batch.height()) != board.visible_height()
+            || batch.initial() != Board256Mask::from_words(board.occupied_words())
+            || execution.initial_cursor() != self.problem.initial_hold().cursor()
+            || execution.initial_hold() != self.problem.initial_hold().hold_piece()
+            || execution.hold_enabled() != supply.hold_enabled()
+            || execution.projects_unplaced_lookahead() != supply.projects_unplaced_lookahead()
+            || execution.projects_standard_bag_lookahead()
+                != supply.projects_standard_bag_lookahead()
+            || execution.kick_table_id() != kick_table_id
+            || execution.rule_profile_id() != rule_profile_id
+        {
+            return Err(rejected("pc_score_full_height_batch_problem_mismatch"));
+        }
+        let universe = self
+            .problem
+            .piece_source()
+            .materialized_universe()
+            .ok_or_else(|| rejected("pc_score_pattern_universe_missing"))?;
+        if execution.patterns().len() != self.materialized_pattern_count
+            || execution
+                .patterns()
+                .iter()
+                .enumerate()
+                .any(|(index, pattern)| pattern.as_slice() != universe.sequence_at(index).as_ref())
+            || result.postprocess_pattern_weights().len() != self.materialized_pattern_count
+            || result
+                .postprocess_pattern_weights()
+                .iter()
+                .enumerate()
+                .any(|(index, weight)| {
+                    weight.parse::<f64>().ok().map(f64::to_bits)
+                        != Some(universe.weight_at(index).get().to_bits())
+                })
+        {
+            return Err(rejected("pc_score_full_height_pattern_mismatch"));
+        }
+        let keys = result.normalized_solution_keys();
+        if !keys.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(rejected("pc_score_full_height_solution_identity_mismatch"));
+        }
+        let mut last_id = 0_u64;
+        for graph in execution.graphs() {
+            let index = graph
+                .candidate_id()
+                .checked_sub(1)
+                .and_then(|index| usize::try_from(index).ok())
+                .ok_or_else(|| rejected("pc_score_full_height_solution_identity_mismatch"))?;
+            // Several physical ILC realizations may share one colored field.
+            // Preserve all of them, while rejecting gaps, reorderings and keys
+            // not owned by the actual complete candidate dictionary.
+            if keys.get(index).map(String::as_str) != Some(graph.candidate_key())
+                || (graph.candidate_id() != last_id
+                    && Some(graph.candidate_id()) != last_id.checked_add(1))
+            {
+                return Err(rejected("pc_score_full_height_solution_identity_mismatch"));
+            }
+            last_id = graph.candidate_id();
+        }
+        if usize::try_from(last_id).ok() != Some(keys.len()) {
+            return Err(rejected("pc_score_full_height_solution_identity_mismatch"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_postprocessed_result(
         &self,
         executed_problem: &Arc<SearchProblem>,
@@ -1079,7 +1186,14 @@ impl PcScoreCompiledAuthority {
     ) -> Result<ValidatedPcScoreExecutionEvidence, PcScoreExecutionError> {
         let execution_source_matches = match derivation.source() {
             PcScoreExecutionSource::WasmExactBatch => {
-                result.pc_score_distributed_merge_evidence().is_none()
+                result.full_height_scoring_execution_batch().is_none()
+                    && result.pc_score_distributed_merge_evidence().is_none()
+                    && result.unique_field("score_execution_distribution") == Some("coordinator")
+                    && result.unique_field("score_distributed_cell_count") == Some("0")
+            }
+            PcScoreExecutionSource::FullHeightExactBatch => {
+                result.full_height_scoring_execution_batch().is_some()
+                    && result.pc_score_distributed_merge_evidence().is_none()
                     && result.unique_field("score_execution_distribution") == Some("coordinator")
                     && result.unique_field("score_distributed_cell_count") == Some("0")
             }
@@ -1211,7 +1325,7 @@ impl PcScoreCompiledAuthority {
         let pattern_winners = Arc::clone(derivation.pattern_winner_owner());
         if !pattern_winner_family_is_valid(
             pattern_winners.as_slice(),
-            result.normalized_solution_identities(),
+            result,
             self.materialized_pattern_count,
             pattern_optimal_count,
             best_score,
@@ -1221,7 +1335,7 @@ impl PcScoreCompiledAuthority {
         let solution_field_averages = Arc::clone(derivation.solution_field_average_owner());
         if !solution_field_average_family_is_valid(
             solution_field_averages.as_slice(),
-            result.normalized_solution_identities(),
+            result,
             self.materialized_pattern_count,
         ) {
             return Err(rejected("pc_score_solution_field_average_family_mismatch"));
@@ -1264,7 +1378,7 @@ impl PcScoreCompiledAuthority {
 
 fn pattern_winner_family_is_valid(
     winners: &[PcScorePatternWinnerV1],
-    solution_identities: &[clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity],
+    result: &CoreExecutionResult,
     materialized_pattern_count: usize,
     pattern_optimal_count: usize,
     best_score: Option<u64>,
@@ -1296,7 +1410,10 @@ fn pattern_winner_family_is_valid(
         else {
             return false;
         };
-        if solution_identities.get(candidate_index).copied() != Some(winner.solution_identity()) {
+        if !winner
+            .solution_identity()
+            .matches_result_candidate(result, candidate_index)
+        {
             return false;
         }
         if previous_pattern != Some(winner.pattern_id()) {
@@ -1319,21 +1436,25 @@ fn pattern_winner_family_is_valid(
 
 fn solution_field_average_family_is_valid(
     fields: &[PcScoreSolutionFieldAverageV1],
-    solution_identities: &[clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity],
+    result: &CoreExecutionResult,
     materialized_pattern_count: usize,
 ) -> bool {
-    fields.len() == solution_identities.len()
-        && fields
-            .iter()
-            .zip(solution_identities)
-            .all(|(field, identity)| {
-                field.field_identity() == *identity
-                    && field.pattern_count() == materialized_pattern_count
-                    && field.covered_pattern_count() <= materialized_pattern_count
-                    && field.score_complete()
-                    && field.average_score().is_finite()
-                    && field.average_score() >= 0.0
-            })
+    let candidate_count = if result.full_height_scoring_execution_batch().is_some() {
+        result.normalized_solution_keys().len()
+    } else {
+        result.normalized_solution_identities().len()
+    };
+    fields.len() == candidate_count
+        && fields.iter().enumerate().all(|(index, field)| {
+            field
+                .field_identity()
+                .matches_result_candidate(result, index)
+                && field.pattern_count() == materialized_pattern_count
+                && field.covered_pattern_count() <= materialized_pattern_count
+                && field.score_complete()
+                && field.average_score().is_finite()
+                && field.average_score() >= 0.0
+        })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

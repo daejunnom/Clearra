@@ -13,6 +13,9 @@ use clearra_core_executor::{
 use clearra_objectives::policy::score_objective_policy::{
     ScoreObjectiveMode, ScoreObjectivePolicy, ScoreProfileSelection, SpinProfileSelection,
 };
+use clearra_postprocess::score_batch::{
+    FullHeightScoreCellError, FullHeightScoreCellMaterialization, FullHeightScoreCellMaterializer,
+};
 use clearra_postprocess::{
     checked_score_profile_memory_projection, score_profile_with_memory_guard, CandidateExecution,
     CandidateExecutionAggregate, ExactScoreCellMaterializationError, ExactScoredExecution,
@@ -30,6 +33,9 @@ use clearra_scoring::{
 
 use crate::{
     pc_score_field_result::PcScoreSolutionFieldAverageV1,
+    pc_score_solution_identity::{
+        PcScoreIdentityLookup, PcScoreIdentitySource, PcScoreSolutionIdentity,
+    },
     pc_score_winner_result::PcScorePatternWinnerV1,
 };
 
@@ -37,6 +43,7 @@ use crate::{
 pub(crate) enum PcScoreExecutionSource {
     NativeLegacyReplay,
     WasmExactBatch,
+    FullHeightExactBatch,
     DistributedPrecomputedCells,
 }
 
@@ -122,7 +129,32 @@ impl PcScoreDerivation {
         let field_bytes = (self.solution_field_averages.capacity() as u128)
             .checked_mul(core::mem::size_of::<PcScoreSolutionFieldAverageV1>() as u128)?
             .checked_add(core::mem::size_of::<Vec<PcScoreSolutionFieldAverageV1>>() as u128)?;
-        winner_bytes.checked_add(field_bytes)
+        winner_bytes.checked_add(field_bytes)?.checked_add(
+            PcScoreSolutionIdentity::checked_shared_retained_bytes(
+                self.pattern_winners
+                    .iter()
+                    .map(PcScorePatternWinnerV1::solution_identity)
+                    .chain(
+                        self.solution_field_averages
+                            .iter()
+                            .map(PcScoreSolutionFieldAverageV1::field_identity),
+                    ),
+            )?,
+        )
+    }
+}
+
+enum ScoreCellMaterialization {
+    Compact(clearra_postprocess::ExactScoreCellMaterialization),
+    FullHeight(FullHeightScoreCellMaterialization),
+}
+
+impl ScoreCellMaterialization {
+    fn len(&self) -> usize {
+        match self {
+            Self::Compact(value) => value.scored_executions().len(),
+            Self::FullHeight(value) => value.cells().len(),
+        }
     }
 }
 
@@ -267,12 +299,15 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
         });
     }
 
-    let batch =
-        result
-            .exact_scoring_execution_batch()
-            .ok_or(CoreExecutionError::RuntimeUnavailable {
-                component: "pc_score_exact_batch_missing",
-            })?;
+    let compact_batch = result.exact_scoring_execution_batch();
+    let full_batch = result.full_height_scoring_execution_batch();
+    if compact_batch.is_some() == full_batch.is_some()
+        || (distributed_score_available && full_batch.is_some())
+    {
+        return Err(CoreExecutionError::RuntimeUnavailable {
+            component: "pc_score_exact_batch_missing_or_ambiguous",
+        });
+    }
     let (materialized, materialization_retained_bytes, execution_source_complete) =
         if distributed_score_available {
             if result.postprocess_score_profile_id() != Some(profile.id()) {
@@ -285,10 +320,53 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
                 0_u128,
                 result.postprocess_score_cells_complete()
                     && result.postprocess_execution_complete()
-                    && batch.complete()
+                    && compact_batch.is_some_and(|batch| batch.complete())
                     && search_objective_complete,
             )
+        } else if let Some(batch) = full_batch {
+            let projection =
+                FullHeightScoreCellMaterializer::checked_memory_projection_with_profile_bytes(
+                    batch,
+                    profile_retained_bytes,
+                )
+                .ok_or(CoreExecutionError::RuntimeUnavailable {
+                    component: "pc_score_cell_memory_projection_overflow",
+                })?;
+            memory_guard(
+                &result,
+                checked_score_add(
+                    pattern_weight_bytes,
+                    projection.required_peak_bytes,
+                    "pc_score_cell_memory_projection_overflow",
+                )?,
+            )?;
+            let materialized =
+                FullHeightScoreCellMaterializer::materialize_with_profile_and_memory_limit(
+                    batch,
+                    score_policy,
+                    &profile,
+                    profile_retained_bytes,
+                    control,
+                    pattern_weight_bytes,
+                    u128::MAX,
+                )
+                .map_err(map_full_height_score_cell_error)?;
+            memory_guard(&result, materialized.admitted_peak_bytes())?;
+            let complete = materialized.complete() && search_objective_complete;
+            let retained = materialized.checked_retained_bytes().ok_or(
+                CoreExecutionError::RuntimeUnavailable {
+                    component: "pc_score_cell_memory_projection_overflow",
+                },
+            )?;
+            (
+                Some(ScoreCellMaterialization::FullHeight(materialized)),
+                retained,
+                complete,
+            )
         } else {
+            let batch = compact_batch.ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "pc_score_exact_batch_missing",
+            })?;
             let materialization_projection = ExactScoringExecutionMaterializer::checked_score_cell_memory_projection_with_profile_bytes(
                 batch,
                 profile_retained_bytes,
@@ -318,7 +396,7 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
             .map_err(map_score_cell_materialization_error)?;
             let complete = materialized.complete() && search_objective_complete;
             (
-                Some(materialized),
+                Some(ScoreCellMaterialization::Compact(materialized)),
                 materialization_report.retained_bytes,
                 complete,
             )
@@ -338,44 +416,45 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
     )?;
     memory_guard(&result, live_after_materialization)?;
 
-    let identity_count = result.normalized_solution_identities().len();
-    let projected_identity_bytes = checked_score_product(
-        identity_count,
-        core::mem::size_of::<StandardBoard64TilingIdentity>(),
-        "pc_score_identity_memory_projection_overflow",
-    )?;
-    memory_guard(
-        &result,
-        checked_score_add(
-            live_after_materialization,
-            projected_identity_bytes,
-            "pc_score_identity_memory_projection_overflow",
-        )?,
-    )?;
-    let mut identities = Vec::new();
-    identities.try_reserve_exact(identity_count).map_err(|_| {
-        CoreExecutionError::RuntimeUnavailable {
-            component: "pc_score_identity_allocation_failed",
-        }
+    let identities = PcScoreIdentitySource::from_result(&result, |future| {
+        memory_guard(
+            &result,
+            checked_score_add(
+                live_after_materialization,
+                future,
+                "pc_score_identity_memory_projection_overflow",
+            )?,
+        )
     })?;
-    identities.extend_from_slice(result.normalized_solution_identities());
-    identities.sort_unstable();
-    identities.dedup();
-    let identity_bytes = checked_score_product(
-        identities.capacity(),
-        core::mem::size_of::<StandardBoard64TilingIdentity>(),
-        "pc_score_identity_memory_projection_overflow",
-    )?;
+    let identity_bytes =
+        identities
+            .checked_retained_bytes()
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "pc_score_identity_memory_projection_overflow",
+            })?;
+    let shared_identity_bytes =
+        identities
+            .shared_retained_bytes()
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "pc_score_identity_memory_projection_overflow",
+            })?;
 
     let scored_execution_count = materialized.as_ref().map_or_else(
         || result.postprocess_score_cells().len(),
-        |materialized| materialized.scored_executions().len(),
+        ScoreCellMaterialization::len,
     );
-    let projected_cell_outer_bytes = checked_score_product(
-        scored_execution_count,
-        core::mem::size_of::<ScoreCell>(),
-        "pc_score_matrix_memory_projection_overflow",
-    )?;
+    let projected_cell_outer_bytes =
+        if matches!(materialized, Some(ScoreCellMaterialization::FullHeight(_))) {
+            // Full-height materialization moves the existing cells into the common
+            // matrix; no second output Vec is allocated.
+            0
+        } else {
+            checked_score_product(
+                scored_execution_count,
+                core::mem::size_of::<ScoreCell>(),
+                "pc_score_matrix_memory_projection_overflow",
+            )?
+        };
     let projected_trace_identity_bytes = if distributed_score_available {
         result
             .postprocess_score_cells()
@@ -408,38 +487,72 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
         )?,
     )?;
     let mut cells = Vec::new();
-    cells
-        .try_reserve_exact(scored_execution_count)
-        .map_err(|_| CoreExecutionError::RuntimeUnavailable {
-            component: "pc_score_matrix_cell_allocation_failed",
-        })?;
+    if !matches!(materialized, Some(ScoreCellMaterialization::FullHeight(_))) {
+        cells
+            .try_reserve_exact(scored_execution_count)
+            .map_err(|_| CoreExecutionError::RuntimeUnavailable {
+                component: "pc_score_matrix_cell_allocation_failed",
+            })?;
+    }
     let mut trace_identity_bytes = 0_u128;
     if let Some(materialized) = materialized {
-        for execution in materialized.into_scored_executions() {
-            let (candidate_identity, pattern_id, trace_identity, score, attack) =
-                execution.into_parts();
-            let candidate_index = identities.binary_search(&candidate_identity).map_err(|_| {
-                CoreExecutionError::RuntimeUnavailable {
-                    component: "pc_score_matrix_candidate_identity_missing",
+        match materialized {
+            ScoreCellMaterialization::FullHeight(materialized) => {
+                let retained = materialized.checked_retained_bytes().ok_or(
+                    CoreExecutionError::RuntimeUnavailable {
+                        component: "pc_score_matrix_memory_projection_overflow",
+                    },
+                )?;
+                cells = materialized.into_cells();
+                trace_identity_bytes = retained
+                    .checked_sub(checked_score_product(
+                        cells.capacity(),
+                        core::mem::size_of::<ScoreCell>(),
+                        "pc_score_matrix_memory_projection_overflow",
+                    )?)
+                    .ok_or(CoreExecutionError::RuntimeUnavailable {
+                        component: "pc_score_matrix_memory_projection_overflow",
+                    })?;
+            }
+            ScoreCellMaterialization::Compact(materialized) => {
+                let compact_identities = identities.compact_identities().ok_or(
+                    CoreExecutionError::RuntimeUnavailable {
+                        component: "pc_score_compact_identity_source_missing",
+                    },
+                )?;
+                for execution in materialized.into_scored_executions() {
+                    let (candidate_identity, pattern_id, trace_identity, score, attack) =
+                        execution.into_parts();
+                    let candidate_index = compact_identities
+                        .binary_search(&candidate_identity)
+                        .map_err(|_| CoreExecutionError::RuntimeUnavailable {
+                            component: "pc_score_matrix_candidate_identity_missing",
+                        })?;
+                    trace_identity_bytes = trace_identity_bytes
+                        .checked_add(trace_identity.capacity() as u128)
+                        .ok_or(CoreExecutionError::RuntimeUnavailable {
+                            component: "pc_score_matrix_memory_projection_overflow",
+                        })?;
+                    cells.push(ScoreCell::new_with_static_accuracy(
+                        (candidate_index + 1) as u64,
+                        pattern_id,
+                        trace_identity,
+                        score,
+                        attack,
+                        profile.accuracy_level().as_str(),
+                    ));
                 }
-            })?;
-            trace_identity_bytes = trace_identity_bytes
-                .checked_add(trace_identity.capacity() as u128)
-                .ok_or(CoreExecutionError::RuntimeUnavailable {
-                    component: "pc_score_matrix_memory_projection_overflow",
-                })?;
-            cells.push(ScoreCell::new_with_static_accuracy(
-                (candidate_index + 1) as u64,
-                pattern_id,
-                trace_identity,
-                score,
-                attack,
-                profile.accuracy_level().as_str(),
-            ));
+            }
         }
     } else {
+        let compact_identities =
+            identities
+                .compact_identities()
+                .ok_or(CoreExecutionError::RuntimeUnavailable {
+                    component: "pc_score_compact_identity_source_missing",
+                })?;
         for source in result.postprocess_score_cells() {
-            let candidate_index = identities
+            let candidate_index = compact_identities
                 .binary_search(&source.candidate_identity())
                 .map_err(|_| CoreExecutionError::RuntimeUnavailable {
                     component: "pc_score_matrix_candidate_identity_missing",
@@ -633,6 +746,7 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
             pattern_weight_bytes,
             pattern_winner_retained_bytes,
             solution_field_average_retained_bytes,
+            shared_identity_bytes,
         ],
         "pc_score_solution_field_average_memory_projection_overflow",
     )?;
@@ -680,6 +794,8 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
     let score_distributed_cell_count_text = try_score_usize_string(score_distributed_cell_count)?;
     let execution_source = if distributed_score_available {
         PcScoreExecutionSource::DistributedPrecomputedCells
+    } else if result.full_height_scoring_execution_batch().is_some() {
+        PcScoreExecutionSource::FullHeightExactBatch
     } else {
         PcScoreExecutionSource::WasmExactBatch
     };
@@ -761,7 +877,11 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
                     future,
                     checked_score_add(
                         pattern_winner_retained_bytes,
-                        solution_field_average_retained_bytes,
+                        checked_score_add(
+                            solution_field_average_retained_bytes,
+                            shared_identity_bytes,
+                            "pc_score_identity_memory_projection_overflow",
+                        )?,
                         "pc_score_solution_field_average_memory_projection_overflow",
                     )?,
                     "pc_score_solution_field_average_memory_projection_overflow",
@@ -773,7 +893,11 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
         &result,
         checked_score_add(
             pattern_winner_retained_bytes,
-            solution_field_average_retained_bytes,
+            checked_score_add(
+                solution_field_average_retained_bytes,
+                shared_identity_bytes,
+                "pc_score_identity_memory_projection_overflow",
+            )?,
             "pc_score_solution_field_average_memory_projection_overflow",
         )?,
     )?;
@@ -883,7 +1007,7 @@ fn checked_solution_field_average_retained_bytes(
 
 fn try_materialize_pattern_winners(
     matrix: &ScoreMatrix,
-    identities: &[StandardBoard64TilingIdentity],
+    identities: &(impl PcScoreIdentityLookup + ?Sized),
     authorize_reserved_capacity: impl FnOnce(usize) -> Result<(), CoreExecutionError>,
 ) -> Result<Vec<PcScorePatternWinnerV1>, CoreExecutionError> {
     let winner_count = checked_pattern_winner_count(matrix)?;
@@ -924,7 +1048,7 @@ fn try_materialize_pattern_winners(
             });
             return;
         };
-        let Some(solution_identity) = identities.get(identity_index).copied() else {
+        let Some(solution_identity) = identities.identity(identity_index) else {
             error = Some(CoreExecutionError::RuntimeUnavailable {
                 component: "pc_score_pattern_winner_candidate_identity_missing",
             });
@@ -951,7 +1075,7 @@ fn try_materialize_pattern_winners(
 
 fn try_materialize_solution_field_averages(
     matrix: &ScoreMatrix,
-    identities: &[StandardBoard64TilingIdentity],
+    identities: &(impl PcScoreIdentityLookup + ?Sized),
     pattern_weights: &[f64],
     authorize_reserved_capacity: impl FnOnce(usize) -> Result<(), CoreExecutionError>,
 ) -> Result<Vec<PcScoreSolutionFieldAverageV1>, CoreExecutionError> {
@@ -968,13 +1092,19 @@ fn try_materialize_solution_field_averages(
     }
 
     let mut fields = Vec::new();
-    fields.try_reserve_exact(identities.len()).map_err(|_| {
-        CoreExecutionError::RuntimeUnavailable {
+    fields
+        .try_reserve_exact(identities.identity_count())
+        .map_err(|_| CoreExecutionError::RuntimeUnavailable {
             component: "pc_score_solution_field_average_allocation_failed",
-        }
-    })?;
+        })?;
     authorize_reserved_capacity(fields.capacity())?;
-    for identity in identities.iter().copied() {
+    for index in 0..identities.identity_count() {
+        let identity =
+            identities
+                .identity(index)
+                .ok_or(CoreExecutionError::RuntimeUnavailable {
+                    component: "pc_score_solution_field_average_candidate_id_invalid",
+                })?;
         fields.push(
             PcScoreSolutionFieldAverageV1::empty(
                 identity,
@@ -1383,6 +1513,19 @@ fn map_score_cell_materialization_error(
     }
 }
 
+fn map_full_height_score_cell_error(error: FullHeightScoreCellError) -> CoreExecutionError {
+    let component = match error {
+        FullHeightScoreCellError::Cancelled => return CoreExecutionError::Cancelled,
+        FullHeightScoreCellError::InvalidEvidence => "pc_score_full_height_cell_evidence_invalid",
+        FullHeightScoreCellError::ProjectionOverflow => "pc_score_cell_memory_projection_overflow",
+        FullHeightScoreCellError::AllocationFailed => "pc_score_cell_allocation_failed",
+        FullHeightScoreCellError::MemoryLimitExceeded { .. } => {
+            "pc_score_cell_memory_limit_exceeded"
+        }
+    };
+    CoreExecutionError::RuntimeUnavailable { component }
+}
+
 fn map_score_matrix_memory_error(error: ScoreMatrixMemoryGuardError) -> CoreExecutionError {
     match error {
         ScoreMatrixMemoryGuardError::ProjectionOverflow => CoreExecutionError::RuntimeUnavailable {
@@ -1596,7 +1739,7 @@ mod tests {
         checked_pattern_winner_count, checked_pattern_winner_retained_bytes,
         checked_solution_field_average_retained_bytes, score_profile_for_policy,
         solution_average_score_reports, try_materialize_pattern_winners,
-        try_materialize_solution_field_averages,
+        try_materialize_solution_field_averages, PcScoreIdentitySource,
     };
 
     #[test]
@@ -1622,7 +1765,12 @@ mod tests {
         );
 
         assert_eq!(checked_pattern_winner_count(&matrix).unwrap(), 3);
-        let winners = try_materialize_pattern_winners(&matrix, &identities, |_| Ok(())).unwrap();
+        let winners = try_materialize_pattern_winners(
+            &matrix,
+            &PcScoreIdentitySource::Compact(identities),
+            |_| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             winners
                 .iter()
@@ -1688,26 +1836,33 @@ mod tests {
             true,
         );
 
-        let winner_error = try_materialize_pattern_winners(&matrix, &[], |capacity| {
-            let fake_overallocated_capacity = capacity.checked_add(1).unwrap();
-            assert!(
-                checked_pattern_winner_retained_bytes(fake_overallocated_capacity).unwrap()
-                    > checked_pattern_winner_retained_bytes(capacity).unwrap()
-            );
-            Err(
-                clearra_core_executor::CoreExecutionError::RuntimeUnavailable {
-                    component: "pc_score_test_fake_winner_capacity_rejected",
-                },
-            )
-        })
+        let winner_error = try_materialize_pattern_winners(
+            &matrix,
+            &PcScoreIdentitySource::Compact(Vec::new()),
+            |capacity| {
+                let fake_overallocated_capacity = capacity.checked_add(1).unwrap();
+                assert!(
+                    checked_pattern_winner_retained_bytes(fake_overallocated_capacity).unwrap()
+                        > checked_pattern_winner_retained_bytes(capacity).unwrap()
+                );
+                Err(
+                    clearra_core_executor::CoreExecutionError::RuntimeUnavailable {
+                        component: "pc_score_test_fake_winner_capacity_rejected",
+                    },
+                )
+            },
+        )
         .expect_err("fake over-allocation must be rejected before the missing identity is read");
         assert_eq!(
             winner_error.unsupported_reason(),
             Some("pc_score_test_fake_winner_capacity_rejected")
         );
 
-        let field_error =
-            try_materialize_solution_field_averages(&matrix, &[], &[1.0], |capacity| {
+        let field_error = try_materialize_solution_field_averages(
+            &matrix,
+            &PcScoreIdentitySource::Compact(Vec::new()),
+            &[1.0],
+            |capacity| {
                 let fake_overallocated_capacity = capacity.checked_add(1).unwrap();
                 assert!(
                     checked_solution_field_average_retained_bytes(fake_overallocated_capacity)
@@ -1719,8 +1874,9 @@ mod tests {
                         component: "pc_score_test_fake_field_capacity_rejected",
                     },
                 )
-            })
-            .expect_err("fake over-allocation must be rejected before score rows are read");
+            },
+        )
+        .expect_err("fake over-allocation must be rejected before score rows are read");
         assert_eq!(
             field_error.unsupported_reason(),
             Some("pc_score_test_fake_field_capacity_rejected")

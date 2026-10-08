@@ -6,7 +6,7 @@ use clearra_app::{
     PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin, PcPathIngressOrigin, PcSaveIngressOrigin,
     PcScoreIngressOrigin, PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, RenderAppCommand,
     RenderArtifactFormat, RequestStructuralProfiles, SpinStructureProductMode,
-    PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_SOURCE_PIECES,
+    PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
 };
 use clearra_core_domain::board::standard_pc_board::Board256Mask;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
@@ -999,6 +999,17 @@ fn validate_pc_score_arguments(arguments: &[String]) -> Result<(), WebCommandErr
         ));
     }
 
+    // This is the bounded pre-translation admission, not a replacement for
+    // the parser/App target validation. The declared target may occur after
+    // --queue. Keep the compact envelope for missing or malformed targets.
+    let target_lines = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--lines")
+        .and_then(|pair| pair[1].parse::<u16>().ok())
+        .filter(|lines| (1..=24).contains(lines))
+        .unwrap_or(4);
+    let max_source_pieces = clearra_app::pc_score_max_source_pieces_for_lines(target_lines);
+
     for (index, option) in arguments.iter().enumerate() {
         let Some(value) = arguments
             .get(index + 1)
@@ -1024,11 +1035,11 @@ fn validate_pc_score_arguments(arguments: &[String]) -> Result<(), WebCommandErr
                 }
             }
             "--queue" => {
-                if value.len() > PC_SCORE_MAX_SOURCE_PIECES {
+                if value.len() > max_source_pieces {
                     return Err(WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,
                         format!(
-                            "pc score --queue accepts at most {PC_SCORE_MAX_SOURCE_PIECES} source pieces"
+                            "pc score --queue accepts at most {max_source_pieces} source pieces"
                         ),
                     ));
                 }
@@ -1036,11 +1047,11 @@ fn validate_pc_score_arguments(arguments: &[String]) -> Result<(), WebCommandErr
             "--source-pieces"
                 if value
                     .parse::<usize>()
-                    .is_ok_and(|pieces| pieces > PC_SCORE_MAX_SOURCE_PIECES) =>
+                    .is_ok_and(|pieces| pieces > max_source_pieces) =>
             {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::InvalidValue,
-                    format!("pc score accepts at most {PC_SCORE_MAX_SOURCE_PIECES} source pieces"),
+                    format!("pc score accepts at most {max_source_pieces} source pieces"),
                 ));
             }
             _ => {}

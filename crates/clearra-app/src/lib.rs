@@ -99,6 +99,7 @@ mod pc_save_result;
 mod pc_score_field_result;
 mod pc_score_minimum_cover_result;
 mod pc_score_postprocess;
+mod pc_score_solution_identity;
 mod pc_score_summary_result;
 mod pc_score_winner_result;
 mod pc_tiling_family_result;
@@ -370,8 +371,8 @@ pub use pc_replay_page_source::{
     PC_REPLAY_MEMBER_PAGE_CONTRACT, PC_REPLAY_MEMBER_PAGE_SIZE,
 };
 pub use pc_result_projection::{
-    PcResultProjection, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
-    PC_SCORE_MAX_SOURCE_PIECES,
+    pc_score_max_source_pieces_for_lines, PcResultProjection, PC_SCORE_MAX_PATTERNS,
+    PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_SOURCE_PIECES,
 };
 pub use pc_save_result::{
     PcBestSaveV2Result, PcBestSaveWinnerV2, PcSaveCompletenessEvidence, PcSaveExactProbability,
@@ -390,6 +391,7 @@ pub use pc_score_minimum_cover_result::{
     PcScorePortfolioCompletenessEvidence, PcScorePortfolioV2Result,
     PcScorePortfolioValidationError, PC_SCORE_PORTFOLIO_RESULT_CONTRACT,
 };
+pub use pc_score_solution_identity::PcScoreSolutionIdentity;
 pub use pc_score_summary_result::{
     PcScoreCompletenessEvidence, PcScoreIngressOrigin, PcScoreProblemPreset, PcScoreQuerySnapshot,
     PcScoreSummaryV2Result,

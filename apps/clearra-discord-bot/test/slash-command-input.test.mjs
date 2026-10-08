@@ -91,6 +91,29 @@ test("24L Minimum refuses disconnected B2B semantics without changing the reques
   ]), /B2B preservation above 6 PC lines/u);
 });
 
+test("typed score products retain the same 7..24L inputs without widening legacy replay", () => {
+  const rows = readFileSync(new URL("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv", import.meta.url), "utf8")
+    .split(/\r?\n/u).filter(line => line && !line.startsWith("#"));
+  for (const product of ["score", "score-minimals", "score-finder"]) {
+    const command = findSlashCommand("pc").subcommands[product];
+    for (const row of rows) {
+      const [id, height, hex, pieces, queue] = row.split("\t");
+      const options = [{ name: "field", value: compactGridFromMask(BigInt(`0x${hex}`)) },
+        { name: "next", value: queue }, { name: "lines", value: Number(height) },
+        { name: "hold", value: "disabled" }];
+      const args = buildSlashCommandArguments(command, options);
+      assert.deepEqual(args.slice(0, 2), ["pc", product]);
+      assert.equal(args[args.indexOf("--height") + 1], height, id);
+      assert.equal(args[args.indexOf("--pieces") + 1], pieces, id);
+      assert.equal(BigInt(args[args.indexOf("--board-mask") + 1]), BigInt(`0x${hex}`), id);
+      assert.deepEqual(buildSlashCommandArgumentPlan(command, options.filter(option => option.name !== "lines")).argumentSets, [args]);
+    }
+    for (const locale of ["en", "ko", "ja"]) {
+      assert.match(formatSlashCommandHelp(`pc ${product}`, locale), /1(?:–|〜|\.\.)24/u);
+    }
+  }
+});
+
 test("24L Failed Queue refuses disconnected observation and B2B semantics instead of dropping them", () => {
   const command = findSlashCommand("pc").subcommands["failed-queue"];
   const options = [

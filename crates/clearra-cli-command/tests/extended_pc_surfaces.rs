@@ -74,6 +74,99 @@ fn context() -> AppContext {
 }
 
 #[test]
+fn canonical_full_height_scores_keep_full_fields_and_share_the_gui_finalizer() {
+    let context = context();
+    for input in inputs() {
+        for product in ["score", "score-minimals", "score-finder"] {
+            let score_options = if product == "score-finder" {
+                "--initial-b2b 0"
+            } else {
+                "--score-profile guideline --spin-profile t-spins --initial-b2b 0"
+            };
+            let command = format!(
+                "clearra pc {product} --lines {} --board-mask 0x{} --height {} --pieces {} --queue {} --no-hold --rule srs-plus --workers 1 {score_options}",
+                input[1], input[2], input[1], input[3], input[4],
+            );
+            let request = CliCommandParser::parse(&command)
+                .unwrap()
+                .to_app_request()
+                .unwrap();
+            let mut execution = context.start_cooperative_execution(request.clone());
+            let mut cooperative = None;
+            for _ in 0..4096 {
+                match execution.advance(256, &ExecutionControl::default()) {
+                    CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                    CooperativeAppAdvance::Completed(response) => {
+                        cooperative = Some(response);
+                        break;
+                    }
+                    other => panic!("unexpected full-height score finalizer: {other:?}"),
+                }
+            }
+            let cooperative = cooperative.expect("bounded few-piece score request");
+            let direct = context.run(request);
+            for response in [&direct, &cooperative] {
+                assert_eq!(
+                    response.status(),
+                    AppStatus::Success,
+                    "{} {product}: {response:?}",
+                    input[0]
+                );
+                let result = response.product_capability_result().unwrap();
+                let keys: Vec<String> = if product == "score-minimals" {
+                    let report = result.pc_score_portfolio_v2().unwrap();
+                    assert!(report.completeness().complete());
+                    assert_eq!(report.selected_score_candidate_ids(), &[1]);
+                    report.selected_solution_keys().to_vec()
+                } else {
+                    let report = result.pc_score_summary_v2().unwrap();
+                    assert!(report.completeness().complete());
+                    assert_eq!(report.solution_field_count(), 1);
+                    assert!(report.best_score().is_some());
+                    assert_eq!(report.pattern_optimal_count(), 1);
+                    assert_eq!(report.canonical_winner().unwrap().candidate_id(), 1);
+                    report
+                        .solution_field_averages()
+                        .iter()
+                        .map(|field| {
+                            assert!(field.field_identity().standard_board64_identity().is_none());
+                            field.normalized_field_key().to_string()
+                        })
+                        .collect()
+                };
+                assert_eq!(keys.len(), 1);
+                let identity = ExtendedTilingSolutionKey::parse_canonical(&keys[0]).unwrap();
+                assert_eq!(identity.height().to_string(), input[1]);
+                assert_eq!(identity.placement_count().to_string(), input[3]);
+                let words = identity.initial_board().words();
+                assert_eq!(
+                    format!(
+                        "{:016x}{:016x}{:016x}{:016x}",
+                        words[3], words[2], words[1], words[0]
+                    ),
+                    input[2]
+                );
+            }
+            let direct_core = direct.render_model().unwrap().core_result().unwrap();
+            let gui_core = cooperative.render_model().unwrap().core_result().unwrap();
+            for field in [
+                "score_best_score",
+                "score_field_average_score",
+                "score_covered_probability",
+                "score_initial_b2b",
+            ] {
+                assert_eq!(
+                    direct_core.field(field),
+                    gui_core.field(field),
+                    "{} {product} {field}",
+                    input[0]
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn canonical_full_height_failed_queue_uses_the_same_direct_and_gui_completion() {
     let context = context();
     for input in inputs() {

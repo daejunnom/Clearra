@@ -10,7 +10,6 @@ use clearra_app::{
     RequestStructuralProfiles, ResourceBudget, ScenarioAppCommand, SequenceDependenciesAppCommand,
     SetupAppCommand, SpinFinderAppCommand, SpinStructureAppCommand, SpinStructureProductMode,
     VerifyAppCommand, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
-    PC_SCORE_MAX_SOURCE_PIECES,
 };
 use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_core_domain::piece::piece_kind::PieceKind;
@@ -1086,6 +1085,8 @@ impl WebCommandRequest {
                 }
             }
             PcResultProjection::ScoreSummaryV2(_) | PcResultProjection::ScorePortfolioV2(_) => {
+                let max_source_pieces =
+                    clearra_app::pc_score_max_source_pieces_for_lines(u16::from(self.lines));
                 if self.backend != RequestedSearchBackend::Cpu
                     || self.allow_backend_fallback
                     || self.gpu_device != GpuDeviceSelection::Auto
@@ -1120,12 +1121,16 @@ impl WebCommandRequest {
                 if self
                     .queue
                     .as_ref()
-                    .is_some_and(|queue| queue.len() > PC_SCORE_MAX_SOURCE_PIECES)
+                    .is_some_and(|queue| queue.len() > max_source_pieces)
                     || self
                         .supply_window_size
-                        .is_some_and(|window| window.source_pieces() > PC_SCORE_MAX_SOURCE_PIECES)
+                        .is_some_and(|window| window.source_pieces() > max_source_pieces)
                 {
-                    return Err(invalid("pc score accepts at most 16 source pieces"));
+                    return Err(invalid(if self.lines > 6 {
+                        "pc score accepts at most 61 source pieces"
+                    } else {
+                        "pc score accepts at most 16 source pieces"
+                    }));
                 }
                 let score = self.objective.score();
                 let expected_objective = if matches!(
@@ -1784,12 +1789,14 @@ impl WebCommandRequest {
             (leading_piece.is_none() || leading_supply_piece.is_some()).then_some(length)
         });
         let score_summary_requested = self.pc_result_projection.score_origin().is_some();
+        let max_score_source_pieces =
+            clearra_app::pc_score_max_source_pieces_for_lines(u16::from(self.lines));
         if score_summary_requested
-            && finite_standard_bag_len.is_some_and(|length| length > PC_SCORE_MAX_SOURCE_PIECES)
+            && finite_standard_bag_len.is_some_and(|length| length > max_score_source_pieces)
         {
             return Err(WebCommandError::new(
                 WebCommandErrorCode::InvalidValue,
-                format!("pc score accepts at most {PC_SCORE_MAX_SOURCE_PIECES} source pieces"),
+                format!("pc score accepts at most {max_score_source_pieces} source pieces"),
             ));
         }
         let queue = if let Some(patterns) = &self.patterns {
@@ -1803,13 +1810,10 @@ impl WebCommandRequest {
                             format!("invalid web queue pattern: {error}"),
                         )
                     })?;
-                if score_summary_requested && expression.sequence_len() > PC_SCORE_MAX_SOURCE_PIECES
-                {
+                if score_summary_requested && expression.sequence_len() > max_score_source_pieces {
                     return Err(WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,
-                        format!(
-                            "pc score accepts at most {PC_SCORE_MAX_SOURCE_PIECES} source pieces"
-                        ),
+                        format!("pc score accepts at most {max_score_source_pieces} source pieces"),
                     ));
                 }
                 PcQueueInput::pattern_expression(expression)
@@ -1821,10 +1825,10 @@ impl WebCommandRequest {
                     format!("invalid web queue: {error:?}"),
                 )
             })?;
-            if score_summary_requested && fixed.len() > PC_SCORE_MAX_SOURCE_PIECES {
+            if score_summary_requested && fixed.len() > max_score_source_pieces {
                 return Err(WebCommandError::new(
                     WebCommandErrorCode::InvalidValue,
-                    format!("pc score accepts at most {PC_SCORE_MAX_SOURCE_PIECES} source pieces"),
+                    format!("pc score accepts at most {max_score_source_pieces} source pieces"),
                 ));
             }
             PcQueueInput::fixed_sequence(fixed)

@@ -960,7 +960,12 @@ pub(crate) fn validate_build_supplied_score_v1_result(
             ));
         }
         let colored = StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(
-            winner.solution_identity(),
+            winner
+                .solution_identity()
+                .standard_board64_identity()
+                .ok_or(BuildSuppliedEvaluationResultError::ScoreEvidenceInvalid(
+                    "winner_candidate_not_compact",
+                ))?,
         );
         let index = *candidate_index.get(&colored).ok_or(
             BuildSuppliedEvaluationResultError::ScoreEvidenceInvalid(

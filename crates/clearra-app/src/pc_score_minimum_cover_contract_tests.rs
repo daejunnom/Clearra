@@ -4,7 +4,9 @@ use clearra_core_domain::solution::normalized_tiling_solution::{
     NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
 };
 
-pub use crate::{CoveragePortfolioAlternativeSet, PortfolioAlternativeSetIdentity};
+pub use crate::{
+    CoveragePortfolioAlternativeSet, PcScoreSolutionIdentity, PortfolioAlternativeSetIdentity,
+};
 
 pub const PC_SCORE_MAX_PATTERNS: usize = 1_066_867_200;
 pub const PC_SCORE_CANONICAL_SELECTION: &str = "smallest-canonical-candidate-id";
@@ -140,11 +142,11 @@ impl PcScoreCompletenessEvidence {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcScorePatternWinnerV1 {
     pattern_id: usize,
     candidate_id: u64,
-    solution_identity: StandardBoard64TilingIdentity,
+    solution_identity: PcScoreSolutionIdentity,
     score: u64,
     informational_attack: u32,
 }
@@ -159,7 +161,7 @@ impl PcScorePatternWinnerV1 {
         Self {
             pattern_id,
             candidate_id,
-            solution_identity: identity(candidate_id),
+            solution_identity: identity(candidate_id).into(),
             score,
             informational_attack,
         }
@@ -173,8 +175,8 @@ impl PcScorePatternWinnerV1 {
         self.candidate_id
     }
 
-    pub const fn solution_identity(&self) -> StandardBoard64TilingIdentity {
-        self.solution_identity
+    pub const fn solution_identity(&self) -> &PcScoreSolutionIdentity {
+        &self.solution_identity
     }
 
     pub const fn score(&self) -> u64 {
@@ -656,7 +658,7 @@ fn set_identity_binds_query_source_profile_universe_rows_and_product_build() {
 #[test]
 fn score_not_attack_controls_eligibility() {
     let tied = two_by_two_winners([0, u32::MAX, 0, u32::MAX]);
-    let reduced = vec![tied[0], tied[2], tied[3]];
+    let reduced = vec![tied[0].clone(), tied[2].clone(), tied[3].clone()];
     let (tied_summary, tied_derivation) = authority_fixture(tied.clone(), tied, 2);
     let (reduced_summary, reduced_derivation) = authority_fixture(reduced.clone(), reduced, 2);
 
@@ -742,7 +744,7 @@ fn summary_and_derivation_are_compared_without_attack_but_with_score_and_identit
     );
 
     let mut identity_mismatch = summary_winners.clone();
-    identity_mismatch[0].solution_identity = identity(99);
+    identity_mismatch[0].solution_identity = identity(99).into();
     let (summary, derivation) = authority_fixture(summary_winners, identity_mismatch, 2);
     assert_eq!(
         validate_pc_score_portfolio_v2_result(&summary, &derivation).unwrap_err(),

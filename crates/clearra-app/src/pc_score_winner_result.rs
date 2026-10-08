@@ -1,6 +1,5 @@
-use clearra_core_domain::solution::normalized_tiling_solution::{
-    NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
-};
+use crate::pc_score_solution_identity::PcScoreSolutionIdentity;
+use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
 
 pub const PC_SCORE_PATTERN_WINNER_CONTRACT: &str = "pc-score-pattern-winner.v1";
 pub const PC_SCORE_INFORMATIONAL_ATTACK_BASIS: &str = "canonical-equal-score-trace";
@@ -11,8 +10,8 @@ pub(crate) fn canonical_score_winner(
 ) -> Option<PcScorePatternWinnerV1> {
     winners
         .iter()
-        .copied()
-        .min_by_key(PcScorePatternWinnerV1::candidate_id)
+        .min_by_key(|winner| winner.candidate_id())
+        .cloned()
 }
 
 /// One candidate in the complete maximum-score family for a materialized
@@ -21,27 +20,27 @@ pub(crate) fn canonical_score_winner(
 /// `score` is the sole ordering and equality authority. The attack value is
 /// copied from the canonical trace chosen after an exact score tie and is
 /// therefore informational only.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcScorePatternWinnerV1 {
     pattern_id: usize,
     candidate_id: u64,
-    solution_identity: StandardBoard64TilingIdentity,
+    solution_identity: PcScoreSolutionIdentity,
     score: u64,
     informational_attack: u32,
 }
 
 impl PcScorePatternWinnerV1 {
-    pub(crate) const fn new(
+    pub(crate) fn new(
         pattern_id: usize,
         candidate_id: u64,
-        solution_identity: StandardBoard64TilingIdentity,
+        solution_identity: impl Into<PcScoreSolutionIdentity>,
         score: u64,
         informational_attack: u32,
     ) -> Self {
         Self {
             pattern_id,
             candidate_id,
-            solution_identity,
+            solution_identity: solution_identity.into(),
             score,
             informational_attack,
         }
@@ -61,12 +60,12 @@ impl PcScorePatternWinnerV1 {
         self.candidate_id
     }
 
-    pub const fn solution_identity(&self) -> StandardBoard64TilingIdentity {
-        self.solution_identity
+    pub const fn solution_identity(&self) -> &PcScoreSolutionIdentity {
+        &self.solution_identity
     }
 
     pub fn normalized_solution_key(&self) -> NormalizedTilingSolutionKey {
-        NormalizedTilingSolutionKey::from_standard_board64_identity(self.solution_identity)
+        self.solution_identity.normalized_solution_key()
     }
 
     pub const fn score(&self) -> u64 {

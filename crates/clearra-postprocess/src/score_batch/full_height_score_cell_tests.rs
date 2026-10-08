@@ -139,6 +139,47 @@ fn multiple_physical_graphs_for_one_colored_family_do_not_duplicate_score_cells(
 }
 
 #[test]
+fn borrowed_profile_full_height_cells_match_the_existing_materialization() {
+    let batch = batch(&[1, 1], false, true);
+    let policy = ScoreObjectivePolicy::summary();
+    let (profile, report) = crate::score_profile_with_memory_guard(policy, 0, 1024 * 1024).unwrap();
+    let projection = FullHeightScoreCellMaterializer::checked_memory_projection_with_profile_bytes(
+        &batch,
+        report.retained_bytes,
+    )
+    .unwrap();
+    let borrowed = FullHeightScoreCellMaterializer::materialize_with_profile_and_memory_limit(
+        &batch,
+        policy,
+        &profile,
+        report.retained_bytes,
+        &ExecutionControl::default(),
+        4096,
+        projection.required_peak_bytes + 4096,
+    )
+    .unwrap();
+    let owned = materialize(&batch).unwrap();
+    assert_eq!(borrowed.cells(), owned.cells());
+    assert_eq!(borrowed.complete(), owned.complete());
+    assert_eq!(
+        borrowed.checked_retained_bytes(),
+        owned.checked_retained_bytes()
+    );
+    assert!(matches!(
+        FullHeightScoreCellMaterializer::materialize_with_profile_and_memory_limit(
+            &batch,
+            policy,
+            &profile,
+            report.retained_bytes,
+            &ExecutionControl::default(),
+            4096,
+            projection.required_peak_bytes + 4095,
+        ),
+        Err(FullHeightScoreCellError::MemoryLimitExceeded { .. })
+    ));
+}
+
+#[test]
 fn public_batches_cannot_relabel_canonical_candidate_indices_or_clear_evidence() {
     assert_eq!(
         materialize(&batch(&[2], false, true)).unwrap_err(),

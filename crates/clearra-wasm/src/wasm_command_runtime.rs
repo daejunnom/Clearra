@@ -11,18 +11,15 @@ use clearra_app::{
     AppErrorCode, AppRequest, AppServices, CooperativeAppAdvance, CooperativeAppExecution,
     ExecutionControl, PcBestSaveWinnerV2, PcPathFamilyV2Result, PcPathWitnessV2,
     PcSaveCompletenessEvidence, PcSaveGroupV2, PcSavePieceMultiset, PcSaveWitness,
-    ProductCapabilityContract, ProductCapabilityResultKind, ProductPageSourceOwner,
-    PC_BEST_SAVE_SCHEMA, PC_PATH_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
-    PC_SCORE_PATTERN_WINNER_CONTRACT, PC_SCORE_SOLUTION_FIELD_CONTRACT,
-    PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
+    PcScoreSolutionIdentity, ProductCapabilityContract, ProductCapabilityResultKind,
+    ProductPageSourceOwner, PC_BEST_SAVE_SCHEMA, PC_PATH_CANONICAL_SELECTION,
+    PC_SCORE_INFORMATIONAL_ATTACK_BASIS, PC_SCORE_PATTERN_WINNER_CONTRACT,
+    PC_SCORE_SOLUTION_FIELD_CONTRACT, PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
 };
 #[cfg(test)]
 use clearra_app::{FiniteCooperativeCallerMemory, FiniteCooperativeCallerMemoryRejection};
 use clearra_cli_command::{CliCommandError, CliCommandParser, CliCommandRequest};
-use clearra_core_domain::{
-    piece::piece_kind::PieceKind,
-    solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
-};
+use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_executor::{
     CoreExecutionResult, PcTilingMemoryAdmissionEvidence, TilingSolutionPageStore,
 };
@@ -2092,20 +2089,18 @@ fn try_host_product_result_payload(
             let canonical_winner = report
                 .canonical_winner()
                 .ok_or_else(finite_projection_error)?;
-            let canonical_solution_key = canonical_winner.normalized_solution_key();
             let canonical_winner_payload = ScorePatternWinnerPayload::new(
                 try_decimal_u128(canonical_winner.pattern_id() as u128, ledger)?,
                 try_decimal_u128(canonical_winner.candidate_id() as u128, ledger)?,
-                try_owned_string(canonical_solution_key.as_str(), ledger)?,
+                try_pc_score_field_key(canonical_winner.solution_identity(), ledger)?,
                 try_decimal_u128(canonical_winner.score() as u128, ledger)?,
                 try_decimal_u128(canonical_winner.informational_attack() as u128, ledger)?,
             );
             let winners = try_owned_vec(report.pattern_winners(), ledger, |winner, ledger| {
-                let normalized_key = winner.normalized_solution_key();
                 Ok(ScorePatternWinnerPayload::new(
                     try_decimal_u128(winner.pattern_id() as u128, ledger)?,
                     try_decimal_u128(winner.candidate_id() as u128, ledger)?,
-                    try_owned_string(normalized_key.as_str(), ledger)?,
+                    try_pc_score_field_key(winner.solution_identity(), ledger)?,
                     try_decimal_u128(winner.score() as u128, ledger)?,
                     try_decimal_u128(winner.informational_attack() as u128, ledger)?,
                 ))
@@ -2862,9 +2857,18 @@ fn try_display_string(
 }
 
 fn try_pc_score_field_key(
-    identity: StandardBoard64TilingIdentity,
+    identity: &PcScoreSolutionIdentity,
     ledger: &mut WasmFiniteMemoryLedger,
 ) -> Result<String, WasmCommandRuntimeError> {
+    // Extended keys may exceed the compact inline formatter. Borrow the
+    // already validated dictionary and admit the single transport copy
+    // before reserve; never truncate or create an unaccounted temporary key.
+    if let Some(key) = identity.extended_canonical_key() {
+        return try_owned_string(key, ledger);
+    }
+    let identity = identity
+        .standard_board64_identity()
+        .ok_or_else(finite_projection_error)?;
     let mut text = InlineProjectionText::new();
     identity
         .write_canonical(&mut text)
@@ -5508,6 +5512,73 @@ mod finite_memory_tests {
         .expect("peak-minus-one baseline admitted");
         let error = try_owned_string(requested, &mut below).expect_err("peak-minus-one rejected");
         assert_eq!(error.code(), WASM_FINITE_MEMORY_LIMIT);
+    }
+
+    #[test]
+    fn full_height_score_key_projection_preserves_a_long_actual_field_and_admits_one_copy() {
+        // Six forced I locks, not an empty sixty-piece enumeration. This
+        // tests the score transport adapter, not a whole-session resource claim.
+        const INPUTS: &str =
+            include_str!("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv");
+        let input: Vec<_> = INPUTS
+            .lines()
+            .find(|line| line.starts_with("forced-24L\t"))
+            .unwrap()
+            .split('\t')
+            .collect();
+        let command = format!(
+            "clearra pc score --lines 24 --height 24 --board-mask 0x{} --pieces {} --queue {} --no-hold --rule srs-plus --workers 1",
+            input[2], input[3], input[4],
+        );
+        let request = CliCommandParser::parse(&command)
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+        let response = WasmCommandRuntime::default().app_context.run(request);
+        assert_eq!(
+            response.status(),
+            clearra_app::AppStatus::Success,
+            "{response:?}"
+        );
+        let report = response
+            .product_capability_result()
+            .unwrap()
+            .pc_score_summary_v2()
+            .unwrap();
+        let identity = report.solution_field_averages()[0].field_identity();
+        let expected = identity.extended_canonical_key().unwrap();
+        assert!(expected.len() > INLINE_PROJECTION_TEXT_CAPACITY);
+        let mut probe = WasmFiniteMemoryLedger::new(
+            0,
+            16 * 1024 * 1024,
+            WasmFiniteConversionRoute::PublicDirect,
+        )
+        .unwrap();
+        let projected = try_pc_score_field_key(identity, &mut probe).unwrap();
+        assert_eq!(projected, expected);
+        assert_eq!(probe.target_heap_bytes(), projected.capacity() as u128);
+        let exact_limit =
+            core::mem::size_of::<WasmExecutionResult>() as u128 + projected.capacity() as u128;
+        drop(projected);
+        let mut exact =
+            WasmFiniteMemoryLedger::new(0, exact_limit, WasmFiniteConversionRoute::PublicDirect)
+                .unwrap();
+        assert_eq!(
+            try_pc_score_field_key(identity, &mut exact).unwrap(),
+            expected
+        );
+        let mut below = WasmFiniteMemoryLedger::new(
+            0,
+            exact_limit - 1,
+            WasmFiniteConversionRoute::PublicDirect,
+        )
+        .unwrap();
+        assert_eq!(
+            try_pc_score_field_key(identity, &mut below)
+                .unwrap_err()
+                .code(),
+            WASM_FINITE_MEMORY_LIMIT
+        );
     }
 
     #[test]

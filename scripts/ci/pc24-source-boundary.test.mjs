@@ -269,11 +269,11 @@ test('the connected twenty-four-line surfaces retain whole fields and an exporta
   const editor = read('packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte');
   assert.ok(model.includes('WORKSPACE_PC_MAX_LINES = 24'));
   assert.ok(model.includes("runtime === 'web' && execution.workers !== 1"));
-  assert.ok(model.includes("!['tiling', 'off', 'minimum-cover', 'failed-queue'].includes(execution.scoreMode)"));
+  assert.ok(model.includes("!['tiling', 'off', 'minimum-cover', 'failed-queue', 'summary', 'score-finder', 'score-minimals'].includes(execution.scoreMode)"));
   assert.ok(workspace.includes('dimensionMax={WORKSPACE_PC_MAX_LINES}'));
   assert.ok(editor.includes('decodeInterchangeField(source, 24)'));
   assert.ok(read('apps/clearra-discord-bot/src/discord/field-limits.mjs')
-    .includes("['pc-tiling-v2', 'pc-v2', 'pc-chance-v2', 'pc-failed-v2'].includes(input)"));
+    .includes("['pc-tiling-v2', 'pc-v2', 'pc-chance-v2', 'pc-failed-v2', 'pc-score-v2', 'pc-score-finder-v2'].includes(input)"));
   const executor = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
   const pcTerminal = executor.slice(executor.indexOf('fn build_pc_family_result('),
     executor.indexOf('pub(super) fn finesse_search_material('));
@@ -365,6 +365,45 @@ test('full-height physical execution does not truncate masks or acquire replay-f
   const tests = read('crates/clearra-replay/src/full_height_replay_tests.rs');
   assert.ok(tests.includes('full_height_projector_is_differentially_equal_to_unchanged_compact_transition'));
   assert.ok(tests.includes('full_height_batch_moves_existing_graph_storage_and_binds_all_four_initial_words'));
+});
+
+test('full-height App score finalizers share identities without truncating or granting public batch authority', () => {
+  const identity = read('crates/clearra-app/src/pc_score_solution_identity.rs');
+  const postprocess = read('crates/clearra-app/src/pc_score_postprocess.rs');
+  const authority = read('crates/clearra-app/src/pc_score_summary_result.rs');
+  const portfolio = read('crates/clearra-app/src/pc_score_minimum_cover_result.rs');
+  const wasm = read('crates/clearra-wasm/src/wasm_command_runtime.rs');
+  const parser = read('crates/clearra-cli-command/src/web_command_parser.rs');
+  const ingress = read('crates/clearra-cli-command/src/lib_tests.rs');
+  const surfaces = read('crates/clearra-cli-command/tests/extended_pc_surfaces.rs');
+  const cli = read('crates/clearra-cli/tests/extended_pc_tiling.rs');
+  assert.ok(identity.includes('keys: Arc<Vec<String>>'));
+  assert.ok(identity.includes('Arc::ptr_eq(previous, keys)'));
+  assert.ok(identity.includes('keys.capacity()'));
+  assert.ok(identity.includes('mixed_dictionary_owners_do_not_gain_unaccounted_memory_credit'));
+  assert.ok(!identity.includes('Box<StandardBoard64TilingIdentity>'));
+  assert.ok(postprocess.includes('FullHeightScoreCellMaterializer::materialize_with_profile_and_memory_limit('));
+  assert.ok(postprocess.includes('cells = materialized.into_cells()'));
+  assert.ok(postprocess.includes('shared_identity_bytes'));
+  assert.ok(authority.includes('Arc::ptr_eq(&self.problem, executed_problem)'));
+  assert.ok(authority.includes('problem_evidence.matches_search_problem(self.problem.as_ref())'));
+  assert.ok(authority.includes('batch.initial() != Board256Mask::from_words(board.occupied_words())'));
+  assert.ok(authority.includes('pc_score_full_height_solution_identity_mismatch'));
+  assert.ok(portfolio.includes('PcScoreSolutionIdentity::checked_shared_retained_bytes('));
+  assert.ok(wasm.includes('identity: &PcScoreSolutionIdentity'));
+  assert.match(wasm, /if let Some\(key\) = identity\.extended_canonical_key\(\)\s*\{\s*return try_owned_string\(key, ledger\)/u);
+  assert.ok(wasm.includes('try_pc_score_field_key(canonical_winner.solution_identity(), ledger)?'));
+  assert.ok(!wasm.includes('let canonical_solution_key = canonical_winner.normalized_solution_key()'));
+  assert.ok(wasm.includes('full_height_score_key_projection_preserves_a_long_actual_field_and_admits_one_copy'));
+  assert.ok(parser.includes('pc_score_max_source_pieces_for_lines(target_lines)'));
+  assert.ok(ingress.includes('pc_score_extended_source_bound_matches_target_before_and_after_translation'));
+  assert.ok(surfaces.includes('canonical_full_height_scores_keep_full_fields_and_share_the_gui_finalizer'));
+  assert.ok(surfaces.includes('["score", "score-minimals", "score-finder"]'));
+  assert.ok(cli.includes('extended_score_real_cli_uses_full_keys_in_existing_score_payloads'));
+  assert.ok(workflow.includes('--lib pc_score_solution_identity -- --test-threads=1'));
+  assert.ok(workflow.includes('--lib pc_score_minimum_cover_contract_tests -- --test-threads=1'));
+  assert.ok(workflow.includes('--lib pc_score_ -- --test-threads=1'));
+  assert.ok(workflow.includes('--lib full_height_score_key_projection -- --test-threads=1'));
 });
 
 test('full-height score source preserves actual physical graphs and uses the common exact score reducer', () => {

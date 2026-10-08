@@ -5,9 +5,7 @@
 // alone owns cardinality proof and canonical selection.
 use std::sync::Arc;
 
-use clearra_core_domain::solution::normalized_tiling_solution::{
-    NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
-};
+use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
 use clearra_core_executor::CoreExecutionResult;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use sha2::{Digest, Sha256};
@@ -23,8 +21,8 @@ use super::{
     pc_score_postprocess::PcScoreDerivation,
     pc_score_summary_result::ValidatedPcScoreExecutionEvidence, CoveragePortfolioAlternativeSet,
     PcScoreIngressOrigin, PcScorePatternWinnerV1, PcScoreProblemPreset, PcScoreQuerySnapshot,
-    PcScoreSummaryV2Result, PortfolioAlternativeSetIdentity, PC_SCORE_CANONICAL_SELECTION,
-    PC_SCORE_MAX_PATTERNS,
+    PcScoreSolutionIdentity, PcScoreSummaryV2Result, PortfolioAlternativeSetIdentity,
+    PC_SCORE_CANONICAL_SELECTION, PC_SCORE_MAX_PATTERNS,
 };
 
 pub const PC_SCORE_PORTFOLIO_RESULT_CONTRACT: &str = "pc-score-portfolio.v2";
@@ -179,7 +177,7 @@ pub struct PcScorePortfolioV2Result {
     selected_score_candidate_ids: Vec<u64>,
     selected_solution_keys: Vec<String>,
     canonical_score_candidate_id: u64,
-    canonical_solution_identity: StandardBoard64TilingIdentity,
+    canonical_solution_identity: PcScoreSolutionIdentity,
     portfolio_alternatives: Arc<CoveragePortfolioAlternativeSet>,
     completeness: PcScorePortfolioCompletenessEvidence,
 }
@@ -259,9 +257,7 @@ impl PcScorePortfolioV2Result {
     }
 
     pub fn canonical_solution_key(&self) -> NormalizedTilingSolutionKey {
-        NormalizedTilingSolutionKey::from_standard_board64_identity(
-            self.canonical_solution_identity,
-        )
+        self.canonical_solution_identity.normalized_solution_key()
     }
 
     pub fn portfolio_alternatives(&self) -> &CoveragePortfolioAlternativeSet {
@@ -286,6 +282,12 @@ impl PcScorePortfolioV2Result {
             (self.pattern_winners.capacity() as u128)
                 .checked_mul(core::mem::size_of::<PcScorePatternWinnerV1>() as u128)?,
         )?;
+        bytes = bytes.checked_add(PcScoreSolutionIdentity::checked_shared_retained_bytes(
+            self.pattern_winners
+                .iter()
+                .map(PcScorePatternWinnerV1::solution_identity)
+                .chain(std::iter::once(&self.canonical_solution_identity)),
+        )?)?;
         bytes = bytes.checked_add(self.checked_portfolio_specific_retained_capacity_bytes()?)?;
         Some(bytes)
     }
@@ -394,15 +396,15 @@ impl PcScorePortfolioValidationError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct WinnerProjection {
-    solution_identity: StandardBoard64TilingIdentity,
+    solution_identity: PcScoreSolutionIdentity,
     score: u64,
 }
 
 struct CandidateAccumulator {
     score_candidate_id: u64,
-    solution_identity: StandardBoard64TilingIdentity,
+    solution_identity: PcScoreSolutionIdentity,
     eligible_patterns: Vec<PcScoreEligiblePatternV2>,
 }
 
@@ -462,7 +464,7 @@ fn prepare_pc_score_portfolio_input(
     let mut candidates: Vec<CandidateAccumulator> = memory.vec(candidate_count)?;
 
     for (winner_index, ((pattern_id, candidate_id), winner)) in
-        derivation_winners.iter().copied().enumerate()
+        derivation_winners.iter().cloned().enumerate()
     {
         let Some(pattern_score) = pattern_best_scores.get_mut(pattern_id) else {
             return Err(PcScorePortfolioValidationError::WinnerFamilyInvalid);
@@ -483,10 +485,10 @@ fn prepare_pc_score_portfolio_input(
                 .iter()
                 .take_while(|((_, id), _)| *id == candidate_id)
                 .count();
-            candidate_identities.push((candidate_id, winner.solution_identity));
+            candidate_identities.push((candidate_id, winner.solution_identity.clone()));
             candidates.push(CandidateAccumulator {
                 score_candidate_id: candidate_id,
-                solution_identity: winner.solution_identity,
+                solution_identity: winner.solution_identity.clone(),
                 eligible_patterns: memory.vec(candidate_pattern_count)?,
             });
         }
@@ -555,7 +557,7 @@ fn prepare_pc_score_portfolio_input(
                 .checked_storage_retained_bytes()
                 .ok_or(PcScorePortfolioValidationError::MemoryProjectionOverflow)?,
         )?;
-        let normalized_solution_key = memory.canonical_key(candidate.solution_identity)?;
+        let normalized_solution_key = memory.canonical_key(&candidate.solution_identity)?;
         let portfolio_candidate_id = u64::try_from(index)
             .ok()
             .and_then(|value| value.checked_add(1))
@@ -656,7 +658,7 @@ fn finish_pc_score_portfolio_result(
     let canonical_solution_identity = candidate_identities
         .iter()
         .find(|(id, _)| *id == canonical_score_candidate_id)
-        .map(|(_, identity)| *identity)
+        .map(|(_, identity)| identity.clone())
         .ok_or(PcScorePortfolioValidationError::CandidateIdentityMismatch)?;
     let portfolio_alternatives = Arc::new(portfolio_alternatives);
 
@@ -763,11 +765,11 @@ fn canonical_winner_projection(
         if winner.candidate_id() == 0 {
             return Err(PcScorePortfolioValidationError::CandidateIdentityMismatch);
         }
-        candidate_identities.push((winner.candidate_id(), winner.solution_identity()));
+        candidate_identities.push((winner.candidate_id(), winner.solution_identity().clone()));
         projected.push((
             (winner.pattern_id(), winner.candidate_id()),
             WinnerProjection {
-                solution_identity: winner.solution_identity(),
+                solution_identity: winner.solution_identity().clone(),
                 score: winner.score(),
             },
         ));
@@ -779,7 +781,9 @@ fn canonical_winner_projection(
     {
         return Err(PcScorePortfolioValidationError::CandidateIdentityMismatch);
     }
-    candidate_identities.sort_unstable_by_key(|(id, identity)| (*identity, *id));
+    candidate_identities.sort_unstable_by(|(left_id, left), (right_id, right)| {
+        left.cmp(right).then(left_id.cmp(right_id))
+    });
     if candidate_identities
         .windows(2)
         .any(|pair| pair[0].1 == pair[1].1 && pair[0].0 != pair[1].0)

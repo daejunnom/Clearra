@@ -2706,6 +2706,23 @@ impl ExtendedBuildProbabilitySession {
                 count_complete && probability_complete,
             );
             fields.extend([
+                field("postprocess_scoring_requested", true),
+                field(
+                    "score_objective_mode",
+                    self.problem.objective().score().mode().as_str(),
+                ),
+                field(
+                    "score_profile_requested",
+                    self.problem.objective().score().profile().as_str(),
+                ),
+                field(
+                    "spin_profile_requested",
+                    self.problem.objective().score().spin_profile().as_str(),
+                ),
+                field(
+                    "score_initial_b2b",
+                    self.problem.objective().score().initial_b2b(),
+                ),
                 field("score_summary_requested", true),
                 field("score_summary_complete", false),
                 field("score_summary_incomplete_reason", "deferred-to-coordinator"),

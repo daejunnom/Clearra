@@ -1,9 +1,8 @@
 // SRP rationale: this module has one behavior-level change reason: representing
 // one normalized solution field's score over the complete materialized universe.
 
-use clearra_core_domain::solution::normalized_tiling_solution::{
-    NormalizedTilingSolutionKey, StandardBoard64TilingIdentity,
-};
+use crate::pc_score_solution_identity::PcScoreSolutionIdentity;
+use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
 
 pub const PC_SCORE_SOLUTION_FIELD_CONTRACT: &str = "pc-score-solution-field-average.v1";
 pub const PC_SCORE_SOLUTION_FIELD_ORDERING: &str = "normalized-solution-field-order";
@@ -18,9 +17,9 @@ pub const PC_SCORE_OVERALL_SCORE_BASIS: &str = "all-materialized-patterns-failed
 /// universe; patterns that the field cannot solve contribute zero. Candidate
 /// IDs, trace/attack selectors, and portfolio membership are intentionally not
 /// part of this type.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcScoreSolutionFieldAverageV1 {
-    field_identity: StandardBoard64TilingIdentity,
+    field_identity: PcScoreSolutionIdentity,
     average_score_bits: u64,
     covered_pattern_count: usize,
     pattern_count: usize,
@@ -29,12 +28,12 @@ pub struct PcScoreSolutionFieldAverageV1 {
 
 impl PcScoreSolutionFieldAverageV1 {
     pub(crate) fn empty(
-        field_identity: StandardBoard64TilingIdentity,
+        field_identity: impl Into<PcScoreSolutionIdentity>,
         pattern_count: usize,
         score_complete: bool,
     ) -> Option<Self> {
         (pattern_count > 0).then_some(Self {
-            field_identity,
+            field_identity: field_identity.into(),
             average_score_bits: 0.0_f64.to_bits(),
             covered_pattern_count: 0,
             pattern_count,
@@ -65,12 +64,12 @@ impl PcScoreSolutionFieldAverageV1 {
         PC_SCORE_SOLUTION_FIELD_CONTRACT
     }
 
-    pub const fn field_identity(&self) -> StandardBoard64TilingIdentity {
-        self.field_identity
+    pub const fn field_identity(&self) -> &PcScoreSolutionIdentity {
+        &self.field_identity
     }
 
     pub fn normalized_field_key(&self) -> NormalizedTilingSolutionKey {
-        NormalizedTilingSolutionKey::from_standard_board64_identity(self.field_identity)
+        self.field_identity.normalized_solution_key()
     }
 
     pub const fn average_score_bits(&self) -> u64 {
@@ -96,6 +95,7 @@ impl PcScoreSolutionFieldAverageV1 {
 
 #[cfg(test)]
 mod tests {
+    use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
     use clearra_core_domain::{
         piece::piece_kind::PieceKind, solution::normalized_tiling_solution::PiecePlacementMask,
     };

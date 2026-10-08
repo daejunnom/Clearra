@@ -522,6 +522,8 @@ export const JAPANESE_HELP_TEXT = Object.freeze({
   "Results maximize ending-piece weights (T6/I4/O3/J1/L1/S0/Z0), then minimize J+L, then maximize probability across all queues in the input pattern.": "終了時のミノの重み（T6/I4/O3/J1/L1/S0/Z0）を最大化し、次にJ+Lを最小化し、最後に入力パターンの全キューに対する確率を最大化します。",
   "If several results tie exactly, Discord displays the first one in deterministic order.": "完全に同順位の結果が複数ある場合、Discordは決められた順序の先頭を表示します。",
   "`field` is a 1–6-row initial PC board or one static document; `next` must be one exact IOTSZJL queue, never a pattern.": "`field`には1〜6行の初期PC盤面または静的なドキュメントを指定します。`next`にはパターンではなく、IOTSZJLの固定キューが必要です。",
+  "`field` is a 1–24-row initial PC board or one static document; `next` must be one exact IOTSZJL queue, never a pattern.": "`field`には1〜24行の初期PC盤面または静的なドキュメントを指定します。`next`にはパターンではなく、IOTSZJLの固定キューが必要です。",
+  "`field` and `next` use the PC contracts; `lines` accepts 1–24 and omission evaluates feasible targets serially.": "`field`と`next`にはPC探索の入力を使います。`lines`は1〜24行に対応し、省略すると可能な目標を順に評価します。",
   "`lines` accepts 1–6; omission evaluates feasible targets serially.": "`lines`は1〜6です。省略すると可能な目標を順に評価します。",
   "`lines` accepts 1–24; omission evaluates feasible targets serially.": "`lines`は1〜24です。省略すると可能な目標を順に評価します。",
   "Failed-queue search returns patterns that cannot satisfy the target. `failed-count` bounds returned failures.": "失敗キュー探索は目標を達成できないパターンを返します。`failed-count`は返す失敗例の数を制限します。",

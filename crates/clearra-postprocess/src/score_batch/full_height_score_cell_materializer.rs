@@ -131,6 +131,16 @@ impl FullHeightScoreCellMaterializer {
         batch: &FullHeightExecutionBatch,
         policy: ScoreObjectivePolicy,
     ) -> Option<FullHeightScoreCellMemoryProjection> {
+        Self::checked_memory_projection_with_profile_bytes(
+            batch,
+            crate::checked_score_profile_memory_projection(policy)?.required_memory_bytes,
+        )
+    }
+
+    pub fn checked_memory_projection_with_profile_bytes(
+        batch: &FullHeightExecutionBatch,
+        profile_storage_bytes: u128,
+    ) -> Option<FullHeightScoreCellMemoryProjection> {
         let (candidate_count, max_path_len) = validated_shape(batch).ok()?;
         let pattern_count = batch.execution().patterns().len();
         let cell_capacity = candidate_count.checked_mul(pattern_count)?;
@@ -150,8 +160,6 @@ impl FullHeightScoreCellMaterializer {
             // Current best and the next exact-score tie key coexist. These
             // keys are scratch only; output cells use the existing fixed ID.
             .checked_add(2 * canonical_key_capacity(max_path_len)? as u128)?;
-        let profile_storage_bytes =
-            crate::checked_score_profile_memory_projection(policy)?.required_memory_bytes;
         Some(FullHeightScoreCellMemoryProjection {
             candidate_count,
             pattern_count,
@@ -181,7 +189,7 @@ impl FullHeightScoreCellMaterializer {
         validated_shape(batch)?;
         let projection = Self::checked_memory_projection(batch, policy)
             .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
-        let mut peak = already_retained_bytes
+        let peak = already_retained_bytes
             .checked_add(projection.required_peak_bytes)
             .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
         ensure_limit(peak, max_memory_bytes)?;
@@ -205,14 +213,41 @@ impl FullHeightScoreCellMaterializer {
                 max_memory_bytes,
             },
         })?;
-        // Check allocator-visible slack after each reserve, before another
-        // owner is allocated. Static projection never substitutes for capacity.
-        peak = peak
-            .checked_add(
-                report
-                    .retained_bytes
-                    .saturating_sub(projection.profile_storage_bytes),
-            )
+        Self::materialize_with_profile_and_memory_limit(
+            batch,
+            policy,
+            &profile,
+            report.retained_bytes,
+            control,
+            already_retained_bytes,
+            max_memory_bytes,
+        )
+    }
+
+    /// Reuses a caller-owned, already admitted score profile. The checked
+    /// projection includes that owner's bytes; no second table is constructed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn materialize_with_profile_and_memory_limit(
+        batch: &FullHeightExecutionBatch,
+        policy: ScoreObjectivePolicy,
+        profile: &clearra_scoring::profile::ScoreProfile,
+        profile_storage_bytes: u128,
+        control: &ExecutionControl,
+        already_retained_bytes: u128,
+        max_memory_bytes: u128,
+    ) -> Result<FullHeightScoreCellMaterialization, FullHeightScoreCellError> {
+        if control.is_cancelled() {
+            return Err(FullHeightScoreCellError::Cancelled);
+        }
+        if !crate::score_profile_selection::score_profile_matches_policy(profile, policy) {
+            return Err(FullHeightScoreCellError::InvalidEvidence);
+        }
+        validated_shape(batch)?;
+        let projection =
+            Self::checked_memory_projection_with_profile_bytes(batch, profile_storage_bytes)
+                .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
+        let mut peak = already_retained_bytes
+            .checked_add(projection.required_peak_bytes)
             .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
         ensure_limit(peak, max_memory_bytes)?;
         let mut cells = Vec::new();
@@ -290,7 +325,7 @@ impl FullHeightScoreCellMaterializer {
                         &mut path,
                         &mut holds,
                         projection.max_path_len,
-                        &profile,
+                        profile,
                         ScoreModelEvaluator::initial_state(ScoreEvaluationPolicy::tetrio_pc(
                             policy.initial_b2b(),
                         )),

@@ -38,6 +38,15 @@ const PATTERN_PROBABILITY_CONTRACT: &str = "pc-b2b-preservation-probability.v1";
 /// enforced after parsing so typed callers cannot bypass the ingress envelope.
 pub const PC_SCORE_MAX_PATTERN_BYTES: usize = 128;
 pub const PC_SCORE_MAX_SOURCE_PIECES: usize = 16;
+/// The extended 10x24 domain has at most sixty placements plus one hold
+/// lookahead. Keep the compact ingress envelope unchanged.
+pub const fn pc_score_max_source_pieces_for_lines(lines: u16) -> usize {
+    if lines > 6 {
+        61
+    } else {
+        PC_SCORE_MAX_SOURCE_PIECES
+    }
+}
 pub const PC_SCORE_MAX_PATTERNS: usize = 1_066_867_200;
 const PC_SCORE_MAX_EXPLICIT_PATTERNS: usize = 4_096;
 const PC_SCORE_MAX_QUERY_QUEUE_RETAINED_BYTES: u128 = 1024 * 1024;
@@ -873,13 +882,14 @@ fn validate_pc_score_opening_request_contract_with_origin(
         return Err("pc score-finder requires an explicit initial-field scenario");
     }
     validate_pc_score_execution_policy(query.execution_policy())?;
-    if !matches!(query.target().lines(), 2 | 4 | 6) {
-        return Err("pc score opening target must be exactly 2, 4, or 6 lines");
+    if !(2..=24).contains(&query.target().lines()) || !query.target().lines().is_multiple_of(2) {
+        return Err("pc score empty opening target must be even and in 2..=24");
     }
     if query.verified_kick_profile().is_some() {
         return Err("pc score does not accept an imported kick-table profile");
     }
-    validate_pc_score_queue_contract(query.queue())?;
+    let max_source_pieces = pc_score_max_source_pieces_for_lines(u16::from(query.target().lines()));
+    validate_pc_score_queue_contract(query.queue(), max_source_pieces)?;
     let geometry_pieces = usize::from(query.target().lines()) * 10 / 4;
     validate_pc_score_supply_window(
         query.queue(),
@@ -887,6 +897,7 @@ fn validate_pc_score_opening_request_contract_with_origin(
         geometry_pieces,
         query.hold_policy().is_enabled(),
         query.hold_policy().initial_piece().is_some(),
+        max_source_pieces,
     )?;
     validate_pc_score_common_request_contract(
         query.objective(),
@@ -917,7 +928,9 @@ fn validate_pc_score_scenario_request_contract_with_origin(
     if query.verified_kick_profile().is_some() {
         return Err("pc score does not accept an imported kick-table profile");
     }
-    validate_pc_score_queue_contract(query.remaining_queue())?;
+    let max_source_pieces =
+        pc_score_max_source_pieces_for_lines(query.initial_board().visible_height());
+    validate_pc_score_queue_contract(query.remaining_queue(), max_source_pieces)?;
     if origin.is_some_and(PcScoreIngressOrigin::is_score_finder) {
         if query.execution_policy().tablebase_requested() {
             return Err("pc score-finder does not accept a tablebase request");
@@ -968,21 +981,30 @@ fn validate_pc_score_scenario_request_contract_with_origin(
     }
 
     let board = query.initial_board();
-    if board.width() != 10 || !(1..=6).contains(&board.visible_height()) {
-        return Err("pc score scenario requires a 10-column board with height in 1..=6");
+    if board.width() != 10 || !(1..=24).contains(&board.visible_height()) {
+        return Err("pc score scenario requires a 10-column board with height in 1..=24");
     }
     let visible_bits = u32::from(board.width()) * u32::from(board.visible_height());
-    let visible_mask = (1_u64 << visible_bits) - 1;
-    if board.occupied_mask() & !visible_mask != 0 {
+    let occupied = clearra_core_domain::board::standard_pc_board::Board256Mask::from_words(
+        board.occupied_words(),
+    );
+    if !occupied
+        .fits_cell_count(visible_bits as u16)
+        .map_err(|_| "pc score board size invalid")?
+    {
         return Err("pc score scenario contains cells above its declared height");
     }
     let normalized_board = board.after_initial_line_clear();
-    let empty_cells = visible_bits - (normalized_board.occupied_mask() & visible_mask).count_ones();
+    let empty_cells = visible_bits
+        - clearra_core_domain::board::standard_pc_board::Board256Mask::from_words(
+            normalized_board.occupied_words(),
+        )
+        .count_ones();
     if empty_cells == 0 || !empty_cells.is_multiple_of(4) {
         return Err("pc score scenario empty-cell count must be a positive multiple of four");
     }
     let required_pieces = empty_cells as usize / 4;
-    if required_pieces > PC_SCORE_MAX_SOURCE_PIECES - 1
+    if required_pieces > max_source_pieces - 1
         || query.piece_window().max_pieces() != required_pieces
         || query.exact_pieces() != Some(required_pieces)
     {
@@ -994,6 +1016,7 @@ fn validate_pc_score_scenario_request_contract_with_origin(
         required_pieces,
         query.allow_hold(),
         query.allow_hold() && query.hold_state().piece().is_some(),
+        max_source_pieces,
     )?;
     Ok(())
 }
@@ -1018,11 +1041,18 @@ fn validate_pc_score_execution_policy(policy: &PcExecutionPolicy) -> Result<(), 
     Ok(())
 }
 
-fn validate_pc_score_queue_contract(queue: &PcQueueInput) -> Result<(), &'static str> {
+fn validate_pc_score_queue_contract(
+    queue: &PcQueueInput,
+    max_source_pieces: usize,
+) -> Result<(), &'static str> {
     match queue {
         PcQueueInput::FixedSequence(sequence) => {
-            if sequence.len() > PC_SCORE_MAX_SOURCE_PIECES {
-                return Err("pc score accepts at most 16 fixed source pieces");
+            if sequence.len() > max_source_pieces {
+                return Err(if max_source_pieces == PC_SCORE_MAX_SOURCE_PIECES {
+                    "pc score accepts at most 16 fixed source pieces"
+                } else {
+                    "pc score accepts at most 61 fixed source pieces in 7..=24L"
+                });
             }
             if sequence
                 .checked_retained_capacity_bytes()
@@ -1035,7 +1065,7 @@ fn validate_pc_score_queue_contract(queue: &PcQueueInput) -> Result<(), &'static
         PcQueueInput::PatternExpression(expression)
             if expression.source().len() <= PC_SCORE_MAX_PATTERN_BYTES
                 && !expression.source().contains(';')
-                && expression.sequence_len() <= PC_SCORE_MAX_SOURCE_PIECES
+                && expression.sequence_len() <= max_source_pieces
                 && expression.pattern_count() <= PC_SCORE_MAX_PATTERNS
                 && expression
                     .checked_retained_capacity_bytes()
@@ -1044,7 +1074,7 @@ fn validate_pc_score_queue_contract(queue: &PcQueueInput) -> Result<(), &'static
                     sequences.len() <= PC_SCORE_MAX_EXPLICIT_PATTERNS
                         && sequences
                             .iter()
-                            .all(|sequence| sequence.len() <= PC_SCORE_MAX_SOURCE_PIECES)
+                            .all(|sequence| sequence.len() <= max_source_pieces)
                 }) =>
         {
             Ok(())
@@ -1065,14 +1095,19 @@ fn validate_pc_score_supply_window(
     geometry_pieces: usize,
     hold_enabled: bool,
     initial_hold_occupied: bool,
+    max_source_pieces: usize,
 ) -> Result<(), &'static str> {
     let initial_hold_pieces = usize::from(hold_enabled && initial_hold_occupied);
     let required_source_pieces = geometry_pieces.saturating_sub(initial_hold_pieces);
     let automatic_source_pieces = geometry_pieces
         .saturating_add(usize::from(hold_enabled))
         .saturating_sub(initial_hold_pieces);
-    if automatic_source_pieces > PC_SCORE_MAX_SOURCE_PIECES {
-        return Err("pc score automatic source window exceeds 16 pieces");
+    if automatic_source_pieces > max_source_pieces {
+        return Err(if max_source_pieces == PC_SCORE_MAX_SOURCE_PIECES {
+            "pc score automatic source window exceeds 16 pieces"
+        } else {
+            "pc score automatic source window exceeds 61 pieces"
+        });
     }
 
     let finite_queue_len = match queue {

@@ -883,9 +883,10 @@ function nativePcArguments(command, values, mode = {}) {
 }
 
 function nativePcScoreFinderArguments(command, values) {
-  const field = normalizeSearchField(values.get("field"));
+  const maxRows = discordPcMaxRows(command.input);
+  const field = normalizeSearchField(values.get("field"), { maxRows, maxBits: maxRows * 10 });
   const queue = validatedNext(values, true).toUpperCase();
-  const lines = optionalInteger(values, "lines", 1, DISCORD_PC_FIELD_MAX_ROWS);
+  const lines = optionalInteger(values, "lines", 1, maxRows);
   if (lines === null) {
     throw new Error("PC score-finder requires one exact lines value after automatic target planning.");
   }

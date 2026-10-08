@@ -3,6 +3,47 @@ use clearra_cli::{exit::ExitCode, run_with_args};
 use clearra_core_domain::board::standard_pc_board::Board256Mask;
 
 #[test]
+fn extended_score_real_cli_uses_full_keys_in_existing_score_payloads() {
+    const INPUTS: &str =
+        include_str!("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv");
+    for input in INPUTS
+        .lines()
+        .filter(|line| line.starts_with("forced-8L\t") || line.starts_with("forced-24L\t"))
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+    {
+        for product in ["score", "score-minimals", "score-finder"] {
+            let command = format!(
+                "clearra --format json pc {product} --lines {} --height {} --board-mask 0x{} --pieces {} --queue {} --workers 1 --no-hold --rule srs-plus",
+                input[1], input[1], input[2], input[3], input[4],
+            );
+            let output = run_with_args(command.split_whitespace().map(str::to_owned));
+            assert_eq!(output.exit_code(), ExitCode::Success, "{output:?}");
+            let json: serde_json::Value = serde_json::from_str(output.stdout()).unwrap();
+            let expected_kind = match product {
+                "score" => "pc-score-summary.v2",
+                "score-minimals" => "pc-score-portfolio.v2",
+                "score-finder" => "pc-fixed-score-witness.v2",
+                _ => unreachable!(),
+            };
+            assert_eq!(json["kind"], expected_kind);
+            let prefix = format!("ctk2|height={}|initial={}|placements=", input[1], input[2]);
+            assert!(output.stdout().contains(&prefix), "{output:?}");
+            if product == "score" {
+                assert_eq!(json["summary"]["score_summary_complete"], true);
+                assert_eq!(json["summary"]["score_solution_field_count"], "1");
+                assert_eq!(
+                    json["summary"]["score_solution_fields"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn full_height_failed_queue_real_cli_executes_instead_of_relabelling_an_unsupported_request() {
     for height in [8_u8, 24] {
         let starts = (0..u16::from(height)).step_by(4).collect::<Vec<_>>();

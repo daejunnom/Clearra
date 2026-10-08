@@ -209,7 +209,7 @@ pub(crate) fn build_field_average_payload(
         return Err("Build field-average row count does not match the solution identity family");
     }
     if fields.iter().zip(identities).any(|(field, identity)| {
-        field.field_identity() != *identity
+        field.field_identity().standard_board64_identity() != Some(*identity)
             || field.normalized_field_key()
                 != NormalizedTilingSolutionKey::from_standard_board64_identity(*identity)
     }) {
@@ -508,7 +508,12 @@ pub(crate) fn build_fixed_queue_max_score_payload(
     for ((pattern_id, candidate_id), winner) in winners_by_identity {
         if pattern_id == 0 && winner.score() == best_score {
             let (_, key) = candidate_map
-                .get(&winner.solution_identity())
+                .get(
+                    &winner
+                        .solution_identity()
+                        .standard_board64_identity()
+                        .ok_or("Build score requires a compact identity")?,
+                )
                 .ok_or("Build fixed-queue winner candidate is missing")?;
             winners.push(ScorePatternWinnerPayload::new(
                 "0",
@@ -662,7 +667,12 @@ pub(crate) fn prepare_build_highest_score_minimum_payload(
             continue;
         }
         let (_, key) = candidate_map
-            .get(&winner.solution_identity())
+            .get(
+                &winner
+                    .solution_identity()
+                    .standard_board64_identity()
+                    .ok_or("Build score requires a compact identity")?,
+            )
             .ok_or("Build score-minimum candidate is missing")?;
         let row = eligible_by_key
             .entry(key.clone())
@@ -741,7 +751,12 @@ pub(crate) fn prepare_build_highest_score_minimum_payload(
             continue;
         }
         let (_, key) = candidate_map
-            .get(&winner.solution_identity())
+            .get(
+                &winner
+                    .solution_identity()
+                    .standard_board64_identity()
+                    .ok_or("Build score requires a compact identity")?,
+            )
             .ok_or("Build score-minimum candidate is missing")?;
         let candidate_index = candidate_keys
             .binary_search(key)
@@ -1481,7 +1496,12 @@ fn validated_score_winners<'a>(
             return Err("Build score winner pattern identity is invalid");
         }
         let (candidate_id, _) = candidate_map
-            .get(&winner.solution_identity())
+            .get(
+                &winner
+                    .solution_identity()
+                    .standard_board64_identity()
+                    .ok_or("Build score requires a compact identity")?,
+            )
             .ok_or("Build score winner references an unknown candidate")?;
         if *candidate_id != winner.candidate_id() {
             return Err("Build score winner candidate identity is inconsistent");
