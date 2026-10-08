@@ -339,3 +339,30 @@ test('full-height failed queue consumes only request-owned complete coverage and
     'full_height_native_parallel_failed_queue_keeps_complete_source_coverage_and_worker_identity',
   ]) assert.ok(tests.includes(`fn ${name}()`));
 });
+
+test('full-height physical execution does not truncate masks or acquire replay-family authority', () => {
+  const replay = read('crates/clearra-replay/src/full_height_replay.rs');
+  const batch = read('crates/clearra-replay/src/full_height_execution.rs');
+  const engine = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
+  assert.ok(workflow.includes('"crates/clearra-replay/**"'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-replay --lib -- --test-threads=1'));
+  assert.ok(replay.includes('cleared_row_mask: u32'));
+  assert.ok(replay.includes('ScoringExecutionEdge'));
+  assert.ok(replay.includes('PieceDecision::from_selected_hold('));
+  assert.ok(replay.includes('memory_guard(requested)'));
+  assert.ok(replay.includes('memory_guard(actual)'));
+  assert.ok(replay.includes('trk2:h{}:'));
+  assert.ok(!replay.includes('words()[0]'));
+  assert.ok(batch.includes('key.initial_board() != initial'));
+  assert.ok(batch.includes('graph.checked_edges(node)'));
+  assert.ok(batch.includes('execution: SpinCoverageExecutionBatch'));
+  assert.ok(!batch.includes('CoreExecutionResult'));
+  assert.ok(!batch.includes('layout::board64_layout'));
+  const terminal = engine.slice(engine.indexOf('fn build_pc_family_result('));
+  assert.ok(terminal.includes('self.validate_pc_representative_physical_chain()?'));
+  assert.ok(engine.includes('extended_pc_replay_terminal_board_not_empty'));
+  assert.ok(!terminal.includes('"pc-path-family.v2"'));
+  const tests = read('crates/clearra-replay/src/full_height_replay_tests.rs');
+  assert.ok(tests.includes('full_height_projector_is_differentially_equal_to_unchanged_compact_transition'));
+  assert.ok(tests.includes('full_height_batch_moves_existing_graph_storage_and_binds_all_four_initial_words'));
+});

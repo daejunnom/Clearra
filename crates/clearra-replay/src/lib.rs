@@ -2,6 +2,8 @@
 
 pub mod board;
 pub mod event;
+mod full_height_execution;
+mod full_height_replay;
 pub mod ownership;
 pub mod replay;
 mod scoring_execution;
@@ -11,6 +13,11 @@ pub mod trace;
 pub use event::{
     KickEvidenceEvent, MovementEvidenceEvent, PlacementEvent, RotationRequest, TraceCompleteness,
     TraceCompletenessEvent,
+};
+pub use full_height_execution::{FullHeightExecutionBatch, FullHeightExecutionBatchError};
+pub use full_height_replay::{
+    FullHeightReplayBuildError, FullHeightReplayError, FullHeightReplayProjector,
+    FullHeightReplayStep, FullHeightReplayTrace, FullHeightTransition,
 };
 pub use ownership::{ColoredCellOwner, ColoredCellOwnership, ColoredCellOwnershipError};
 pub use replay::CellOwner;

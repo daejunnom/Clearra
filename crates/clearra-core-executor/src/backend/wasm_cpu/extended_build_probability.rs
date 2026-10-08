@@ -24,7 +24,9 @@ use clearra_finesse::{
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, PcChanceEvidencePolicy, SearchProblem,
 };
-use clearra_replay::{SpinCoverageExecutionBatch, SpinCoverageExecutionGraph};
+use clearra_replay::{
+    FullHeightReplayProjector, SpinCoverageExecutionBatch, SpinCoverageExecutionGraph,
+};
 use clearra_supply::pattern_universe::{
     PackingMultisetFamily, PackingPatternMembershipKind, PieceMultisetKey,
 };
@@ -2262,7 +2264,56 @@ impl ExtendedBuildProbabilitySession {
             && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountAll
     }
 
+    fn validate_pc_representative_physical_chain(&self) -> Result<(), WasmExactSearchError> {
+        // This is only the already-selected witness. Full replay multiplicity
+        // and query-bound terminal authority remain separate contracts.
+        if self.representative_path.is_empty() {
+            return if self.buildable_tilings.is_empty() {
+                Ok(())
+            } else {
+                Err(WasmExactSearchError::InvalidProblem(
+                    "extended_pc_representative_replay_missing",
+                ))
+            };
+        }
+        let mut board = clearra_core_domain::board::standard_pc_board::Board256Mask::from_words(
+            self.catalog.initial_board().words(),
+        );
+        for step in &self.representative_path {
+            let rotation = clearra_core_domain::piece::rotation::RotationState::from_quarter_turns(
+                step.rotation(),
+            )
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("extended_pc_replay_rotation_invalid")
+            })?;
+            let projected = FullHeightReplayProjector::project_lock(
+                self.field.height(),
+                board,
+                step.piece(),
+                rotation,
+                step.x(),
+                step.y(),
+            )
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("extended_pc_physical_replay_invalid")
+            })?;
+            if projected.cleared_lines() != step.cleared_lines() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "extended_pc_replay_cleared_lines_mismatch",
+                ));
+            }
+            board = projected.after_line_clear();
+        }
+        if !board.is_empty() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_replay_terminal_board_not_empty",
+            ));
+        }
+        Ok(())
+    }
+
     fn build_pc_family_result(&self) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        self.validate_pc_representative_physical_chain()?;
         let minimum_source =
             self.problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::PcMinimumCoverV2;
         let failed_source = self
@@ -2382,6 +2433,10 @@ impl ExtendedBuildProbabilitySession {
                 self.parallel_maximum_worker_candidates,
             ),
             field("solution_found", !keys.is_empty()),
+            field(
+                "representative_physical_replay_validated",
+                !self.representative_path.is_empty(),
+            ),
             field("solution_set_materialized", true),
             field("solution_keys_materialized_count", keys.len()),
             field("solution_keys_complete", count_complete),

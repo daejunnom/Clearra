@@ -1,3 +1,5 @@
+use core::fmt::{self, Write};
+
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_geometry::{
     layout::board64_layout::Board64Layout, placement::placement_mask::PlacementMask,
@@ -506,4 +508,3 @@ mod tests {
         assert_eq!(length.0, usize::MAX);
     }
 }
-use core::fmt::{self, Write};

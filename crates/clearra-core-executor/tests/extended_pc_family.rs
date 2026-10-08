@@ -65,6 +65,10 @@ fn full_height_pc_family_runs_buildup_and_clears_the_whole_board_in_all_profiles
                 WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
                     .unwrap();
             assert_eq!(result.field("actual_backend"), Some("wasm-cpu-pc-extended"));
+            assert_eq!(
+                result.bool_field("representative_physical_replay_validated"),
+                Some(true)
+            );
             assert_eq!(result.bool_field("buildup_executed"), Some(true));
             assert_eq!(result.bool_field("count_complete"), Some(true));
             assert_eq!(result.bool_field("build_variant_count_exact"), Some(true));

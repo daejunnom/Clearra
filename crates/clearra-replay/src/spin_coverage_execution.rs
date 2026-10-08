@@ -62,6 +62,14 @@ impl SpinCoverageExecutionGraph {
         &self.edges[start..start + node.edge_count() as usize]
     }
 
+    /// Fallible projection for loaders and full-height evidence consumers.
+    /// Hot-loop callers with an already validated producer retain `edges`.
+    pub fn checked_edges(&self, node: ScoringExecutionNode) -> Option<&[ScoringExecutionEdge]> {
+        let start = node.edge_start() as usize;
+        let end = start.checked_add(node.edge_count() as usize)?;
+        self.edges.get(start..end)
+    }
+
     pub fn retained_bytes(&self) -> usize {
         usize::try_from(self.checked_nested_retained_bytes().unwrap_or(u128::MAX))
             .unwrap_or(usize::MAX)
