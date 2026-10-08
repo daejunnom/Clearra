@@ -41,6 +41,12 @@ impl SpinCoverageExecutionGraph {
         self.candidate_id
     }
 
+    /// Assigns the producer's canonical family index without rebuilding or
+    /// copying its lock graph. The full candidate key remains the authority.
+    pub fn set_candidate_id(&mut self, candidate_id: u64) {
+        self.candidate_id = candidate_id;
+    }
+
     pub fn candidate_key(&self) -> &str {
         &self.candidate_key
     }

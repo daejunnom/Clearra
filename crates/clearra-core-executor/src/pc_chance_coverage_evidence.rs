@@ -589,6 +589,12 @@ impl PcChanceProblemEvidence {
 }
 
 impl PcScoreProblemEvidence {
+    pub(crate) fn checked_creation_future_bytes(problem: &SearchProblem) -> Option<u128> {
+        // Same snapshot owner inventory as PC coverage; zero coverage rows.
+        // Keep a conservative additional credit for this closed score wrapper.
+        PcChanceCoverageEvidence::checked_pc_family_creation_future_bytes(problem, 0)?
+            .checked_add(core::mem::size_of::<Self>() as u128)
+    }
     pub(crate) fn from_executed_problem(
         problem: &SearchProblem,
     ) -> Result<Self, PcChanceProblemEvidenceError> {
@@ -1190,9 +1196,12 @@ impl PcChanceCoverageEvidence {
         problem: &SearchProblem,
         row_count: usize,
     ) -> Option<u128> {
-        let nested = problem
-            .checked_pc_family_pointee_retained_bytes()?
-            .checked_sub(core::mem::size_of::<SearchProblem>() as u128)?;
+        let pointee = if problem.objective().score().requested() {
+            problem.checked_pc_score_pointee_retained_bytes()?
+        } else {
+            problem.checked_pc_family_pointee_retained_bytes()?
+        };
+        let nested = pointee.checked_sub(core::mem::size_of::<SearchProblem>() as u128)?;
         let piece_slots = problem
             .piece_set()
             .pieces()
@@ -1285,7 +1294,10 @@ impl PcChanceCoverageEvidence {
         mut self,
         keys: &[String],
     ) -> Result<Self, PcChanceCoverageEvidenceError> {
-        if self.problem.pc_chance_evidence_policy != PcChanceEvidencePolicy::PcMinimumCoverV2
+        if !(self.problem.pc_chance_evidence_policy == PcChanceEvidencePolicy::PcMinimumCoverV2
+            || (self.problem.pc_chance_evidence_policy
+                == PcChanceEvidencePolicy::PcScorePortfolioV2
+                && self.problem.objective.score().requested()))
             || self.problem.objective.kind() != ObjectiveKind::MinimumCover
             || !(7..=24).contains(&self.problem.board.visible_height())
             || keys.len() != self.rows.len()

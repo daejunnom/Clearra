@@ -149,6 +149,203 @@ fn full_height_cooperative_and_direct_pc_families_match() {
 }
 
 #[test]
+fn full_height_score_source_retains_actual_lock_graphs_and_distinct_problem_authority() {
+    for rule in [srs(), srs_plus(), srs_x(), jstris_180(), no_kick()] {
+        for height in [7, 8, 12, 24] {
+            let (query, initial, _) = forced_query(height, rule);
+            let query = query.with_objective(ObjectivePolicy::all().with_score_summary());
+            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            let result =
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .unwrap();
+            let evidence = result
+                .pc_score_problem_evidence()
+                .expect("executed score problem");
+            assert!(evidence.matches_search_problem(&problem));
+            assert!(!evidence
+                .matches_search_problem(&problem.clone().with_pc_score_portfolio_v2_evidence(),));
+            let batch = result
+                .full_height_scoring_execution_batch()
+                .expect("all physical graphs, not only representative path");
+            assert_eq!(batch.height(), height);
+            assert_eq!(batch.initial(), initial);
+            assert!(batch.execution().complete());
+            assert!(!batch.execution().graphs().is_empty());
+            for graph in batch.execution().graphs() {
+                assert_eq!(graph.candidate_id(), 1);
+                assert_eq!(graph.candidate_key(), result.normalized_solution_keys()[0]);
+            }
+            assert!(result.exact_scoring_execution_batches().is_empty());
+            assert!(result.spin_coverage_execution_batches().is_empty());
+            assert_eq!(result.bool_field("objective_complete"), Some(false));
+            assert!(
+                result.checked_resource_retained_bytes().unwrap()
+                    >= batch.checked_nested_retained_bytes().unwrap()
+            );
+            let policy = problem.objective().score();
+            let materialized = clearra_postprocess::score_batch::FullHeightScoreCellMaterializer::materialize_with_memory_limit(
+                batch, policy, &ExecutionControl::default(),
+                result.checked_resource_retained_bytes().unwrap(), 32 * 1024 * 1024,
+            ).unwrap();
+            assert!(materialized.complete());
+            assert_eq!(materialized.cells().len(), 1);
+            let cell = &materialized.cells()[0];
+            assert_eq!(cell.candidate_id(), 1);
+            assert_eq!(cell.pattern_id(), 0);
+            // Independently evaluate this forced all-I path. Default T-only
+            // spin scoring cannot award any spin to these I pieces.
+            let (profile, _) =
+                clearra_postprocess::score_profile_with_memory_guard(policy, 0, 1024 * 1024)
+                    .unwrap();
+            let mut expected = clearra_scoring::model::ScoreModelEvaluator::initial_state(
+                clearra_scoring::model::ScoreEvaluationPolicy::tetrio_pc(policy.initial_b2b()),
+            );
+            for (index, step) in result.path_steps().iter().enumerate() {
+                expected = clearra_scoring::model::ScoreModelEvaluator::evaluate_classified_lock(
+                    &profile,
+                    expected,
+                    index,
+                    step.cleared_lines(),
+                    index + 1 == result.path_steps().len(),
+                    None,
+                );
+            }
+            assert_eq!(
+                (cell.score(), cell.attack()),
+                (expected.score(), expected.attack())
+            );
+            let matrix = clearra_postprocess::ScoreMatrix::from_materialized_cells(
+                materialized.into_cells(),
+                &profile,
+                batch.execution().patterns().len(),
+                true,
+            );
+            assert!(
+                matrix.complete(),
+                "the common reducer consumes actual full-height cells"
+            );
+            let public = result.without_pc_score_transient_evidence();
+            assert!(public.full_height_scoring_execution_batch().is_none());
+            assert!(public.pc_score_problem_evidence().is_none());
+        }
+    }
+}
+
+#[test]
+fn full_height_score_portfolio_retains_both_execution_and_complete_coverage_without_score_only_alias(
+) {
+    let (query, _, _) = forced_query(24, srs_plus());
+    let problem = ProblemCompiler::compile_scenario_pc(
+        &query.with_objective(ObjectivePolicy::minimum_cover().with_score_summary()),
+    )
+    .unwrap()
+    .with_pc_score_portfolio_v2_evidence();
+    let result =
+        WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default()).unwrap();
+    assert!(result
+        .pc_score_problem_evidence()
+        .unwrap()
+        .matches_search_problem(&problem));
+    let coverage = result.pc_chance_coverage_evidence().unwrap();
+    assert!(coverage.complete());
+    assert!(coverage.matches_extended_minimum_source_keys(result.normalized_solution_keys()));
+    assert!(result
+        .full_height_scoring_execution_batch()
+        .unwrap()
+        .execution()
+        .complete());
+    assert_eq!(result.bool_field("minimum_cover_complete"), Some(false));
+    assert_eq!(result.bool_field("score_summary_complete"), Some(false));
+}
+
+#[test]
+fn full_height_parent_authorized_score_session_retains_its_terminal_memory_lease() {
+    use clearra_core_executor::WasmCpuTerminalResourceAuthority;
+    let (query, _, _) = forced_query(24, srs_plus());
+    let problem = Arc::new(
+        ProblemCompiler::compile_scenario_pc(
+            &query.with_objective(ObjectivePolicy::all().with_score_summary()),
+        )
+        .unwrap(),
+    );
+    let authority = WasmCpuTerminalResourceAuthority::try_acquire_full_capacity().unwrap();
+    let mut session = WasmCpuSearchSession::new_shared_under_authority(
+        Arc::clone(&problem),
+        1024 * 1024,
+        &authority,
+    )
+    .unwrap();
+    let control = ExecutionControl::default();
+    let result = loop {
+        match session.advance(64, &control).unwrap() {
+            WasmCpuSearchAdvance::Pending => {}
+            WasmCpuSearchAdvance::Completed(result) => break result,
+            WasmCpuSearchAdvance::Cancelled => panic!("not cancelled"),
+        }
+    };
+    session
+        .validate_public_result_memory_with_future(&result, 4096)
+        .unwrap();
+    assert!(session
+        .validate_public_result_memory_with_future(&result, u128::MAX)
+        .is_err());
+    assert!(result.full_height_scoring_execution_batch().is_some());
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_parallel_score_source_and_common_materializer_keep_the_same_cells() {
+    let hardware = std::thread::available_parallelism().map_or(1, usize::from);
+    if hardware < 2 {
+        return;
+    }
+    for height in [8, 24] {
+        let base = branching_query(height, srs_plus())
+            .with_count_policy(PcCountPolicy::CountAll)
+            .with_objective(ObjectivePolicy::all().with_score_summary());
+        let mut baseline = None;
+        for workers in [1, 2] {
+            let query = base.clone().with_execution_policy(
+                base.execution_policy()
+                    .clone()
+                    .with_workers(workers)
+                    .with_use_all_logical_processors(hardware == 2),
+            );
+            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            let control = ExecutionControl::default();
+            let result = WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap();
+            assert_eq!(result.usize_field("workers_used"), Some(workers));
+            let batch = result.full_height_scoring_execution_batch().unwrap();
+            let cells = clearra_postprocess::score_batch::FullHeightScoreCellMaterializer::materialize_with_memory_limit(
+                batch, problem.objective().score(), &control,
+                result.checked_resource_retained_bytes().unwrap(), 32 * 1024 * 1024,
+            ).unwrap();
+            assert!(cells.complete());
+            assert_eq!(cells.cells().len(), result.normalized_solution_keys().len());
+            let signature = cells
+                .cells()
+                .iter()
+                .map(|cell| {
+                    (
+                        cell.candidate_id(),
+                        cell.pattern_id(),
+                        cell.trace_identity().to_owned(),
+                        cell.score(),
+                        cell.attack(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let observed = (result.normalized_solution_keys().to_vec(), signature);
+            if let Some(expected) = baseline.as_ref() {
+                assert_eq!(&observed, expected);
+            } else {
+                baseline = Some(observed);
+            }
+        }
+    }
+}
+
+#[test]
 fn full_height_pc_never_silently_lowers_the_worker_request_or_invents_product_authority() {
     let (query, _, _) = forced_query(24, srs_plus());
     #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]

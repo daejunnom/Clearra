@@ -9,6 +9,7 @@ on:
       - "crates/clearra-problem/**"
       - "crates/clearra-core-executor/**"
       - "crates/clearra-replay/**"
+      - "crates/clearra-postprocess/**"
       - "crates/clearra-app/**"
       - "crates/clearra-validation/**"
       - "crates/clearra-wasm-abi/**"
@@ -88,10 +89,14 @@ jobs:
       - name: Verify the bounded non-publishing feedback contract
         run: node --test scripts/ci/pc24-source-boundary.test.mjs
       - name: Check target-frame and compiler source format
-        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-core-executor -p clearra-replay -p clearra-output -p clearra-fumen -p clearra-host-contract -p clearra-cli -p clearra-cli-command -p clearra-app -p clearra-validation -p clearra-wasm-abi --check
+        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-core-executor -p clearra-replay -p clearra-postprocess -p clearra-output -p clearra-fumen -p clearra-host-contract -p clearra-cli -p clearra-cli-command -p clearra-app -p clearra-validation -p clearra-wasm-abi --check
       - name: Test four-word physical replay without changing compact trk1 identities
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-replay --lib -- --test-threads=1
+      - name: Test common exact score traversal and full-height score cells without claiming surface authority
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p clearra-postprocess --no-default-features --lib score_batch:: -- --test-threads=1
       - name: Test allocation-free CTK2 identities and unchanged compact identities
         if: ${{ !cancelled() }}
         run: |
@@ -174,11 +179,13 @@ jobs:
           cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_geometry::parallel::tests -- --test-threads=1
           cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- --test-threads=1
           cargo test --locked -p clearra-app --no-default-features --features parallel --test extended_pc_tiling -- --test-threads=1
-          cargo clippy --locked -p clearra-replay -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings
-          cargo clippy --locked -p clearra-replay --all-targets -- -D warnings
+          cargo clippy --locked -p clearra-replay -p clearra-postprocess -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings
+          cargo clippy --locked -p clearra-replay -p clearra-postprocess --all-targets -- -D warnings
       - name: Verify complete PC evidence memory is admitted before row and snapshot construction
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib pc_family_evidence_admits_snapshot_row_slots_and_owned_bitsets_before_construction -- --test-threads=1
+        run: |
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib pc_family_evidence_admits_snapshot_row_slots_and_owned_bitsets_before_construction -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib build_pc_resource_projection_field_inventory_is_exhaustive -- --test-threads=1
       - name: Verify immutable compact and extended page owners and bounded catalog admission
         if: ${{ !cancelled() }}
         run: |

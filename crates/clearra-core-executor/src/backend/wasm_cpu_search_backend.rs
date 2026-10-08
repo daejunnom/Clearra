@@ -237,6 +237,18 @@ impl WasmCpuSearchSession {
                     && problem.visible_height() > 6
                     && problem.output_policy() == SearchOutputPolicy::TilingOnly));
         validate_shared_terminal_problem(problem.as_ref(), true, allow_native_parallel)?;
+        if problem.visible_height() > 6 && problem.objective().score().requested() {
+            return Ok(Self {
+                inner: WasmSearchSessionInner::ExtendedPc(
+                    ExtendedPcSearchSession::new_under_authority(
+                        &problem,
+                        checked_external_retained_upper_bound_bytes,
+                        authority,
+                    )
+                    .map_err(map_error)?,
+                ),
+            });
+        }
         if problem.visible_height() > 6 && problem.output_policy() == SearchOutputPolicy::TilingOnly
         {
             if !allow_native_parallel

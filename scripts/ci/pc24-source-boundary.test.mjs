@@ -212,8 +212,8 @@ test('Opening inputs retain the whole target rather than a six-line or twenty-li
   ]) assert.ok(read(path).includes('SearchProblemPreset::ScenarioPc | SearchProblemPreset::OpeningPc'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-validation --lib validators::pc_query_validator::tests'));
   assert.ok(workflow.includes('--lib ordinary_pc_family_memory_projection_counts_opening_and_scenario_owners'));
-  assert.ok(read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_search.rs')
-    .includes('.checked_pc_family_pointee_retained_bytes()?'));
+  const session = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_search.rs');
+  assert.match(session, /if problem\.objective\(\)\.score\(\)\.requested\(\)[\s\S]*problem\.checked_pc_score_pointee_retained_bytes\(\)\?[\s\S]*problem\.checked_pc_family_pointee_retained_bytes\(\)\?/u);
   assert.match(read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs'),
     /checked_pc_family_problem_nested_retained_bytes\(\s*&self\.problem/u);
 });
@@ -365,4 +365,38 @@ test('full-height physical execution does not truncate masks or acquire replay-f
   const tests = read('crates/clearra-replay/src/full_height_replay_tests.rs');
   assert.ok(tests.includes('full_height_projector_is_differentially_equal_to_unchanged_compact_transition'));
   assert.ok(tests.includes('full_height_batch_moves_existing_graph_storage_and_binds_all_four_initial_words'));
+});
+
+test('full-height score source preserves actual physical graphs and uses the common exact score reducer', () => {
+  const session = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_search.rs');
+  const engine = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
+  const parallel = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_family_parallel.rs');
+  const result = read('crates/clearra-core-executor/src/core_execution_result.rs');
+  const traversal = read('crates/clearra-postprocess/src/score_batch/score_cell_traversal.rs');
+  const compact = read('crates/clearra-postprocess/src/score_batch/exact_scoring_execution_materializer.rs');
+  const extended = read('crates/clearra-postprocess/src/score_batch/full_height_score_cell_materializer.rs');
+  const tests = read('crates/clearra-core-executor/tests/extended_pc_family.rs');
+  assert.ok(workflow.includes('"crates/clearra-postprocess/**"'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-postprocess --no-default-features --lib score_batch:: -- --test-threads=1'));
+  assert.ok(session.includes('admit_budget_bound_search_execution_under_terminal_authority('));
+  assert.ok(session.includes('extended_pc_family_parent_authority_not_supplied'));
+  assert.ok(engine.includes('PcScoreProblemEvidence::from_executed_score_portfolio_problem('));
+  assert.ok(engine.includes('graph.set_candidate_id(id)'));
+  assert.ok(engine.includes('extended_pc_score_graph_family_incomplete'));
+  assert.ok(engine.includes('core::mem::take(&mut self.spin_execution_graphs)'));
+  assert.match(parallel, /self\.spin_execution_graphs\s*\.append\(&mut worker\.spin_execution_graphs\)/u);
+  assert.ok(result.includes('pub fn full_height_scoring_execution_batch('));
+  assert.ok(result.includes('self.full_height_scoring_execution_batch = None'));
+  assert.ok(traversal.includes('for_each_supply_successor('));
+  assert.ok(traversal.includes('ScoreModelEvaluator::evaluate_classified_lock('));
+  assert.ok(traversal.includes('CompactScoreCellProjection'));
+  assert.ok(compact.includes('visit_score_cell_paths('));
+  assert.ok(extended.includes('visit_score_cell_paths('));
+  assert.ok(extended.includes('FullHeightReplayProjector::project_scoring_step('));
+  assert.ok(extended.includes('state.operations != self.required_operations'));
+  assert.ok(extended.includes('candidate.canonical_trace < current.canonical_trace'));
+  assert.ok(!extended.includes('candidate.attack >'));
+  assert.ok(!extended.includes('Board64Layout'));
+  assert.ok(tests.includes('full_height_score_source_retains_actual_lock_graphs_and_distinct_problem_authority'));
+  assert.ok(tests.includes('full_height_parallel_score_source_and_common_materializer_keep_the_same_cells'));
 });

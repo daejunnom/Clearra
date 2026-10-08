@@ -5,7 +5,8 @@ use clearra_core_domain::solution::normalized_tiling_solution::{
     NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
 };
 use clearra_replay::{
-    ExactScoringExecutionBatch, ReplayTrace as PostProcessReplayTrace, SpinCoverageExecutionBatch,
+    ExactScoringExecutionBatch, FullHeightExecutionBatch, ReplayTrace as PostProcessReplayTrace,
+    SpinCoverageExecutionBatch,
 };
 use std::sync::Arc;
 
@@ -147,6 +148,7 @@ pub struct CoreExecutionResult {
     solution_average_scores: Vec<SolutionAverageScoreReport>,
     exact_scoring_execution_batches: Vec<ExactScoringExecutionBatch>,
     spin_coverage_execution_batches: Vec<SpinCoverageExecutionBatch>,
+    full_height_scoring_execution_batch: Option<FullHeightExecutionBatch>,
     postprocess_score_cells: Vec<CorePostProcessScoreCell>,
     postprocess_score_cells_complete: bool,
     postprocess_score_profile_id: Option<String>,
@@ -242,6 +244,7 @@ impl CoreExecutionResult {
             solution_average_scores: Vec::new(),
             exact_scoring_execution_batches: Vec::new(),
             spin_coverage_execution_batches: Vec::new(),
+            full_height_scoring_execution_batch: None,
             postprocess_score_cells: Vec::new(),
             postprocess_score_cells_complete: false,
             postprocess_score_profile_id: None,
@@ -425,6 +428,16 @@ impl CoreExecutionResult {
         batch: Option<ExactScoringExecutionBatch>,
     ) -> Self {
         self.exact_scoring_execution_batches = batch.into_iter().collect();
+        self
+    }
+
+    /// Only an executed Core PC producer can retain this physical graph.
+    /// It must also bind the independent executed-problem score evidence.
+    pub(crate) fn with_full_height_scoring_execution_batch(
+        mut self,
+        batch: FullHeightExecutionBatch,
+    ) -> Self {
+        self.full_height_scoring_execution_batch = Some(batch);
         self
     }
 
@@ -654,6 +667,7 @@ impl CoreExecutionResult {
         self.solution_average_scores = Vec::new();
         self.exact_scoring_execution_batches = Vec::new();
         self.spin_coverage_execution_batches = Vec::new();
+        self.full_height_scoring_execution_batch = None;
         self.postprocess_score_cells = Vec::new();
         self.postprocess_score_cells_complete = false;
         self.postprocess_score_profile_id = None;
@@ -874,6 +888,7 @@ impl CoreExecutionResult {
         self.postprocess_pattern_weights.clear();
         self.exact_scoring_execution_batches.clear();
         self.spin_coverage_execution_batches.clear();
+        self.full_height_scoring_execution_batch = None;
         self.postprocess_score_cells.clear();
         self.postprocess_score_cells_complete = false;
         self.postprocess_score_profile_id = None;
@@ -1309,6 +1324,9 @@ impl CoreExecutionResult {
             bytes = bytes.checked_add(batch.checked_nested_retained_bytes()?)?;
         }
         for batch in &self.spin_coverage_execution_batches {
+            bytes = bytes.checked_add(batch.checked_nested_retained_bytes()?)?;
+        }
+        if let Some(batch) = &self.full_height_scoring_execution_batch {
             bytes = bytes.checked_add(batch.checked_nested_retained_bytes()?)?;
         }
         for cell in &self.postprocess_score_cells {
@@ -1804,6 +1822,10 @@ impl CoreExecutionResult {
 
     pub fn spin_coverage_execution_batches(&self) -> &[SpinCoverageExecutionBatch] {
         &self.spin_coverage_execution_batches
+    }
+
+    pub fn full_height_scoring_execution_batch(&self) -> Option<&FullHeightExecutionBatch> {
+        self.full_height_scoring_execution_batch.as_ref()
     }
 
     pub fn postprocess_score_cells(&self) -> &[CorePostProcessScoreCell] {
@@ -2559,6 +2581,7 @@ mod tests {
             solution_average_scores,
             exact_scoring_execution_batches,
             spin_coverage_execution_batches,
+            full_height_scoring_execution_batch,
             postprocess_score_cells,
             postprocess_score_cells_complete,
             postprocess_score_profile_id,
@@ -2599,6 +2622,7 @@ mod tests {
             solution_average_scores,
             exact_scoring_execution_batches,
             spin_coverage_execution_batches,
+            full_height_scoring_execution_batch,
             postprocess_score_cells,
             postprocess_score_cells_complete,
             postprocess_score_profile_id,
@@ -2613,7 +2637,7 @@ mod tests {
             solution_set_audit_report,
         );
         assert!(inventory.0.is_empty());
-        assert!(inventory.25.is_none());
+        assert!(setup_finder_report.is_none());
     }
 
     #[test]

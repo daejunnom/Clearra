@@ -319,6 +319,12 @@ impl ExtendedBuildProbabilitySession {
                 )
             })
             .ok_or_else(projection_error)?;
+        let execution_graphs = successful
+            .iter()
+            .try_fold(0_usize, |count, worker| {
+                count.checked_add(worker.engine.spin_execution_graphs.len())
+            })
+            .ok_or_else(projection_error)?;
         // Bucket/control growth coexists with transferred private keys and
         // coverage. The conservative projection does not rely on HashMap's
         // internal load factor or ownership reference count.
@@ -328,6 +334,12 @@ impl ExtendedBuildProbabilitySession {
                 bytes.checked_add(
                     (coverage_rows as u128)
                         * (4 * (size_of::<String>() + size_of::<PatternBitSet>() + 1)) as u128,
+                )
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (execution_graphs as u128)
+                        * size_of::<super::SpinCoverageExecutionGraph>() as u128,
                 )
             })
             .ok_or_else(projection_error)?;
@@ -347,6 +359,9 @@ impl ExtendedBuildProbabilitySession {
             rows.try_reserve(coverage_rows)
                 .map_err(|_| storage_error())?;
         }
+        self.spin_execution_graphs
+            .try_reserve_exact(execution_graphs)
+            .map_err(|_| storage_error())?;
         self.parallel_minimum_worker_candidates = usize::MAX;
         while let Some(worker) = successful.pop() {
             self.merge_pc_verifier(worker.engine)?;
@@ -453,7 +468,8 @@ impl ExtendedBuildProbabilitySession {
             || !Arc::ptr_eq(&self.catalog, &worker.catalog)
             || worker.truncated_reason.is_some()
             || worker.finished
-            || !worker.spin_execution_graphs.is_empty()
+            || (!self.problem.objective().score().requested()
+                && !worker.spin_execution_graphs.is_empty())
             || !worker.finesse_languages.is_empty()
         {
             return Err(contract_error());
@@ -463,6 +479,11 @@ impl ExtendedBuildProbabilitySession {
             .map_err(|_| contract_error())?;
         self.buildable_tilings
             .extend(worker.buildable_tilings.drain());
+        // Transfer concrete lock evidence, never a compact Board64 surrogate
+        // or only the worker's representative path. Canonical IDs are rebound
+        // once after the complete source family has been merged and sorted.
+        self.spin_execution_graphs
+            .append(&mut worker.spin_execution_graphs);
         if let Some(rows) = worker.solution_coverage.take() {
             let target = self.solution_coverage.as_mut().ok_or_else(contract_error)?;
             for (key, bits) in rows {

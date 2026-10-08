@@ -3,6 +3,8 @@ pub mod candidate_execution_aggregate;
 mod exact_replay_language;
 mod exact_scoring_execution_materializer;
 mod execution_supply;
+mod full_height_score_cell_materializer;
+mod score_cell_traversal;
 pub mod score_matrix;
 mod t_spin_coverage_only_materializer;
 
@@ -20,6 +22,10 @@ pub use exact_scoring_execution_materializer::{
     ExactScoreCellMaterializationError, ExactScoreCellMemoryProjection, ExactScoreCellMemoryReport,
     ExactScoredExecution, ExactScoringExecutionCancelled, ExactScoringExecutionMaterialization,
     ExactScoringExecutionMaterializer,
+};
+pub use full_height_score_cell_materializer::{
+    FullHeightScoreCellError, FullHeightScoreCellMaterialization, FullHeightScoreCellMaterializer,
+    FullHeightScoreCellMemoryProjection,
 };
 pub use score_matrix::{
     ScoreCell, ScoreMatrix, ScoreMatrixMemoryGuardError, ScoreMatrixMemoryProjection,

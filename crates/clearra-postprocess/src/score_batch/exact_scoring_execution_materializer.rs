@@ -312,7 +312,7 @@ impl ExactScoringExecutionMaterialization {
     }
 }
 
-const COMPACT_SCORE_CELL_TRACE_ID_BYTES: usize = 63;
+pub(super) const COMPACT_SCORE_CELL_TRACE_ID_BYTES: usize = 63;
 
 /// Checked peak projection for the typed score-cell-only path.
 ///
@@ -1696,7 +1696,7 @@ fn checked_score_cell_memory_projection_for_shape(
     })
 }
 
-fn compact_score_cell_trace_identity(
+pub(super) fn compact_score_cell_trace_identity(
     candidate_id: u64,
     pattern_id: usize,
 ) -> Result<String, ExactScoreCellMaterializationError> {
@@ -1728,143 +1728,41 @@ fn visit_score_cell_paths(
     best: &mut Option<ScoreCellBestExecution>,
     control: &ExecutionControl,
 ) -> Result<bool, ExactScoreCellMaterializationError> {
-    if control.is_cancelled() {
-        return Err(ExactScoreCellMaterializationError::Cancelled);
-    }
-    let Some(node) = graph.node(state.node) else {
-        return Ok(false);
-    };
-    if node.accepting() {
-        if terminal_supply_state_is_accepted(batch, sequence, state) {
+    use super::score_cell_traversal::{CompactScoreCellProjection, ScoreCellTraversalError};
+    super::score_cell_traversal::visit_score_cell_paths(
+        batch,
+        graph,
+        sequence,
+        state,
+        (),
+        &CompactScoreCellProjection,
+        path,
+        holds,
+        max_path_len,
+        profile,
+        score_state,
+        &mut |_, _, score_state| {
             let candidate = ScoreCellBestExecution {
                 score: score_state.score(),
                 attack: score_state.attack(),
             };
-            // Attack is informational. This compact path deliberately keeps
-            // the first deterministic traversal representative of an exact
-            // score tie instead of using attack as a hidden tiebreaker.
+            // Preserve compact score-only tie behavior. Never rank by attack.
             if best
                 .as_ref()
                 .is_none_or(|current| candidate.score > current.score)
             {
                 *best = Some(candidate);
             }
+            Ok(())
+        },
+        control,
+    )
+    .map_err(|error| match error {
+        ScoreCellTraversalError::Cancelled => ExactScoreCellMaterializationError::Cancelled,
+        ScoreCellTraversalError::InvalidEvidence | ScoreCellTraversalError::ScratchCapacity => {
+            ExactScoreCellMaterializationError::ProjectionOverflow
         }
-        return Ok(true);
-    }
-
-    let mut complete = true;
-    for &edge in graph.edges(node) {
-        let next_score_state = ScoreModelEvaluator::evaluate_classified_lock(
-            profile,
-            score_state,
-            path.len(),
-            edge.cleared_lines(),
-            edge.perfect_clear(),
-            SpinDetector::detect_scoring_edge_with_profile(edge, profile.spin_profile()),
-        );
-        if batch.projects_unplaced_lookahead()
-            && batch.hold_enabled()
-            && state.cursor as usize == sequence.len()
-            && state.hold == Some(edge.piece())
-            && graph.node(edge.to()).is_some_and(|child| child.accepting())
-            && (!batch.projects_standard_bag_lookahead()
-                || first_standard_bag_lookahead(sequence).is_none())
-        {
-            push_score_cell_scratch(
-                path,
-                holds,
-                edge,
-                HoldDecision::ReleaseHeldAtTerminal {
-                    held_piece: edge.piece(),
-                },
-                max_path_len,
-            )?;
-            let result = visit_score_cell_paths(
-                batch,
-                graph,
-                sequence,
-                SupplyState {
-                    node: edge.to(),
-                    cursor: state.cursor.saturating_add(1),
-                    hold: state.hold,
-                },
-                path,
-                holds,
-                max_path_len,
-                profile,
-                next_score_state,
-                best,
-                control,
-            );
-            holds.pop();
-            path.pop();
-            complete &= result?;
-        }
-
-        let mut branch_error = None;
-        let supply_result =
-            for_each_supply_successor(batch, sequence, state, edge.piece(), |decision, next| {
-                if let Err(error) =
-                    push_score_cell_scratch(path, holds, edge, decision, max_path_len)
-                {
-                    branch_error = Some(error);
-                    return Err(ExactScoringExecutionCancelled);
-                }
-                let result = visit_score_cell_paths(
-                    batch,
-                    graph,
-                    sequence,
-                    SupplyState {
-                        node: edge.to(),
-                        ..next
-                    },
-                    path,
-                    holds,
-                    max_path_len,
-                    profile,
-                    next_score_state,
-                    best,
-                    control,
-                );
-                holds.pop();
-                path.pop();
-                match result {
-                    Ok(path_complete) => complete &= path_complete,
-                    Err(error) => {
-                        branch_error = Some(error);
-                        return Err(ExactScoringExecutionCancelled);
-                    }
-                }
-                Ok(())
-            });
-        if let Some(error) = branch_error {
-            return Err(error);
-        }
-        if supply_result.is_err() {
-            return Err(ExactScoreCellMaterializationError::Cancelled);
-        }
-    }
-    Ok(complete)
-}
-
-fn push_score_cell_scratch(
-    path: &mut Vec<ScoringExecutionEdge>,
-    holds: &mut Vec<HoldDecision>,
-    edge: ScoringExecutionEdge,
-    hold: HoldDecision,
-    max_path_len: usize,
-) -> Result<(), ExactScoreCellMaterializationError> {
-    if path.len() >= max_path_len
-        || holds.len() >= max_path_len
-        || path.len() == path.capacity()
-        || holds.len() == holds.capacity()
-    {
-        return Err(ExactScoreCellMaterializationError::ProjectionOverflow);
-    }
-    path.push(edge);
-    holds.push(hold);
-    Ok(())
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

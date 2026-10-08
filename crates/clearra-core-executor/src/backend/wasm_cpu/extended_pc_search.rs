@@ -17,19 +17,25 @@ use super::{
     WasmExactSearchError,
 };
 use crate::{
-    resource::{admit_budget_bound_search_execution, ExecutionAdmission},
+    resource::{
+        admit_budget_bound_search_execution,
+        admit_budget_bound_search_execution_under_terminal_authority, ExecutionAdmission,
+        WasmCpuTerminalResourceAuthority,
+    },
     CoreExecutionResult,
 };
 
 pub(crate) struct ExtendedPcSearchSession {
     engine: ExtendedBuildProbabilitySession,
     _admission: ExecutionAdmission,
+    terminal_authority_supplied: bool,
 }
 
 pub(super) fn validate_pc_family_problem(
     problem: &SearchProblem,
 ) -> Result<(), WasmExactSearchError> {
     let ordinary_source = problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::Disabled
+        && !problem.objective().score().requested()
         && matches!(
             problem.objective().kind(),
             ObjectiveKind::All | ObjectiveKind::Unique
@@ -62,6 +68,16 @@ pub(super) fn validate_pc_family_problem(
         )
         && problem.output_policy() == SearchOutputPolicy::CoverageSummary
         && !problem.solution_probability_policy().requested();
+    let score_source = problem.objective().score().requested()
+        && problem.count_policy() == PcCountPolicy::CountAll
+        && problem.output_policy() == SearchOutputPolicy::Trace
+        && match problem.pc_chance_evidence_policy() {
+            PcChanceEvidencePolicy::Disabled => problem.objective().kind() == ObjectiveKind::All,
+            PcChanceEvidencePolicy::PcScorePortfolioV2 => {
+                problem.objective().kind() == ObjectiveKind::MinimumCover
+            }
+            _ => false,
+        };
     if !matches!(
         problem.preset(),
         SearchProblemPreset::ScenarioPc | SearchProblemPreset::OpeningPc
@@ -70,7 +86,7 @@ pub(super) fn validate_pc_family_problem(
         || problem.goal().as_str() != "clear-to-empty"
         || problem.initial_board().width() != 10
         || !(7..=24).contains(&problem.visible_height())
-        || !(ordinary_source || minimum_source || chance_source || failed_source)
+        || !(ordinary_source || minimum_source || chance_source || failed_source || score_source)
         || !matches!(
             problem.count_policy(),
             PcCountPolicy::CountAll | PcCountPolicy::CountUnique
@@ -80,7 +96,7 @@ pub(super) fn validate_pc_family_problem(
             SearchOutputPolicy::Summary | SearchOutputPolicy::Trace
         ) || chance_source
             || failed_source)
-        || problem.objective().score().requested()
+        || (problem.objective().score().requested() && !score_source)
         || problem.objective().execution_constraints().requested()
         || problem.allowed_colored_solution_identities().is_some()
         || problem
@@ -101,9 +117,12 @@ pub(super) fn checked_pc_family_problem_nested_retained_bytes(
 ) -> Option<u128> {
     // Constructor validation owns execution compatibility. This projection
     // only counts owners and does not revalidate kicks in the solver loop.
-    problem
-        .checked_pc_family_pointee_retained_bytes()?
-        .checked_sub(core::mem::size_of::<SearchProblem>() as u128)
+    let pointee = if problem.objective().score().requested() {
+        problem.checked_pc_score_pointee_retained_bytes()?
+    } else {
+        problem.checked_pc_family_pointee_retained_bytes()?
+    };
+    pointee.checked_sub(core::mem::size_of::<SearchProblem>() as u128)
 }
 
 impl ExtendedPcSearchSession {
@@ -122,6 +141,27 @@ impl ExtendedPcSearchSession {
     pub(super) fn new_with_coexisting_retained_bytes(
         problem: &SearchProblem,
         additional_coexisting_retained_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_admission(problem, additional_coexisting_retained_bytes, None)
+    }
+
+    pub(crate) fn new_under_authority(
+        problem: &SearchProblem,
+        external_retained_bytes: u128,
+        authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, WasmExactSearchError> {
+        if !problem.objective().score().requested() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_terminal_authority_requires_score",
+            ));
+        }
+        Self::new_with_admission(problem, external_retained_bytes, Some(authority))
+    }
+
+    fn new_with_admission(
+        problem: &SearchProblem,
+        additional_coexisting_retained_bytes: u128,
+        authority: Option<&WasmCpuTerminalResourceAuthority>,
     ) -> Result<Self, WasmExactSearchError> {
         validate_pc_family_problem(problem)?;
         // Do not silently turn a multiworker product into a serial search.
@@ -159,9 +199,17 @@ impl ExtendedPcSearchSession {
             required.words(),
         )
         .map_err(|_| WasmExactSearchError::InvalidProblem("extended_pc_field_invalid"))?;
-        let admission =
+        let admission = if let Some(authority) = authority {
+            admit_budget_bound_search_execution_under_terminal_authority(
+                problem,
+                additional_coexisting_retained_bytes,
+                authority,
+                problem.backend_policy().workers(),
+            )
+        } else {
             admit_budget_bound_search_execution(problem, problem.backend_policy().workers())
-                .map_err(WasmExactSearchError::resource_admission)?;
+        }
+        .map_err(WasmExactSearchError::resource_admission)?;
         // The legacy ordinary execution API borrows a caller-owned problem;
         // both that input and the engine's owned snapshot coexist.
         let external = checked_pc_family_problem_nested_retained_bytes(problem)
@@ -184,6 +232,7 @@ impl ExtendedPcSearchSession {
         Ok(Self {
             engine,
             _admission: admission,
+            terminal_authority_supplied: authority.is_some(),
         })
     }
 
@@ -228,13 +277,25 @@ impl ExtendedPcSearchSession {
 
     pub fn validate_public_result_memory_with_future(
         &self,
-        _result: &CoreExecutionResult,
-        _future: u128,
+        result: &CoreExecutionResult,
+        future: u128,
     ) -> Result<(), WasmExactSearchError> {
         // This ordinary borrowed-input path never manufactures the parent
         // authority required by typed score/Tiling terminal callbacks.
-        Err(WasmExactSearchError::InvalidProblem(
-            "extended_pc_family_parent_authority_not_supplied",
-        ))
+        if !self.terminal_authority_supplied {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_family_parent_authority_not_supplied",
+            ));
+        }
+        let retained = self
+            .engine
+            .checked_retained_bytes_with_coexisting_owners()
+            .and_then(|bytes| bytes.checked_add(result.checked_resource_retained_bytes()?))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_memory_projection_unavailable",
+            ))?;
+        self._admission
+            .ensure_memory_bound(retained, future)
+            .map_err(WasmExactSearchError::resource_admission)
     }
 }

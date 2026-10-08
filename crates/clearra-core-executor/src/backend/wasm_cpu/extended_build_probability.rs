@@ -25,7 +25,8 @@ use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, PcChanceEvidencePolicy, SearchProblem,
 };
 use clearra_replay::{
-    FullHeightReplayProjector, SpinCoverageExecutionBatch, SpinCoverageExecutionGraph,
+    FullHeightExecutionBatch, FullHeightReplayProjector, SpinCoverageExecutionBatch,
+    SpinCoverageExecutionGraph,
 };
 use clearra_supply::pattern_universe::{
     PackingMultisetFamily, PackingPatternMembershipKind, PieceMultisetKey,
@@ -33,7 +34,7 @@ use clearra_supply::pattern_universe::{
 
 use crate::{
     resource::ExecutionMemoryBound, CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage,
-    PcChanceCoverageEvidence,
+    PcChanceCoverageEvidence, PcScoreProblemEvidence,
 };
 
 use super::{
@@ -365,6 +366,7 @@ impl ExtendedBuildProbabilitySession {
             covered_patterns,
             buildable_tilings: HashSet::new(),
             solution_coverage: (problem.solution_probability_policy().requested()
+                || problem.objective().score().requested()
                 || problem.objective().execution_constraints().requested()
                 || matches!(
                     problem.pc_chance_evidence_policy(),
@@ -559,6 +561,7 @@ impl ExtendedBuildProbabilitySession {
             self.buildable_tilings.insert(tiling.clone());
         }
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
+            || self.problem.objective().score().requested()
             || self.problem.objective().execution_constraints().requested();
         let candidate_key = (execution_evidence_requested
             || self.finesse_requested
@@ -769,6 +772,20 @@ impl ExtendedBuildProbabilitySession {
                 }
                 self.retain_buildable_tiling(tiling)?;
                 if let Some(spin_graph) = spin_graph {
+                    // The returned graph and source scratch coexist until
+                    // transfer. Charge both before growing its retained owner.
+                    self.ensure_memory_bound(
+                        (spin_graph.retained_bytes() as u128)
+                            .checked_add(
+                                ((self.spin_execution_graphs.len() + 1)
+                                    .saturating_mul(2)
+                                    .max(4) as u128)
+                                    * core::mem::size_of::<SpinCoverageExecutionGraph>() as u128,
+                            )
+                            .ok_or(WasmExactSearchError::InvalidProblem(
+                                "extended_pc_score_graph_projection_overflow",
+                            ))?,
+                    )?;
                     self.spin_execution_graphs.try_reserve(1).map_err(|_| {
                         WasmExactSearchError::InvalidProblem(
                             "wasm_extended_spin_graph_storage_unavailable",
@@ -2312,10 +2329,13 @@ impl ExtendedBuildProbabilitySession {
         Ok(())
     }
 
-    fn build_pc_family_result(&self) -> Result<CoreExecutionResult, WasmExactSearchError> {
+    fn build_pc_family_result(&mut self) -> Result<CoreExecutionResult, WasmExactSearchError> {
         self.validate_pc_representative_physical_chain()?;
-        let minimum_source =
-            self.problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::PcMinimumCoverV2;
+        let minimum_source = self
+            .problem
+            .pc_chance_evidence_policy()
+            .retains_pc_minimum_cover_v2_evidence();
+        let score_source = self.problem.objective().score().requested();
         let failed_source = self
             .problem
             .pc_chance_evidence_policy()
@@ -2464,7 +2484,7 @@ impl ExtendedBuildProbabilitySession {
             field("renormalized", false),
             field(
                 "objective_complete",
-                !minimum_source && count_complete && probability_complete,
+                !minimum_source && !score_source && count_complete && probability_complete,
             ),
             field("build_variant_count", self.pc_build_variant_count),
             field(
@@ -2616,6 +2636,100 @@ impl ExtendedBuildProbabilitySession {
                 field("truncated", self.truncated_reason.is_some()),
             ]);
         }
+        let score_evidence = if score_source {
+            Some(
+                if self
+                    .problem
+                    .pc_chance_evidence_policy()
+                    .retains_pc_score_portfolio_v2_evidence()
+                {
+                    PcScoreProblemEvidence::from_executed_score_portfolio_problem(&self.problem)
+                } else {
+                    PcScoreProblemEvidence::from_executed_problem(&self.problem)
+                }
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "extended_pc_score_problem_evidence_mismatch",
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+        let score_batch = if score_source {
+            // A digest is not a canonical candidate index. Rebind every actual
+            // physical graph to the sorted complete family; multiple physical
+            // realizations of one colored tiling deliberately share its index.
+            self.spin_execution_graphs
+                .sort_unstable_by(|left, right| left.candidate_key().cmp(right.candidate_key()));
+            let mut covered_key_count = 0_usize;
+            let mut previous_key_index = None;
+            for graph in &mut self.spin_execution_graphs {
+                let index = keys
+                    .binary_search_by(|key| key.as_str().cmp(graph.candidate_key()))
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "extended_pc_score_graph_family_mismatch",
+                        )
+                    })?;
+                if previous_key_index != Some(index) {
+                    covered_key_count += 1;
+                    previous_key_index = Some(index);
+                }
+                let id = u64::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_pc_score_candidate_index_overflow",
+                    ))?;
+                graph.set_candidate_id(id);
+            }
+            if covered_key_count != keys.len() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "extended_pc_score_graph_family_incomplete",
+                ));
+            }
+            let patterns = (0..universe.pattern_count())
+                .map(|index| universe.sequence_at(index).into_owned())
+                .collect();
+            let (kick_table_id, rule_profile_id) = replay_profile_ids(&self.problem);
+            let batch = SpinCoverageExecutionBatch::new(
+                patterns,
+                self.problem.initial_hold().cursor(),
+                self.problem.initial_hold().hold_piece(),
+                self.problem.supply().hold_enabled(),
+                self.problem.supply().projects_unplaced_lookahead(),
+                self.problem.supply().projects_standard_bag_lookahead(),
+                kick_table_id,
+                rule_profile_id,
+                core::mem::take(&mut self.spin_execution_graphs),
+                count_complete && probability_complete,
+            );
+            fields.extend([
+                field("score_summary_requested", true),
+                field("score_summary_complete", false),
+                field("score_summary_incomplete_reason", "deferred-to-coordinator"),
+                field("objective_incomplete_reason", "deferred-to-coordinator"),
+                field(
+                    "full_height_score_execution_graph_count",
+                    batch.graphs().len(),
+                ),
+            ]);
+            Some(
+                FullHeightExecutionBatch::from_spin_coverage(
+                    self.field.height(),
+                    clearra_core_domain::board::standard_pc_board::Board256Mask::from_words(
+                        self.catalog.initial_board().words(),
+                    ),
+                    batch,
+                )
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("extended_pc_score_physical_batch_invalid")
+                })?,
+            )
+        } else {
+            None
+        };
         // Minimum evidence comes from this PC producer's verified language,
         // not from Build result fields. The common exact reducer runs in App.
         let mut result = CoreExecutionResult::new(fields, self.representative_path.clone())
@@ -2626,16 +2740,26 @@ impl ExtendedBuildProbabilitySession {
         if let Some(evidence) = evidence {
             result = result.with_pc_chance_coverage_evidence(evidence);
         }
-        Ok(if self.problem.solution_probability_policy().requested() {
-            // Canonical weights are denominator evidence only. An empty,
-            // incomplete replay batch grants no score/path execution authority.
-            let weights = (0..universe.pattern_count())
-                .map(|index| universe.weight_at(index).get().to_string())
-                .collect();
-            result.with_postprocess_execution_batch(Vec::new(), false, weights)
-        } else {
-            result
-        })
+        result = result.with_pc_score_problem_evidence(score_evidence);
+        if let Some(batch) = score_batch {
+            result = result.with_full_height_scoring_execution_batch(batch);
+        }
+        Ok(
+            if self.problem.solution_probability_policy().requested() || score_source {
+                // Canonical weights are denominator evidence only. An empty,
+                // incomplete replay batch grants no score/path execution authority.
+                let weights = (0..universe.pattern_count())
+                    .map(|index| universe.weight_at(index).get().to_string())
+                    .collect();
+                result.with_postprocess_execution_batch(
+                    Vec::new(),
+                    score_source && count_complete && probability_complete,
+                    weights,
+                )
+            } else {
+                result
+            },
+        )
     }
 
     pub(super) fn finesse_search_material(
@@ -2818,6 +2942,10 @@ impl ExtendedBuildProbabilitySession {
             total = total.checked_add(graph.retained_bytes() as u128)?;
         }
         total = total.checked_add(
+            (self.spin_execution_graphs.capacity() as u128)
+                .checked_mul(core::mem::size_of::<SpinCoverageExecutionGraph>() as u128)?,
+        )?;
+        total = total.checked_add(
             (self.finesse_languages.capacity() as u128)
                 .checked_mul(core::mem::size_of::<(String, PreparedFinesseLanguage)>() as u128)?,
         )?;
@@ -2933,6 +3061,7 @@ impl ExtendedBuildProbabilitySession {
                 PcChanceEvidencePolicy::PcMinimumCoverV2
                     | PcChanceEvidencePolicy::PcProbabilityV2
                     | PcChanceEvidencePolicy::PcFailedQueueV2 { .. }
+                    | PcChanceEvidencePolicy::PcScorePortfolioV2
             )
         {
             future = future
@@ -2948,7 +3077,8 @@ impl ExtendedBuildProbabilitySession {
                 )?;
         }
         if self.purpose == ExtendedFamilyPurpose::Pc
-            && self.problem.solution_probability_policy().requested()
+            && (self.problem.solution_probability_policy().requested()
+                || self.problem.objective().score().requested())
         {
             future = future
                 .checked_add((key_count as u128).checked_mul(
@@ -2979,6 +3109,7 @@ impl ExtendedBuildProbabilitySession {
         }
 
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
+            || self.problem.objective().score().requested()
             || self.problem.objective().execution_constraints().requested();
         if execution_evidence_requested
             && !(self.problem.objective().execution_constraints().requested()
@@ -2995,6 +3126,12 @@ impl ExtendedBuildProbabilitySession {
                         .checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
                 )?;
             }
+        }
+        if self.purpose == ExtendedFamilyPurpose::Pc && self.problem.objective().score().requested()
+        {
+            future = future.checked_add(PcScoreProblemEvidence::checked_creation_future_bytes(
+                &self.problem,
+            )?)?;
         }
         Some(future)
     }

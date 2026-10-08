@@ -85,7 +85,7 @@ impl ScoreCell {
         self.accuracy_level.as_ref()
     }
 
-    fn checked_string_retained_bytes(&self) -> Option<u128> {
+    pub(super) fn checked_string_retained_bytes(&self) -> Option<u128> {
         let accuracy_bytes = match &self.accuracy_level {
             Cow::Borrowed(_) => 0,
             Cow::Owned(value) => value.capacity() as u128,
