@@ -6,6 +6,14 @@ const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), '
   .replace(/\r\n/gu, '\n');
 const workflow = read('.github/workflows/pc24-source-boundary.yml');
 
+function jobSection(name) {
+  const start = workflow.indexOf(`\n  ${name}:\n`);
+  assert.notEqual(start, -1, `missing independent job ${name}`);
+  const tail = workflow.slice(start + 1);
+  const next = tail.search(/\n  [a-z][a-z0-9-]*:\n/u);
+  return next < 0 ? tail : tail.slice(0, next);
+}
+
 function assertSafePlainRunScalars(source) {
   for (const match of source.matchAll(/^\s+run:\s+([^\n]+)$/gmu)) {
     const value = match[1].trim();
@@ -33,8 +41,8 @@ test('the scalar guard rejects the actual pre-job CTK2 workflow regression', () 
 test('extended functional proofs run independently of existing release and product jobs', () => {
   const branches = ['codex/converge-pc24-integration-20261005', 'codex/converge-main-product-fixes-20261005', 'codex/pc24-target-boundary-20261006', 'codex/converge-pc24-family-20261006', 'codex/converge-v081-document-frame-20261006', 'codex/converge-v081-extended-pc-products-20261007'];
   assert.ok(workflow.includes(`branches: [${branches.map((branch) => JSON.stringify(branch)).join(', ')}]`));
-  for (const job of ['input-contract', 'inverse-lock-clear', 'document-wire']) {
-    const section = workflow.slice(workflow.indexOf(`\n  ${job}:`));
+  for (const job of ['input-contract', 'inverse-lock-clear', 'native-family-parallel', 'document-wire']) {
+    const section = jobSection(job);
     assert.ok(section.includes("if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005'"));
     assert.ok(section.includes("github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005'"));
     assert.ok(section.includes("github.ref == 'refs/heads/codex/pc24-target-boundary-20261006'"));
@@ -48,8 +56,39 @@ test('extended functional proofs run independently of existing release and produ
   assert.ok(!workflow.includes('gh workflow run'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-problem --test extended_pc_execution'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-geometry --lib layout::standard_pc_layout::tests'));
-  assert.ok(workflow.includes('cargo test --locked -p clearra-core-executor --test extended_pc_ilc'));
+  assert.ok(workflow.includes('cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_ilc'));
   assert.ok(workflow.includes('--target wasm32-unknown-unknown'));
+});
+
+test('native feature compilation cannot exhaust the ordinary surface owner or drop its later proofs', () => {
+  const ordinary = jobSection('inverse-lock-clear');
+  const native = jobSection('native-family-parallel');
+  assert.match(ordinary, /timeout-minutes: 20/u);
+  assert.match(native, /timeout-minutes: 15/u);
+  assert.doesNotMatch(ordinary, /--features parallel/u);
+  assert.doesNotMatch(native, /needs:|download-artifact|upload-artifact|wasm32/u);
+  assert.ok(native.includes('--features parallel --test extended_pc_family'));
+  assert.ok(native.includes('--features parallel --test extended_pc_tiling'));
+  for (const selector of [
+    '--lib extended_geometry::parallel::tests',
+    '--lib pc_family_evidence_admits_snapshot_row_slots_and_owned_bitsets_before_construction',
+    '--lib build_pc_resource_projection_field_inventory_is_exhaustive',
+    '--lib tiling_solution_store::tests',
+    '--lib bounded_catalog_keeps_exact_identity_and_refuses_before_growth',
+    '--test extended_pc_ilc',
+    '--lib shared_extended_identity_resolves_only_matching_full_height_catalog_rows',
+  ]) {
+    const command = `cargo test --locked -p clearra-core-executor --no-default-features --features parallel ${selector} -- --test-threads=1`;
+    assert.ok(native.includes(command), `native proof was removed or switched build owner: ${selector}`);
+    assert.equal(workflow.split(command).length - 1, 1, `duplicate native proof ${selector}`);
+  }
+  assert.ok(native.includes('cargo clippy --locked -p clearra-replay -p clearra-postprocess -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings'));
+  assert.ok(ordinary.includes('--test extended_pc_surfaces'));
+  assert.ok(ordinary.includes('--lib full_height_score_key_projection'));
+  assert.ok(ordinary.includes('--lib pc_pinned_solution_document'));
+  assert.ok(ordinary.includes('cargo test --locked -p clearra-accelerator-product-host --lib'));
+  assert.ok(ordinary.includes('cargo clippy --locked -p clearra-accelerator-product-host --all-targets -- -D warnings'));
+  assert.ok(ordinary.includes('cargo clippy --locked -p clearra-replay -p clearra-postprocess --all-targets -- -D warnings'));
 });
 
 test('extended Tiling has its own typed exact producer without relabelling Build coverage', () => {

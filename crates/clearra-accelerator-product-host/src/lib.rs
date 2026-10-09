@@ -12,6 +12,7 @@ use clearra_accelerator_activation::{
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 const KEYRING_JSON: &str = include_str!("../../../config/accelerator-activation-keyring.v1.json");
 const LEGAL_BOARD_CATALOG_JSON: &str =
@@ -149,8 +150,11 @@ pub enum QualifiedProductMetadata {
     ExactLegalBoard {
         active_session_shared_bytes: u64,
         chain_identity: [u8; 32],
-        layer_counts: [u64; 11],
-        layer_payload_identities: [[u8; 32]; 11],
+        // Immutable control-plane metadata, not per-worker asset storage.
+        // A cloned catalog shares these arrays rather than copying the whole
+        // legal-board manifest into every profile/status enum carrier.
+        layer_counts: Arc<[u64; 11]>,
+        layer_payload_identities: Arc<[[u8; 32]; 11]>,
     },
     BoardConditionedReachability {
         active_session_shared_bytes: u64,
@@ -198,7 +202,9 @@ impl QualifiedCatalogAsset {
 #[derive(Clone, Debug)]
 pub enum CatalogProfileStatus {
     NotQualified,
-    Qualified(QualifiedCatalogAsset),
+    // Readers lease the same fully verified envelope and metadata. Private
+    // asset fields and immutable accessors preserve the existing authority.
+    Qualified(Arc<QualifiedCatalogAsset>),
 }
 
 impl CatalogProfileStatus {
@@ -364,11 +370,11 @@ fn parse_profile(
                 ));
             }
             let metadata = parse_qualified_metadata(&value["metadata"], kind, &authority)?;
-            CatalogProfileStatus::Qualified(QualifiedCatalogAsset {
+            CatalogProfileStatus::Qualified(Arc::new(QualifiedCatalogAsset {
                 authority,
                 metadata,
                 envelope_json: envelope_json.to_owned(),
-            })
+            }))
         }
         _ => return Err(ProductCatalogError::new("accelerator_catalog_status")),
     };
@@ -444,8 +450,8 @@ fn parse_qualified_metadata(
             Ok(QualifiedProductMetadata::ExactLegalBoard {
                 active_session_shared_bytes,
                 chain_identity,
-                layer_counts,
-                layer_payload_identities,
+                layer_counts: Arc::new(layer_counts),
+                layer_payload_identities: Arc::new(layer_payload_identities),
             })
         }
         ProductCatalogKind::BoardConditionedReachability => {
@@ -649,6 +655,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cloned_catalogs_share_verified_assets_and_legal_layer_metadata() {
+        for kind in [
+            ProductCatalogKind::ExactLegalBoard,
+            ProductCatalogKind::BoardConditionedReachability,
+        ] {
+            let catalog = embedded_catalog(kind).unwrap();
+            let cloned = catalog.clone();
+            assert_eq!(catalog.catalog_identity(), cloned.catalog_identity());
+            for (source, clone) in catalog.profiles().iter().zip(cloned.profiles()) {
+                assert_eq!(source.profile(), clone.profile());
+                let (
+                    CatalogProfileStatus::Qualified(source),
+                    CatalogProfileStatus::Qualified(clone),
+                ) = (source.status(), clone.status())
+                else {
+                    panic!("qualified catalogs must retain every independently verified slot");
+                };
+                assert!(Arc::ptr_eq(source, clone));
+                assert_eq!(source.envelope_json(), clone.envelope_json());
+                let metadata_clone = source.metadata().clone();
+                assert_eq!(source.metadata(), &metadata_clone);
+                if let (
+                    QualifiedProductMetadata::ExactLegalBoard {
+                        layer_counts,
+                        layer_payload_identities,
+                        ..
+                    },
+                    QualifiedProductMetadata::ExactLegalBoard {
+                        layer_counts: cloned_counts,
+                        layer_payload_identities: cloned_identities,
+                        ..
+                    },
+                ) = (source.metadata(), &metadata_clone)
+                {
+                    assert!(Arc::ptr_eq(layer_counts, cloned_counts));
+                    assert!(Arc::ptr_eq(layer_payload_identities, cloned_identities));
+                }
+            }
+        }
+        // Heap arrays remain present and shared. This bounds only the inline
+        // control carrier; it is not an asset/session peak-memory claim.
+        assert!(core::mem::size_of::<QualifiedProductMetadata>() <= 80);
+        assert!(core::mem::size_of::<CatalogProfileStatus>() <= 2 * core::mem::size_of::<usize>());
     }
 
     #[test]

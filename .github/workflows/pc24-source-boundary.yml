@@ -10,6 +10,7 @@ on:
       - "crates/clearra-core-executor/**"
       - "crates/clearra-replay/**"
       - "crates/clearra-render/**"
+      - "crates/clearra-accelerator-product-host/**"
       - "crates/clearra-postprocess/**"
       - "crates/clearra-app/**"
       - "crates/clearra-validation/**"
@@ -93,7 +94,7 @@ jobs:
       - name: Verify the bounded non-publishing feedback contract
         run: node --test scripts/ci/pc24-source-boundary.test.mjs
       - name: Check target-frame and compiler source format
-        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-core-executor -p clearra-replay -p clearra-render -p clearra-postprocess -p clearra-output -p clearra-fumen -p clearra-host-contract -p clearra-cli -p clearra-cli-command -p clearra-app -p clearra-validation -p clearra-wasm -p clearra-wasm-abi --check
+        run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-core-executor -p clearra-replay -p clearra-render -p clearra-accelerator-product-host -p clearra-postprocess -p clearra-output -p clearra-fumen -p clearra-host-contract -p clearra-cli -p clearra-cli-command -p clearra-app -p clearra-validation -p clearra-wasm -p clearra-wasm-abi --check
       - name: Test four-word physical replay without changing compact trk1 identities
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-replay --lib -- --test-threads=1
@@ -150,7 +151,7 @@ jobs:
   inverse-lock-clear:
     if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006' || github.ref == 'refs/heads/codex/converge-v081-document-frame-20261006' || github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -201,6 +202,29 @@ jobs:
       - name: Verify native CLI assembly retains the shared full-height Opening input contract
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --lib assemble::pc_query_assembler::tests -- --test-threads=1
+      - name: Verify shared signed catalog owners without regenerating qualified assets
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p clearra-accelerator-product-host --lib -- --test-threads=1
+          cargo clippy --locked -p clearra-accelerator-product-host --all-targets -- -D warnings
+      - name: Check compact and full-height replay postprocess targets
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked -p clearra-replay -p clearra-postprocess --all-targets -- -D warnings
+
+  # The former 15-minute owner finished the actual surface proofs but expired
+  # while compiling a second, native-parallel feature set. Give that feature
+  # owner its own cold-build budget and runner, not a wait on another job's
+  # artifacts. The tests and strict lint remain mandatory and fail closed.
+  native-family-parallel:
+    if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006' || github.ref == 'refs/heads/codex/converge-v081-document-frame-20261006' || github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned native Rust and Clippy
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Verify exact extended family splits and bounded native Tiling workers
         if: ${{ !cancelled() }}
         run: |
@@ -208,7 +232,6 @@ jobs:
           cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- --test-threads=1
           cargo test --locked -p clearra-app --no-default-features --features parallel --test extended_pc_tiling -- --test-threads=1
           cargo clippy --locked -p clearra-replay -p clearra-postprocess -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings
-          cargo clippy --locked -p clearra-replay -p clearra-postprocess --all-targets -- -D warnings
       - name: Verify complete PC evidence memory is admitted before row and snapshot construction
         if: ${{ !cancelled() }}
         run: |
@@ -217,14 +240,14 @@ jobs:
       - name: Verify immutable compact and extended page owners and bounded catalog admission
         if: ${{ !cancelled() }}
         run: |
-          cargo test --locked -p clearra-core-executor --lib tiling_solution_store::tests -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --lib bounded_catalog_keeps_exact_identity_and_refuses_before_growth -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib tiling_solution_store::tests -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib bounded_catalog_keeps_exact_identity_and_refuses_before_growth -- --test-threads=1
       - name: Verify one-placement Build and forced extended PC completion without large enumeration
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p clearra-core-executor --test extended_pc_ilc -- --test-threads=1
+        run: cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_ilc -- --test-threads=1
       - name: Verify CTK2 catalog reconstruction keeps the full source board and target height
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p clearra-core-executor --lib shared_extended_identity_resolves_only_matching_full_height_catalog_rows -- --test-threads=1
+        run: cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib shared_extended_identity_resolves_only_matching_full_height_catalog_rows -- --test-threads=1
 
   document-wire:
     if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006' || github.ref == 'refs/heads/codex/converge-v081-document-frame-20261006' || github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007'

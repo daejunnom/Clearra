@@ -77,21 +77,6 @@ fn require_local_entry_exit_contract() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{require_local_entry_exit_contract, require_v081_qualification};
-
-    #[test]
-    fn product_contract_is_actual_entry_to_first_exit() {
-        assert_eq!(require_local_entry_exit_contract(), Ok(()));
-    }
-
-    #[test]
-    fn five_profile_catalogs_satisfy_the_data_qualification_gate() {
-        assert_eq!(require_v081_qualification(), Ok(()));
-    }
-}
-
 fn qualified_resident_bytes(
     status: &CatalogProfileStatus,
     product: &str,
@@ -127,5 +112,20 @@ fn qualified_bytes(
         CatalogProfileStatus::NotQualified => {
             Err(format!("{product}_profile_not_qualified_{profile}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{require_local_entry_exit_contract, require_v081_qualification};
+
+    #[test]
+    fn product_contract_is_actual_entry_to_first_exit() {
+        assert_eq!(require_local_entry_exit_contract(), Ok(()));
+    }
+
+    #[test]
+    fn five_profile_catalogs_satisfy_the_data_qualification_gate() {
+        assert_eq!(require_v081_qualification(), Ok(()));
     }
 }
