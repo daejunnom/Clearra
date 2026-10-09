@@ -91,12 +91,16 @@ mod pc_failed_queue_result;
 mod pc_minimum_cover_result;
 mod pc_minimum_cover_source_identities;
 mod pc_path_result;
+mod pc_pinned_solution_document;
 mod pc_replay_page_error;
 mod pc_replay_page_source;
 mod pc_replay_source_digest;
 mod pc_result_projection;
 mod pc_save_result;
 mod pc_score_field_result;
+// The contract fixture compiles this reducer under synthetic authority as well.
+// Only unit-test builds permit that deliberate second module, not production.
+#[cfg_attr(test, allow(clippy::duplicate_mod))]
 mod pc_score_minimum_cover_result;
 mod pc_score_postprocess;
 mod pc_score_solution_identity;
@@ -364,6 +368,9 @@ pub use pc_path_result::{
     PcPathCompletenessEvidence, PcPathFamilyV2Result, PcPathIngressOrigin, PcPathProblemPreset,
     PcPathQuerySnapshot, PcPathStepV2, PcPathWitnessV2, PC_PATH_CANONICAL_SELECTION,
     PC_PATH_FAMILY_RESULT_CONTRACT, PC_PATH_ORDERING, PC_PATH_WITNESS_CONTRACT,
+};
+pub use pc_pinned_solution_document::{
+    PcPinnedDrawing, PcPinnedSolutionDocument, PcPinnedSolutionDocumentError,
 };
 pub use pc_replay_page_error::PcReplayPageError;
 pub use pc_replay_page_source::{

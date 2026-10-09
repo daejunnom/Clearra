@@ -1,4 +1,5 @@
 // SRP rationale: this module has one change reason: lowering canonical CLI commands into typed application requests.
+use clearra_app::PcPinnedDrawing;
 use clearra_app::{
     AppCommand, AppRequest, BoundaryRecoveryAppCommand, BuildProbabilityAppCommand,
     DamageAppCommand, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
@@ -14,7 +15,6 @@ use clearra_app::{
 use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
-use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
 use clearra_forward_search::{BoundaryRecoveryQuery, ForwardSearchMode, ForwardSearchQuery};
 use clearra_objectives::policy::{
     objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
@@ -54,7 +54,7 @@ pub struct WebCommandRequest {
     objective: ObjectivePolicy,
     pc_result_projection: PcResultProjection,
     pc_minimum_pins: Vec<String>,
-    pc_pinned_drawings: Vec<StandardBoard64ColoredTilingIdentity>,
+    pc_pinned_drawings: Vec<PcPinnedDrawing>,
     pc_expected_source_set_hash: Option<String>,
     pc_failed_queue_origin: Option<PcFailedQueueIngressOrigin>,
     product_capability_contract: Option<ProductCapabilityContract>,
@@ -685,7 +685,7 @@ impl WebCommandRequest {
 
     pub fn with_pc_pinned_drawings(
         mut self,
-        drawings: Vec<StandardBoard64ColoredTilingIdentity>,
+        drawings: Vec<PcPinnedDrawing>,
         expected_source_set_hash: Option<String>,
     ) -> Result<Self, WebCommandError> {
         if self.product_capability_contract != Some(ProductCapabilityContract::PcPinnedMinimals)
@@ -1967,7 +1967,7 @@ impl WebCommandRequest {
                 let command = ScenarioAppCommand::new(query)
                     .with_result_projection(self.pc_result_projection)
                     .with_pinned_minimum_keys(self.pc_minimum_pins.clone())
-                    .with_pinned_minimum_drawings(
+                    .with_pinned_minimum_selection(
                         self.pc_pinned_drawings.clone(),
                         self.pc_expected_source_set_hash.clone(),
                     );
@@ -2024,7 +2024,7 @@ impl WebCommandRequest {
             let command = PcAppCommand::new(query)
                 .with_result_projection(self.pc_result_projection)
                 .with_pinned_minimum_keys(self.pc_minimum_pins.clone())
-                .with_pinned_minimum_drawings(
+                .with_pinned_minimum_selection(
                     self.pc_pinned_drawings.clone(),
                     self.pc_expected_source_set_hash.clone(),
                 );

@@ -2,7 +2,7 @@
 
 use std::{fmt, sync::Arc};
 
-use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
+use crate::PcPinnedDrawing;
 use clearra_host_contract::{AppCommandKind, QueryEnvelope};
 use clearra_pc_graph::request::{OpeningPcSearchQuery, PcScenarioQuery};
 
@@ -105,7 +105,7 @@ impl ProductCapabilityContract {
                         query: command.query_arc(),
                         projection,
                         pinned_keys: Arc::from(command.pinned_minimum_keys()),
-                        pinned_drawings: Arc::from(command.pinned_minimum_drawings()),
+                        pinned_drawings: command.pinned_minimum_drawing_owner(),
                         expected_source_set_hash: command
                             .expected_source_set_hash()
                             .map(str::to_owned),
@@ -161,7 +161,7 @@ impl ProductCapabilityContract {
                         query: command.query_arc(),
                         projection,
                         pinned_keys: Arc::from(command.pinned_minimum_keys()),
-                        pinned_drawings: Arc::from(command.pinned_minimum_drawings()),
+                        pinned_drawings: command.pinned_minimum_drawing_owner(),
                         expected_source_set_hash: command
                             .expected_source_set_hash()
                             .map(str::to_owned),
@@ -449,14 +449,14 @@ enum ValidatedProductCapabilityPayload {
         query: Arc<OpeningPcSearchQuery>,
         projection: ValidatedPcResultProjection,
         pinned_keys: Arc<[String]>,
-        pinned_drawings: Arc<[StandardBoard64ColoredTilingIdentity]>,
+        pinned_drawings: Arc<[PcPinnedDrawing]>,
         expected_source_set_hash: Option<String>,
     },
     PcMinimalsScenario {
         query: Arc<PcScenarioQuery>,
         projection: ValidatedPcResultProjection,
         pinned_keys: Arc<[String]>,
-        pinned_drawings: Arc<[StandardBoard64ColoredTilingIdentity]>,
+        pinned_drawings: Arc<[PcPinnedDrawing]>,
         expected_source_set_hash: Option<String>,
     },
     PcPathOpening {
@@ -629,7 +629,7 @@ impl ValidatedProductCapabilityPayload {
         PcMinimumCoverQueryBinding<'_>,
         PcMinimalsIngressOrigin,
         &[String],
-        &[StandardBoard64ColoredTilingIdentity],
+        &[PcPinnedDrawing],
         Option<&str>,
     )> {
         match self {
@@ -858,15 +858,55 @@ impl ValidatedProductCapabilityContract {
         ) {
             return None;
         }
-        match &self.payload {
-            ValidatedProductCapabilityPayload::PcMinimalsOpening { query, .. } => {
-                crate::pc_minimum_cover_result::checked_minimum_opening_query_retained_bytes(query)
-            }
-            ValidatedProductCapabilityPayload::PcMinimalsScenario { query, .. } => {
-                crate::pc_minimum_cover_result::checked_minimum_scenario_query_retained_bytes(query)
-            }
-            _ => None,
-        }
+        let (query_bytes, pinned_keys, pinned_drawings, expected_source_set_hash) =
+            match &self.payload {
+                ValidatedProductCapabilityPayload::PcMinimalsOpening {
+                    query,
+                    pinned_keys,
+                    pinned_drawings,
+                    expected_source_set_hash,
+                    ..
+                } => (
+                    crate::pc_minimum_cover_result::checked_minimum_opening_query_retained_bytes(
+                        query,
+                    )?,
+                    pinned_keys,
+                    pinned_drawings,
+                    expected_source_set_hash,
+                ),
+                ValidatedProductCapabilityPayload::PcMinimalsScenario {
+                    query,
+                    pinned_keys,
+                    pinned_drawings,
+                    expected_source_set_hash,
+                    ..
+                } => (
+                    crate::pc_minimum_cover_result::checked_minimum_scenario_query_retained_bytes(
+                        query,
+                    )?,
+                    pinned_keys,
+                    pinned_drawings,
+                    expected_source_set_hash,
+                ),
+                _ => return None,
+            };
+        let key_slots =
+            (pinned_keys.len() as u128).checked_mul(core::mem::size_of::<String>() as u128)?;
+        let keys = pinned_keys.iter().try_fold(key_slots, |bytes, key| {
+            bytes.checked_add(key.capacity() as u128)
+        })?;
+        let drawings = (pinned_drawings.len() as u128)
+            .checked_mul(core::mem::size_of::<PcPinnedDrawing>() as u128)?;
+        query_bytes
+            .checked_add(keys)?
+            .checked_add(drawings)?
+            // Both slice Arc control blocks, conservatively including empty owners.
+            .checked_add((4 * core::mem::size_of::<usize>()) as u128)?
+            .checked_add(
+                expected_source_set_hash
+                    .as_ref()
+                    .map_or(0, |hash| hash.capacity() as u128),
+            )
     }
 
     pub(crate) const fn contract(&self) -> ProductCapabilityContract {
@@ -948,7 +988,7 @@ impl ValidatedProductCapabilityContract {
         PcMinimumCoverQueryBinding<'_>,
         PcMinimalsIngressOrigin,
         &[String],
-        &[StandardBoard64ColoredTilingIdentity],
+        &[PcPinnedDrawing],
         Option<&str>,
     )> {
         self.payload.pc_minimum_cover_binding()

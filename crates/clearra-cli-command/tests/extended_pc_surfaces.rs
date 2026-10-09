@@ -20,6 +20,161 @@ fn inputs() -> impl Iterator<Item = Vec<&'static str>> {
         .map(|line| line.split('\t').collect())
 }
 
+fn selected_i_drawing(input: &[&str]) -> String {
+    let height = input[1].parse::<usize>().unwrap();
+    let mask = input[2];
+    let mut words = [0_u64; 4];
+    for (index, word) in words.iter_mut().enumerate() {
+        let end = mask.len() - index * 16;
+        *word = u64::from_str_radix(&mask[end - 16..end], 16).unwrap();
+    }
+    let cells = (0..height * 10)
+        .map(|index| {
+            if words[index / 64] & (1_u64 << (index % 64)) != 0 {
+                clearra_app::Ctk3Color::Gray
+            } else {
+                clearra_app::Ctk3Color::Piece(clearra_app::Ctk3Piece::I)
+            }
+        })
+        .collect();
+    clearra_app::encode_ctk3_compact(&clearra_app::Ctk3Document::new(
+        10,
+        vec![clearra_app::Ctk3Page::new(height, cells)],
+    ))
+    .unwrap()
+}
+
+#[test]
+fn canonical_full_height_pinned_drawings_resolve_only_against_the_complete_minimum_source() {
+    let context = context();
+    for input in inputs() {
+        let base = format!(
+            "clearra pc minimals --lines {} --board-mask 0x{} --height {} --pieces {} --queue {} --no-hold --rule srs-plus --no-tablebase --no-build-dependency-dag --backend cpu --workers 1",
+            input[1], input[2], input[1], input[3], input[4],
+        );
+        let ordinary = context.run(
+            CliCommandParser::parse(&base)
+                .unwrap()
+                .to_app_request()
+                .unwrap(),
+        );
+        let expected = assert_minimum(&ordinary, &input);
+        let source = ordinary
+            .product_capability_result()
+            .unwrap()
+            .pc_minimum_cover_v2()
+            .unwrap();
+        let pinned_command = format!(
+            "{} --required-format ctk3 --required-document {} --expected-source-set-hash {}",
+            base.replacen("pc minimals", "pc pinned-minimals", 1),
+            selected_i_drawing(&input),
+            ordinary
+                .render_model()
+                .unwrap()
+                .core_result()
+                .unwrap()
+                .field("actual_normalized_solution_set_hash")
+                .unwrap(),
+        );
+        let request = CliCommandParser::parse(&pinned_command)
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+        let pinned = context.run(request.clone());
+        assert_eq!(assert_minimum(&pinned, &input), expected);
+        let report = pinned
+            .product_capability_result()
+            .unwrap()
+            .pc_minimum_cover_v2()
+            .unwrap();
+        assert_eq!(
+            report.source_solution_count(),
+            source.source_solution_count()
+        );
+        assert_eq!(
+            report.required_pattern_count(),
+            source.required_pattern_count()
+        );
+        assert_eq!(report.portfolio_alternatives().pinned_candidate_ids(), &[1]);
+        let actual_source_hash = ordinary
+            .render_model()
+            .unwrap()
+            .core_result()
+            .unwrap()
+            .field("actual_normalized_solution_set_hash")
+            .unwrap();
+        let stale_hash = if actual_source_hash == "cts1:0000000000000000" {
+            "cts1:ffffffffffffffff"
+        } else {
+            "cts1:0000000000000000"
+        };
+        let stale_command = pinned_command.replace(actual_source_hash, stale_hash);
+        let stale = context.run(
+            CliCommandParser::parse(&stale_command)
+                .unwrap()
+                .to_app_request()
+                .unwrap(),
+        );
+        assert_ne!(stale.status(), AppStatus::Success);
+        assert!(
+            format!("{stale:?}")
+                .contains("pc pinned minimals source set changed; select drawings again"),
+            "{stale:?}"
+        );
+        let mut execution = context.start_cooperative_execution(request);
+        let mut completed = false;
+        for _ in 0..4096 {
+            match execution.advance(256, &ExecutionControl::default()) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                CooperativeAppAdvance::Completed(response) => {
+                    assert_eq!(assert_minimum(&response, &input), expected);
+                    completed = true;
+                    break;
+                }
+                other => panic!("unexpected full-height pinned finalizer: {other:?}"),
+            }
+        }
+        assert!(completed, "{} pinned minimum must finish", input[0]);
+    }
+}
+
+#[test]
+fn full_height_pinned_drawing_rejects_touching_same_kind_placement_ambiguity() {
+    // Four I pieces can partition the same 4x4 colors either horizontally or
+    // vertically. The fifth I keeps the target at eight rows. Colors alone
+    // cannot select one of those distinct exact source identities.
+    let mut holes = Board256Mask::EMPTY;
+    for row in 0..4 {
+        for column in 0..4 {
+            holes = holes.union(Board256Mask::singleton(row * 10 + column).unwrap());
+        }
+    }
+    for row in 4..8 {
+        holes = holes.union(Board256Mask::singleton(row * 10 + 5).unwrap());
+    }
+    let words = Board256Mask::all_cells(80).unwrap().without(holes).words();
+    let mask = format!(
+        "{:016x}{:016x}{:016x}{:016x}",
+        words[3], words[2], words[1], words[0]
+    );
+    let input = ["ambiguous-eight", "8", mask.as_str(), "5", "IIIII"];
+    let command = format!(
+        "clearra pc pinned-minimals --lines 8 --height 8 --board-mask 0x{mask} --pieces 5 --queue IIIII --no-hold --rule srs-plus --backend cpu --workers 1 --no-tablebase --no-build-dependency-dag --required-format ctk3 --required-document {}",
+        selected_i_drawing(&input),
+    );
+    let response = context().run(
+        CliCommandParser::parse(&command)
+            .unwrap()
+            .to_app_request()
+            .unwrap(),
+    );
+    assert_ne!(response.status(), AppStatus::Success);
+    assert!(
+        format!("{response:?}").contains("pc pinned drawing matches multiple normalized solutions"),
+        "{response:?}"
+    );
+}
+
 #[test]
 fn extended_minimum_publishes_first_canonical_set_and_keeps_equal_minima_lazy() {
     let mut holes = Board256Mask::EMPTY;

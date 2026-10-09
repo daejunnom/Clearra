@@ -124,7 +124,7 @@ fn pc_product_replays_full_source_and_proves_a_pinned_minimum() {
     let ProductResultPayloadContent::CoveragePortfolio(page) = payload.content() else {
         panic!("pinned PC product must retain its coverage portfolio payload");
     };
-    assert_eq!(page.pinned_candidate_keys(), &[key.clone()]);
+    assert_eq!(page.pinned_candidate_keys(), std::slice::from_ref(&key));
     assert_eq!(
         report.required_pattern_count(),
         ordinary_report.required_pattern_count()

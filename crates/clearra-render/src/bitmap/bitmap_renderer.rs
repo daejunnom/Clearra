@@ -389,7 +389,7 @@ fn render_connected_document_pixels(
     authority: &mut RenderAllocationAuthority,
 ) -> Result<Vec<u8>, RenderError> {
     let mut rgba = allocate_rgba(output_plan.capacity, authority)?;
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&[30, 41, 39, 255]);
     }
     let board_left = (output_plan.width - board_plan.width) / 2;

@@ -385,7 +385,7 @@ pub mod pc_score_postprocess {
 #[path = "pc_score_minimum_cover_result.rs"]
 // Includes the production reducer with synthetic score authority, but the real
 // private portfolio continuation. No public API is exposed just for fixtures.
-#[allow(dead_code)]
+#[allow(dead_code, clippy::duplicate_mod)]
 mod pc_score_minimum_cover_result;
 
 use crate::PortfolioEnumerationStop;

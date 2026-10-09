@@ -406,6 +406,39 @@ test('full-height App score finalizers share identities without truncating or gr
   assert.ok(workflow.includes('--lib full_height_score_key_projection -- --test-threads=1'));
 });
 
+test('full-height score ingress admits connected source layouts without removing the real execution proofs', () => {
+  const validator = read('crates/clearra-validation/src/validators/pc_scenario_query_validator.rs');
+  const tests = read('crates/clearra-validation/src/validators/pc_query_validator_tests.rs');
+  assert.ok(validator.includes('let score_source = query.objective().score().requested()'));
+  assert.ok(validator.includes('let full_height_family = (ordinary_source || score_source)'));
+  assert.ok(validator.includes('query.objective().execution_constraints().requested()'));
+  assert.ok(validator.includes('.requires_observation_policy()'));
+  assert.ok(tests.includes('full_height_score_scenario_accepts_all_four_words_without_granting_product_authority'));
+  assert.ok(tests.includes('full_height_score_scenario_still_rejects_unconnected_objective_and_constraint_domains'));
+  assert.ok(workflow.includes('--test extended_pc_surfaces -- --test-threads=1'));
+  assert.ok(workflow.includes('--lib full_height_score_key_projection -- --test-threads=1'));
+});
+
+test('PC pinned drawings have their own full-height codec and cannot select an unproved or ambiguous source', () => {
+  const decoder = read('crates/clearra-app/src/pc_pinned_solution_document.rs');
+  const parser = read('crates/clearra-cli-command/src/web_command_parser.rs');
+  const reducer = read('crates/clearra-app/src/pc_minimum_cover_result.rs');
+  const contract = read('crates/clearra-app/src/product_capability_contract.rs');
+  const surfaces = read('crates/clearra-cli-command/tests/extended_pc_surfaces.rs');
+  assert.ok(parser.includes('clearra_app::PcPinnedSolutionDocument::decode(format, &document)'));
+  assert.ok(decoder.includes('!(1..=24).contains(&page.height)'));
+  assert.ok(decoder.includes('key.height() != height || key.initial_board() != initial'));
+  assert.ok(decoder.includes('actual == pieces'));
+  assert.ok(reducer.includes('drawing.matches_extended(identity)'));
+  assert.ok(reducer.includes('pc pinned drawing matches multiple normalized solutions'));
+  assert.ok(reducer.includes('pc pinned minimals source set changed; select drawings again'));
+  assert.ok(contract.includes('core::mem::size_of::<PcPinnedDrawing>()'));
+  assert.ok(contract.includes('pinned_drawings: command.pinned_minimum_drawing_owner()'));
+  assert.ok(surfaces.includes('canonical_full_height_pinned_drawings_resolve_only_against_the_complete_minimum_source'));
+  assert.ok(workflow.includes('--lib pc_pinned_solution_document -- --test-threads=1'));
+  assert.ok(workflow.includes('--lib build_colored_target_document -- --test-threads=1'));
+});
+
 test('full-height score source preserves actual physical graphs and uses the common exact score reducer', () => {
   const session = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_search.rs');
   const engine = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');

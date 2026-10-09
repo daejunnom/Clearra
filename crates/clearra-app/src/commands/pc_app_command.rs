@@ -28,7 +28,7 @@ pub struct PcAppCommand {
     query: Arc<OpeningPcSearchQuery>,
     result_projection: PcResultProjection,
     pinned_minimum_keys: Vec<String>,
-    pinned_minimum_drawings: Vec<StandardBoard64ColoredTilingIdentity>,
+    pinned_minimum_drawings: Arc<[crate::PcPinnedDrawing]>,
     expected_source_set_hash: Option<String>,
 }
 
@@ -38,7 +38,7 @@ impl PcAppCommand {
             query: Arc::new(query),
             result_projection: PcResultProjection::Standard,
             pinned_minimum_keys: Vec::new(),
-            pinned_minimum_drawings: Vec::new(),
+            pinned_minimum_drawings: Arc::from([]),
             expected_source_set_hash: None,
         }
     }
@@ -62,7 +62,21 @@ impl PcAppCommand {
         drawings: Vec<StandardBoard64ColoredTilingIdentity>,
         expected_source_set_hash: Option<String>,
     ) -> Self {
-        self.pinned_minimum_drawings = drawings;
+        self.pinned_minimum_drawings = drawings
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>()
+            .into();
+        self.expected_source_set_hash = expected_source_set_hash;
+        self
+    }
+
+    pub fn with_pinned_minimum_selection(
+        mut self,
+        drawings: Vec<crate::PcPinnedDrawing>,
+        expected_source_set_hash: Option<String>,
+    ) -> Self {
+        self.pinned_minimum_drawings = drawings.into();
         self.expected_source_set_hash = expected_source_set_hash;
         self
     }
@@ -84,8 +98,12 @@ impl PcAppCommand {
         &self.pinned_minimum_keys
     }
 
-    pub fn pinned_minimum_drawings(&self) -> &[StandardBoard64ColoredTilingIdentity] {
+    pub fn pinned_minimum_drawings(&self) -> &[crate::PcPinnedDrawing] {
         &self.pinned_minimum_drawings
+    }
+
+    pub(crate) fn pinned_minimum_drawing_owner(&self) -> Arc<[crate::PcPinnedDrawing]> {
+        Arc::clone(&self.pinned_minimum_drawings)
     }
 
     pub fn expected_source_set_hash(&self) -> Option<&str> {

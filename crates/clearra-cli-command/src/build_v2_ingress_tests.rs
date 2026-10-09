@@ -180,7 +180,10 @@ fn build_minimals_pin_is_bound_to_a_candidate_from_the_supplied_document() {
     let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
         panic!("expected pinned supplied minimum request");
     };
-    assert_eq!(request.pinned_candidate_keys(), [pinned_key.clone()]);
+    assert_eq!(
+        request.pinned_candidate_keys(),
+        std::slice::from_ref(pinned_key)
+    );
     let response = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     )
@@ -197,7 +200,10 @@ fn build_minimals_pin_is_bound_to_a_candidate_from_the_supplied_document() {
     let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
         panic!("expected duplicate-normalized supplied minimum request");
     };
-    assert_eq!(request.pinned_candidate_keys(), [pinned_key.clone()]);
+    assert_eq!(
+        request.pinned_candidate_keys(),
+        std::slice::from_ref(pinned_key)
+    );
     assert!(CliCommandParser::parse(&format!("{base} --pin-candidate 999")).is_err());
 
     let document_pinned = CliCommandParser::parse(&format!(
@@ -212,7 +218,10 @@ fn build_minimals_pin_is_bound_to_a_candidate_from_the_supplied_document() {
     let BuildV2AppRequest::BuildEvaluateMinimals(request) = command.request() else {
         panic!("expected document-pinned supplied minimum request");
     };
-    assert_eq!(request.pinned_candidate_keys(), [pinned_key.clone()]);
+    assert_eq!(
+        request.pinned_candidate_keys(),
+        std::slice::from_ref(pinned_key)
+    );
     assert!(CliCommandParser::parse(&format!("{base} --pin-solution-format ctk3")).is_err());
     assert!(CliCommandParser::parse(&format!(
         "{base} --pin-candidate 1 --pin-solution-format ctk3 --pin-solution-document {document}"

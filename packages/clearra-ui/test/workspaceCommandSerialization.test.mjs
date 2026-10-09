@@ -100,6 +100,25 @@ test('connected extended workspace terminals keep cell 239, area and explicit wo
   assert.equal(clearCompletedRows(full, 24).clearedRows, 24);
 });
 
+test('extended mandatory selection passes a full document through the common PC pinned command', () => {
+  const rows = readFileSync(new URL('../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv', import.meta.url), 'utf8')
+    .split(/\r?\n/u).filter(line => line && !line.startsWith('#'));
+  for (const row of rows) {
+    const [id, height, hex, , queue] = row.split('\t');
+    const request = { ...createDefaultWorkspaceRequest(), lines: Number(height),
+      boardMask: BigInt(`0x${hex}`), queue, holdEnabled: false, workers: 1,
+      scoreMode: 'minimum-cover', pinnedSolutionKeys: ['ctk2|selected-source-key'],
+      pinnedSolutionDocument: 'ctk3_selected', pinnedSourceSetHash: 'cts1:0123456789abcdef' };
+    assert.deepEqual(workspaceValidationCodes(request, 'web'), [], id);
+    const args = buildWorkspaceCommandArguments(request);
+    assert.deepEqual(args.slice(0, 3), ['clearra', 'pc', 'pinned-minimals']);
+    assert.equal(args[args.indexOf('--required-document') + 1], request.pinnedSolutionDocument);
+    assert.equal(args[args.indexOf('--expected-source-set-hash') + 1], request.pinnedSourceSetHash);
+    assert.equal(args.includes('--pin-key'), false, 'UI must send the drawing, not trust a candidate identifier');
+    assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args);
+  }
+});
+
 test('extended workspace guards result and option capabilities separately from the 24L field range', () => {
   const base = { ...createDefaultWorkspaceRequest(), lines: 24, workers: 1 };
   for (const scoreMode of ['path']) {

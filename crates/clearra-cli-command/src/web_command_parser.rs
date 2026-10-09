@@ -672,7 +672,7 @@ fn parse_pc_pinned_minimals_command(
         ));
     }
     let decoded =
-        clearra_app::BuildColoredTargetDocument::decode(format, &document).map_err(|error| {
+        clearra_app::PcPinnedSolutionDocument::decode(format, &document).map_err(|error| {
             WebCommandError::new(
                 WebCommandErrorCode::InvalidValue,
                 format!("invalid pc.pinned-minimals selected document: {error:?}"),
@@ -680,10 +680,7 @@ fn parse_pc_pinned_minimals_command(
         })?;
     parse_pc_minimals_command(&forwarded, worker_hardware_limit)?
         .with_pc_minimals_product_capability(PcMinimalsIngressOrigin::CanonicalPcPinnedMinimals)
-        .with_pc_pinned_drawings(
-            decoded.target().identities().to_vec(),
-            expected_source_set_hash,
-        )
+        .with_pc_pinned_drawings(decoded.into_drawings(), expected_source_set_hash)
 }
 
 fn parse_pc_path_command(

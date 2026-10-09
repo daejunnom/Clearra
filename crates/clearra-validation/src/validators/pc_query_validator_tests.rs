@@ -142,6 +142,58 @@ fn validates_pc_scenario_query_without_target_lines() {
 }
 
 #[test]
+fn full_height_score_scenario_accepts_all_four_words_without_granting_product_authority() {
+    for height in [7, 8, 12, 24] {
+        let top_bit =
+            clearra_core_domain::board::standard_pc_board::Board256Mask::singleton(height * 10 - 1)
+                .unwrap();
+        for objective in [
+            ObjectivePolicy::all().with_score_summary(),
+            ObjectivePolicy::minimum_cover().with_score_summary(),
+        ] {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10_from_words(height, top_bit.words()).unwrap(),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+                PieceWindow::new(1),
+            )
+            .with_objective(objective);
+            let report = validate_pc_scenario_query(&query);
+            assert!(!report.has_errors(), "{height}: {report:?}");
+            assert!(report.contains_code(DiagnosticCode::IPcQueryMvpSupported));
+        }
+    }
+}
+
+#[test]
+fn full_height_score_scenario_still_rejects_unconnected_objective_and_constraint_domains() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10_from_words(24, [0; 4]).unwrap(),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+        PieceWindow::new(1),
+    );
+    for unsupported in [
+        query
+            .clone()
+            .with_objective(ObjectivePolicy::unique().with_score_summary()),
+        query.clone().with_objective(
+            ObjectivePolicy::all()
+                .with_score_summary()
+                .with_back_to_back_preservation(
+                clearra_objectives::policy::score_objective_policy::SpinProfileSelection::TSpins,
+            ),
+        ),
+        query
+            .clone()
+            .with_objective(ObjectivePolicy::all().with_score_summary())
+            .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven),
+    ] {
+        let report = validate_pc_scenario_query(&unsupported);
+        assert!(report.has_errors(), "{report:?}");
+        assert!(report.contains_code(DiagnosticCode::EPcQueryInvalid));
+    }
+}
+
+#[test]
 fn pc_scenario_fixed_sequence_allows_duplicates_without_bag_offset_zero_contract() {
     let query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(2, 0),

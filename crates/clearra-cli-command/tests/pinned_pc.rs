@@ -97,7 +97,7 @@ fn pc_minimals_accepts_a_second_canonical_solution_selection() {
     let AppCommand::Scenario(command) = request.command() else {
         panic!("expected scenario-backed PC minimals");
     };
-    assert_eq!(command.pinned_minimum_keys(), [key.clone()]);
+    assert_eq!(command.pinned_minimum_keys(), std::slice::from_ref(&key));
     assert!(CliCommandParser::parse(&command_string_with_invalid_pin()).is_err());
 
     let repeated = format!(

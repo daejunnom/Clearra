@@ -465,16 +465,12 @@ impl PcMinimumCoverV2Preparation {
     /// placement boundary, so ambiguous matches must be rejected.
     pub(crate) fn new_with_drawings(
         source: ValidatedPcMinimumCoverSource,
-        drawings: &[StandardBoard64ColoredTilingIdentity],
+        drawings: &[crate::PcPinnedDrawing],
         expected_source_set_hash: Option<&str>,
     ) -> Result<Self, &'static str> {
         if drawings.is_empty() {
             return Err("pc pinned minimals requires at least one selected drawing");
         }
-        let source_identities = source
-            .source_solution_identities
-            .compact()
-            .ok_or("pc pinned drawings require a full-height drawing contract")?;
         let source_hash = source
             .source_solution_identities
             .source_hash(&source.candidate_keys)?;
@@ -483,14 +479,16 @@ impl PcMinimumCoverV2Preparation {
         }
         let mut pins = Vec::with_capacity(drawings.len());
         for drawing in drawings {
-            let mut matched = source_identities
-                .iter()
-                .zip(&source.candidate_keys)
-                .filter(|(identity, _)| {
-                    StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(**identity)
-                        == *drawing
-                })
-                .map(|(_, key)| key);
+            let mut matched = source.candidate_keys.iter().enumerate().filter_map(|(index, key)| {
+                let matches = match source.source_solution_identities.compact() {
+                    Some(identities) => drawing.compact_identity().is_some_and(|selected| {
+                        StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(identities[index]) == selected
+                    }),
+                    None => clearra_core_domain::solution::ExtendedTilingSolutionKey::parse_canonical(key)
+                        .is_ok_and(|identity| drawing.matches_extended(identity)),
+                };
+                matches.then_some(key)
+            });
             let key = matched
                 .next()
                 .ok_or("pc pinned drawing is absent from the complete source")?;

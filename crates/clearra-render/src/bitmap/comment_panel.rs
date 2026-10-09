@@ -724,6 +724,6 @@ mod tests {
         let panel = CommentPanelLayout::prepare(&["한글 주석".to_owned()], 80).unwrap();
         let mut rgba = vec![0; (panel.width * panel.height * 4) as usize];
         panel.paint(&mut rgba, panel.width, 0, 0);
-        assert!(rgba.chunks_exact(4).any(|pixel| pixel == TEXT_COLOR));
+        assert!(rgba.as_chunks::<4>().0.contains(&TEXT_COLOR));
     }
 }

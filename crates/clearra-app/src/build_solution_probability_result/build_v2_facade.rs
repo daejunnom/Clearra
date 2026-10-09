@@ -2705,7 +2705,10 @@ mod tests {
             pinned.source_candidate_count(),
             source.source_candidate_count()
         );
-        assert_eq!(pinned.canonical_candidate_keys(), &[key.clone()]);
+        assert_eq!(
+            pinned.canonical_candidate_keys(),
+            std::slice::from_ref(&key)
+        );
         assert_eq!(
             pinned
                 .portfolio_alternative_owner()

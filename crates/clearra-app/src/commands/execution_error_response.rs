@@ -55,6 +55,25 @@ pub(crate) fn core_execution_error_response(error: CoreExecutionError) -> AppRes
     }
 }
 
+fn unsupported_runtime_response(reason: &'static str) -> AppResponse {
+    let code = if reason == "core_c_packing_runtime_unavailable"
+        || reason == "core_c_buildup_runtime_unavailable"
+    {
+        AppErrorCode::NativeCoreUnavailable
+    } else if reason.starts_with("gpu_") {
+        AppErrorCode::BackendGpuUnavailable
+    } else {
+        AppErrorCode::Unsupported
+    };
+    AppResponse::failed(
+        AppStatus::Unsupported,
+        AppError::new(
+            code,
+            format!("requested execution runtime is unsupported: {reason}"),
+        ),
+    )
+}
+
 #[cfg(test)]
 mod replay_failure_tests {
     use super::*;
@@ -92,23 +111,4 @@ mod replay_failure_tests {
         assert_eq!(missing_runtime.status(), AppStatus::Unsupported);
         assert!(!missing_runtime.resource_report().solver_executed());
     }
-}
-
-fn unsupported_runtime_response(reason: &'static str) -> AppResponse {
-    let code = if reason == "core_c_packing_runtime_unavailable"
-        || reason == "core_c_buildup_runtime_unavailable"
-    {
-        AppErrorCode::NativeCoreUnavailable
-    } else if reason.starts_with("gpu_") {
-        AppErrorCode::BackendGpuUnavailable
-    } else {
-        AppErrorCode::Unsupported
-    };
-    AppResponse::failed(
-        AppStatus::Unsupported,
-        AppError::new(
-            code,
-            format!("requested execution runtime is unsupported: {reason}"),
-        ),
-    )
 }

@@ -54,16 +54,30 @@ pub fn validate_pc_scenario_query(query: &PcScenarioQuery) -> DiagnosticReport {
 
 fn validate_scenario_board(query: &PcScenarioQuery, report: &mut DiagnosticReport) {
     let board = query.initial_board();
-    let full_height_family = matches!(
-        query.objective().kind(),
-        clearra_core_domain::objective::objective_kind::ObjectiveKind::All
-            | clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique
-            | clearra_core_domain::objective::objective_kind::ObjectiveKind::MinimumCover
-    ) && matches!(
-        query.count_policy(),
-        clearra_pc_graph::request::PcCountPolicy::CountAll
-            | clearra_pc_graph::request::PcCountPolicy::CountUnique
-    ) && !query.objective().score().requested()
+    // Score-summary and score-minimals now retain the same four-word PC
+    // source. Admit their input layout here; the App product contract and
+    // Core's purpose-specific evidence still own result qualification.
+    // Unique + score is not that complete physical score source.
+    let score_source = query.objective().score().requested()
+        && matches!(
+            query.objective().kind(),
+            clearra_core_domain::objective::objective_kind::ObjectiveKind::All
+                | clearra_core_domain::objective::objective_kind::ObjectiveKind::MinimumCover
+        )
+        && query.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountAll;
+    let ordinary_source = !query.objective().score().requested()
+        && matches!(
+            query.objective().kind(),
+            clearra_core_domain::objective::objective_kind::ObjectiveKind::All
+                | clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique
+                | clearra_core_domain::objective::objective_kind::ObjectiveKind::MinimumCover
+        );
+    let full_height_family = (ordinary_source || score_source)
+        && matches!(
+            query.count_policy(),
+            clearra_pc_graph::request::PcCountPolicy::CountAll
+                | clearra_pc_graph::request::PcCountPolicy::CountUnique
+        )
         && !query.objective().execution_constraints().requested()
         && !query
             .queue_observation_policy()
