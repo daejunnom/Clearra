@@ -107,6 +107,7 @@ fn full_height_pc_family_runs_buildup_and_clears_the_whole_board_in_all_profiles
             // minimum/score/replay producer.
             assert!(result.tiling_solution_page_store().is_none());
             assert!(result.pc_chance_coverage_evidence().is_none());
+            assert!(result.pc_full_height_replay_evidence().is_none());
             assert!(result.exact_scoring_execution_batches().is_empty());
         }
     }
@@ -227,6 +228,132 @@ fn full_height_score_source_retains_actual_lock_graphs_and_distinct_problem_auth
             let public = result.without_pc_score_transient_evidence();
             assert!(public.full_height_scoring_execution_batch().is_none());
             assert!(public.pc_score_problem_evidence().is_none());
+        }
+    }
+}
+
+fn replay_signature(result: &clearra_core_executor::CoreExecutionResult) -> Vec<Vec<String>> {
+    use clearra_postprocess::{
+        ExactReplayGraphLocation, ExactReplayMaterializationLimits, FullHeightReplayLanguageSession,
+    };
+    let batch = result.pc_full_height_replay_evidence().unwrap().batch();
+    let batches: Arc<[_]> = vec![batch.clone()].into();
+    let mut signatures = Vec::new();
+    for candidate in 1..=result.normalized_solution_keys().len() as u64 {
+        let locations = batch
+            .execution()
+            .graphs()
+            .iter()
+            .enumerate()
+            .filter(|(_, graph)| graph.candidate_id() == candidate)
+            .map(|(graph, _)| ExactReplayGraphLocation { batch: 0, graph })
+            .collect();
+        let mut language = FullHeightReplayLanguageSession::new(
+            Arc::clone(&batches),
+            locations,
+            0,
+            ExactReplayMaterializationLimits::new(1_000_000, 60, 32 * 1024 * 1024),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        let control = ExecutionControl::default();
+        while !language.advance(1024, &control, &mut |_| Ok(())).unwrap() {}
+        let keys = (0..language.count().unwrap())
+            .map(|rank| {
+                let member = language.select(rank, &control, &mut |_| Ok(())).unwrap();
+                assert!(member.replay_trace().final_board().is_empty());
+                member.trace_identity().to_owned()
+            })
+            .collect();
+        signatures.push(keys);
+    }
+    signatures
+}
+
+#[test]
+fn full_height_replay_source_is_purpose_bound_and_retains_every_physical_graph() {
+    for rule in [srs(), srs_plus(), srs_x(), jstris_180(), no_kick()] {
+        for height in [7, 8, 12, 24] {
+            let (query, initial, _) = forced_query(height, rule);
+            let ordinary = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            let problem = ordinary.clone().with_pc_path_v2_evidence();
+            let result =
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .unwrap();
+            let evidence = result.pc_full_height_replay_evidence().unwrap();
+            assert!(evidence.matches_result_source(&problem, result.normalized_solution_keys()));
+            assert!(!evidence.matches_result_source(&ordinary, result.normalized_solution_keys()));
+            assert!(!evidence.matches_result_source(
+                &problem.clone().with_pc_minimum_cover_v2_evidence(),
+                result.normalized_solution_keys(),
+            ));
+            assert!(!evidence.matches_result_source(&problem, &[]));
+            let altered = vec![format!("{}foreign", result.normalized_solution_keys()[0])];
+            assert!(!evidence.matches_result_source(&problem, &altered));
+            assert_eq!(evidence.batch().height(), height);
+            assert_eq!(evidence.batch().initial(), initial);
+            assert!(result.full_height_scoring_execution_batch().is_none());
+            assert!(result.pc_score_problem_evidence().is_none());
+            assert!(result.exact_scoring_execution_batches().is_empty());
+            // Core completed its All family and raw BuildUp paths. The App
+            // still must count/project the distinct visible replay language.
+            assert_eq!(result.bool_field("objective_complete"), Some(true));
+            assert_eq!(result.bool_field("complete_replay_complete"), Some(false));
+            let members = replay_signature(&result);
+            assert_eq!(members.len(), 1);
+            assert!(!members[0].is_empty());
+            assert!(members[0].windows(2).all(|pair| pair[0] < pair[1]));
+            let before = result.checked_resource_retained_bytes().unwrap();
+            let cleared = result.clone().without_pc_full_height_replay_evidence();
+            assert!(cleared.checked_resource_retained_bytes().unwrap() < before);
+            assert!(cleared.pc_full_height_replay_evidence().is_none());
+            assert!(result
+                .into_fail_closed_public_solution_surface()
+                .pc_full_height_replay_evidence()
+                .is_none());
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_parallel_replay_source_has_the_same_complete_ranked_language() {
+    let hardware = std::thread::available_parallelism().map_or(1, usize::from);
+    if hardware < 2 {
+        return;
+    }
+    for height in [7, 8, 12, 24] {
+        let query = branching_query(height, srs_plus()).with_count_policy(PcCountPolicy::CountAll);
+        let mut signature = None;
+        for workers in [1, 2] {
+            let problem = ProblemCompiler::compile_scenario_pc(
+                &query.clone().with_execution_policy(
+                    query
+                        .execution_policy()
+                        .clone()
+                        .with_workers(workers)
+                        .with_use_all_logical_processors(hardware == 2),
+                ),
+            )
+            .unwrap()
+            .with_pc_path_v2_evidence();
+            let result =
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .unwrap();
+            assert_eq!(result.usize_field("workers_used"), Some(workers));
+            assert!(result
+                .pc_full_height_replay_evidence()
+                .unwrap()
+                .matches_result_source(&problem, result.normalized_solution_keys()));
+            let observed = (
+                result.normalized_solution_keys().to_vec(),
+                replay_signature(&result),
+            );
+            if let Some(expected) = &signature {
+                assert_eq!(&observed, expected);
+            } else {
+                signature = Some(observed);
+            }
         }
     }
 }

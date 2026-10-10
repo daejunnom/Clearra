@@ -1,5 +1,7 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
-use clearra_replay::{ExactScoringExecutionBatch, HoldDecision, SpinCoverageExecutionBatch};
+use clearra_replay::{
+    ExactScoringExecutionBatch, FullHeightExecutionBatch, HoldDecision, SpinCoverageExecutionBatch,
+};
 use clearra_supply::{
     execution_automaton::{
         SupplyBranchKind, SupplyExecutionAutomaton, SupplyExecutionState,
@@ -50,6 +52,18 @@ impl ExecutionSupplyBatch for SpinCoverageExecutionBatch {
 
     fn projects_standard_bag_lookahead(&self) -> bool {
         self.projects_standard_bag_lookahead()
+    }
+}
+
+impl ExecutionSupplyBatch for FullHeightExecutionBatch {
+    fn hold_enabled(&self) -> bool {
+        self.execution().hold_enabled()
+    }
+    fn projects_unplaced_lookahead(&self) -> bool {
+        self.execution().projects_unplaced_lookahead()
+    }
+    fn projects_standard_bag_lookahead(&self) -> bool {
+        self.execution().projects_standard_bag_lookahead()
     }
 }
 

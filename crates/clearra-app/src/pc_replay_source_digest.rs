@@ -5,7 +5,8 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_problem::SearchProblem;
 use clearra_replay::{
-    ExactScoringExecutionBatch, ExactScoringExecutionGraph, RotationRequest, ScoringExecutionEdge,
+    ExactScoringExecutionBatch, ExactScoringExecutionGraph, FullHeightExecutionBatch,
+    RotationRequest, ScoringExecutionEdge, SpinCoverageExecutionGraph,
 };
 use sha2::{Digest, Sha256};
 
@@ -31,39 +32,11 @@ pub(crate) fn pc_replay_source_hasher(
         &mut hash,
         b"count:distinct-visible-language/lexical-rank/v1",
     )?;
-    bytes(&mut hash, problem.problem_id().as_str().as_bytes())?;
-    bytes(&mut hash, problem.board_profile().id().as_str().as_bytes())?;
-    hash.update(problem.initial_board().occupied_mask().to_le_bytes());
-    hash.update(problem.visible_height().to_le_bytes());
-    hash.update(problem.search_height().to_le_bytes());
-    hash.update(problem.initial_hold().cursor().to_le_bytes());
-    hash.update([optional_piece(problem.initial_hold().hold_piece())]);
-    let supply = problem.supply();
-    hash.update([
-        u8::from(supply.hold_enabled()),
-        u8::from(supply.projects_unplaced_lookahead()),
-        u8::from(supply.projects_standard_bag_lookahead()),
-    ]);
-    count(&mut hash, supply.source_sequence_length())?;
-    bytes(&mut hash, supply.queue_mode().as_bytes())?;
-    bytes(&mut hash, supply.supply_window_resolution().as_bytes())?;
-    hash.update(problem.piece_source().id().get().to_le_bytes());
-    bytes(
-        &mut hash,
-        problem.rule_profile_value().id().as_str().as_bytes(),
-    )?;
-    let kicks = problem.kick_profile();
-    bytes(&mut hash, kicks.profile_id().as_str().as_bytes())?;
-    bytes(&mut hash, kicks.source_rule().as_str().as_bytes())?;
-    hash.update([u8::from(kicks.verified()), u8::from(kicks.supports_180())]);
-    count(&mut hash, kicks.transition_count())?;
-    let spawn = problem.spawn_profile();
-    bytes(&mut hash, spawn.id().as_str().as_bytes())?;
-    hash.update(spawn.x().to_le_bytes());
-    hash.update(spawn.y().to_le_bytes());
+    hash_problem_context(&mut hash, problem, false)?;
 
     bytes(&mut hash, b"ordered-batches")?;
     count(&mut hash, batches.len())?;
+    let supply = problem.supply();
     for batch in batches {
         if !batch.complete()
             || batch.initial_occupied() != problem.initial_board().occupied_mask()
@@ -84,6 +57,145 @@ pub(crate) fn pc_replay_source_hasher(
     }
     bytes(&mut hash, b"ordered-exact-manifest")?;
     Ok(hash)
+}
+
+fn hash_problem_context(
+    hash: &mut Sha256,
+    problem: &SearchProblem,
+    full_height: bool,
+) -> Result<(), &'static str> {
+    bytes(hash, problem.problem_id().as_str().as_bytes())?;
+    bytes(hash, problem.board_profile().id().as_str().as_bytes())?;
+    if full_height {
+        for word in problem.initial_board().occupied_words() {
+            hash.update(word.to_le_bytes());
+        }
+    } else {
+        hash.update(problem.initial_board().occupied_mask().to_le_bytes());
+    }
+    hash.update(problem.visible_height().to_le_bytes());
+    hash.update(problem.search_height().to_le_bytes());
+    hash.update(problem.initial_hold().cursor().to_le_bytes());
+    hash.update([optional_piece(problem.initial_hold().hold_piece())]);
+    let supply = problem.supply();
+    hash.update([
+        u8::from(supply.hold_enabled()),
+        u8::from(supply.projects_unplaced_lookahead()),
+        u8::from(supply.projects_standard_bag_lookahead()),
+    ]);
+    count(hash, supply.source_sequence_length())?;
+    bytes(hash, supply.queue_mode().as_bytes())?;
+    bytes(hash, supply.supply_window_resolution().as_bytes())?;
+    hash.update(problem.piece_source().id().get().to_le_bytes());
+    bytes(hash, problem.rule_profile_value().id().as_str().as_bytes())?;
+    let kicks = problem.kick_profile();
+    bytes(hash, kicks.profile_id().as_str().as_bytes())?;
+    bytes(hash, kicks.source_rule().as_str().as_bytes())?;
+    hash.update([u8::from(kicks.verified()), u8::from(kicks.supports_180())]);
+    count(hash, kicks.transition_count())?;
+    let spawn = problem.spawn_profile();
+    bytes(hash, spawn.id().as_str().as_bytes())?;
+    hash.update(spawn.x().to_le_bytes());
+    hash.update(spawn.y().to_le_bytes());
+
+    Ok(())
+}
+
+/// Distinct identity schema for four-word physical replay. The compact v3
+/// byte stream stays unchanged and cannot alias this source's trk2/ranks.
+pub(crate) fn full_height_pc_replay_source_hasher(
+    problem: &SearchProblem,
+    batches: &[FullHeightExecutionBatch],
+) -> Result<Sha256, &'static str> {
+    if !(7..=24).contains(&problem.visible_height()) {
+        return Err(INVALID_SOURCE);
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"clearra.pc-replay-source.v4/full-height\0");
+    bytes(
+        &mut hash,
+        b"canonical-projection:trk2/four-word/request-bound-cursor-hold/v1",
+    )?;
+    bytes(
+        &mut hash,
+        b"count:distinct-visible-language/lexical-rank/v1",
+    )?;
+    hash_problem_context(&mut hash, problem, true)?;
+    bytes(&mut hash, b"ordered-batches")?;
+    count(&mut hash, batches.len())?;
+    let supply = problem.supply();
+    for batch in batches {
+        let execution = batch.execution();
+        if !execution.complete()
+            || batch.initial().words() != problem.initial_board().occupied_words()
+            || u16::from(batch.height()) != problem.visible_height()
+            || execution.initial_cursor() != problem.initial_hold().cursor()
+            || execution.initial_hold() != problem.initial_hold().hold_piece()
+            || execution.hold_enabled() != supply.hold_enabled()
+            || execution.projects_unplaced_lookahead() != supply.projects_unplaced_lookahead()
+            || execution.projects_standard_bag_lookahead()
+                != supply.projects_standard_bag_lookahead()
+            || batches
+                .first()
+                .is_some_and(|first| execution.patterns() != first.execution().patterns())
+        {
+            return Err(INVALID_SOURCE);
+        }
+        hash.update([batch.height()]);
+        for word in batch.initial().words() {
+            hash.update(word.to_le_bytes());
+        }
+        hash.update(execution.initial_cursor().to_le_bytes());
+        hash.update([
+            optional_piece(execution.initial_hold()),
+            u8::from(execution.hold_enabled()),
+            u8::from(execution.projects_unplaced_lookahead()),
+            u8::from(execution.projects_standard_bag_lookahead()),
+            u8::from(execution.complete()),
+        ]);
+        hash.update(execution.kick_table_id().to_le_bytes());
+        hash.update(execution.rule_profile_id().to_le_bytes());
+        count(&mut hash, execution.patterns().len())?;
+        for pattern in execution.patterns() {
+            count(&mut hash, pattern.len())?;
+            for piece in pattern {
+                hash.update([piece.as_ascii() as u8]);
+            }
+        }
+        count(&mut hash, execution.graphs().len())?;
+        for graph in execution.graphs() {
+            hash_full_height_graph(&mut hash, graph)?;
+        }
+    }
+    bytes(&mut hash, b"ordered-exact-manifest")?;
+    Ok(hash)
+}
+
+fn hash_full_height_graph(
+    hash: &mut Sha256,
+    graph: &SpinCoverageExecutionGraph,
+) -> Result<(), &'static str> {
+    let nodes = u32::try_from(graph.node_count()).map_err(|_| INVALID_SOURCE)?;
+    if graph.root() >= nodes {
+        return Err(INVALID_SOURCE);
+    }
+    hash.update(b"full-height-graph\0");
+    hash.update(graph.candidate_id().to_le_bytes());
+    bytes(hash, graph.candidate_key().as_bytes())?;
+    hash.update(graph.root().to_le_bytes());
+    hash.update(nodes.to_le_bytes());
+    for index in 0..nodes {
+        let node = graph.node(index).ok_or(INVALID_SOURCE)?;
+        graph.checked_edges(node).ok_or(INVALID_SOURCE)?;
+        hash.update(node.edge_start().to_le_bytes());
+        hash.update(node.edge_count().to_le_bytes());
+        hash.update([u8::from(node.accepting())]);
+    }
+    count(hash, graph.all_edges().len())?;
+    for edge in graph.all_edges() {
+        hash_edge(hash, *edge);
+    }
+    Ok(())
 }
 
 fn count(hash: &mut Sha256, value: usize) -> Result<(), &'static str> {

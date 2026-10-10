@@ -18,6 +18,10 @@ use clearra_replay::ExactScoringExecutionBatch;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+#[path = "pc_replay_source_batches.rs"]
+mod batches;
+use batches::{ReplayBatches, ReplayLanguage};
+
 #[path = "pc_replay_page_store.rs"]
 mod store;
 pub use store::{PcReplayPageAdvance, PcReplayPageStore};
@@ -54,7 +58,7 @@ struct PatternManifest {
 pub struct PcReplayPageSource {
     problem_id: String,
     projection: PcPathProjectionContext,
-    batches: Arc<[ExactScoringExecutionBatch]>,
+    batches: ReplayBatches,
     retained_graph_bytes: u128,
     retained_manifest_nested_bytes: u128,
     retained_first_member_nested_bytes: u128,
@@ -81,7 +85,7 @@ pub struct PcReplaySourceBuildSession {
     next_pattern: usize,
     current_patterns: Vec<PatternManifest>,
     current_witness_count: usize,
-    language: Option<ExactReplayLanguageSession>,
+    language: Option<ReplayLanguage>,
     first_rank: usize,
     hasher: Sha256,
     complete: bool,
@@ -161,89 +165,14 @@ impl PcReplaySourceBuildSession {
             return Err("pc replay empty pattern universe".into());
         }
         let projection = PcPathProjectionContext::from_problem(problem);
-        let input = result.exact_scoring_execution_batches();
-        if input.is_empty()
-            && !(result.bool_field("count_complete") == Some(true)
-                && result.usize_field("solution_count") == Some(0)
-                && result.bool_field("solution_found") == Some(false))
-        {
-            return Err(
-                "pc replay execution graph is missing or its empty result is unproven".into(),
-            );
-        }
-        let mut clone_peak = bytes::<ExactScoringExecutionBatch>(input.len())?
-            .checked_mul(2)
-            .ok_or(OVERFLOW)?;
-        let mut graph_count = 0usize;
-        for batch in input {
-            if !batch.complete()
-                || batch.initial_occupied() != projection.initial_board
-                || usize::from(batch.initial_cursor()) != projection.initial_cursor
-                || batch.initial_hold() != projection.initial_hold
-                || batch.patterns().len() != pattern_count
-            {
-                return Err("pc replay graph source does not match the query".into());
-            }
-            clone_peak = clone_peak
-                .checked_add(batch.checked_clone_nested_bytes().ok_or(OVERFLOW)?)
-                .ok_or(OVERFLOW)?;
-            graph_count = graph_count
-                .checked_add(batch.graphs().len())
-                .ok_or(OVERFLOW)?;
-        }
-        // A sorted flat index avoids hidden BTree allocation during grouping.
-        let base_peak = original
-            .checked_add(clone_peak)
-            .and_then(|n| {
-                n.checked_add(bytes::<(u64, ExactReplayGraphLocation)>(graph_count).ok()?)
-            })
-            .and_then(|n| {
-                n.checked_add(bytes::<(u64, Vec<ExactReplayGraphLocation>)>(graph_count).ok()?)
-            })
-            .and_then(|n| n.checked_add(bytes::<ExactReplayGraphLocation>(graph_count).ok()?))
-            .and_then(|n| n.checked_add(problem.problem_id().as_str().len() as u128))
-            .and_then(|n| {
-                n.checked_add(
-                    (core::mem::size_of::<Self>() + 2 * core::mem::size_of::<usize>()) as u128,
-                )
-            })
-            .ok_or(OVERFLOW)?;
-        ensure_peak(base_peak, maximum_bytes, &mut |_| true)?;
-        let copied = input.to_vec();
-        let copied_heap = copied
-            .iter()
-            .try_fold(
-                bytes::<ExactScoringExecutionBatch>(copied.capacity())?,
-                |n, b| n.checked_add(b.checked_nested_retained_bytes()?),
-            )
-            .ok_or(OVERFLOW)?;
-        // Vec -> Arc moves all nested allocations, but both outer backing
-        // stores overlap while the Arc header/slice is allocated.
-        ensure_peak(
-            original
-                .checked_add(copied_heap)
-                .and_then(|n| {
-                    n.checked_add(bytes::<ExactScoringExecutionBatch>(copied.len()).ok()?)
-                })
-                .and_then(|n| {
-                    n.checked_add(
-                        (core::mem::size_of::<Self>() + 2 * core::mem::size_of::<usize>()) as u128,
-                    )
-                })
-                .ok_or(OVERFLOW)?,
+        let (batches, retained_graph_bytes, graph_count) = ReplayBatches::copy_from_result(
+            problem,
+            result,
+            projection,
+            pattern_count,
+            original,
             maximum_bytes,
-            &mut |_| true,
         )?;
-        let batches: Arc<[ExactScoringExecutionBatch]> = copied.into();
-        let retained_graph_bytes = batches
-            .iter()
-            .try_fold(
-                bytes::<ExactScoringExecutionBatch>(batches.len())?
-                    .checked_add((2 * core::mem::size_of::<usize>()) as u128)
-                    .ok_or(OVERFLOW)?,
-                |n, b| n.checked_add(b.checked_nested_retained_bytes()?),
-            )
-            .ok_or(OVERFLOW)?;
         let constructor_live = original
             .checked_add(retained_graph_bytes)
             .and_then(|n| n.checked_add(core::mem::size_of::<Self>() as u128))
@@ -259,14 +188,7 @@ impl PcReplaySourceBuildSession {
         let mut flat = Vec::new();
         flat.try_reserve_exact(graph_count)
             .map_err(|_| "complete_replay_allocation_failed")?;
-        for (batch, source) in batches.iter().enumerate() {
-            for (graph, value) in source.graphs().iter().enumerate() {
-                flat.push((
-                    value.candidate_id(),
-                    ExactReplayGraphLocation { batch, graph },
-                ));
-            }
-        }
+        batches.push_flat_index(&mut flat);
         flat.sort_unstable_by_key(|(id, loc)| (*id, loc.batch, loc.graph));
         let flat_live = constructor_live
             .checked_add(bytes::<(u64, ExactReplayGraphLocation)>(flat.capacity())?)
@@ -326,7 +248,7 @@ impl PcReplaySourceBuildSession {
             index += count;
         }
         drop(flat);
-        let hasher = crate::pc_replay_source_digest::pc_replay_source_hasher(problem, &batches)?;
+        let hasher = batches.source_hasher(problem)?;
         let session = Self {
             source: PcReplayPageSource {
                 problem_id: problem.problem_id().as_str().to_owned(),
@@ -424,16 +346,16 @@ impl PcReplaySourceBuildSession {
                 && self.source.first_members.len() < PC_REPLAY_MEMBER_PAGE_SIZE
                 && self.first_rank < count
             {
-                let member = language
-                    .select(self.first_rank, control, &mut language_guard)
-                    .map_err(|e| replay_engine_error(e, external))?;
-                let execution = into_core(self.pending[self.next_geometry].0, member)?;
+                let execution = language.select(
+                    self.pending[self.next_geometry].0,
+                    self.first_rank,
+                    control,
+                    external,
+                    &mut language_guard,
+                )?;
                 let engine_bytes = language.checked_retained_bytes().ok_or(OVERFLOW)?;
-                let execution_bytes = (core::mem::size_of::<CorePostProcessExecution>() as u128)
-                    .checked_add(execution.checked_nested_retained_bytes().ok_or(OVERFLOW)?)
-                    .ok_or(OVERFLOW)?;
-                let projection =
-                    checked_execution_projection_peak_bytes(&execution).ok_or(OVERFLOW)?;
+                let execution_bytes = execution.checked_owned_bytes().ok_or(OVERFLOW)?;
+                let projection = execution.checked_projection_bytes().ok_or(OVERFLOW)?;
                 let new_slots = bytes::<PcPathWitnessV2>(
                     self.source
                         .first_members
@@ -462,9 +384,8 @@ impl PcReplaySourceBuildSession {
                         })
                         .ok_or(OVERFLOW)?,
                 )?;
-                let witness = project_execution_with_context(
+                let witness = execution.project(
                     self.source.projection,
-                    &execution,
                     self.source.materialized_pattern_count,
                     1,
                 )?;
@@ -651,7 +572,7 @@ impl PcReplayPageSource {
         &self.first_members
     }
     pub(crate) fn matches_result(&self, result: &CoreExecutionResult) -> bool {
-        self.batches.as_ref() == result.exact_scoring_execution_batches()
+        self.batches.matches_result(result)
     }
 
     pub fn page_metadata(
@@ -696,12 +617,7 @@ impl PcReplayPageSource {
     }
     #[cfg(test)]
     pub(crate) fn checked_full_capacity_recount(&self) -> Option<u128> {
-        let graph = self.batches.iter().try_fold(
-            bytes::<ExactScoringExecutionBatch>(self.batches.len())
-                .ok()?
-                .checked_add((2 * core::mem::size_of::<usize>()) as u128)?,
-            |n, b| n.checked_add(b.checked_nested_retained_bytes()?),
-        )?;
+        let graph = self.batches.checked_retained_bytes()?;
         let manifest = self.geometries.iter().try_fold(0u128, |n, g| {
             n.checked_add(bytes::<ExactReplayGraphLocation>(g.locations.capacity()).ok()?)?
                 .checked_add(bytes::<PatternManifest>(g.patterns.capacity()).ok()?)
@@ -723,7 +639,7 @@ impl PcReplayPageSource {
         pattern: usize,
         additional: u128,
         guard: &mut impl FnMut(u128) -> bool,
-    ) -> ReplayResult<ExactReplayLanguageSession> {
+    ) -> ReplayResult<ReplayLanguage> {
         let external = self
             .checked_retained_capacity_bytes()
             .and_then(|n| n.checked_add(self.retained_external_bytes()?))
@@ -751,14 +667,14 @@ impl PcReplayPageSource {
                     required: external,
                     maximum: self.maximum_bytes,
                 })?;
-        ExactReplayLanguageSession::new(
-            Arc::clone(&self.batches),
-            locations,
-            pattern,
-            ExactReplayMaterializationLimits::new(MAX_GEOMETRY_EXECUTIONS, 256, allowance),
-            &mut |peak| engine_guard(external, peak, self.maximum_bytes, guard),
-        )
-        .map_err(|e| replay_engine_error(e, external))
+        self.batches
+            .new_language(
+                locations,
+                pattern,
+                ExactReplayMaterializationLimits::new(MAX_GEOMETRY_EXECUTIONS, 256, allowance),
+                &mut |peak| engine_guard(external, peak, self.maximum_bytes, guard),
+            )
+            .map_err(|e| replay_engine_error(e, external))
     }
 }
 

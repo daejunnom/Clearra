@@ -10,6 +10,15 @@ use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{OpeningPcSearchQuery, PcCountPolicy, PcScenarioQuery};
 use clearra_problem::{ProblemCompiler, SearchOutputPolicy, SearchProblem, SearchProblemPreset};
 
+#[path = "pc_path_board_mask.rs"]
+mod board_mask;
+pub use board_mask::PcPathBoardMask;
+#[path = "pc_full_height_path_projection.rs"]
+mod full_height;
+pub(crate) use full_height::{
+    checked_full_height_execution_projection_peak_bytes, project_full_height_execution,
+};
+
 pub const PC_PATH_FAMILY_RESULT_CONTRACT: &str = "pc-path-family.v2";
 pub const PC_PATH_WITNESS_CONTRACT: &str = "pc-path-witness.v2";
 pub const PC_PATH_CANONICAL_SELECTION: &str = "smallest-canonical-candidate-id";
@@ -84,10 +93,10 @@ pub struct PcPathStepV2 {
     rotation: u8,
     x: u16,
     y: u16,
-    placement_mask: u64,
-    board_before_mask: u64,
-    board_after_placement_mask: u64,
-    board_after_line_clear_mask: u64,
+    placement_mask: PcPathBoardMask,
+    board_before_mask: PcPathBoardMask,
+    board_after_placement_mask: PcPathBoardMask,
+    board_after_line_clear_mask: PcPathBoardMask,
     cleared_row_mask: u64,
     cleared_lines: u8,
     line_clear_identity: String,
@@ -138,19 +147,19 @@ impl PcPathStepV2 {
         self.y
     }
 
-    pub const fn placement_mask(&self) -> u64 {
+    pub const fn placement_mask(&self) -> PcPathBoardMask {
         self.placement_mask
     }
 
-    pub const fn board_before_mask(&self) -> u64 {
+    pub const fn board_before_mask(&self) -> PcPathBoardMask {
         self.board_before_mask
     }
 
-    pub const fn board_after_placement_mask(&self) -> u64 {
+    pub const fn board_after_placement_mask(&self) -> PcPathBoardMask {
         self.board_after_placement_mask
     }
 
-    pub const fn board_after_line_clear_mask(&self) -> u64 {
+    pub const fn board_after_line_clear_mask(&self) -> PcPathBoardMask {
         self.board_after_line_clear_mask
     }
 
@@ -272,7 +281,7 @@ pub(crate) fn pc_path_witness_payload(witness: &PcPathWitnessV2) -> PcPathWitnes
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PcPathProjectionContext {
-    pub initial_board: u64,
+    pub initial_board: PcPathBoardMask,
     pub initial_cursor: usize,
     pub initial_hold: Option<PieceKind>,
 }
@@ -280,7 +289,17 @@ pub(crate) struct PcPathProjectionContext {
 impl PcPathProjectionContext {
     pub(crate) fn from_problem(problem: &SearchProblem) -> Self {
         Self {
-            initial_board: problem.initial_board().occupied_mask(),
+            initial_board: if problem.visible_height() <= 6 {
+                PcPathBoardMask::Compact(problem.initial_board().occupied_mask())
+            } else {
+                PcPathBoardMask::FullHeight {
+                    height: problem.visible_height() as u8,
+                    occupied:
+                        clearra_core_domain::board::standard_pc_board::Board256Mask::from_words(
+                            problem.initial_board().occupied_words(),
+                        ),
+                }
+            },
             initial_cursor: usize::from(problem.initial_hold().cursor()),
             initial_hold: problem.initial_hold().hold_piece(),
         }
@@ -389,6 +408,7 @@ impl PcPathQueryBinding<'_> {
             Self::Opening(query) => ProblemCompiler::compile_opening_pc(query.as_ref()),
             Self::Scenario(query) => ProblemCompiler::compile_scenario_pc(query.as_ref()),
         }
+        .map(SearchProblem::with_pc_path_v2_evidence)
         .map_err(|_| "pc path expected problem did not compile")
     }
 }
@@ -648,7 +668,10 @@ fn validate_and_project_execution(
     if source_steps.is_empty() {
         return Err("pc path replay trace is empty");
     }
-    let mut expected_board = context.initial_board;
+    let mut expected_board = context
+        .initial_board
+        .compact()
+        .ok_or("pc path compact projection cannot consume a full-height board")?;
     let mut expected_cursor = context.initial_cursor;
     let mut expected_hold = context.initial_hold;
     let mut projected = if project {
@@ -720,10 +743,14 @@ fn validate_and_project_execution(
                 rotation: placement.rotation().quarter_turns(),
                 x: placement.x(),
                 y: placement.y(),
-                placement_mask: placement.mask(),
-                board_before_mask: before.occupied(),
-                board_after_placement_mask: after.after_placement().occupied(),
-                board_after_line_clear_mask: after.after_line_clear().occupied(),
+                placement_mask: PcPathBoardMask::Compact(placement.mask()),
+                board_before_mask: PcPathBoardMask::Compact(before.occupied()),
+                board_after_placement_mask: PcPathBoardMask::Compact(
+                    after.after_placement().occupied(),
+                ),
+                board_after_line_clear_mask: PcPathBoardMask::Compact(
+                    after.after_line_clear().occupied(),
+                ),
                 cleared_row_mask,
                 cleared_lines,
                 line_clear_identity,

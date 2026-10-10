@@ -18,6 +18,7 @@ use crate::{
     pc_chance_coverage_evidence::{
         DistributedPcChanceCoverageRows, PcChanceCoverageEvidence, PcScoreProblemEvidence,
     },
+    pc_full_height_replay_evidence::PcFullHeightReplayEvidence,
     result_views::{SearchExecutionReport, SearchExecutionReportBuildError},
     setup_finder_report::SetupFinderReport,
     solution_probability::{
@@ -142,6 +143,7 @@ pub struct CoreExecutionResult {
     pc_chance_coverage_evidence: Option<PcChanceCoverageEvidence>,
     distributed_pc_chance_coverage_rows: Option<DistributedPcChanceCoverageRows>,
     pc_score_problem_evidence: Option<PcScoreProblemEvidence>,
+    pc_full_height_replay_evidence: Option<PcFullHeightReplayEvidence>,
     solution_coverages: Vec<SolutionCoverage>,
     normalized_solution_coverages: Vec<NormalizedSolutionCoverage>,
     solution_probabilities: Vec<SolutionProbabilityReport>,
@@ -238,6 +240,7 @@ impl CoreExecutionResult {
             pc_chance_coverage_evidence: None,
             distributed_pc_chance_coverage_rows: None,
             pc_score_problem_evidence: None,
+            pc_full_height_replay_evidence: None,
             solution_coverages: Vec::new(),
             normalized_solution_coverages: Vec::new(),
             solution_probabilities: Vec::new(),
@@ -441,6 +444,25 @@ impl CoreExecutionResult {
         self
     }
 
+    pub(crate) fn with_pc_full_height_replay_evidence(
+        mut self,
+        evidence: PcFullHeightReplayEvidence,
+    ) -> Self {
+        self.pc_full_height_replay_evidence = Some(evidence);
+        self
+    }
+
+    pub fn pc_full_height_replay_evidence(&self) -> Option<&PcFullHeightReplayEvidence> {
+        self.pc_full_height_replay_evidence.as_ref()
+    }
+
+    /// Page sources own the copied immutable physical graphs after validation;
+    /// the response must not retain a second complete producer graph owner.
+    pub fn without_pc_full_height_replay_evidence(mut self) -> Self {
+        self.pc_full_height_replay_evidence = None;
+        self
+    }
+
     pub fn with_exact_scoring_execution_batches(
         mut self,
         batches: Vec<ExactScoringExecutionBatch>,
@@ -565,12 +587,14 @@ impl CoreExecutionResult {
         self.pc_chance_coverage_evidence = None;
         self.distributed_pc_chance_coverage_rows = None;
         self.pc_score_problem_evidence = None;
+        self.pc_full_height_replay_evidence = None;
         self.solution_coverages.clear();
         self.normalized_solution_coverages.clear();
         self.solution_probabilities.clear();
         self.solution_average_scores.clear();
         self.exact_scoring_execution_batches.clear();
         self.spin_coverage_execution_batches.clear();
+        self.full_height_scoring_execution_batch = None;
         self.postprocess_score_cells.clear();
         self.postprocess_score_cells_complete = false;
         self.postprocess_score_profile_id = None;
@@ -661,6 +685,7 @@ impl CoreExecutionResult {
         self.pc_chance_coverage_evidence = None;
         self.distributed_pc_chance_coverage_rows = None;
         self.pc_score_problem_evidence = None;
+        self.pc_full_height_replay_evidence = None;
         self.solution_coverages = Vec::new();
         self.normalized_solution_coverages = Vec::new();
         self.solution_probabilities = Vec::new();
@@ -882,6 +907,7 @@ impl CoreExecutionResult {
     /// the product response boundary.
     pub fn without_pc_score_transient_evidence(mut self) -> Self {
         self.pc_score_problem_evidence = None;
+        self.pc_full_height_replay_evidence = None;
         self.postprocess_replay_trace = None;
         self.postprocess_executions.clear();
         self.postprocess_execution_complete = false;
@@ -1265,6 +1291,9 @@ impl CoreExecutionResult {
         }
         if let Some(evidence) = &self.pc_score_problem_evidence {
             bytes = bytes.checked_add(evidence.checked_storage_retained_bytes()?)?;
+        }
+        if let Some(evidence) = &self.pc_full_height_replay_evidence {
+            bytes = bytes.checked_add(evidence.checked_nested_retained_bytes()?)?;
         }
 
         bytes = bytes.checked_add(
@@ -2575,6 +2604,7 @@ mod tests {
             pc_chance_coverage_evidence,
             distributed_pc_chance_coverage_rows,
             pc_score_problem_evidence,
+            pc_full_height_replay_evidence,
             solution_coverages,
             normalized_solution_coverages,
             solution_probabilities,
@@ -2616,6 +2646,7 @@ mod tests {
             pc_chance_coverage_evidence,
             distributed_pc_chance_coverage_rows,
             pc_score_problem_evidence,
+            pc_full_height_replay_evidence,
             solution_coverages,
             normalized_solution_coverages,
             solution_probabilities,

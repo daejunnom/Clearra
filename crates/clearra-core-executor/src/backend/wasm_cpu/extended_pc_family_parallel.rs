@@ -469,6 +469,10 @@ impl ExtendedBuildProbabilitySession {
             || worker.truncated_reason.is_some()
             || worker.finished
             || (!self.problem.objective().score().requested()
+                && !self
+                    .problem
+                    .pc_chance_evidence_policy()
+                    .retains_pc_path_v2_evidence()
                 && !worker.spin_execution_graphs.is_empty())
             || !worker.finesse_languages.is_empty()
         {

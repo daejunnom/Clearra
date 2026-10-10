@@ -229,6 +229,85 @@ fn context() -> AppContext {
 }
 
 #[test]
+fn canonical_full_height_gui_and_discord_replay_commands_share_one_lazy_source() {
+    let context = context();
+    for input in inputs() {
+        let command = format!(
+            "clearra pc path --lines {} --board-mask 0x{} --height {} --pieces {} --queue {} --no-hold --rule srs-plus --no-tablebase --no-build-dependency-dag --backend auto --allow-backend-fallback --workers 1 --gpu-warmup",
+            input[1], input[2], input[1], input[3], input[4],
+        );
+        let request = CliCommandParser::parse(&command)
+            .unwrap()
+            .to_app_request()
+            .unwrap();
+        let direct = context.run(request.clone());
+        assert_eq!(
+            direct.status(),
+            AppStatus::Success,
+            "{}: {direct:?}",
+            input[0]
+        );
+        let expected = direct
+            .product_capability_result()
+            .unwrap()
+            .pc_path_family_v2()
+            .unwrap();
+        assert!(expected.completeness().complete());
+        assert_eq!(expected.page_source().unwrap().geometry_count(), 1);
+        let payload = direct
+            .product_capability_result()
+            .unwrap()
+            .public_result_payload()
+            .unwrap();
+        let ProductResultPayloadContent::PcPathFamily(family) = payload.content() else {
+            panic!("keep the existing replay family, not a second full-height presenter");
+        };
+        assert!(family.complete());
+        let witness = family.canonical_witness().unwrap();
+        assert_eq!(witness.steps().len().to_string(), input[3]);
+        assert_eq!(
+            witness.steps()[0].board_before_mask(),
+            format!("0x{}", input[2])
+        );
+        assert_eq!(
+            witness
+                .steps()
+                .last()
+                .unwrap()
+                .board_after_line_clear_mask(),
+            format!("0x{}", "0".repeat(64))
+        );
+        assert!(witness.normalized_trace_key().starts_with("trk2:"));
+        assert!(direct.public_page_source_owner().is_some());
+        let mut execution = context.start_cooperative_execution(request);
+        let mut completed = None;
+        for _ in 0..4096 {
+            match execution.advance(256, &ExecutionControl::default()) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                CooperativeAppAdvance::Completed(response) => {
+                    completed = Some(response);
+                    break;
+                }
+                other => panic!("unexpected full-height replay finalizer: {other:?}"),
+            }
+        }
+        let cooperative = completed.expect("bounded few-piece GUI replay");
+        assert_eq!(cooperative.status(), AppStatus::Success, "{cooperative:?}");
+        let actual = cooperative
+            .product_capability_result()
+            .unwrap()
+            .pc_path_family_v2()
+            .unwrap();
+        assert_eq!(actual.witness_count(), expected.witness_count());
+        assert_eq!(actual.witnesses(), expected.witnesses());
+        assert_eq!(
+            actual.page_source().unwrap().identity_sha256(),
+            expected.page_source().unwrap().identity_sha256()
+        );
+    }
+}
+
+#[test]
 fn canonical_full_height_scores_keep_full_fields_and_share_the_gui_finalizer() {
     let context = context();
     for input in inputs() {

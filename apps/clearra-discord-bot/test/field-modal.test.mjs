@@ -484,7 +484,7 @@ test("pc tiling Modal resolves only the canonical typed tiling authority", () =>
 test("24L Tiling, Minimum, Chance and Failed Queue Modals expose exactly Auto plus 24 rows in every released locale", () => {
   const expected = ["auto", ...Array.from({ length: 24 }, (_, index) => String(index + 1))];
   for (const locale of ["en", "ko", "ja"]) {
-    for (const product of ["tiling", "minimals", "chance", "failed-queue"]) {
+    for (const product of ["tiling", "minimals", "chance", "failed-queue", "path"]) {
     const modal = modalForSubcommand("pc", product, [], locale);
     assertStringSelect(component(modal, "lines"), expected, "auto");
     assert.equal(component(modal, "lines").options.length, 25, "Discord's 25-choice cap");

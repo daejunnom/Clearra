@@ -60,6 +60,11 @@ on:
       - "tests/fixtures/contracts/pc_target_frame_parity.v1.tsv"
       - "tests/fixtures/contracts/extended_solution_keys.v1.tsv"
       - "tests/fixtures/contracts/extended_pc_surface_input.v1.tsv"
+      - "tests/fixtures/contracts/extended_pc_replay_witness.v1.mjs"
+      - "packages/clearra-ui/src/lib/workspace/pcPathReplayPresentation.ts"
+      - "packages/clearra-ui/test/pcPathReplayRenderParity.test.mjs"
+      - "apps/clearra-discord-bot/src/viewer/pc-path-replay.mjs"
+      - "apps/clearra-discord-bot/test/pc-path-replay.test.mjs"
   workflow_dispatch:
 
 permissions:
@@ -163,6 +168,7 @@ jobs:
           cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown
           cargo check --locked -p clearra-output --no-default-features --target wasm32-unknown-unknown
           cargo check --locked -p clearra-wasm-abi --target wasm32-unknown-unknown
+          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown
       - name: Verify real extended PC Tiling App products and cooperative terminals
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-app --no-default-features --test extended_pc_tiling -- --test-threads=1
@@ -193,6 +199,12 @@ jobs:
       - name: Verify actual full-height score keys survive the bounded WASM payload adapter
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-wasm --lib full_height_score_key_projection -- --test-threads=1
+      - name: Verify full-height replay masks and the original compact page source without changing ordering
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p clearra-wasm --lib full_height_replay_payload -- --test-threads=1
+          cargo test --locked -p clearra-app --no-default-features --lib pc_replay_page_source -- --test-threads=1
+          cargo test --locked -p clearra-app --no-default-features --lib pc_path_board_mask -- --test-threads=1
       - name: Check changed App command validation and renderer owners without hiding global release lint
         if: ${{ !cancelled() }}
         run: cargo clippy --locked --no-deps -p clearra-app -p clearra-cli-command -p clearra-validation -p clearra-render --all-targets --no-default-features -- -D warnings
@@ -278,3 +290,6 @@ jobs:
       - name: Check Discord CTK3 projection against the same wire cases
         if: ${{ !cancelled() }}
         run: node --test apps/clearra-discord-bot/test/extended-solution-key.test.mjs apps/clearra-discord-bot/test/ctk3-result.test.mjs apps/clearra-discord-bot/test/slash-command-input.test.mjs apps/clearra-discord-bot/test/field-modal.test.mjs
+      - name: Verify the same full-height GUI and Discord replay frames and GIF bytes at 500ms
+        if: ${{ !cancelled() }}
+        run: node --test apps/clearra-discord-bot/test/pc-path-replay.test.mjs packages/clearra-ui/test/pcPathReplayRenderParity.test.mjs

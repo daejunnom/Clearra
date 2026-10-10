@@ -40,9 +40,14 @@ export function buildCanonicalPathReplayDocument(structured) {
     throw new Error("Discord received an invalid canonical path witness.");
   }
 
-  const height = replayHeight(witness.steps);
+  const maskHexDigits = /^0x[0-9a-f]{64}$/u.test(witness.steps[0]?.board_before_mask)
+    ? 64 : 16;
+  if (contract.build && maskHexDigits !== 16) {
+    throw new Error("Discord received an invalid Build path mask frame.");
+  }
+  const height = replayHeight(witness.steps, maskHexDigits);
   const cellCount = WIDTH * height;
-  const firstBefore = parseMask(witness.steps[0].board_before_mask, cellCount);
+  const firstBefore = parseMask(witness.steps[0].board_before_mask, cellCount, maskHexDigits);
   let cells = maskCells(firstBefore, cellCount, "G");
   let occupied = firstBefore;
   const pages = [page(height, cells)];
@@ -52,10 +57,10 @@ export function buildCanonicalPathReplayDocument(structured) {
     if (!plainObject(step) || step.step_index !== String(index) || !PIECES.has(step.active_piece)) {
       throw new Error("Discord received an invalid path replay step.");
     }
-    const before = parseMask(step.board_before_mask, cellCount);
-    const placement = parseMask(step.placement_mask, cellCount);
-    const afterPlacement = parseMask(step.board_after_placement_mask, cellCount);
-    const afterClear = parseMask(step.board_after_line_clear_mask, cellCount);
+    const before = parseMask(step.board_before_mask, cellCount, maskHexDigits);
+    const placement = parseMask(step.placement_mask, cellCount, maskHexDigits);
+    const afterPlacement = parseMask(step.board_after_placement_mask, cellCount, maskHexDigits);
+    const afterClear = parseMask(step.board_after_line_clear_mask, cellCount, maskHexDigits);
     const clearedRows = parseMask(step.cleared_row_mask, height);
     if (
       before !== occupied ||
@@ -126,7 +131,7 @@ function pathReplayContract(kind) {
   return null;
 }
 
-function replayHeight(steps) {
+function replayHeight(steps, maskHexDigits) {
   let height = MIN_VIEW_ROWS;
   for (const step of steps) {
     for (const value of [
@@ -135,7 +140,7 @@ function replayHeight(steps) {
       step?.board_after_placement_mask,
       step?.board_after_line_clear_mask,
     ]) {
-      const mask = parseCanonicalHexMask(value);
+      const mask = parseCanonicalHexMask(value, maskHexDigits);
       if (mask !== 0n) {
         height = Math.max(height, Math.ceil(mask.toString(2).length / WIDTH));
       }
@@ -191,16 +196,17 @@ function clearedRowsAreFull(board, height, clearedRows) {
   return true;
 }
 
-function parseMask(value, bitLimit) {
-  const mask = parseCanonicalHexMask(value);
+function parseMask(value, bitLimit, maskHexDigits = 16) {
+  const mask = parseCanonicalHexMask(value, maskHexDigits);
   if ((mask >> BigInt(bitLimit)) !== 0n) {
     throw new Error("Discord received a path replay mask outside its board.");
   }
   return mask;
 }
 
-function parseCanonicalHexMask(value) {
-  if (typeof value !== "string" || !/^0x[0-9a-f]{16}$/u.test(value)) {
+function parseCanonicalHexMask(value, maskHexDigits = 16) {
+  const canonical = maskHexDigits === 64 ? /^0x[0-9a-f]{64}$/u : /^0x[0-9a-f]{16}$/u;
+  if (typeof value !== "string" || !canonical.test(value)) {
     throw new Error("Discord received a noncanonical path replay mask.");
   }
   return BigInt(value);

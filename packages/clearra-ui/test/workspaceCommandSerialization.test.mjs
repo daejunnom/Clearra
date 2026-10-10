@@ -47,7 +47,7 @@ test('GUI and Desktop canonical argv retain the shared bounded 7..24L surface in
     .split(/\r?\n/u).filter(line => line && !line.startsWith('#'));
   for (const row of rows) {
     const [id, height, hex, pieces, queue] = row.split('\t');
-    for (const scoreMode of ['off', 'tiling', 'minimum-cover']) {
+    for (const scoreMode of ['off', 'tiling', 'minimum-cover', 'path']) {
       const request = { ...createDefaultWorkspaceRequest(), lines: Number(height),
         boardMask: BigInt(`0x${hex}`), queue, holdEnabled: false, workers: 1, scoreMode };
       assert.deepEqual(workspaceValidationCodes(request, 'web'), [], id);
@@ -121,10 +121,10 @@ test('extended mandatory selection passes a full document through the common PC 
 
 test('extended workspace guards result and option capabilities separately from the 24L field range', () => {
   const base = { ...createDefaultWorkspaceRequest(), lines: 24, workers: 1 };
-  for (const scoreMode of ['path']) {
-    assert.ok(workspaceValidationCodes({ ...base, queue: 'I', scoreMode }, 'desktop')
-      .includes('pc_extended_result_unavailable'), scoreMode);
-  }
+  const replay = { ...base, queue: 'IIIIII', scoreMode: 'path' };
+  assert.ok(!workspaceValidationCodes(replay, 'desktop').some(code => code.startsWith('pc_extended_')));
+  assert.ok(!workspaceValidationCodes(replay, 'web').some(code => code.startsWith('pc_extended_')));
+  assert.deepEqual(buildWorkspaceCommandArguments(replay).slice(0, 3), ['clearra', 'pc', 'path']);
   assert.ok(!workspaceValidationCodes({ ...base, queue: 'I', scoreMode: 'failed-queue' }, 'web')
     .some(code => code.startsWith('pc_extended_')));
   for (const scoreMode of ['summary', 'score-finder', 'score-minimals']) {

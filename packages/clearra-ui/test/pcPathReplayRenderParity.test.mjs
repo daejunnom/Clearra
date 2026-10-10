@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { fullHeightPcReplayWitness } from '../../../tests/fixtures/contracts/extended_pc_replay_witness.v1.mjs';
 
 import { build } from 'esbuild';
 
 import { renderDocumentGif } from '../../../apps/clearra-discord-bot/src/viewer/gif.mjs';
+import { buildCanonicalPcPathReplayDocument } from '../../../apps/clearra-discord-bot/src/viewer/pc-path-replay.mjs';
 
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 const bundle = await build({
@@ -66,6 +68,28 @@ test('Build export retains original and mirrored paths in one canonical group', 
   assert.equal(group.witnessCount, 2);
   assert.equal(production.pcPathCandidateGroupExportPages(group, 4, [left, right]).length, 2);
   assert.throws(() => production.pcPathCandidateGroupExportPages(group, 4, [left]), /authorized/u);
+});
+
+test('GUI and Discord render the same full-height PC timeline without explicit mask-width metadata', () => {
+  const member = fullHeightPcReplayWitness();
+  const frames = production.buildPcPathReplayFrames(member, 24);
+  const replay = buildCanonicalPcPathReplayDocument({
+    kind: 'pc-path-family.v2', contract: { command: { kind: 'pc-path-family.v2' } },
+    summary: { capability_id: 'pc.path', result_contract: 'pc-path-family.v2',
+      payload_kind: 'canonical-pc-path-witness', witness_contract: 'pc-path-witness.v2',
+      canonical_selection: 'smallest-canonical-candidate-id', complete: true, canonical_witness: member }
+  });
+  assert.equal(frames.length, 13);
+  assert.deepEqual(frames.map(({ height, cells }) => ({ height, cells })), replay.document.pages);
+  assert.deepEqual(production.encodePcPathReplayGif(frames), renderDocumentGif(replay.document, { delayMs: 500 }));
+  const [group] = production.groupPcPathWitnesses([member]);
+  const [page] = production.pcPathCandidateGroupExportPages(group, 24);
+  assert.equal(page.height, 24);
+  assert.equal(page.placements.length, 6);
+  assert.ok(page.initialMask >> 192n);
+  const bad = structuredClone(member);
+  bad.steps[1].board_after_line_clear_mask = '0x0000000000000000';
+  assert.throws(() => production.buildPcPathReplayFrames(bad, 24), /not canonical/u);
 });
 
 function witness() {

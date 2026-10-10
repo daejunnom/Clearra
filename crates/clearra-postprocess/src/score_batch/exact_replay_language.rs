@@ -5,18 +5,22 @@
 //! Source DAG paths are not identities: subset construction unions equal trk1
 //! labels before adding suffix counts. No displayed-page sample grants authority.
 use super::{
-    exact_scoring_execution_materializer::replay_path,
+    compact_replay_language_domain::CompactReplayDomain,
     execution_supply::{
         first_standard_bag_lookahead, for_each_supply_successor, terminal_supply_state_is_accepted,
-        SupplyState,
+        ExecutionSupplyBatch, SupplyState,
+    },
+    full_height_replay_language_domain::{FullHeightCandidateExecution, FullHeightReplayDomain},
+    replay_language_domain::{
+        ReplayLanguageBatch, ReplayLanguageDomain, ReplayLanguageGraph, ReplayLanguageOutput,
     },
     CandidateExecution, ExactReplayMaterializationError as Error,
     ExactReplayMaterializationLimits as Limits,
 };
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_replay::{
-    trace::solution_trace_builder::SolutionTraceBuilder, ExactScoringExecutionBatch, HoldDecision,
-    PieceDecision, ScoringExecutionEdge, TraceCanonicalKey,
+    ExactScoringExecutionBatch, FullHeightExecutionBatch, HoldDecision, PieceDecision,
+    ScoringExecutionEdge, TraceCanonicalKey,
 };
 use std::{
     cmp::Ordering,
@@ -36,19 +40,30 @@ pub struct ExactReplayGraphLocation {
 // bytes, not numeric tuples. 192 covers even usize::MAX cursor text; overflow is
 // explicitly rejected rather than truncating a label.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Label {
+pub(super) struct Label {
     bytes: [u8; 192],
     len: usize,
 }
 impl Label {
-    fn new(edge: ScoringExecutionEdge, decision: PieceDecision, mask: u64) -> Result<Self, Error> {
+    pub(super) fn new(
+        edge: ScoringExecutionEdge,
+        decision: PieceDecision,
+        mask: u64,
+    ) -> Result<Self, Error> {
+        Self::from_writer(|label| {
+            TraceCanonicalKey::write_scoring_step_key_with_decision(label, edge, decision, mask)
+        })
+    }
+    pub(super) fn from_writer(write: impl FnOnce(&mut Self) -> fmt::Result) -> Result<Self, Error> {
         let mut label = Self {
             bytes: [0; 192],
             len: 0,
         };
-        TraceCanonicalKey::write_scoring_step_key_with_decision(&mut label, edge, decision, mask)
-            .map_err(|_| Error::ProjectionOverflow)?;
+        write(&mut label).map_err(|_| Error::ProjectionOverflow)?;
         Ok(label)
+    }
+    pub(super) fn as_str(&self) -> Result<&str, Error> {
+        std::str::from_utf8(&self.bytes[..self.len]).map_err(|_| Error::InvalidEvidence)
     }
 }
 impl fmt::Write for Label {
@@ -74,10 +89,10 @@ impl PartialOrd for Label {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct NfaKey {
+struct NfaKey<S> {
     location: usize,
     supply: SupplyState,
-    board: u64,
+    state: S,
     depth: usize,
 }
 #[derive(Clone, Copy, Debug)]
@@ -89,8 +104,8 @@ struct NfaEdge {
     end_count: usize,
 }
 #[derive(Clone, Debug)]
-struct NfaNode {
-    key: NfaKey,
+struct NfaNode<S> {
+    key: NfaKey<S>,
     accepting: bool,
     edges: Vec<NfaEdge>,
     raw_count: usize,
@@ -159,13 +174,13 @@ enum Phase {
 /// cursor. `guard` always receives the full engine inline+heap+temporary peak.
 /// Cancellation or any rejection poisons the cursor, never a partial count.
 #[derive(Debug)]
-pub struct ExactReplayLanguageSession {
-    batches: Arc<[ExactScoringExecutionBatch]>,
+struct ReplayLanguageSession<D: ReplayLanguageDomain> {
+    batches: Arc<[D::Batch]>,
     locations: Vec<ExactReplayGraphLocation>,
     pattern_id: usize,
     limits: Limits,
     phase: Phase,
-    nfa: Vec<NfaNode>,
+    nfa: Vec<NfaNode<D::State>>,
     nfa_table: Vec<usize>,
     roots: Vec<usize>,
     dfa: Vec<DfaNode>,
@@ -195,7 +210,7 @@ fn bytes<T>(values: &Vec<T>) -> Result<u128, Error> {
         .checked_mul(size_of::<T>() as u128)
         .ok_or(Error::ProjectionOverflow)
 }
-fn admit(
+pub(super) fn admit(
     limits: Limits,
     peak: u128,
     guard: &mut impl FnMut(u128) -> Result<(), Error>,
@@ -277,7 +292,7 @@ fn hash(key: &impl Hash) -> usize {
     h.finish() as usize
 }
 
-impl ExactReplayLanguageSession {
+impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
     /// Zero-based lexical selection. Suffix counts skip complete families;
     /// backtracking through a single coherent NFA predecessor chain prevents
     /// combining hidden witnesses from unrelated graph locations.
@@ -286,7 +301,7 @@ impl ExactReplayLanguageSession {
         mut rank: usize,
         control: &ExecutionControl,
         guard: &mut impl FnMut(u128) -> Result<(), Error>,
-    ) -> Result<CandidateExecution, Error> {
+    ) -> Result<D::Output, Error> {
         if control.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -388,7 +403,7 @@ impl ExactReplayLanguageSession {
         scratch: u128,
         control: &ExecutionControl,
         guard: &mut impl FnMut(u128) -> Result<(), Error>,
-    ) -> Result<CandidateExecution, Error> {
+    ) -> Result<D::Output, Error> {
         if control.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -399,42 +414,22 @@ impl ExactReplayLanguageSession {
         }
         let location = self.locations[root_key.location];
         let batch = &self.batches[location.batch];
-        let graph = &batch.graphs()[location.graph];
-        let projection = replay_projection(path.len(), usize::from(batch.layout().cell_count()))?;
-        admit(
-            self.limits,
+        let graph = batch.graph(location.graph).ok_or(Error::InvalidEvidence)?;
+        let candidate = D::project_selected(
+            batch,
+            graph,
+            self.pattern_id,
+            path,
+            holds,
+            control,
             original
                 .checked_add(scratch)
-                .and_then(|n| n.checked_add(projection))
                 .ok_or(Error::ProjectionOverflow)?,
-            guard,
-        )?;
-        let trace = replay_path(batch, graph, self.pattern_id, path, holds)
-            .ok_or(Error::InvalidEvidence)?;
-        let trace_bytes = (size_of::<clearra_replay::ReplayTrace>() as u128)
-            .checked_add(
-                trace
-                    .checked_nested_retained_bytes()
-                    .ok_or(Error::ProjectionOverflow)?,
-            )
-            .ok_or(Error::ProjectionOverflow)?;
-        let key_bytes = trace
-            .checked_canonical_key_requested_bytes()
-            .ok_or(Error::ProjectionOverflow)?;
-        admit(
             self.limits,
-            original
-                .checked_add(scratch)
-                .and_then(|n| n.checked_add(trace_bytes))
-                .and_then(|n| n.checked_add(key_bytes))
-                .ok_or(Error::ProjectionOverflow)?,
             guard,
         )?;
-        let identity = trace.canonical_key();
-        let mut remaining = identity
-            .strip_prefix("trk1:")
-            .ok_or(Error::InvalidEvidence)?;
-        let mut board = batch.initial_occupied();
+        let mut remaining = D::step_suffix(batch, candidate.identity())?;
+        let mut state = D::initial(batch, graph)?;
         let mut cursor = usize::from(batch.initial_cursor());
         let mut held = batch.initial_hold();
         for (index, (&edge, &hold)) in path.iter().zip(holds).enumerate() {
@@ -444,17 +439,14 @@ impl ExactReplayLanguageSession {
             if index != 0 {
                 remaining = remaining.strip_prefix('~').ok_or(Error::InvalidEvidence)?;
             }
-            let (mask, next_board) =
-                SolutionTraceBuilder::project_scoring_step(batch.layout(), board, edge)
-                    .ok_or(Error::InvalidEvidence)?;
-            board = next_board;
+            let (mask, next_state) = D::transition(batch, state, edge)?;
+            state = next_state;
             let decision = PieceDecision::from_selected_hold(edge.piece(), cursor, held, hold)
                 .ok_or(Error::InvalidEvidence)?;
             cursor = decision.output_cursor();
             held = decision.output_hold_piece();
-            let canonical = Label::new(edge, decision, mask)?;
-            let label = std::str::from_utf8(&canonical.bytes[..canonical.len])
-                .map_err(|_| Error::InvalidEvidence)?;
+            let canonical = D::label(edge, decision, mask)?;
+            let label = canonical.as_str()?;
             remaining = remaining
                 .strip_prefix(label)
                 .ok_or(Error::InvalidEvidence)?;
@@ -462,13 +454,12 @@ impl ExactReplayLanguageSession {
         if !remaining.is_empty() {
             return Err(Error::InvalidEvidence);
         }
-        let candidate = CandidateExecution::new(self.pattern_id, identity, trace);
+        D::terminal(state, path.len())?;
         admit(
             self.limits,
             original
                 .checked_add(scratch)
-                .and_then(|n| n.checked_add(size_of::<CandidateExecution>() as u128))
-                .and_then(|n| n.checked_add(candidate.checked_nested_retained_bytes()?))
+                .and_then(|n| n.checked_add(candidate.checked_owned_bytes()?))
                 .ok_or(Error::ProjectionOverflow)?,
             guard,
         )?;
@@ -480,7 +471,7 @@ impl ExactReplayLanguageSession {
         mut rank: usize,
         control: &ExecutionControl,
         guard: &mut impl FnMut(u128) -> Result<(), Error>,
-    ) -> Result<CandidateExecution, Error> {
+    ) -> Result<D::Output, Error> {
         let root = self.roots[0];
         let mut node = root;
         let mut path = Vec::new();
@@ -526,7 +517,7 @@ impl ExactReplayLanguageSession {
     }
 
     pub fn new(
-        batches: Arc<[ExactScoringExecutionBatch]>,
+        batches: Arc<[D::Batch]>,
         locations: Vec<ExactReplayGraphLocation>,
         pattern_id: usize,
         limits: Limits,
@@ -744,7 +735,7 @@ impl ExactReplayLanguageSession {
     }
     fn intern_nfa(
         &mut self,
-        key: NfaKey,
+        key: NfaKey<D::State>,
         guard: &mut impl FnMut(u128) -> Result<(), Error>,
     ) -> Result<usize, Error> {
         self.ensure_nfa_table()?;
@@ -834,26 +825,20 @@ impl ExactReplayLanguageSession {
                     .batches
                     .get(location.batch)
                     .ok_or(Error::InvalidEvidence)?;
-                let graph = batch
-                    .graphs()
-                    .get(location.graph)
-                    .ok_or(Error::InvalidEvidence)?;
+                let graph = batch.graph(location.graph).ok_or(Error::InvalidEvidence)?;
                 let first = self.locations[0];
                 let first_batch = self
                     .batches
                     .get(first.batch)
                     .ok_or(Error::InvalidEvidence)?;
                 let first_graph = first_batch
-                    .graphs()
-                    .get(first.graph)
+                    .graph(first.graph)
                     .ok_or(Error::InvalidEvidence)?;
                 if !batch.complete()
                     || self.pattern_id >= batch.patterns().len()
                     || graph.node(graph.root()).is_none()
-                    || graph.candidate_id() != first_graph.candidate_id()
-                    || graph.identity() != first_graph.identity()
-                    || batch.layout() != first_batch.layout()
-                    || batch.initial_occupied() != first_batch.initial_occupied()
+                    || !graph.same_candidate(first_graph)
+                    || !D::same_frame(batch, first_batch)
                     || batch.initial_cursor() != first_batch.initial_cursor()
                     || batch.initial_hold() != first_batch.initial_hold()
                     || batch.patterns().get(self.pattern_id)
@@ -865,7 +850,6 @@ impl ExactReplayLanguageSession {
                         != first_batch.projects_standard_bag_lookahead()
                     || batch.kick_table_id() != first_batch.kick_table_id()
                     || batch.rule_profile_id() != first_batch.rule_profile_id()
-                    || batch.initial_occupied() & !batch.layout().all_cells_mask() != 0
                 {
                     return Err(Error::InvalidEvidence);
                 }
@@ -876,7 +860,7 @@ impl ExactReplayLanguageSession {
                         cursor: batch.initial_cursor(),
                         hold: batch.initial_hold(),
                     },
-                    board: batch.initial_occupied(),
+                    state: D::initial(batch, graph)?,
                     depth: 0,
                 };
                 let root = self.intern_nfa(key, guard)?;
@@ -1020,7 +1004,7 @@ impl ExactReplayLanguageSession {
         let key = self.nfa[self.index].key;
         let location = self.locations[key.location];
         let batch = &self.batches[location.batch];
-        let graph = &batch.graphs()[location.graph];
+        let graph = batch.graph(location.graph).ok_or(Error::InvalidEvidence)?;
         let node = graph.node(key.supply.node).ok_or(Error::InvalidEvidence)?;
         let edges = graph.checked_edges(node).ok_or(Error::InvalidEvidence)?;
         let sequence = &batch.patterns()[self.pattern_id];
@@ -1028,8 +1012,8 @@ impl ExactReplayLanguageSession {
             let accepted = terminal_supply_state_is_accepted(batch, sequence, key.supply);
             // Every counted witness is board- and supply-bound. Nondefault
             // starts now use the same real decisions as the public projection.
-            if accepted && (key.depth == 0 || key.board != 0) {
-                return Err(Error::InvalidEvidence);
+            if accepted {
+                D::terminal(key.state, key.depth)?;
             }
             self.nfa[self.index].accepting = accepted;
             self.index += 1;
@@ -1094,9 +1078,7 @@ impl ExactReplayLanguageSession {
                     max_path_steps: self.limits.max_path_steps(),
                 });
             }
-            let (mask, board) =
-                SolutionTraceBuilder::project_scoring_step(batch.layout(), key.board, edge)
-                    .ok_or(Error::InvalidEvidence)?;
+            let (mask, state) = D::transition(batch, key.state, edge)?;
             for branch in branches.into_iter().take(length) {
                 let (hold, supply) = branch.ok_or(Error::InvalidEvidence)?;
                 let decision = PieceDecision::from_selected_hold(
@@ -1113,12 +1095,12 @@ impl ExactReplayLanguageSession {
                 {
                     return Err(Error::InvalidEvidence);
                 }
-                let label = Label::new(edge, decision, mask)?;
+                let label = D::label(edge, decision, mask)?;
                 let destination = self.intern_nfa(
                     NfaKey {
                         location: key.location,
                         supply,
-                        board,
+                        state,
                         depth: key.depth.checked_add(1).ok_or(Error::ProjectionOverflow)?,
                     },
                     guard,
@@ -1228,13 +1210,82 @@ impl ExactReplayLanguageSession {
     }
 }
 
+/// Compact and full-height public cursors wrap the same private engine. The
+/// physical adapters are statically selected, so compact nodes still contain a
+/// u64, not a four-word enum. Neither wrapper is an attachable product proof.
+#[derive(Debug)]
+pub struct ExactReplayLanguageSession {
+    inner: ReplayLanguageSession<CompactReplayDomain>,
+}
+
+#[derive(Debug)]
+pub struct FullHeightReplayLanguageSession {
+    inner: ReplayLanguageSession<FullHeightReplayDomain>,
+}
+
+macro_rules! language_cursor {
+    ($cursor:ty, $batch:ty, $output:ty) => {
+        impl $cursor {
+            pub fn new(
+                batches: Arc<[$batch]>,
+                locations: Vec<ExactReplayGraphLocation>,
+                pattern_id: usize,
+                limits: Limits,
+                guard: &mut impl FnMut(u128) -> Result<(), Error>,
+            ) -> Result<Self, Error> {
+                Ok(Self {
+                    inner: ReplayLanguageSession::new(
+                        batches, locations, pattern_id, limits, guard,
+                    )?,
+                })
+            }
+
+            pub fn checked_retained_bytes(&self) -> Option<u128> {
+                self.inner.checked_retained_bytes()
+            }
+            pub fn count(&self) -> Option<usize> {
+                self.inner.count()
+            }
+            pub fn work_units(&self) -> u64 {
+                self.inner.work_units()
+            }
+            pub fn advance(
+                &mut self,
+                work: usize,
+                control: &ExecutionControl,
+                guard: &mut impl FnMut(u128) -> Result<(), Error>,
+            ) -> Result<bool, Error> {
+                self.inner.advance(work, control, guard)
+            }
+            pub fn select(
+                &self,
+                rank: usize,
+                control: &ExecutionControl,
+                guard: &mut impl FnMut(u128) -> Result<(), Error>,
+            ) -> Result<$output, Error> {
+                self.inner.select(rank, control, guard)
+            }
+        }
+    };
+}
+language_cursor!(
+    ExactReplayLanguageSession,
+    ExactScoringExecutionBatch,
+    CandidateExecution
+);
+language_cursor!(
+    FullHeightReplayLanguageSession,
+    FullHeightExecutionBatch,
+    FullHeightCandidateExecution
+);
+
 // ReplayEngine's compatibility projection creates at most 12 events/placement,
 // two operation/order/hold generations, three cell-owner working buffers and
 // one cleared-owner vector/placement. Four times each requested growable buffer
 // admits old/new capacity overlap; fixed structs/variant strings get a separate
 // 4096-byte reserve. This bound is only for the selected <=max_path_steps trace,
 // never for the number of paths in the language. Retained output is checked again.
-fn replay_projection(steps: usize, cells: usize) -> Result<u128, Error> {
+pub(super) fn replay_projection(steps: usize, cells: usize) -> Result<u128, Error> {
     use clearra_replay::{
         BuildVariantOperation, CellOwner, ColoredCellOwner, KickEvidenceEvent,
         MovementEvidenceEvent, PlacementStep, ReplayEvent,
@@ -1267,3 +1318,7 @@ fn replay_projection(steps: usize, cells: usize) -> Result<u128, Error> {
 #[cfg(test)]
 #[path = "exact_replay_language_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "full_height_replay_language_tests.rs"]
+mod full_height_tests;

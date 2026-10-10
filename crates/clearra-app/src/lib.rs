@@ -365,9 +365,10 @@ pub use pc_minimum_cover_result::{
     PC_MINIMUM_COVER_RESULT_CONTRACT,
 };
 pub use pc_path_result::{
-    PcPathCompletenessEvidence, PcPathFamilyV2Result, PcPathIngressOrigin, PcPathProblemPreset,
-    PcPathQuerySnapshot, PcPathStepV2, PcPathWitnessV2, PC_PATH_CANONICAL_SELECTION,
-    PC_PATH_FAMILY_RESULT_CONTRACT, PC_PATH_ORDERING, PC_PATH_WITNESS_CONTRACT,
+    PcPathBoardMask, PcPathCompletenessEvidence, PcPathFamilyV2Result, PcPathIngressOrigin,
+    PcPathProblemPreset, PcPathQuerySnapshot, PcPathStepV2, PcPathWitnessV2,
+    PC_PATH_CANONICAL_SELECTION, PC_PATH_FAMILY_RESULT_CONTRACT, PC_PATH_ORDERING,
+    PC_PATH_WITNESS_CONTRACT,
 };
 pub use pc_pinned_solution_document::{
     PcPinnedDrawing, PcPinnedSolutionDocument, PcPinnedSolutionDocumentError,

@@ -308,11 +308,11 @@ test('the connected twenty-four-line surfaces retain whole fields and an exporta
   const editor = read('packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte');
   assert.ok(model.includes('WORKSPACE_PC_MAX_LINES = 24'));
   assert.ok(model.includes("runtime === 'web' && execution.workers !== 1"));
-  assert.ok(model.includes("!['tiling', 'off', 'minimum-cover', 'failed-queue', 'summary', 'score-finder', 'score-minimals'].includes(execution.scoreMode)"));
+  assert.ok(model.includes("!['tiling', 'off', 'minimum-cover', 'failed-queue', 'summary', 'score-finder', 'score-minimals', 'path'].includes(execution.scoreMode)"));
   assert.ok(workspace.includes('dimensionMax={WORKSPACE_PC_MAX_LINES}'));
   assert.ok(editor.includes('decodeInterchangeField(source, 24)'));
   assert.ok(read('apps/clearra-discord-bot/src/discord/field-limits.mjs')
-    .includes("['pc-tiling-v2', 'pc-v2', 'pc-chance-v2', 'pc-failed-v2', 'pc-score-v2', 'pc-score-finder-v2'].includes(input)"));
+    .includes("['pc-tiling-v2', 'pc-v2', 'pc-path-v2', 'pc-chance-v2', 'pc-failed-v2', 'pc-score-v2', 'pc-score-finder-v2'].includes(input)"));
   const executor = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
   const pcTerminal = executor.slice(executor.indexOf('fn build_pc_family_result('),
     executor.indexOf('pub(super) fn finesse_search_material('));
@@ -390,7 +390,7 @@ test('full-height physical execution does not truncate masks or acquire replay-f
   assert.ok(replay.includes('PieceDecision::from_selected_hold('));
   assert.ok(replay.includes('memory_guard(requested)'));
   assert.ok(replay.includes('memory_guard(actual)'));
-  assert.ok(replay.includes('trk2:h{}:'));
+  assert.ok(replay.includes('trk2:h{height}:'));
   assert.ok(!replay.includes('words()[0]'));
   assert.ok(batch.includes('key.initial_board() != initial'));
   assert.ok(batch.includes('graph.checked_edges(node)'));
@@ -510,4 +510,33 @@ test('full-height score source preserves actual physical graphs and uses the com
   assert.ok(!extended.includes('Board64Layout'));
   assert.ok(tests.includes('full_height_score_source_retains_actual_lock_graphs_and_distinct_problem_authority'));
   assert.ok(tests.includes('full_height_parallel_score_source_and_common_materializer_keep_the_same_cells'));
+});
+
+test('full-height PC replay has its own complete source proof and reuses the existing lazy rank and page owners', () => {
+  const proof = read('crates/clearra-core-executor/src/pc_full_height_replay_evidence.rs');
+  assert.ok(proof.includes('pub(crate) fn from_executed_problem('));
+  assert.ok(proof.includes('self.problem.matches_search_problem(problem)'));
+  assert.ok(proof.includes('self.matches_source_keys(keys)'));
+  assert.ok(proof.includes('extended_pc_replay_source_family_incomplete'));
+  const result = read('crates/clearra-core-executor/src/core_execution_result.rs');
+  assert.ok(result.includes('pc_full_height_replay_evidence: Option<PcFullHeightReplayEvidence>'));
+  assert.ok(result.includes('self.pc_full_height_replay_evidence = None'));
+  const domain = read('crates/clearra-postprocess/src/score_batch/full_height_replay_language_domain.rs');
+  assert.ok(domain.includes('Board256Mask'));
+  assert.ok(domain.includes('FullHeightReplayProjector::project_scoring_step('));
+  assert.ok(!domain.includes('Board64Layout'));
+  const language = read('crates/clearra-postprocess/src/score_batch/exact_replay_language.rs');
+  assert.ok(language.includes('ReplayLanguageSession<D: ReplayLanguageDomain>'));
+  const source = read('crates/clearra-app/src/pc_replay_source_batches.rs');
+  assert.ok(source.includes('evidence.matches_result_source(problem, result.normalized_solution_keys())'));
+  assert.ok(source.includes('FullHeightReplayLanguageSession::new('));
+  assert.ok(source.includes('full_height_pc_replay_source_hasher(problem, b)'));
+  const tests = read('crates/clearra-app/tests/extended_pc_tiling.rs');
+  assert.ok(tests.includes('full_height_replay_direct_cooperative_and_lazy_pages_preserve_all_words'));
+  assert.ok(tests.includes('store.page(1, 1, &control).unwrap(), first'));
+  assert.ok(workflow.includes('cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown'));
+  assert.ok(workflow.includes('--lib full_height_replay_payload -- --test-threads=1'));
+  assert.ok(workflow.includes('--lib pc_replay_page_source -- --test-threads=1'));
+  assert.ok(workflow.includes('packages/clearra-ui/test/pcPathReplayRenderParity.test.mjs'));
+  assert.ok(workflow.includes('apps/clearra-discord-bot/test/pc-path-replay.test.mjs'));
 });

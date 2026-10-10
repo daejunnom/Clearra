@@ -24,7 +24,7 @@ pub struct PcReplayPageStore {
     source: Arc<PcReplayPageSource>,
     current_geometry: Option<usize>,
     current_pattern: Option<usize>,
-    language: Option<ExactReplayLanguageSession>,
+    language: Option<ReplayLanguage>,
     pending: Option<PendingPage>,
 }
 
@@ -260,18 +260,13 @@ impl PcReplayPageStore {
             let rank = absolute
                 .checked_sub(pattern_start)
                 .ok_or("pc replay rank outside current pattern")?;
-            let member = language
-                .select(rank, control, &mut |peak| {
+            let execution =
+                language.select(candidate_id, rank, control, external, &mut |peak| {
                     engine_guard(external, peak, maximum, guard)
-                })
-                .map_err(|error| replay_engine_error(error, external))?;
-            let execution = into_core(candidate_id, member)?;
+                })?;
             self.language = Some(language);
-            let retained_execution = (core::mem::size_of::<CorePostProcessExecution>() as u128)
-                .checked_add(execution.checked_nested_retained_bytes().ok_or(OVERFLOW)?)
-                .ok_or(OVERFLOW)?;
-            let projection_peak =
-                checked_execution_projection_peak_bytes(&execution).ok_or(OVERFLOW)?;
+            let retained_execution = execution.checked_owned_bytes().ok_or(OVERFLOW)?;
+            let projection_peak = execution.checked_projection_bytes().ok_or(OVERFLOW)?;
             self.guard_page(
                 public,
                 projection_peak
@@ -279,9 +274,8 @@ impl PcReplayPageStore {
                     .ok_or(OVERFLOW)?,
                 guard,
             )?;
-            let witness = project_execution_with_context(
+            let witness = execution.project(
                 self.source.projection,
-                &execution,
                 self.source.materialized_pattern_count,
                 u64::try_from(pending.geometry)
                     .map_err(|_| "pc replay candidate identity overflow")?,

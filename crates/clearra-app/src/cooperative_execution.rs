@@ -270,7 +270,7 @@ struct CooperativePcReplayFinalizeExecution {
 /// that response's projection. Keep both transition/finalizer inline carriers
 /// conservatively reserved, including the compiled query used at construction
 /// and final sealing. The source retains this reservation for later pages.
-fn checked_pc_replay_external_reserve(
+pub(crate) fn checked_pc_replay_external_reserve(
     context: &AppContext,
     response: &AppResponse,
     output: &AppOutputPolicy,
@@ -285,7 +285,7 @@ fn checked_pc_replay_external_reserve(
         .checked_add(response.checked_pc_replay_external_retained_capacity_bytes()?)?
         .checked_add(output.checked_retained_capacity_bytes()?)?
         .checked_add(contract.checked_pc_replay_retained_capacity_bytes()?)?
-        .checked_add(problem.checked_pc_score_pointee_retained_bytes()?)
+        .checked_add(problem.checked_pc_family_pointee_retained_bytes()?)
 }
 
 /// Exact App-owned graph that remains live while the consumed scenario query

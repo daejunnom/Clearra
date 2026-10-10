@@ -124,14 +124,15 @@ export function pcPathWitnessExportPage(
     );
     const logicalHeight = frames[0].height;
     const cellCount = logicalHeight * PC_PATH_REPLAY_WIDTH;
-    const initialMask = parseMask(witness.steps[0].board_before_mask, cellCount, witness.maskHexDigits ?? 16);
+    const maskHexDigits = replayMaskHexDigits(witness);
+    const initialMask = parseMask(witness.steps[0].board_before_mask, cellCount, maskHexDigits);
     const logicalToDisplay = Array.from({ length: logicalHeight }, (_, row) => row);
     const placements: SolutionExportPage['placements'] = [];
     let nextDisplayRow = logicalHeight;
     let displayOccupied = initialMask;
 
     for (const step of witness.steps) {
-      const logicalPlacement = parseMask(step.placement_mask, cellCount, witness.maskHexDigits ?? 16);
+      const logicalPlacement = parseMask(step.placement_mask, cellCount, maskHexDigits);
       let displayPlacement = 0n;
       forEachSetBit(logicalPlacement, cellCount, (cellIndex) => {
         const x = cellIndex % PC_PATH_REPLAY_WIDTH;
@@ -151,7 +152,7 @@ export function pcPathWitnessExportPage(
         mask: displayPlacement
       });
 
-      const clearedRows = parseMask(step.cleared_row_mask, logicalHeight, witness.maskHexDigits ?? 16);
+      const clearedRows = parseRowMask(step.cleared_row_mask, logicalHeight);
       let clearedRowCount = 0;
       for (let row = logicalHeight - 1; row >= 0; row -= 1) {
         if ((clearedRows & (1n << BigInt(row))) === 0n) continue;
@@ -186,9 +187,10 @@ export function buildPcPathReplayFrames(
   if (!Array.isArray(witness.steps) || witness.steps.length === 0) {
     throw new Error('The PC path replay has no placement steps.');
   }
-  const height = replayHeight(witness.steps, requestedRows, witness.maskHexDigits ?? 16);
+  const maskHexDigits = replayMaskHexDigits(witness);
+  const height = replayHeight(witness.steps, requestedRows, maskHexDigits);
   const cellCount = PC_PATH_REPLAY_WIDTH * height;
-  const firstBefore = parseMask(witness.steps[0].board_before_mask, cellCount, witness.maskHexDigits ?? 16);
+  const firstBefore = parseMask(witness.steps[0].board_before_mask, cellCount, maskHexDigits);
   let cells = maskCells(firstBefore, cellCount, 'G');
   let occupied = firstBefore;
   const frames: PcPathReplayFrame[] = [frame('initial', null, height, cells)];
@@ -198,11 +200,11 @@ export function buildPcPathReplayFrames(
     if (step.step_index !== String(index)) {
       throw new Error('The PC path replay step order is invalid.');
     }
-    const before = parseMask(step.board_before_mask, cellCount, witness.maskHexDigits ?? 16);
-    const placement = parseMask(step.placement_mask, cellCount, witness.maskHexDigits ?? 16);
-    const afterPlacement = parseMask(step.board_after_placement_mask, cellCount, witness.maskHexDigits ?? 16);
-    const afterClear = parseMask(step.board_after_line_clear_mask, cellCount, witness.maskHexDigits ?? 16);
-    const clearedRows = parseMask(step.cleared_row_mask, height, witness.maskHexDigits ?? 16);
+    const before = parseMask(step.board_before_mask, cellCount, maskHexDigits);
+    const placement = parseMask(step.placement_mask, cellCount, maskHexDigits);
+    const afterPlacement = parseMask(step.board_after_placement_mask, cellCount, maskHexDigits);
+    const afterClear = parseMask(step.board_after_line_clear_mask, cellCount, maskHexDigits);
+    const clearedRows = parseRowMask(step.cleared_row_mask, height);
     const piece = replayPiece(step.active_piece);
     if (
       before !== occupied ||
@@ -239,7 +241,7 @@ export function buildPcPathReplayFrames(
 
   const expectedTerminal = expectedTerminalBoardMask === null
     ? 0n
-    : parseMask(expectedTerminalBoardMask, cellCount, witness.maskHexDigits ?? 16);
+    : parseMask(expectedTerminalBoardMask, cellCount, maskHexDigits);
   if (occupied !== expectedTerminal) {
     throw new Error(
       expectedTerminalBoardMask === null
@@ -343,6 +345,24 @@ function parseMask(value: string, bitLimit: number, maskHexDigits: 16 | 64 = 16)
     throw new Error('The PC path replay mask exceeds its board.');
   }
   return mask;
+}
+
+/** Board width belongs to the canonical payload, not the GUI form height.
+ * All subsequent board masks must use that same width. Row masks are a
+ * separate <=24-bit domain: the PC API retains its existing 16 hex digits,
+ * while the recovery adapter explicitly emits 64 digits. */
+function replayMaskHexDigits(witness: PathReplayGeometryWitness): 16 | 64 {
+  const first = witness.steps[0]?.board_before_mask;
+  const digits = /^0x[0-9a-f]{64}$/u.test(first ?? '') ? 64 : 16;
+  parseCanonicalHexMask(first ?? '', digits);
+  if (witness.maskHexDigits !== undefined && witness.maskHexDigits !== digits) {
+    throw new Error('The PC path replay mask frame is inconsistent.');
+  }
+  return digits;
+}
+
+function parseRowMask(value: string, bitLimit: number): bigint {
+  return parseMask(value, bitLimit, /^0x[0-9a-f]{64}$/u.test(value) ? 64 : 16);
 }
 
 function parseCanonicalHexMask(value: string, maskHexDigits: 16 | 64): bigint {

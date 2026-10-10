@@ -272,6 +272,111 @@ fn full_height_tiling_uses_the_real_app_product_in_all_profiles() {
 }
 
 #[test]
+fn full_height_replay_direct_cooperative_and_lazy_pages_preserve_all_words() {
+    use clearra_app::{PcPathIngressOrigin, PcReplayPageStore};
+    use std::collections::BTreeSet;
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for rule in [srs(), srs_plus(), srs_x(), jstris_180(), no_kick()] {
+        for height in [7, 8, 12, 24] {
+            let (base, initial, pieces) = forced_request(height, rule);
+            let AppCommand::Scenario(source) = base.command() else {
+                panic!("scenario fixture");
+            };
+            let command = ScenarioAppCommand::new(
+                source
+                    .query()
+                    .clone()
+                    .with_objective(ObjectivePolicy::all())
+                    .with_count_policy(PcCountPolicy::CountAll),
+            )
+            .with_result_projection(PcResultProjection::PathFamilyV2(
+                PcPathIngressOrigin::CanonicalPcPath,
+            ));
+            let request = AppRequest::new(AppCommand::Scenario(command))
+                .with_product_capability_contract(ProductCapabilityContract::PcPath)
+                .unwrap();
+            let direct = context.run(request.clone());
+            assert_eq!(direct.status(), AppStatus::Success, "{height} {direct:?}");
+            let report = direct
+                .product_capability_result()
+                .unwrap()
+                .pc_path_family_v2()
+                .unwrap();
+            assert!(report.completeness().complete());
+            let witness = report.canonical_witness().expect("first canonical member");
+            assert_eq!(witness.steps().len(), pieces);
+            assert_eq!(
+                witness.steps()[0].board_before_mask().words(),
+                initial.words()
+            );
+            assert!(witness
+                .steps()
+                .last()
+                .unwrap()
+                .board_after_line_clear_mask()
+                .is_empty());
+            assert!(witness.normalized_trace_key().starts_with("trk2:"));
+            let core = direct.render_model().unwrap().core_result().unwrap();
+            assert!(
+                core.pc_full_height_replay_evidence().is_none(),
+                "private source must be consumed"
+            );
+            assert!(core.exact_scoring_execution_batches().is_empty());
+            let page_source = report.page_source().unwrap();
+            assert_eq!(page_source.geometry_count(), 1);
+            let mut store = PcReplayPageStore::new(page_source.clone());
+            let control = ExecutionControl::default();
+            let first = store.page(1, 1, &control).unwrap();
+            assert_eq!(first.witnesses.len(), report.witnesses().len());
+            assert_eq!(
+                first.witnesses[0].normalized_trace_key(),
+                witness.normalized_trace_key()
+            );
+            assert_eq!(first.witnesses[0].steps()[0].board_before_mask().len(), 66);
+            let pages = first.metadata.member_page_count.parse::<usize>().unwrap();
+            let mut keys = BTreeSet::new();
+            for page in 1..=pages {
+                for member in store.page(1, page, &control).unwrap().witnesses {
+                    assert!(
+                        keys.insert(member.normalized_trace_key().to_owned()),
+                        "no duplicate replay identity"
+                    );
+                }
+            }
+            assert_eq!(keys.len() as u128, report.witness_count());
+            assert_eq!(store.page(1, 1, &control).unwrap(), first);
+            let mut execution = context.start_cooperative_execution(request);
+            let mut completed = None;
+            for _ in 0..4096 {
+                match execution.advance(128, &control) {
+                    CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                    CooperativeAppAdvance::Completed(response) => {
+                        completed = Some(response);
+                        break;
+                    }
+                    other => panic!("unexpected replay step: {other:?}"),
+                }
+            }
+            let response = completed.expect("bounded replay request completes");
+            assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+            let other = response
+                .product_capability_result()
+                .unwrap()
+                .pc_path_family_v2()
+                .unwrap();
+            assert_eq!(other.witness_count(), report.witness_count());
+            assert_eq!(other.witnesses(), report.witnesses());
+            assert_eq!(
+                other.page_source().unwrap().identity_sha256(),
+                page_source.identity_sha256()
+            );
+        }
+    }
+}
+
+#[test]
 fn full_height_cooperative_tiling_and_direct_product_have_the_same_family() {
     let context = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),

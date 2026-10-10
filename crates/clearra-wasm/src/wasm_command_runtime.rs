@@ -2559,10 +2559,10 @@ fn try_pc_path_witness_payload(
             try_decimal_u128(step.rotation() as u128, ledger)?,
             try_decimal_u128(step.x() as u128, ledger)?,
             try_decimal_u128(step.y() as u128, ledger)?,
-            try_hex_mask(step.placement_mask(), ledger)?,
-            try_hex_mask(step.board_before_mask(), ledger)?,
-            try_hex_mask(step.board_after_placement_mask(), ledger)?,
-            try_hex_mask(step.board_after_line_clear_mask(), ledger)?,
+            try_pc_path_mask(step.placement_mask(), ledger)?,
+            try_pc_path_mask(step.board_before_mask(), ledger)?,
+            try_pc_path_mask(step.board_after_placement_mask(), ledger)?,
+            try_pc_path_mask(step.board_after_line_clear_mask(), ledger)?,
             try_hex_mask(step.cleared_row_mask(), ledger)?,
             try_decimal_u128(step.cleared_lines() as u128, ledger)?,
             try_owned_string(step.line_clear_identity(), ledger)?,
@@ -2904,6 +2904,26 @@ fn try_hex_mask(
     for index in 0..16 {
         let shift = (15 - index) * 4;
         bytes[index + 2] = HEX[((value >> shift) & 0x0f) as usize];
+    }
+    let value = core::str::from_utf8(&bytes).map_err(|_| finite_projection_error())?;
+    try_owned_string(value, ledger)
+}
+
+fn try_pc_path_mask(
+    value: clearra_app::PcPathBoardMask,
+    ledger: &mut WasmFiniteMemoryLedger,
+) -> Result<String, WasmCommandRuntimeError> {
+    if let Some(compact) = value.compact() {
+        return try_hex_mask(compact, ledger);
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let words = value.words();
+    let mut bytes = [b'0'; 66];
+    bytes[1] = b'x';
+    for index in 0..64 {
+        let word = words[3 - index / 16];
+        let shift = (15 - index % 16) * 4;
+        bytes[index + 2] = HEX[((word >> shift) & 0x0f) as usize];
     }
     let value = core::str::from_utf8(&bytes).map_err(|_| finite_projection_error())?;
     try_owned_string(value, ledger)

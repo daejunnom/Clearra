@@ -506,6 +506,7 @@ export const JAPANESE_HELP_TEXT = Object.freeze({
   "Subcommands:": "サブコマンド:",
   "For a multiline `#`/`_` grid, omit the board option and use the form. Direct input uses `grid:top-row/next-row`.": "複数行の`#`/`_`格子は、盤面オプションを省略してフォームで入力してください。直接入力には`grid:top-row/next-row`形式を使います。",
   "`field` is a 1–6-row initial PC board or one static document; `next` is one exact queue or one supported pattern source.": "`field`には1〜6行の初期PC盤面または静的なドキュメントを、`next`には固定キューまたは対応するパターンを指定します。",
+  "`field` is a 1–24-row initial PC board or one static document; `next` is one exact queue or one supported pattern source.": "`field`には1〜24行の初期PC盤面または静的なドキュメントを、`next`には固定キューまたは対応するパターンを指定します。",
   "`kicktable` is `srs-plus`, `srs`, `srs-x`, `jstris-180`, or `no-kick`; Clearra defaults to `srs-plus`.": "`kicktable`は`srs-plus`、`srs`、`srs-x`、`jstris-180`、`no-kick`から選びます。Clearraの既定値は`srs-plus`です。",
   "Note: Discord publishes only the first result in deterministic order and exposes no tie or paging surface.": "補足: Discordでは決められた順序の先頭の結果だけを表示します。同順位の一覧やページ切り替えはありません。",
   "`lines` accepts every height 1–6; omitting it evaluates all feasible heights serially. `hold` is disabled, empty, or one occupied piece.": "`lines`は1〜6のすべての高さに対応します。省略すると可能な高さを順に評価します。`hold`は無効、空、または保持するミノ1つです。",

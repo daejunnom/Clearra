@@ -841,6 +841,63 @@ fn wasm_pc_path_returns_the_complete_normal_replay_family_with_a_live_page_owner
 }
 
 #[test]
+fn full_height_replay_payload_keeps_four_words_and_uses_the_live_lazy_page_source() {
+    let inputs = include_str!("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv");
+    for row in inputs
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let input: Vec<_> = row.split('\t').collect();
+        let command = format!(
+            "clearra pc path --lines {} --board-mask 0x{} --height {} --pieces {} --queue {} --no-hold --rule srs-plus --backend cpu --workers 1 --no-tablebase --no-build-dependency-dag",
+            input[1], input[2], input[1], input[3], input[4],
+        );
+        let result = WasmCommandRuntime::default()
+            .run_command_text(&command)
+            .unwrap();
+        assert_eq!(
+            result.app_response().status(),
+            AppStatus::Success,
+            "{}: {result:?}",
+            input[0]
+        );
+        let Some(clearra_app::ProductPageSourceOwner::PcReplay(source)) =
+            result.product_page_source_owner()
+        else {
+            panic!("the same App replay owner must reach WASM");
+        };
+        let payload = result.app_response().product_result_payload().unwrap();
+        let ProductResultPayloadContent::PcPathFamily(family) = payload.content() else {
+            panic!("full-height replay must retain the existing typed family contract");
+        };
+        assert!(family.complete());
+        assert_eq!(source.witness_count().to_string(), family.witness_count());
+        let witness = family.canonical_witness().unwrap();
+        assert!(witness.normalized_trace_key().starts_with("trk2:"));
+        assert_eq!(witness.steps().len().to_string(), input[3]);
+        assert_eq!(
+            witness.steps()[0].board_before_mask(),
+            format!("0x{}", input[2])
+        );
+        assert!(witness.steps().iter().all(|step| {
+            step.placement_mask().len() == 66
+                && step.board_before_mask().len() == 66
+                && step.board_after_placement_mask().len() == 66
+                && step.board_after_line_clear_mask().len() == 66
+                && step.cleared_row_mask().len() == 18
+        }));
+        assert_eq!(
+            witness
+                .steps()
+                .last()
+                .unwrap()
+                .board_after_line_clear_mask(),
+            format!("0x{}", "0".repeat(64))
+        );
+    }
+}
+
+#[test]
 fn wasm_pc_score_returns_every_normalized_field_with_its_whole_universe_average() {
     let result = WasmCommandRuntime::default()
         .run_command_text(

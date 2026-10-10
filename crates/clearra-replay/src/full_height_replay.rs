@@ -299,34 +299,86 @@ impl FullHeightReplayTrace {
     /// high rows. The operation ordering, not diagnostic producer IDs, is the
     /// trace identity. No result-family completeness is asserted by this key.
     pub fn write_canonical_key(&self, writer: &mut impl fmt::Write) -> fmt::Result {
-        write!(writer, "trk2:h{}:", self.height)?;
-        write_mask(writer, self.initial)?;
+        Self::write_canonical_prefix(writer, self.height, self.initial)?;
         for step in &self.steps {
             writer.write_char('~')?;
-            let decision = step.decision;
-            write!(
+            Self::write_step_key_with_decision(
                 writer,
-                "a{}i{}o{}ih",
-                decision.active_piece().as_ascii(),
-                decision.input_cursor(),
-                decision.output_cursor()
+                step.edge,
+                step.decision,
+                step.transition.placement(),
             )?;
-            write_hold_piece(writer, decision.input_hold_piece())?;
-            writer.write_str("oh")?;
-            write_hold_piece(writer, decision.output_hold_piece())?;
-            writer.write_char('d')?;
-            write_hold_decision(writer, decision.hold_decision())?;
-            write!(
-                writer,
-                "p{}r{}x{}y{}m",
-                step.edge.piece().as_ascii(),
-                step.edge.rotation().quarter_turns(),
-                step.edge.x(),
-                step.edge.y()
-            )?;
-            write_mask(writer, step.transition.placement())?;
         }
         Ok(())
+    }
+
+    /// The exact same writers serve counting labels and selected trace keys.
+    /// They serialize identity only; neither helper grants execution authority.
+    pub fn write_canonical_prefix(
+        writer: &mut impl fmt::Write,
+        height: u8,
+        initial: Board256Mask,
+    ) -> fmt::Result {
+        write!(writer, "trk2:h{height}:")?;
+        write_mask(writer, initial)
+    }
+
+    pub fn write_step_key_with_decision(
+        writer: &mut impl fmt::Write,
+        edge: ScoringExecutionEdge,
+        decision: PieceDecision,
+        placement: Board256Mask,
+    ) -> fmt::Result {
+        write!(
+            writer,
+            "a{}i{}o{}ih",
+            decision.active_piece().as_ascii(),
+            decision.input_cursor(),
+            decision.output_cursor()
+        )?;
+        write_hold_piece(writer, decision.input_hold_piece())?;
+        writer.write_str("oh")?;
+        write_hold_piece(writer, decision.output_hold_piece())?;
+        writer.write_char('d')?;
+        write_hold_decision(writer, decision.hold_decision())?;
+        write!(
+            writer,
+            "p{}r{}x{}y{}m",
+            edge.piece().as_ascii(),
+            edge.rotation().quarter_turns(),
+            edge.x(),
+            edge.y()
+        )?;
+        write_mask(writer, placement)
+    }
+
+    /// No allocation before the caller's memory admission. The selected key is
+    /// later checked again using allocator-visible String capacity.
+    pub fn checked_canonical_key_requested_bytes(&self) -> Option<u128> {
+        struct Counter(u128);
+        impl fmt::Write for Counter {
+            fn write_str(&mut self, value: &str) -> fmt::Result {
+                self.0 = self.0.checked_add(value.len() as u128).ok_or(fmt::Error)?;
+                Ok(())
+            }
+        }
+        let mut counter = Counter(0);
+        self.write_canonical_key(&mut counter).ok()?;
+        Some(counter.0)
+    }
+
+    /// Compare one selected canonical identity without a temporary key owner.
+    /// This does not prove family completeness or membership.
+    pub fn canonical_key_matches(&self, identity: &str) -> bool {
+        struct MatchWriter<'a>(&'a str);
+        impl fmt::Write for MatchWriter<'_> {
+            fn write_str(&mut self, value: &str) -> fmt::Result {
+                self.0 = self.0.strip_prefix(value).ok_or(fmt::Error)?;
+                Ok(())
+            }
+        }
+        let mut writer = MatchWriter(identity);
+        self.write_canonical_key(&mut writer).is_ok() && writer.0.is_empty()
     }
 }
 

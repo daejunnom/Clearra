@@ -34,7 +34,7 @@ use clearra_supply::pattern_universe::{
 
 use crate::{
     resource::ExecutionMemoryBound, CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage,
-    PcChanceCoverageEvidence, PcScoreProblemEvidence,
+    PcChanceCoverageEvidence, PcFullHeightReplayEvidence, PcScoreProblemEvidence,
 };
 
 use super::{
@@ -562,7 +562,12 @@ impl ExtendedBuildProbabilitySession {
         }
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().score().requested()
-            || self.problem.objective().execution_constraints().requested();
+            || self.problem.objective().execution_constraints().requested()
+            || (self.purpose == ExtendedFamilyPurpose::Pc
+                && self
+                    .problem
+                    .pc_chance_evidence_policy()
+                    .retains_pc_path_v2_evidence());
         let candidate_key = (execution_evidence_requested
             || self.finesse_requested
             || self.solution_coverage.is_some())
@@ -2336,6 +2341,10 @@ impl ExtendedBuildProbabilitySession {
             .pc_chance_evidence_policy()
             .retains_pc_minimum_cover_v2_evidence();
         let score_source = self.problem.objective().score().requested();
+        let path_source = self
+            .problem
+            .pc_chance_evidence_policy()
+            .retains_pc_path_v2_evidence();
         let failed_source = self
             .problem
             .pc_chance_evidence_policy()
@@ -2656,7 +2665,7 @@ impl ExtendedBuildProbabilitySession {
         } else {
             None
         };
-        let score_batch = if score_source {
+        let mut physical_batch = if score_source || path_source {
             // A digest is not a canonical candidate index. Rebind every actual
             // physical graph to the sorted complete family; multiple physical
             // realizations of one colored tiling deliberately share its index.
@@ -2705,33 +2714,45 @@ impl ExtendedBuildProbabilitySession {
                 core::mem::take(&mut self.spin_execution_graphs),
                 count_complete && probability_complete,
             );
-            fields.extend([
-                field("postprocess_scoring_requested", true),
-                field(
-                    "score_objective_mode",
-                    self.problem.objective().score().mode().as_str(),
-                ),
-                field(
-                    "score_profile_requested",
-                    self.problem.objective().score().profile().as_str(),
-                ),
-                field(
-                    "spin_profile_requested",
-                    self.problem.objective().score().spin_profile().as_str(),
-                ),
-                field(
-                    "score_initial_b2b",
-                    self.problem.objective().score().initial_b2b(),
-                ),
-                field("score_summary_requested", true),
-                field("score_summary_complete", false),
-                field("score_summary_incomplete_reason", "deferred-to-coordinator"),
-                field("objective_incomplete_reason", "deferred-to-coordinator"),
-                field(
-                    "full_height_score_execution_graph_count",
-                    batch.graphs().len(),
-                ),
-            ]);
+            if score_source {
+                fields.extend([
+                    field("postprocess_scoring_requested", true),
+                    field(
+                        "score_objective_mode",
+                        self.problem.objective().score().mode().as_str(),
+                    ),
+                    field(
+                        "score_profile_requested",
+                        self.problem.objective().score().profile().as_str(),
+                    ),
+                    field(
+                        "spin_profile_requested",
+                        self.problem.objective().score().spin_profile().as_str(),
+                    ),
+                    field(
+                        "score_initial_b2b",
+                        self.problem.objective().score().initial_b2b(),
+                    ),
+                    field("score_summary_requested", true),
+                    field("score_summary_complete", false),
+                    field("score_summary_incomplete_reason", "deferred-to-coordinator"),
+                    field("objective_incomplete_reason", "deferred-to-coordinator"),
+                    field(
+                        "full_height_score_execution_graph_count",
+                        batch.graphs().len(),
+                    ),
+                ]);
+            } else {
+                fields.extend([
+                    field(
+                        "full_height_replay_execution_graph_count",
+                        batch.graphs().len(),
+                    ),
+                    field("complete_replay_requested", true),
+                    field("complete_replay_complete", false),
+                    field("objective_incomplete_reason", "deferred-to-coordinator"),
+                ]);
+            }
             Some(
                 FullHeightExecutionBatch::from_spin_coverage(
                     self.field.height(),
@@ -2747,6 +2768,22 @@ impl ExtendedBuildProbabilitySession {
         } else {
             None
         };
+        let path_evidence = if path_source && count_complete && probability_complete {
+            Some(
+                PcFullHeightReplayEvidence::from_executed_problem(
+                    &self.problem,
+                    &keys,
+                    physical_batch
+                        .take()
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "extended_pc_replay_physical_batch_missing",
+                        ))?,
+                )
+                .map_err(WasmExactSearchError::InvalidProblem)?,
+            )
+        } else {
+            None
+        };
         // Minimum evidence comes from this PC producer's verified language,
         // not from Build result fields. The common exact reducer runs in App.
         let mut result = CoreExecutionResult::new(fields, self.representative_path.clone())
@@ -2758,8 +2795,13 @@ impl ExtendedBuildProbabilitySession {
             result = result.with_pc_chance_coverage_evidence(evidence);
         }
         result = result.with_pc_score_problem_evidence(score_evidence);
-        if let Some(batch) = score_batch {
-            result = result.with_full_height_scoring_execution_batch(batch);
+        if score_source {
+            if let Some(batch) = physical_batch {
+                result = result.with_full_height_scoring_execution_batch(batch);
+            }
+        }
+        if let Some(evidence) = path_evidence {
+            result = result.with_pc_full_height_replay_evidence(evidence);
         }
         Ok(
             if self.problem.solution_probability_policy().requested() || score_source {
@@ -3127,7 +3169,12 @@ impl ExtendedBuildProbabilitySession {
 
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().score().requested()
-            || self.problem.objective().execution_constraints().requested();
+            || self.problem.objective().execution_constraints().requested()
+            || (self.purpose == ExtendedFamilyPurpose::Pc
+                && self
+                    .problem
+                    .pc_chance_evidence_policy()
+                    .retains_pc_path_v2_evidence());
         if execution_evidence_requested
             && !(self.problem.objective().execution_constraints().requested()
                 && self.distributed_execution_constraint_materialized)
@@ -3149,6 +3196,16 @@ impl ExtendedBuildProbabilitySession {
             future = future.checked_add(PcScoreProblemEvidence::checked_creation_future_bytes(
                 &self.problem,
             )?)?;
+        }
+        if self.purpose == ExtendedFamilyPurpose::Pc
+            && self
+                .problem
+                .pc_chance_evidence_policy()
+                .retains_pc_path_v2_evidence()
+        {
+            future = future.checked_add(
+                PcFullHeightReplayEvidence::checked_creation_future_bytes(&self.problem)?,
+            )?;
         }
         Some(future)
     }

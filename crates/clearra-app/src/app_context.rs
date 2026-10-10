@@ -21,6 +21,9 @@ use crate::{
     product_capability_result::ProductCapabilityResult,
 };
 
+#[path = "pc_replay_direct_finalizer.rs"]
+mod pc_replay_direct_finalizer;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppContext {
     services: AppServices,
@@ -142,6 +145,23 @@ impl AppContext {
                 response.with_validation_diagnostics(validation_report)
             }
         };
+        if response.status() == AppStatus::Success
+            && product_capability_contract
+                .as_ref()
+                .is_some_and(|c| c.contract() == ProductCapabilityContract::PcPath)
+            && response
+                .render_model()
+                .and_then(crate::render::AppRenderModel::core_result)
+                .is_some_and(|core| core.pc_full_height_replay_evidence().is_some())
+        {
+            return self.finalize_full_height_replay_response(
+                response,
+                command_kind,
+                &output_policy,
+                product_capability_contract.expect("checked pc.path contract"),
+                execution_control,
+            );
+        }
         self.finalize_response_with_product_capability(
             response,
             command_kind,

@@ -813,7 +813,7 @@ function nativePcArguments(command, values, mode = {}) {
     throw invalidOption("queue-knowledge", "Visible-7 evaluation above 6 PC lines is not connected yet.");
   }
   const preserveB2b = onOffValue(values, "preserve-b2b", false);
-  if (lines > DISCORD_PC_FIELD_MAX_ROWS && (typedMinimumCover || mode.failedQueue) && preserveB2b) {
+  if (lines > DISCORD_PC_FIELD_MAX_ROWS && (typedMinimumCover || mode.failedQueue || mode.path) && preserveB2b) {
     throw invalidOption("preserve-b2b", "B2B preservation above 6 PC lines is not connected yet.");
   }
   const requestedSpinProfile = optionalText(values, "spin-profile", 32);

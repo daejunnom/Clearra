@@ -668,7 +668,7 @@ function registrationOptions(input, capabilityId = null) {
       return Object.freeze([
         nextOption(false),
         fieldOption(input),
-        linesOption(),
+        linesOption(discordPcMaxRows(input)),
         pcHoldOption(),
         kicktableOption(true),
         spinProfileOption(false),
@@ -1856,7 +1856,7 @@ function syntax(entry, locale = "en") {
       case "pc-v2":
         return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<프로필>] [preserve-b2b:<on|off>] [solution-probabilities:<on|off>]`;
       case "pc-path-v2":
-        return `/${path} next:<큐|패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [spin-profile:<프로필>] [preserve-b2b:<on|off>]`;
+        return `/${path} next:<큐|패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [spin-profile:<프로필>] [preserve-b2b:<on|off>]`;
       case "pc-chance-v2":
         return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>]`;
       case "pc-save-v2":
@@ -1945,7 +1945,7 @@ function syntax(entry, locale = "en") {
     case "pc-v2":
       return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [queue-knowledge:<oracle|visible-7>] [spin-profile:<profile>] [preserve-b2b:<on|off>] [solution-probabilities:<on|off>]`;
     case "pc-path-v2":
-      return `/${path} next:<queue|pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [spin-profile:<profile>] [preserve-b2b:<on|off>]`;
+      return `/${path} next:<queue|pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [spin-profile:<profile>] [preserve-b2b:<on|off>]`;
     case "pc-chance-v2":
       return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>]`;
     case "pc-save-v2":
@@ -2062,7 +2062,8 @@ function inputHelp(entry, locale = "en") {
       ];
     case "pc-path-v2":
       return [
-        `\`field\` is a 1–${DISCORD_PC_FIELD_MAX_ROWS}-row initial PC board or one static document; \`next\` is one exact queue or one supported pattern source.`,
+        `\`field\` is a 1–${discordPcMaxRows(entry.input)}-row initial PC board or one static document; \`next\` is one exact queue or one supported pattern source.`,
+        "Above 6 PC lines, B2B preservation is not connected yet.",
         "This path route fixes objective and count to `all` with full-oracle queue knowledge. It accepts only hold, spin profile, B2B preservation, and the rule profile; score, tiling, probability, queue-knowledge, dependency, tablebase, and max-memory controls are closed.",
         "The typed engine result is the complete finite path family. Discord projects only its numeric-smallest canonical candidate as the single published witness.",
         nativeKickHelp,
@@ -2372,7 +2373,8 @@ function koreanInputHelp(entry) {
       ];
     case "pc-path-v2":
       return [
-        `\`field\`는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 PC 초기 필드 또는 정적 문서이며 \`next\`는 정확한 큐 하나 또는 지원되는 패턴 공급원 하나입니다.`,
+        `\`field\`는 1–${discordPcMaxRows(entry.input)}줄 PC 초기 필드 또는 정적 문서이며 \`next\`는 정확한 큐 하나 또는 지원되는 패턴 공급원 하나입니다.`,
+        "6L 초과 PC의 B2B 보존은 아직 연결되지 않았습니다.",
         "이 path 경로는 objective와 count를 `all`, 큐 공개 범위를 full-oracle로 고정합니다. 홀드, 스핀 프로필, B2B 보존, 규칙 프로필만 받으며 점수·타일링·확률·queue-knowledge·의존성·테이블베이스·최대 메모리 설정은 닫혀 있습니다.",
         "타입 엔진 결과는 완전한 유한 path family입니다. Discord는 그중 숫자로 가장 작은 canonical candidate 하나만 게시 증거로 투영합니다.",
         nativeKickHelp,

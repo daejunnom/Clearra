@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { fullHeightPcReplayWitness } from "../../../tests/fixtures/contracts/extended_pc_replay_witness.v1.mjs";
 
 import { Clearrabot } from "../src/bot.mjs";
 import {
@@ -42,6 +43,25 @@ test("pc.path replay fails closed instead of fabricating a cleared final field",
     () => buildCanonicalPcPathReplayDocument(corrupted),
     /inconsistent path replay clear field/u,
   );
+});
+
+test("full-height PC replay retains all 24 rows, six locks and clears at 500ms", () => {
+  const structured = result();
+  structured.summary.canonical_witness = fullHeightPcReplayWitness();
+  const replay = buildCanonicalPcPathReplayDocument(structured);
+  assert.equal(replay.frameCount, 13);
+  assert.ok(replay.document.pages.every((page) => page.height === 24 && page.cells.length === 240));
+  assert.equal(replay.document.pages[0].cells[238], "G");
+  assert.equal(replay.document.pages[0].cells[239], null);
+  assert.ok(replay.document.pages.at(-1).cells.every((cell) => cell === null));
+  const gif = renderDocumentGif(replay.document, { delayMs: PC_PATH_REPLAY_FRAME_DELAY_MS });
+  assert.deepEqual(gifFrameDelays(gif), Array(13).fill(50));
+  const corrupt = structuredClone(structured);
+  corrupt.summary.canonical_witness.steps[0].board_before_mask = `0x1${"0".repeat(63)}`;
+  assert.throws(() => buildCanonicalPcPathReplayDocument(corrupt), /height limit/u);
+  const narrowed = structuredClone(structured);
+  narrowed.summary.canonical_witness.steps[1].board_before_mask = "0x0000000000000000";
+  assert.throws(() => buildCanonicalPcPathReplayDocument(narrowed), /noncanonical/u);
 });
 
 test("pc.path replay rejects a declared clear on a non-full row", () => {

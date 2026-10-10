@@ -63,6 +63,12 @@ impl SpinCoverageExecutionGraph {
         self.nodes.len()
     }
 
+    /// Includes edges outside node spans so a source digest binds hidden
+    /// evidence too. Read-only storage does not grant path completeness.
+    pub fn all_edges(&self) -> &[ScoringExecutionEdge] {
+        &self.edges
+    }
+
     pub fn edges(&self, node: ScoringExecutionNode) -> &[ScoringExecutionEdge] {
         let start = node.edge_start() as usize;
         &self.edges[start..start + node.edge_count() as usize]

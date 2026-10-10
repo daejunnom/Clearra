@@ -1,9 +1,12 @@
 mod b2b_execution_filter;
 pub mod candidate_execution_aggregate;
+mod compact_replay_language_domain;
 mod exact_replay_language;
 mod exact_scoring_execution_materializer;
 mod execution_supply;
+mod full_height_replay_language_domain;
 mod full_height_score_cell_materializer;
+mod replay_language_domain;
 mod score_cell_traversal;
 pub mod score_matrix;
 mod t_spin_coverage_only_materializer;
@@ -13,7 +16,9 @@ pub use b2b_execution_filter::{
     BackToBackFilterMemoryProjection, BackToBackFilterMemoryReport,
 };
 pub use candidate_execution_aggregate::{CandidateExecution, CandidateExecutionAggregate};
-pub use exact_replay_language::{ExactReplayGraphLocation, ExactReplayLanguageSession};
+pub use exact_replay_language::{
+    ExactReplayGraphLocation, ExactReplayLanguageSession, FullHeightReplayLanguageSession,
+};
 #[cfg(feature = "stage-profiling")]
 pub use exact_scoring_execution_materializer::ExactScoringExecutionProfile;
 pub use exact_scoring_execution_materializer::{
@@ -23,6 +28,7 @@ pub use exact_scoring_execution_materializer::{
     ExactScoredExecution, ExactScoringExecutionCancelled, ExactScoringExecutionMaterialization,
     ExactScoringExecutionMaterializer,
 };
+pub use full_height_replay_language_domain::FullHeightCandidateExecution;
 pub use full_height_score_cell_materializer::{
     FullHeightScoreCellError, FullHeightScoreCellMaterialization, FullHeightScoreCellMaterializer,
     FullHeightScoreCellMemoryProjection,

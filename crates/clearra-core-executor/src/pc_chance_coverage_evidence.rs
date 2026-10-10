@@ -313,6 +313,18 @@ impl PcChanceProblemEvidence {
         Self::from_search_problem_fields(problem)
     }
 
+    pub(crate) fn from_pc_path_search_problem(
+        problem: &SearchProblem,
+    ) -> Result<Self, PcChanceProblemEvidenceError> {
+        if !problem
+            .pc_chance_evidence_policy()
+            .retains_pc_path_v2_evidence()
+        {
+            return Err(PcChanceProblemEvidenceError::UnexpectedChanceEvidencePolicy);
+        }
+        Self::from_search_problem_fields(problem)
+    }
+
     fn from_search_problem_fields(
         problem: &SearchProblem,
     ) -> Result<Self, PcChanceProblemEvidenceError> {
@@ -570,7 +582,7 @@ impl PcChanceProblemEvidence {
         self.piece_source.complete
     }
 
-    fn checked_storage_retained_bytes(&self) -> Option<u128> {
+    pub(crate) fn checked_storage_retained_bytes(&self) -> Option<u128> {
         let mut bytes = self.problem_id.capacity() as u128;
         if let Some(schedule) = &self.checkpoint_schedule {
             bytes = bytes.checked_add(schedule.checked_storage_retained_bytes()?)?;

@@ -78,6 +78,13 @@ pub(super) fn validate_pc_family_problem(
             }
             _ => false,
         };
+    let path_source = problem
+        .pc_chance_evidence_policy()
+        .retains_pc_path_v2_evidence()
+        && problem.objective().kind() == ObjectiveKind::All
+        && problem.count_policy() == PcCountPolicy::CountAll
+        && problem.output_policy() == SearchOutputPolicy::Trace
+        && !problem.objective().score().requested();
     if !matches!(
         problem.preset(),
         SearchProblemPreset::ScenarioPc | SearchProblemPreset::OpeningPc
@@ -86,7 +93,12 @@ pub(super) fn validate_pc_family_problem(
         || problem.goal().as_str() != "clear-to-empty"
         || problem.initial_board().width() != 10
         || !(7..=24).contains(&problem.visible_height())
-        || !(ordinary_source || minimum_source || chance_source || failed_source || score_source)
+        || !(ordinary_source
+            || minimum_source
+            || chance_source
+            || failed_source
+            || score_source
+            || path_source)
         || !matches!(
             problem.count_policy(),
             PcCountPolicy::CountAll | PcCountPolicy::CountUnique
@@ -150,9 +162,13 @@ impl ExtendedPcSearchSession {
         external_retained_bytes: u128,
         authority: &WasmCpuTerminalResourceAuthority,
     ) -> Result<Self, WasmExactSearchError> {
-        if !problem.objective().score().requested() {
+        if !problem.objective().score().requested()
+            && !problem
+                .pc_chance_evidence_policy()
+                .retains_pc_path_v2_evidence()
+        {
             return Err(WasmExactSearchError::InvalidProblem(
-                "extended_pc_terminal_authority_requires_score",
+                "extended_pc_terminal_authority_requires_score_or_path",
             ));
         }
         Self::new_with_admission(problem, external_retained_bytes, Some(authority))

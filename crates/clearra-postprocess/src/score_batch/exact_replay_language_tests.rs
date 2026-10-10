@@ -410,7 +410,7 @@ fn merged_suffix_keeps_distinct_prefix_multiplicity() {
     complete(&mut counted).unwrap();
     assert_eq!(counted.count(), Some(2));
     assert!(
-        counted.fast,
+        counted.inner.fast,
         "unique visible successors certify the direct DAG route"
     );
     assert_eq!(all(&counted), expected);
@@ -433,13 +433,13 @@ fn duplicate_same_destination_is_one_word_but_two_raw_paths() {
     let source: Arc<[ExactScoringExecutionBatch]> = vec![batch(vec![graph], 2, false)].into();
     let mut counted = session(Arc::clone(&source), 2);
     complete(&mut counted).unwrap();
-    assert!(!counted.fast);
+    assert!(!counted.inner.fast);
     assert_eq!(counted.count(), Some(1));
     assert_eq!(all(&counted), oracle(&source));
-    for (id, node) in counted.nfa.iter().enumerate() {
+    for (id, node) in counted.inner.nfa.iter().enumerate() {
         assert!(node.edges.iter().all(|e| e.destination > id));
     }
-    for (id, node) in counted.dfa.iter().enumerate() {
+    for (id, node) in counted.inner.dfa.iter().enumerate() {
         assert!(node.edges.iter().all(|e| e.destination > id));
     }
 }

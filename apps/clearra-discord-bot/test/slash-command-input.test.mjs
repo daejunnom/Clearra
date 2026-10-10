@@ -52,8 +52,8 @@ function compactGridFromMask(mask) {
   return `grid:${rows.join("/")}`;
 }
 
-test("Discord 7..24L Tiling, Minimum, Chance and Failed Queue retain all field words and normalize the explicit or automatic target once", () => {
-  for (const product of ["tiling", "minimals", "chance", "failed-queue"]) {
+test("Discord 7..24L Tiling, Minimum, Chance, Failed Queue and Replay retain all field words and normalize the explicit or automatic target once", () => {
+  for (const product of ["tiling", "minimals", "chance", "failed-queue", "path"]) {
   const command = findSlashCommand("pc").subcommands[product];
   const rows = readFileSync(new URL("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv", import.meta.url), "utf8")
     .split(/\r?\n/u).filter(line => line && !line.startsWith("#"));
@@ -70,8 +70,6 @@ test("Discord 7..24L Tiling, Minimum, Chance and Failed Queue retain all field w
     const automatic = buildSlashCommandArgumentPlan(command, options.filter(option => option.name !== "lines"));
     assert.equal(automatic.automaticPcTargets, true);
     assert.deepEqual(automatic.argumentSets, [args], `${id}: only the whole target fits this supply`);
-    assert.throws(() => buildSlashCommandArguments(findSlashCommand("pc").subcommands.path, options),
-      /rows|lines|Board64/u, "unconnected replay authority remains compact");
   }
   assert.deepEqual(automaticPcLines({ occupied: 0n, pieceCount: 60, maxLines: 24 }),
     Array.from({ length: 12 }, (_, index) => 2 + index * 2));
@@ -86,6 +84,13 @@ test("Discord 7..24L Tiling, Minimum, Chance and Failed Queue retain all field w
 
 test("24L Minimum refuses disconnected B2B semantics without changing the requested target", () => {
   assert.throws(() => buildSlashCommandArguments(findSlashCommand("pc").subcommands.minimals, [
+    { name: "field", value: "grid:__________" }, { name: "next", value: "I".repeat(20) },
+    { name: "lines", value: 8 }, { name: "preserve-b2b", value: "on" },
+  ]), /B2B preservation above 6 PC lines/u);
+});
+
+test("24L Replay refuses disconnected B2B semantics without changing the requested target", () => {
+  assert.throws(() => buildSlashCommandArguments(findSlashCommand("pc").subcommands.path, [
     { name: "field", value: "grid:__________" }, { name: "next", value: "I".repeat(20) },
     { name: "lines", value: 8 }, { name: "preserve-b2b", value: "on" },
   ]), /B2B preservation above 6 PC lines/u);
@@ -129,7 +134,7 @@ test("24L Failed Queue refuses disconnected observation and B2B semantics instea
 test("Discord PC input shares the 1..6L target-frame and initial-clear corpus", () => {
   const command = findSlashCommand("pc").subcommands.path;
   const expectedError = Object.freeze({
-    "target-lines-invalid": /lines must be an integer from 1 through 6/u,
+    "target-lines-invalid": /lines must be an integer from 1 through 24/u,
     "area-impossible": /target does not contain a whole number of tetrominoes/u,
     "outside-target": /field has occupied cells above the requested PC target/u,
   });
