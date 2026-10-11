@@ -468,9 +468,11 @@ test('full-height score ingress admits connected source layouts without removing
   const tests = read('crates/clearra-validation/src/validators/pc_query_validator_tests.rs');
   assert.ok(validator.includes('let score_source = query.objective().score().requested()'));
   assert.ok(validator.includes('let full_height_family = (ordinary_source || score_source)'));
-  assert.ok(validator.includes('query.objective().execution_constraints().requested()'));
+  assert.doesNotMatch(validator, /&&\s*!query\.objective\(\)\.execution_constraints\(\)\.requested\(\)/u,
+    'the already-materialized full-height B2B source must not fall back to the compact input guard');
   assert.ok(validator.includes('.requires_observation_policy()'));
   assert.ok(tests.includes('full_height_score_scenario_accepts_all_four_words_without_granting_product_authority'));
+  assert.ok(tests.includes('full_height_b2b_scenario_admits_the_shared_physical_source_for_each_product'));
   assert.ok(tests.includes('full_height_score_scenario_still_rejects_unconnected_objective_and_constraint_domains'));
   assert.ok(workflow.includes('--test extended_pc_surfaces -- --test-threads=1'));
   assert.ok(workflow.includes('--lib full_height_score_key_projection -- --test-threads=1'));
