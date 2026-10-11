@@ -244,6 +244,7 @@ jobs:
           cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- --test-threads=1
           cargo test --locked -p clearra-app --no-default-features --features parallel --test extended_pc_tiling -- --test-threads=1
           cargo clippy --locked -p clearra-replay -p clearra-postprocess -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings
+          cargo clippy --locked --no-deps -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- -D warnings
       - name: Verify complete PC evidence memory is admitted before row and snapshot construction
         if: ${{ !cancelled() }}
         run: |

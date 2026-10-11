@@ -341,6 +341,24 @@ test('full-height minimum uses source-bound coverage proof and the common canoni
   assert.ok(integration.includes('set.open_store()'));
 });
 
+test('full-height B2B filters exact BuildUp before supply and typed proof, not after candidate selection', () => {
+  const producer = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs');
+  const builder = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_buildup.rs');
+  const constraints = read('crates/clearra-app/src/execution_constraint_postprocess.rs');
+  const family = read('crates/clearra-core-executor/tests/extended_pc_family.rs');
+  assert.ok(producer.includes('} else if self.purpose == ExtendedFamilyPurpose::Pc {\n            build_extended_pc_order_graph('));
+  assert.ok(builder.includes('finesse_b2b_policy(problem)'));
+  assert.ok(builder.includes('scoring_edge.is_none_or(|edge| !policy.allows(edge))'));
+  assert.ok(builder.indexOf('scoring_edge.is_none_or(|edge| !policy.allows(edge))') < builder.indexOf('if existing_child.is_none()'));
+  const terminal = producer.slice(producer.indexOf('fn build_pc_family_result('));
+  assert.ok(terminal.includes('field("execution_constraint_materialized", true)'));
+  assert.ok(terminal.includes('"original-materialized-queue"'));
+  assert.ok(constraints.includes('if result.field("execution_constraint_materialized") == Some("true")'));
+  assert.ok(family.includes('full_height_b2b_family_matches_an_independent_unfiltered_graph_pass'));
+  assert.ok(family.includes('full_height_parallel_b2b_uses_the_same_filtered_graphs_and_coverage'));
+  assert.ok(jobSection('native-family-parallel').includes('--features parallel --test extended_pc_family -- -D warnings'));
+});
+
 test('full-height chance retains its independent four-word authority and admits evidence memory first', () => {
   const app = read('crates/clearra-app/src/pc_chance_probability_result.rs');
   const memory = read('crates/clearra-core-executor/src/pc_chance_coverage_evidence.rs');

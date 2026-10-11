@@ -54,7 +54,8 @@ use super::{
     extended_board::{compact_logical_board, words_hex},
     extended_buildup::{
         build_extended_order_graph, build_extended_order_graph_with_finesse,
-        ExtendedBuildOrderResult, ExtendedBuildOrderWorkspace, ExtendedTilingKey,
+        build_extended_pc_order_graph, ExtendedBuildOrderResult, ExtendedBuildOrderWorkspace,
+        ExtendedTilingKey,
     },
     extended_geometry::{ExtendedGeometryAdvance, ExtendedGeometrySearch},
     extended_inverse_catalog::ExtendedInverseCatalog,
@@ -595,6 +596,16 @@ impl ExtendedBuildProbabilitySession {
                 node_limit,
                 spin_candidate,
                 self.aggregation.requests_spin_coverage(),
+                control,
+            )
+        } else if self.purpose == ExtendedFamilyPurpose::Pc {
+            build_extended_pc_order_graph(
+                &self.problem,
+                &self.catalog,
+                &candidate,
+                &mut self.build_order_workspace,
+                node_limit,
+                spin_candidate,
                 control,
             )
         } else {
@@ -2568,6 +2579,47 @@ impl ExtendedBuildProbabilitySession {
                 self.truncated_reason.unwrap_or("none"),
             ),
         ];
+        let constraints = self.problem.objective().execution_constraints();
+        if constraints.requested() {
+            // The PC BuildUp language is already filtered. App must not apply
+            // a compact batch filter after typed coverage/replay proof was
+            // created, nor renormalize away unsuccessful supplied queues.
+            fields.extend([
+                field("execution_constraint_preserve_b2b", true),
+                field(
+                    "execution_constraint_spin_profile",
+                    constraints.spin_profile().as_str(),
+                ),
+                field("execution_constraint_materialized", true),
+                field("b2b_preservation_selection", "existential"),
+                field(
+                    "b2b_preservation_denominator_semantics",
+                    "original-materialized-queue",
+                ),
+                field("b2b_preserving_solution_count", keys.len()),
+                field(
+                    "b2b_preserving_pattern_count",
+                    self.covered_patterns.count_ones(),
+                ),
+                field(
+                    "b2b_preservation_pattern_universe_count",
+                    universe.pattern_count(),
+                ),
+                field("b2b_preservation_probability", probability.get()),
+                field("b2b_preservation_count_complete", count_complete),
+                field(
+                    "b2b_preservation_probability_complete",
+                    probability_complete,
+                ),
+                field(
+                    "b2b_preserving_candidate_pattern_count",
+                    coverages
+                        .iter()
+                        .map(|coverage| u128::from(coverage.covered_patterns().count_ones()))
+                        .sum::<u128>(),
+                ),
+            ]);
+        }
         let evidence = if minimum_source || chance_source {
             let mut union = PatternBitSet::new(universe.pattern_count());
             let mut rows = Vec::new();

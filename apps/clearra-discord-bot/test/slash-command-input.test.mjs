@@ -82,18 +82,28 @@ test("Discord 7..24L Tiling, Minimum, Chance, Failed Queue and Replay retain all
   }
 });
 
-test("24L Minimum refuses disconnected B2B semantics without changing the requested target", () => {
-  assert.throws(() => buildSlashCommandArguments(findSlashCommand("pc").subcommands.minimals, [
-    { name: "field", value: "grid:__________" }, { name: "next", value: "I".repeat(20) },
-    { name: "lines", value: 8 }, { name: "preserve-b2b", value: "on" },
-  ]), /B2B preservation above 6 PC lines/u);
-});
-
-test("24L Replay refuses disconnected B2B semantics without changing the requested target", () => {
-  assert.throws(() => buildSlashCommandArguments(findSlashCommand("pc").subcommands.path, [
-    { name: "field", value: "grid:__________" }, { name: "next", value: "I".repeat(20) },
-    { name: "lines", value: 8 }, { name: "preserve-b2b", value: "on" },
-  ]), /B2B preservation above 6 PC lines/u);
+test("7..24L Minimum, Replay and Failed Queue preserve B2B and spin profile without erasing field words", () => {
+  const rows = readFileSync(new URL("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv", import.meta.url), "utf8")
+    .split(/\r?\n/u).filter(line => line && !line.startsWith("#"));
+  for (const product of ["minimals", "path", "failed-queue"]) {
+    const command = findSlashCommand("pc").subcommands[product];
+    for (const row of rows) {
+      const [id, height, hex, , queue] = row.split("\t");
+      const args = buildSlashCommandArguments(command, [
+        { name: "field", value: compactGridFromMask(BigInt(`0x${hex}`)) }, { name: "next", value: queue },
+        { name: "lines", value: Number(height) }, { name: "hold", value: "disabled" },
+        { name: "preserve-b2b", value: "on" }, { name: "spin-profile", value: "all-spin" },
+      ]);
+      assert.equal(args.includes("--preserve-b2b"), true, id);
+      assert.equal(args[args.indexOf("--spin-profile") + 1], "all-spin", id);
+      assert.equal(args[args.indexOf("--lines") + 1], height, id);
+      assert.equal(BigInt(args[args.indexOf("--board-mask") + 1]), BigInt(`0x${hex}`), id);
+    }
+    for (const locale of ["en", "ko", "ja"]) {
+      const help = formatSlashCommandHelp(`pc ${product}`, locale);
+      assert.doesNotMatch(help, /B2B preservation must be off|B2B preservation is not connected|B2B 보존을 off|B2B 보존은 아직|B2B維持はoff|B2B維持にはまだ/u);
+    }
+  }
 });
 
 test("typed score products retain the same 7..24L inputs without widening legacy replay", () => {
@@ -119,7 +129,7 @@ test("typed score products retain the same 7..24L inputs without widening legacy
   }
 });
 
-test("24L Failed Queue refuses disconnected observation and B2B semantics instead of dropping them", () => {
+test("24L Failed Queue refuses disconnected observation instead of dropping it", () => {
   const command = findSlashCommand("pc").subcommands["failed-queue"];
   const options = [
     { name: "field", value: "grid:__________" }, { name: "next", value: "I".repeat(20) },
@@ -127,8 +137,6 @@ test("24L Failed Queue refuses disconnected observation and B2B semantics instea
   ];
   assert.throws(() => buildSlashCommandArguments(command,
     [...options, { name: "queue-knowledge", value: "visible-7" }]), /Visible-7 evaluation above 6 PC lines/u);
-  assert.throws(() => buildSlashCommandArguments(command,
-    [...options, { name: "preserve-b2b", value: "on" }]), /B2B preservation above 6 PC lines/u);
 });
 
 test("Discord PC input shares the 1..6L target-frame and initial-clear corpus", () => {

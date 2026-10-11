@@ -204,6 +204,9 @@ fn apply_execution_constraints_inner(
     // Distributed finalizers initialize this marker from the requested constraint and AND it
     // with every absorbed worker result. Once true, every partition is already materialized;
     // a coordinator-generated empty evidence wrapper must not trigger a second filtering pass.
+    // Full-height PC also sets this only after filtering actual BuildUp lock
+    // edges, before supply coverage and request-owned minimum/replay proof.
+    // Refusing a second compact pass preserves that producer-bound family.
     if result.field("execution_constraint_materialized") == Some("true") {
         return Ok(result);
     }

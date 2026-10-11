@@ -109,7 +109,6 @@ pub(super) fn validate_pc_family_problem(
         ) || chance_source
             || failed_source)
         || (problem.objective().score().requested() && !score_source)
-        || problem.objective().execution_constraints().requested()
         || problem.allowed_colored_solution_identities().is_some()
         || problem
             .queue_observation_policy()

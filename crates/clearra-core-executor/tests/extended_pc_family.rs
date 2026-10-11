@@ -7,7 +7,9 @@ use clearra_core_executor::backend::{
     WasmCpuSearchAdvance, WasmCpuSearchBackend, WasmCpuSearchError, WasmCpuSearchSession,
 };
 use clearra_core_executor::{WasmPcFailedQueueAdvance, WasmPcFailedQueueSession};
-use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+use clearra_objectives::policy::{
+    objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+};
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
     PcScenarioBoard, PcScenarioQuery, PieceWindow, RequestedSearchBackend,
@@ -53,6 +55,219 @@ fn forced_query(height: u8, rule: RuleProfile) -> (PcScenarioQuery, Board256Mask
             .with_allow_backend_fallback(false),
     );
     (query, initial, pieces)
+}
+
+#[test]
+fn full_height_b2b_is_filtered_before_family_coverage_and_typed_source_creation() {
+    for rule in [srs(), srs_plus(), srs_x(), jstris_180(), no_kick()] {
+        for height in [7, 8, 12, 24] {
+            let (query, _, _) = forced_query(height, rule);
+            for mode in ["all", "minimum", "path", "score"] {
+                let objective = match mode {
+                    "minimum" => ObjectivePolicy::minimum_cover(),
+                    "score" => ObjectivePolicy::all().with_score_summary(),
+                    _ => ObjectivePolicy::all(),
+                };
+                let constrained =
+                    objective.with_back_to_back_preservation(SpinProfileSelection::TSpins);
+                let source = ProblemCompiler::compile_scenario_pc(
+                    &query.clone().with_objective(constrained),
+                )
+                .unwrap();
+                let source = match mode {
+                    "minimum" => source.with_pc_minimum_cover_v2_evidence(),
+                    "path" => source.with_pc_path_v2_evidence(),
+                    _ => source,
+                };
+                let result = WasmCpuSearchBackend::execute_with_control(
+                    &source,
+                    &ExecutionControl::default(),
+                )
+                .unwrap();
+                // The 7L forced-I input must clear a non-PC triple before the
+                // terminal tetris. Other heights clear only tetrises.
+                let accepted = height != 7;
+                assert_eq!(
+                    result.bool_field("execution_constraint_materialized"),
+                    Some(true)
+                );
+                assert_eq!(result.bool_field("count_complete"), Some(true));
+                assert_eq!(
+                    result.normalized_solution_keys().len(),
+                    usize::from(accepted)
+                );
+                assert_eq!(
+                    result.field("coverage_probability"),
+                    Some(if accepted { "1" } else { "0" })
+                );
+                assert_eq!(result.usize_field("coverage_pattern_count"), Some(1));
+                assert_eq!(
+                    result.usize_field("covered_pattern_count"),
+                    Some(usize::from(accepted))
+                );
+                assert_eq!(
+                    result.field("b2b_preservation_denominator_semantics"),
+                    Some("original-materialized-queue")
+                );
+                match mode {
+                    "minimum" => {
+                        let proof = result.pc_chance_coverage_evidence().unwrap();
+                        assert!(proof.complete());
+                        assert!(proof.problem().matches_search_problem(&source));
+                        assert!(proof.matches_extended_minimum_source_keys(
+                            result.normalized_solution_keys()
+                        ));
+                    }
+                    "path" => {
+                        let proof = result.pc_full_height_replay_evidence().unwrap();
+                        assert!(
+                            proof.matches_result_source(&source, result.normalized_solution_keys())
+                        );
+                        let unconstrained = ProblemCompiler::compile_scenario_pc(
+                            &query.clone().with_objective(objective),
+                        )
+                        .unwrap()
+                        .with_pc_path_v2_evidence();
+                        assert!(!proof.matches_result_source(
+                            &unconstrained,
+                            result.normalized_solution_keys()
+                        ));
+                    }
+                    "score" => assert!(result
+                        .pc_score_problem_evidence()
+                        .unwrap()
+                        .matches_search_problem(&source)),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn b2b_live(
+    graph: &clearra_replay::SpinCoverageExecutionGraph,
+    profile: SpinProfileSelection,
+) -> bool {
+    let policy = clearra_postprocess::score_batch::BackToBackEdgePolicy::new(profile);
+    let mut live = vec![false; graph.node_count()];
+    for index in (0..graph.node_count()).rev() {
+        let node = graph.node(index as u32).unwrap();
+        live[index] = node.accepting()
+            || graph
+                .edges(node)
+                .iter()
+                .any(|edge| policy.allows(*edge) && live[edge.to() as usize]);
+    }
+    live[graph.root() as usize]
+}
+
+#[test]
+fn full_height_b2b_family_matches_an_independent_unfiltered_graph_pass() {
+    for profile in [SpinProfileSelection::TSpins, SpinProfileSelection::AllSpin] {
+        for height in [7, 8, 24] {
+            let query =
+                branching_query(height, srs_plus()).with_count_policy(PcCountPolicy::CountAll);
+            let baseline = ProblemCompiler::compile_scenario_pc(&query)
+                .unwrap()
+                .with_pc_path_v2_evidence();
+            let control = ExecutionControl::default();
+            let reference =
+                WasmCpuSearchBackend::execute_with_control(&baseline, &control).unwrap();
+            let mut expected = reference
+                .pc_full_height_replay_evidence()
+                .unwrap()
+                .batch()
+                .execution()
+                .graphs()
+                .iter()
+                .filter(|graph| b2b_live(graph, profile))
+                .map(|graph| graph.candidate_key().to_owned())
+                .collect::<Vec<_>>();
+            expected.sort_unstable();
+            expected.dedup();
+            let constrained = ProblemCompiler::compile_scenario_pc(
+                &query
+                    .with_objective(ObjectivePolicy::all().with_back_to_back_preservation(profile)),
+            )
+            .unwrap()
+            .with_pc_path_v2_evidence();
+            let direct =
+                WasmCpuSearchBackend::execute_with_control(&constrained, &control).unwrap();
+            assert_eq!(direct.normalized_solution_keys(), expected);
+            for graph in direct
+                .pc_full_height_replay_evidence()
+                .unwrap()
+                .batch()
+                .execution()
+                .graphs()
+            {
+                assert!(b2b_live(graph, profile));
+                let policy = clearra_postprocess::score_batch::BackToBackEdgePolicy::new(profile);
+                for index in 0..graph.node_count() {
+                    assert!(graph
+                        .edges(graph.node(index as u32).unwrap())
+                        .iter()
+                        .all(|edge| policy.allows(*edge)));
+                }
+            }
+            let mut session = WasmCpuSearchSession::new(&constrained).unwrap();
+            let cooperative = loop {
+                match session.advance(1, &control).unwrap() {
+                    WasmCpuSearchAdvance::Pending => {}
+                    WasmCpuSearchAdvance::Completed(result) => break result,
+                    WasmCpuSearchAdvance::Cancelled => panic!("no cancellation requested"),
+                }
+            };
+            assert_eq!(cooperative.normalized_solution_keys(), expected);
+            assert_eq!(
+                cooperative.coverage_pattern_words(),
+                direct.coverage_pattern_words()
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_parallel_b2b_uses_the_same_filtered_graphs_and_coverage() {
+    let hardware = std::thread::available_parallelism().map_or(1, usize::from);
+    if hardware < 2 {
+        return;
+    }
+    for height in [7, 8, 24] {
+        let query = branching_query(height, srs_plus())
+            .with_count_policy(PcCountPolicy::CountAll)
+            .with_objective(
+                ObjectivePolicy::all().with_back_to_back_preservation(SpinProfileSelection::TSpins),
+            );
+        let mut reference = None;
+        for workers in [1, 2] {
+            let query = query.clone().with_execution_policy(
+                query
+                    .execution_policy()
+                    .clone()
+                    .with_workers(workers)
+                    .with_use_all_logical_processors(hardware == 2),
+            );
+            let problem = ProblemCompiler::compile_scenario_pc(&query)
+                .unwrap()
+                .with_pc_path_v2_evidence();
+            let result =
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .unwrap();
+            assert_eq!(result.usize_field("workers_used"), Some(workers));
+            let observed = (
+                result.normalized_solution_keys().to_vec(),
+                result.coverage_pattern_words().to_vec(),
+                replay_signature(&result),
+            );
+            if let Some(expected) = reference.as_ref() {
+                assert_eq!(&observed, expected);
+            } else {
+                reference = Some(observed);
+            }
+        }
+    }
 }
 
 #[test]
@@ -680,7 +895,6 @@ fn full_height_failed_queue_cancellation_never_returns_unsat_or_a_failure_list()
     ));
 }
 
-#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 fn branching_query(height: u8, rule: RuleProfile) -> PcScenarioQuery {
     let mut holes = Board256Mask::EMPTY;
     for row in 0..4 {

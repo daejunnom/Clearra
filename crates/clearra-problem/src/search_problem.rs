@@ -816,7 +816,6 @@ mod retained_capacity {
                     || failed_source
                     || path_source)
                 || self.objective.score().requested()
-                || self.objective.execution_constraints().requested()
                 || self
                     .queue_observation_policy()
                     .requires_observation_policy()
@@ -1124,13 +1123,26 @@ mod retained_capacity {
                 .checked_pc_family_pointee_retained_bytes()
                 .is_none());
             let minimum = ProblemCompiler::compile_scenario_pc(
-                &query.with_objective(ObjectivePolicy::minimum_cover()),
+                &query
+                    .clone()
+                    .with_objective(ObjectivePolicy::minimum_cover()),
             )
             .unwrap()
             .with_pc_minimum_cover_v2_evidence();
             assert_eq!(
                 minimum.checked_pc_family_pointee_retained_bytes(),
                 manual_expected(&minimum)
+            );
+            let constrained = ProblemCompiler::compile_scenario_pc(
+                &query.with_objective(
+                    ObjectivePolicy::all().with_back_to_back_preservation(
+                        clearra_objectives::policy::score_objective_policy::SpinProfileSelection::TSpins,
+                    ),
+                ),
+            ).unwrap();
+            assert_eq!(
+                constrained.checked_pc_family_pointee_retained_bytes(),
+                manual_expected(&constrained)
             );
         }
 

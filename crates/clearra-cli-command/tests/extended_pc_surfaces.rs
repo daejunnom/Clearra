@@ -229,6 +229,86 @@ fn context() -> AppContext {
 }
 
 #[test]
+fn full_height_b2b_canonical_commands_keep_the_original_denominator_and_typed_products() {
+    let context = context();
+    for input in inputs() {
+        let accepted = input[1] != "7";
+        for product in ["", "minimals", "path", "failed-queue"] {
+            let command = format!(
+                "clearra pc {product} --lines {} --board-mask 0x{} --height {} --pieces {} --queue {} --no-hold --rule srs-plus --backend cpu --workers 1 --spin-profile t-spins --preserve-b2b",
+                input[1], input[2], input[1], input[3], input[4],
+            );
+            let request = CliCommandParser::parse(&command)
+                .unwrap()
+                .to_app_request()
+                .unwrap();
+            let direct = context.run(request.clone());
+            assert_eq!(direct.status(), AppStatus::Success, "{command}: {direct:?}");
+            let check = |response: &AppResponse| {
+                let core = response.render_model().unwrap().core_result().unwrap();
+                assert_eq!(
+                    core.bool_field("execution_constraint_materialized"),
+                    Some(true)
+                );
+                assert_eq!(
+                    core.field("coverage_probability"),
+                    Some(if accepted { "1" } else { "0" })
+                );
+                assert_eq!(core.usize_field("coverage_pattern_count"), Some(1));
+                if product == "failed-queue" {
+                    let failed = response
+                        .product_capability_result()
+                        .unwrap()
+                        .pc_failed_queue_v2()
+                        .unwrap();
+                    assert_eq!(failed.success_pattern_count(), usize::from(accepted));
+                    assert_eq!(failed.failed_pattern_count(), usize::from(!accepted));
+                } else if product == "minimals" {
+                    let minimum = response
+                        .product_capability_result()
+                        .unwrap()
+                        .pc_minimum_cover_v2()
+                        .unwrap();
+                    assert!(minimum.completeness().complete());
+                    assert_eq!(minimum.source_solution_count(), usize::from(accepted));
+                    assert_eq!(minimum.selected_solution_count(), usize::from(accepted));
+                } else if product == "path" {
+                    let path = response
+                        .product_capability_result()
+                        .unwrap()
+                        .pc_path_family_v2()
+                        .unwrap();
+                    assert!(path.completeness().complete());
+                    assert_eq!(path.canonical_witness().is_some(), accepted);
+                } else {
+                    assert_eq!(core.normalized_solution_keys().len(), usize::from(accepted));
+                }
+            };
+            check(&direct);
+            let mut execution = context.start_cooperative_execution(request);
+            let mut completed = false;
+            for _ in 0..4096 {
+                match execution.advance(256, &ExecutionControl::default()) {
+                    CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                    CooperativeAppAdvance::Completed(response) => {
+                        assert_eq!(
+                            response.status(),
+                            AppStatus::Success,
+                            "{command}: {response:?}"
+                        );
+                        check(&response);
+                        completed = true;
+                        break;
+                    }
+                    other => panic!("unexpected B2B product completion: {other:?}"),
+                }
+            }
+            assert!(completed, "bounded B2B request must finish");
+        }
+    }
+}
+
+#[test]
 fn canonical_full_height_gui_and_discord_replay_commands_share_one_lazy_source() {
     let context = context();
     for input in inputs() {

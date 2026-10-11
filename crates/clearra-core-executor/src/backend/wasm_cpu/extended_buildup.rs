@@ -7,6 +7,7 @@ use clearra_core_domain::{
     piece::piece_kind::PieceKind,
 };
 use clearra_finesse::{FinesseBoard, FinesseTarget, GeometryActionKey};
+use clearra_postprocess::score_batch::BackToBackEdgePolicy;
 use clearra_problem::SearchProblem;
 use clearra_replay::{ScoringExecutionEdge, ScoringExecutionNode, SpinCoverageExecutionGraph};
 
@@ -303,6 +304,33 @@ pub(super) fn build_extended_order_graph(
         spin_candidate,
         None,
         false,
+        None,
+        control,
+    )
+}
+
+// PC constraints must be applied before supply coverage, minimum-source proof,
+// and replay authority are minted. Passing a finesse problem here would turn
+// this into geometry-only enumeration and skip ordinary exact reachability.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_extended_pc_order_graph(
+    problem: &SearchProblem,
+    catalog: &ExtendedInverseCatalog,
+    candidate: &ExtendedGeometryCandidate,
+    workspace: &mut ExtendedBuildOrderWorkspace,
+    remaining_node_budget: usize,
+    spin_candidate: Option<(u64, String)>,
+    control: &ExecutionControl,
+) -> Result<ExtendedBuildOrderResult, WasmExactSearchError> {
+    build_extended_order_graph_mode(
+        catalog,
+        candidate,
+        workspace,
+        remaining_node_budget,
+        spin_candidate,
+        None,
+        false,
+        finesse_b2b_policy(problem),
         control,
     )
 }
@@ -327,6 +355,7 @@ pub(super) fn build_extended_order_graph_with_finesse(
         spin_candidate,
         Some(problem),
         spin_coverage_requested,
+        None,
         control,
     )
 }
@@ -340,6 +369,7 @@ fn build_extended_order_graph_mode(
     spin_candidate: Option<(u64, String)>,
     finesse_problem: Option<&SearchProblem>,
     finesse_spin_coverage_requested: bool,
+    b2b_policy: Option<BackToBackEdgePolicy>,
     control: &ExecutionControl,
 ) -> Result<ExtendedBuildOrderResult, WasmExactSearchError> {
     let geometry_only = finesse_problem.is_some();
@@ -452,7 +482,7 @@ fn build_extended_order_graph_mode(
                 lock_sets[piece_slot] = Some(workspace.reachability.reachable_locks_with_scoring(
                     board,
                     piece,
-                    spin_candidate.is_some(),
+                    spin_candidate.is_some() || b2b_policy.is_some(),
                 ));
             }
             let locks = lock_sets[piece_slot].as_ref();
@@ -479,68 +509,27 @@ fn build_extended_order_graph_mode(
                 if next_board != expected_board || next_deleted != expected_deleted {
                     continue;
                 }
-                let child_index = if dense_state_count.is_some() {
-                    if workspace.subset_node_ids[child_subset as usize] == NO_BUILD_NODE {
-                        let child_index = u32::try_from(specs.len()).map_err(|_| {
-                            WasmExactSearchError::InvalidProblem(
-                                "wasm_extended_build_order_node_index_overflow",
-                            )
-                        })?;
-                        workspace.subset_node_ids[child_subset as usize] = child_index;
-                        workspace.subset_queue.push(child_subset);
-                        specs.push(BuildOrderNodeSpec {
-                            edge_start: 0,
-                            edge_count: 0,
-                            depth: child_subset.count_ones() as u8,
-                            accepting: false,
-                        });
-                        if spin_candidate.is_some() {
-                            spin_node_spans.push((0, 0));
-                        }
-                        child_index
-                    } else {
-                        workspace.subset_node_ids[child_subset as usize]
-                    }
-                } else if let Some(child_index) = workspace.subset_node_map.get(&child_subset) {
-                    *child_index
+                // Resolve a destination without retaining a rejected state.
+                // Ordered-kick scoring and PC evidence use the same exact lock
+                // as the ordinary edge; this is not a post-hoc family filter.
+                let existing_child = if dense_state_count.is_some() {
+                    let id = workspace.subset_node_ids[child_subset as usize];
+                    (id != NO_BUILD_NODE).then_some(id)
                 } else {
-                    let child_index = u32::try_from(specs.len()).map_err(|_| {
+                    workspace.subset_node_map.get(&child_subset).copied()
+                };
+                let child_index = match existing_child {
+                    Some(id) => id,
+                    None => u32::try_from(specs.len()).map_err(|_| {
                         WasmExactSearchError::InvalidProblem(
                             "wasm_extended_build_order_node_index_overflow",
                         )
-                    })?;
-                    workspace.subset_node_map.try_reserve(1).map_err(|_| {
-                        WasmExactSearchError::InvalidProblem(
-                            "wasm_extended_build_order_index_storage_unavailable",
-                        )
-                    })?;
-                    workspace.subset_node_map.insert(child_subset, child_index);
-                    workspace.subset_queue.push(child_subset);
-                    specs.push(BuildOrderNodeSpec {
-                        edge_start: 0,
-                        edge_count: 0,
-                        depth: child_subset.count_ones() as u8,
-                        accepting: false,
-                    });
-                    if spin_candidate.is_some() {
-                        spin_node_spans.push((0, 0));
-                    }
-                    child_index
+                    })?,
                 };
-                if geometry_only || !build_edge_added {
-                    workspace.edge_scratch.push(BuildOrderGraph::edge(
-                        child_index,
-                        operation as u8,
-                        piece,
-                        realization.rotation,
-                        realization.x,
-                        realization.lock_y,
-                        cleared_lines,
-                    ));
-                    build_edge_added = true;
-                }
-                if spin_candidate.is_some() && lock_reachable {
-                    let locks = locks.expect("spin evidence requires initialized reachability");
+                let scoring_edge = if (spin_candidate.is_some() || b2b_policy.is_some())
+                    && lock_reachable
+                {
+                    let locks = locks.expect("scoring evidence requires initialized reachability");
                     let lock_evidence = locks.scoring_evidence(
                         realization.rotation,
                         realization.x,
@@ -558,7 +547,7 @@ fn build_extended_order_graph_mode(
                     } else {
                         (0, 0)
                     };
-                    spin_edges.push(
+                    Some(
                         ScoringExecutionEdge::new(
                             child_index,
                             operation as u8,
@@ -572,7 +561,51 @@ fn build_extended_order_graph_mode(
                             lock_evidence,
                         )
                         .with_perfect_clear(cleared_lines > 0 && next_board.is_empty()),
-                    );
+                    )
+                } else {
+                    None
+                };
+                if b2b_policy
+                    .is_some_and(|policy| scoring_edge.is_none_or(|edge| !policy.allows(edge)))
+                {
+                    continue;
+                }
+                if existing_child.is_none() {
+                    if dense_state_count.is_some() {
+                        workspace.subset_node_ids[child_subset as usize] = child_index;
+                    } else {
+                        workspace.subset_node_map.try_reserve(1).map_err(|_| {
+                            WasmExactSearchError::InvalidProblem(
+                                "wasm_extended_build_order_index_storage_unavailable",
+                            )
+                        })?;
+                        workspace.subset_node_map.insert(child_subset, child_index);
+                    }
+                    workspace.subset_queue.push(child_subset);
+                    specs.push(BuildOrderNodeSpec {
+                        edge_start: 0,
+                        edge_count: 0,
+                        depth: child_subset.count_ones() as u8,
+                        accepting: false,
+                    });
+                    if spin_candidate.is_some() {
+                        spin_node_spans.push((0, 0));
+                    }
+                }
+                if geometry_only || !build_edge_added {
+                    workspace.edge_scratch.push(BuildOrderGraph::edge(
+                        child_index,
+                        operation as u8,
+                        piece,
+                        realization.rotation,
+                        realization.x,
+                        realization.lock_y,
+                        cleared_lines,
+                    ));
+                    build_edge_added = true;
+                }
+                if let Some(edge) = scoring_edge.filter(|_| spin_candidate.is_some()) {
+                    spin_edges.push(edge);
                 }
                 // Buildability depends on the exact operation order, not on how
                 // many equivalent movement paths reach the same lock state.

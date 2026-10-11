@@ -137,7 +137,7 @@ test('extended workspace guards result and option capabilities separately from t
     assert.ok(workspaceValidationCodes({ ...request, workers: 11 }, 'web')
       .includes('pc_extended_browser_workers_unavailable'), 'do not silently reduce workers');
   }
-  for (const change of [{ preserveB2B: true }, { queueKnowledge: 'visible-7' },
+  for (const change of [{ queueKnowledge: 'visible-7' },
     { tablebaseEnabled: true }, { precomputeBuildDependencies: true }, { backend: 'hybrid' }]) {
     assert.ok(workspaceValidationCodes({ ...base, ...change }, 'web')
       .includes('pc_extended_options_unavailable'));
@@ -148,6 +148,26 @@ test('extended workspace guards result and option capabilities separately from t
   for (const lines of [1, 3, 5, 6]) {
     assert.ok(!workspaceValidationCodes({ ...base, lines, workers: 11, scoreMode: 'minimum-cover' }, 'web')
       .some(code => code.startsWith('pc_extended_')), 'compact product semantics stay unchanged');
+  }
+});
+
+test('extended GUI B2B requests retain the same full-height arguments in Web and Desktop', () => {
+  const rows = readFileSync(new URL('../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv', import.meta.url), 'utf8')
+    .split(/\r?\n/u).filter(line => line && !line.startsWith('#'));
+  for (const row of rows) {
+    const [id, height, hex, , queue] = row.split('\t');
+    for (const scoreMode of ['off', 'minimum-cover', 'failed-queue']) {
+      const request = { ...createDefaultWorkspaceRequest(), lines: Number(height), boardMask: BigInt(`0x${hex}`),
+        queue, holdEnabled: false, workers: 1, scoreMode, preserveB2B: true, spinProfile: 'all-spin' };
+      assert.deepEqual(workspaceValidationCodes(request, 'web'), [], id);
+      assert.deepEqual(workspaceValidationCodes(request, 'desktop'), [], id);
+      const args = buildWorkspaceCommandArguments(request);
+      assert.equal(args.includes('--preserve-b2b'), true, id);
+      assert.equal(args[args.indexOf('--spin-profile') + 1], 'all-spin', id);
+      assert.equal(BigInt(args[args.indexOf('--board-mask') + 1]), BigInt(`0x${hex}`), id);
+      assert.equal(args[args.indexOf('--lines') + 1], height, id);
+      assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args, id);
+    }
   }
 });
 

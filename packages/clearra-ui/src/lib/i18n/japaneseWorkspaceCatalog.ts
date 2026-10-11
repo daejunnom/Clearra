@@ -591,7 +591,7 @@ export const japaneseWorkspaceMessages = Object.freeze({
   target_lines_invalid: '目標ライン数は1〜24の整数にしてください。',
   pc_extended_result_unavailable: 'この集計は6ラインを超える目標にまだ接続されていません。対応するPC集計を選択してください。',
   pc_extended_browser_workers_unavailable: '6ラインを超えるブラウザ探索では、現在ワーカーを明示的に1つ選択してください。Desktopは複数ワーカーに対応しています。',
-  pc_extended_options_unavailable: '6ラインを超える場合はCPUまたは自動、供給された全キューを使用し、テーブルベース・依存関係の事前計算・B2B維持を無効にしてください。',
+  pc_extended_options_unavailable: '6ラインを超える場合はCPUまたは自動、供給された全キューを使用し、テーブルベース・依存関係の事前計算を無効にしてください。',
   scenario_outside_target: '選択した目標ラインより上にブロックがあります。',
   scenario_not_tileable: 'フィールドの空きセル数は4の倍数である必要があります。',
   scenario_supply_mismatch: 'このフィールドとミノ順では、4ライン以内にパーフェクトクリアを達成できません。',

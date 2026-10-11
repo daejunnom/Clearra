@@ -493,8 +493,7 @@ export function workspaceValidationCodes(
       errors.push('pc_extended_browser_workers_unavailable');
     }
     if (!['cpu', 'auto'].includes(execution.backend) || execution.tablebaseEnabled ||
-        execution.precomputeBuildDependencies || execution.queueKnowledge !== 'oracle' ||
-        execution.preserveB2B) {
+        execution.precomputeBuildDependencies || execution.queueKnowledge !== 'oracle') {
       errors.push('pc_extended_options_unavailable');
     }
   }

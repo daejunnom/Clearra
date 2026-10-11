@@ -153,7 +153,6 @@ fn path_contract(problem: &SearchProblem) -> bool {
         && problem.count_policy() == PcCountPolicy::CountAll
         && problem.output_policy() == SearchOutputPolicy::Trace
         && !problem.objective().score().requested()
-        && !problem.objective().execution_constraints().requested()
         && !problem
             .queue_observation_policy()
             .requires_observation_policy()

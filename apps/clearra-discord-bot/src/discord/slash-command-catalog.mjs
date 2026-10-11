@@ -2057,13 +2057,12 @@ function inputHelp(entry, locale = "en") {
         `\`field\` is a top-first 10-column grid of 1–${discordPcMaxRows(entry.input)} rows or one static CTK3/v115 Fumen/URL; \`next\` accepts the supported fixed/group/bag pattern grammar.`,
         `\`lines\` accepts every height 1–${discordPcMaxRows(entry.input)}; omitting it evaluates all feasible heights serially. \`hold\` is disabled, empty, or one occupied piece.`,
         "`queue-knowledge`, `spin-profile`, B2B preservation, and per-solution probabilities are named. A spin profile requires preservation on unscored PC objectives; visible-7 is unavailable with minimum-cover.",
-        "Above 6 PC lines, B2B preservation is not connected yet.",
+        "Above 6 PC lines, queue knowledge must be oracle.",
         nativeKickHelp,
       ];
     case "pc-path-v2":
       return [
         `\`field\` is a 1–${discordPcMaxRows(entry.input)}-row initial PC board or one static document; \`next\` is one exact queue or one supported pattern source.`,
-        "Above 6 PC lines, B2B preservation is not connected yet.",
         "This path route fixes objective and count to `all` with full-oracle queue knowledge. It accepts only hold, spin profile, B2B preservation, and the rule profile; score, tiling, probability, queue-knowledge, dependency, tablebase, and max-memory controls are closed.",
         "The typed engine result is the complete finite path family. Discord projects only its numeric-smallest canonical candidate as the single published witness.",
         nativeKickHelp,
@@ -2136,7 +2135,7 @@ function inputHelp(entry, locale = "en") {
     case "pc-failed-v2":
       return [
         "Failed-queue search returns patterns that cannot satisfy the target. `failed-count` bounds returned failures.",
-        `\`lines\` accepts 1–${discordPcMaxRows(entry.input)}. Above 6 lines, queue knowledge must be oracle and B2B preservation must be off.`,
+        `\`lines\` accepts 1–${discordPcMaxRows(entry.input)}. Above 6 lines, queue knowledge must be oracle.`,
         "Queue knowledge and B2B preservation are named; a spin profile requires preservation. Scoring, tiling, and per-solution probabilities are unavailable.",
         nativeKickHelp,
       ];
@@ -2368,13 +2367,12 @@ function koreanInputHelp(entry) {
         `\`field\`에는 위쪽 줄부터 적은 10열 1–${discordPcMaxRows(entry.input)}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력하며, \`next\`에는 지원되는 고정·그룹·가방 패턴을 사용합니다.`,
         `\`lines\`는 1–${discordPcMaxRows(entry.input)} 전부를 지원하며 생략하면 가능한 높이를 순서대로 판정합니다. \`hold\`는 비활성·빈 홀드·미노 하나 중 하나입니다.`,
         "`queue-knowledge`, `spin-profile`, B2B 보존, 해법별 확률은 각각 명명 옵션입니다. 점수 없는 PC에서 스핀 프로필은 B2B 보존이 필요하고 visible-7은 minimum-cover와 함께 쓸 수 없습니다.",
-        "6L 초과 PC의 B2B 보존은 아직 연결되지 않았습니다.",
+        "6L 초과 PC에서는 큐 공개 범위를 oracle로 지정해야 합니다.",
         nativeKickHelp,
       ];
     case "pc-path-v2":
       return [
         `\`field\`는 1–${discordPcMaxRows(entry.input)}줄 PC 초기 필드 또는 정적 문서이며 \`next\`는 정확한 큐 하나 또는 지원되는 패턴 공급원 하나입니다.`,
-        "6L 초과 PC의 B2B 보존은 아직 연결되지 않았습니다.",
         "이 path 경로는 objective와 count를 `all`, 큐 공개 범위를 full-oracle로 고정합니다. 홀드, 스핀 프로필, B2B 보존, 규칙 프로필만 받으며 점수·타일링·확률·queue-knowledge·의존성·테이블베이스·최대 메모리 설정은 닫혀 있습니다.",
         "타입 엔진 결과는 완전한 유한 path family입니다. Discord는 그중 숫자로 가장 작은 canonical candidate 하나만 게시 증거로 투영합니다.",
         nativeKickHelp,
@@ -2447,7 +2445,7 @@ function koreanInputHelp(entry) {
     case "pc-failed-v2":
       return [
         "실패 큐 탐색은 목표를 달성하지 못하는 패턴을 반환하며 `failed-count`가 반환 수를 제한합니다.",
-        `\`lines\`는 1–${discordPcMaxRows(entry.input)}입니다. 6줄 초과에서는 큐 공개 범위를 oracle로, B2B 보존을 off로 지정해야 합니다.`,
+        `\`lines\`는 1–${discordPcMaxRows(entry.input)}입니다. 6줄 초과에서는 큐 공개 범위를 oracle로 지정해야 합니다.`,
         "큐 공개 범위와 B2B 보존은 명명 옵션이고, 스핀 프로필은 보존을 필요로 합니다. 점수·타일링·해법별 확률은 사용할 수 없습니다.",
         nativeKickHelp,
       ];
