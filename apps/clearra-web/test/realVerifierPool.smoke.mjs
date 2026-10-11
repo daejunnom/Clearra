@@ -37,6 +37,7 @@ installFileArtifactSurface(wasmRoot, [manifest.bindings.path, manifest.wasm.path
 const wasm = await loadClearraWasmModule(undefined, caps);
 const transports = [];
 let cancelOnConsume = null;
+let nextPrewarmDelayMs = 0;
 class NodeVerifierTransport {
   onmessage = null;
   onerror = null;
@@ -44,7 +45,10 @@ class NodeVerifierTransport {
   sent = [];
   received = [];
   admitted = { legal: 0, relation: 0 };
+  prewarmDelayMs = nextPrewarmDelayMs;
+  prewarmTimer = null;
   constructor() {
+    nextPrewarmDelayMs = 0;
     this.node = new Worker(process.env.CLEARRA_REAL_VERIFIER_BOOT, { workerData: {
       wasmRoot, artifacts: [manifest.bindings.path, manifest.wasm.path]
     } });
@@ -78,12 +82,27 @@ class NodeVerifierTransport {
       assert.ok(!message.wire || message.wire.byteLength <= 256 * 1024);
     }
     this.sent.push(message.type);
-    this.node.postMessage(message, transfer);
+    if (message.type === 'prewarm' && this.prewarmDelayMs > 0) {
+      const delay = this.prewarmDelayMs;
+      this.prewarmDelayMs = 0;
+      // Delay only a transport's initialization, never the solver or a
+      // resource grant. Faster peers must continue through the same pool.
+      this.prewarmTimer = setTimeout(() => {
+        this.prewarmTimer = null;
+        this.node.postMessage(message, transfer);
+      }, delay);
+    } else {
+      this.node.postMessage(message, transfer);
+    }
     if (message.type === 'consume' && cancelOnConsume) {
       const cancel = cancelOnConsume; cancelOnConsume = null; queueMicrotask(cancel);
     }
   }
-  terminate() { void this.node.terminate(); }
+  terminate() {
+    if (this.prewarmTimer !== null) clearTimeout(this.prewarmTimer);
+    this.prewarmTimer = null;
+    void this.node.terminate();
+  }
 }
 
 const pool = new ClearraVerifierPool(() => new NodeVerifierTransport(), {
@@ -136,7 +155,7 @@ async function assets(profile, legal, relation) {
   }
   return { synopsis, pack };
 }
-async function distributed(text, activated, cancel = false) {
+async function distributed(text, activated, cancel = false, expectedRootTasks = false) {
   const admissions = () => transports.reduce((sum, transport) => ({
     legal: sum.legal + transport.admitted.legal, relation: sum.relation + transport.admitted.relation
   }), { legal: 0, relation: 0 });
@@ -148,6 +167,8 @@ async function distributed(text, activated, cancel = false) {
     const plan = runner.prepare(text);
     assert.equal(plan.mode, 'cpu-multi', 'a serial or ready fallback is not a pool proof');
     assert.equal(plan.workerCount, 3);
+    if (expectedRootTasks) assert.equal(plan.rootTaskParallel, true,
+      'ordinary GUI full-solution coverage must exercise the natural-root producer');
     if (cancel) cancelOnConsume = () => runner.cancel();
     const execution = runner.run(text, plan, () => {});
     if (cancel) {
@@ -167,6 +188,28 @@ async function distributed(text, activated, cancel = false) {
   } finally { cancelOnConsume = null; runner.dispose(); }
 }
 try {
+  // The older smoke always requested per-solution probabilities and therefore
+  // bypassed the ordinary GUI's PcRoots producer entirely. Use real solver
+  // results, reuse one pool, and vary readiness independently of input.
+  const ordinaryText = command('srs-plus', 3, false, false)
+    .replace('--solution-probabilities ', '');
+  const ordinaryBaseline = result(await new WasmJobRunner(wasm).run(
+    ordinaryText.replace('--workers 3', '--workers 1'), () => {}));
+  assert.equal(ordinaryBaseline.keys.length, 246);
+  for (let repeat = 0; repeat < 4; repeat++) {
+    // Alternate a cold pool with warm reuse. The delayed peer can be retired
+    // at the producer boundary; completed results may never be lost or hung.
+    const delayedPrewarmMs = repeat === 2 ? 250 : 0;
+    if (repeat % 2 === 0) {
+      pool.cancel();
+      await Promise.all(transports.map(transport => transport.exited));
+      nextPrewarmDelayMs = delayedPrewarmMs;
+    }
+    const actual = await distributed(ordinaryText, { synopsis: null, pack: null }, false, true);
+    assert.deepEqual(actual, ordinaryBaseline, `ordinary-root-repeat-${repeat}`);
+    console.log(`real_web_pc_root_repeat=passed repeat=${repeat} delayed_prewarm=${delayedPrewarmMs}`);
+  }
+  nextPrewarmDelayMs = 0;
   for (let profile = 0; profile < profiles.length; profile++) {
     for (const input of ['existing', 'empty']) {
       await assets(profile, false, false);

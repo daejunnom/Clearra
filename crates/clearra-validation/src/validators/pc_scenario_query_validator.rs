@@ -56,7 +56,9 @@ fn validate_scenario_board(query: &PcScenarioQuery, report: &mut DiagnosticRepor
     let board = query.initial_board();
     // Score-summary and score-minimals now retain the same four-word PC
     // source. Admit their input layout here; the App product contract and
-    // Core's purpose-specific evidence still own result qualification.
+    // Core's purpose-specific evidence still own result qualification. B2B
+    // constraints are materialized in the shared full-height order graph
+    // before coverage, score, minimum, failed-queue, or replay evidence.
     // Unique + score is not that complete physical score source.
     let score_source = query.objective().score().requested()
         && matches!(
@@ -78,7 +80,6 @@ fn validate_scenario_board(query: &PcScenarioQuery, report: &mut DiagnosticRepor
             clearra_pc_graph::request::PcCountPolicy::CountAll
                 | clearra_pc_graph::request::PcCountPolicy::CountUnique
         )
-        && !query.objective().execution_constraints().requested()
         && !query
             .queue_observation_policy()
             .requires_observation_policy()

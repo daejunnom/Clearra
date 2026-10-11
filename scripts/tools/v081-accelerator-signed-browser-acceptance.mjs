@@ -312,15 +312,24 @@ async function browserAcceptance() {
       });
       const workers = Math.min(3, logicalProcessors);
       const workerAuthority = resolveWorkerAuthority(snapshot, workers);
-      async function runOnWorker(rootWorker, profile, legal, relation, input) {
+      async function runOnWorker(rootWorker, profile, legal, relation, input, options = {}) {
         let timeout;
         let onMessage;
         let onError;
+        const requestedWorkers = options.workers ?? workers;
+        const phases = [];
+        let lastProgress = null;
         try {
           const terminal = new Promise((resolve, reject) => {
-            timeout = setTimeout(() => reject(new Error('browser_product_worker_timeout')), 120_000);
+            timeout = setTimeout(() => reject(new Error(
+              `browser_product_worker_timeout: phases=${JSON.stringify(phases)}; last_progress=${JSON.stringify(lastProgress)}`
+            )), 120_000);
             onError = error => reject(new Error(`browser_product_worker_error: ${error.message}`));
             onMessage = ({ data }) => {
+              if (data.event === 'progress' && data.progress?.telemetry) {
+                lastProgress = data.progress.telemetry;
+                if (phases.at(-1) !== lastProgress.phase) phases.push(lastProgress.phase);
+              }
               if (data.event === 'final_response') resolve(data);
               if (data.event === 'failed' || data.event === 'cancelled' || data.event === 'terminated') {
                 reject(new Error(`browser_product_worker_${data.event}: ${JSON.stringify(data.diagnostics ?? data)}`));
@@ -333,7 +342,7 @@ async function browserAcceptance() {
             (relation ? '--conditioned-reachability' : '--no-conditioned-reachability');
           let commandText;
           if (Array.isArray(input)) {
-            commandText = `clearra ${input.join(' ')} --workers ${workers}`;
+            commandText = `clearra ${input.join(' ')} --workers ${requestedWorkers}`;
           } else if (input === 'setup-score') {
             commandText = `clearra setup score --document-format ctk3 --document ${setupScoreDocument} ` +
               '--setup-queue I --solution-queue OOOI --clear 2 --no-hold ' +
@@ -361,11 +370,12 @@ async function browserAcceptance() {
               acceleratorFlags;
           }
           rootWorker.postMessage({ type: 'run_command_text', commandText,
-            prewarmWorkerCount: workers, tablebaseRequested: false,
-            hostCapabilitySnapshot: snapshot, workerAuthority,
-            warmupPolicy: { backend: 'cpu', cpuWarmup: false, gpuWarmup: false } });
+            prewarmWorkerCount: requestedWorkers, tablebaseRequested: false,
+            hostCapabilitySnapshot: snapshot,
+            workerAuthority: requestedWorkers === workers ? workerAuthority : resolveWorkerAuthority(snapshot, requestedWorkers),
+            warmupPolicy: { backend: 'cpu', cpuWarmup: options.cpuWarmup === true, gpuWarmup: false } });
           const result = await terminal;
-          return { result };
+          return { result, phases };
         } finally {
           clearTimeout(timeout);
           if (onError) rootWorker.removeEventListener('error', onError);
@@ -549,6 +559,32 @@ async function browserAcceptance() {
         }
         results[profile].buildAllSolutions = results[profile].build['all-solutions'];
       }
+      // Default GUI full solutions do not request per-solution probabilities.
+      // That distinct PcRoots path must complete repeatedly on one real warm
+      // product worker, with durable IndexedDB commits and actual verifier
+      // transports. Toggle only accelerators/prewarm, not the candidate universe.
+      const ordinaryRootWorker = new Worker('/workers/clearraWorker.ts', { type: 'module' });
+      const ordinaryRootRuns = [];
+      try {
+        const ordinaryArgs = ['pc', '--lines', '4', '--height', '4', '--board-mask', '0x3c0f03c0f',
+          '--pieces', '6', '--patterns', 'P7', '--hold', 'empty', '--count', 'unique',
+          '--backend', 'cpu', '--rule', 'srs-plus', '--no-tablebase', '--no-legal-board',
+          '--no-conditioned-reachability'];
+        ordinaryRootRuns.push(await runOnWorker(ordinaryRootWorker, 'srs-plus', false, false,
+          ordinaryArgs, { workers: 1 }));
+        for (let repeat = 0; repeat < 4; repeat++) {
+          const flags = repeat % 2 === 0
+            ? ordinaryArgs.map(arg => arg === '--no-legal-board' ? '--legal-board'
+              : arg === '--no-conditioned-reachability' ? '--conditioned-reachability' : arg)
+            : ordinaryArgs;
+          ordinaryRootRuns.push(await runOnWorker(ordinaryRootWorker, 'srs-plus', repeat % 2 === 0,
+            repeat % 2 === 0, flags, { cpuWarmup: true }));
+        }
+      } finally {
+        ordinaryRootWorker.postMessage({ type: 'dispose_runtime' });
+        await new Promise(resolve => setTimeout(resolve, 100));
+        ordinaryRootWorker.terminate();
+      }
       // Exercise invalidation on one warm owner, not merely a fresh worker.
       // A corrupt local pointer must revoke already-admitted negative proof
       // and relation authority before the next exact search begins.
@@ -574,7 +610,7 @@ async function browserAcceptance() {
         await new Promise(resolve => setTimeout(resolve, 100));
         rootWorker.terminate();
       }
-      return { results, workers, corruption };
+      return { results, workers, corruption, ordinaryRootRuns };
     }, { profiles, setupScoreDocument: realSetupScoreDocument, pcProductInputs, buildResultSurfaces })
       .catch(error => {
         throw new Error(`signed browser product execution failed; page_errors=${JSON.stringify(errors.slice(-3))}`,
@@ -598,6 +634,16 @@ async function browserAcceptance() {
     };
     const existingCounts = { srs: 245, 'srs-plus': 246, 'srs-x': 289,
       'jstris-180': 246, 'no-kick': 175 };
+    const ordinaryBaseline = compact(execution.ordinaryRootRuns[0]);
+    assert.equal(ordinaryBaseline.keys.length, 246);
+    for (const [repeat, sample] of execution.ordinaryRootRuns.slice(1).entries()) {
+      assert.deepEqual(compact(sample), ordinaryBaseline, `ordinary GUI full-solution repeat ${repeat}`);
+      assert.ok(sample.phases.includes('draining'), 'the root producer must finish Geometry and drain real worker work');
+      assert.ok(sample.phases.includes('postprocessing'), 'verifier completion must not hang after Geometry');
+      assert.ok(sample.phases.includes('merging'), 'the complete exact family must reach its terminal merger');
+      assert.equal(sample.result.search_report.cpu_parallel_execution, true);
+    }
+    console.log(`browser_ordinary_full_solution_repeats=passed repeats=4 workers=${execution.workers}`);
     for (const profile of profiles) {
       for (const scope of ['eligible', 'existing']) {
         const pair = execution.results[profile][scope];

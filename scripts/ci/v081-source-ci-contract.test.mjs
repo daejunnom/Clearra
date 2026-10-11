@@ -20,7 +20,7 @@ const signedMetadata = [
 
 test('all convergence branches run the non-publishing v0.8.1 and recovery gates', () => {
   const branches = ['codex/v081-main-convergence-20260928', 'codex/converge-v081-linear-20260928', 'codex/converge-main-product-fixes-20261005'];
-  assert.ok(workflow.includes(`branches: ["codex/v081-selective-source-ci-20260927", ${branches.map((branch) => JSON.stringify(branch)).join(', ')}]`));
+  assert.ok(workflow.includes(`branches: ["codex/v081-selective-source-ci-20260927", ${branches.map((branch) => JSON.stringify(branch)).join(', ')}, "codex/converge-v081-extended-pc-products-20261007"]`));
   for (const job of ['core', 'native-products', 'wasm-abi', 'surfaces', 'wasm-realms']) {
     const start = workflow.indexOf(`\n  ${job}:`);
     assert.ok(start >= 0, `missing job ${job}`);
@@ -34,6 +34,27 @@ test('all convergence branches run the non-publishing v0.8.1 and recovery gates'
   }
   assert.ok(recoveryWorkflow.includes('node scripts/tools/v081-accelerator-opfs-browser-acceptance.mjs'));
   assert.ok(!recoveryWorkflow.includes('deploy-pages'));
+});
+
+test('the PC24 candidate runs actual GUI root-path feedback without duplicating native build owners', () => {
+  const candidate = 'refs/heads/codex/converge-v081-extended-pc-products-20261007';
+  for (const [job, enabled] of [['core', false], ['native-products', false], ['wasm-abi', false],
+    ['surfaces', true], ['wasm-realms', true]]) {
+    const start = workflow.indexOf(`\n  ${job}:`);
+    const guard = workflow.slice(start, workflow.indexOf('\n    runs-on:', start));
+    assert.equal(guard.includes(candidate), enabled, `${job}: separate exact source build ownership`);
+  }
+  const consumer = readFileSync(new URL('../../apps/clearra-web/test/realVerifierPool.smoke.mjs', import.meta.url), 'utf8');
+  assert.ok(consumer.includes(".replace('--solution-probabilities ', '')"));
+  assert.ok(consumer.includes('assert.equal(plan.rootTaskParallel, true'));
+  assert.ok(consumer.includes('repeat < 4'));
+  assert.ok(consumer.includes('ordinary-root-repeat-'));
+  const browser = readFileSync(new URL('../tools/v081-accelerator-signed-browser-acceptance.mjs', import.meta.url), 'utf8');
+  assert.ok(browser.includes('ordinaryRootRuns'));
+  assert.ok(browser.includes('ordinary GUI full-solution repeat'));
+  for (const phase of ['draining', 'postprocessing', 'merging']) {
+    assert.ok(browser.includes(`sample.phases.includes('${phase}')`));
+  }
 });
 
 test('independent recovery feedback prepares dependencies even after a formatting failure', () => {
