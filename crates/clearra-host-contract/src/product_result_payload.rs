@@ -2888,6 +2888,14 @@ impl CoveragePortfolioPagePayload {
         &self.pinned_candidate_keys
     }
 
+    /// Retains the producer's canonical selection policy for an empty exact
+    /// portfolio, without inventing a representative candidate. The App
+    /// validates the empty optimum before choosing this transport boundary.
+    pub fn with_canonical_selection(mut self, selection: impl Into<String>) -> Self {
+        self.canonical_selection = Some(selection.into());
+        self
+    }
+
     /// Attaches a product-specific, upstream-selected witness without asking
     /// any host adapter to choose again from `members`.
     pub fn with_canonical_witness(
@@ -3424,6 +3432,42 @@ impl ScorePatternWinnerPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_portfolio_retains_canonical_policy_without_inventing_a_witness() {
+        let payload = CoveragePortfolioPagePayload::new(
+            "set",
+            "page",
+            "members",
+            "a".repeat(64),
+            "b".repeat(64),
+            "1",
+            "0",
+            "1",
+            Some("1".to_owned()),
+            true,
+            "1",
+            "1",
+            Vec::new(),
+            true,
+        )
+        .with_canonical_selection("first-canonical-exact-minimum");
+        assert_eq!(
+            payload.canonical_selection(),
+            Some("first-canonical-exact-minimum")
+        );
+        assert!(payload.canonical_witness().is_none());
+        assert!(payload.members().is_empty());
+        assert_eq!(payload.optimal_cardinality(), "0");
+        assert!(payload.checked_retained_capacity_bytes().is_some());
+        let value = serde_json::to_value(payload).expect("empty canonical portfolio JSON");
+        assert_eq!(
+            value["canonical_selection"],
+            "first-canonical-exact-minimum"
+        );
+        assert!(value.get("canonical_witness").is_none());
+        assert_eq!(value["members"], serde_json::json!([]));
+    }
 
     #[test]
     fn candidate_ids_and_large_counts_serialize_as_decimal_strings() {

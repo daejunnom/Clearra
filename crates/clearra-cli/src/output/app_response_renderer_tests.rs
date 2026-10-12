@@ -850,6 +850,69 @@ fn score_finder_renderer_rejects_a_noncanonical_supplied_witness() {
 }
 
 #[test]
+fn minimum_renderer_preserves_an_exact_empty_optimum_without_fabricating_a_witness() {
+    let empty = |cardinality, member_page, pages| {
+        CoveragePortfolioPagePayload::new(
+            "coverage-portfolio-set.v1",
+            "coverage-portfolio-page.v1",
+            "coverage-portfolio-member-page.v1",
+            "set-identity",
+            "candidate-map-identity",
+            "1",
+            cardinality,
+            "1",
+            Some("1".to_owned()),
+            true,
+            member_page,
+            pages,
+            Vec::new(),
+            true,
+        )
+    };
+    let payload =
+        empty("0", "1", "1").with_canonical_selection(PC_MINIMUM_COVER_CANONICAL_SELECTION);
+    assert!(valid_coverage_portfolio_canonical_witness(
+        &payload,
+        PC_MINIMUM_COVER_CANONICAL_SELECTION,
+    ));
+    let fields = coverage_portfolio_fields("pc.minimals", "pc-minimum-cover.v2", &payload)
+        .expect("the exact empty minimum has a normal typed success payload");
+    let text = CommandRenderer::render("pc-minimum-cover.v2", fields, RenderFormat::Json)
+        .expect("empty minimum JSON");
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["summary"]["optimal_cardinality"], "0");
+    assert_eq!(value["summary"]["members"], serde_json::json!([]));
+    assert!(value["summary"]["canonical_witness"].is_null());
+    assert_eq!(
+        value["summary"]["canonical_selection"],
+        PC_MINIMUM_COVER_CANONICAL_SELECTION,
+    );
+    // No witness is not authority to claim the board or pattern generally UNSAT.
+    assert!(value["summary"].get("unsatisfiable").is_none());
+    assert!(
+        coverage_portfolio_fields("pc.minimals", "pc-minimum-cover.v2", &empty("0", "1", "1"))
+            .is_err()
+    );
+    for malformed in [
+        empty("1", "1", "1"),
+        empty("0", "2", "2"),
+        empty("0", "1", "2"),
+    ] {
+        assert!(coverage_portfolio_fields(
+            "pc.minimals",
+            "pc-minimum-cover.v2",
+            &malformed.with_canonical_selection(PC_MINIMUM_COVER_CANONICAL_SELECTION),
+        )
+        .is_err());
+    }
+    let invented = payload.with_canonical_witness(
+        PC_MINIMUM_COVER_CANONICAL_SELECTION,
+        clearra_host_contract::ProductCandidateMemberPayload::new("1", "invented"),
+    );
+    assert!(coverage_portfolio_fields("pc.minimals", "pc-minimum-cover.v2", &invented).is_err());
+}
+
+#[test]
 fn pc_failed_queue_v2_json_kind_requires_the_closed_product_pair() {
     let typed_kind = public_success_render_kind(
         Some((

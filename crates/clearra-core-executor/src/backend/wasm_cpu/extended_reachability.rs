@@ -153,6 +153,64 @@ impl ExtendedReachabilityWorkspace {
                 .map(ExtendedReachabilityTemplate::retained_bytes)
                 .sum::<usize>()
     }
+
+    /// Conservative creation/transient bound, charged before a cold template,
+    /// scoring scratch, queue, or lock set allocates. Uses the exact profile's
+    /// ordered kick lengths and sky ceiling rather than a generic 4L constant.
+    pub(super) fn checked_query_future_bytes(
+        &self,
+        piece: PieceKind,
+        scoring: bool,
+    ) -> Option<u128> {
+        let profile = builtin_kick_profile(self.kick_profile_id)?;
+        let ceiling = source_ceiling(self.height, piece, profile.supports_180(), profile);
+        let states = 4_u128
+            .checked_mul(u128::try_from(ceiling).ok()?.checked_add(1)?)?
+            .checked_mul(u128::from(self.width))?;
+        let mut kicks = 0_u128;
+        for from in RotationState::ALL {
+            for to in [
+                from.clockwise(),
+                from.counter_clockwise(),
+                from.rotated_180(),
+            ] {
+                kicks = kicks.checked_add(
+                    profile
+                        .sequence_for(KickTransition::new(piece, from, to))
+                        .map_or(0, |sequence| sequence.offsets().len()) as u128,
+                )?;
+            }
+        }
+        let template = if self.templates[piece_index(piece)].is_none() {
+            states
+                .checked_mul(
+                    (core::mem::size_of::<ExtendedBoard>()
+                        + 1
+                        + 3 * core::mem::size_of::<u16>()
+                        + 3 * core::mem::size_of::<u32>()
+                        + core::mem::size_of::<u16>()) as u128,
+                )?
+                .checked_add(states.checked_mul(kicks)?.checked_mul(3)?)?
+                .checked_mul(2)?
+                .checked_add(kicks.checked_mul(8)?)?
+        } else {
+            0
+        };
+        let scratch = states
+            .checked_mul(
+                (4 + if scoring {
+                    2 + core::mem::size_of::<(bool, bool, u8)>()
+                        + core::mem::size_of::<ScoringLockEvidence>()
+                } else {
+                    0
+                }) as u128,
+            )?
+            .checked_mul(2)?;
+        let lock_set = states
+            .checked_mul(core::mem::size_of::<((u8, i8, i8), ScoringLockEvidence)>() as u128)?
+            .checked_mul(2)?;
+        template.checked_add(scratch)?.checked_add(lock_set)
+    }
 }
 
 pub(super) struct ExtendedReachabilityTemplate {

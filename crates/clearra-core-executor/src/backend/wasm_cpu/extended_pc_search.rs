@@ -85,6 +85,12 @@ pub(super) fn validate_pc_family_problem(
         && problem.count_policy() == PcCountPolicy::CountAll
         && problem.output_policy() == SearchOutputPolicy::Trace
         && !problem.objective().score().requested();
+    // Match the compact engine's ordinary observation-policy family. Typed
+    // minimum/chance/score/replay products keep their separate oracle proof
+    // contracts; neither a local worker coverage nor an oracle union can stand
+    // in for a VisibleSeven policy over the complete candidate language.
+    let observation_source =
+        ordinary_source && problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::Disabled;
     if !matches!(
         problem.preset(),
         SearchProblemPreset::ScenarioPc | SearchProblemPreset::OpeningPc
@@ -110,9 +116,10 @@ pub(super) fn validate_pc_family_problem(
             || failed_source)
         || (problem.objective().score().requested() && !score_source)
         || problem.allowed_colored_solution_identities().is_some()
-        || problem
+        || (problem
             .queue_observation_policy()
             .requires_observation_policy()
+            && !observation_source)
         || problem.backend_policy().tablebase_requested()
         || problem.backend_policy().precompute_build_dependencies()
     {
@@ -187,14 +194,8 @@ impl ExtendedPcSearchSession {
                 "extended_pc_family_parallel_not_connected",
             ));
         }
-        // A finite node cap is shared across Geometry and all BuildUp graphs.
-        // Until that global credit is connected, refuse rather than grant each
-        // worker a duplicate cap or silently downgrade the request.
-        if problem.backend_policy().workers() > 1 && problem.backend_request().max_nodes() != 0 {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "extended_pc_family_parallel_node_budget_not_connected",
-            ));
-        }
+        // The engine owns the shared Geometry/BuildUp node debit. A requested
+        // multiworker execution must not be downgraded for an explicit cap.
         let height = problem.visible_height() as u8;
         let initial = Board256Mask::from_words(problem.initial_board().occupied_words());
         let full = Board256Mask::all_cells(u16::from(height) * 10)

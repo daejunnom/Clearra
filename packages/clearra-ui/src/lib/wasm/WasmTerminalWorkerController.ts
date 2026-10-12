@@ -82,6 +82,7 @@ export class WasmTerminalWorkerController {
   private progressFingerprint: string | null = null;
   private progressPhaseKind: 'preparation' | 'search' | null = null;
   private runningJobId: number | null = null;
+  private newestStartedJobId: number | null = null;
   private readonly preparationProgressStallTimeoutMs: number;
   private readonly searchProgressStallTimeoutMs: number;
   private readonly productPageStallTimeoutMs: number;
@@ -515,6 +516,7 @@ export class WasmTerminalWorkerController {
     if (!this.worker && this.workerFactory) {
       const worker = this.workerFactory();
       this.worker = worker;
+      this.newestStartedJobId = null;
       this.workerArtifactGeneration = currentWasmArtifactGeneration();
       this.workerLinearMemoryBytes = 0;
       worker.onmessage = (
@@ -546,6 +548,7 @@ export class WasmTerminalWorkerController {
           applyTablebaseWarmupEvent(message.data);
           return;
         }
+        if (!this.acceptCurrentJobEvent(message.data)) return;
         this.observeWorkerMemory(message.data.runtime_memory_bytes);
         if (this.cancellingWorker === worker) {
           if (message.data.event === 'started') {
@@ -611,6 +614,21 @@ export class WasmTerminalWorkerController {
       };
     }
     return this.worker;
+  }
+
+  private acceptCurrentJobEvent(event: ClearraWasmWorkerEvent): boolean {
+    if (!this.runInFlight) return false;
+    if (event.event === 'started') {
+      // Retained workers assign monotonically increasing foreground job IDs.
+      // A late/duplicate started or terminal event from a settled job must not
+      // clear runInFlight, release current ownership or renew its watchdog.
+      if (this.runningJobId !== null || !Number.isSafeInteger(event.job_id) || event.job_id < 1 ||
+          (this.newestStartedJobId !== null && event.job_id <= this.newestStartedJobId)) return false;
+      this.runningJobId = event.job_id;
+      this.newestStartedJobId = event.job_id;
+      return true;
+    }
+    return event.job_id === this.runningJobId;
   }
 
   private terminateCancelledWorker(worker: Worker, jobId: number | null) {

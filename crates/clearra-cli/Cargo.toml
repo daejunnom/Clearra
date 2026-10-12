@@ -52,6 +52,11 @@ name = "desktop_signed_accelerator_execution"
 path = "tests/desktop_signed_accelerator_execution.rs"
 required-features = ["wasm-cpu-runtime"]
 
+[[test]]
+name = "desktop_full_height_products"
+path = "tests/desktop_full_height_products.rs"
+required-features = ["wasm-cpu-runtime"]
+
 [dependencies]
 clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
 clearra-accelerator-runtime = { path = "../clearra-accelerator-runtime" }

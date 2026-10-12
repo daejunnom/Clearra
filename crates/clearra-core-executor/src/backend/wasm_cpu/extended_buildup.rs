@@ -1,6 +1,6 @@
 // SRP rationale: this module has one behavior-level change reason: constructing and annotating exact extended-board BuildUp order languages.
 
-use std::{collections::HashMap, fmt::Write as _};
+use std::{collections::HashMap, fmt::Write as _, sync::Arc};
 
 use clearra_core_domain::{
     board::standard_pc_board::StandardPcBoard, execution_cancellation::ExecutionControl,
@@ -11,7 +11,10 @@ use clearra_postprocess::score_batch::BackToBackEdgePolicy;
 use clearra_problem::SearchProblem;
 use clearra_replay::{ScoringExecutionEdge, ScoringExecutionNode, SpinCoverageExecutionGraph};
 
-use crate::performance::{ExecutorSearchStage, SearchStageSpan};
+use crate::{
+    performance::{ExecutorSearchStage, SearchStageSpan},
+    resource::{ExecutionMemoryBound, ExecutionMemoryOwner, SharedExecutionNodeBudget},
+};
 
 use super::{
     buildup::{
@@ -149,6 +152,14 @@ pub(super) struct ExtendedBuildOrderWorkspace {
     subset_node_map: HashMap<u64, u32>,
     subset_queue: Vec<u64>,
     edge_scratch: Vec<BuildEdge>,
+    resource_boundary: Option<ExtendedBuildOrderResourceBoundary>,
+}
+
+struct ExtendedBuildOrderResourceBoundary {
+    memory: ExecutionMemoryBound,
+    external_private_bytes: u128,
+    owner: Option<ExecutionMemoryOwner>,
+    nodes: Option<Arc<SharedExecutionNodeBudget>>,
 }
 
 impl ExtendedBuildOrderWorkspace {
@@ -163,16 +174,76 @@ impl ExtendedBuildOrderWorkspace {
             subset_node_map: HashMap::new(),
             subset_queue: Vec::new(),
             edge_scratch: Vec::new(),
+            resource_boundary: None,
         }
     }
 
     pub fn retained_bytes(&self) -> usize {
         self.reachability.retained_bytes()
             + self.subset_node_ids.capacity() * core::mem::size_of::<u32>()
-            + self.subset_node_map.capacity()
-                * (core::mem::size_of::<u64>() + core::mem::size_of::<u32>())
+            + if self.subset_node_map.capacity() == 0 {
+                0
+            } else {
+                self.subset_node_map
+                    .capacity()
+                    .saturating_mul(8)
+                    .div_ceil(7)
+                    * (core::mem::size_of::<(u64, u32)>() + 1)
+                    + 16
+            }
             + self.subset_queue.capacity() * core::mem::size_of::<u64>()
             + self.edge_scratch.capacity() * core::mem::size_of::<BuildEdge>()
+    }
+
+    pub(super) fn set_resource_boundary(
+        &mut self,
+        memory: ExecutionMemoryBound,
+        external_private_bytes: u128,
+        owner: Option<ExecutionMemoryOwner>,
+        nodes: Option<Arc<SharedExecutionNodeBudget>>,
+    ) {
+        self.resource_boundary = Some(ExtendedBuildOrderResourceBoundary {
+            memory,
+            external_private_bytes,
+            owner,
+            nodes,
+        });
+    }
+
+    fn ensure_graph_allocation(
+        &self,
+        transient_bytes: u128,
+        future_bytes: u128,
+    ) -> Result<(), WasmExactSearchError> {
+        let Some(boundary) = self.resource_boundary.as_ref() else {
+            return Ok(());
+        };
+        let observed = boundary
+            .external_private_bytes
+            .checked_add(self.retained_bytes() as u128)
+            .and_then(|bytes| bytes.checked_add(transient_bytes))
+            .ok_or_else(build_memory_projection_error)?;
+        if let Some(owner) = boundary.owner.as_ref() {
+            owner
+                .ensure(
+                    observed
+                        .checked_add(future_bytes)
+                        .ok_or_else(build_memory_projection_error)?,
+                )
+                .map_err(WasmExactSearchError::resource_admission)
+        } else {
+            boundary
+                .memory
+                .ensure(observed, future_bytes)
+                .map_err(WasmExactSearchError::resource_admission)
+        }
+    }
+
+    fn try_debit_node(&self) -> bool {
+        self.resource_boundary
+            .as_ref()
+            .and_then(|boundary| boundary.nodes.as_ref())
+            .is_none_or(|budget| budget.try_consume())
     }
 }
 
@@ -375,10 +446,26 @@ fn build_extended_order_graph_mode(
     let geometry_only = finesse_problem.is_some();
     let mut finesse_geometry_span =
         geometry_only.then(|| SearchStageSpan::begin(ExecutorSearchStage::FinesseGeometry));
-    let projection = CandidateProjection::compile(catalog, candidate)?;
     let rows = candidate.row_ids();
+    workspace.ensure_graph_allocation(
+        0,
+        (rows.len() as u128)
+            .checked_mul(
+                (core::mem::size_of::<ExtendedBoard>() + core::mem::size_of::<PieceKind>()) as u128,
+            )
+            .ok_or_else(build_memory_projection_error)?,
+    )?;
+    let projection = CandidateProjection::compile(catalog, candidate)?;
     let dense_state_count =
         (rows.len() <= super::MAX_BOARD64_PIECES).then(|| 1_usize << rows.len());
+    let initial_future = (dense_state_count.unwrap_or(1) as u128)
+        .checked_mul(core::mem::size_of::<u32>() as u128)
+        .and_then(|bytes| {
+            bytes.checked_add(1024 * core::mem::size_of::<BuildOrderNodeSpec>() as u128)
+        })
+        .and_then(|bytes| bytes.checked_add(128))
+        .ok_or_else(build_memory_projection_error)?;
+    workspace.ensure_graph_allocation(projection.retained_bytes() as u128, initial_future)?;
     if let Some(state_count) = dense_state_count {
         if workspace.subset_node_ids.len() < state_count {
             workspace
@@ -433,7 +520,9 @@ fn build_extended_order_graph_mode(
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
         }
-        if remaining_node_budget != 0 && searched_nodes >= remaining_node_budget {
+        if (remaining_node_budget != 0 && searched_nodes >= remaining_node_budget)
+            || !workspace.try_debit_node()
+        {
             if let Some(span) = finesse_geometry_span.take() {
                 span.finish(searched_nodes as u64);
             }
@@ -469,7 +558,131 @@ fn build_extended_order_graph_mode(
         }
 
         let (board, deleted_rows) = projection.state_for_subset(subset);
+        // Reserve all children and concrete edges for this one visited node
+        // before any Vec/HashMap growth. The bound is independent of scheduling
+        // and uses the real catalog realization counts, not the final solution
+        // count. Mutable scratch remains private; only the request owner is shared.
+        let remaining_operations = rows.len() - subset.count_ones() as usize;
+        let concrete_edges = rows
+            .iter()
+            .enumerate()
+            .filter(|(operation, _)| subset & (1_u64 << operation) == 0)
+            .try_fold(0_usize, |count, (_, row)| {
+                count.checked_add(catalog.realization_count(*row))
+            })
+            .ok_or_else(build_memory_projection_error)?;
+        let graph_live = checked_build_storage_bytes(
+            &projection,
+            specs.capacity(),
+            edges.capacity(),
+            spin_node_spans.capacity(),
+            spin_edges.capacity(),
+        )?;
+        let mut future = 0_u128;
+        for (capacity, len, additional, item) in [
+            (
+                specs.capacity(),
+                specs.len(),
+                remaining_operations,
+                core::mem::size_of::<BuildOrderNodeSpec>(),
+            ),
+            (
+                workspace.subset_queue.capacity(),
+                workspace.subset_queue.len(),
+                remaining_operations,
+                core::mem::size_of::<u64>(),
+            ),
+            (
+                workspace.edge_scratch.capacity(),
+                0,
+                concrete_edges,
+                core::mem::size_of::<BuildEdge>(),
+            ),
+            (
+                edges.capacity(),
+                edges.len(),
+                concrete_edges,
+                core::mem::size_of::<BuildEdge>(),
+            ),
+            (
+                spin_node_spans.capacity(),
+                spin_node_spans.len(),
+                if spin_candidate.is_some() {
+                    remaining_operations
+                } else {
+                    0
+                },
+                core::mem::size_of::<(u32, u32)>(),
+            ),
+            (
+                spin_edges.capacity(),
+                spin_edges.len(),
+                if spin_candidate.is_some() {
+                    concrete_edges
+                } else {
+                    0
+                },
+                core::mem::size_of::<ScoringExecutionEdge>(),
+            ),
+        ] {
+            future = future
+                .checked_add(checked_vec_growth_bytes(capacity, len, additional, item)?)
+                .ok_or_else(build_memory_projection_error)?;
+        }
+        if dense_state_count.is_none()
+            && workspace
+                .subset_node_map
+                .len()
+                .checked_add(remaining_operations)
+                .ok_or_else(build_memory_projection_error)?
+                > workspace.subset_node_map.capacity()
+        {
+            future = future
+                .checked_add(
+                    (workspace.subset_node_map.len() as u128 + remaining_operations as u128)
+                        .checked_mul(4 * (core::mem::size_of::<(u64, u32)>() + 1) as u128)
+                        .and_then(|bytes| bytes.checked_add(16))
+                        .ok_or_else(build_memory_projection_error)?,
+                )
+                .ok_or_else(build_memory_projection_error)?;
+        }
+        // At most one lock set per remaining piece is created in this node.
+        let mut pieces = [false; 7];
+        if !geometry_only || spin_candidate.is_some() {
+            for (operation, &piece) in projection.operation_pieces.iter().enumerate() {
+                if subset & (1_u64 << operation) != 0 || pieces[piece_index(piece)] {
+                    continue;
+                }
+                pieces[piece_index(piece)] = true;
+                future = future
+                    .checked_add(
+                        workspace
+                            .reachability
+                            .checked_query_future_bytes(
+                                piece,
+                                spin_candidate.is_some() || b2b_policy.is_some(),
+                            )
+                            .ok_or_else(build_memory_projection_error)?,
+                    )
+                    .ok_or_else(build_memory_projection_error)?;
+            }
+        }
+        workspace.ensure_graph_allocation(graph_live, future)?;
+        reserve_graph_vec(&mut specs, remaining_operations)?;
+        reserve_graph_vec(&mut workspace.subset_queue, remaining_operations)?;
         workspace.edge_scratch.clear();
+        reserve_graph_vec(&mut workspace.edge_scratch, concrete_edges)?;
+        reserve_graph_vec(&mut edges, concrete_edges)?;
+        if dense_state_count.is_none() {
+            workspace
+                .subset_node_map
+                .try_reserve(remaining_operations)
+                .map_err(|_| build_memory_projection_error())?;
+        }
+        if spin_candidate.is_some() {
+            reserve_graph_vec(&mut spin_node_spans, remaining_operations)?;
+            reserve_graph_vec(&mut spin_edges, concrete_edges)?;
+        }
         let mut lock_sets: [Option<ExtendedReachableLocks>; 7] = std::array::from_fn(|_| None);
         for (operation, &row_id) in rows.iter().enumerate() {
             let operation_bit = 1_u64 << operation;
@@ -645,6 +858,39 @@ fn build_extended_order_graph_mode(
     if let Some(span) = finesse_geometry_span.take() {
         span.finish(searched_nodes as u64);
     }
+    let terminal_future = (specs.len() as u128)
+        .checked_mul(
+            8 * (core::mem::size_of::<super::buildup::BuildNode>()
+                + core::mem::size_of::<PreparedFinesseNode>()
+                + core::mem::size_of::<ScoringExecutionNode>()) as u128,
+        )
+        .and_then(|bytes| {
+            bytes.checked_add(
+                (edges.len() as u128)
+                    * 4
+                    * (core::mem::size_of::<BuildEdge>()
+                        + core::mem::size_of::<PreparedFinesseEdge>())
+                        as u128,
+            )
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                (spin_edges.len() as u128)
+                    * 2
+                    * core::mem::size_of::<ScoringExecutionEdge>() as u128,
+            )
+        })
+        .ok_or_else(build_memory_projection_error)?;
+    workspace.ensure_graph_allocation(
+        checked_build_storage_bytes(
+            &projection,
+            specs.capacity(),
+            edges.capacity(),
+            spin_node_spans.capacity(),
+            spin_edges.capacity(),
+        )?,
+        terminal_future,
+    )?;
     let finesse_language = finesse_problem
         .map(|problem| {
             annotate_and_prune_extended_finesse_graph(
@@ -713,6 +959,80 @@ fn build_extended_order_graph_mode(
         reachability_states,
         scratch_bytes,
     })
+}
+
+fn build_memory_projection_error() -> WasmExactSearchError {
+    WasmExactSearchError::InvalidProblem("extended_build_order_memory_projection_unavailable")
+}
+
+fn checked_vec_growth_bytes(
+    capacity: usize,
+    len: usize,
+    additional: usize,
+    item: usize,
+) -> Result<u128, WasmExactSearchError> {
+    let needed = len
+        .checked_add(additional)
+        .ok_or_else(build_memory_projection_error)?;
+    let future = if needed > capacity {
+        needed
+            .checked_next_power_of_two()
+            .ok_or_else(build_memory_projection_error)?
+    } else {
+        capacity
+    };
+    // A reallocation may keep old and new backing alive while copying. The
+    // observed owner already counts the old capacity, so admit the complete
+    // replacement allocation, not merely its retained-byte delta.
+    (if future > capacity { future as u128 } else { 0 })
+        .checked_mul(item as u128)
+        .ok_or_else(build_memory_projection_error)
+}
+
+fn reserve_graph_vec<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+) -> Result<(), WasmExactSearchError> {
+    let needed = values
+        .len()
+        .checked_add(additional)
+        .ok_or_else(build_memory_projection_error)?;
+    if needed > values.capacity() {
+        let capacity = needed
+            .checked_next_power_of_two()
+            .ok_or_else(build_memory_projection_error)?;
+        values
+            .try_reserve_exact(capacity - values.len())
+            .map_err(|_| build_memory_projection_error())?;
+    }
+    Ok(())
+}
+
+fn checked_build_storage_bytes(
+    projection: &CandidateProjection,
+    specs: usize,
+    edges: usize,
+    spans: usize,
+    scoring: usize,
+) -> Result<u128, WasmExactSearchError> {
+    // Capacity, not length: recently-cleared or mostly-empty Vecs still own
+    // their backing allocation and must not disappear from admission.
+    let mut bytes = projection.retained_bytes() as u128;
+    for (capacity, item) in [
+        (specs, core::mem::size_of::<BuildOrderNodeSpec>()),
+        (edges, core::mem::size_of::<BuildEdge>()),
+        (spans, core::mem::size_of::<(u32, u32)>()),
+        (scoring, core::mem::size_of::<ScoringExecutionEdge>()),
+    ] {
+        bytes = bytes
+            .checked_add(
+                (capacity as u128)
+                    .checked_mul(item as u128)
+                    .ok_or_else(build_memory_projection_error)?,
+            )
+            .ok_or_else(build_memory_projection_error)?;
+    }
+    Ok(bytes)
 }
 
 // Pruning operates on independent caller-owned graph and policy surfaces.
@@ -1035,6 +1355,52 @@ mod finesse_tests {
     use clearra_replay::{RotationRequest, ScoringLockEvidence};
 
     use super::*;
+
+    #[test]
+    fn extended_build_order_preallocation_refusal_keeps_private_vectors_unchanged() {
+        let mut workspace =
+            ExtendedBuildOrderWorkspace::new(10, 24, problem().kick_profile().profile_id());
+        let before = workspace.retained_bytes();
+        workspace.set_resource_boundary(
+            ExecutionMemoryBound::for_test_cap(before as u128),
+            0,
+            None,
+            None,
+        );
+        let error = workspace.ensure_graph_allocation(0, 1).unwrap_err();
+        assert!(matches!(error, WasmExactSearchError::ResourceAdmission(_)));
+        assert_eq!(workspace.retained_bytes(), before);
+        assert!(workspace.subset_node_ids.is_empty());
+        assert!(workspace.subset_node_map.is_empty());
+        assert!(workspace.subset_queue.is_empty());
+        assert!(workspace.edge_scratch.is_empty());
+    }
+
+    #[test]
+    fn extended_build_order_debit_shares_one_request_without_allocating_a_graph() {
+        let budget = Arc::new(SharedExecutionNodeBudget::new(3));
+        let mut left =
+            ExtendedBuildOrderWorkspace::new(10, 24, problem().kick_profile().profile_id());
+        let mut right =
+            ExtendedBuildOrderWorkspace::new(10, 24, problem().kick_profile().profile_id());
+        left.set_resource_boundary(
+            ExecutionMemoryBound::for_test_cap(1_000_000),
+            0,
+            None,
+            Some(Arc::clone(&budget)),
+        );
+        right.set_resource_boundary(
+            ExecutionMemoryBound::for_test_cap(1_000_000),
+            0,
+            None,
+            Some(Arc::clone(&budget)),
+        );
+        assert!(left.try_debit_node());
+        assert!(right.try_debit_node());
+        assert!(left.try_debit_node());
+        assert!(!right.try_debit_node());
+        assert_eq!(budget.consumed(), 3);
+    }
 
     fn problem() -> SearchProblem {
         let query = OpeningPcSearchQuery::new(PcTarget::two_lines())

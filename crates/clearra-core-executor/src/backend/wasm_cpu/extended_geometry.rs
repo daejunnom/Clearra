@@ -1,10 +1,9 @@
+use crate::resource::{ExecutionMemoryBound, SharedExecutionNodeBudget};
 use std::{collections::HashMap, sync::Arc};
 
-#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 #[path = "extended_geometry_parallel.rs"]
 mod parallel;
-#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
-pub(super) use parallel::ExtendedParallelGeometryBranch;
+pub(super) use parallel::{ExtendedParallelGeometryBranch, ExtendedParallelGeometryPlan};
 
 use clearra_supply::pattern_universe::{
     piece_multiset_group::PackingMultisetFamily, MaterializedPatternUniverse,
@@ -13,7 +12,9 @@ use clearra_supply::pattern_universe::{
 
 use super::{
     extended_board::ExtendedBoard,
-    extended_geometry_component::{compile_component_plan, ExtendedComponentPlanResult},
+    extended_geometry_component::{
+        checked_component_scratch_upper_bound, compile_component_plan, ExtendedComponentPlanResult,
+    },
     extended_geometry_dense::{DenseCompileAdvance, DenseExtendedFamilyCompiler},
     extended_geometry_domain::{
         feasible_piece_mask, ExtendedDomainPropagation, ExtendedDomainResult,
@@ -105,6 +106,7 @@ enum CompileAdvance {
     Pending,
     Complete,
     ResourceIncomplete,
+    NodeBudgetExceeded,
 }
 
 struct ExtendedFamilyCompiler {
@@ -125,6 +127,7 @@ struct ExtendedFamilyCompiler {
     column_pruned_states: usize,
     component_pruned_states: usize,
     component_compositions: usize,
+    allow_component_optimization: bool,
 }
 
 impl ExtendedFamilyCompiler {
@@ -151,10 +154,101 @@ impl ExtendedFamilyCompiler {
             column_pruned_states: 0,
             component_pruned_states: 0,
             component_compositions: 0,
+            allow_component_optimization: true,
         }
     }
 
-    fn advance(&mut self, catalog: &ExtendedInverseCatalog) -> CompileAdvance {
+    fn admit_advance(
+        &mut self,
+        catalog: &ExtendedInverseCatalog,
+        node_budget: Option<&SharedExecutionNodeBudget>,
+        bound: ExecutionMemoryBound,
+        coexisting_bytes: u128,
+    ) -> Result<u128, WasmExactSearchError> {
+        let observed = coexisting_bytes
+            .checked_add(self.retained_bytes() as u128)
+            .ok_or_else(memory_projection_error)?;
+        // Final path-count and Vec-to-Arc allocations are admitted separately
+        // after the last compiler step, against the final (not previous) DAG.
+        let mut future = 0_u128;
+        if self.stack.len() == self.stack.capacity() {
+            future = future
+                .checked_add(
+                    (self
+                        .stack
+                        .len()
+                        .checked_add(1)
+                        .ok_or_else(memory_projection_error)? as u128)
+                        .checked_mul(2 * core::mem::size_of::<CompileFrame>() as u128)
+                        .ok_or_else(memory_projection_error)?,
+                )
+                .ok_or_else(memory_projection_error)?;
+        }
+        if !self.stack.is_empty()
+            && !self.memo_insertion_disabled
+            && self.residual_memo.len() == self.residual_memo.capacity()
+        {
+            future = future
+                .checked_add(
+                    (self
+                        .residual_memo
+                        .len()
+                        .checked_add(1)
+                        .ok_or_else(memory_projection_error)? as u128)
+                        .checked_mul(4 * (core::mem::size_of::<(ResidualKey, u32)>() + 1) as u128)
+                        .and_then(|bytes| bytes.checked_add(16))
+                        .ok_or_else(memory_projection_error)?,
+                )
+                .ok_or_else(memory_projection_error)?;
+        }
+        if let Some(top) = self.stack.last() {
+            if !top.entered {
+                future = future
+                    .checked_add(
+                        self.domain_workspace
+                            .checked_compile_future_bytes(
+                                catalog,
+                                top.remaining,
+                                self.used_counts,
+                                &self.target_counts,
+                            )
+                            .ok_or_else(memory_projection_error)?,
+                    )
+                    .ok_or_else(memory_projection_error)?;
+            }
+            let component_future = checked_component_scratch_upper_bound(
+                top.remaining.count_ones(),
+                feasible_piece_mask(&self.target_counts, self.used_counts),
+            );
+            self.allow_component_optimization = !top.entered
+                && self.target_depth >= 7
+                && node_budget.is_none()
+                && component_future
+                    .and_then(|extra| future.checked_add(extra))
+                    .is_some_and(|extra| bound.ensure(observed, extra).is_ok());
+            if self.allow_component_optimization {
+                future = future
+                    .checked_add(component_future.ok_or_else(memory_projection_error)?)
+                    .ok_or_else(memory_projection_error)?;
+            }
+        }
+        bound
+            .ensure(observed, future)
+            .map_err(WasmExactSearchError::resource_admission)?;
+        let base = observed
+            .checked_sub(self.family.retained_bytes() as u128)
+            .and_then(|bytes| bytes.checked_add(future))
+            .ok_or_else(memory_projection_error)?;
+        self.family
+            .set_retained_limit_bytes(Some(bound.cap_bytes() - base));
+        Ok(base)
+    }
+
+    fn advance(
+        &mut self,
+        catalog: &ExtendedInverseCatalog,
+        node_budget: Option<&SharedExecutionNodeBudget>,
+    ) -> CompileAdvance {
         if self.stack.is_empty() {
             return CompileAdvance::Complete;
         }
@@ -170,6 +264,9 @@ impl ExtendedFamilyCompiler {
                 return self.finish_top(catalog, family, false);
             }
 
+            if node_budget.is_some_and(|budget| !budget.try_consume()) {
+                return CompileAdvance::NodeBudgetExceeded;
+            }
             self.expanded_nodes = self.expanded_nodes.saturating_add(1);
             self.peak_frontier = self.peak_frontier.max(self.stack.len());
             let depth = self.stack[top_index].depth;
@@ -210,7 +307,11 @@ impl ExtendedFamilyCompiler {
                 }
             };
             let feasible_piece_mask = feasible_piece_mask(&self.target_counts, self.used_counts);
-            if self.target_depth >= 7 {
+            // The synchronous component optimizer has its own optimization
+            // budget. Explicit request caps use the incremental exact DFS so
+            // every visited node is debited before work, not retroactively.
+            if self.target_depth >= 7 && node_budget.is_none() && self.allow_component_optimization
+            {
                 match compile_component_plan(
                     catalog,
                     remaining,
@@ -361,8 +462,9 @@ impl ExtendedFamilyCompiler {
         self.targets.capacity() * core::mem::size_of::<GeometryTarget>()
             + self.target_counts.capacity() * core::mem::size_of::<[u8; 7]>()
             + self.stack.capacity() * core::mem::size_of::<CompileFrame>()
-            + self.residual_memo.capacity()
-                * (core::mem::size_of::<ResidualKey>() + core::mem::size_of::<u32>())
+            + self.residual_memo.capacity().saturating_mul(8).div_ceil(7)
+                * (core::mem::size_of::<(ResidualKey, u32)>() + 1)
+            + 16
             + self.domain_workspace.retained_bytes()
             + self.family.retained_bytes()
     }
@@ -375,6 +477,23 @@ impl ExtendedFamilyCompiler {
             self.target_depth,
         )
     }
+}
+
+pub(super) fn memory_projection_error() -> WasmExactSearchError {
+    WasmExactSearchError::InvalidProblem("extended_geometry_memory_projection_unavailable")
+}
+
+pub(super) fn checked_compiler_completion_future_bytes(
+    node_count: u32,
+    target_count: usize,
+) -> Option<u128> {
+    (u128::from(node_count) + 2)
+        .checked_mul(core::mem::size_of::<u128>() as u128)?
+        .checked_add(
+            (target_count as u128)
+                .checked_mul(2 * core::mem::size_of::<GeometryTarget>() as u128)?,
+        )?
+        .checked_add(4 * core::mem::size_of::<TraversalTask>() as u128 + 64)
 }
 
 #[derive(Clone, Copy)]
@@ -391,9 +510,7 @@ struct ExtendedFamilyEnumerator {
     tasks: Vec<TraversalTask>,
     rows: [u32; MAX_EXTENDED_PIECES],
     target_depth: u8,
-    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     task_memory_limit: Option<u128>,
-    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     refused_task_bytes: Option<u128>,
 }
 
@@ -419,9 +536,7 @@ impl ExtendedFamilyEnumerator {
             tasks,
             rows: [0; MAX_EXTENDED_PIECES],
             target_depth,
-            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
             task_memory_limit: None,
-            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
             refused_task_bytes: None,
         }
     }
@@ -429,6 +544,14 @@ impl ExtendedFamilyEnumerator {
     fn next_candidate(
         &mut self,
         catalog: &ExtendedInverseCatalog,
+    ) -> Result<Option<ExtendedGeometryCandidate>, ()> {
+        self.next_candidate_with_allocation_guard(catalog, |_| Ok(()))
+    }
+
+    fn next_candidate_with_allocation_guard(
+        &mut self,
+        catalog: &ExtendedInverseCatalog,
+        mut guard: impl FnMut(u128) -> Result<(), ()>,
     ) -> Result<Option<ExtendedGeometryCandidate>, ()> {
         while let Some(mut task) = self.tasks.pop() {
             loop {
@@ -461,7 +584,7 @@ impl ExtendedFamilyEnumerator {
                     FamilyNodeKind::Union => {
                         let mut right = task;
                         right.family = node.right;
-                        self.push_task(right)?;
+                        self.push_task(right, &mut guard)?;
                         task.family = node.left;
                     }
                     FamilyNodeKind::Product => {
@@ -479,8 +602,18 @@ impl ExtendedFamilyEnumerator {
         Ok(None)
     }
 
-    fn push_task(&mut self, task: TraversalTask) -> Result<(), ()> {
-        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    fn push_task(
+        &mut self,
+        task: TraversalTask,
+        guard: &mut impl FnMut(u128) -> Result<(), ()>,
+    ) -> Result<(), ()> {
+        let future_capacity = if self.tasks.len() == self.tasks.capacity() {
+            self.tasks.len().saturating_add(1).saturating_mul(2).max(4)
+        } else {
+            self.tasks.capacity()
+        };
+        let future_bytes = future_capacity as u128 * core::mem::size_of::<TraversalTask>() as u128;
+        guard(future_bytes)?;
         if let Some(limit) = self.task_memory_limit {
             let future_capacity = if self.tasks.len() == self.tasks.capacity() {
                 self.tasks.len().saturating_add(1).saturating_mul(2).max(4)
@@ -547,6 +680,81 @@ pub(super) struct ExtendedGeometrySearch {
 }
 
 impl ExtendedGeometrySearch {
+    pub fn new_bounded(
+        universe: &MaterializedPatternUniverse,
+        family: &PackingMultisetFamily,
+        catalog: &ExtendedInverseCatalog,
+        bound: ExecutionMemoryBound,
+        coexisting_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
+        let piece_count = catalog.required_cells().count_ones() as usize / 4;
+        let sequence_len = match universe.structure() {
+            clearra_supply::pattern_universe::materialized_pattern_universe::MaterializedPatternUniverseStructure::Explicit =>
+                (0..universe.pattern_count()).map(|index| universe.sequence_len_at(index)).max().unwrap_or(0),
+            clearra_supply::pattern_universe::materialized_pattern_universe::MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len }
+            | clearra_supply::pattern_universe::materialized_pattern_universe::MaterializedPatternUniverseStructure::ObservedStandard7BagLexicographic { sequence_len, .. }
+            | clearra_supply::pattern_universe::materialized_pattern_universe::MaterializedPatternUniverseStructure::FactorizedQueueExpression { sequence_len } => usize::from(sequence_len),
+        };
+        let mut future = (family.len() as u128)
+            .checked_mul((2 * core::mem::size_of::<GeometryTarget>() + 7 + 32) as u128)
+            .ok_or_else(memory_projection_error)?;
+        future = future
+            .checked_add(
+                universe
+                    .checked_retained_capacity_bytes()
+                    .ok_or_else(memory_projection_error)?,
+            )
+            .ok_or_else(memory_projection_error)?;
+        future = future
+            .checked_add(
+                (sequence_len as u128)
+                    .checked_mul(
+                        2 * core::mem::size_of::<clearra_core_domain::piece::piece_kind::PieceKind>(
+                        ) as u128,
+                    )
+                    .ok_or_else(memory_projection_error)?,
+            )
+            .ok_or_else(memory_projection_error)?;
+        for group in family.groups() {
+            let local = group.shared_pattern_bits().count_ones() as u128;
+            let index_bytes = local
+                .checked_mul(4)
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        local
+                            .div_ceil(64)
+                            .checked_mul(sequence_len as u128)?
+                            .checked_mul(7 * 8)?,
+                    )
+                })
+                .ok_or_else(memory_projection_error)?;
+            future = future
+                .checked_add(index_bytes)
+                .ok_or_else(memory_projection_error)?;
+        }
+        let bucket_count = match piece_count {
+            0..=7 => 1_u128 << 14,
+            8..=12 => 1 << 17,
+            _ => 1 << 18,
+        };
+        future = future
+            .checked_add(
+                bucket_count * 4 + 16 * 1024 + core::mem::size_of::<CompileFrame>() as u128 + 4096,
+            )
+            .ok_or_else(memory_projection_error)?;
+        let observed = coexisting_bytes
+            .checked_add(
+                family
+                    .checked_retained_bytes()
+                    .ok_or_else(memory_projection_error)?,
+            )
+            .ok_or_else(memory_projection_error)?;
+        bound
+            .ensure(observed, future)
+            .map_err(WasmExactSearchError::resource_admission)?;
+        Self::new(universe, family, catalog)
+    }
+
     pub fn new(
         universe: &MaterializedPatternUniverse,
         family: &PackingMultisetFamily,
@@ -650,7 +858,6 @@ impl ExtendedGeometrySearch {
 
     /// A native verifier consumes only candidates from the parent's admitted
     /// exact family. It owns no compiler, target index or enumeration DAG.
-    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     pub fn private_verifier_placeholder() -> Self {
         Self {
             dense_compiler: None,
@@ -671,12 +878,42 @@ impl ExtendedGeometrySearch {
         }
     }
 
-    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub(super) fn checked_external_verifier_future_bytes(&self) -> Option<u128> {
+        if self.external_targets.is_some() || self.enumerator.is_some() {
+            return Some(0);
+        }
+        let count = if let Some(dense) = self.dense_compiler.as_ref() {
+            dense.targets().len()
+        } else {
+            self.compiler.as_ref()?.targets.len()
+        };
+        // `Vec<GeometryTarget>` and the resulting Arc slice briefly coexist.
+        (count as u128)
+            .checked_mul(2 * core::mem::size_of::<GeometryTarget>() as u128)?
+            .checked_add(32)
+    }
+
+    /// Pattern indexes remain Arc-shared. No compiler/family DAG or private
+    /// traversal workspace is copied into a packet verifier.
+    pub(super) fn external_verifier_from_owner(&self) -> Option<Self> {
+        let targets = if let Some(targets) = self.external_targets.as_ref() {
+            Arc::clone(targets)
+        } else if let Some(enumerator) = self.enumerator.as_ref() {
+            Arc::clone(&enumerator.targets)
+        } else if let Some(dense) = self.dense_compiler.as_ref() {
+            Arc::from(dense.targets().to_vec())
+        } else {
+            Arc::from(self.compiler.as_ref()?.targets.clone())
+        };
+        let mut verifier = Self::private_verifier_placeholder();
+        verifier.external_targets = Some(targets);
+        Some(verifier)
+    }
+
     pub fn is_compiling(&self) -> bool {
         self.dense_compiler.is_some() || self.compiler.is_some()
     }
 
-    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     pub fn complete_parallel_enumeration(
         &mut self,
         candidate_count: usize,
@@ -694,24 +931,137 @@ impl ExtendedGeometrySearch {
     }
 
     pub fn advance(&mut self, catalog: &ExtendedInverseCatalog) -> ExtendedGeometryAdvance {
+        self.advance_with_node_budget(catalog, None, None)
+            .expect("unbounded Geometry does not perform memory admission")
+    }
+
+    /// Credits compiler scratch and DAG growth before allocation. Shared-owner
+    /// callers pass the live bytes outside this Geometry owner, not a per-worker
+    /// copy of the whole request envelope.
+    pub fn advance_bounded(
+        &mut self,
+        catalog: &ExtendedInverseCatalog,
+        node_budget: Option<&SharedExecutionNodeBudget>,
+        bound: ExecutionMemoryBound,
+        coexisting_bytes: u128,
+    ) -> Result<ExtendedGeometryAdvance, WasmExactSearchError> {
+        let family_base = if let Some(compiler) = self.compiler.as_mut() {
+            Some(
+                compiler.admit_advance(
+                    catalog,
+                    node_budget,
+                    bound,
+                    coexisting_bytes
+                        .checked_add(self.pattern_index_bytes as u128)
+                        .ok_or_else(memory_projection_error)?,
+                )?,
+            )
+        } else if let Some(compiler) = self.dense_compiler.as_mut() {
+            Some(
+                compiler.admit_advance(
+                    catalog,
+                    node_budget,
+                    bound,
+                    coexisting_bytes
+                        .checked_add(self.pattern_index_bytes as u128)
+                        .ok_or_else(memory_projection_error)?,
+                )?,
+            )
+        } else {
+            None
+        };
+        let enumerator_base = if let Some(enumerator) = self.enumerator.as_mut() {
+            let retained = enumerator.retained_bytes() as u128;
+            let tasks =
+                enumerator.tasks.capacity() as u128 * core::mem::size_of::<TraversalTask>() as u128;
+            let base = coexisting_bytes
+                .checked_add(self.pattern_index_bytes as u128)
+                .and_then(|bytes| bytes.checked_add(retained))
+                .and_then(|bytes| bytes.checked_sub(tasks))
+                .ok_or_else(memory_projection_error)?;
+            bound
+                .ensure(base, tasks)
+                .map_err(WasmExactSearchError::resource_admission)?;
+            enumerator.task_memory_limit = Some(bound.cap_bytes() - base);
+            Some(base)
+        } else {
+            None
+        };
+        let result =
+            self.advance_with_node_budget(catalog, node_budget, Some((bound, coexisting_bytes)))?;
+        let refused = self
+            .compiler
+            .as_ref()
+            .and_then(|compiler| compiler.family.refused_retained_bytes())
+            .or_else(|| {
+                self.dense_compiler
+                    .as_ref()
+                    .and_then(DenseExtendedFamilyCompiler::refused_family_bytes)
+            });
+        if let (Some(base), Some(bytes)) = (family_base, refused) {
+            return Err(WasmExactSearchError::resource_admission(
+                bound
+                    .ensure(base, bytes)
+                    .expect_err("family refused a preallocation beyond its assigned credit"),
+            ));
+        }
+        if let (Some(base), Some(bytes)) = (
+            enumerator_base,
+            self.enumerator
+                .as_ref()
+                .and_then(|enumerator| enumerator.refused_task_bytes),
+        ) {
+            return Err(WasmExactSearchError::resource_admission(
+                bound
+                    .ensure(base, bytes)
+                    .expect_err("enumerator refused a preallocation beyond its assigned credit"),
+            ));
+        }
+        Ok(result)
+    }
+
+    pub(super) fn advance_with_node_budget(
+        &mut self,
+        catalog: &ExtendedInverseCatalog,
+        node_budget: Option<&SharedExecutionNodeBudget>,
+        completion_bound: Option<(ExecutionMemoryBound, u128)>,
+    ) -> Result<ExtendedGeometryAdvance, WasmExactSearchError> {
         if let Some(compiler) = self.dense_compiler.as_mut() {
             let Some(dense_catalog) = catalog.dense_geometry() else {
-                return ExtendedGeometryAdvance::ResourceIncomplete(
+                return Ok(ExtendedGeometryAdvance::ResourceIncomplete(
                     "dense_geometry_catalog_missing",
-                );
+                ));
             };
-            match compiler.advance(catalog, dense_catalog) {
+            match compiler.advance(catalog, dense_catalog, node_budget) {
                 DenseCompileAdvance::Pending => {
                     self.observe_compiler_metrics();
-                    return ExtendedGeometryAdvance::Pending;
+                    return Ok(ExtendedGeometryAdvance::Pending);
                 }
                 DenseCompileAdvance::ResourceIncomplete => {
                     self.observe_compiler_metrics();
-                    return ExtendedGeometryAdvance::ResourceIncomplete(
+                    return Ok(ExtendedGeometryAdvance::ResourceIncomplete(
                         "geometry_solution_family_storage_unavailable",
-                    );
+                    ));
+                }
+                DenseCompileAdvance::NodeBudgetExceeded => {
+                    self.observe_compiler_metrics();
+                    return Ok(ExtendedGeometryAdvance::ResourceIncomplete(
+                        "node_budget_exceeded",
+                    ));
                 }
                 DenseCompileAdvance::Complete => {
+                    if let Some((bound, outside)) = completion_bound {
+                        let observed = outside
+                            .checked_add(self.pattern_index_bytes as u128)
+                            .and_then(|bytes| bytes.checked_add(compiler.retained_bytes() as u128))
+                            .ok_or_else(memory_projection_error)?;
+                        let future = compiler
+                            .checked_completion_future_bytes()
+                            .ok_or_else(memory_projection_error)?;
+                        bound
+                            .ensure(observed, future)
+                            .map_err(WasmExactSearchError::resource_admission)?;
+                    }
                     self.observe_compiler_metrics();
                     let compiler = self
                         .dense_compiler
@@ -725,35 +1075,55 @@ impl ExtendedGeometrySearch {
                         root_family,
                         target_depth,
                     ));
-                    return ExtendedGeometryAdvance::Pending;
+                    return Ok(ExtendedGeometryAdvance::Pending);
                 }
             }
         }
         if let Some(compiler) = self.compiler.as_mut() {
-            match compiler.advance(catalog) {
+            match compiler.advance(catalog, node_budget) {
                 CompileAdvance::Pending => {
                     self.observe_compiler_metrics();
-                    return ExtendedGeometryAdvance::Pending;
+                    return Ok(ExtendedGeometryAdvance::Pending);
                 }
                 CompileAdvance::ResourceIncomplete => {
                     self.observe_compiler_metrics();
-                    return ExtendedGeometryAdvance::ResourceIncomplete(
+                    return Ok(ExtendedGeometryAdvance::ResourceIncomplete(
                         "geometry_solution_family_storage_unavailable",
-                    );
+                    ));
+                }
+                CompileAdvance::NodeBudgetExceeded => {
+                    self.observe_compiler_metrics();
+                    return Ok(ExtendedGeometryAdvance::ResourceIncomplete(
+                        "node_budget_exceeded",
+                    ));
                 }
                 CompileAdvance::Complete => {
+                    if let Some((bound, outside)) = completion_bound {
+                        let observed = outside
+                            .checked_add(self.pattern_index_bytes as u128)
+                            .and_then(|bytes| bytes.checked_add(compiler.retained_bytes() as u128))
+                            .ok_or_else(memory_projection_error)?;
+                        let future = checked_compiler_completion_future_bytes(
+                            compiler.family.node_count(),
+                            compiler.targets.len(),
+                        )
+                        .ok_or_else(memory_projection_error)?;
+                        bound
+                            .ensure(observed, future)
+                            .map_err(WasmExactSearchError::resource_admission)?;
+                    }
                     self.observe_compiler_metrics();
                     let compiler = self.compiler.take().expect("extended compiler exists");
                     self.candidate_family_count = compiler.family.path_count(compiler.root_family);
                     self.enumerator = Some(compiler.into_enumerator());
-                    return ExtendedGeometryAdvance::Pending;
+                    return Ok(ExtendedGeometryAdvance::Pending);
                 }
             }
         }
         let Some(enumerator) = self.enumerator.as_mut() else {
-            return ExtendedGeometryAdvance::Complete;
+            return Ok(ExtendedGeometryAdvance::Complete);
         };
-        match enumerator.next_candidate(catalog) {
+        Ok(match enumerator.next_candidate(catalog) {
             Ok(Some(candidate)) => {
                 self.candidate_count = self.candidate_count.saturating_add(1);
                 ExtendedGeometryAdvance::Candidate(candidate)
@@ -765,7 +1135,7 @@ impl ExtendedGeometrySearch {
             Err(()) => ExtendedGeometryAdvance::ResourceIncomplete(
                 "geometry_solution_family_traversal_unavailable",
             ),
-        }
+        })
     }
 
     pub fn external_candidate(

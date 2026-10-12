@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { fullHeightPcReplayWitness } from "../../../tests/fixtures/contracts/extended_pc_replay_witness.v1.mjs";
 
 import { assertDiscordCanonicalOnlyResult } from "../src/clearra/command.mjs";
 import {
@@ -68,6 +69,48 @@ test("pc.path fails closed when the supplied canonical witness is missing or mis
   const forged = structuredClone(result);
   forged.summary.canonical_witness.trace_identity = "forged";
   assert.equal(validDiscordTypedProductResult(forged), false);
+});
+
+test("full-height PC replay survives both canonical projection hops without narrowing its zero terminal", () => {
+  const witness = fullHeightPcReplayWitness();
+  const raw = envelope("pc-path-family.v2", {
+    capability_id: "pc.path",
+    witness_contract: "pc-path-witness.v2",
+    ordering: "candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending",
+    problem_id: "full-height-transport-fixture",
+    materialized_pattern_count: "1",
+    witness_count: "1",
+    complete: true,
+    canonical_selection: "smallest-canonical-candidate-id",
+    canonical_witness: structuredClone(witness),
+    witnesses: [witness],
+  });
+  const projected = projectDiscordTypedProductResult(raw);
+  assert.deepEqual(projected.summary.canonical_witness, witness);
+  assert.equal(projected.summary.canonical_witness.steps.at(-1).board_after_line_clear_mask,
+    `0x${"0".repeat(64)}`);
+  assert.deepEqual(projectDiscordTypedProductResult(projected), projected);
+  const firstHop = assertDiscordCanonicalOnlyResult({
+    exitCode: 0, signal: null, stderr: "", stdout: JSON.stringify(raw),
+  });
+  assert.deepEqual(JSON.parse(firstHop.stdout), projected);
+  assert.equal(assertDiscordCanonicalOnlyResult(firstHop).stdout, firstHop.stdout);
+
+  for (const original of [raw, projected]) {
+    const mixed = structuredClone(original);
+    mixed.summary.canonical_witness.steps[1].board_after_line_clear_mask =
+      "0x0000000000000000";
+    if (mixed.summary.witnesses) {
+      mixed.summary.witnesses[0] = structuredClone(mixed.summary.canonical_witness);
+    }
+    assert.equal(validDiscordTypedProductResult(mixed), false);
+    const outside = structuredClone(original);
+    outside.summary.canonical_witness.steps[0].board_before_mask = `0x1${"0".repeat(63)}`;
+    if (outside.summary.witnesses) {
+      outside.summary.witnesses[0] = structuredClone(outside.summary.canonical_witness);
+    }
+    assert.equal(validDiscordTypedProductResult(outside), false);
+  }
 });
 
 test("Build replay accepts only its declared terminal, including a full-clear zero terminal", () => {
@@ -267,6 +310,28 @@ test("pc.minimals canonical projection survives runner, HTTP client and bot vali
   assert.deepEqual(Object.keys(third.summary).sort(), [
     "capability_id", "canonical_candidate", "canonical_selection", "payload_kind", "result_contract",
   ].sort());
+});
+
+test("pc.minimals keeps an App-owned zero-member optimum without inventing a canonical candidate", () => {
+  const raw = coverage("pc-minimum-cover.v2", "pc.minimals");
+  raw.summary.members = [];
+  raw.summary.optimal_cardinality = "0";
+  raw.summary.canonical_witness = null;
+  const canonical = roundTrip(raw);
+  assert.equal(canonical.summary.canonical_candidate, null);
+  assert.equal(Object.hasOwn(canonical.summary, "unsatisfiable"), false);
+  assert.equal(Object.hasOwn(canonical.summary, "members"), false);
+  for (const mutate of [
+    value => { value.summary.optimal_cardinality = "1"; },
+    value => { value.summary.canonical_witness = { candidate_id: "1", normalized_solution_key: "forged" }; },
+    value => { value.summary.total_member_pages = "2"; },
+    value => { value.summary.known_alternative_count = "0"; },
+    value => { value.summary.canonical_selection = null; },
+  ]) {
+    const missingAuthority = structuredClone(raw);
+    mutate(missingAuthority);
+    assert.equal(validDiscordTypedProductResult(missingAuthority), false);
+  }
 });
 
 test("pc.minimals rejects duplicate or noncanonical source membership before narrowing", () => {
@@ -616,9 +681,9 @@ function pathWitness(candidateId, patternId, traceKey) {
       rotation: "spawn",
       x: "0",
       y: "0",
-      placement_mask: "000000000000000f",
-      board_before_mask: "0000000000000000",
-      board_after_placement_mask: "000000000000000f",
+      placement_mask: "0x000000000000000f",
+      board_before_mask: "0x0000000000000000",
+      board_after_placement_mask: "0x000000000000000f",
       board_after_line_clear_mask: "0x0000000000000000",
       cleared_row_mask: "0000000000000001",
       cleared_lines: "1",

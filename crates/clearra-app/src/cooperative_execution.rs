@@ -775,6 +775,9 @@ impl CooperativeSearchResponseKind {
     /// dedicated evidence merger or coordinator-owned exact replay.
     pub(crate) fn distributed_product_capability(&self) -> Option<ProductCapabilityContract> {
         match self {
+            Self::PcFailedQueue { authority } if authority.uses_extended_family() => {
+                Some(ProductCapabilityContract::PcFailedQueue)
+            }
             Self::PcTiling { .. } | Self::ScenarioTiling { .. } => {
                 Some(ProductCapabilityContract::PcTiling)
             }

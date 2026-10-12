@@ -9,7 +9,8 @@ import type {
   ClearraScorePatternWinnerPayload,
   ClearraSolutionSetArtifactPayload
 } from '../wasm/wasmCommandClient';
-import { validatePcReplayPage } from './pcReplayPager';
+import { validatePcReplayPage, validatePcReplayWitnesses } from './pcReplayPager';
+import { parseSolutionKey } from './solutionExport';
 import { validateRecoveryBuildPayload } from './recoveryBuildPresentation';
 import { validateBoundaryRecoveryPayload } from './boundaryRecoveryPayloadValidation';
 
@@ -1200,7 +1201,7 @@ function validatePcScoreFieldSummary(
   let previousFieldKey: string | null = null;
   const fieldsValid = summary.fields.every((field) => {
     if (
-      !validPcScoreFieldKey(field.normalized_field_key) ||
+      !validPcScoreFieldKey(field.normalized_field_key, outerContract === 'pc.score') ||
       observedKeys.has(field.normalized_field_key) ||
       (previousFieldKey !== null && previousFieldKey >= field.normalized_field_key) ||
       !finiteInRange(field.average_score, 0, Number.MAX_VALUE) ||
@@ -1211,8 +1212,8 @@ function validatePcScoreFieldSummary(
       return false;
     }
     observedKeys.add(field.normalized_field_key);
-    // The ctk1 identity uses fixed-width lowercase hexadecimal fields, so its
-    // serialized lexical order is the Rust StandardBoard64TilingIdentity order.
+    // Each candidate family retains one canonical fixed-width key frame;
+    // full-height PC fields carry CTK2's height and all four mask words.
     previousFieldKey = field.normalized_field_key;
     const coveredPatternCount = BigInt(field.covered_pattern_count);
     const patternCount = BigInt(field.pattern_count);
@@ -1313,10 +1314,13 @@ function sameScorePatternWinner(
     left.informational_attack === right.informational_attack;
 }
 
-function validPcScoreFieldKey(value: string): boolean {
-  return /^ctk1\|initial=[0-9a-f]{16}\|placements=[IOTSZJL]:[0-9a-f]{16}(?:,[IOTSZJL]:[0-9a-f]{16})*$/u.test(
-    value
-  );
+function validPcScoreFieldKey(value: string, allowFullHeight: boolean): boolean {
+  if (typeof value !== 'string') return false;
+  if (/^ctk1\|initial=[0-9a-f]{16}\|placements=[IOTSZJL]:[0-9a-f]{16}(?:,[IOTSZJL]:[0-9a-f]{16})*$/u.test(value)) return true;
+  // Reuse the existing exact drawing parser for CTK2's height, full-word
+  // bounds, four-cell placements and non-overlap. Build keeps its compact
+  // field contract instead of acquiring a full-height PC capability here.
+  return allowFullHeight && value.startsWith('ctk2|') && parseSolutionKey(value) !== null;
 }
 
 function validatePathFamily(
@@ -1335,7 +1339,7 @@ function validatePathFamily(
       validatePcReplayPage(family as ClearraPcReplayRuntimePage) === null
     : !hasPagingMetadata && family.witness_count === family.witnesses.length.toString();
   let previousOrderKey: readonly [string, string, string, string] | null = null;
-  const witnessesValid = family.witnesses.every((witness) => {
+  const witnessesValid = semantics === 'pc' ? validatePcReplayWitnesses(family.witnesses) : family.witnesses.every((witness) => {
     const orderKey = [
       witness.candidate_id,
       witness.pattern_id,
@@ -1386,7 +1390,9 @@ function validatePathFamily(
     ? outerContract === 'pc.path' &&
       outerResultKind === 'pc-path-family.v2' &&
       family.witness_contract === 'pc-path-witness.v2' &&
-      !('target_terminal_board_mask' in family)
+      !('target_terminal_board_mask' in family) &&
+      family.witnesses.every((witness) => /^0x(?:0{16}|0{64})$/u.test(
+        witness.steps.at(-1)?.board_after_line_clear_mask ?? ''))
     : outerContract === 'build.complete-replay-paths' &&
       outerResultKind === 'build-path-family.v1' &&
       family.witness_contract === 'build-path-witness.v1' &&

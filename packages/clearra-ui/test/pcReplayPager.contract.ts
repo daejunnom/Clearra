@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { fullHeightPcReplayWitness } from '../../../tests/fixtures/contracts/extended_pc_replay_witness.v1.mjs';
 import type { ClearraPcPathWitnessPayload, ClearraPcReplayRuntimePage, ClearraProductResultPayload } from '../src/lib/wasm/wasmCommandClient';
 import { collectPcReplayGeometryExportPages, createReplayExportBudget, loadPcReplayPage, validatePcReplayPage } from '../src/lib/workspace/pcReplayPager';
 import { productResultIdentity, validateProductResultPayload, type ProductMemberPageLoader } from '../src/lib/workspace/productResultPager';
@@ -40,6 +41,30 @@ function result(value = page()): ClearraProductResultPayload {
 
 assert.equal(validatePcReplayPage(page()), null);
 assert.equal(validateProductResultPayload(result()), null, 'global witness count is distinct from the bounded materialized member page');
+const extendedPage: ClearraPcReplayRuntimePage = {
+  ...page(), geometry_count: '1', candidate_id: '1', geometry_witness_count: '1', geometry_pattern_count: '1',
+  member_page_count: '1', witness_count: '1', materialized_pattern_count: '1', witnesses: [fullHeightPcReplayWitness()]
+};
+assert.equal(validatePcReplayPage(extendedPage), null, 'PC replay paging accepts four-word boards with the unchanged 16-digit row mask');
+assert.equal(validateProductResultPayload(result(extendedPage)), null, 'the initial family uses the same full-height witness validator');
+const extendedExport = await collectPcReplayGeometryExportPages({ initialPage: extendedPage,
+  loadMemberPage: async () => { throw new Error('one-page export must not load another geometry'); },
+  targetLines: 24, isCurrent: () => true });
+assert.equal(extendedExport.length, 1);
+assert.equal(extendedExport[0]!.height, 24);
+assert.equal(extendedExport[0]!.placements.length, 6);
+assert.ok(extendedExport[0]!.initialMask >> 192n, 'whole-geometry copy preserves the high words, not a compact truncation');
+for (const mutate of [
+  (member: ClearraPcPathWitnessPayload) => { member.steps[0]!.placement_mask = '0x0000008020080200'; },
+  (member: ClearraPcPathWitnessPayload) => { member.steps[1]!.board_after_line_clear_mask = '0x0000000000000000'; },
+  (member: ClearraPcPathWitnessPayload) => { member.steps[0]!.cleared_row_mask = `0x${'0'.repeat(63)}f`; },
+  (member: ClearraPcPathWitnessPayload) => { member.steps[0]!.board_before_mask = `0x${(1n << 240n).toString(16).padStart(64, '0')}`; }
+]) {
+  const invalid = structuredClone(extendedPage);
+  mutate(invalid.witnesses[0]!);
+  assert.notEqual(validatePcReplayPage(invalid), null, 'mixed-width and out-of-scope PC masks fail closed');
+  assert.notEqual(validateProductResultPayload(result(invalid)), null);
+}
 const traceTiePage = { ...page(), geometry_count: '1', geometry_witness_count: '2', geometry_pattern_count: '1',
   member_page_count: '1', witness_count: '2', witnesses: [
     { ...witness(0), trace_identity: 'identity-a' }, { ...witness(0), trace_identity: 'identity-b' }

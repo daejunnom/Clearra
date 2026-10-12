@@ -1,9 +1,14 @@
 use clearra_core_domain::resource::{ResourceBudget, ResourceReport, ResourceTruncationReason};
 
+mod aggregate_execution_budget;
 mod dense_pattern_preflight;
 mod durable_delegation_journal;
 mod execution_admission;
 mod shared_execution_resource_authority;
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+pub(crate) use aggregate_execution_budget::SharedExecutionMemoryBudget;
+pub(crate) use aggregate_execution_budget::{ExecutionMemoryOwner, SharedExecutionNodeBudget};
 
 pub(crate) use dense_pattern_preflight::{
     preflight_dense_pattern_execution, DensePatternExecutionSurface, DensePatternPreflight,

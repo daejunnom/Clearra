@@ -34,6 +34,7 @@ pub(super) struct GeometrySolutionFamily {
     intern_count: usize,
     interning_disabled: bool,
     retained_limit_bytes: Option<u128>,
+    refused_retained_bytes: Option<u128>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -57,14 +58,20 @@ impl GeometrySolutionFamily {
             intern_count: 0,
             interning_disabled,
             retained_limit_bytes: None,
+            refused_retained_bytes: None,
         }
     }
 
     pub fn set_retained_limit_bytes(&mut self, retained_limit_bytes: Option<u128>) {
         self.retained_limit_bytes = retained_limit_bytes;
+        self.refused_retained_bytes = None;
         if retained_limit_bytes.is_some_and(|limit| self.retained_bytes() as u128 > limit) {
             self.disable_interning();
         }
+    }
+
+    pub fn refused_retained_bytes(&self) -> Option<u128> {
+        self.refused_retained_bytes
     }
 
     pub fn append(&mut self, row_id: u32, suffix: u32) -> Option<u32> {
@@ -230,6 +237,16 @@ impl GeometrySolutionFamily {
         if needs_chunk {
             if self.chunks.len() == self.chunks.capacity() {
                 let requested = self.chunks.len().checked_add(1)?;
+                let replacement_peak = (requested as u128)
+                    .checked_mul(core::mem::size_of::<Vec<FamilyNode>>() as u128)?
+                    .checked_add(self.retained_bytes() as u128)?;
+                if self
+                    .retained_limit_bytes
+                    .is_some_and(|limit| replacement_peak > limit)
+                {
+                    self.refused_retained_bytes = Some(replacement_peak);
+                    return None;
+                }
                 let mut replacement = Vec::new();
                 replacement.try_reserve_exact(requested).ok()?;
                 let replacement_bytes = (replacement.capacity() as u128)
@@ -240,10 +257,21 @@ impl GeometrySolutionFamily {
                     .retained_limit_bytes
                     .is_some_and(|limit| replacement_peak > limit)
                 {
+                    self.refused_retained_bytes = Some(replacement_peak);
                     return None;
                 }
                 let old = core::mem::replace(&mut self.chunks, replacement);
                 self.chunks.extend(old);
+            }
+            let projected = (FAMILY_NODE_CHUNK_CAPACITY as u128)
+                .checked_mul(core::mem::size_of::<FamilyNode>() as u128)?
+                .checked_add(self.retained_bytes() as u128)?;
+            if self
+                .retained_limit_bytes
+                .is_some_and(|limit| projected > limit)
+            {
+                self.refused_retained_bytes = Some(projected);
+                return None;
             }
             let mut chunk = Vec::new();
             chunk.try_reserve_exact(FAMILY_NODE_CHUNK_CAPACITY).ok()?;
@@ -254,6 +282,7 @@ impl GeometrySolutionFamily {
                 .retained_limit_bytes
                 .is_some_and(|limit| projected > limit)
             {
+                self.refused_retained_bytes = Some(projected);
                 return None;
             }
             self.chunks.push(chunk);
@@ -375,6 +404,18 @@ fn node_hash(node: FamilyNode) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{GeometrySolutionFamily, FAMILY_EMPTY};
+
+    #[test]
+    fn capped_family_refuses_outer_chunk_backing_before_allocation() {
+        let mut family = GeometrySolutionFamily::new();
+        let before = family.retained_bytes() as u128;
+        family.set_retained_limit_bytes(Some(before));
+        assert!(family.append(7, FAMILY_EMPTY).is_none());
+        assert_eq!(family.node_count(), 0);
+        assert_eq!(family.chunks.capacity(), 0);
+        assert_eq!(family.retained_bytes() as u128, before);
+        assert!(family.refused_retained_bytes().unwrap() > before);
+    }
 
     #[test]
     fn family_chunk_growth_accepts_exact_retained_cap_and_rejects_one_under() {

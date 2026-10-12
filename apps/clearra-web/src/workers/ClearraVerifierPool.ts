@@ -18,6 +18,7 @@ import {
   type ExecutableDelegationPermit
 } from './DurableDelegationJournal';
 import { VerifierTransportProfile, type TransportOperation } from './VerifierTransportProfile';
+import { createWorkerHostYield } from './workerHostYield';
 
 type VerifierResponse =
   | { type: 'prewarmed' }
@@ -123,6 +124,8 @@ const VERIFIER_INITIALIZATION_TIMEOUT_MS = 0;
 const VERIFIER_REQUEST_STALL_TIMEOUT_MS = 0;
 const VERIFIER_FINISH_STALL_TIMEOUT_MS = 0;
 const VERIFIER_WATCHDOG_MAX_SCAN_INTERVAL_MS = 1_000;
+const MERGE_HOST_QUANTUM_MS = 8;
+const yieldMergerToHost = createWorkerHostYield('timer');
 
 export type ClearraVerifierPoolOptions = {
   initializationTimeoutMs?: number;
@@ -1054,6 +1057,7 @@ export class ClearraVerifierPool {
   private clients: VerifierClient[] = [];
   private waiters: PoolWaiter[] = [];
   private inFlight = new Set<Promise<void>>();
+  private resultCommitTail: Promise<void> = Promise.resolve();
   private leasedClients = new Set<VerifierClient>();
   private exactTaskKeys = new Map<VerifierClient, { key: ArrayBuffer; cancelled: boolean }>();
   private targetWorkerCount = 0;
@@ -1063,6 +1067,7 @@ export class ClearraVerifierPool {
     retiredClients: Set<VerifierClient>;
   } | null = null;
   private active = false;
+  private issuanceClosed = true;
   private failure: Error | null = null;
   private readonly jobId = uniqueDelegationUuid();
   private readonly bootId = uniqueDelegationUuid();
@@ -1102,6 +1107,10 @@ export class ClearraVerifierPool {
     lifecycleOwnerId = '',
     hostCapabilities?: ClearraWasmHostCapabilities
   ) {
+    // Speculative readiness is not an execution owner. In particular a late
+    // UI warmup request must not advance the generation of a foreground job
+    // that is waiting for its exact results to be committed.
+    if (this.active) return;
     const generation = ++this.generation;
     try {
       while (this.clients.length < size) {
@@ -1137,7 +1146,9 @@ export class ClearraVerifierPool {
     const generation = ++this.generation;
     this.readySubsetFinalization = null;
     this.active = true;
+    this.issuanceClosed = false;
     this.failure = null;
+    this.resultCommitTail = Promise.resolve();
     // All durable v0.8 modes seal an immutable task result before merger
     // application. The legacy `streaming` label is accepted as an input
     // compatibility spelling but does not re-enable streaming application.
@@ -1210,6 +1221,7 @@ export class ClearraVerifierPool {
   ): Promise<boolean> {
     const generation = this.generation;
     this.assertActive(generation);
+    this.assertIssuanceOpen();
     let client = this.findAvailableClient();
     const readyWait = this.transportProfile.start('ready_client_wait');
     while (!client) {
@@ -1217,6 +1229,7 @@ export class ClearraVerifierPool {
         this.waiters.push({ generation, resolve, reject })
       );
       this.assertActive(generation);
+      this.assertIssuanceOpen();
       client = this.findAvailableClient();
     }
     readyWait();
@@ -1228,10 +1241,12 @@ export class ClearraVerifierPool {
       // or new generation cannot publish the old task in its replacement.
       batch = takeTask();
       this.assertActive(generation);
+      this.assertIssuanceOpen();
       if (batch !== null && taskKey) {
         const key = taskKey();
         if (key.byteLength !== 56) throw new Error('exact task routing key must contain its full core identity');
         this.assertActive(generation);
+        this.assertIssuanceOpen();
         this.exactTaskKeys.set(client, { key, cancelled: false });
       }
     } catch (error) {
@@ -1267,11 +1282,12 @@ export class ClearraVerifierPool {
     options: ClearraVerifierPoolFinishOptions = {}
   ): Promise<number> {
     const generation = this.generation;
+    this.assertActive(generation);
+    this.closeIssuance();
     await this.waitForIdle();
     this.assertActive(generation);
     if (options.readySubset) await this.retainReadySubset(generation);
     this.assertActive(generation);
-    let commitTail = Promise.resolve();
     const finished = await Promise.all(
       this.clients.map(async (client) => {
         try {
@@ -1279,13 +1295,7 @@ export class ClearraVerifierPool {
           // A sealed worker result can be merged while siblings still finalize.
           // Keep coordinator mutation and durable receipts in one ordered queue;
           // a rejected commit poisons the queue instead of applying later results.
-          const committed = commitTail.then(async () => {
-            this.assertActive(generation);
-            await applySealedVerifierResult(value, consumePartial);
-            this.assertActive(generation);
-          });
-          commitTail = committed;
-          await committed;
+          await this.commitResult(value, consumePartial, generation);
         } catch (error) {
           if (this.active && generation === this.generation) this.fail(error);
           throw error;
@@ -1319,6 +1329,8 @@ export class ClearraVerifierPool {
    * This is a transport lifetime boundary, never an exact-proof conclusion. */
   async completeAtomicTasks(): Promise<number> {
     const generation = this.generation;
+    this.assertActive(generation);
+    this.closeIssuance();
     await this.waitForIdle();
     await this.retainReadySubset(generation);
     this.assertActive(generation);
@@ -1408,6 +1420,7 @@ export class ClearraVerifierPool {
 
   cancel() {
     this.active = false;
+    this.issuanceClosed = true;
     this.failure = null;
     this.generation++;
     this.readySubsetFinalization = null;
@@ -1476,7 +1489,7 @@ export class ClearraVerifierPool {
     try {
       const result = await client.consume(batch);
       this.assertActive(generation);
-      await applySealedVerifierResult(result.sealed, consumePartial);
+      await this.commitResult(result.sealed, consumePartial, generation);
     } finally {
       if (generation === this.generation) {
         this.leasedClients.delete(client);
@@ -1494,6 +1507,23 @@ export class ClearraVerifierPool {
     return result;
   }
 
+  private commitResult(
+    result: DelegatedVerifierResponse,
+    consumePartial: (partial: ArrayBuffer) => void,
+    generation: number
+  ): Promise<void> {
+    const committed = this.resultCommitTail.then(async () => {
+      this.assertActive(generation);
+      await applySealedVerifierResult(result, consumePartial, () => this.assertActive(generation));
+      this.assertActive(generation);
+    });
+    // One coordinator mutation queue spans consume and finish. Host yielding
+    // must not interleave two sealed results or turn a failed application into
+    // permission to apply a later result from the same generation.
+    this.resultCommitTail = committed;
+    return committed;
+  }
+
   private assertActive(generation: number) {
     if (this.failure) throw this.failure;
     if (!this.active || generation !== this.generation) {
@@ -1501,10 +1531,23 @@ export class ClearraVerifierPool {
     }
   }
 
+  private assertIssuanceOpen() {
+    if (this.issuanceClosed) throw new Error('distributed verifier task issuance is closed');
+  }
+
+  private closeIssuance() {
+    this.issuanceClosed = true;
+    // A task factory that never acquired an executor has not issued a core
+    // task. Reject it rather than admitting it after the final drain snapshot.
+    const error = new Error('distributed verifier task issuance is closed');
+    for (const waiter of this.waiters.splice(0)) waiter.reject(error);
+  }
+
   private fail(error: unknown) {
     if (this.failure) return;
     this.failure = error instanceof Error ? error : new Error(String(error));
     this.active = false;
+    this.issuanceClosed = true;
     this.generation++;
     this.readySubsetFinalization = null;
     for (const client of this.clients) client.terminate();
@@ -1757,14 +1800,27 @@ function canonicalVerifierReply(response: VerifierResponse): unknown {
 
 async function applySealedVerifierResult(
   sealed: DelegatedVerifierResponse,
-  consumePartial: (partial: ArrayBuffer) => void
+  consumePartial: (partial: ArrayBuffer) => void,
+  requireCurrentOwner: () => void
 ): Promise<void> {
   const { authority, token } = sealed.delegation;
   const decision = authority.resultApplicationDecision(token, sealed.resultSha256);
   if (decision === 'already-applied') return;
   try {
     const applying = sealed.delegation.profile.start('result_apply', sealed.delegation.operation);
-    for (const partial of sealed.partials) commitPartial(consumePartial, partial);
+    let quantumStarted = performance.now();
+    for (let index = 0; index < sealed.partials.length; index += 1) {
+      requireCurrentOwner();
+      commitPartial(consumePartial, sealed.partials[index]);
+      if (index + 1 < sealed.partials.length && performance.now() - quantumStarted >= MERGE_HOST_QUANTUM_MS) {
+        // Durable result application remains exactly once. Only host message
+        // handling may interleave between bounded wire chunks, and the same
+        // generation must still own the next chunk and terminal journal ACK.
+        await yieldMergerToHost();
+        quantumStarted = performance.now();
+      }
+    }
+    requireCurrentOwner();
     applying();
     // These two profiling intervals intentionally overlap: the two durable
     // events now share one terminal commit, never two independent ACKs.

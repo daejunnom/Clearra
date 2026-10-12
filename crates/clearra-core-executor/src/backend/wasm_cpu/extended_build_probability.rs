@@ -33,9 +33,13 @@ use clearra_supply::pattern_universe::{
 };
 
 use crate::{
-    resource::ExecutionMemoryBound, CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage,
-    PcChanceCoverageEvidence, PcFullHeightReplayEvidence, PcScoreProblemEvidence,
+    resource::{ExecutionMemoryBound, ExecutionMemoryOwner, SharedExecutionNodeBudget},
+    CoreExecutionResult, CorePathStep, NormalizedSolutionCoverage, PcChanceCoverageEvidence,
+    PcFullHeightReplayEvidence, PcScoreProblemEvidence,
 };
+
+#[path = "extended_pc_distributed.rs"]
+pub(super) mod pc_distributed;
 
 use super::{
     build_probability::{
@@ -113,6 +117,9 @@ pub(super) struct ExtendedBuildProbabilitySession {
     finesse_requested: bool,
     finesse_languages: Vec<(String, PreparedFinesseLanguage)>,
     memory_bound: ExecutionMemoryBound,
+    request_node_budget: Option<Arc<SharedExecutionNodeBudget>>,
+    private_memory_owner: Option<ExecutionMemoryOwner>,
+    pc_observation: Option<super::extended_pc_observation::ExtendedPcObservationLanguage>,
     coexisting_retained_bytes: u128,
     finished: bool,
 }
@@ -249,6 +256,113 @@ impl ExtendedBuildProbabilitySession {
         )
     }
 
+    /// Borrow immutable source/catalog owners; BuildUp, language and reducer
+    /// state remain private. Native and local WASM coordinators use this exact
+    /// constructor instead of cloning full graph assets into a new session.
+    pub(super) fn new_shared_pc_verifier_with_bound(
+        &self,
+        memory_bound: ExecutionMemoryBound,
+    ) -> Result<Self, WasmExactSearchError> {
+        self.new_shared_pc_verifier_with_resources(memory_bound, None)
+    }
+
+    fn new_shared_pc_verifier_with_resources(
+        &self,
+        memory_bound: ExecutionMemoryBound,
+        private_memory_owner: Option<ExecutionMemoryOwner>,
+    ) -> Result<Self, WasmExactSearchError> {
+        if self.purpose != ExtendedFamilyPurpose::Pc {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_shared_verifier_requires_pc",
+            ));
+        }
+        let pattern_count = self
+            .problem
+            .piece_source()
+            .materialized_universe()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_piece_source_not_materialized",
+            ))?
+            .pattern_count();
+        let creation = (pattern_count.div_ceil(64) as u128)
+            .checked_mul(core::mem::size_of::<u64>() as u128)
+            .and_then(|bytes| bytes.checked_add(128))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_verifier_creation_projection_overflow",
+            ))?;
+        if let Some(owner) = private_memory_owner.as_ref() {
+            owner
+                .ensure(creation)
+                .map_err(WasmExactSearchError::resource_admission)?;
+        } else {
+            memory_bound
+                .ensure(0, creation)
+                .map_err(WasmExactSearchError::resource_admission)?;
+        }
+        let verifier = Self {
+            problem: Arc::clone(&self.problem),
+            purpose: ExtendedFamilyPurpose::Pc,
+            aggregation: self.aggregation,
+            field: self.field,
+            catalog: Arc::clone(&self.catalog),
+            shared_immutable_owners: true,
+            geometry: ExtendedGeometrySearch::private_verifier_placeholder(),
+            build_order_workspace: ExtendedBuildOrderWorkspace::new(
+                self.field.width(),
+                self.field.height(),
+                self.problem.kick_profile().profile_id(),
+            ),
+            coverage_evaluator: CoverageProductEvaluator::default(),
+            covered_patterns: PatternBitSet::new(pattern_count),
+            buildable_tilings: HashSet::new(),
+            solution_coverage: self.solution_coverage.as_ref().map(|_| HashMap::new()),
+            spin_execution_graphs: Vec::new(),
+            distributed_solution_keys: HashSet::new(),
+            candidate_digest: 0,
+            processed_candidate_count: 0,
+            searched_build_nodes: 0,
+            reachability_states: 0,
+            coverage_product_states: 0,
+            coverage_product_edge_checks: 0,
+            coverage_product_words: 0,
+            peak_build_order_nodes: 0,
+            total_build_order_nodes: 0,
+            peak_build_scratch_bytes: 0,
+            witnessed_pattern_count: 0,
+            pc_build_variant_count: 0,
+            pc_build_variant_count_complete: true,
+            representative_path: Vec::new(),
+            representative_pattern_id: None,
+            representative_rank: None,
+            truncated_reason: None,
+            supply_projection_complete: self.supply_projection_complete,
+            distributed_count_complete: true,
+            distributed_probability_complete: true,
+            trivial_target: false,
+            external_geometry: true,
+            workers_used: 1,
+            parallel_active_workers: 0,
+            parallel_minimum_worker_candidates: 0,
+            parallel_maximum_worker_candidates: 0,
+            distributed_worker_memory_bytes: 0,
+            native_parallel_peak_bytes: 0,
+            distributed_execution_constraint_materialized: false,
+            finesse_requested: false,
+            finesse_languages: Vec::new(),
+            memory_bound,
+            request_node_budget: self.request_node_budget.clone(),
+            private_memory_owner,
+            pc_observation:
+                super::extended_pc_observation::ExtendedPcObservationLanguage::for_problem(
+                    &self.problem,
+                ),
+            coexisting_retained_bytes: 0,
+            finished: false,
+        };
+        verifier.ensure_memory_bound(0)?;
+        Ok(verifier)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new_mode(
         problem: &SearchProblem,
@@ -343,7 +457,29 @@ impl ExtendedBuildProbabilitySession {
         };
         let supply_projection_complete = universe.complete()
             || family.membership_kind() == PackingPatternMembershipKind::ExactSymbolicStandardBag;
-        let geometry = ExtendedGeometrySearch::new(universe, &family, &catalog)?;
+        let geometry_other = coexisting_retained_bytes
+            .checked_add(core::mem::size_of::<Self>() as u128)
+            .and_then(|bytes| bytes.checked_add(catalog.retained_bytes() as u128))
+            .and_then(|bytes| {
+                bytes.checked_add(core::mem::size_of::<ExtendedInverseCatalog>() as u128 + 32)
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                        problem,
+                    )?,
+                )
+            })
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_geometry_memory_projection_unavailable",
+            ))?;
+        let geometry = ExtendedGeometrySearch::new_bounded(
+            universe,
+            &family,
+            &catalog,
+            memory_bound,
+            geometry_other,
+        )?;
         let build_order_workspace = ExtendedBuildOrderWorkspace::new(
             field.width(),
             field.height(),
@@ -411,6 +547,19 @@ impl ExtendedBuildProbabilitySession {
             finesse_languages: Vec::new(),
             memory_bound,
             coexisting_retained_bytes,
+            request_node_budget: (problem.backend_request().max_nodes() != 0).then(|| {
+                Arc::new(SharedExecutionNodeBudget::new(
+                    problem.backend_request().max_nodes(),
+                ))
+            }),
+            private_memory_owner: None,
+            pc_observation: (purpose == ExtendedFamilyPurpose::Pc)
+                .then(|| {
+                    super::extended_pc_observation::ExtendedPcObservationLanguage::for_problem(
+                        problem,
+                    )
+                })
+                .flatten(),
             finished: false,
         };
         session.ensure_memory_bound(0)?;
@@ -501,7 +650,7 @@ impl ExtendedBuildProbabilitySession {
         }
         self.ensure_memory_bound(0)?;
         if self.trivial_target {
-            return self.complete();
+            return self.complete_with_control(control);
         }
 
         let mut work = 0usize;
@@ -511,28 +660,28 @@ impl ExtendedBuildProbabilitySession {
             }
             if self.node_budget_exhausted() {
                 self.truncated_reason = Some("node_budget_exceeded");
-                return self.complete();
+                return self.complete_with_control(control);
             }
             self.ensure_memory_bound(0)?;
             let max_candidates = self.problem.backend_request().max_candidates();
             if max_candidates != 0 && self.geometry.candidate_count() >= max_candidates {
                 self.truncated_reason = Some("candidate_budget_exceeded");
-                return self.complete();
+                return self.complete_with_control(control);
             }
-            match self.geometry.advance(&self.catalog) {
+            match self.advance_geometry_bounded()? {
                 ExtendedGeometryAdvance::Pending => work += 1,
                 ExtendedGeometryAdvance::Candidate(candidate) => {
                     let ordinal = self.geometry.candidate_count().saturating_sub(1) as u64;
                     self.process_candidate(candidate, Some(ordinal), control)?;
                     work += 1;
                     if self.truncated_reason.is_some() {
-                        return self.complete();
+                        return self.complete_with_control(control);
                     }
                 }
-                ExtendedGeometryAdvance::Complete => return self.complete(),
+                ExtendedGeometryAdvance::Complete => return self.complete_with_control(control),
                 ExtendedGeometryAdvance::ResourceIncomplete(reason) => {
                     self.truncated_reason = Some(reason);
-                    return self.complete();
+                    return self.complete_with_control(control);
                 }
             }
         }
@@ -545,11 +694,49 @@ impl ExtendedBuildProbabilitySession {
         external_ordinal: Option<u64>,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
+        // Candidate identities and their optional score/spin string clones
+        // coexist with the graph builder. Keep their bounded credit present
+        // until the complete candidate has transferred or dropped them.
+        let local = (candidate.row_ids().len() as u128)
+            .checked_mul(256)
+            .and_then(|bytes| bytes.checked_add(512))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_memory_projection_unavailable",
+            ))?;
+        self.ensure_memory_bound(local)?;
+        let original_coexisting = self.coexisting_retained_bytes;
+        self.coexisting_retained_bytes =
+            original_coexisting
+                .checked_add(local)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "extended_pc_memory_projection_unavailable",
+                ))?;
+        let result =
+            self.process_candidate_with_identity_credit(candidate, external_ordinal, control);
+        self.coexisting_retained_bytes = original_coexisting;
+        result
+    }
+
+    fn process_candidate_with_identity_credit(
+        &mut self,
+        candidate: super::extended_geometry::ExtendedGeometryCandidate,
+        external_ordinal: Option<u64>,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
         self.processed_candidate_count = self.processed_candidate_count.saturating_add(1);
         let tiling = ExtendedTilingKey::from_candidate(&self.catalog, &candidate);
         let tiling_digest = tiling.digest();
         self.candidate_digest = mix_digest(self.candidate_digest, tiling_digest);
         if self.aggregation.is_tiling_only() {
+            let growth = checked_hash_growth_future_bytes(
+                self.buildable_tilings.capacity(),
+                self.buildable_tilings.len(),
+                core::mem::size_of::<ExtendedTilingKey>(),
+            )
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_memory_projection_unavailable",
+            ))?;
+            self.ensure_memory_bound(growth)?;
             self.buildable_tilings.try_reserve(1).map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
                     "wasm_extended_build_probability_solution_storage_unavailable",
@@ -587,6 +774,7 @@ impl ExtendedBuildProbabilitySession {
             self.truncated_reason = Some("node_budget_exceeded");
             return Ok(());
         }
+        self.prepare_build_order_resources()?;
         let build_order = if self.finesse_requested {
             build_extended_order_graph_with_finesse(
                 &self.problem,
@@ -671,7 +859,31 @@ impl ExtendedBuildProbabilitySession {
                 if !graph.is_live() {
                     return Ok(());
                 }
+                if let Some(observation) = self.pc_observation.as_ref() {
+                    let future = observation
+                        .checked_graph_insert_future_bytes(&graph)
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "extended_pc_observation_memory_projection_overflow",
+                        ))?;
+                    self.ensure_memory_bound(future)?;
+                    self.pc_observation
+                        .as_mut()
+                        .expect("observation owner remains bound")
+                        .insert_graph(&graph)?;
+                }
                 let count_pc_paths = self.count_pc_build_paths();
+                let coverage_future = self
+                    .coverage_evaluator
+                    .checked_evaluation_future_bytes(
+                        &graph,
+                        candidate.pattern_index.word_count(),
+                        candidate.pattern_index.global_pattern_count(),
+                        count_pc_paths,
+                    )
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_pc_coverage_memory_projection_overflow",
+                    ))?;
+                self.ensure_memory_bound(coverage_future)?;
                 let product = if let Some(language) = finesse_language.as_ref() {
                     self.coverage_evaluator.evaluate_with_finesse(
                         &graph,
@@ -821,6 +1033,15 @@ impl ExtendedBuildProbabilitySession {
         if self.buildable_tilings.contains(&tiling) {
             return Ok(());
         }
+        let future = checked_hash_growth_future_bytes(
+            self.buildable_tilings.capacity(),
+            self.buildable_tilings.len(),
+            core::mem::size_of::<ExtendedTilingKey>(),
+        )
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "extended_pc_memory_projection_unavailable",
+        ))?;
+        self.ensure_memory_bound(future)?;
         if self.buildable_tilings.try_reserve(1).is_err() {
             self.truncated_reason = Some("solution_storage_capacity_exceeded");
             return Ok(());
@@ -834,6 +1055,25 @@ impl ExtendedBuildProbabilitySession {
         candidate_key: &str,
         coverage: &PatternBitSet,
     ) -> Result<(), WasmExactSearchError> {
+        let retained_map =
+            self.solution_coverage
+                .as_ref()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_solution_coverage_not_requested",
+                ))?;
+        if !retained_map.contains_key(candidate_key) {
+            let future = checked_hash_growth_future_bytes(
+                retained_map.capacity(),
+                retained_map.len(),
+                core::mem::size_of::<(String, PatternBitSet)>(),
+            )
+            .and_then(|bytes| bytes.checked_add(candidate_key.len() as u128))
+            .and_then(|bytes| bytes.checked_add(2 * coverage.retained_bytes() as u128))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_memory_projection_unavailable",
+            ))?;
+            self.ensure_memory_bound(future)?;
+        }
         let solution_coverage =
             self.solution_coverage
                 .as_mut()
@@ -860,7 +1100,6 @@ impl ExtendedBuildProbabilitySession {
 
     // The browser coordinator uses the external-memory-guard form so retained
     // worker payloads participate in admission.
-    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn advance_distributed_geometry(
         &mut self,
         pass_index: u8,
@@ -917,7 +1156,7 @@ impl ExtendedBuildProbabilitySession {
                 self.distributed_geometry_summary(self.truncated_reason),
             ));
         }
-        match self.geometry.advance(&self.catalog) {
+        match self.advance_geometry_bounded()? {
             ExtendedGeometryAdvance::Pending => Ok(WasmCandidateProducerAdvance::Pending),
             ExtendedGeometryAdvance::Candidate(candidate) => {
                 let row_ids = self.try_copy_distributed_candidate_row_ids_with_memory_guard(
@@ -1652,6 +1891,162 @@ impl ExtendedBuildProbabilitySession {
         self.rebuild_distributed_solution_evidence(control, false)
     }
 
+    // A raw worker's oracle coverage cannot authorize VisibleSeven. Rebuild
+    // only the observation language over accepted canonical keys. Existing
+    // path/coverage/count evidence is retained and must not be tallied twice.
+    pub(super) fn rebuild_distributed_observation_language(
+        &mut self,
+        reconstruction: &ExtendedGeometrySearch,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.purpose != ExtendedFamilyPurpose::Pc || self.pc_observation.is_none() {
+            return Ok(());
+        }
+        if self.external_geometry || self.finished {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_observation_reconstruction_state_invalid",
+            ));
+        }
+        let mut future = (self.distributed_solution_keys.len() as u128)
+            .checked_mul(core::mem::size_of::<String>() as u128)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_observation_memory_projection_overflow",
+            ))?;
+        for key in &self.distributed_solution_keys {
+            future = future.checked_add(key.len() as u128).ok_or(
+                WasmExactSearchError::InvalidProblem(
+                    "extended_pc_observation_memory_projection_overflow",
+                ),
+            )?;
+        }
+        self.ensure_memory_bound(future)?;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(self.distributed_solution_keys.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "extended_pc_observation_key_storage_unavailable",
+                )
+            })?;
+        for key in &self.distributed_solution_keys {
+            let mut owned = String::new();
+            owned.try_reserve_exact(key.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "extended_pc_observation_key_storage_unavailable",
+                )
+            })?;
+            owned.push_str(key);
+            keys.push(owned);
+        }
+        keys.sort_unstable();
+        let scratch = keys
+            .iter()
+            .try_fold(
+                keys.capacity() as u128 * core::mem::size_of::<String>() as u128,
+                |bytes, key| bytes.checked_add(key.capacity() as u128),
+            )
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_observation_memory_projection_overflow",
+            ))?;
+        let original_coexisting = self.coexisting_retained_bytes;
+        self.coexisting_retained_bytes = original_coexisting.checked_add(scratch).ok_or(
+            WasmExactSearchError::InvalidProblem(
+                "extended_pc_observation_memory_projection_overflow",
+            ),
+        )?;
+        self.pc_observation
+            .as_mut()
+            .expect("observation owner exists")
+            .reset();
+        let result = (|| {
+            for key in keys {
+                if control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                // Parsing a canonical key owns placement and row vectors.
+                // Credit their coexistence before parsing, not after it.
+                let identity_future = (self.field.target_piece_count() as u128)
+                    .checked_mul(128)
+                    .and_then(|bytes| bytes.checked_add(2 * key.len() as u128))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_pc_observation_memory_projection_overflow",
+                    ))?;
+                self.ensure_memory_bound(identity_future)?;
+                let rows =
+                    extended_row_ids_from_canonical_key(&key, self.field.height(), &self.catalog)?;
+                let candidate = reconstruction
+                    .external_candidate(&self.catalog, &rows)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_pc_observation_reconstruction_not_in_family",
+                    ))?;
+                let tiling = ExtendedTilingKey::from_candidate(&self.catalog, &candidate);
+                if tiling.canonical_key(self.catalog.initial_board(), self.field.height()) != key {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "extended_pc_observation_reconstruction_identity_mismatch",
+                    ));
+                }
+                let local = (rows.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<u32>() as u128)
+                    .and_then(|bytes| bytes.checked_add(tiling.retained_bytes() as u128))
+                    .and_then(|bytes| bytes.checked_add(key.capacity() as u128))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_pc_observation_memory_projection_overflow",
+                    ))?;
+                self.coexisting_retained_bytes = original_coexisting
+                    .checked_add(scratch)
+                    .and_then(|bytes| bytes.checked_add(local))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_pc_observation_memory_projection_overflow",
+                    ))?;
+                // Boolean coverage still uses exactly the original PC/B2B
+                // language, not an unconstrained generic Build graph.
+                self.prepare_build_order_resources()?;
+                let graph = match build_extended_pc_order_graph(
+                    &self.problem,
+                    &self.catalog,
+                    &candidate,
+                    &mut self.build_order_workspace,
+                    0,
+                    None,
+                    control,
+                )? {
+                    ExtendedBuildOrderResult::Complete { graph, .. } if graph.is_live() => graph,
+                    _ => {
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "extended_pc_observation_reconstruction_incomplete",
+                        ))
+                    }
+                };
+                let insert_future = self
+                    .pc_observation
+                    .as_ref()
+                    .expect("observation owner exists")
+                    .checked_graph_insert_future_bytes(&graph)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_pc_observation_memory_projection_overflow",
+                    ))?;
+                self.ensure_memory_bound(
+                    (graph.retained_bytes() as u128)
+                        .checked_add(insert_future)
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "extended_pc_observation_memory_projection_overflow",
+                        ))?,
+                )?;
+                self.pc_observation
+                    .as_mut()
+                    .expect("observation owner exists")
+                    .insert_graph(&graph)?;
+                self.coexisting_retained_bytes = original_coexisting.checked_add(scratch).ok_or(
+                    WasmExactSearchError::InvalidProblem(
+                        "extended_pc_observation_memory_projection_overflow",
+                    ),
+                )?;
+            }
+            Ok(())
+        })();
+        self.coexisting_retained_bytes = original_coexisting;
+        result
+    }
+
     fn rebuild_distributed_solution_evidence(
         &mut self,
         control: &ExecutionControl,
@@ -1672,78 +2067,156 @@ impl ExtendedBuildProbabilitySession {
             self.problem.supply().hold_enabled(),
             super::packing_hold_projection(&self.problem),
         );
-        let mut reconstruction = ExtendedGeometrySearch::new(universe, &family, &self.catalog)?;
+        let reconstruction_other = self.checked_retained_bytes_with_coexisting_owners().ok_or(
+            WasmExactSearchError::InvalidProblem("extended_geometry_memory_projection_unavailable"),
+        )?;
+        let mut reconstruction = ExtendedGeometrySearch::new_bounded(
+            universe,
+            &family,
+            &self.catalog,
+            self.memory_bound,
+            reconstruction_other,
+        )?;
         if !reconstruction.prepare_external() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_extended_finesse_reconstruction_targets_unavailable",
             ));
         }
-        let mut solution_keys = self
+        let key_future = self
             .distributed_solution_keys
             .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        solution_keys.sort_unstable();
-        self.reset_distributed_evidence_aggregation(collect_finesse);
-        for (ordinal, solution_key) in solution_keys.into_iter().enumerate() {
-            if control.is_cancelled() {
-                return Err(WasmExactSearchError::Cancelled);
-            }
-            let row_ids = extended_row_ids_from_canonical_key(
-                &solution_key,
-                self.field.height(),
-                &self.catalog,
-            )?;
-            let candidate = reconstruction
-                .external_candidate(&self.catalog, &row_ids)
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_not_in_catalog",
-                ))?;
-            let tiling = ExtendedTilingKey::from_candidate(&self.catalog, &candidate);
-            if tiling.canonical_key(self.catalog.initial_board(), self.field.height())
-                != solution_key
-            {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_extended_finesse_solution_key_reconstruction_mismatch",
-                ));
-            }
-            let spin_candidate = (self.aggregation.requests_spin_coverage()
-                || self.problem.objective().execution_constraints().requested())
-            .then(|| (tiling.digest(), solution_key.clone()));
-            let build = if collect_finesse {
-                build_extended_order_graph_with_finesse(
-                    &self.problem,
-                    &self.catalog,
-                    &candidate,
-                    &mut self.build_order_workspace,
-                    usize::MAX,
-                    spin_candidate,
-                    self.aggregation.requests_spin_coverage(),
-                    control,
+            .try_fold(
+                self.distributed_solution_keys.len() as u128
+                    * core::mem::size_of::<String>() as u128,
+                |bytes, key| bytes.checked_add(key.len() as u128),
+            )
+            .and_then(|bytes| bytes.checked_add(reconstruction.retained_bytes() as u128))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_geometry_memory_projection_unavailable",
+            ))?;
+        self.ensure_memory_bound(key_future)?;
+        let mut solution_keys = Vec::new();
+        solution_keys
+            .try_reserve_exact(self.distributed_solution_keys.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_solution_key_storage_unavailable",
                 )
-            } else {
-                build_extended_order_graph(
-                    &self.catalog,
-                    &candidate,
-                    &mut self.build_order_workspace,
-                    usize::MAX,
-                    spin_candidate,
-                    control,
+            })?;
+        for key in &self.distributed_solution_keys {
+            let mut owned = String::new();
+            owned.try_reserve_exact(key.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_finesse_solution_key_storage_unavailable",
                 )
-            }?;
-            self.apply_build_order_result(
-                &candidate,
-                tiling,
-                Some(solution_key),
-                Some(ordinal as u64),
-                build,
-                control,
-            )?;
+            })?;
+            owned.push_str(key);
+            solution_keys.push(owned);
         }
-        Ok(())
+        solution_keys.sort_unstable();
+        let scratch = solution_keys
+            .iter()
+            .try_fold(
+                solution_keys.capacity() as u128 * core::mem::size_of::<String>() as u128,
+                |bytes, key| bytes.checked_add(key.capacity() as u128),
+            )
+            .and_then(|bytes| bytes.checked_add(reconstruction.retained_bytes() as u128))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_geometry_memory_projection_unavailable",
+            ))?;
+        let original_coexisting = self.coexisting_retained_bytes;
+        self.coexisting_retained_bytes = original_coexisting.checked_add(scratch).ok_or(
+            WasmExactSearchError::InvalidProblem("extended_geometry_memory_projection_unavailable"),
+        )?;
+        self.reset_distributed_evidence_aggregation(collect_finesse);
+        let result = (|| {
+            for (ordinal, solution_key) in solution_keys.into_iter().enumerate() {
+                if control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                let identity_future = (self.field.target_piece_count() as u128)
+                    .checked_mul(128)
+                    .and_then(|bytes| bytes.checked_add(2 * solution_key.len() as u128))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_geometry_memory_projection_unavailable",
+                    ))?;
+                self.ensure_memory_bound(identity_future)?;
+                let row_ids = extended_row_ids_from_canonical_key(
+                    &solution_key,
+                    self.field.height(),
+                    &self.catalog,
+                )?;
+                let candidate = reconstruction
+                    .external_candidate(&self.catalog, &row_ids)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_extended_finesse_solution_key_not_in_catalog",
+                    ))?;
+                let tiling = ExtendedTilingKey::from_candidate(&self.catalog, &candidate);
+                if tiling.canonical_key(self.catalog.initial_board(), self.field.height())
+                    != solution_key
+                {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_extended_finesse_solution_key_reconstruction_mismatch",
+                    ));
+                }
+                let spin_candidate = (self.aggregation.requests_spin_coverage()
+                    || self.problem.objective().execution_constraints().requested())
+                .then(|| (tiling.digest(), solution_key.clone()));
+                let local = row_ids.capacity() as u128 * core::mem::size_of::<u32>() as u128
+                    + tiling.retained_bytes() as u128
+                    + 2 * solution_key.capacity() as u128;
+                self.coexisting_retained_bytes = original_coexisting
+                    .checked_add(scratch)
+                    .and_then(|bytes| bytes.checked_add(local))
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "extended_geometry_memory_projection_unavailable",
+                    ))?;
+                self.prepare_build_order_resources()?;
+                let build = if collect_finesse {
+                    build_extended_order_graph_with_finesse(
+                        &self.problem,
+                        &self.catalog,
+                        &candidate,
+                        &mut self.build_order_workspace,
+                        usize::MAX,
+                        spin_candidate,
+                        self.aggregation.requests_spin_coverage(),
+                        control,
+                    )
+                } else {
+                    build_extended_order_graph(
+                        &self.catalog,
+                        &candidate,
+                        &mut self.build_order_workspace,
+                        usize::MAX,
+                        spin_candidate,
+                        control,
+                    )
+                }?;
+                self.apply_build_order_result(
+                    &candidate,
+                    tiling,
+                    Some(solution_key),
+                    Some(ordinal as u64),
+                    build,
+                    control,
+                )?;
+                self.coexisting_retained_bytes = original_coexisting.checked_add(scratch).ok_or(
+                    WasmExactSearchError::InvalidProblem(
+                        "extended_geometry_memory_projection_unavailable",
+                    ),
+                )?;
+            }
+            Ok(())
+        })();
+        self.coexisting_retained_bytes = original_coexisting;
+        result
     }
 
     fn reset_distributed_evidence_aggregation(&mut self, collect_finesse: bool) {
+        if let Some(observation) = self.pc_observation.as_mut() {
+            observation.reset();
+        }
         self.finesse_requested = collect_finesse;
         self.covered_patterns = if self.trivial_target {
             PatternBitSet::all(self.covered_patterns.pattern_count())
@@ -1772,6 +2245,73 @@ impl ExtendedBuildProbabilitySession {
         self.distributed_execution_constraint_materialized = false;
         self.distributed_count_complete = true;
         self.distributed_probability_complete = true;
+    }
+
+    pub(super) fn finalize_pc_observation(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.external_geometry
+            || self
+                .pc_observation
+                .as_ref()
+                .is_none_or(|owner| owner.evaluated())
+        {
+            return Ok(());
+        }
+        let owned = self
+            .pc_observation
+            .as_ref()
+            .expect("unevaluated observation owner exists")
+            .checked_retained_bytes()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_observation_memory_projection_overflow",
+            ))?;
+        let mut observation = self
+            .pc_observation
+            .take()
+            .expect("unevaluated observation owner exists");
+        let problem = Arc::clone(&self.problem);
+        let mut admitted_peak = 0_u128;
+        let result = observation.evaluate_with_memory_guard(&problem, control, |future| {
+            let future = owned.checked_add(future).unwrap_or(u128::MAX);
+            self.ensure_memory_bound(future)?;
+            let peak = self
+                .checked_retained_bytes_with_coexisting_owners()
+                .and_then(|bytes| bytes.checked_add(future))
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "extended_pc_observation_memory_projection_overflow",
+                ))?;
+            admitted_peak = admitted_peak.max(peak);
+            Ok(())
+        });
+        self.pc_observation = Some(observation);
+        let coverage = result?;
+        let observation = self
+            .pc_observation
+            .as_ref()
+            .expect("observation owner restored on every result");
+        self.ensure_memory_bound(observation.evaluation_peak_bytes())?;
+        let peak = self
+            .checked_retained_bytes_with_coexisting_owners()
+            .and_then(|bytes| bytes.checked_add(observation.evaluation_peak_bytes()))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_observation_memory_projection_overflow",
+            ))?;
+        self.native_parallel_peak_bytes =
+            self.native_parallel_peak_bytes.max(peak).max(admitted_peak);
+        if let Some(coverage) = coverage {
+            self.covered_patterns = coverage.covered_patterns;
+        }
+        Ok(())
+    }
+
+    fn complete_with_control(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {
+        self.finalize_pc_observation(control)?;
+        self.complete()
     }
 
     fn complete(&mut self) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {
@@ -2346,6 +2886,16 @@ impl ExtendedBuildProbabilitySession {
     }
 
     fn build_pc_family_result(&mut self) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        if !self.external_geometry
+            && self
+                .pc_observation
+                .as_ref()
+                .is_some_and(|owner| !owner.evaluated())
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_observation_not_finalized",
+            ));
+        }
         self.validate_pc_representative_physical_chain()?;
         let minimum_source = self
             .problem
@@ -2389,8 +2939,18 @@ impl ExtendedBuildProbabilitySession {
         let count_complete = self.supply_projection_complete
             && self.truncated_reason.is_none()
             && self.pc_build_variant_count_complete;
-        let probability_complete = universe.complete() && self.truncated_reason.is_none();
-        let probabilities = if self.problem.solution_probability_policy().requested() {
+        let policy_requested = self.pc_observation.is_some();
+        let policy_evaluated = self
+            .pc_observation
+            .as_ref()
+            .is_some_and(|owner| owner.evaluated())
+            && !self.external_geometry;
+        let probability_complete = universe.complete()
+            && self.truncated_reason.is_none()
+            && (!policy_requested || policy_evaluated);
+        let probabilities = if self.problem.solution_probability_policy().requested()
+            && !policy_requested
+        {
             crate::solution_probability::normalized_solution_probability_reports(
                 &keys,
                 &coverages,
@@ -2547,7 +3107,7 @@ impl ExtendedBuildProbabilitySession {
             field(
                 "solution_probability_complete",
                 !self.problem.solution_probability_policy().requested()
-                    || probability_complete && count_complete,
+                    || !policy_requested && probability_complete && count_complete,
             ),
             field("packing_candidate_count", self.geometry.candidate_count()),
             field(
@@ -2556,6 +3116,12 @@ impl ExtendedBuildProbabilitySession {
             ),
             field("searched_geometry_nodes", self.geometry.expanded_nodes()),
             field("searched_build_nodes", self.searched_build_nodes),
+            field(
+                "resource_node_budget_consumed",
+                self.request_node_budget
+                    .as_ref()
+                    .map_or(0, |budget| budget.consumed()),
+            ),
             field("total_reachability_states", self.reachability_states),
             field(
                 "coverage_product_edge_checks",
@@ -2579,6 +3145,50 @@ impl ExtendedBuildProbabilitySession {
                 self.truncated_reason.unwrap_or("none"),
             ),
         ];
+        if policy_requested {
+            let metrics = self
+                .pc_observation
+                .as_ref()
+                .expect("policy owner exists")
+                .metrics();
+            fields.extend([
+                field(
+                    "queue_knowledge",
+                    self.problem.queue_observation_policy().keyword(),
+                ),
+                field(
+                    "visible_piece_count",
+                    self.problem
+                        .queue_observation_policy()
+                        .visible_piece_count()
+                        .unwrap_or(0),
+                ),
+                field("observation_policy_evaluated", policy_evaluated),
+                field(
+                    "coverage_semantics",
+                    if policy_evaluated {
+                        self.problem.queue_observation_policy().coverage_semantics()
+                    } else {
+                        "partial-family-oracle-upper-bound"
+                    },
+                ),
+                field("observation_policy_states", metrics.policy_states),
+                field("observation_policy_action_checks", metrics.action_checks),
+                field("observation_trie_nodes", metrics.observation_nodes),
+            ]);
+            if self.problem.solution_probability_policy().requested() {
+                fields.extend([
+                    field(
+                        "solution_probability_basis",
+                        "unsupported-under-visible-seven-policy",
+                    ),
+                    field(
+                        "solution_probability_incomplete_reason",
+                        "per-solution-policy-language-not-materialized",
+                    ),
+                ]);
+            }
+        }
         let constraints = self.problem.objective().execution_constraints();
         if constraints.requested() {
             // The PC BuildUp language is already filtered. App must not apply
@@ -2958,7 +3568,38 @@ impl ExtendedBuildProbabilitySession {
         self.problem.backend_request().max_nodes() != 0 && self.remaining_node_budget() == 0
     }
 
+    fn advance_geometry_bounded(
+        &mut self,
+    ) -> Result<ExtendedGeometryAdvance, WasmExactSearchError> {
+        let outside = self
+            .checked_retained_bytes()
+            .and_then(|bytes| bytes.checked_add(self.coexisting_retained_bytes))
+            .and_then(|bytes| bytes.checked_sub(self.geometry.retained_bytes() as u128))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_geometry_memory_projection_unavailable",
+            ))?;
+        self.geometry.advance_bounded(
+            &self.catalog,
+            self.request_node_budget.as_deref(),
+            self.memory_bound,
+            outside,
+        )
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    fn pc_resource_stop_error(&self, reason: &'static str) -> WasmExactSearchError {
+        if reason == "node_budget_exceeded" {
+            if let Some(budget) = self.request_node_budget.as_ref() {
+                return WasmExactSearchError::resource_admission(budget.exhaustion_report());
+            }
+        }
+        WasmExactSearchError::InvalidProblem(reason)
+    }
+
     fn remaining_node_budget(&self) -> usize {
+        if let Some(budget) = self.request_node_budget.as_ref() {
+            return budget.remaining();
+        }
         let limit = self.problem.backend_request().max_nodes();
         if limit == 0 {
             return 0;
@@ -3003,7 +3644,14 @@ impl ExtendedBuildProbabilitySession {
     }
 
     fn checked_non_problem_retained_bytes(&self) -> Option<u128> {
-        let mut total = 0_u128;
+        let mut total = if !self.shared_immutable_owners && self.request_node_budget.is_some() {
+            core::mem::size_of::<SharedExecutionNodeBudget>() as u128 + 32
+        } else {
+            0
+        };
+        if let Some(observation) = self.pc_observation.as_ref() {
+            total = total.checked_add(observation.checked_retained_bytes()?)?;
+        }
         for bytes in [
             if self.shared_immutable_owners {
                 0
@@ -3018,10 +3666,10 @@ impl ExtendedBuildProbabilitySession {
         ] {
             total = total.checked_add(bytes as u128)?;
         }
-        total = total.checked_add(
-            (self.buildable_tilings.capacity() as u128)
-                .checked_mul(core::mem::size_of::<ExtendedTilingKey>() as u128)?,
-        )?;
+        total = total.checked_add(checked_hash_retained_bytes(
+            self.buildable_tilings.capacity(),
+            core::mem::size_of::<ExtendedTilingKey>(),
+        )?)?;
         for key in &self.buildable_tilings {
             total = total.checked_add(
                 (key.retained_bytes() as u128)
@@ -3029,8 +3677,9 @@ impl ExtendedBuildProbabilitySession {
             )?;
         }
         if let Some(coverage) = self.solution_coverage.as_ref() {
-            total = total.checked_add((coverage.capacity() as u128).checked_mul(
-                (core::mem::size_of::<String>() + core::mem::size_of::<PatternBitSet>()) as u128,
+            total = total.checked_add(checked_hash_retained_bytes(
+                coverage.capacity(),
+                core::mem::size_of::<(String, PatternBitSet)>(),
             )?)?;
             for (key, patterns) in coverage {
                 total = total
@@ -3038,10 +3687,10 @@ impl ExtendedBuildProbabilitySession {
                     .checked_add(patterns.retained_bytes() as u128)?;
             }
         }
-        total = total.checked_add(
-            (self.distributed_solution_keys.capacity() as u128)
-                .checked_mul(core::mem::size_of::<String>() as u128)?,
-        )?;
+        total = total.checked_add(checked_hash_retained_bytes(
+            self.distributed_solution_keys.capacity(),
+            core::mem::size_of::<String>(),
+        )?)?;
         for key in &self.distributed_solution_keys {
             total = total.checked_add(key.capacity() as u128)?;
         }
@@ -3280,9 +3929,41 @@ impl ExtendedBuildProbabilitySession {
                         .expect_err("checked coexisting retained-byte overflow is unavailable"),
                 )
             })?;
-        self.memory_bound
-            .ensure(observed, future)
-            .map_err(WasmExactSearchError::resource_admission)
+        if let Some(owner) = self.private_memory_owner.as_ref() {
+            let private = observed.checked_add(future).ok_or_else(|| {
+                WasmExactSearchError::resource_admission(
+                    self.memory_bound
+                        .ensure(u128::MAX, 1)
+                        .expect_err("private owner overflow is unavailable"),
+                )
+            })?;
+            owner
+                .ensure(private)
+                .map_err(WasmExactSearchError::resource_admission)
+        } else {
+            self.memory_bound
+                .ensure(observed, future)
+                .map_err(WasmExactSearchError::resource_admission)
+        }
+    }
+
+    fn prepare_build_order_resources(&mut self) -> Result<(), WasmExactSearchError> {
+        let external = self
+            .checked_retained_bytes()
+            .and_then(|bytes| {
+                bytes.checked_sub(self.build_order_workspace.retained_bytes() as u128)
+            })
+            .and_then(|bytes| bytes.checked_add(self.coexisting_retained_bytes))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_build_order_memory_projection_overflow",
+            ))?;
+        self.build_order_workspace.set_resource_boundary(
+            self.memory_bound,
+            external,
+            self.private_memory_owner.clone(),
+            self.request_node_budget.clone(),
+        );
+        Ok(())
     }
 }
 
@@ -3341,6 +4022,28 @@ fn extended_row_ids_from_canonical_key(
 
 fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
     (key.into(), value.to_string())
+}
+
+fn checked_hash_growth_future_bytes(capacity: usize, len: usize, item: usize) -> Option<u128> {
+    let needed = len.checked_add(1)?;
+    if needed <= capacity {
+        return Some(0);
+    }
+    (needed as u128)
+        .checked_mul(4)?
+        .checked_mul(item as u128 + 1)?
+        .checked_add(16)
+}
+
+fn checked_hash_retained_bytes(capacity: usize, item: usize) -> Option<u128> {
+    if capacity == 0 {
+        return Some(0);
+    }
+    (capacity as u128)
+        .checked_mul(8)?
+        .div_ceil(7)
+        .checked_mul(item as u128 + 1)?
+        .checked_add(16)
 }
 
 #[cfg(test)]

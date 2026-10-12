@@ -91,6 +91,116 @@ fn full_height_failed_queue_direct_and_cooperative_products_share_the_same_sourc
 }
 
 #[test]
+fn full_height_distributed_failed_queue_requires_the_original_problem_owner() {
+    use clearra_app::{
+        DistributedSearchPreparation, PcFailedQueueIngressOrigin, PercentAppCommand,
+    };
+    use clearra_core_executor::{WasmPcFailedQueueAdvance, WasmPcFailedQueueSession};
+
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for height in [7, 8, 12, 24] {
+        let (source, _, _) = forced_request(height, srs_plus());
+        let AppCommand::Scenario(source) = source.command() else {
+            panic!("scenario fixture");
+        };
+        let request = AppRequest::new(AppCommand::Percent(
+            PercentAppCommand::pc_failed_queue(
+                source
+                    .query()
+                    .clone()
+                    .with_objective(ObjectivePolicy::all())
+                    .with_count_policy(PcCountPolicy::CountAll),
+                PcFailedQueueIngressOrigin::CanonicalFailedQueue,
+            )
+            .with_failed_pattern_limit(1),
+        ))
+        .with_product_capability_contract(ProductCapabilityContract::PcFailedQueue)
+        .unwrap();
+        let prepare = || match context.prepare_distributed_search(request.clone()) {
+            DistributedSearchPreparation::Search(prepared) => prepared,
+            DistributedSearchPreparation::Ready(response) => panic!("{response:?}"),
+        };
+        let original = prepare();
+        let foreign = prepare();
+        let cancelled = prepare();
+        let mut producer = WasmPcFailedQueueSession::new(original.problem_arc()).unwrap();
+        let control = ExecutionControl::default();
+        let mut completed = None;
+        for _ in 0..4096 {
+            match producer.advance(1, &control).unwrap() {
+                WasmPcFailedQueueAdvance::Pending => {}
+                WasmPcFailedQueueAdvance::Completed(result, evidence) => {
+                    completed = Some((result, evidence));
+                    break;
+                }
+                WasmPcFailedQueueAdvance::Cancelled => panic!("unexpected cancellation"),
+            }
+        }
+        let (result, evidence) = completed.expect("bounded request-owned failed-queue evidence");
+        let finite = match context.prepare_distributed_search(request.clone().with_resource_budget(
+            clearra_host_contract::ResourceBudget::new(1, None, Some(256)),
+        )) {
+            DistributedSearchPreparation::Search(prepared) => prepared,
+            DistributedSearchPreparation::Ready(response) => panic!("{response:?}"),
+        };
+        let finite = finite.complete_failed_queue(result.clone(), evidence.clone(), &control);
+        assert_eq!(finite.status(), AppStatus::Unsupported);
+        assert!(finite.product_capability_result().is_none());
+        assert!(finite.pc_failed_queue_execution_evidence().is_none());
+        assert!(finite
+            .error()
+            .unwrap()
+            .message()
+            .contains("distributed_pc_failed_queue_finite_completion_unavailable"));
+        let mismatched = foreign.complete_failed_queue(result.clone(), evidence.clone(), &control);
+        // A foreign authority is refused at this App completion ingress, using
+        // the established RuntimeUnavailable mapping rather than a fabricated
+        // failed-queue product or a completed complement proof.
+        assert_eq!(mismatched.status(), AppStatus::Unsupported);
+        assert!(mismatched.product_capability_result().is_none());
+        assert!(mismatched.pc_failed_queue_execution_evidence().is_none());
+        assert!(mismatched
+            .error()
+            .unwrap()
+            .message()
+            .contains("distributed_pc_failed_queue_authority_mismatch"));
+
+        let stop = ExecutionControl::default();
+        stop.cancel();
+        let stopped = cancelled.complete_failed_queue(result.clone(), evidence.clone(), &stop);
+        assert_ne!(stopped.status(), AppStatus::Success);
+        assert!(stopped.product_capability_result().is_none());
+        assert!(stopped.pc_failed_queue_execution_evidence().is_none());
+
+        let accepted = original.complete_failed_queue(result, evidence, &control);
+        assert_eq!(accepted.status(), AppStatus::Success, "{accepted:?}");
+        let actual = accepted
+            .product_capability_result()
+            .unwrap()
+            .pc_failed_queue_v2()
+            .unwrap();
+        let direct = context.run(request);
+        let expected = direct
+            .product_capability_result()
+            .unwrap()
+            .pc_failed_queue_v2()
+            .unwrap();
+        assert_eq!(
+            actual.success_pattern_count(),
+            expected.success_pattern_count()
+        );
+        assert_eq!(
+            actual.failed_pattern_count(),
+            expected.failed_pattern_count()
+        );
+        assert_eq!(actual.pattern_universe_id(), expected.pattern_universe_id());
+        assert_eq!(actual.examples(), expected.examples());
+    }
+}
+
+#[test]
 fn full_height_tiling_opening_keeps_a_distinct_typed_ingress_without_enumeration() {
     for lines in (8..=24).step_by(2) {
         let query = OpeningPcSearchQuery::new(PcTarget::new(lines).unwrap())

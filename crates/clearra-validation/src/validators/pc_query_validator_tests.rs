@@ -1,8 +1,8 @@
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
-    OpeningPcSearchQuery, PcExecutionPolicy, PcHoldPolicy, PcQueueInput, PcScenarioBoard,
-    PieceWindow, RequestedSearchBackend, VISIBLE_SEVEN_MINIMUM_COVER_ERROR_CODE,
+    OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
+    PcScenarioBoard, PieceWindow, RequestedSearchBackend, VISIBLE_SEVEN_MINIMUM_COVER_ERROR_CODE,
 };
 use clearra_rules::{
     kicks::{KickTableProfile, KickTableProfileId, SrsKicks, VerifiedKickTableProfile},
@@ -213,6 +213,39 @@ fn full_height_score_scenario_still_rejects_unconnected_objective_and_constraint
         let report = validate_pc_scenario_query(&unsupported);
         assert!(report.has_errors(), "{report:?}");
         assert!(report.contains_code(DiagnosticCode::EPcQueryInvalid));
+    }
+}
+
+#[test]
+fn full_height_ordinary_visible_seven_keeps_the_original_observation_contract() {
+    for height in [7, 8, 12, 24] {
+        let top_bit =
+            clearra_core_domain::board::standard_pc_board::Board256Mask::singleton(height * 10 - 1)
+                .unwrap();
+        let base = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10_from_words(height, top_bit.words()).unwrap(),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven);
+        for objective in [ObjectivePolicy::all(), ObjectivePolicy::unique()] {
+            for count in [PcCountPolicy::CountAll, PcCountPolicy::CountUnique] {
+                let query = base
+                    .clone()
+                    .with_objective(objective)
+                    .with_count_policy(count);
+                let report = validate_pc_scenario_query(&query);
+                assert!(!report.has_errors(), "{height}: {report:?}");
+                assert_eq!(
+                    query.queue_observation_policy(),
+                    QueueObservationPolicy::VisibleSeven
+                );
+            }
+        }
+        let unsupported =
+            validate_pc_scenario_query(&base.with_objective(ObjectivePolicy::minimum_cover()));
+        assert!(unsupported.has_errors());
+        assert!(format!("{unsupported:?}").contains("visible-seven-minimum-cover-unsupported"));
     }
 }
 

@@ -314,6 +314,26 @@ impl ExtendedDomainWorkspace {
         self.projection_cache.retained_bytes()
     }
 
+    pub fn checked_compile_future_bytes(
+        &self,
+        catalog: &ExtendedInverseCatalog,
+        remaining: ExtendedBoard,
+        used_counts: [u8; 7],
+        targets: &[[u8; 7]],
+    ) -> Option<u128> {
+        if catalog.required_cells().count_ones() < 28
+            || catalog.initial_board().is_empty()
+            || remaining.count_ones() < 24
+        {
+            return Some(0);
+        }
+        self.projection_cache.checked_extended_future_bytes(
+            catalog.projection_catalog(),
+            targets,
+            used_counts,
+        )
+    }
+
     fn reset_union_find(&mut self) {
         for (index, parent) in self.parents.iter_mut().enumerate() {
             *parent = index as u16;

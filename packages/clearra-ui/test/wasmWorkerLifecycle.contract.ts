@@ -141,6 +141,50 @@ async function duplicateRunIsRejectedBeforePosting() {
   controller.dispose();
 }
 
+async function retainedWorkerDiscardsSettledAndForeignJobEvents() {
+  resetState();
+  const worker = new FakeWorker();
+  const controller = controllerFor(worker);
+  const completed = (jobId: number): ClearraWasmWorkerEvent => ({
+    schema_version: 1, runtime: 'clearra-wasm', event: 'final_response', job_id: jobId,
+    response: { command: 'pc', status: 'success', result: null, diagnostics: [] },
+    search_report: null, webgpu_backend: null
+  } as unknown as ClearraWasmWorkerEvent);
+
+  assert.equal(controller.run(), true);
+  worker.emit(started(101));
+  worker.emit(completed(101));
+  assert.equal(get(wasmWorkerState).status, 'completed');
+  worker.emit(progress(101, 'searching', 99, 'distributed'));
+  assert.equal(get(wasmWorkerState).progressLabel, '', 'settled work cannot restore stale progress');
+
+  assert.equal(controller.run(), true);
+  worker.emit(started(101));
+  worker.emit(completed(101));
+  assert.equal(get(wasmWorkerState).status, 'running', 'the old terminal cannot settle the queued replacement');
+  assert.equal(get(wasmWorkerState).jobId, null);
+  worker.emit(started(102));
+  worker.emit(progress(102, 'searching', 2, 'distributed'));
+  for (const foreignId of [101, 103]) {
+    worker.emit(started(foreignId));
+    worker.emit(progress(foreignId, 'preparing', 0));
+    worker.emit(completed(foreignId));
+    worker.emit(cancelled(foreignId));
+  }
+  assert.equal(get(wasmWorkerState).jobId, 102);
+  assert.equal(get(wasmWorkerState).status, 'running');
+  assert.equal(get(wasmWorkerState).progressLabel, 'searching');
+  assert.equal(controller.run(), false, 'foreign terminals cannot reopen admission');
+  assert.equal(worker.terminateCount, 0, 'foreign cancellation cannot release the current owner');
+
+  controller.cancel();
+  worker.emit(completed(101));
+  assert.equal(get(wasmWorkerState).status, 'cancelling');
+  worker.emit(cancelled(102));
+  assert.equal(get(wasmWorkerState).status, 'cancelled');
+  assert.equal(worker.terminateCount, 1);
+}
+
 async function activeSearchStartsOnlyTheNewTablebaseTransportIntent() {
   resetState();
   const worker = new FakeWorker();
@@ -1091,6 +1135,7 @@ try {
   await ownerDisposalIsForceTermination();
   await ownerTerminationReachesDescendants();
   await duplicateRunIsRejectedBeforePosting();
+  await retainedWorkerDiscardsSettledAndForeignJobEvents();
   await activeSearchStartsOnlyTheNewTablebaseTransportIntent();
   await tablebaseToggleDoesNotRotateThePrewarmingWorker();
   await idleMemoryCeilingRotatesOnlyOverLimitWorkers();
@@ -1125,6 +1170,7 @@ console.log(
     terminal_race: 'preserved',
     descendant_release_signal: 'delivered',
     duplicate_run: 'rejected',
+    retained_job_event_fence: 'settled-and-foreign-work-discarded',
     active_tablebase_transport_prewarm: 'started-without-runtime-reconfiguration',
     tablebase_toggle_worker_lifetime: 'preserved',
     idle_worker_memory_ceiling: 'over-limit-rotated-within-limit-retained',

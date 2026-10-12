@@ -25,6 +25,9 @@ export function comparePcReplayWitnesses(left: ClearraPcPathWitnessPayload, righ
 
 export function validatePcReplayWitnesses(witnesses: readonly ClearraPcPathWitnessPayload[]): boolean {
   if (!Array.isArray(witnesses)) return false;
+  const frame = witnesses[0]?.steps?.[0]?.board_before_mask;
+  const boardMaskPattern = /^0x[0-9a-f]{64}$/u.test(frame ?? '')
+    ? /^0x[0-9a-f]{64}$/u : /^0x[0-9a-f]{16}$/u;
   return witnesses.every((witness, index) => witness != null &&
     [witness.candidate_id, witness.producer_candidate_id, witness.pattern_id, witness.consumed_piece_count].every(decimal) &&
     nonempty(witness.trace_identity) && nonempty(witness.normalized_trace_key) && piece(witness.terminal_hold_piece) &&
@@ -36,7 +39,11 @@ export function validatePcReplayWitnesses(witnesses: readonly ClearraPcPathWitne
       piece(step.input_hold_piece) && piece(step.output_hold_piece) &&
       nonempty(step.hold_decision) && nonempty(step.rotation) && signed(step.x) && signed(step.y) &&
       [step.placement_mask, step.board_before_mask, step.board_after_placement_mask,
-        step.board_after_line_clear_mask, step.cleared_row_mask].every((mask) => /^0x[0-9a-f]{16}$/u.test(mask)) &&
+        step.board_after_line_clear_mask].every((mask) => boardMaskPattern.test(mask) &&
+          (mask.length === 18 || BigInt(mask) < (1n << 240n))) &&
+      // Row masks retain the PC API's 16-digit <=24-row domain. They are not
+      // four-word board occupancies and must not inherit that wider encoding.
+      /^0x[0-9a-f]{16}$/u.test(step.cleared_row_mask) && BigInt(step.cleared_row_mask) < (1n << 24n) &&
       nonempty(step.line_clear_identity)) &&
     (index === 0 || comparePcReplayWitnesses(witnesses[index - 1]!, witness) < 0));
 }
@@ -65,7 +72,7 @@ export function validatePcReplayPage(page: ClearraPcReplayRuntimePage): string |
       BigInt(page.witnesses.length) !== (remaining < PAGE_SIZE ? remaining : PAGE_SIZE) ||
       page.witnesses.some((witness) => witness.candidate_id !== page.candidate_id ||
         BigInt(witness.pattern_id) >= BigInt(page.materialized_pattern_count) ||
-        witness.steps.at(-1)?.board_after_line_clear_mask !== '0x0000000000000000')) {
+        !/^0x(?:0{16}|0{64})$/u.test(witness.steps.at(-1)?.board_after_line_clear_mask ?? ''))) {
     return 'invalid PC replay page counts or witness identity';
   }
   return null;
@@ -119,6 +126,7 @@ export async function loadPcReplayPage(options: {
   if (failure) throw new Error(failure);
   if (page.geometry_page_number !== geometryPageNumber || page.member_page_number !== memberPageNumber ||
       GLOBAL_FIELDS.some((key) => page[key] !== reference[key]) ||
+      page.witnesses[0]?.steps[0]?.board_before_mask.length !== reference.witnesses[0]?.steps[0]?.board_before_mask.length ||
       (geometryPageNumber === reference.geometry_page_number && GEOMETRY_FIELDS.some((key) => page[key] !== reference[key]))) {
     throw new Error('The PC replay page is not bound to the requested source and geometry.');
   }

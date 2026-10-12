@@ -36,9 +36,9 @@ test('all convergence branches run the non-publishing v0.8.1 and recovery gates'
   assert.ok(!recoveryWorkflow.includes('deploy-pages'));
 });
 
-test('the PC24 candidate runs actual GUI root-path feedback without duplicating native build owners', () => {
+test('the PC24 candidate runs GUI roots and actual native surface readback with separate compile owners', () => {
   const candidate = 'refs/heads/codex/converge-v081-extended-pc-products-20261007';
-  for (const [job, enabled] of [['core', false], ['native-products', false], ['wasm-abi', false],
+  for (const [job, enabled] of [['core', false], ['native-products', true], ['wasm-abi', false],
     ['surfaces', true], ['wasm-realms', true]]) {
     const start = workflow.indexOf(`\n  ${job}:`);
     const guard = workflow.slice(start, workflow.indexOf('\n    runs-on:', start));
@@ -55,6 +55,24 @@ test('the PC24 candidate runs actual GUI root-path feedback without duplicating 
   for (const phase of ['draining', 'postprocessing', 'merging']) {
     assert.ok(browser.includes(`sample.phases.includes('${phase}')`));
   }
+});
+
+test('full-height native readback reuses the exact CLI and keeps the real Desktop host as a separate surface', () => {
+  const native = workflow.slice(workflow.indexOf('\n  native-products:'), workflow.indexOf('\n  wasm-abi:'));
+  assert.ok(native.includes('CLEARRA_REAL_PC24_CLI: ${{ github.workspace }}/build/cargo/default/debug/clearra'));
+  assert.ok(native.includes('CLEARRA_REAL_PC24_SOURCE_COMMIT: ${{ github.sha }}'));
+  assert.ok(native.includes('node --test apps/clearra-discord-bot/test/realCliFullHeightProducts.test.mjs'));
+  assert.ok(native.includes('cargo test --locked -p clearra-cli --test desktop_full_height_products --no-default-features --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1'));
+  assert.ok(native.includes('CLEARRA_REAL_DESKTOP_SOURCE_COMMIT: ${{ github.sha }}'));
+  assert.ok(native.includes('node packages/clearra-ui/scripts/prepare-test-dependencies.mjs'));
+  assert.equal(native.split('cargo build --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime').length - 1, 1);
+  const consumer = readFileSync(new URL('../../apps/clearra-discord-bot/test/realCliFullHeightProducts.test.mjs', import.meta.url), 'utf8');
+  assert.ok(consumer.includes('CLEARRA_REAL_PC24_SOURCE_COMMIT'));
+  assert.ok(!consumer.includes('fakeCli('));
+  const desktop = readFileSync(new URL('../../crates/clearra-cli/tests/desktop_full_height_products.rs', import.meta.url), 'utf8');
+  assert.ok(desktop.includes('CLEARRA_REAL_DESKTOP_SOURCE_COMMIT'));
+  assert.ok(desktop.includes('#[ignore'));
+  assert.ok(!native.includes('continue-on-error:'));
 });
 
 test('independent recovery feedback prepares dependencies even after a formatting failure', () => {

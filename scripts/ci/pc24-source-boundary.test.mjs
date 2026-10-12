@@ -307,8 +307,9 @@ test('the connected twenty-four-line surfaces retain whole fields and an exporta
   const workspace = read('packages/clearra-ui/src/lib/workspace/SolverWorkspace.svelte');
   const editor = read('packages/clearra-ui/src/lib/workspace/WorkspaceBoardEditor.svelte');
   assert.ok(model.includes('WORKSPACE_PC_MAX_LINES = 24'));
-  assert.ok(model.includes("runtime === 'web' && execution.workers !== 1"));
+  assert.ok(!model.includes("runtime === 'web' && execution.workers !== 1"));
   assert.ok(model.includes("!['tiling', 'off', 'minimum-cover', 'failed-queue', 'summary', 'score-finder', 'score-minimals', 'path'].includes(execution.scoreMode)"));
+  assert.ok(model.includes("(execution.queueKnowledge !== 'oracle' && execution.scoreMode !== 'off')"));
   assert.ok(workspace.includes('dimensionMax={WORKSPACE_PC_MAX_LINES}'));
   assert.ok(editor.includes('decodeInterchangeField(source, 24)'));
   assert.ok(read('apps/clearra-discord-bot/src/discord/field-limits.mjs')
@@ -320,6 +321,45 @@ test('the connected twenty-four-line surfaces retain whole fields and an exporta
   assert.ok(!pcTerminal.includes('normalized_string_solution_set_hash'));
   assert.ok(workflow.includes('--test extended_pc_surfaces'));
   assert.ok(workflow.includes('tests/fixtures/contracts/extended_pc_surface_input.v1.tsv'));
+});
+
+test('full-height Web products preserve distinct PC and Tiling distribution owners', () => {
+  const runtime = read('crates/clearra-wasm/src/distributed_runtime.rs');
+  const pc = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_distributed.rs');
+  const tiling = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_tiling_distributed.rs');
+  const prepared = read('crates/clearra-app/src/distributed_search_execution.rs');
+  for (const type of ['WasmFullHeightPcProducer', 'WasmFullHeightPcVerifier', 'WasmFullHeightPcResultMerger',
+    'WasmFullHeightTilingProducer', 'WasmFullHeightTilingWorker', 'WasmFullHeightTilingResultMerger']) {
+    assert.ok(runtime.includes(type), `${type}: connected runtime variant`);
+  }
+  assert.ok(pc.includes('rebuild_distributed_observation_language'));
+  assert.ok(pc.includes('finalize_pc_observation'));
+  assert.ok(pc.includes('extended_pc_distributed_node_credit_not_connected'));
+  assert.ok(tiling.includes('extended_tiling_distributed_duplicate_solution'));
+  assert.ok(tiling.includes('complete_parallel_enumeration'));
+  assert.ok(!tiling.includes('build_extended_order_graph'));
+  assert.ok(prepared.includes('evidence.matches_problem_owner(&self.problem)'));
+  assert.ok(prepared.includes('distributed_pc_failed_queue_finite_completion_unavailable'));
+  assert.ok(workflow.includes('--lib pc_distributed::tests'));
+  assert.ok(workflow.includes('--lib extended_pc_tiling::distributed::tests'));
+  assert.ok(workflow.includes('--lib full_height_pc_and_tiling_use_raw_protocol'));
+  assert.ok(workflow.includes('--lib full_height_tiling_empty_finish_sentinel'));
+  assert.ok(workflow.includes('--test extended_pc_observation'));
+  assert.ok(workflow.includes('--lib resource::aggregate_execution_budget::tests'));
+});
+
+test('source-bound full-height replay and exact empty minimum keep their presenter metadata', () => {
+  const payload = read('crates/clearra-host-contract/src/product_result_payload.rs');
+  const wasm = read('crates/clearra-wasm/src/wasm_command_runtime.rs');
+  assert.ok(payload.includes('with_canonical_selection'));
+  assert.ok(wasm.includes('try_owned_string_vec(payload.pinned_candidate_keys(), ledger)'));
+  assert.ok(wasm.includes('payload.optimal_cardinality() == "0"'));
+  assert.ok(wasm.includes('payload.total_alternative_count() == Some("1")'));
+  assert.ok(workflow.includes('--lib pinned_minimum_projection_preserves_owned_keys'));
+  assert.ok(workflow.includes('--lib empty_minimum_projection_keeps_canonical_policy'));
+  assert.ok(workflow.includes('packages/clearra-ui/test/mandatorySolutionFullHeight.test.mjs'));
+  assert.ok(workflow.includes('packages/clearra-ui/test/pcReplayPager.contract.ts'));
+  assert.ok(workflow.includes('apps/clearra-discord-bot/test/typed-product-result.test.mjs'));
 });
 
 test('full-height minimum uses source-bound coverage proof and the common canonical lazy reducer', () => {

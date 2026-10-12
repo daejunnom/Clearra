@@ -606,7 +606,7 @@ impl ProductCapabilityResult {
                                 canonical_solution_key,
                             ),
                         ),
-                    None => page_payload,
+                    None => page_payload.with_canonical_selection(report.canonical_selection()),
                 };
                 Some(ProductResultPayload::new(
                     self.contract.as_str(),

@@ -76,7 +76,7 @@ function projectPcPath(structured, semantics = "pc") {
     !Array.isArray(summary.witnesses) ||
     BigInt(summary.witness_count) !== BigInt(summary.witnesses.length)
   ) throw invalid(capabilityId, "family evidence");
-  const targetTerminal = build ? summary.target_terminal_board_mask : "0x0000000000000000";
+  const targetTerminal = build ? summary.target_terminal_board_mask : null;
   if (
     (build && !canonicalBoardMask(targetTerminal)) ||
     (!build && Object.hasOwn(summary, "target_terminal_board_mask"))
@@ -166,7 +166,7 @@ function preserveCanonicalPath(structured, semantics = "pc") {
   ) throw invalid(capabilityId, "canonical path envelope");
   const targetTerminal = build
     ? summary.target_terminal_board_mask
-    : "0x0000000000000000";
+    : null;
   if (
     (build && !canonicalBoardMask(targetTerminal)) ||
     (!build && Object.hasOwn(summary, "target_terminal_board_mask"))
@@ -190,8 +190,31 @@ function validatePathWitness(witness, capabilityId, targetTerminal) {
     !optionalSafeText(witness.terminal_hold_piece) ||
     !Array.isArray(witness.steps)
   ) throw invalid(capabilityId, "witness");
-  for (const step of witness.steps) validatePcPathStep(step, capabilityId);
-  if (witness.steps.at(-1)?.board_after_line_clear_mask !== targetTerminal) {
+  // The physical producer owns the mask width. A full-height PC witness is
+  // Board256 throughout, including its all-zero terminal; comparing it with a
+  // Board64 zero rejects a valid result after CLI computation has succeeded.
+  // Build retains its existing compact terminal contract. Never narrow masks
+  // or accept a mixed-width witness at this projection boundary.
+  const firstBoard = witness.steps[0]?.board_before_mask;
+  const maskDigits = canonicalBoardMask(firstBoard) ? 16
+    : typeof firstBoard === "string" && /^0x[0-9a-f]{64}$/u.test(firstBoard) ? 64
+    : null;
+  if (maskDigits === null || (targetTerminal !== null && maskDigits !== 16)) {
+    throw invalid(capabilityId, "physical witness frame");
+  }
+  const maskPattern = maskDigits === 16 ? /^0x[0-9a-f]{16}$/u : /^0x[0-9a-f]{64}$/u;
+  for (const step of witness.steps) {
+    validatePcPathStep(step, capabilityId);
+    for (const field of ["placement_mask", "board_before_mask", "board_after_placement_mask",
+      "board_after_line_clear_mask"]) {
+      if (!maskPattern.test(step[field]) ||
+        (maskDigits === 64 && (BigInt(step[field]) >> 240n) !== 0n)) {
+        throw invalid(capabilityId, "physical witness frame");
+      }
+    }
+  }
+  const expectedTerminal = targetTerminal ?? `0x${"0".repeat(maskDigits)}`;
+  if (witness.steps.at(-1)?.board_after_line_clear_mask !== expectedTerminal) {
     throw invalid(capabilityId, "terminal witness");
   }
 }
@@ -457,10 +480,10 @@ function preserveCanonicalMinimum(structured) {
     ]) ||
     summary.result_contract !== "pc-minimum-cover.v2" ||
     summary.canonical_selection !== CANONICAL_SELECTION ||
-    !plainObject(candidate) ||
-    !exactKeys(candidate, ["candidate_id", "normalized_solution_key"]) ||
-    !canonicalPositiveDecimalU64(candidate.candidate_id) ||
-    !safeText(candidate.normalized_solution_key)
+    (candidate !== null && (!plainObject(candidate) ||
+      !exactKeys(candidate, ["candidate_id", "normalized_solution_key"]) ||
+      !canonicalPositiveDecimalU64(candidate.candidate_id) ||
+      !safeText(candidate.normalized_solution_key)))
   ) throw invalid("pc.minimals", "canonical minimum envelope");
   // This preserves the existing core-selected candidate, not proof or paging
   // authority. Mixed full-family/private fields may not bypass normal checks.
@@ -472,15 +495,17 @@ function preserveCanonicalMinimum(structured) {
 function projectPcMinimals(structured) {
   const summary = assertEnvelope(structured, "pc-minimum-cover.v2", "pc.minimals");
   const members = canonicalPortfolioMembers(summary, "pc.minimals");
-  if (members.length === 0) throw invalid("pc.minimals", "empty canonical portfolio");
   assertCanonicalMinimumMembers(members);
   if (
     summary.canonical_selection !== CANONICAL_SELECTION ||
-    !plainObject(summary.canonical_witness) ||
-    !samePlainValue(summary.canonical_witness, members[0])
+    (members.length === 0
+      ? summary.optimal_cardinality !== "0" || summary.canonical_witness !== null ||
+        summary.total_member_pages !== "1" || summary.known_alternative_count !== "1"
+      : !plainObject(summary.canonical_witness) ||
+        !samePlainValue(summary.canonical_witness, members[0]))
   ) throw invalid("pc.minimals", "core-owned canonical witness");
-  const suppliedCandidateId = BigInt(summary.canonical_witness.candidate_id);
-  if (members.some((member) => BigInt(member.candidate_id) < suppliedCandidateId)) {
+  if (members.length > 0 && members.some((member) =>
+    BigInt(member.candidate_id) < BigInt(summary.canonical_witness.candidate_id))) {
     throw invalid("pc.minimals", "core-owned canonical witness");
   }
   const projected = clonePlain(structured);
@@ -489,7 +514,7 @@ function projectPcMinimals(structured) {
     result_contract: "pc-minimum-cover.v2",
     payload_kind: "canonical-minimum-cover-candidate",
     canonical_selection: summary.canonical_selection,
-    canonical_candidate: clonePlain(summary.canonical_witness),
+    canonical_candidate: summary.canonical_witness === null ? null : clonePlain(summary.canonical_witness),
   };
   return deepFreeze(projected);
 }

@@ -70,6 +70,10 @@ pub use backend::{
     WasmSetupSearchSession, WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer,
     WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
+pub use backend::{
+    WasmFullHeightPcProducer, WasmFullHeightPcResultMerger, WasmFullHeightPcVerifier,
+    WasmFullHeightTilingProducer, WasmFullHeightTilingResultMerger, WasmFullHeightTilingWorker,
+};
 pub use buildup::{
     BuildUpEvent, BuildUpReducerReport, BuildUpRunResult, BuildUpRunner, BuildUpState,
 };

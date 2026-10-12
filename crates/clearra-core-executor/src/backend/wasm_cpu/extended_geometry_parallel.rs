@@ -2,6 +2,8 @@
 //! Rows and Product continuations are private; the DAG and target indexes have
 //! one immutable owner. No concrete placement family is copied per worker.
 use crate::resource::ExecutionMemoryBound;
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+use crate::resource::ExecutionMemoryOwner;
 
 use super::{
     Arc, ExtendedFamilyEnumerator, ExtendedGeometryCandidate, ExtendedGeometrySearch,
@@ -24,7 +26,45 @@ pub(in crate::backend::wasm_cpu) struct ExtendedParallelGeometryBranch {
 }
 
 impl ExtendedParallelGeometryBranch {
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub(in crate::backend::wasm_cpu) fn next_candidate_with_owner(
+        &mut self,
+        catalog: &ExtendedInverseCatalog,
+        owner: &ExecutionMemoryOwner,
+        coexisting_private_bytes: u128,
+    ) -> Result<Option<ExtendedGeometryCandidate>, WasmExactSearchError> {
+        let mut refused = None;
+        let result = self
+            .enumerator
+            .next_candidate_with_allocation_guard(catalog, |bytes| {
+                let total = coexisting_private_bytes
+                    .checked_add(bytes)
+                    .unwrap_or(u128::MAX);
+                owner.ensure(total).map_err(|report| {
+                    refused = Some(report);
+                })
+            });
+        if let Some(report) = refused {
+            return Err(WasmExactSearchError::resource_admission(report));
+        }
+        result.map_err(|_| {
+            WasmExactSearchError::InvalidProblem("extended_parallel_geometry_traversal_failed")
+        })
+    }
+
+    #[cfg(test)]
     pub(in crate::backend::wasm_cpu) fn next_candidate(
+        &mut self,
+        catalog: &ExtendedInverseCatalog,
+        memory_bound: ExecutionMemoryBound,
+        coexisting_private_bytes: u128,
+    ) -> Result<Option<ExtendedGeometryCandidate>, WasmExactSearchError> {
+        self.next_candidate_bounded(catalog, memory_bound, coexisting_private_bytes)
+    }
+
+    /// Applies the realm's assigned credit before growing traversal backing.
+    /// The immutable family and target owner stay shared within that realm.
+    pub(in crate::backend::wasm_cpu) fn next_candidate_bounded(
         &mut self,
         catalog: &ExtendedInverseCatalog,
         memory_bound: ExecutionMemoryBound,

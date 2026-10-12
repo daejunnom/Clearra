@@ -61,7 +61,7 @@ jobs:
         run: cargo test --locked -p clearra-core-executor --lib v081_signed_conditioned_pack_owner_peer_solver_smoke --features parallel,local-search-ab,qualification-reference -- --ignored --test-threads=1
 
   native-products:
-    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005') && github.ref_type == 'branch'
+    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007') && github.ref_type == 'branch'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
@@ -175,6 +175,19 @@ jobs:
           CLEARRA_LEGAL_BOARD_DIRECTORY: ${{ github.workspace }}/_local/artifacts/v081-compute-data-smoke/legal-board
           CLEARRA_CONDITIONED_REACHABILITY_DIRECTORY: ${{ github.workspace }}/_local/artifacts/v081-compute-data-smoke/conditioned-reachability
         run: node --test apps/clearra-discord-bot/test/realCliProductProjection.test.mjs
+      - name: Prepare only locked CTK3 dependencies for full-height native surface readback
+        if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' }}
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.0 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+      - name: Read back the same CLI through all full-height Discord product hops without publishing
+        if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' }}
+        env:
+          CLEARRA_REAL_PC24_CLI: ${{ github.workspace }}/build/cargo/default/debug/clearra
+          CLEARRA_REAL_PC24_SOURCE_COMMIT: ${{ github.sha }}
+        run: node --test apps/clearra-discord-bot/test/realCliFullHeightProducts.test.mjs
       - name: Verify real Desktop native jobs with the same installed signed assets
         if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' && steps.compute-assets.outcome == 'success' }}
         env:
@@ -186,6 +199,7 @@ jobs:
           test "$CLEARRA_CONDITIONED_REACHABILITY_DIRECTORY" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke/conditioned-reachability"
           mkdir -p "$GITHUB_WORKSPACE/_local/artifacts/v081-desktop-native-smoke"
           cargo test --locked -p clearra-cli --test desktop_signed_accelerator_execution --no-default-features --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1
+          cargo test --locked -p clearra-cli --test desktop_full_height_products --no-default-features --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1
       - name: Recheck the same native data layer read-only as an unprivileged user, not an accepted image
         if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' }}
         shell: bash

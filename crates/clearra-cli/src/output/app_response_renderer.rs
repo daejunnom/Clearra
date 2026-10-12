@@ -1700,6 +1700,19 @@ fn valid_coverage_portfolio_canonical_witness(
     if payload.canonical_selection() != Some(expected_selection) {
         return false;
     }
+    if payload.members().is_empty() {
+        // The App-owned exact reducer can select the zero-member portfolio
+        // when no pattern is coverable. Preserve that result rather than
+        // reporting an unsupported runtime or inventing a candidate witness.
+        // This is only the canonical first empty page, not a missing slice of
+        // a non-empty optimum, and does not declare the input generally UNSAT.
+        return payload.optimal_cardinality() == "0"
+            && payload.canonical_witness().is_none()
+            && payload.alternative_index() == "1"
+            && payload.known_alternative_count() == "1"
+            && payload.member_page_number() == "1"
+            && payload.total_member_pages() == "1";
+    }
     let (Some(canonical), Some(first)) = (payload.canonical_witness(), payload.members().first())
     else {
         return false;

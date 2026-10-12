@@ -1,5 +1,6 @@
 // SRP rationale: this contract test has one behavior-level change reason: verifying the complete fail-closed product-result validation, canonical identity, and paging boundary exposed by the workspace pager.
 import assert from 'node:assert/strict';
+import { fullHeightPcReplayWitness } from '../../../tests/fixtures/contracts/extended_pc_replay_witness.v1.mjs';
 
 import type {
   ClearraBuildV2ProductPayload,
@@ -62,10 +63,37 @@ assert.equal(
   'invalid coverage portfolio payload',
   'an empty page cannot claim success without sealed enumeration authority'
 );
+for (const mutate of [
+  (page: ClearraCoveragePortfolioRuntimePage) => { page.members = coveragePayload(1).content.payload.members; },
+  (page: ClearraCoveragePortfolioRuntimePage) => { page.known_alternative_count = '2'; page.total_alternative_count = '2'; },
+  (page: ClearraCoveragePortfolioRuntimePage) => { page.member_page_number = '2'; page.total_member_pages = '2'; },
+  (page: ClearraCoveragePortfolioRuntimePage) => { page.optimal_cardinality = '1'; }
+]) {
+  const forgedEmpty = structuredClone(completeEmpty);
+  mutate(forgedEmpty.content.payload);
+  assert.equal(
+    validateProductResultPayload(forgedEmpty),
+    'invalid coverage portfolio payload',
+    'zero-cardinality success must not relax nonempty member or exact-empty enumeration authority'
+  );
+}
 assert.equal(isCanonicalDecimal('184467440737095516160'), true);
 assert.equal(isCanonicalDecimal('00'), false);
 assert.equal(isCanonicalProbability('0.14285714285714285'), true);
 assert.equal(isCanonicalProbability('1.2'), false);
+
+const fullHeightPinnedMinimum = coveragePayload(1);
+fullHeightPinnedMinimum.contract = 'pc.pinned-minimals';
+fullHeightPinnedMinimum.result_kind = 'pc-pinned-minimum-cover.v1';
+const requiredFullHeightKey = `ctk2|height=24|initial=${'0'.repeat(64)}|placements=I:${(15n << 236n).toString(16).padStart(64, '0')}`;
+fullHeightPinnedMinimum.content.payload.members[0]!.normalized_solution_key = requiredFullHeightKey;
+fullHeightPinnedMinimum.content.payload.pinned_candidate_keys = [requiredFullHeightKey];
+assert.equal(validateProductResultPayload(fullHeightPinnedMinimum), null,
+  'the full-height drawing-selected pin is preserved through the ordinary portfolio payload');
+const missingFullHeightPin = structuredClone(fullHeightPinnedMinimum);
+delete missingFullHeightPin.content.payload.pinned_candidate_keys;
+assert.equal(validateProductResultPayload(missingFullHeightPin), 'invalid coverage portfolio payload',
+  'transport must not silently turn a required full-height selection into an unpinned minimum');
 
 await verifyCoveragePortfolioPagerNavigation();
 await verifyCoveragePortfolioPagerDemandLoadsOnlyTheVisibleAlternative();
@@ -333,6 +361,25 @@ const score: ClearraProductResultPayload = {
   }
 };
 assert.equal(validateProductResultPayload(score), null);
+const fullHeightScore = structuredClone(score);
+const fullHex = (mask: bigint) => mask.toString(16).padStart(64, '0');
+const upperMasks = [(15n << 236n), (3n << 216n) | (3n << 226n)];
+for (let index = 0; index < fullHeightScore.content.payload.fields.length; index += 1) {
+  fullHeightScore.content.payload.fields[index]!.normalized_field_key =
+    `ctk2|height=24|initial=${fullHex(0n)}|placements=${index === 0 ? 'I' : 'O'}:${fullHex(upperMasks[index]!)}`;
+}
+assert.equal(validateProductResultPayload(fullHeightScore), null,
+  'PC field-average rows retain all four mask words under the existing field reducer contract');
+for (const mutate of [
+  (key: string) => key.replace('height=24', 'height=25'),
+  (key: string) => key.replace(`initial=${fullHex(0n)}`, 'initial=0000000000000000'),
+  (key: string) => key.replace(fullHex(upperMasks[0]!), fullHex(1n << 240n)),
+  (key: string) => key.replace(`initial=${fullHex(0n)}`, `initial=${fullHex(upperMasks[0]!)}`)
+]) {
+  const invalid = structuredClone(fullHeightScore);
+  invalid.content.payload.fields[0]!.normalized_field_key = mutate(invalid.content.payload.fields[0]!.normalized_field_key);
+  assert.notEqual(validateProductResultPayload(invalid), null, 'malformed CTK2 fields must not bypass the drawing parser');
+}
 assert.deepEqual(
   score.content.payload.fields.map((field) => [field.normalized_field_key, field.average_score]),
   [
@@ -376,6 +423,10 @@ assert.equal(
   null,
   'Build field average reuses the score-row shape under an explicit Build contract'
 );
+const unsupportedBuildFullHeightScore = structuredClone(buildFieldAverage);
+unsupportedBuildFullHeightScore.content.payload.fields = structuredClone(fullHeightScore.content.payload.fields);
+assert.notEqual(validateProductResultPayload(unsupportedBuildFullHeightScore as unknown as ClearraProductResultPayload), null,
+  'widening the PC field contract does not grant a full-height Build field capability');
 const forgedBuildScoreAsPc = structuredClone(buildFieldAverage);
 forgedBuildScoreAsPc.contract = 'pc.score';
 forgedBuildScoreAsPc.result_kind = 'pc-score-summary.v2';
@@ -467,6 +518,16 @@ assert.equal(
 
 const pathFamily = pcPathFamilyPayload();
 assert.equal(validateProductResultPayload(pathFamily), null);
+const fullHeightPathFamily = structuredClone(pathFamily);
+fullHeightPathFamily.content.payload.witnesses = fullHeightPathFamily.content.payload.witnesses.map((member) => ({
+  ...fullHeightPcReplayWitness(), candidate_id: member.candidate_id, producer_candidate_id: member.producer_candidate_id,
+  pattern_id: member.pattern_id, trace_identity: member.trace_identity, normalized_trace_key: member.normalized_trace_key
+}));
+fullHeightPathFamily.content.payload.canonical_witness = structuredClone(fullHeightPathFamily.content.payload.witnesses[0]!);
+assert.equal(validateProductResultPayload(fullHeightPathFamily), null, 'eager PC replay accepts the same full-height frame as lazy replay');
+const mixedPathFamily = structuredClone(fullHeightPathFamily);
+mixedPathFamily.content.payload.witnesses[1]!.steps[0]!.board_after_placement_mask = '0x00000000000003ff';
+assert.notEqual(validateProductResultPayload(mixedPathFamily), null, 'later witnesses cannot change the PC mask frame');
 assert.match(productResultIdentity(pathFamily), /^pc\.path:pc-path-family\.v2:/u);
 assert.equal(pathFamily.content.payload.witness_count, '2');
 assert.equal(

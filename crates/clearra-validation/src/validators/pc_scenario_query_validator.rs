@@ -80,9 +80,15 @@ fn validate_scenario_board(query: &PcScenarioQuery, report: &mut DiagnosticRepor
             clearra_pc_graph::request::PcCountPolicy::CountAll
                 | clearra_pc_graph::request::PcCountPolicy::CountUnique
         )
-        && !query
+        && (!query
             .queue_observation_policy()
             .requires_observation_policy()
+            || (!query.objective().score().requested()
+                && matches!(
+                    query.objective().kind(),
+                    clearra_core_domain::objective::objective_kind::ObjectiveKind::All
+                        | clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique
+                )))
         && query.completion_goal() == PcCompletionGoal::ClearToEmpty;
     if board.width() == 10
         && (7..=24).contains(&board.visible_height())

@@ -37,6 +37,35 @@ const {
 const SET_IDENTITY = 'a'.repeat(64);
 const CANDIDATE_MAP_IDENTITY = 'b'.repeat(64);
 
+test('sealed empty exact minimum has no copy source and performs no member loading', () => {
+  let loaderCalls = 0;
+  const emptyPage = {
+    ...page(1, 0, 1),
+    optimal_cardinality: '0',
+    total_alternative_count: '1',
+    enumeration_complete: true,
+    total_member_pages: '1'
+  };
+  const activation = tryCreateCoveragePortfolioExportKeySource({
+    initialPage: emptyPage,
+    isCurrent: () => true,
+    loadMemberPage() {
+      loaderCalls += 1;
+      throw new Error('the canonical empty set has no member to load or export');
+    }
+  });
+  assert.deepEqual(activation, { keySource: null, error: null });
+  assert.equal(loaderCalls, 0);
+
+  const forgedNonempty = tryCreateCoveragePortfolioExportKeySource({
+    initialPage: { ...emptyPage, optimal_cardinality: '1' },
+    isCurrent: () => true,
+    loadMemberPage: null
+  });
+  assert.equal(forgedNonempty.keySource, null);
+  assert.match(forgedNonempty.error, /counts or enumeration metadata are invalid/u);
+});
+
 test('portfolio export materializes the complete selected outer alternative in canonical order', async () => {
   const initialPage = page(1, 100, 1);
   assert.equal(initialPage.known_alternative_count, '1');

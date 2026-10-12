@@ -11,6 +11,26 @@ use super::{
 // the exact monolithic compiler without dropping a candidate.
 const DENSE_COMPONENT_STATE_BUDGET: usize = 1_000_000;
 
+/// Bounded scratch preflight for the optional synchronous optimizer. Its
+/// memo can retain at most the declared number of states, and a component of
+/// at most sixteen pieces has at most C(m+k,k) nonnegative count signatures.
+/// If this conservative projection does not fit, the caller uses incremental
+/// exact Geometry instead; no candidate or requested worker is discarded.
+pub(super) fn checked_component_scratch_upper_bound(cells: u32, feasible_mask: u8) -> Option<u128> {
+    if !(8..=64).contains(&cells) {
+        return Some(0);
+    }
+    let pieces = u128::from(cells / 4);
+    let kinds = u128::from(feasible_mask.count_ones());
+    let mut signatures = 1_u128;
+    for index in 1..=kinds {
+        signatures = signatures.checked_mul(pieces.checked_add(index)?)? / index;
+    }
+    let states = (1_u128.checked_shl(cells)?).min(DENSE_COMPONENT_STATE_BUDGET as u128);
+    let tables = states.checked_add(pieces.checked_mul(4)?.checked_add(8)?)?;
+    tables.checked_mul(signatures.checked_mul(64)?.checked_add(128)?)
+}
+
 #[derive(Clone, Copy)]
 struct ExtendedComponentEntry {
     counts: [u8; 7],

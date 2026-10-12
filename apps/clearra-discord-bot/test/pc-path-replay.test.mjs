@@ -64,6 +64,26 @@ test("full-height PC replay retains all 24 rows, six locks and clears at 500ms",
   assert.throws(() => buildCanonicalPcPathReplayDocument(narrowed), /noncanonical/u);
 });
 
+test("full-height PC replay crosses the production canonical-only boundary before GIF rendering", () => {
+  const raw = exhaustiveResult();
+  const canonical = fullHeightPcReplayWitness();
+  const second = structuredClone(canonical);
+  second.candidate_id = "2";
+  second.producer_candidate_id = "2";
+  second.trace_identity = "second-full-height-fixture";
+  second.normalized_trace_key = "trk2:second-fixture";
+  raw.summary.canonical_witness = structuredClone(canonical);
+  raw.summary.witnesses = [canonical, second];
+  const first = assertDiscordCanonicalOnlyResult(success(raw));
+  const secondHop = assertDiscordCanonicalOnlyResult(first);
+  assert.equal(secondHop.stdout, first.stdout);
+  const replay = buildCanonicalPcPathReplayDocument(JSON.parse(secondHop.stdout));
+  assert.equal(replay.frameCount, 13);
+  assert.ok(replay.document.pages.every(page => page.height === 24));
+  assert.deepEqual(gifFrameDelays(renderDocumentGif(replay.document,
+    { delayMs: PC_PATH_REPLAY_FRAME_DELAY_MS })), Array(13).fill(50));
+});
+
 test("pc.path replay rejects a declared clear on a non-full row", () => {
   const corrupted = structuredClone(result());
   corrupted.summary.canonical_witness.steps[0].cleared_row_mask =

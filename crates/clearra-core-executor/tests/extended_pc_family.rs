@@ -1156,14 +1156,129 @@ fn full_height_parallel_node_budget_is_not_duplicated_per_worker() {
             .with_max_nodes(1),
     );
     let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
-    let error = match WasmCpuSearchSession::new(&problem) {
-        Ok(_) => panic!("finite node credit is not yet a per-worker allowance"),
-        Err(error) => error,
-    };
-    assert_eq!(
-        error.reason(),
-        "extended_pc_family_parallel_node_budget_not_connected"
+    let mut session = WasmCpuSearchSession::new(&problem).expect("aggregate node cap is admitted");
+    let error = session
+        .advance(1, &ExecutionControl::default())
+        .unwrap_err();
+    assert_eq!(error.reason(), "shared_execution_compute_exhausted");
+    match error {
+        WasmCpuSearchError::ResourceAdmission { resource_report } => {
+            assert!(resource_report.execution_started());
+            assert!(!resource_report.result_complete());
+            assert!(resource_report.truncated);
+        }
+        other => {
+            panic!("finite aggregate node budget must stop as typed resource exhaustion: {other:?}")
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_parallel_finite_node_budget_preserves_shared_geometry_and_exact_family() {
+    let hardware = std::thread::available_parallelism().map_or(1, usize::from);
+    if hardware < 2 {
+        return;
+    }
+    let base = branching_query(24, srs_plus()).with_count_policy(PcCountPolicy::CountAll);
+    let serial_problem = ProblemCompiler::compile_scenario_pc(&base).unwrap();
+    let serial =
+        WasmCpuSearchBackend::execute_with_control(&serial_problem, &ExecutionControl::default())
+            .unwrap();
+    let query = base.clone().with_execution_policy(
+        base.execution_policy()
+            .clone()
+            .with_workers(2)
+            .with_use_all_logical_processors(hardware == 2)
+            .with_max_nodes(100_000),
     );
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    let parallel =
+        WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default()).unwrap();
+    assert_eq!(parallel.usize_field("workers_used"), Some(2));
+    assert_eq!(
+        parallel.normalized_solution_keys(),
+        serial.normalized_solution_keys()
+    );
+    assert_eq!(
+        parallel.coverage_pattern_words(),
+        serial.coverage_pattern_words()
+    );
+    assert_eq!(
+        parallel.field("normalized_solution_set_hash"),
+        serial.field("normalized_solution_set_hash")
+    );
+    let debit = parallel
+        .usize_field("resource_node_budget_consumed")
+        .expect("aggregate debit receipt");
+    assert!(debit <= 100_000);
+    assert_eq!(
+        debit,
+        parallel.usize_field("searched_geometry_nodes").unwrap()
+            + parallel.usize_field("searched_build_nodes").unwrap()
+    );
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_parallel_preserves_requested_width_for_a_single_candidate_family() {
+    let hardware = std::thread::available_parallelism().map_or(1, usize::from);
+    if hardware < 2 {
+        return;
+    }
+    let (base, _, _) = forced_query(24, srs_plus());
+    let query = base.clone().with_execution_policy(
+        base.execution_policy()
+            .clone()
+            .with_workers(2)
+            .with_use_all_logical_processors(hardware == 2),
+    );
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    let result =
+        WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default()).unwrap();
+    assert_eq!(result.usize_field("workers_used"), Some(2));
+    assert_eq!(result.usize_field("parallel_active_workers"), Some(1));
+    assert_eq!(result.normalized_solution_keys().len(), 1);
+    assert_eq!(result.bool_field("count_complete"), Some(true));
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_parallel_tiling_preserves_requested_width_and_shared_finite_node_debit() {
+    let hardware = std::thread::available_parallelism().map_or(1, usize::from);
+    if hardware < 2 {
+        return;
+    }
+    let (base, _, _) = forced_query(24, srs_plus());
+    let serial_problem = ProblemCompiler::compile_scenario_pc_tiling(&base).unwrap();
+    let serial =
+        WasmCpuSearchBackend::execute_with_control(&serial_problem, &ExecutionControl::default())
+            .unwrap();
+    let query = base.with_execution_policy(
+        PcExecutionPolicy::default()
+            .with_workers(2)
+            .with_use_all_logical_processors(hardware == 2)
+            .with_max_nodes(100_000),
+    );
+    let problem = ProblemCompiler::compile_scenario_pc_tiling(&query).unwrap();
+    let result =
+        WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default()).unwrap();
+    assert_eq!(result.usize_field("workers_used"), Some(2));
+    assert_eq!(result.usize_field("parallel_active_workers"), Some(1));
+    assert_eq!(
+        result.normalized_solution_keys(),
+        serial.normalized_solution_keys()
+    );
+    assert_eq!(
+        result.field("normalized_solution_set_hash"),
+        serial.field("normalized_solution_set_hash")
+    );
+    assert_eq!(
+        result.usize_field("resource_node_budget_consumed"),
+        result.usize_field("searched_geometry_nodes")
+    );
+    assert_eq!(result.bool_field("count_complete"), Some(true));
+    assert!(result.pc_tiling_family_publication_contract_is_valid());
 }
 
 #[test]

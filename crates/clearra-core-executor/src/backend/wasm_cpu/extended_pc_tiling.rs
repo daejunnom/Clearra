@@ -4,6 +4,8 @@
 
 use std::{mem::size_of, sync::Arc};
 
+#[path = "extended_pc_tiling_distributed.rs"]
+pub(super) mod distributed;
 #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 #[path = "extended_pc_tiling_parallel.rs"]
 mod parallel;
@@ -24,7 +26,7 @@ use clearra_supply::pattern_universe::PackingPatternMembershipKind;
 use crate::{
     resource::{
         admit_budget_bound_search_execution_under_terminal_authority, ExecutionAdmission,
-        WasmCpuTerminalResourceAuthority,
+        SharedExecutionNodeBudget, WasmCpuTerminalResourceAuthority,
     },
     CoreExecutionResult, PcTilingMemoryAdmissionEvidence, TilingSolutionPageStore,
 };
@@ -45,7 +47,9 @@ pub(crate) struct ExtendedPcTilingSession {
     external_retained_bytes: u128,
     finished: bool,
     workers_used: usize,
+    parallel_active_workers: usize,
     parallel_peak_bytes: u128,
+    request_node_budget: Option<Arc<SharedExecutionNodeBudget>>,
 }
 
 impl ExtendedPcTilingSession {
@@ -53,6 +57,28 @@ impl ExtendedPcTilingSession {
         problem: Arc<SearchProblem>,
         external_retained_bytes: u128,
         authority: &WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, WasmExactSearchError> {
+        let execution_admission = admit_budget_bound_search_execution_under_terminal_authority(
+            &problem,
+            external_retained_bytes,
+            authority,
+            if cfg!(all(feature = "parallel", not(target_family = "wasm"))) {
+                problem.backend_policy().workers().max(1)
+            } else {
+                1
+            },
+        )
+        .map_err(WasmExactSearchError::resource_admission)?;
+        Self::new_with_admission(problem, external_retained_bytes, execution_admission)
+    }
+
+    /// Transfers an already admitted execution lease without acquiring another
+    /// compute child. A distributed realm may restrict its memory credit before
+    /// entering here; every original typed Tiling contract is still checked.
+    pub(super) fn new_with_admission(
+        problem: Arc<SearchProblem>,
+        external_retained_bytes: u128,
+        execution_admission: ExecutionAdmission,
     ) -> Result<Self, WasmExactSearchError> {
         if !matches!(
             problem.preset(),
@@ -92,17 +118,6 @@ impl ExtendedPcTilingSession {
             required.words(),
         )
         .map_err(|_| WasmExactSearchError::InvalidProblem("extended_pc_tiling_field_invalid"))?;
-        let execution_admission = admit_budget_bound_search_execution_under_terminal_authority(
-            &problem,
-            external_retained_bytes,
-            authority,
-            if cfg!(all(feature = "parallel", not(target_family = "wasm"))) {
-                problem.backend_policy().workers().max(1)
-            } else {
-                1
-            },
-        )
-        .map_err(WasmExactSearchError::resource_admission)?;
         let universe = problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
@@ -121,6 +136,14 @@ impl ExtendedPcTilingSession {
         }
         let fixed_catalog_peak = external_retained_bytes
             .checked_add(size_of::<Self>() as u128)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                        &problem,
+                    )?,
+                )
+            })
+            .and_then(|bytes| bytes.checked_add(size_of::<SearchProblem>() as u128 + 32))
             .and_then(|bytes| bytes.checked_add(32 * 1024))
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "extended_pc_tiling_memory_projection_unavailable",
@@ -142,7 +165,33 @@ impl ExtendedPcTilingSession {
                     error
                 }
             })?;
-        let geometry = ExtendedGeometrySearch::new(universe, &family, &catalog)?;
+        let geometry_other = external_retained_bytes
+            .checked_add(size_of::<Self>() as u128)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                        &problem,
+                    )?,
+                )
+            })
+            .and_then(|bytes| bytes.checked_add(size_of::<SearchProblem>() as u128 + 32))
+            .and_then(|bytes| bytes.checked_add(catalog.retained_bytes() as u128))
+            .and_then(|bytes| bytes.checked_add(size_of::<ExtendedInverseCatalog>() as u128 + 64))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_geometry_memory_projection_unavailable",
+            ))?;
+        let geometry = ExtendedGeometrySearch::new_bounded(
+            universe,
+            &family,
+            &catalog,
+            execution_admission.memory_bound(),
+            geometry_other,
+        )?;
+        let request_node_budget = (problem.backend_request().max_nodes() != 0).then(|| {
+            Arc::new(SharedExecutionNodeBudget::new(
+                problem.backend_request().max_nodes(),
+            ))
+        });
         let session = Self {
             problem,
             catalog: Arc::new(catalog),
@@ -152,7 +201,9 @@ impl ExtendedPcTilingSession {
             external_retained_bytes,
             finished: false,
             workers_used: 1,
+            parallel_active_workers: 1,
             parallel_peak_bytes: 0,
+            request_node_budget,
         };
         session.ensure_memory(0)?;
         Ok(session)
@@ -173,10 +224,6 @@ impl ExtendedPcTilingSession {
                 return Ok(ExactSearchAdvance::Cancelled);
             }
             self.ensure_memory(0)?;
-            let max_nodes = self.problem.backend_request().max_nodes();
-            if max_nodes != 0 && self.geometry.expanded_nodes() >= max_nodes {
-                return Err(WasmExactSearchError::InvalidProblem("node_budget_exceeded"));
-            }
             #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
             if self.problem.backend_policy().workers() > 1 && !self.geometry.is_compiling() {
                 if let Some(result) = self.execute_parallel_if_worthwhile(
@@ -186,7 +233,7 @@ impl ExtendedPcTilingSession {
                     return Ok(ExactSearchAdvance::Completed(result));
                 }
             }
-            match self.geometry.advance(&self.catalog) {
+            match self.advance_geometry_bounded()? {
                 ExtendedGeometryAdvance::Pending => {}
                 ExtendedGeometryAdvance::Candidate(candidate) => {
                     let max_candidates = self.problem.backend_request().max_candidates();
@@ -220,7 +267,7 @@ impl ExtendedPcTilingSession {
                 }
                 ExtendedGeometryAdvance::Complete => return self.finish(),
                 ExtendedGeometryAdvance::ResourceIncomplete(reason) => {
-                    return Err(WasmExactSearchError::InvalidProblem(reason));
+                    return Err(self.resource_stop_error(reason));
                 }
             }
         }
@@ -352,6 +399,17 @@ impl ExtendedPcTilingSession {
         );
         set("workers_used", self.workers_used.to_string());
         set(
+            "parallel_active_workers",
+            self.parallel_active_workers.to_string(),
+        );
+        set(
+            "resource_node_budget_consumed",
+            self.request_node_budget
+                .as_ref()
+                .map_or(0, |budget| budget.consumed())
+                .to_string(),
+        );
+        set(
             "cpu_parallel_execution",
             (self.workers_used > 1).to_string(),
         );
@@ -393,6 +451,16 @@ impl ExtendedPcTilingSession {
 
     fn checked_retained_bytes(&self) -> Option<u128> {
         let mut bytes = (size_of::<Self>() as u128).checked_add(self.external_retained_bytes)?;
+        bytes = bytes
+            .checked_add(
+                super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                    &self.problem,
+                )?,
+            )?
+            .checked_add(size_of::<SearchProblem>() as u128 + 32)?;
+        if self.request_node_budget.is_some() {
+            bytes = bytes.checked_add(size_of::<SharedExecutionNodeBudget>() as u128 + 32)?;
+        }
         bytes = bytes.checked_add(self.catalog.retained_bytes() as u128)?;
         bytes = bytes.checked_add(size_of::<ExtendedInverseCatalog>() as u128 + 32)?;
         bytes = bytes.checked_add(self.geometry.retained_bytes() as u128)?;
@@ -403,6 +471,32 @@ impl ExtendedPcTilingSession {
             bytes = bytes.checked_add(key.capacity() as u128)?;
         }
         Some(bytes)
+    }
+
+    fn resource_stop_error(&self, reason: &'static str) -> WasmExactSearchError {
+        if reason == "node_budget_exceeded" {
+            if let Some(budget) = self.request_node_budget.as_ref() {
+                return WasmExactSearchError::resource_admission(budget.exhaustion_report());
+            }
+        }
+        WasmExactSearchError::InvalidProblem(reason)
+    }
+
+    fn advance_geometry_bounded(
+        &mut self,
+    ) -> Result<ExtendedGeometryAdvance, WasmExactSearchError> {
+        let outside = self
+            .checked_retained_bytes()
+            .and_then(|bytes| bytes.checked_sub(self.geometry.retained_bytes() as u128))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_geometry_memory_projection_unavailable",
+            ))?;
+        self.geometry.advance_bounded(
+            &self.catalog,
+            self.request_node_budget.as_deref(),
+            self.execution_admission.memory_bound(),
+            outside,
+        )
     }
 
     fn ensure_memory(&self, future: u128) -> Result<(), WasmExactSearchError> {

@@ -469,6 +469,50 @@ impl ProjectionCatalog {
 }
 
 impl ProjectionReachabilityCache {
+    /// Upper bound for one extended adaptive evaluation's new cache entries
+    /// and the coexisting current/next projection sets. The existing adaptive
+    /// combination ceiling bounds each set; this is not measured peak memory.
+    pub fn checked_extended_future_bytes(
+        &self,
+        catalog: &ProjectionCatalog,
+        targets: &[[u8; 7]],
+        used_counts: [u8; 7],
+    ) -> Option<u128> {
+        let mut future = 0_u128;
+        let mut new_entries = 0_usize;
+        for target in targets.iter().copied() {
+            if !counts_dominate(target, used_counts) {
+                continue;
+            }
+            let counts = core::array::from_fn(|piece| target[piece] - used_counts[piece]);
+            if self.entries.contains_key(&pack_projection_counts(counts))
+                || !catalog.exact_projection_is_budgeted(counts)
+            {
+                continue;
+            }
+            let mut combinations = 1_u128;
+            for (piece, count) in counts.into_iter().enumerate() {
+                for _ in 0..count {
+                    combinations =
+                        combinations.checked_mul(catalog.piece_options[piece].len() as u128)?;
+                }
+            }
+            // Hash-table control/slack, both convolution sets, collected Vec,
+            // boxed final signatures, and table growth can coexist transiently.
+            future = future.checked_add(combinations.checked_mul(128)?.checked_add(64)?)?;
+            new_entries = new_entries.checked_add(1)?;
+        }
+        if new_entries != 0 {
+            let projected_entries = self.entries.len().checked_add(new_entries)?;
+            future = future.checked_add((projected_entries as u128).checked_mul(
+                (4 * (core::mem::size_of::<u64>()
+                    + core::mem::size_of::<ProjectionCacheEntry>()
+                    + 1)) as u128,
+            )?)?;
+        }
+        Some(future)
+    }
+
     /// Cheap, allocation-free negative filter shared by ordinary and extended
     /// ILC geometry. It uses the residual target-frame cells and only residue
     /// options compiled from rows that the active catalog can actually emit.
@@ -612,8 +656,9 @@ impl ProjectionReachabilityCache {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.entries.capacity()
-            * (core::mem::size_of::<u64>() + core::mem::size_of::<ProjectionCacheEntry>())
+        self.entries.capacity().saturating_mul(8).div_ceil(7)
+            * (core::mem::size_of::<(u64, ProjectionCacheEntry)>() + 1)
+            + 16
             + self
                 .entries
                 .values()

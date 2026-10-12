@@ -82,6 +82,105 @@ pub(super) enum CoverageCacheLookup {
 }
 
 impl PieceOrderLanguageCache {
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Each deterministic-union node is a prefix of at least one source
+    /// path. Summing source prefixes (without quotienting duplicate words) is
+    /// therefore an upper bound, even when several roots share suffixes.
+    /// The caller admits `node_count * size_of::<u128>()` before this scratch.
+    pub fn checked_prefix_path_upper_bound(&self, roots: &[u32]) -> Option<u128> {
+        let mut counts = Vec::new();
+        counts.try_reserve_exact(self.nodes.len()).ok()?;
+        for (index, node) in self.nodes.iter().copied().enumerate() {
+            let mut prefixes = 1_u128;
+            for edge in self.node_edges(node) {
+                if edge.child() as usize >= index {
+                    return None;
+                }
+                prefixes = prefixes.checked_add(*counts.get(edge.child() as usize)?)?;
+            }
+            counts.push(prefixes);
+        }
+        roots.iter().try_fold(0_u128, |sum, root| {
+            sum.checked_add(*counts.get(*root as usize)?)
+        })
+    }
+
+    pub fn maximum_root_depth(&self, roots: &[u32]) -> Option<u8> {
+        roots.iter().try_fold(0_u8, |depth, root| {
+            Some(depth.max(self.nodes.get(*root as usize)?.remaining_depth))
+        })
+    }
+
+    /// Imports worker-local roots by exact node/edge equality. A numeric root
+    /// is scoped to its source owner and must never be copied into another
+    /// cache without rebinding all child references first.
+    pub fn import_roots(
+        &mut self,
+        source: &Self,
+        roots: &[u32],
+    ) -> Result<Vec<u32>, WasmExactSearchError> {
+        self.ensure_buckets();
+        let mut rebound = Vec::new();
+        rebound.try_reserve_exact(source.nodes.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_piece_language_import_storage_unavailable")
+        })?;
+        for (index, node) in source.nodes.iter().copied().enumerate() {
+            self.edge_scratch.clear();
+            let edges = source.node_edges(node);
+            self.edge_scratch.try_reserve(edges.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_import_storage_unavailable",
+                )
+            })?;
+            for edge in edges {
+                // Children are interned before parents in every producer.
+                // Validate that invariant rather than trusting a hash/root ID.
+                let child = rebound.get(edge.child() as usize).copied().ok_or(
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_piece_language_import_not_topological",
+                    ),
+                )?;
+                if edge.child() as usize >= index {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_piece_language_import_not_topological",
+                    ));
+                }
+                self.edge_scratch
+                    .push(CanonicalPieceEdge::new(child, edge.piece_code()).ok_or(
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_piece_language_child_index_overflow",
+                        ),
+                    )?);
+            }
+            self.edge_scratch.sort_unstable();
+            self.edge_scratch.dedup();
+            let depth = self.remaining_depth(node.accepting)?;
+            if depth != node.remaining_depth {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_import_depth_mismatch",
+                ));
+            }
+            rebound.push(self.intern_node(node.accepting, depth)?);
+        }
+        let mut imported = Vec::new();
+        imported.try_reserve_exact(roots.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_piece_language_import_storage_unavailable")
+        })?;
+        for root in roots {
+            imported.push(*rebound.get(*root as usize).ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_observation_language_root_out_of_range"),
+            )?);
+        }
+        Ok(imported)
+    }
+
     pub fn canonicalize(&mut self, graph: &BuildOrderGraph) -> Result<u32, WasmExactSearchError> {
         self.ensure_buckets();
         if self.graph_classes.len() < graph.nodes.len() {

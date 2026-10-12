@@ -41,6 +41,7 @@ on:
       - "crates/clearra-cli-command/src/web_pc_scenario_input.rs"
       - "crates/clearra-cli-command/tests/pinned_pc.rs"
       - "crates/clearra-cli-command/tests/extended_pc_surfaces.rs"
+      - "crates/clearra-cli-command/tests/extended_pc_observation.rs"
       - "packages/clearra-ui/src/lib/workspace/solutionExport.ts"
       - "packages/clearra-ui/src/lib/workspace/productResultPager.ts"
       - "packages/clearra-ui/src/lib/wasm/wasmCommandClient.ts"
@@ -121,6 +122,9 @@ jobs:
       - name: Test typed twenty-four-line export refusal without truncating CTK3
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-output --no-default-features --lib full_height_document_keeps_ctk3_and_reports_fumens_real_limit -- --test-threads=1
+      - name: Preserve exact empty minimum selection without an invented canonical witness
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-host-contract --lib empty_portfolio_retains_canonical_policy -- --test-threads=1
       - name: Test the public App and CLI height-limit reasons
         if: ${{ !cancelled() }}
         run: |
@@ -174,7 +178,16 @@ jobs:
         run: cargo test --locked -p clearra-app --no-default-features --test extended_pc_tiling -- --test-threads=1
       - name: Verify full-height PC family with actual BuildUp and supply-language evaluation
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p clearra-core-executor --no-default-features --test extended_pc_family -- --test-threads=1
+        run: |
+          cargo test --locked -p clearra-core-executor --no-default-features --test extended_pc_family -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --test extended_pc_observation -- --test-threads=1
+      - name: Verify raw full-height worker transfers cannot create typed product authority
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p clearra-core-executor --no-default-features --lib pc_distributed::tests -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --lib extended_pc_tiling::distributed::tests -- --test-threads=1
+          cargo test --locked -p clearra-wasm --lib full_height_pc_and_tiling_use_raw_protocol -- --test-threads=1
+          cargo test --locked -p clearra-wasm --lib full_height_tiling_empty_finish_sentinel -- --test-threads=1
       - name: Verify canonical full-height CLI execution without a native-C or tablebase fallback
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --test extended_pc_tiling -- --test-threads=1
@@ -184,6 +197,9 @@ jobs:
       - name: Verify closed replay ingress retains B2B without score or tie overrides
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli-command --lib pc_path_ -- --test-threads=1
+      - name: Verify the same full-height VisibleSeven input and direct cooperative policy evidence
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-cli-command --test extended_pc_observation -- --test-threads=1
       - name: Verify score identities share one full-height dictionary and preserve compact rows
         if: ${{ !cancelled() }}
         run: |
@@ -205,9 +221,16 @@ jobs:
       - name: Verify full-height replay masks and the original compact page source without changing ordering
         if: ${{ !cancelled() }}
         run: |
+          cargo test --locked -p clearra-wasm --lib empty_minimum_projection_keeps_canonical_policy -- --test-threads=1
+          cargo test --locked -p clearra-wasm --lib pinned_minimum_projection_preserves_owned_keys -- --test-threads=1
           cargo test --locked -p clearra-wasm --lib full_height_replay_payload -- --test-threads=1
           cargo test --locked -p clearra-app --no-default-features --lib pc_replay_page_source -- --test-threads=1
           cargo test --locked -p clearra-app --no-default-features --lib pc_path_board_mask -- --test-threads=1
+      - name: Verify exact empty native minimum output instead of an unsupported presenter response
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --lib minimum_renderer_preserves_an_exact_empty_optimum -- --test-threads=1
+          cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --test canonical_witness_contract extended_pc_minimum_preserves_exact_empty_optimum -- --test-threads=1
       - name: Check changed App command validation and renderer owners without hiding global release lint
         if: ${{ !cancelled() }}
         run: cargo clippy --locked --no-deps -p clearra-app -p clearra-cli-command -p clearra-validation -p clearra-render --all-targets --no-default-features -- -D warnings
@@ -245,12 +268,21 @@ jobs:
         run: |
           cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_geometry::parallel::tests -- --test-threads=1
           cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_observation -- --test-threads=1
           cargo test --locked -p clearra-app --no-default-features --features parallel --test extended_pc_tiling -- --test-threads=1
           cargo clippy --locked -p clearra-replay -p clearra-postprocess -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings
           cargo clippy --locked --no-deps -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- -D warnings
       - name: Verify complete PC evidence memory is admitted before row and snapshot construction
         if: ${{ !cancelled() }}
         run: |
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib resource::aggregate_execution_budget::tests -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib restricting_a_realm_cap_preserves_the_exact_parent_lease -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_bounded_geometry_ -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_build_order_preallocation_refusal_keeps_private_vectors_unchanged -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_build_order_debit_shares_one_request_without_allocating_a_graph -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib geometry_family::tests -- --test-threads=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_coverage_preflight -- --test-threads=1
+          cargo test --locked -p clearra-core-domain --lib typed_execution_exhaustion_preserves_started_but_not_complete -- --test-threads=1
           cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib pc_family_evidence_admits_snapshot_row_slots_and_owned_bitsets_before_construction -- --test-threads=1
           cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib build_pc_resource_projection_field_inventory_is_exhaustive -- --test-threads=1
       - name: Verify immutable compact and extended page owners and bounded catalog admission
@@ -289,11 +321,12 @@ jobs:
         run: |
           pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json
           pnpm --filter @clearra/ui exec node --input-type=module -e "import { readFileSync } from 'node:fs'; import { parse } from 'svelte/compiler'; for (const path of ['src/lib/workspace/SolverWorkspace.svelte','src/lib/workspace/WorkspaceBoardEditor.svelte']) parse(readFileSync(path, 'utf8'), { filename: path, modern: true });"
-          node scripts/tools/run-typescript-contracts.mjs packages/clearra-ui/test/extendedSolutionKey.contract.ts packages/clearra-ui/test/solutionExport.contract.ts packages/clearra-ui/test/productResultPager.contract.ts
+          node scripts/tools/run-typescript-contracts.mjs packages/clearra-ui/test/extendedSolutionKey.contract.ts packages/clearra-ui/test/solutionExport.contract.ts packages/clearra-ui/test/productResultPager.contract.ts packages/clearra-ui/test/pcReplayPager.contract.ts
           node --test packages/clearra-ui/test/workspaceCommandSerialization.test.mjs
+          node --test packages/clearra-ui/test/mandatorySolutionFullHeight.test.mjs
       - name: Check Discord CTK3 projection against the same wire cases
         if: ${{ !cancelled() }}
-        run: node --test apps/clearra-discord-bot/test/extended-solution-key.test.mjs apps/clearra-discord-bot/test/ctk3-result.test.mjs apps/clearra-discord-bot/test/slash-command-input.test.mjs apps/clearra-discord-bot/test/field-modal.test.mjs
+        run: node --test apps/clearra-discord-bot/test/extended-solution-key.test.mjs apps/clearra-discord-bot/test/ctk3-result.test.mjs apps/clearra-discord-bot/test/slash-command-input.test.mjs apps/clearra-discord-bot/test/field-modal.test.mjs apps/clearra-discord-bot/test/typed-product-result.test.mjs
       - name: Verify the same full-height GUI and Discord replay frames and GIF bytes at 500ms
         if: ${{ !cancelled() }}
         run: node --test apps/clearra-discord-bot/test/pc-path-replay.test.mjs packages/clearra-ui/test/pcPathReplayRenderParity.test.mjs

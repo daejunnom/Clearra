@@ -19,6 +19,8 @@ use clearra_core_executor::{
     WasmCandidatePacket, WasmCandidateProducerAdvance, WasmCpuCandidateProducer,
     WasmCpuSearchBackend, WasmCpuSearchError, WasmDistributedGeometrySummary,
     WasmDistributedProgress, WasmDistributedResultMerger, WasmDistributedVerifier,
+    WasmFullHeightPcProducer, WasmFullHeightPcResultMerger, WasmFullHeightPcVerifier,
+    WasmFullHeightTilingProducer, WasmFullHeightTilingResultMerger, WasmFullHeightTilingWorker,
     WasmPcRootProducer, WasmPcRootResultMerger, WasmProductSearchBackend,
     WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
     WasmTilingRootAdvance, WasmTilingRootProducer, WasmTilingRootResultMerger,
@@ -1243,6 +1245,8 @@ impl WasmDistributedCompletionSession {
 #[allow(clippy::large_enum_variant)]
 enum DistributedCandidateProducer {
     Cpu(WasmCpuCandidateProducer),
+    FullHeightPc(WasmFullHeightPcProducer),
+    FullHeightTiling(WasmFullHeightTilingProducer),
     PcRoots(WasmPcRootProducer),
     Tiling(WasmTilingRootProducer),
     BuildProbability(WasmBuildProbabilityCandidateProducer),
@@ -1268,6 +1272,8 @@ pub struct WasmDistributedVerifierRuntime {
 #[allow(clippy::large_enum_variant)]
 enum DistributedVerifier {
     Pc(WasmDistributedVerifier),
+    FullHeightPc(WasmFullHeightPcVerifier),
+    FullHeightTiling(WasmFullHeightTilingWorker),
     PcRoots(WasmTilingRootWorker),
     Tiling(WasmTilingRootWorker),
     BuildProbability(WasmBuildProbabilityDistributedVerifier),
@@ -1281,6 +1287,8 @@ enum DistributedVerifier {
 #[allow(clippy::large_enum_variant)]
 enum DistributedResultMerger {
     Pc(WasmDistributedResultMerger),
+    FullHeightPc(WasmFullHeightPcResultMerger),
+    FullHeightTiling(WasmFullHeightTilingResultMerger),
     PcRoots(WasmPcRootResultMerger),
     Tiling(WasmTilingRootResultMerger),
     BuildProbability(WasmBuildProbabilityDistributedResultMerger),
@@ -1478,9 +1486,13 @@ impl WasmDistributedCoordinator {
             DistributedSearchPreparation::Search(prepared) => prepared,
         };
         let problem = prepared.problem();
+        let full_height_pc = WasmFullHeightPcProducer::supports(problem);
+        let full_height_tiling = WasmFullHeightTilingProducer::supports(problem);
         if problem
             .queue_observation_policy()
             .requires_observation_policy()
+            && !full_height_pc
+            && !full_height_tiling
         {
             return Ok(WasmDistributedPreparation::Serial);
         }
@@ -1506,13 +1518,20 @@ impl WasmDistributedCoordinator {
             .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
         let typed_pc_tiling_requires_coordinator =
             worker_count >= 2 && pc_tiling_terminal_resource_authority.is_some();
-        if worker_count < 2 || (!distributed_worthwhile && !typed_pc_tiling_requires_coordinator) {
+        if worker_count < 2
+            || (!distributed_worthwhile
+                && !typed_pc_tiling_requires_coordinator
+                && !full_height_pc
+                && !full_height_tiling)
+        {
             return Ok(WasmDistributedPreparation::Serial);
         }
         let requested_backend = problem.backend_policy().requested_backend();
         let distributed_requested_backend = requested_backend.into();
         let explicit_gpu = requested_backend == RequestedSearchBackend::Gpu;
         let webgpu_connected = build_probability_request.is_none()
+            && !full_height_pc
+            && !full_height_tiling
             && problem.backend_policy().runtime_webgpu_available()
             && cfg!(feature = "webgpu-search");
         if explicit_gpu && !webgpu_connected && !problem.backend_policy().allow_backend_fallback() {
@@ -1520,6 +1539,8 @@ impl WasmDistributedCoordinator {
         }
         let unavailable_gpu = (explicit_gpu && !webgpu_connected).then(|| {
             if build_probability_request.is_some()
+                || full_height_pc
+                || full_height_tiling
                 || problem.backend_policy().runtime_webgpu_available()
             {
                 (
@@ -1580,6 +1601,48 @@ impl WasmDistributedCoordinator {
                 };
             (
                 DistributedCandidateProducer::BuildProbability(producer),
+                WasmDistributedMode::CpuMulti,
+                worker_count,
+            )
+        } else if full_height_tiling {
+            let producer = match pc_tiling_terminal_resource_authority {
+                Some((authority, external)) => {
+                    WasmFullHeightTilingProducer::new_shared_under_authority(
+                        prepared.problem_arc(),
+                        worker_count,
+                        external,
+                        authority,
+                    )
+                }
+                None => {
+                    return Err(distributed_error(
+                        "E_WASM_DISTRIBUTED_START",
+                        "extended_tiling_distributed_terminal_authority_missing",
+                    ))
+                }
+            }
+            .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_START", error))?;
+            (
+                DistributedCandidateProducer::FullHeightTiling(producer),
+                WasmDistributedMode::CpuMulti,
+                worker_count,
+            )
+        } else if full_height_pc {
+            let score_authority = prepared
+                .pc_score_terminal_resource_authority()
+                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
+            let producer = match score_authority {
+                Some((authority, external)) => WasmFullHeightPcProducer::new_under_authority(
+                    problem,
+                    worker_count,
+                    external,
+                    authority,
+                ),
+                None => WasmFullHeightPcProducer::new_shared(prepared.problem_arc(), worker_count),
+            }
+            .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_START", error))?;
+            (
+                DistributedCandidateProducer::FullHeightPc(producer),
                 WasmDistributedMode::CpuMulti,
                 worker_count,
             )
@@ -1741,6 +1804,36 @@ impl WasmDistributedCoordinator {
         runtime: &WasmCommandRuntime,
         command_text: &str,
     ) -> Result<WasmDistributedVerifierRuntime, WasmCommandRuntimeError> {
+        if let Some(DistributedCandidateProducer::FullHeightTiling(producer)) =
+            self.producer.as_ref()
+        {
+            let verifier = producer.new_delegated_worker().map_err(|error| {
+                distributed_search_error("E_WASM_DISTRIBUTED_VERIFIER_START", error)
+            })?;
+            return Ok(WasmDistributedVerifierRuntime {
+                verifier: DistributedVerifier::FullHeightTiling(verifier),
+                postprocessor: *runtime.app_context().services().core_executor(),
+                build_solution_probability_policy: None,
+                pending_candidates: Vec::new(),
+                pending_candidate_cursor: 0,
+                pending_external_retained_bytes: 0,
+                control: self.control.clone(),
+            });
+        }
+        if let Some(DistributedCandidateProducer::FullHeightPc(producer)) = self.producer.as_ref() {
+            let verifier = producer.new_delegated_verifier().map_err(|error| {
+                distributed_search_error("E_WASM_DISTRIBUTED_VERIFIER_START", error)
+            })?;
+            return Ok(WasmDistributedVerifierRuntime {
+                verifier: DistributedVerifier::FullHeightPc(verifier),
+                postprocessor: *runtime.app_context().services().core_executor(),
+                build_solution_probability_policy: None,
+                pending_candidates: Vec::new(),
+                pending_candidate_cursor: 0,
+                pending_external_retained_bytes: 0,
+                control: self.control.clone(),
+            });
+        }
         if let (
             Some(DistributedCandidateProducer::BuildProbability(producer)),
             Some(DistributedPreparedSearch::Core(prepared)),
@@ -1855,14 +1948,22 @@ impl WasmDistributedCoordinator {
     }
 
     pub fn tiling_geometry_parallel(&self) -> bool {
-        matches!(self.producer, Some(DistributedCandidateProducer::Tiling(_)))
+        matches!(
+            self.producer,
+            Some(
+                DistributedCandidateProducer::Tiling(_)
+                    | DistributedCandidateProducer::FullHeightTiling(_)
+            )
+        )
     }
 
     pub fn root_task_parallel(&self) -> bool {
         matches!(
             self.producer,
             Some(
-                DistributedCandidateProducer::PcRoots(_) | DistributedCandidateProducer::Tiling(_)
+                DistributedCandidateProducer::PcRoots(_)
+                    | DistributedCandidateProducer::Tiling(_)
+                    | DistributedCandidateProducer::FullHeightTiling(_)
             )
         )
     }
@@ -2030,8 +2131,13 @@ impl WasmDistributedCoordinator {
                 }
             };
         }
-        let tiling_root_tasks =
-            matches!(self.producer, Some(DistributedCandidateProducer::Tiling(_)));
+        let tiling_root_tasks = matches!(
+            self.producer,
+            Some(
+                DistributedCandidateProducer::Tiling(_)
+                    | DistributedCandidateProducer::FullHeightTiling(_)
+            )
+        );
         let producer = self.producer.as_mut().ok_or_else(|| {
             distributed_error(
                 "E_WASM_DISTRIBUTED_STATE",
@@ -2046,6 +2152,8 @@ impl WasmDistributedCoordinator {
         };
         reserve_candidate_batch_storage(producer, &mut candidates, batch_capacity)?;
         let (pc_geometry, target_preparation_pending) = match &*producer {
+            DistributedCandidateProducer::FullHeightPc(_)
+            | DistributedCandidateProducer::FullHeightTiling(_) => (true, false),
             DistributedCandidateProducer::Cpu(producer) => {
                 (true, producer.target_preparation_pending())
             }
@@ -2072,12 +2180,9 @@ impl WasmDistributedCoordinator {
             {
                 break;
             }
-            let external_candidate_bytes = if let DistributedCandidateProducer::BuildProbability(
-                build_producer,
-            ) = &*producer
-            {
+            let external_candidate_bytes = if producer.guards_candidate_memory() {
                 checked_candidate_vec_retained_bytes(&candidates)
-                    .ok_or_else(|| build_candidate_memory_projection_error(build_producer))
+                    .ok_or_else(|| candidate_memory_projection_error(producer))
                     .map_err(|error| {
                         distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error)
                     })?
@@ -2179,6 +2284,82 @@ impl WasmDistributedCoordinator {
                         self.summary = Some(summary);
                         return Ok(WasmDistributedProducerAdvance::Completed);
                     }
+                    if matches!(&*producer, DistributedCandidateProducer::FullHeightPc(_)) {
+                        let external = checked_build_candidate_transition_retained_bytes(
+                            &candidates,
+                            encoded.as_ref(),
+                        )
+                        .ok_or_else(|| {
+                            distributed_error(
+                                "E_WASM_DISTRIBUTED_CANDIDATE_MEMORY",
+                                "extended_pc_distributed_memory_projection_overflow",
+                            )
+                        })?;
+                        let Some(DistributedCandidateProducer::FullHeightPc(producer)) =
+                            self.producer.take()
+                        else {
+                            return Err(distributed_error(
+                                "E_WASM_DISTRIBUTED_STATE",
+                                "full-height PC producer disappeared before completion",
+                            ));
+                        };
+                        let merger = producer
+                            .into_merger_with_external_retained(external)
+                            .map_err(|reason| {
+                                distributed_error("E_WASM_DISTRIBUTED_MERGER", reason)
+                            })?;
+                        merger
+                            .validate_external_result_memory(external, 0)
+                            .map_err(|error| {
+                                distributed_search_error("E_WASM_DISTRIBUTED_MERGER", error)
+                            })?;
+                        drop(candidates);
+                        self.merger = Some(DistributedResultMerger::FullHeightPc(merger));
+                        // The final batch must be delegated before publishing the
+                        // producer-complete transition and beginning worker drain.
+                        if let Some(encoded) = encoded {
+                            self.pending_build_completion_summary = Some(summary);
+                            return Ok(WasmDistributedProducerAdvance::Batch(encoded));
+                        }
+                        self.summary = Some(summary);
+                        return Ok(WasmDistributedProducerAdvance::Completed);
+                    }
+                    if matches!(
+                        &*producer,
+                        DistributedCandidateProducer::FullHeightTiling(_)
+                    ) {
+                        let external = checked_build_candidate_transition_retained_bytes(
+                            &candidates,
+                            encoded.as_ref(),
+                        )
+                        .ok_or_else(|| {
+                            distributed_error(
+                                "E_WASM_DISTRIBUTED_CANDIDATE_MEMORY",
+                                "extended_tiling_distributed_memory_projection_unavailable",
+                            )
+                        })?;
+                        let Some(DistributedCandidateProducer::FullHeightTiling(producer)) =
+                            self.producer.take()
+                        else {
+                            return Err(distributed_error(
+                                "E_WASM_DISTRIBUTED_STATE",
+                                "full-height Tiling producer disappeared before completion",
+                            ));
+                        };
+                        let merger = producer
+                            .into_merger_with_external_retained(external)
+                            .map_err(|reason| {
+                                distributed_error("E_WASM_DISTRIBUTED_MERGER", reason)
+                            })?;
+                        drop(candidates);
+                        self.merger = Some(DistributedResultMerger::FullHeightTiling(merger));
+                        if let Some(encoded) = encoded {
+                            self.pending_build_completion_summary = Some(summary);
+                            return Ok(WasmDistributedProducerAdvance::Batch(encoded));
+                        }
+                        self.summary = Some(summary);
+                        return Ok(WasmDistributedProducerAdvance::Completed);
+                    }
                     let producer = self.producer.take().ok_or_else(|| {
                         distributed_error(
                             "E_WASM_DISTRIBUTED_STATE",
@@ -2224,6 +2405,36 @@ impl WasmDistributedCoordinator {
         input: &[u8],
         external_retained_bytes: u128,
     ) -> Result<(), WasmCommandRuntimeError> {
+        // A geometry-only worker transfers every finite raw chunk before its
+        // terminal call. Its empty finish sentinel is not a family proof and
+        // must never mark an interval complete or enter the payload parser.
+        if input.is_empty() {
+            if let Some(DistributedCandidateProducer::FullHeightTiling(producer)) =
+                self.producer.as_ref()
+            {
+                return producer
+                    .validate_external_result_memory(external_retained_bytes)
+                    .map_err(|error| {
+                        distributed_search_error("E_WASM_DISTRIBUTED_TILING24_MERGE", error)
+                    });
+            }
+            if let Some(DistributedResultMerger::FullHeightTiling(merger)) = self.merger.as_ref() {
+                return merger
+                    .validate_external_result_memory(external_retained_bytes, 0)
+                    .map_err(|error| {
+                        distributed_search_error("E_WASM_DISTRIBUTED_TILING24_MERGE", error)
+                    });
+            }
+        }
+        if let Some(DistributedCandidateProducer::FullHeightTiling(producer)) =
+            self.producer.as_mut()
+        {
+            return producer
+                .absorb_raw(input, external_retained_bytes)
+                .map_err(|error| {
+                    distributed_search_error("E_WASM_DISTRIBUTED_TILING24_MERGE", error)
+                });
+        }
         if is_tiling_root_chunk(input) {
             let chunk = decode_tiling_root_chunk(input).map_err(|error| {
                 distributed_error("E_WASM_DISTRIBUTED_TILING_PARTIAL_INVALID", error.reason())
@@ -2271,6 +2482,18 @@ impl WasmDistributedCoordinator {
         let merger = self.merger.as_mut().ok_or_else(|| {
             distributed_error("E_WASM_DISTRIBUTED_STATE", "result merger is not ready")
         })?;
+        if let DistributedResultMerger::FullHeightPc(merger) = merger {
+            return merger
+                .absorb_raw(input, external_retained_bytes)
+                .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_PC24_MERGE", error));
+        }
+        if let DistributedResultMerger::FullHeightTiling(merger) = merger {
+            return merger
+                .absorb_raw(input, external_retained_bytes)
+                .map_err(|error| {
+                    distributed_search_error("E_WASM_DISTRIBUTED_TILING24_MERGE", error)
+                });
+        }
         if let DistributedResultMerger::BuildProbability(merger) = merger {
             absorb_build_probability_partial_batch_with_external_retained(
                 input,
@@ -2555,7 +2778,28 @@ impl WasmDistributedCoordinator {
             distributed_error("E_WASM_DISTRIBUTED_STATE", "result merger is not ready")
         })?;
         let pc_score = prepared.is_pc_score();
+        let pc_failed_queue = prepared
+            .problem()
+            .pc_chance_evidence_policy()
+            .pc_failed_queue_example_limit()
+            .is_some();
         let response = match merger {
+            DistributedResultMerger::FullHeightPc(mut merger) if pc_failed_queue => {
+                let result = merger
+                    .finish(&summary, workers_used, control)
+                    .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))?;
+                merger
+                    .validate_public_result_memory_with_future(&result, 0)
+                    .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_FINISH", reason))?;
+                let evidence = merger.take_failed_queue_evidence().ok_or_else(|| {
+                    distributed_error(
+                        "E_WASM_DISTRIBUTED_FINISH",
+                        "extended_pc_failed_queue_source_evidence_missing",
+                    )
+                })?;
+                drop(merger);
+                prepared.complete_failed_queue(result, evidence, control)
+            }
             DistributedResultMerger::BuildProbability(merger) => {
                 stage_build_probability_completion(
                     merger,
@@ -2890,16 +3134,16 @@ fn reserve_candidate_batch_storage(
     candidates: &mut Vec<WasmCandidatePacket>,
     batch_capacity: usize,
 ) -> Result<(), WasmCommandRuntimeError> {
-    let DistributedCandidateProducer::BuildProbability(producer) = producer else {
+    if !producer.guards_candidate_memory() {
         candidates.reserve(batch_capacity);
         return Ok(());
-    };
+    }
     let requested_outer_bytes = (batch_capacity as u128)
         .checked_mul(core::mem::size_of::<WasmCandidatePacket>() as u128)
-        .ok_or_else(|| build_candidate_memory_projection_error(producer))
+        .ok_or_else(|| candidate_memory_projection_error(producer))
         .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error))?;
     producer
-        .validate_external_result_memory(requested_outer_bytes)
+        .validate_candidate_external_memory(requested_outer_bytes)
         .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error))?;
     candidates.try_reserve_exact(batch_capacity).map_err(|_| {
         distributed_error(
@@ -2908,10 +3152,10 @@ fn reserve_candidate_batch_storage(
         )
     })?;
     let actual_outer_bytes = checked_candidate_vec_retained_bytes(candidates)
-        .ok_or_else(|| build_candidate_memory_projection_error(producer))
+        .ok_or_else(|| candidate_memory_projection_error(producer))
         .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error))?;
     producer
-        .validate_external_result_memory(actual_outer_bytes)
+        .validate_candidate_external_memory(actual_outer_bytes)
         .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error))
 }
 
@@ -2920,15 +3164,15 @@ fn validate_candidate_before_push(
     candidates: &Vec<WasmCandidatePacket>,
     candidate: &WasmCandidatePacket,
 ) -> Result<(), WasmCommandRuntimeError> {
-    let DistributedCandidateProducer::BuildProbability(producer) = producer else {
+    if !producer.guards_candidate_memory() {
         return Ok(());
-    };
+    }
     let external_bytes = checked_candidate_vec_retained_bytes(candidates)
         .and_then(|bytes| bytes.checked_add(candidate.checked_nested_retained_bytes()?))
-        .ok_or_else(|| build_candidate_memory_projection_error(producer))
+        .ok_or_else(|| candidate_memory_projection_error(producer))
         .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error))?;
     producer
-        .validate_external_result_memory(external_bytes)
+        .validate_candidate_external_memory(external_bytes)
         .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error))
 }
 
@@ -2936,14 +3180,14 @@ fn validate_candidate_batch_actual(
     producer: &DistributedCandidateProducer,
     candidates: &Vec<WasmCandidatePacket>,
 ) -> Result<(), WasmCommandRuntimeError> {
-    let DistributedCandidateProducer::BuildProbability(producer) = producer else {
+    if !producer.guards_candidate_memory() {
         return Ok(());
-    };
+    }
     let external_bytes = checked_candidate_vec_retained_bytes(candidates)
-        .ok_or_else(|| build_candidate_memory_projection_error(producer))
+        .ok_or_else(|| candidate_memory_projection_error(producer))
         .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error))?;
     producer
-        .validate_external_result_memory(external_bytes)
+        .validate_candidate_external_memory(external_bytes)
         .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error))
 }
 
@@ -2951,17 +3195,17 @@ fn encode_candidate_batch_for_producer(
     producer: &DistributedCandidateProducer,
     candidates: &Vec<WasmCandidatePacket>,
 ) -> Result<Vec<u8>, WasmCommandRuntimeError> {
-    let DistributedCandidateProducer::BuildProbability(producer) = producer else {
+    if !producer.guards_candidate_memory() {
         return Ok(encode_candidate_batch(candidates));
-    };
+    }
     let candidate_bytes = checked_candidate_vec_retained_bytes(candidates)
-        .ok_or_else(|| build_candidate_memory_projection_error(producer))
+        .ok_or_else(|| candidate_memory_projection_error(producer))
         .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_ENCODE", error))?;
     encode_candidate_batch_with_memory_guard(candidates, |wire_bytes| {
         let external_bytes = candidate_bytes
             .checked_add(wire_bytes)
-            .ok_or_else(|| build_candidate_memory_projection_error(producer))?;
-        producer.validate_external_result_memory(external_bytes)
+            .ok_or_else(|| candidate_memory_projection_error(producer))?;
+        producer.validate_candidate_external_memory(external_bytes)
     })
     .map_err(|error| match error {
         GuardedDistributedWireError::Wire(error) => {
@@ -3000,6 +3244,14 @@ fn build_candidate_memory_projection_error(
         .expect_err("overflow-sized build candidate storage is unavailable")
 }
 
+fn candidate_memory_projection_error(
+    producer: &DistributedCandidateProducer,
+) -> WasmCpuSearchError {
+    producer
+        .validate_candidate_external_memory(u128::MAX)
+        .expect_err("overflow-sized distributed candidate storage is unavailable")
+}
+
 impl From<RequestedSearchBackend> for WasmDistributedRequestedBackend {
     fn from(value: RequestedSearchBackend) -> Self {
         match value {
@@ -3012,9 +3264,29 @@ impl From<RequestedSearchBackend> for WasmDistributedRequestedBackend {
 }
 
 impl DistributedCandidateProducer {
+    fn guards_candidate_memory(&self) -> bool {
+        matches!(
+            self,
+            Self::BuildProbability(_) | Self::FullHeightPc(_) | Self::FullHeightTiling(_)
+        )
+    }
+
+    fn validate_candidate_external_memory(&self, external: u128) -> Result<(), WasmCpuSearchError> {
+        match self {
+            Self::BuildProbability(producer) => producer.validate_external_result_memory(external),
+            Self::FullHeightPc(producer) => producer.validate_external_result_memory(external),
+            Self::FullHeightTiling(producer) => producer.validate_external_result_memory(external),
+            _ => Ok(()),
+        }
+    }
+
     fn known_parallel_session_capacity(&self) -> Option<usize> {
         let (candidate_family_count, coordinator_computes) = match self {
             Self::Cpu(producer) => (producer.progress().candidate_family_count, true),
+            // Preserve the requested full-height pool. A completed small family
+            // may leave a real slot idle, but must not rewrite its admission.
+            Self::FullHeightPc(_) => (None, true),
+            Self::FullHeightTiling(_) => (None, false),
             Self::PcRoots(producer) => (Some(producer.root_count() as u128), false),
             Self::Tiling(producer) => (Some(producer.root_count() as u128), false),
             Self::BuildProbability(producer) => (producer.progress().candidate_family_count, true),
@@ -3038,7 +3310,10 @@ impl DistributedCandidateProducer {
     fn verification_required(&self) -> bool {
         match self {
             Self::Cpu(producer) => producer.verification_required(),
-            Self::PcRoots(_) | Self::Tiling(_) => true,
+            Self::PcRoots(_)
+            | Self::Tiling(_)
+            | Self::FullHeightPc(_)
+            | Self::FullHeightTiling(_) => true,
             Self::BuildProbability(_) | Self::Forward(_) | Self::Setup(_) | Self::Recovery(_) => {
                 true
             }
@@ -3054,6 +3329,12 @@ impl DistributedCandidateProducer {
     ) -> Result<WasmCandidateProducerAdvance, WasmCpuSearchError> {
         match self {
             Self::Cpu(producer) => producer.advance(control).map_err(invalid_search_error),
+            Self::FullHeightPc(producer) => {
+                producer.advance_with_external_retained(control, external_retained_bytes)
+            }
+            Self::FullHeightTiling(producer) => {
+                producer.advance_with_external_retained(control, external_retained_bytes)
+            }
             Self::PcRoots(producer) => producer.advance(control).map_err(invalid_search_error),
             Self::Tiling(producer) => producer.advance(control).map_err(invalid_search_error),
             Self::BuildProbability(producer) => {
@@ -3078,6 +3359,14 @@ impl DistributedCandidateProducer {
             Self::Cpu(producer) => producer
                 .into_merger()
                 .map(DistributedResultMerger::Pc)
+                .map_err(invalid_search_error),
+            Self::FullHeightPc(producer) => producer
+                .into_merger()
+                .map(DistributedResultMerger::FullHeightPc)
+                .map_err(invalid_search_error),
+            Self::FullHeightTiling(producer) => producer
+                .into_merger()
+                .map(DistributedResultMerger::FullHeightTiling)
                 .map_err(invalid_search_error),
             Self::PcRoots(producer) => producer
                 .into_merger()
@@ -3106,6 +3395,8 @@ impl DistributedCandidateProducer {
     fn progress(&self) -> WasmDistributedProgress {
         match self {
             Self::Cpu(producer) => producer.progress(),
+            Self::FullHeightPc(producer) => producer.progress(),
+            Self::FullHeightTiling(producer) => producer.progress(),
             Self::PcRoots(producer) => producer.progress(),
             Self::Tiling(producer) => producer.progress(),
             Self::BuildProbability(producer) => producer.progress(),
@@ -3151,6 +3442,10 @@ impl DistributedVerifier {
     fn finish(&mut self) -> Result<Vec<clearra_core_executor::CoreExecutionResult>, &'static str> {
         match self {
             Self::Pc(verifier) => verifier.finish().map(|result| vec![result]),
+            Self::FullHeightPc(_) => Err("full_height_pc_worker_requires_raw_partial_finish"),
+            Self::FullHeightTiling(_) => {
+                Err("full_height_tiling_worker_requires_raw_partial_finish")
+            }
             Self::PcRoots(verifier) => verifier.finish_pc().map(|result| vec![result]),
             Self::Tiling(verifier) => {
                 if verifier.has_pending_work() {
@@ -3175,6 +3470,8 @@ impl DistributedVerifier {
     fn progress(&self) -> WasmDistributedProgress {
         match self {
             Self::Pc(verifier) => verifier.progress(),
+            Self::FullHeightPc(verifier) => verifier.progress(),
+            Self::FullHeightTiling(verifier) => verifier.progress(),
             Self::PcRoots(verifier) => verifier.progress(),
             Self::Tiling(verifier) => {
                 let progress = verifier.progress();
@@ -3209,6 +3506,8 @@ impl DistributedResultMerger {
             Self::Pc(merger) => merger.tiling_progress(),
             Self::PcRoots(merger) => merger.progress(),
             Self::Tiling(merger) => merger.progress(),
+            Self::FullHeightPc(merger) => Some(merger.progress()),
+            Self::FullHeightTiling(merger) => Some(merger.progress()),
             Self::BuildProbability(_) | Self::Forward(_) => None,
         }
     }
@@ -3219,6 +3518,8 @@ impl DistributedResultMerger {
     ) -> Result<(), &'static str> {
         match self {
             Self::Pc(merger) => merger.absorb(result),
+            Self::FullHeightPc(_) => Err("full_height_pc_merger_requires_raw_partial"),
+            Self::FullHeightTiling(_) => Err("full_height_tiling_merger_requires_raw_partial"),
             Self::PcRoots(merger) => merger.absorb(result),
             Self::Tiling(_) => Err("tiling_merger_requires_tiling_chunk"),
             Self::BuildProbability(merger) => merger.absorb(result),
@@ -3234,6 +3535,12 @@ impl DistributedResultMerger {
         match self {
             Self::Pc(merger) => merger
                 .validate_external_result_memory(external_retained_bytes, checked_future_bytes),
+            Self::FullHeightPc(merger) => merger
+                .validate_external_result_memory(external_retained_bytes, checked_future_bytes)
+                .map_err(|error| error.reason()),
+            Self::FullHeightTiling(merger) => merger
+                .validate_external_result_memory(external_retained_bytes, checked_future_bytes)
+                .map_err(|error| error.reason()),
             Self::PcRoots(merger) => merger
                 .validate_external_result_memory(external_retained_bytes, checked_future_bytes),
             Self::Tiling(_) => Err("tiling_merger_requires_tiling_chunk"),
@@ -3250,6 +3557,8 @@ impl DistributedResultMerger {
     ) -> Result<(), &'static str> {
         match self {
             Self::Pc(merger) => merger.absorb_tiling_chunk(chunk),
+            Self::FullHeightPc(_) => Err("full_height_pc_merger_requires_raw_partial"),
+            Self::FullHeightTiling(_) => Err("full_height_tiling_merger_requires_raw_partial"),
             Self::PcRoots(merger) => merger.absorb_root_chunk(chunk),
             Self::Tiling(merger) => merger.absorb(chunk),
             Self::BuildProbability(_) => Err("tiling_chunk_requires_pc_result_merger"),
@@ -3264,6 +3573,12 @@ impl DistributedResultMerger {
     ) -> Result<(), &'static str> {
         match self {
             Self::Pc(merger) => {
+                merger.validate_public_result_memory_with_future(result, checked_future_bytes)
+            }
+            Self::FullHeightPc(merger) => {
+                merger.validate_public_result_memory_with_future(result, checked_future_bytes)
+            }
+            Self::FullHeightTiling(merger) => {
                 merger.validate_public_result_memory_with_future(result, checked_future_bytes)
             }
             Self::PcRoots(merger) => {
@@ -3283,6 +3598,8 @@ impl DistributedResultMerger {
     ) -> Result<clearra_core_executor::CoreExecutionResult, &'static str> {
         match self {
             Self::Pc(merger) => merger.finish(summary, workers_used),
+            Self::FullHeightPc(merger) => merger.finish(summary, workers_used, control),
+            Self::FullHeightTiling(merger) => merger.finish(summary, workers_used, control),
             Self::PcRoots(merger) => merger.finish(summary, workers_used),
             Self::Tiling(merger) => merger.finish(summary, workers_used),
             Self::BuildProbability(merger) => {
@@ -3310,7 +3627,8 @@ impl WasmDistributedVerifierRuntime {
     ) -> Result<Self, WasmCommandRuntimeError> {
         let prepared = runtime.prepare_command_text(command_text)?;
         let (request, _) = prepared.into_parts();
-        let request = if score_product_worker_count(&request).is_some() {
+        let score_workers = score_product_worker_count(&request);
+        let request = if score_workers.is_some() {
             runtime
                 .prepare_distributed_score_child_command_text(command_text)?
                 .into_parts()
@@ -3338,6 +3656,23 @@ impl WasmDistributedVerifierRuntime {
                         aggregation,
                     )
                     .map_err(|error| {
+                        distributed_search_error("E_WASM_DISTRIBUTED_VERIFIER_START", error)
+                    })?,
+                )
+            } else if WasmFullHeightTilingProducer::supports(prepared.problem()) {
+                let workers = prepared.problem().backend_policy().workers();
+                let problem = prepared.into_worker_problem();
+                DistributedVerifier::FullHeightTiling(
+                    WasmFullHeightTilingWorker::new(problem, workers).map_err(|error| {
+                        distributed_search_error("E_WASM_DISTRIBUTED_VERIFIER_START", error)
+                    })?,
+                )
+            } else if WasmFullHeightPcProducer::supports(prepared.problem()) {
+                let workers =
+                    score_workers.unwrap_or_else(|| prepared.problem().backend_policy().workers());
+                let problem = prepared.into_worker_problem();
+                DistributedVerifier::FullHeightPc(
+                    WasmFullHeightPcVerifier::new(&problem, workers).map_err(|error| {
                         distributed_search_error("E_WASM_DISTRIBUTED_VERIFIER_START", error)
                     })?,
                 )
@@ -3499,6 +3834,76 @@ impl WasmDistributedVerifierRuntime {
             })?;
             return advance_setup_worker(verifier, &self.control);
         }
+        if let DistributedVerifier::FullHeightTiling(verifier) = &mut self.verifier {
+            if external_retained_bytes < input.len() as u128 {
+                return Err(distributed_error(
+                    "E_WASM_DISTRIBUTED_CANDIDATE_MEMORY",
+                    "wasm_distributed_raw_retained_bytes_below_input_length",
+                ));
+            }
+            let candidates =
+                decode_build_probability_candidate_batch_with_memory_guard(input, |future| {
+                    verifier.validate_external_result_memory(external_retained_bytes, future)
+                })
+                .map_err(|error| match error {
+                    GuardedDistributedWireError::Wire(error) => {
+                        distributed_error("E_WASM_DISTRIBUTED_CANDIDATE_INVALID", error.reason())
+                    }
+                    GuardedDistributedWireError::MemoryGuard(error) => {
+                        distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error)
+                    }
+                })?;
+            let retained = checked_candidate_vec_retained_bytes(&candidates)
+                .and_then(|bytes| bytes.checked_add(external_retained_bytes))
+                .ok_or_else(|| {
+                    distributed_error(
+                        "E_WASM_DISTRIBUTED_CANDIDATE_MEMORY",
+                        "extended_tiling_distributed_memory_projection_unavailable",
+                    )
+                })?;
+            verifier
+                .validate_external_result_memory(retained, 0)
+                .map_err(|error| {
+                    distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error)
+                })?;
+            self.begin_pending_candidates(candidates, retained);
+            return self.advance_pending_candidate();
+        }
+        if let DistributedVerifier::FullHeightPc(verifier) = &mut self.verifier {
+            if external_retained_bytes < input.len() as u128 {
+                return Err(distributed_error(
+                    "E_WASM_DISTRIBUTED_CANDIDATE_MEMORY",
+                    "wasm_distributed_raw_retained_bytes_below_input_length",
+                ));
+            }
+            let candidates =
+                decode_build_probability_candidate_batch_with_memory_guard(input, |future| {
+                    verifier.validate_external_result_memory(external_retained_bytes, future)
+                })
+                .map_err(|error| match error {
+                    GuardedDistributedWireError::Wire(error) => {
+                        distributed_error("E_WASM_DISTRIBUTED_CANDIDATE_INVALID", error.reason())
+                    }
+                    GuardedDistributedWireError::MemoryGuard(error) => {
+                        distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error)
+                    }
+                })?;
+            let retained = checked_candidate_vec_retained_bytes(&candidates)
+                .and_then(|bytes| bytes.checked_add(external_retained_bytes))
+                .ok_or_else(|| {
+                    distributed_error(
+                        "E_WASM_DISTRIBUTED_CANDIDATE_MEMORY",
+                        "extended_pc_distributed_memory_projection_overflow",
+                    )
+                })?;
+            verifier
+                .validate_external_result_memory(retained, 0)
+                .map_err(|error| {
+                    distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error)
+                })?;
+            self.begin_pending_candidates(candidates, retained);
+            return self.advance_pending_candidate();
+        }
         if let DistributedVerifier::BuildProbability(verifier) = &mut self.verifier {
             if external_retained_bytes < input.len() as u128 {
                 return Err(distributed_error(
@@ -3570,7 +3975,16 @@ impl WasmDistributedVerifierRuntime {
         &mut self,
     ) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
         if !self.has_pending_candidates() {
-            self.pending_candidates.clear();
+            if matches!(
+                self.verifier,
+                DistributedVerifier::FullHeightPc(_) | DistributedVerifier::FullHeightTiling(_)
+            ) {
+                // Raw finish accounts retained engine and transfer storage, not
+                // a stale drained batch's allocator capacity.
+                self.pending_candidates = Vec::new();
+            } else {
+                self.pending_candidates.clear();
+            }
             self.pending_candidate_cursor = 0;
             self.pending_external_retained_bytes = 0;
             return Ok(WasmDistributedVerifierConsume {
@@ -3581,6 +3995,8 @@ impl WasmDistributedVerifierRuntime {
         }
 
         let candidate = &self.pending_candidates[self.pending_candidate_cursor];
+        let mut partial = None;
+        let mut candidate_count = 1;
         match &mut self.verifier {
             DistributedVerifier::Pc(verifier) => {
                 if verifier.preparation_pending() {
@@ -3609,6 +4025,33 @@ impl WasmDistributedVerifierRuntime {
                     self.pending_external_retained_bytes,
                 )
                 .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_VERIFY", error))?,
+            DistributedVerifier::FullHeightPc(verifier) => verifier
+                .consume_with_external_retained(
+                    candidate,
+                    &self.control,
+                    self.pending_external_retained_bytes,
+                )
+                .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_VERIFY", error))?,
+            DistributedVerifier::FullHeightTiling(verifier) => {
+                let (chunk, completed, generated) = verifier
+                    .advance_root_with_external_retained(
+                        candidate,
+                        &self.control,
+                        self.pending_external_retained_bytes,
+                    )
+                    .map_err(|error| {
+                        distributed_search_error("E_WASM_DISTRIBUTED_VERIFY", error)
+                    })?;
+                if !completed {
+                    return Ok(WasmDistributedVerifierConsume {
+                        candidate_count: generated,
+                        partial: chunk,
+                        has_pending_work: true,
+                    });
+                }
+                partial = chunk;
+                candidate_count = generated;
+            }
             DistributedVerifier::PcRoots(_)
             | DistributedVerifier::Tiling(_)
             | DistributedVerifier::Forward(_)
@@ -3623,13 +4066,20 @@ impl WasmDistributedVerifierRuntime {
         self.pending_candidate_cursor += 1;
         let has_pending_work = self.has_pending_candidates();
         if !has_pending_work {
-            self.pending_candidates.clear();
+            if matches!(
+                self.verifier,
+                DistributedVerifier::FullHeightPc(_) | DistributedVerifier::FullHeightTiling(_)
+            ) {
+                self.pending_candidates = Vec::new();
+            } else {
+                self.pending_candidates.clear();
+            }
             self.pending_candidate_cursor = 0;
             self.pending_external_retained_bytes = 0;
         }
         Ok(WasmDistributedVerifierConsume {
-            candidate_count: 1,
-            partial: None,
+            candidate_count,
+            partial,
             has_pending_work,
         })
     }
@@ -3690,6 +4140,18 @@ impl WasmDistributedVerifierRuntime {
                 "E_WASM_DISTRIBUTED_STATE",
                 "distributed verifier cannot finish with pending candidates",
             ));
+        }
+        if let DistributedVerifier::FullHeightPc(verifier) = &mut self.verifier {
+            // No generic Core/score/PC proof is materialized by a worker. The
+            // complete PC owner validates this closed raw family transfer.
+            return verifier.finish_raw().map_err(|error| {
+                distributed_search_error("E_WASM_DISTRIBUTED_VERIFY_FINISH", error)
+            });
+        }
+        if let DistributedVerifier::FullHeightTiling(verifier) = &mut self.verifier {
+            return verifier.finish_raw().map_err(|error| {
+                distributed_search_error("E_WASM_DISTRIBUTED_VERIFY_FINISH", error)
+            });
         }
         if matches!(self.verifier, DistributedVerifier::Tiling(_)) {
             self.verifier
@@ -4980,6 +5442,178 @@ mod build_probability_partial_ingress_tests {
             verifier.verifier,
             DistributedVerifier::BuildProbability(_)
         ));
+    }
+
+    #[test]
+    fn full_height_pc_and_tiling_use_raw_protocol_and_original_terminal_family() {
+        let runtime = WasmCommandRuntime::default().with_host_capabilities(
+            crate::WasmHostCapabilities::new(4, false, false).with_product_retention_budget(
+                clearra_app::ProductRetentionBudget::new(64 * 1024 * 1024),
+            ),
+        );
+        let input: Vec<_> =
+            include_str!("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv")
+                .lines()
+                .find(|line| line.starts_with("forced-8L\t"))
+                .unwrap()
+                .split('\t')
+                .collect();
+        let workers = admitted_workers_for_host(2, 4);
+        if workers < 2 {
+            return;
+        }
+        for product in ["", "tiling"] {
+            let command = format!(
+                "clearra pc {product} --lines {} --height {} --board-mask 0x{} \
+                --pieces {} --queue {} --no-hold --rule srs-plus --no-tablebase \
+                --no-build-dependency-dag --backend cpu --workers {workers}",
+                input[1], input[1], input[2], input[3], input[4]
+            );
+            let reference = runtime
+                .run_command_text(&command.replace(&format!("--workers {workers}"), "--workers 1"))
+                .unwrap();
+            assert_eq!(
+                reference.app_response().status(),
+                clearra_app::AppStatus::Success
+            );
+            let mut coordinator =
+                match WasmDistributedCoordinator::prepare(&runtime, &command).unwrap() {
+                    WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
+                    _ => panic!("actual four-word source must not silently use a scalar runtime"),
+                };
+            let tiling = product == "tiling";
+            assert_eq!(coordinator.root_task_parallel(), tiling);
+            assert_eq!(coordinator.tiling_geometry_parallel(), tiling);
+            assert_eq!(coordinator.worker_count(), workers);
+            assert!(coordinator.verification_required());
+            let mut verifier = coordinator
+                .prepare_in_process_verifier(&runtime, &command)
+                .unwrap();
+            let mut generated = 0;
+            let mut raw_chunks = 0;
+            loop {
+                match coordinator.advance_producer(64, 16).unwrap() {
+                    WasmDistributedProducerAdvance::Pending
+                    | WasmDistributedProducerAdvance::Initialization(_) => {}
+                    WasmDistributedProducerAdvance::Batch(batch) => {
+                        let mut consumed = verifier
+                            .consume_with_external_retained(&batch, batch.capacity() as u128)
+                            .unwrap();
+                        loop {
+                            generated += consumed.candidate_count;
+                            if let Some(chunk) = consumed.partial.take() {
+                                assert!(
+                                    tiling,
+                                    "PC evidence is emitted only once the raw verifier finishes"
+                                );
+                                assert_eq!(&chunk[..8], b"CTL24C01");
+                                coordinator
+                                    .absorb_partial_with_external_retained(
+                                        &chunk,
+                                        chunk.capacity() as u128,
+                                    )
+                                    .unwrap();
+                                raw_chunks += 1;
+                            }
+                            if !consumed.has_pending_work {
+                                break;
+                            }
+                            consumed = verifier.continue_work().unwrap();
+                        }
+                    }
+                    WasmDistributedProducerAdvance::Completed => break,
+                    WasmDistributedProducerAdvance::Cancelled => panic!("unexpected cancellation"),
+                }
+            }
+            assert!(generated > 0, "the verifier must perform concrete work");
+            let last = verifier.finish().unwrap();
+            if tiling {
+                assert!(last.is_empty());
+                assert!(raw_chunks > 0);
+                let progress = coordinator.progress();
+                coordinator
+                    .absorb_partial_with_external_retained(&last, last.capacity() as u128)
+                    .unwrap();
+                assert_eq!(
+                    coordinator.progress().candidates,
+                    progress.candidates,
+                    "an empty worker sentinel never creates candidate authority"
+                );
+            } else {
+                assert_eq!(&last[..8], b"CPC24P01");
+                coordinator
+                    .absorb_partial_with_external_retained(&last, last.capacity() as u128)
+                    .unwrap();
+            }
+            drop(verifier); // return the one native fixture compute child before App finalization
+            let result = coordinator.finish(workers).unwrap();
+            assert_eq!(
+                result.app_response().status(),
+                clearra_app::AppStatus::Success
+            );
+            let expected = reference.search_report().unwrap();
+            let actual = result.search_report().unwrap();
+            assert_eq!(
+                actual.normalized_solution_keys,
+                expected.normalized_solution_keys
+            );
+            assert_eq!(
+                actual.normalized_solution_set_hash,
+                expected.normalized_solution_set_hash
+            );
+            for field in ["unique_solution_count", "count_complete", "board_height"] {
+                let value = |report: &crate::WasmSearchReport| {
+                    report
+                        .summary_fields
+                        .iter()
+                        .find(|(key, _)| key == field)
+                        .map(|(_, value)| value.clone())
+                };
+                assert_eq!(value(actual), value(expected), "{product}/{field}");
+            }
+        }
+    }
+
+    #[test]
+    fn full_height_tiling_empty_finish_sentinel_cannot_complete_missing_roots() {
+        let workers = admitted_workers_for_host(2, 4);
+        if workers < 2 {
+            return;
+        }
+        let runtime = WasmCommandRuntime::default()
+            .with_host_capabilities(crate::WasmHostCapabilities::new(4, false, false));
+        let input: Vec<_> =
+            include_str!("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv")
+                .lines()
+                .find(|line| line.starts_with("forced-8L\t"))
+                .unwrap()
+                .split('\t')
+                .collect();
+        let command = format!(
+            "clearra pc tiling --lines 8 --height 8 --board-mask 0x{} \
+            --pieces {} --queue {} --no-hold --backend cpu --workers {workers}",
+            input[2], input[3], input[4]
+        );
+        let mut coordinator = match WasmDistributedCoordinator::prepare(&runtime, &command).unwrap()
+        {
+            WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
+            _ => panic!("full-height typed Tiling must retain its coordinator"),
+        };
+        coordinator.absorb_partial(&[]).unwrap();
+        loop {
+            match coordinator.advance_producer(64, 16).unwrap() {
+                WasmDistributedProducerAdvance::Completed => break,
+                WasmDistributedProducerAdvance::Pending
+                | WasmDistributedProducerAdvance::Initialization(_)
+                | WasmDistributedProducerAdvance::Batch(_) => {}
+                WasmDistributedProducerAdvance::Cancelled => panic!("unexpected cancellation"),
+            }
+        }
+        coordinator.absorb_partial(&[]).unwrap();
+        assert_eq!(
+            coordinator.finish(workers).unwrap_err().code(),
+            "E_WASM_DISTRIBUTED_FINISH"
+        );
     }
 
     #[test]

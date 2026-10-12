@@ -1950,7 +1950,22 @@ fn try_host_product_result_payload(
                 )?,
                 members,
                 true,
-            );
+            )
+            .with_pinned_candidate_keys(try_owned_vec(
+                set.pinned_candidate_ids(),
+                ledger,
+                |candidate_id, ledger| {
+                    let index = candidate_id
+                        .checked_sub(1)
+                        .and_then(|index| usize::try_from(index).ok())
+                        .ok_or_else(finite_projection_error)?;
+                    let candidate = set
+                        .candidates()
+                        .get(index)
+                        .ok_or_else(finite_projection_error)?;
+                    try_owned_string(candidate.normalized_key(), ledger)
+                },
+            )?);
             let page_payload = match canonical_candidate {
                 Some((canonical_candidate_id, canonical_solution_key)) => page_payload
                     .with_canonical_witness(
@@ -1960,7 +1975,10 @@ fn try_host_product_result_payload(
                             try_owned_string(canonical_solution_key, ledger)?,
                         ),
                     ),
-                None => page_payload,
+                None => page_payload.with_canonical_selection(try_owned_string(
+                    report.canonical_selection(),
+                    ledger,
+                )?),
             };
             Ok(Some(ProductResultPayload::new(
                 try_owned_string(product.contract().as_str(), ledger)?,
@@ -2253,10 +2271,26 @@ fn try_clone_public_product_result_payload(
                         try_owned_string(witness.normalized_solution_key(), ledger)?,
                     ),
                 ),
+                (Some(selection), None)
+                    if selection == clearra_app::PC_MINIMUM_COVER_CANONICAL_SELECTION
+                        && matches!(source.contract(), "pc.minimals" | "pc.pinned-minimals")
+                        && payload.optimal_cardinality() == "0"
+                        && payload.members().is_empty()
+                        && payload.alternative_index() == "1"
+                        && payload.known_alternative_count() == "1"
+                        && payload.total_alternative_count() == Some("1")
+                        && payload.enumeration_complete()
+                        && payload.member_page_number() == "1"
+                        && payload.total_member_pages() == "1" =>
+                {
+                    cloned.with_canonical_selection(try_owned_string(selection, ledger)?)
+                }
                 (None, None) => cloned,
                 _ => return Err(finite_projection_error()),
             };
-            ProductResultPayloadContent::CoveragePortfolio(cloned)
+            ProductResultPayloadContent::CoveragePortfolio(cloned.with_pinned_candidate_keys(
+                try_owned_string_vec(payload.pinned_candidate_keys(), ledger)?,
+            ))
         }
         ProductResultPayloadContent::BuildV2(payload) => ProductResultPayloadContent::BuildV2(
             try_clone_build_v2_product_payload(payload, ledger)?,
@@ -5599,6 +5633,105 @@ mod finite_memory_tests {
                 .code(),
             WASM_FINITE_MEMORY_LIMIT
         );
+    }
+
+    #[test]
+    fn pinned_minimum_projection_preserves_owned_keys_through_the_finite_ledger() {
+        let member = ProductCandidateMemberPayload::new("1", "source-bound-pinned-key");
+        let payload = CoveragePortfolioPagePayload::new(
+            "coverage-portfolio-alternatives.v1",
+            "coverage-portfolio-page.v1",
+            PORTFOLIO_MEMBER_PAGE_CONTRACT,
+            "a".repeat(64),
+            "b".repeat(64),
+            "1",
+            "1",
+            "1",
+            Some("1".to_owned()),
+            true,
+            "1",
+            "1",
+            vec![member.clone()],
+            true,
+        )
+        .with_pinned_candidate_keys(vec![member.normalized_solution_key().to_owned()])
+        .with_canonical_witness(clearra_app::PC_MINIMUM_COVER_CANONICAL_SELECTION, member);
+        let source = ProductResultPayload::new(
+            "pc.pinned-minimals",
+            "pc-pinned-minimum-cover.v1",
+            ProductResultPayloadContent::CoveragePortfolio(payload),
+        );
+        let mut ledger = WasmFiniteMemoryLedger::new(
+            0,
+            16 * 1024 * 1024,
+            WasmFiniteConversionRoute::PublicDirect,
+        )
+        .unwrap();
+        let projected = try_clone_public_product_result_payload(&source, &mut ledger).unwrap();
+        assert_eq!(
+            projected, source,
+            "transport must not erase producer-selected required keys"
+        );
+    }
+
+    #[test]
+    fn empty_minimum_projection_keeps_canonical_policy_and_rejects_a_missing_nonempty_witness() {
+        let empty = || {
+            CoveragePortfolioPagePayload::new(
+                "coverage-portfolio-alternatives.v1",
+                "coverage-portfolio-page.v1",
+                PORTFOLIO_MEMBER_PAGE_CONTRACT,
+                "a".repeat(64),
+                "b".repeat(64),
+                "1",
+                "0",
+                "1",
+                Some("1".to_owned()),
+                true,
+                "1",
+                "1",
+                Vec::new(),
+                true,
+            )
+            .with_canonical_selection(clearra_app::PC_MINIMUM_COVER_CANONICAL_SELECTION)
+        };
+        let source = ProductResultPayload::new(
+            "pc.minimals",
+            "pc-minimum-cover.v2",
+            ProductResultPayloadContent::CoveragePortfolio(empty()),
+        );
+        let mut ledger = WasmFiniteMemoryLedger::new(
+            0,
+            16 * 1024 * 1024,
+            WasmFiniteConversionRoute::PublicDirect,
+        )
+        .unwrap();
+        let projected = try_clone_public_product_result_payload(&source, &mut ledger).unwrap();
+        assert_eq!(projected, source);
+        let malformed = ProductResultPayload::new(
+            "pc.minimals",
+            "pc-minimum-cover.v2",
+            ProductResultPayloadContent::CoveragePortfolio(
+                CoveragePortfolioPagePayload::new(
+                    "set",
+                    "page",
+                    PORTFOLIO_MEMBER_PAGE_CONTRACT,
+                    "a".repeat(64),
+                    "b".repeat(64),
+                    "1",
+                    "1",
+                    "1",
+                    Some("1".to_owned()),
+                    true,
+                    "1",
+                    "1",
+                    vec![ProductCandidateMemberPayload::new("1", "key")],
+                    true,
+                )
+                .with_canonical_selection(clearra_app::PC_MINIMUM_COVER_CANONICAL_SELECTION),
+            ),
+        );
+        assert!(try_clone_public_product_result_payload(&malformed, &mut ledger).is_err());
     }
 
     #[test]

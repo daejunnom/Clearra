@@ -390,6 +390,81 @@ impl CoverageProductEvaluator {
                 .sum::<usize>()
             + self.coverage_words.capacity() * core::mem::size_of::<u64>()
             + self.path_counts.capacity() * core::mem::size_of::<u128>()
+            + self.depth_queues.capacity() * core::mem::size_of::<Vec<usize>>()
+    }
+
+    /// Allocation-time upper bound for extended request admission. In
+    /// particular CountAll owns 64 path counters per graph/hold state; counting
+    /// only the final coverage words would miss this private worker surface.
+    pub(super) fn checked_evaluation_future_bytes(
+        &self,
+        graph: &BuildOrderGraph,
+        local_words: usize,
+        global_patterns: usize,
+        count_paths: bool,
+    ) -> Option<u128> {
+        let states = graph
+            .nodes
+            .len()
+            .checked_mul(EXTRA_DRAW_STATE_COUNT)?
+            .checked_mul(HOLD_STATE_COUNT)?;
+        let depths = graph.max_depth().checked_add(1)?;
+        let mut bytes = 0_u128;
+        // A grow may coexist with the old allocation during relocation. The
+        // old owner is already charged, so reserve the whole new buffer here.
+        for (needed, capacity, item) in [
+            (
+                states,
+                self.product_masks.capacity(),
+                core::mem::size_of::<u64>(),
+            ),
+            (
+                states,
+                self.product_stamps.capacity(),
+                core::mem::size_of::<u32>(),
+            ),
+            (
+                depths,
+                self.depth_queues.capacity(),
+                2 * core::mem::size_of::<Vec<usize>>(),
+            ),
+            (
+                local_words,
+                self.coverage_words.capacity(),
+                2 * core::mem::size_of::<u64>(),
+            ),
+        ] {
+            if needed > capacity {
+                bytes = bytes.checked_add((needed as u128).checked_mul(item as u128)?)?;
+            }
+        }
+        // Generation tags activate each state once. Queue capacities grow
+        // geometrically and tiny per-depth queues have a minimum capacity.
+        bytes = bytes.checked_add(
+            (states as u128)
+                .checked_add((depths as u128).checked_mul(4)?)?
+                .checked_mul(2 * core::mem::size_of::<usize>() as u128)?,
+        )?;
+        if count_paths {
+            let counters = states.checked_mul(PATTERNS_PER_WORD)?;
+            if counters > self.path_counts.capacity() {
+                bytes = bytes.checked_add(
+                    (counters as u128).checked_mul(core::mem::size_of::<u128>() as u128)?,
+                )?;
+            }
+        }
+        // expand_coverage_words constructs global IDs, then a sparse or dense
+        // bitset while those IDs can still be alive.
+        bytes
+            .checked_add(
+                (local_words as u128)
+                    .checked_mul(PATTERNS_PER_WORD as u128)?
+                    .checked_mul(2 * core::mem::size_of::<u32>() as u128)?,
+            )?
+            .checked_add(
+                (global_patterns.div_ceil(PATTERNS_PER_WORD) as u128)
+                    .checked_mul(2 * core::mem::size_of::<u64>() as u128)?,
+            )
     }
 
     pub fn local_coverage_words(&self) -> &[u64] {
@@ -596,5 +671,78 @@ const fn piece_from_code(code: u8) -> Option<PieceKind> {
         6 => Some(PieceKind::J),
         7 => Some(PieceKind::L),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::super::buildup::BuildOrderNodeSpec;
+    use super::*;
+    use crate::resource::ExecutionMemoryBound;
+    use clearra_core_domain::piece::rotation::RotationState;
+
+    fn graph() -> BuildOrderGraph {
+        BuildOrderGraph::from_topological_parts(
+            vec![
+                BuildOrderNodeSpec {
+                    edge_start: 0,
+                    edge_count: 1,
+                    depth: 0,
+                    accepting: false,
+                },
+                BuildOrderNodeSpec {
+                    edge_start: 1,
+                    edge_count: 0,
+                    depth: 1,
+                    accepting: true,
+                },
+            ],
+            vec![BuildOrderGraph::edge(
+                1,
+                0,
+                PieceKind::I,
+                RotationState::Zero,
+                0,
+                0,
+                0,
+            )],
+            0,
+            0,
+            true,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn extended_coverage_preflight_includes_all_countall_counters_before_growth() {
+        let evaluator = CoverageProductEvaluator::default();
+        let graph = graph();
+        let boolean = evaluator
+            .checked_evaluation_future_bytes(&graph, 1, 1, false)
+            .unwrap();
+        let countall = evaluator
+            .checked_evaluation_future_bytes(&graph, 1, 1, true)
+            .unwrap();
+        assert_eq!(
+            countall - boolean,
+            (graph.nodes.len()
+                * HOLD_STATE_COUNT
+                * EXTRA_DRAW_STATE_COUNT
+                * PATTERNS_PER_WORD
+                * core::mem::size_of::<u128>()) as u128
+        );
+        assert_eq!(evaluator.retained_bytes(), 0);
+    }
+
+    #[test]
+    fn extended_coverage_preflight_refuses_before_private_storage_is_created() {
+        let evaluator = CoverageProductEvaluator::default();
+        let future = evaluator
+            .checked_evaluation_future_bytes(&graph(), 1, 1, true)
+            .unwrap();
+        assert!(ExecutionMemoryBound::for_test_cap(1)
+            .ensure(0, future)
+            .is_err());
+        assert_eq!(evaluator.retained_bytes(), 0);
     }
 }

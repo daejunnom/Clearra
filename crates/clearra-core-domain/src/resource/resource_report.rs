@@ -54,6 +54,15 @@ impl ResourceReport {
         }
     }
 
+    /// Records a typed resource stop after useful execution has already begun.
+    /// This must not claim admission failed or promote an exhausted run to a
+    /// complete zero-result proof.
+    pub const fn execution_incomplete(execution_availability: ExecutionAvailability) -> Self {
+        let mut report = Self::admission_failure(execution_availability);
+        report.execution_started = true;
+        report
+    }
+
     pub const fn execution_started(&self) -> bool {
         self.execution_started
     }
@@ -153,6 +162,25 @@ mod tests {
         assert_eq!(
             report.execution_availability(),
             ExecutionAvailability::not_executed()
+        );
+    }
+
+    #[test]
+    fn typed_execution_exhaustion_preserves_started_but_not_complete() {
+        use super::super::{ExecutionAvailabilityReason, ExecutionAvailabilityState};
+        let report = ResourceReport::execution_incomplete(ExecutionAvailability::exhausted(
+            ExecutionAvailabilityReason::ComputeBudgetExceeded,
+        ));
+        assert!(report.execution_started());
+        assert!(!report.result_complete());
+        assert!(!report.probability_complete);
+        assert_eq!(
+            report.execution_availability().state(),
+            ExecutionAvailabilityState::Exhausted
+        );
+        assert_eq!(
+            report.execution_availability().reason(),
+            Some(ExecutionAvailabilityReason::ComputeBudgetExceeded)
         );
     }
 }

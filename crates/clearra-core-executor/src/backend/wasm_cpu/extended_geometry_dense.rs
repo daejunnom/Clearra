@@ -1,13 +1,19 @@
 use super::{
-    extended_geometry::GeometryTarget,
-    extended_geometry_component::{compile_dense_component_plan, ExtendedComponentPlanResult},
+    extended_geometry::{
+        checked_compiler_completion_future_bytes, memory_projection_error, GeometryTarget,
+    },
+    extended_geometry_component::{
+        checked_component_scratch_upper_bound, compile_dense_component_plan,
+        ExtendedComponentPlanResult,
+    },
     extended_geometry_domain::{
         feasible_piece_mask, ExtendedDomainResult, ExtendedDomainWorkspace,
     },
     extended_inverse_catalog::{DenseExtendedGeometryCatalog, ExtendedInverseCatalog},
     geometry_family::{GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID},
-    mix_digest, piece_index,
+    mix_digest, piece_index, WasmExactSearchError,
 };
+use crate::resource::{ExecutionMemoryBound, SharedExecutionNodeBudget};
 
 const NO_ROW: u32 = u32::MAX;
 const UNION_LEVEL_COUNT: usize = 32;
@@ -204,6 +210,7 @@ pub(super) enum DenseCompileAdvance {
     Pending,
     Complete,
     ResourceIncomplete,
+    NodeBudgetExceeded,
 }
 
 pub(super) struct DenseExtendedFamilyCompiler {
@@ -224,6 +231,7 @@ pub(super) struct DenseExtendedFamilyCompiler {
     column_pruned_states: usize,
     component_pruned_states: usize,
     component_compositions: usize,
+    allow_component_optimization: bool,
 }
 
 impl DenseExtendedFamilyCompiler {
@@ -250,13 +258,137 @@ impl DenseExtendedFamilyCompiler {
             column_pruned_states: 0,
             component_pruned_states: 0,
             component_compositions: 0,
+            allow_component_optimization: true,
         }
+    }
+
+    pub fn admit_advance(
+        &mut self,
+        catalog: &ExtendedInverseCatalog,
+        node_budget: Option<&SharedExecutionNodeBudget>,
+        bound: ExecutionMemoryBound,
+        coexisting_bytes: u128,
+    ) -> Result<u128, WasmExactSearchError> {
+        let observed = coexisting_bytes
+            .checked_add(self.retained_bytes() as u128)
+            .ok_or_else(memory_projection_error)?;
+        let mut future = 0_u128;
+        if self.stack.len() == self.stack.capacity() {
+            future = future
+                .checked_add(
+                    (self
+                        .stack
+                        .len()
+                        .checked_add(1)
+                        .ok_or_else(memory_projection_error)? as u128)
+                        .checked_mul(2 * core::mem::size_of::<DenseCompileFrame>() as u128)
+                        .ok_or_else(memory_projection_error)?,
+                )
+                .ok_or_else(memory_projection_error)?;
+        }
+        if !self.stack.is_empty()
+            && !self.residual_memo.insertion_disabled
+            && self
+                .residual_memo
+                .chunks
+                .last()
+                .is_none_or(|chunk| chunk.entries.len() == MEMO_ENTRY_CHUNK_CAPACITY)
+        {
+            future = future
+                .checked_add(
+                    (MEMO_ENTRY_CHUNK_CAPACITY as u128)
+                        * (core::mem::size_of::<DenseResidualEntry>() + core::mem::size_of::<u32>())
+                            as u128,
+                )
+                .ok_or_else(memory_projection_error)?;
+            future = future
+                .checked_add(
+                    (self
+                        .residual_memo
+                        .chunks
+                        .len()
+                        .checked_add(1)
+                        .ok_or_else(memory_projection_error)? as u128)
+                        .checked_mul(2 * core::mem::size_of::<DenseResidualChunk>() as u128)
+                        .ok_or_else(memory_projection_error)?,
+                )
+                .ok_or_else(memory_projection_error)?;
+        }
+        if let Some(top) = self.stack.last() {
+            let physical = catalog
+                .dense_geometry()
+                .and_then(|dense| dense.decode(top.remaining))
+                .ok_or_else(memory_projection_error)?;
+            let maximum_support = physical
+                .cells()
+                .map(|cell| catalog.support(cell).len())
+                .max()
+                .unwrap_or(0);
+            let requested = self
+                .support_scratch
+                .len()
+                .checked_add(maximum_support)
+                .ok_or_else(memory_projection_error)?;
+            if requested > self.support_scratch.capacity() {
+                future = future
+                    .checked_add(
+                        (requested as u128)
+                            .checked_mul(2 * core::mem::size_of::<u32>() as u128)
+                            .ok_or_else(memory_projection_error)?,
+                    )
+                    .ok_or_else(memory_projection_error)?;
+            }
+            if !top.entered {
+                future = future
+                    .checked_add(
+                        self.domain_workspace
+                            .checked_compile_future_bytes(
+                                catalog,
+                                physical,
+                                self.used_counts,
+                                &self.target_counts,
+                            )
+                            .ok_or_else(memory_projection_error)?,
+                    )
+                    .ok_or_else(memory_projection_error)?;
+            }
+            let component_future = checked_component_scratch_upper_bound(
+                top.remaining.count_ones(),
+                feasible_piece_mask(&self.target_counts, self.used_counts),
+            );
+            self.allow_component_optimization = !top.entered
+                && self.target_depth >= 7
+                && node_budget.is_none()
+                && component_future
+                    .and_then(|extra| future.checked_add(extra))
+                    .is_some_and(|extra| bound.ensure(observed, extra).is_ok());
+            if self.allow_component_optimization {
+                future = future
+                    .checked_add(component_future.ok_or_else(memory_projection_error)?)
+                    .ok_or_else(memory_projection_error)?;
+            }
+        }
+        bound
+            .ensure(observed, future)
+            .map_err(WasmExactSearchError::resource_admission)?;
+        let base = observed
+            .checked_sub(self.family.retained_bytes() as u128)
+            .and_then(|bytes| bytes.checked_add(future))
+            .ok_or_else(memory_projection_error)?;
+        self.family
+            .set_retained_limit_bytes(Some(bound.cap_bytes() - base));
+        Ok(base)
+    }
+
+    pub fn refused_family_bytes(&self) -> Option<u128> {
+        self.family.refused_retained_bytes()
     }
 
     pub fn advance(
         &mut self,
         catalog: &ExtendedInverseCatalog,
         dense_catalog: &DenseExtendedGeometryCatalog,
+        node_budget: Option<&SharedExecutionNodeBudget>,
     ) -> DenseCompileAdvance {
         if self.stack.is_empty() {
             return DenseCompileAdvance::Complete;
@@ -273,6 +405,9 @@ impl DenseExtendedFamilyCompiler {
                 return self.finish_top(catalog, family, false);
             }
 
+            if node_budget.is_some_and(|budget| !budget.try_consume()) {
+                return DenseCompileAdvance::NodeBudgetExceeded;
+            }
             self.expanded_nodes = self.expanded_nodes.saturating_add(1);
             self.peak_frontier = self.peak_frontier.max(self.stack.len());
             let depth = self.stack[top_index].depth;
@@ -292,7 +427,8 @@ impl DenseExtendedFamilyCompiler {
             }
 
             let feasible_mask = feasible_piece_mask(&self.target_counts, self.used_counts);
-            if self.target_depth >= 7 {
+            if self.target_depth >= 7 && node_budget.is_none() && self.allow_component_optimization
+            {
                 match compile_dense_component_plan(
                     catalog,
                     dense_catalog,
@@ -482,6 +618,10 @@ impl DenseExtendedFamilyCompiler {
 
     pub fn candidate_family_count(&self) -> Option<u128> {
         self.family.path_count(self.root_family)
+    }
+
+    pub fn checked_completion_future_bytes(&self) -> Option<u128> {
+        checked_compiler_completion_future_bytes(self.family.node_count(), self.targets.len())
     }
 
     pub const fn expanded_nodes(&self) -> usize {

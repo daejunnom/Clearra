@@ -11,8 +11,8 @@ pub(crate) mod pc4_candidate_product;
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_executor::{
-    CoreExecutionError, CoreExecutionResult, WasmCpuTerminalResourceAuthority,
-    WasmTilingRootProducer,
+    CoreExecutionError, CoreExecutionResult, PcFailedQueueEvidence,
+    WasmCpuTerminalResourceAuthority, WasmFullHeightTilingProducer, WasmTilingRootProducer,
 };
 use clearra_host_contract::{AppCommandKind, ResourceBudget};
 use clearra_problem::{
@@ -161,29 +161,29 @@ impl AppContext {
             );
         }
 
-        // Failed-queue uses a typed Percent authority not implemented by this
-        // distributed compiler. Reject the ingress before generic compilation
-        // can turn a missing product binding into an unrelated runtime error.
-        if product_capability_contract
+        // The full-height compiler preserves a request-owned failed-queue
+        // authority. Compact distributed failed-queue remains unconnected;
+        // keep its established ingress refusal rather than relabelling it.
+        let failed_queue_product = product_capability_contract
             .as_ref()
             .is_some_and(|contract| {
                 contract.contract() == crate::ProductCapabilityContract::PcFailedQueue
-            })
-        {
-            return DistributedSearchPreparation::Ready(self.finalize_response(
-                AppResponse::failed(
-                    AppStatus::ValidationFailed,
-                    AppError::new(
-                        AppErrorCode::InvalidInput,
-                        "distributed product capability result binding is unavailable",
-                    ),
-                ),
-                command_kind,
-                &output_policy,
-            ));
-        }
+            });
         let (problem, response_kind) = match compile_search_command(command) {
             Ok(compiled) => compiled,
+            Err(_) if failed_queue_product => {
+                return DistributedSearchPreparation::Ready(self.finalize_response(
+                    AppResponse::failed(
+                        AppStatus::ValidationFailed,
+                        AppError::new(
+                            AppErrorCode::InvalidInput,
+                            "distributed product capability result binding is unavailable",
+                        ),
+                    ),
+                    command_kind,
+                    &output_policy,
+                ));
+            }
             Err(response) => {
                 return DistributedSearchPreparation::Ready(
                     self.finalize_response_with_product_capability(
@@ -234,6 +234,94 @@ fn distributed_product_capability_matches_response_kind(
 }
 
 impl PreparedDistributedSearch {
+    /// A full-height failed-queue terminal must carry the producer's separate
+    /// complement proof. A complete chance result alone cannot authorize this
+    /// product, and no worker or presenter is permitted to manufacture it.
+    pub fn complete_failed_queue(
+        self,
+        result: CoreExecutionResult,
+        evidence: PcFailedQueueEvidence,
+        control: &ExecutionControl,
+    ) -> AppResponse {
+        if control.is_cancelled() {
+            return self.fail(CoreExecutionError::Cancelled);
+        }
+        // This compatibility completion has no allocation-governed App
+        // payload owner. Do not turn its single retained-memory check into
+        // authority for finite postprocessing, query cloning, and rendering.
+        if self.resource_budget.max_memory_mib().is_some() {
+            return self.fail(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_pc_failed_queue_finite_completion_unavailable",
+            });
+        }
+        if !(7..=24).contains(&self.problem.visible_height())
+            || !evidence.matches_problem_owner(&self.problem)
+            || !matches!(
+                &self.response_kind,
+                CooperativeSearchResponseKind::PcFailedQueue { .. }
+            )
+            || self
+                .product_capability_contract
+                .as_ref()
+                .is_none_or(|contract| {
+                    contract.contract() != crate::ProductCapabilityContract::PcFailedQueue
+                })
+        {
+            return self.fail(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_pc_failed_queue_authority_mismatch",
+            });
+        }
+        let retained = checked_distributed_terminal_external_retained_bytes(
+            &self.response_kind,
+            &self.output_policy,
+            &self.validation_report,
+        )
+        .and_then(|bytes| bytes.checked_add(self.context.checked_retained_capacity_bytes()?))
+        .and_then(|bytes| bytes.checked_add(evidence.memory_report().retained_producer_bytes()));
+        let Some(retained) = retained else {
+            return self.fail(CoreExecutionError::RuntimeUnavailable {
+                component: "distributed_pc_failed_queue_memory_projection_overflow",
+            });
+        };
+        let limit = match checked_request_memory_limit_bytes(self.resource_budget) {
+            Ok(limit) => limit,
+            Err(error) => return self.fail(error),
+        };
+        if let Err(error) = validate_request_terminal_memory(&result, retained, limit) {
+            return self.fail(error);
+        }
+        let CooperativeSearchResponseKind::PcFailedQueue { authority } = self.response_kind else {
+            unreachable!("failed-queue completion kind checked above");
+        };
+        let response = match self
+            .context
+            .services()
+            .core_executor()
+            .postprocess_pc_failed_queue_completion(result, evidence, control)
+        {
+            Ok((result, evidence)) => match authority.validate_and_decorate(result, evidence) {
+                Ok((result, evidence)) => AppResponse::success(AppRenderModel::Percent(result))
+                    .with_pc_failed_queue_execution_evidence(evidence),
+                Err(error) => AppResponse::failed(
+                    AppStatus::ExecutionFailed,
+                    AppError::new(AppErrorCode::ExecutionFailed, error.reason()),
+                ),
+            },
+            Err(error) => error.into_response(),
+        };
+        let response = if self.validation_report.is_empty() {
+            response
+        } else {
+            response.with_validation_diagnostics(self.validation_report)
+        };
+        self.context.finalize_response_with_product_capability(
+            response,
+            self.command_kind,
+            &self.output_policy,
+            self.product_capability_contract,
+        )
+    }
+
     pub fn requires_cooperative_product_completion(&self) -> bool {
         matches!(&self.response_kind, CooperativeSearchResponseKind::BuildCover { .. })
             || self.is_build_score_minimum()
@@ -361,9 +449,14 @@ impl PreparedDistributedSearch {
             | CooperativeSearchResponseKind::ScenarioTiling { authority, .. } => authority,
             _ => return Ok(None),
         };
-        let producer_retained_bytes =
+        let producer_retained_bytes = if WasmFullHeightTilingProducer::supports(&self.problem) {
+            WasmFullHeightTilingProducer::checked_shared_external_retained_upper_bound(
+                &self.problem,
+            )
+        } else {
             WasmTilingRootProducer::checked_shared_external_retained_upper_bound(&self.problem)
-                .ok_or("pc_tiling_distributed_producer_retained_projection_unavailable")?;
+        }
+        .ok_or("pc_tiling_distributed_producer_retained_projection_unavailable")?;
         let output_retained_bytes = self
             .output_policy
             .checked_retained_capacity_bytes()

@@ -224,7 +224,18 @@ fn terminal(bridge: &mut DesktopTauriCommandBridge, job: u64) -> Value {
             assert_eq!(event["job_id"], job);
             match event["event"].as_str().unwrap() {
                 "completed" | "failed" | "cancelled" => {
-                    bridge.ensure_no_running_job().unwrap();
+                    // The runner sends a terminal event immediately before
+                    // its owned OS thread returns. Receiving that event is
+                    // not itself authority to mutate the profile registry.
+                    // Drain the real thread under the existing fixture cap;
+                    // never manufacture a completed job or retry the request.
+                    while bridge.ensure_no_running_job().is_err() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "terminal Desktop worker did not drain"
+                        );
+                        thread::sleep(Duration::from_millis(1));
+                    }
                     return event;
                 }
                 "started" | "progress" | "diagnostic" => {}

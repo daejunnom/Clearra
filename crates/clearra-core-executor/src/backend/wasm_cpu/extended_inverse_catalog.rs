@@ -402,6 +402,10 @@ impl ExtendedInverseCatalog {
             .filter_map(move |realization| self.instantiate(realization, deleted_rows))
     }
 
+    pub(super) fn realization_count(&self, row_id: u32) -> usize {
+        self.skeleton(row_id).realization_count as usize
+    }
+
     pub const fn identity_digest(&self) -> u64 {
         self.identity_digest
     }

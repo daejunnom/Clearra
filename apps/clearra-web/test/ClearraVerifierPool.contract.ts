@@ -1102,6 +1102,23 @@ async function controlledFinishPool(owner: string) {
 }
 
 {
+  const { pool, workers } = await controlledFinishPool('closed-terminal-issuance');
+  const applied: number[] = [];
+  const finishing = pool.finish((partial) => applied.push(new Uint8Array(partial)[0]));
+  let issued = 0;
+  await assert.rejects(pool.enqueueFromSource(() => {
+    issued += 1;
+    return Uint8Array.of(9).buffer;
+  }, () => undefined), /issuance is closed/);
+  assert.equal(issued, 0, 'drain closes the core task factory before the in-flight snapshot');
+  await bounded('closed issuance finalizers running', Promise.all(workers.map((worker) => worker.finishStarted.promise)));
+  for (const worker of workers) worker.releaseFinish();
+  assert.equal(await bounded('closed issuance finalizers complete', finishing), 2);
+  assert.deepEqual(applied.slice().sort(), [1, 2]);
+  pool.cancel();
+}
+
+{
   const { pool, workers } = await controlledFinishPool('streaming-finish');
   const applied: number[] = [];
   const firstApplied = signal();
@@ -1206,6 +1223,84 @@ class ControlledConsumeVerifierWorker extends FakeVerifierWorker {
     this.pendingConsume = null;
     super.handleExecutable(message);
   }
+}
+
+class MultiPartialFinishWorker extends FakeVerifierWorker {
+  constructor() { super(false); }
+  protected override handleExecutable(message: WorkerMessage) {
+    if (message.type !== 'finish') { super.handleExecutable(message); return; }
+    for (const value of [1, 2]) {
+      this.emit({ type: 'partial', requestId: message.requestId, partial: Uint8Array.of(value).buffer });
+    }
+    this.emit({ type: 'finished', requestId: message.requestId, partial: Uint8Array.of(3).buffer });
+  }
+}
+
+{
+  const worker = new ControlledConsumeVerifierWorker();
+  const pool = new ClearraVerifierPool(() => worker as unknown as Worker);
+  await pool.initialize(new ArrayBuffer(0), 1, undefined, 'queued-issuer-terminal-fence');
+  const applied: number[] = [];
+  await pool.enqueue(Uint8Array.of(4).buffer, () => undefined);
+  await bounded('issued task enters verifier before drain', worker.consumeStarted.promise);
+  let issued = 0;
+  const queuedIssuer = pool.enqueueFromSource(() => {
+    issued += 1;
+    return Uint8Array.of(9).buffer;
+  }, () => undefined);
+  const issuerRejected = assert.rejects(queuedIssuer, /issuance is closed/);
+  const finishing = pool.finish((partial) => applied.push(new Uint8Array(partial)[0]));
+  await bounded('waiting issuer is rejected at the terminal source boundary', issuerRejected);
+  assert.equal(issued, 0, 'a queued factory never claims a core task after the drain snapshot');
+  worker.releaseConsume();
+  assert.equal(await bounded('already issued work drains before final completion', finishing), 1);
+  assert.deepEqual(applied, [4], 'the final receipt contains exactly the work issued before closure');
+  pool.cancel();
+}
+
+for (const cancelBetweenChunks of [false, true]) {
+  const pool = new ClearraVerifierPool(() => new MultiPartialFinishWorker() as unknown as Worker);
+  await pool.initialize(new ArrayBuffer(0), 1, undefined, `bounded-merger-${cancelBetweenChunks}`);
+  const applied: number[] = [];
+  let now = 0;
+  const monotonic = mock.method(performance, 'now', () => { now += 10; return now; });
+  try {
+    const finish = pool.finish((partial) => {
+      applied.push(new Uint8Array(partial)[0]);
+      if (cancelBetweenChunks && applied.length === 1) queueMicrotask(() => pool.cancel());
+    });
+    if (cancelBetweenChunks) {
+      await bounded('merger host yield observes cancellation', assert.rejects(finish, /cancelled/));
+      assert.deepEqual(applied, [1], 'cancelled ownership cannot apply another sealed chunk or terminal ACK');
+    } else {
+      assert.equal(await bounded('yielded merger completes', finish), 1);
+      assert.deepEqual(applied, [1, 2, 3], 'host yielding preserves exact sealed chunk order');
+    }
+  } finally {
+    monotonic.mock.restore();
+    pool.cancel();
+  }
+}
+
+{
+  const workers: ControlledConsumeVerifierWorker[] = [];
+  const pool = new ClearraVerifierPool(() => {
+    const worker = new ControlledConsumeVerifierWorker();
+    workers.push(worker);
+    return worker as unknown as Worker;
+  });
+  await pool.initialize(new ArrayBuffer(0), 2, undefined, 'foreground-prewarm-fence');
+  await pool.enqueue(Uint8Array.of(3).buffer, () => undefined);
+  await bounded('foreground consumes before warmup', workers[0].consumeStarted.promise);
+  await pool.prewarm(11, undefined, 'foreign-speculative-owner');
+  assert.equal(workers.length, 2, 'speculative warmup cannot resize the admitted foreground pool');
+  assert.equal(pool.progressSnapshot().workerCount, 2);
+  workers[0].releaseConsume();
+  await bounded('foreground remains drainable after warmup', pool.waitForIdle());
+  const applied: number[] = [];
+  assert.equal(await pool.finish((partial) => applied.push(new Uint8Array(partial)[0])), 2);
+  assert.deepEqual(applied.slice().sort(), [0, 3]);
+  pool.cancel();
 }
 
 for (const size of [1, 3, 11]) {

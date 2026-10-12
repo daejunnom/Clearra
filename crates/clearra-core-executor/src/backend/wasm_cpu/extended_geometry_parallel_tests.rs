@@ -80,6 +80,104 @@ fn rows(
 }
 
 #[test]
+fn extended_bounded_geometry_constructor_and_step_refuse_before_dag_or_memo_growth() {
+    let (problem, catalog, _) = fixture(24);
+    let universe = problem.piece_source().materialized_universe().unwrap();
+    let family = universe.packing_multiset_family_for_execution(
+        catalog.required_cells().count_ones() as usize / 4,
+        problem.initial_hold(),
+        false,
+        crate::backend::wasm_cpu::packing_hold_projection(&problem),
+    );
+    let bound = ExecutionMemoryBound::unbounded_for_problem(&problem).unwrap();
+    let tiny = bound.with_cap(1).unwrap();
+    assert!(matches!(
+        ExtendedGeometrySearch::new_bounded(universe, &family, &catalog, tiny, 0),
+        Err(WasmExactSearchError::ResourceAdmission(_))
+    ));
+    let mut geometry = ExtendedGeometrySearch::new(universe, &family, &catalog).unwrap();
+    let before = geometry.retained_bytes();
+    assert!(matches!(
+        geometry.advance_bounded(&catalog, None, tiny, 0),
+        Err(WasmExactSearchError::ResourceAdmission(_))
+    ));
+    assert_eq!(geometry.expanded_nodes(), 0);
+    assert_eq!(geometry.candidate_count(), 0);
+    assert_eq!(geometry.retained_bytes(), before);
+}
+
+#[test]
+fn extended_bounded_geometry_refuses_final_count_table_before_owner_transition() {
+    let (problem, catalog, mut geometry) = fixture(24);
+    let enumerator = geometry.enumerator.take().unwrap();
+    let root = enumerator.tasks[0].family;
+    let mut compiler =
+        ExtendedFamilyCompiler::new(catalog.required_cells(), enumerator.targets.to_vec());
+    compiler.stack.clear();
+    compiler.root_family = root;
+    compiler.family = Arc::try_unwrap(enumerator.family).unwrap();
+    let future = checked_compiler_completion_future_bytes(
+        compiler.family.node_count(),
+        compiler.targets.len(),
+    )
+    .unwrap();
+    geometry.compiler = Some(compiler);
+    geometry.candidate_family_count = None;
+    let before = geometry.retained_bytes();
+    let cap = (before as u128).checked_add(future).unwrap() - 1;
+    let bound = ExecutionMemoryBound::unbounded_for_problem(&problem)
+        .unwrap()
+        .with_cap(cap)
+        .unwrap();
+    assert!(matches!(
+        geometry.advance_bounded(&catalog, None, bound, 0),
+        Err(WasmExactSearchError::ResourceAdmission(_))
+    ));
+    assert!(geometry.compiler.is_some());
+    assert!(geometry.enumerator.is_none());
+    assert!(geometry.candidate_family_count.is_none());
+    assert_eq!(geometry.retained_bytes(), before);
+}
+
+#[test]
+fn extended_bounded_geometry_matches_the_exact_unbounded_family() {
+    let (problem, catalog, baseline) = fixture(24);
+    let expected = rows(baseline.enumerator.unwrap(), &catalog);
+    let universe = problem.piece_source().materialized_universe().unwrap();
+    let family = universe.packing_multiset_family_for_execution(
+        catalog.required_cells().count_ones() as usize / 4,
+        problem.initial_hold(),
+        false,
+        crate::backend::wasm_cpu::packing_hold_projection(&problem),
+    );
+    let bound = ExecutionMemoryBound::unbounded_for_problem(&problem)
+        .unwrap()
+        .with_cap(64 * 1024 * 1024)
+        .unwrap();
+    let mut geometry =
+        ExtendedGeometrySearch::new_bounded(universe, &family, &catalog, bound, 0).unwrap();
+    let mut actual = Vec::new();
+    let mut complete = false;
+    for _ in 0..100_000 {
+        match geometry.advance_bounded(&catalog, None, bound, 0).unwrap() {
+            ExtendedGeometryAdvance::Pending => {}
+            ExtendedGeometryAdvance::Candidate(candidate) => {
+                actual.push(candidate.row_ids().to_vec())
+            }
+            ExtendedGeometryAdvance::Complete => {
+                complete = true;
+                break;
+            }
+            ExtendedGeometryAdvance::ResourceIncomplete(reason) => {
+                panic!("bounded exact family incomplete: {reason}")
+            }
+        }
+    }
+    assert!(complete);
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn extended_parallel_real_family_preserves_disjoint_ordered_intervals_and_shared_owners() {
     for height in [7, 8, 12, 24] {
         for partitions in [1, 2, 11] {

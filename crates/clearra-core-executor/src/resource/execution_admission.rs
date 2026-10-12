@@ -172,6 +172,15 @@ pub(crate) struct ExecutionMemoryBound {
 }
 
 impl ExecutionMemoryBound {
+    #[cfg(test)]
+    pub(crate) const fn for_test_cap(cap_bytes: u128) -> Self {
+        Self {
+            descriptor_pattern_count: 1,
+            dense_pattern_count: 1,
+            required_dense_bytes: 8,
+            cap_bytes,
+        }
+    }
     // Internal authority APIs preserve the typed report; product-facing errors box it at the seam.
     #[allow(clippy::result_large_err)]
     pub(crate) fn unbounded_for_problem(problem: &SearchProblem) -> Result<Self, ResourceReport> {
@@ -257,6 +266,16 @@ impl ExecutionAdmission {
 
     pub(crate) const fn memory_cap_bytes(&self) -> u128 {
         self.memory_enforcement_cap_bytes
+    }
+
+    /// Shrinks this owner's logical allocation credit without creating,
+    /// resizing, or replacing its original authority lease. This is only an
+    /// allocation envelope for one distributed realm, not a new resource grant.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn restrict_memory_cap(mut self, cap_bytes: u128) -> Result<Self, ResourceReport> {
+        self.memory_bound().with_cap(cap_bytes)?;
+        self.memory_enforcement_cap_bytes = cap_bytes;
+        Ok(self)
     }
 
     pub(crate) const fn memory_bound(&self) -> ExecutionMemoryBound {
@@ -972,6 +991,50 @@ mod tests {
         drop(children);
         assert_eq!(authority.available().compute_units, 4);
         assert_eq!(authority.available().memory_bytes, 32);
+    }
+
+    #[test]
+    fn restricting_a_realm_cap_preserves_the_exact_parent_lease() {
+        let authority = clearra_core_domain::resource::SharedResourceLeaseAuthority::new(
+            clearra_core_domain::resource::ResourceLeaseCapacity::new(2, 64).unwrap(),
+        );
+        let lease = authority
+            .try_acquire(
+                clearra_core_domain::resource::ResourceLeaseOwnerId::new(900).unwrap(),
+                ResourceLeaseRequest::new(2, 64).unwrap(),
+            )
+            .unwrap();
+        let token = lease.token();
+        let parent = ExecutionAdmission {
+            dense_preflight: DensePatternPreflight {
+                descriptor_pattern_count: 64,
+                dense_pattern_count: 64,
+                dense_word_count: 1,
+                required_dense_bytes: 8,
+                availability: ExecutionAvailability::available().with_pattern_evidence(64, 64, 8),
+            },
+            projection: ExecutionMemoryProjection {
+                dense_bitset_bytes: 8,
+                dense_bitset_copies: 1,
+                per_pattern_bytes: 0,
+                fixed_bytes: 56,
+                required_memory_bytes: 64,
+            },
+            memory_enforcement_cap_bytes: 64,
+            lease,
+        };
+        let realm = parent.restrict_memory_cap(24).unwrap();
+        assert_eq!(realm.lease_token(), token);
+        assert_eq!(realm.memory_cap_bytes(), 24);
+        assert!(realm.ensure_memory_bound(16, 8).is_ok());
+        assert!(realm.ensure_memory_bound(16, 9).is_err());
+        assert_eq!(authority.available().compute_units, 0);
+        assert_eq!(authority.available().memory_bytes, 0);
+        assert!(realm.restrict_memory_cap(25).is_err());
+        // Rejecting an attempted enlargement drops only this consumed owner,
+        // returning its original grant rather than inventing a child lease.
+        assert_eq!(authority.available().compute_units, 2);
+        assert_eq!(authority.available().memory_bytes, 64);
     }
 
     #[test]

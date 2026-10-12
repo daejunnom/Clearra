@@ -901,6 +901,48 @@ pub(super) struct QueueObservationPolicyEvaluator {
 }
 
 impl QueueObservationPolicyEvaluator {
+    /// Conservative pre-allocation credit for a non-reusable policy solve.
+    /// The trie has at most one node per input prefix; a policy state is fixed
+    /// by one language node, trie node, cursor and one of the nine hold codes
+    /// (empty, seven pieces, terminal-held release). Hash tables compare full
+    /// keys and can only quotient that Cartesian product, never enlarge it.
+    /// Factors cover bucket growth with old/new tables coexisting, vector
+    /// capacity growth, future-class interning and DFS/reveal scratch. This
+    /// credit authorizes allocation, not a claim of observed peak usage.
+    pub fn checked_evaluation_peak_upper_bound(
+        pattern_count: usize,
+        sequence_len: usize,
+        language_node_count: u128,
+    ) -> Option<u128> {
+        let patterns = pattern_count as u128;
+        let cursors = (sequence_len as u128).checked_add(1)?;
+        let trie_nodes = patterns.checked_mul(sequence_len as u128)?.checked_add(1)?;
+        let states = language_node_count
+            .checked_mul(trie_nodes)?
+            .checked_mul(cursors)?
+            .checked_mul(9)?;
+        let memo_entry = (core::mem::size_of::<PolicyMemoState>()
+            + core::mem::size_of::<PolicyValue>()
+            + 32) as u128;
+        let memo_bytes = states.checked_mul(memo_entry)?.checked_mul(16)?;
+        let trie_entry = (core::mem::size_of::<ObservationTrieNode>()
+            + core::mem::size_of::<ObservationFutureSignature>()
+            + core::mem::size_of::<u32>() * 4
+            + 32) as u128;
+        let trie_bytes = trie_nodes.checked_mul(trie_entry)?.checked_mul(8)?;
+        let terminal_bytes = patterns
+            .checked_mul((core::mem::size_of::<TerminalPattern>() + 32) as u128)?
+            .checked_mul(8)?;
+        let recursion_bytes = cursors
+            .checked_mul((MAX_REVEAL_BRANCHES * core::mem::size_of::<u32>() + 256) as u128)?
+            .checked_mul(4)?;
+        memo_bytes
+            .checked_add(trie_bytes)?
+            .checked_add(terminal_bytes)?
+            .checked_add(recursion_bytes)?
+            .checked_add(32 * 1024)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         universe: &MaterializedPatternUniverse,

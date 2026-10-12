@@ -8,7 +8,10 @@ use std::{
     },
 };
 
-use crate::{cpu_worker_pool, resource::ExecutionMemoryBound};
+use crate::{
+    cpu_worker_pool,
+    resource::{ExecutionMemoryOwner, SharedExecutionMemoryBudget},
+};
 
 use super::super::extended_geometry::ExtendedParallelGeometryBranch;
 use super::{
@@ -22,6 +25,7 @@ struct WorkerResult {
     key_heap_bytes: u128,
     candidate_count: usize,
     private_peak_bytes: u128,
+    memory_owner: ExecutionMemoryOwner,
 }
 
 impl WorkerResult {
@@ -50,14 +54,10 @@ impl ExtendedPcTilingSession {
                 return Err(WasmExactSearchError::Cancelled);
             }
             self.ensure_memory(0)?;
-            let max_nodes = self.problem.backend_request().max_nodes();
-            if max_nodes != 0 && self.geometry.expanded_nodes() >= max_nodes {
-                return Err(WasmExactSearchError::InvalidProblem("node_budget_exceeded"));
-            }
-            match self.geometry.advance(&self.catalog) {
+            match self.advance_geometry_bounded()? {
                 ExtendedGeometryAdvance::Pending => {}
                 ExtendedGeometryAdvance::ResourceIncomplete(reason) => {
-                    return Err(WasmExactSearchError::InvalidProblem(reason));
+                    return Err(self.resource_stop_error(reason));
                 }
                 _ => {
                     return Err(WasmExactSearchError::InvalidProblem(
@@ -89,11 +89,20 @@ impl ExtendedPcTilingSession {
                 "candidate_budget_exceeded",
             ));
         }
-        // Clamp only to real disjoint branches, never to a piece-count or
-        // arbitrary topology heuristic. The request still records its width.
-        let workers = requested_workers.min(plan.branches.len()).max(1);
+        // The admitted width is a request contract. Empty slots remain idle or
+        // steal queued work; useful participation is reported separately.
+        let workers = requested_workers;
         let shared = plan.shared_retained_bytes() as u128;
-        let branch_bytes = plan.branch_retained_bytes() as u128;
+        let queued_branch_private = plan
+            .branches
+            .iter()
+            .try_fold(0_u128, |bytes, branch| {
+                bytes.checked_add(branch.private_retained_bytes() as u128)
+            })
+            .ok_or_else(projection_error)?;
+        let branch_bytes = (plan.branch_retained_bytes() as u128)
+            .checked_sub(queued_branch_private)
+            .ok_or_else(projection_error)?;
         let fixed = self
             .checked_retained_bytes()
             .ok_or_else(projection_error)?
@@ -112,11 +121,15 @@ impl ExtendedPcTilingSession {
         self.execution_admission
             .ensure_memory_bound(fixed, 0)
             .map_err(WasmExactSearchError::resource_admission)?;
-        let credit = (self.execution_admission.memory_cap_bytes() - fixed) / workers as u128;
-        let worker_bound = self
-            .execution_admission
-            .memory_bound()
-            .with_cap(credit)
+        let private_memory = SharedExecutionMemoryBudget::new(
+            self.execution_admission.memory_bound(),
+            fixed,
+            workers.checked_add(1).ok_or_else(projection_error)?,
+        )
+        .map_err(WasmExactSearchError::resource_admission)?;
+        let queued_memory = private_memory.owner(workers);
+        queued_memory
+            .ensure(queued_branch_private)
             .map_err(WasmExactSearchError::resource_admission)?;
 
         // Large branches are offered first. Canonical ordinal intervals remain
@@ -139,12 +152,14 @@ impl ExtendedPcTilingSession {
         }
         let mut submitted = 0_usize;
         let mut first_error = None;
-        for _ in 0..workers.saturating_sub(1) {
+        for index in 0..workers.saturating_sub(1) {
             let queue = Arc::clone(&queue);
             let catalog = Arc::clone(&self.catalog);
             let abort_worker = Arc::clone(&abort);
             let worker_control = control.clone();
             let sender = sender.clone();
+            let memory_owner = private_memory.owner(index);
+            let queued_memory = queued_memory.clone();
             let queued = cpu_worker_pool::submit_cpu_job(move || {
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     run_worker(
@@ -152,7 +167,8 @@ impl ExtendedPcTilingSession {
                         &catalog,
                         &abort_worker,
                         &worker_control,
-                        worker_bound,
+                        memory_owner,
+                        &queued_memory,
                     )
                 }))
                 .map_err(|_| {
@@ -173,7 +189,14 @@ impl ExtendedPcTilingSession {
         }
         drop(sender);
         let caller = catch_unwind(AssertUnwindSafe(|| {
-            run_worker(&queue, &self.catalog, &abort, control, worker_bound)
+            run_worker(
+                &queue,
+                &self.catalog,
+                &abort,
+                control,
+                private_memory.owner(workers - 1),
+                &queued_memory,
+            )
         }))
         .map_err(|_| {
             WasmExactSearchError::InvalidProblem("extended_parallel_tiling_worker_panicked")
@@ -182,14 +205,24 @@ impl ExtendedPcTilingSession {
         if caller.is_err() {
             abort.store(true, Ordering::Release);
         }
-        let mut results = Vec::with_capacity(workers);
+        let mut results = Vec::new();
+        results.try_reserve_exact(workers).map_err(|_| {
+            abort.store(true, Ordering::Release);
+            for _ in 0..submitted {
+                let _ = receiver.recv();
+            }
+            pool_error()
+        })?;
         results.push(caller);
         // Even submit/panic/cancellation errors must drain every owned job.
         // A returned error must not release the compute lease under a live job.
         for _ in 0..submitted {
             results.push(receiver.recv().unwrap_or_else(|_| Err(pool_error())));
         }
-        let mut successful = Vec::with_capacity(workers);
+        let mut successful = Vec::new();
+        successful
+            .try_reserve_exact(workers)
+            .map_err(|_| pool_error())?;
         for result in results {
             match result {
                 Ok(result) => successful.push(result),
@@ -221,14 +254,20 @@ impl ExtendedPcTilingSession {
         }
         let private_bytes = successful
             .iter()
-            .map(WorkerResult::retained_bytes)
-            .sum::<u128>();
-        let peak = fixed
-            + successful
-                .iter()
-                .map(|worker| worker.private_peak_bytes)
-                .sum::<u128>();
+            .try_fold(0_u128, |bytes, worker| {
+                bytes.checked_add(worker.retained_bytes())
+            })
+            .ok_or_else(projection_error)?;
+        let peak = successful
+            .iter()
+            .try_fold(fixed, |bytes, worker| {
+                bytes.checked_add(worker.private_peak_bytes)
+            })
+            .ok_or_else(projection_error)?;
         self.parallel_peak_bytes = self.parallel_peak_bytes.max(peak);
+        self.parallel_peak_bytes = self
+            .parallel_peak_bytes
+            .max(private_memory.admitted_peak_bytes());
         let growth = count as u128 * size_of::<String>() as u128;
         self.execution_admission
             .ensure_memory_bound(fixed + private_bytes, growth)
@@ -236,8 +275,19 @@ impl ExtendedPcTilingSession {
         self.keys.try_reserve_exact(count).map_err(|_| {
             WasmExactSearchError::InvalidProblem("extended_pc_tiling_storage_unavailable")
         })?;
-        for worker in &mut successful {
+        self.parallel_active_workers = successful
+            .iter()
+            .filter(|worker| worker.candidate_count != 0)
+            .count();
+        while let Some(mut worker) = successful.pop() {
+            let memory_owner = worker.memory_owner.clone();
             self.keys.append(&mut worker.keys);
+            // Keys are now charged by the parent. The worker's capacity and
+            // remaining private backing must drop before returning its credit.
+            drop(worker);
+            memory_owner
+                .release_after_drop()
+                .map_err(WasmExactSearchError::resource_admission)?;
         }
         self.workers_used = workers;
         self.geometry.complete_parallel_enumeration(count)?;
@@ -259,13 +309,15 @@ fn run_worker(
     catalog: &ExtendedInverseCatalog,
     abort: &AtomicBool,
     control: &ExecutionControl,
-    bound: ExecutionMemoryBound,
+    memory_owner: ExecutionMemoryOwner,
+    queued_memory: &ExecutionMemoryOwner,
 ) -> Result<WorkerResult, WasmExactSearchError> {
     let mut result = WorkerResult {
         keys: Vec::new(),
         key_heap_bytes: 0,
         candidate_count: 0,
         private_peak_bytes: 0,
+        memory_owner,
     };
     loop {
         if control.is_cancelled() || abort.load(Ordering::Acquire) {
@@ -274,13 +326,21 @@ fn run_worker(
         let Some(mut branch) = queue.lock().map_err(|_| pool_error())?.pop() else {
             break;
         };
+        queued_memory
+            .transfer_retained_to(
+                &result.memory_owner,
+                branch.private_retained_bytes() as u128,
+            )
+            .map_err(WasmExactSearchError::resource_admission)?;
         let mut branch_count = 0_u128;
         loop {
             if control.is_cancelled() || abort.load(Ordering::Acquire) {
                 return Err(WasmExactSearchError::Cancelled);
             }
             let owned = result.retained_bytes();
-            let Some(candidate) = branch.next_candidate(catalog, bound, owned)? else {
+            let Some(candidate) =
+                branch.next_candidate_with_owner(catalog, &result.memory_owner, owned)?
+            else {
                 break;
             };
             let retained = owned + branch.private_retained_bytes() as u128;
@@ -292,8 +352,9 @@ fn run_worker(
                 0
             };
             let future = vector_growth + 128 + piece_count * (64 + 67);
-            bound
-                .ensure(retained, future)
+            result
+                .memory_owner
+                .ensure(retained.checked_add(future).ok_or_else(projection_error)?)
                 .map_err(WasmExactSearchError::resource_admission)?;
             result.private_peak_bytes = result.private_peak_bytes.max(retained + future);
             result.keys.try_reserve(1).map_err(|_| {
@@ -311,10 +372,13 @@ fn run_worker(
                 .candidate_count
                 .checked_add(1)
                 .ok_or_else(projection_error)?;
-            bound
+            result
+                .memory_owner
                 .ensure(
-                    result.retained_bytes(),
-                    branch.private_retained_bytes() as u128,
+                    result
+                        .retained_bytes()
+                        .checked_add(branch.private_retained_bytes() as u128)
+                        .ok_or_else(projection_error)?,
                 )
                 .map_err(WasmExactSearchError::resource_admission)?;
         }
@@ -323,7 +387,16 @@ fn run_worker(
                 "extended_parallel_tiling_branch_count_mismatch",
             ));
         }
+        drop(branch);
+        result
+            .memory_owner
+            .ensure(result.retained_bytes())
+            .map_err(WasmExactSearchError::resource_admission)?;
     }
+    result
+        .memory_owner
+        .ensure(result.retained_bytes())
+        .map_err(WasmExactSearchError::resource_admission)?;
     Ok(result)
 }
 

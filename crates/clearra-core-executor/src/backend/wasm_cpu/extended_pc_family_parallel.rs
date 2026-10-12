@@ -11,13 +11,15 @@ use std::{
     },
 };
 
-use crate::{cpu_worker_pool, resource::ExecutionMemoryBound};
+use crate::{
+    cpu_worker_pool,
+    resource::{ExecutionMemoryOwner, SharedExecutionMemoryBudget},
+};
 
 use super::super::extended_geometry::ExtendedParallelGeometryBranch;
 use super::{
-    mix_digest, Arc, BuildProbabilityAdvance, CoreExecutionResult, CoverageProductEvaluator,
-    ExecutionControl, ExtendedBuildOrderWorkspace, ExtendedBuildProbabilitySession,
-    ExtendedFamilyPurpose, ExtendedGeometryAdvance, ExtendedGeometrySearch, HashMap, HashSet,
+    mix_digest, Arc, BuildProbabilityAdvance, CoreExecutionResult, ExecutionControl,
+    ExtendedBuildProbabilitySession, ExtendedFamilyPurpose, ExtendedGeometryAdvance, HashMap,
     PatternBitSet, WasmExactSearchError,
 };
 
@@ -74,21 +76,16 @@ impl ExtendedBuildProbabilitySession {
         {
             return Err(contract_error());
         }
-        if self.problem.backend_request().max_nodes() != 0 {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "extended_pc_family_parallel_node_budget_not_connected",
-            ));
-        }
         let mut preparation_steps = 0_usize;
         while self.geometry.is_compiling() {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }
             self.ensure_memory_bound(0)?;
-            match self.geometry.advance(&self.catalog) {
+            match self.advance_geometry_bounded()? {
                 ExtendedGeometryAdvance::Pending => {}
                 ExtendedGeometryAdvance::ResourceIncomplete(reason) => {
-                    return Err(WasmExactSearchError::InvalidProblem(reason));
+                    return Err(self.pc_resource_stop_error(reason));
                 }
                 _ => return Err(contract_error()),
             }
@@ -121,14 +118,25 @@ impl ExtendedBuildProbabilitySession {
                 "candidate_budget_exceeded",
             ));
         }
-        let workers = requested_workers.min(plan.branches.len()).max(1);
+        let workers = requested_workers;
         let branch_count = plan.branches.len();
+        let queued_branch_private = plan
+            .branches
+            .iter()
+            .try_fold(0_u128, |bytes, branch| {
+                bytes.checked_add(branch.private_retained_bytes() as u128)
+            })
+            .ok_or_else(projection_error)?;
         let original_coexisting = self.coexisting_retained_bytes;
         let root_retained = self.checked_retained_bytes().ok_or_else(projection_error)?;
         let fixed = root_retained
             .checked_add(original_coexisting)
             .and_then(|bytes| bytes.checked_add(plan.shared_retained_bytes() as u128))
-            .and_then(|bytes| bytes.checked_add(plan.branch_retained_bytes() as u128))
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (plan.branch_retained_bytes() as u128).checked_sub(queued_branch_private)?,
+                )
+            })
             .and_then(|bytes| {
                 bytes.checked_add(
                     (workers as u128)
@@ -143,10 +151,15 @@ impl ExtendedBuildProbabilitySession {
         self.memory_bound
             .ensure(fixed, 0)
             .map_err(WasmExactSearchError::resource_admission)?;
-        let credit = (self.memory_bound.cap_bytes() - fixed) / workers as u128;
-        let worker_bound = self
-            .memory_bound
-            .with_cap(credit)
+        let private_memory = SharedExecutionMemoryBudget::new(
+            self.memory_bound,
+            fixed,
+            workers.checked_add(1).ok_or_else(projection_error)?,
+        )
+        .map_err(WasmExactSearchError::resource_admission)?;
+        let queued_memory = private_memory.owner(workers);
+        queued_memory
+            .ensure(queued_branch_private)
             .map_err(WasmExactSearchError::resource_admission)?;
 
         plan.branches
@@ -155,11 +168,27 @@ impl ExtendedBuildProbabilitySession {
         tasks
             .try_reserve_exact(workers)
             .map_err(|_| storage_error())?;
-        // Give every launched worker real initial work even when the caller
-        // could otherwise empty a tiny queue before pool jobs begin running.
-        for _ in 0..workers {
-            let engine = self.new_shared_pc_verifier(worker_bound)?;
-            let first = plan.branches.pop().ok_or_else(contract_error)?;
+        // Preserve the admitted request width even for a one-branch family.
+        // Slots without initial work may steal a queued branch or remain idle;
+        // `parallel_active_workers` separately reports useful participation.
+        for index in 0..workers {
+            let mut engine = self.new_shared_pc_verifier_with_resources(
+                self.memory_bound,
+                Some(private_memory.owner(index)),
+            )?;
+            engine.ensure_memory_bound(0)?;
+            let first = plan.branches.pop();
+            if let Some(branch) = first.as_ref() {
+                queued_memory
+                    .transfer_retained_to(
+                        engine
+                            .private_memory_owner
+                            .as_ref()
+                            .ok_or_else(contract_error)?,
+                        branch.private_retained_bytes() as u128,
+                    )
+                    .map_err(WasmExactSearchError::resource_admission)?;
+            }
             tasks.push((engine, first));
         }
         let queue = Arc::new(Mutex::new(core::mem::take(&mut plan.branches)));
@@ -184,6 +213,7 @@ impl ExtendedBuildProbabilitySession {
             let queue = Arc::clone(&queue);
             let abort_worker = Arc::clone(&abort);
             let progress = Arc::clone(&progress_nodes);
+            let queued_memory = queued_memory.clone();
             let worker_control = control.clone();
             let sender = sender.clone();
             let queued = cpu_worker_pool::submit_cpu_job(move || {
@@ -191,6 +221,7 @@ impl ExtendedBuildProbabilitySession {
                     engine,
                     first,
                     &queue,
+                    &queued_memory,
                     &abort_worker,
                     &progress,
                     &worker_control,
@@ -214,6 +245,7 @@ impl ExtendedBuildProbabilitySession {
             caller_engine,
             caller_first,
             &queue,
+            &queued_memory,
             &abort,
             &progress_nodes,
             control,
@@ -270,6 +302,9 @@ impl ExtendedBuildProbabilitySession {
             })
             .ok_or_else(projection_error)?;
         self.native_parallel_peak_bytes = self.native_parallel_peak_bytes.max(peak);
+        self.native_parallel_peak_bytes = self
+            .native_parallel_peak_bytes
+            .max(private_memory.admitted_peak_bytes());
         // FNV is ordered, not a commutative worker digest. Fold the bounded
         // per-branch values in exact serial ordinal order, including rejected
         // BuildUp candidates. Never concatenate worker completion digests.
@@ -364,9 +399,22 @@ impl ExtendedBuildProbabilitySession {
             .map_err(|_| storage_error())?;
         self.parallel_minimum_worker_candidates = usize::MAX;
         while let Some(worker) = successful.pop() {
+            let memory_owner = worker
+                .engine
+                .private_memory_owner
+                .clone()
+                .ok_or_else(contract_error)?;
+            self.coexisting_retained_bytes = fixed
+                .checked_sub(root_retained)
+                .and_then(|bytes| bytes.checked_add(worker.checked_retained_bytes()?))
+                .and_then(|bytes| bytes.checked_add(checked_worker_bytes(&successful).ok()?))
+                .ok_or_else(projection_error)?;
             self.merge_pc_verifier(worker.engine)?;
             // The popped worker's remaining scratch/digest owners drop here.
             drop(worker.digests);
+            memory_owner
+                .release_after_drop()
+                .map_err(WasmExactSearchError::resource_admission)?;
             self.coexisting_retained_bytes = fixed
                 .checked_sub(root_retained)
                 .and_then(|bytes| bytes.checked_add(checked_worker_bytes(&successful).ok()?))
@@ -384,81 +432,10 @@ impl ExtendedBuildProbabilitySession {
         drop(plan);
         self.ensure_memory_bound(0)?;
         control.report_progress("buildup", self.searched_build_nodes as u64, None);
-        match self.complete()? {
+        match self.complete_with_control(control)? {
             BuildProbabilityAdvance::Completed(result) => Ok(Some(result)),
             _ => Err(contract_error()),
         }
-    }
-
-    fn new_shared_pc_verifier(
-        &self,
-        memory_bound: ExecutionMemoryBound,
-    ) -> Result<Self, WasmExactSearchError> {
-        if self.purpose != ExtendedFamilyPurpose::Pc {
-            return Err(contract_error());
-        }
-        let pattern_count = self
-            .problem
-            .piece_source()
-            .materialized_universe()
-            .ok_or_else(contract_error)?
-            .pattern_count();
-        let verifier = Self {
-            problem: Arc::clone(&self.problem),
-            purpose: ExtendedFamilyPurpose::Pc,
-            aggregation: self.aggregation,
-            field: self.field,
-            catalog: Arc::clone(&self.catalog),
-            shared_immutable_owners: true,
-            geometry: ExtendedGeometrySearch::private_verifier_placeholder(),
-            build_order_workspace: ExtendedBuildOrderWorkspace::new(
-                self.field.width(),
-                self.field.height(),
-                self.problem.kick_profile().profile_id(),
-            ),
-            coverage_evaluator: CoverageProductEvaluator::default(),
-            covered_patterns: PatternBitSet::new(pattern_count),
-            buildable_tilings: HashSet::new(),
-            solution_coverage: self.solution_coverage.as_ref().map(|_| HashMap::new()),
-            spin_execution_graphs: Vec::new(),
-            distributed_solution_keys: HashSet::new(),
-            candidate_digest: 0,
-            processed_candidate_count: 0,
-            searched_build_nodes: 0,
-            reachability_states: 0,
-            coverage_product_states: 0,
-            coverage_product_edge_checks: 0,
-            coverage_product_words: 0,
-            peak_build_order_nodes: 0,
-            total_build_order_nodes: 0,
-            peak_build_scratch_bytes: 0,
-            witnessed_pattern_count: 0,
-            pc_build_variant_count: 0,
-            pc_build_variant_count_complete: true,
-            representative_path: Vec::new(),
-            representative_pattern_id: None,
-            representative_rank: None,
-            truncated_reason: None,
-            supply_projection_complete: self.supply_projection_complete,
-            distributed_count_complete: true,
-            distributed_probability_complete: true,
-            trivial_target: false,
-            external_geometry: true,
-            workers_used: 1,
-            parallel_active_workers: 0,
-            parallel_minimum_worker_candidates: 0,
-            parallel_maximum_worker_candidates: 0,
-            distributed_worker_memory_bytes: 0,
-            native_parallel_peak_bytes: 0,
-            distributed_execution_constraint_materialized: false,
-            finesse_requested: false,
-            finesse_languages: Vec::new(),
-            memory_bound,
-            coexisting_retained_bytes: 0,
-            finished: false,
-        };
-        verifier.ensure_memory_bound(0)?;
-        Ok(verifier)
     }
 
     fn merge_pc_verifier(&mut self, mut worker: Self) -> Result<(), WasmExactSearchError> {
@@ -469,6 +446,7 @@ impl ExtendedBuildProbabilitySession {
             || worker.truncated_reason.is_some()
             || worker.finished
             || (!self.problem.objective().score().requested()
+                && !self.problem.objective().execution_constraints().requested()
                 && !self
                     .problem
                     .pc_chance_evidence_policy()
@@ -477,6 +455,20 @@ impl ExtendedBuildProbabilitySession {
             || !worker.finesse_languages.is_empty()
         {
             return Err(contract_error());
+        }
+        match (self.pc_observation.as_ref(), worker.pc_observation.as_ref()) {
+            (Some(target), Some(source)) => {
+                let future = target
+                    .checked_merge_future_bytes(source)
+                    .ok_or_else(projection_error)?;
+                self.ensure_memory_bound(future)?;
+                self.pc_observation
+                    .as_mut()
+                    .expect("checked observation owner")
+                    .merge_from(source)?;
+            }
+            (None, None) => {}
+            _ => return Err(contract_error()),
         }
         self.covered_patterns
             .union_with(&worker.covered_patterns)
@@ -561,22 +553,32 @@ impl ExtendedBuildProbabilitySession {
 
 fn caught_worker(
     engine: ExtendedBuildProbabilitySession,
-    first: ExtendedParallelGeometryBranch,
+    first: Option<ExtendedParallelGeometryBranch>,
     queue: &Mutex<Vec<ExtendedParallelGeometryBranch>>,
+    queued_memory: &ExecutionMemoryOwner,
     abort: &AtomicBool,
     progress: &AtomicUsize,
     control: &ExecutionControl,
 ) -> Result<WorkerResult, WasmExactSearchError> {
     catch_unwind(AssertUnwindSafe(|| {
-        run_worker(engine, first, queue, abort, progress, control)
+        run_worker(
+            engine,
+            first,
+            queue,
+            queued_memory,
+            abort,
+            progress,
+            control,
+        )
     }))
     .map_err(|_| WasmExactSearchError::InvalidProblem("extended_pc_family_worker_panicked"))?
 }
 
 fn run_worker(
     engine: ExtendedBuildProbabilitySession,
-    first: ExtendedParallelGeometryBranch,
+    first: Option<ExtendedParallelGeometryBranch>,
     queue: &Mutex<Vec<ExtendedParallelGeometryBranch>>,
+    queued_memory: &ExecutionMemoryOwner,
     abort: &AtomicBool,
     progress: &AtomicUsize,
     control: &ExecutionControl,
@@ -586,14 +588,29 @@ fn run_worker(
         digests: Vec::new(),
         private_peak_bytes: 0,
     };
-    let mut assigned = Some(first);
+    let mut assigned = first;
     loop {
         if control.is_cancelled() || abort.load(Ordering::Acquire) {
             return Err(WasmExactSearchError::Cancelled);
         }
         let next = match assigned.take() {
             Some(branch) => Some(branch),
-            None => queue.lock().map_err(|_| pool_error())?.pop(),
+            None => {
+                let branch = queue.lock().map_err(|_| pool_error())?.pop();
+                if let Some(branch) = branch.as_ref() {
+                    queued_memory
+                        .transfer_retained_to(
+                            result
+                                .engine
+                                .private_memory_owner
+                                .as_ref()
+                                .ok_or_else(contract_error)?,
+                            branch.private_retained_bytes() as u128,
+                        )
+                        .map_err(WasmExactSearchError::resource_admission)?;
+                }
+                branch
+            }
         };
         let Some(mut branch) = next else {
             break;
@@ -611,10 +628,16 @@ fn run_worker(
             .checked_retained_bytes()
             .ok_or_else(projection_error)?;
         let branch_bytes = branch.private_retained_bytes() as u128;
+        let private = owned
+            .checked_add(branch_bytes)
+            .and_then(|bytes| bytes.checked_add(growth))
+            .ok_or_else(projection_error)?;
         result
             .engine
-            .memory_bound
-            .ensure(owned + branch_bytes, growth)
+            .private_memory_owner
+            .as_ref()
+            .ok_or_else(contract_error)?
+            .ensure(private)
             .map_err(WasmExactSearchError::resource_admission)?;
         result.digests.try_reserve(1).map_err(|_| storage_error())?;
         let mut values = Vec::new();
@@ -634,8 +657,15 @@ fn run_worker(
             let owned = result
                 .checked_retained_bytes()
                 .ok_or_else(projection_error)?;
-            let Some(candidate) =
-                branch.next_candidate(&result.engine.catalog, result.engine.memory_bound, owned)?
+            let Some(candidate) = branch.next_candidate_with_owner(
+                &result.engine.catalog,
+                result
+                    .engine
+                    .private_memory_owner
+                    .as_ref()
+                    .ok_or_else(contract_error)?,
+                owned,
+            )?
             else {
                 break;
             };
@@ -644,6 +674,22 @@ fn run_worker(
                 .checked_add(result.digests[index].values.len() as u128)
                 .and_then(|ordinal| u64::try_from(ordinal).ok())
                 .ok_or_else(projection_error)?;
+            let digest_future = (candidate.row_ids().len() as u128)
+                .checked_mul(64)
+                .and_then(|bytes| bytes.checked_add(128))
+                .ok_or_else(projection_error)?;
+            result
+                .engine
+                .private_memory_owner
+                .as_ref()
+                .ok_or_else(contract_error)?
+                .ensure(
+                    owned
+                        .checked_add(branch.private_retained_bytes() as u128)
+                        .and_then(|bytes| bytes.checked_add(digest_future))
+                        .ok_or_else(projection_error)?,
+                )
+                .map_err(WasmExactSearchError::resource_admission)?;
             let digest =
                 super::ExtendedTilingKey::from_candidate(&result.engine.catalog, &candidate)
                     .digest();
@@ -657,7 +703,7 @@ fn run_worker(
                 .engine
                 .process_candidate(candidate, Some(ordinal), control)?;
             if let Some(reason) = result.engine.truncated_reason {
-                return Err(WasmExactSearchError::InvalidProblem(reason));
+                return Err(result.engine.pc_resource_stop_error(reason));
             }
             result.digests[index].values.push(digest);
             result.engine.ensure_memory_bound(0)?;
@@ -679,8 +725,32 @@ fn run_worker(
         if result.engine.processed_candidate_count - before_count != count {
             return Err(contract_error());
         }
+        drop(branch);
+        result.engine.coexisting_retained_bytes = 0;
+        result
+            .engine
+            .private_memory_owner
+            .as_ref()
+            .ok_or_else(contract_error)?
+            .ensure(
+                result
+                    .checked_retained_bytes()
+                    .ok_or_else(projection_error)?,
+            )
+            .map_err(WasmExactSearchError::resource_admission)?;
     }
     result.engine.coexisting_retained_bytes = 0;
+    result
+        .engine
+        .private_memory_owner
+        .as_ref()
+        .ok_or_else(contract_error)?
+        .ensure(
+            result
+                .checked_retained_bytes()
+                .ok_or_else(projection_error)?,
+        )
+        .map_err(WasmExactSearchError::resource_admission)?;
     Ok(result)
 }
 

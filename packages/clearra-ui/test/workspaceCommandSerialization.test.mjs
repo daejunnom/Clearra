@@ -47,16 +47,21 @@ test('GUI and Desktop canonical argv retain the shared bounded 7..24L surface in
     .split(/\r?\n/u).filter(line => line && !line.startsWith('#'));
   for (const row of rows) {
     const [id, height, hex, pieces, queue] = row.split('\t');
-    for (const scoreMode of ['off', 'tiling', 'minimum-cover', 'path']) {
-      const request = { ...createDefaultWorkspaceRequest(), lines: Number(height),
-        boardMask: BigInt(`0x${hex}`), queue, holdEnabled: false, workers: 1, scoreMode };
-      assert.deepEqual(workspaceValidationCodes(request, 'web'), [], id);
-      assert.deepEqual(workspaceValidationCodes(request, 'desktop'), [], id);
-      const args = buildWorkspaceCommandArguments(request);
-      assert.equal(args[args.indexOf('--height') + 1], height, id);
-      assert.equal(args[args.indexOf('--pieces') + 1], pieces, id);
-      assert.equal(BigInt(args[args.indexOf('--board-mask') + 1]), BigInt(`0x${hex}`), id);
-      assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args, id);
+    for (const scoreMode of ['off', 'tiling', 'minimum-cover', 'failed-queue',
+      'summary', 'score-finder', 'score-minimals', 'path']) {
+      for (const workers of [1, 11]) {
+        const request = { ...createDefaultWorkspaceRequest(), lines: Number(height),
+          boardMask: BigInt(`0x${hex}`), queue, holdEnabled: false, workers, scoreMode };
+        assert.deepEqual(workspaceValidationCodes(request, 'web'), [], `${id}/${scoreMode}/${workers}`);
+        assert.deepEqual(workspaceValidationCodes(request, 'desktop'), [], `${id}/${scoreMode}/${workers}`);
+        const args = buildWorkspaceCommandArguments(request);
+        assert.equal(args[args.indexOf('--height') + 1], height, id);
+        assert.equal(args[args.indexOf('--pieces') + 1], pieces, id);
+        assert.equal(BigInt(args[args.indexOf('--board-mask') + 1]), BigInt(`0x${hex}`), id);
+        assert.equal(args[args.indexOf('--queue') + 1], queue, 'the GUI keeps its explicit fixed scenario');
+        assert.equal(args[args.indexOf('--workers') + 1], String(workers), 'no hidden worker reduction');
+        assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args, id);
+      }
     }
   }
 });
@@ -93,8 +98,7 @@ test('connected extended workspace terminals keep cell 239, area and explicit wo
   assert.equal(BigInt(minimumArgs[minimumArgs.indexOf('--board-mask') + 1]), boardMask);
   assert.deepEqual(workspaceRequestForDesktop(minimum, 'ko').arguments, minimumArgs);
   assert.deepEqual(workspaceValidationCodes({ ...request, workers: 11 }, 'desktop'), []);
-  assert.ok(workspaceValidationCodes({ ...request, workers: 11 }, 'web')
-    .includes('pc_extended_browser_workers_unavailable'));
+  assert.deepEqual(workspaceValidationCodes({ ...request, workers: 11 }, 'web'), []);
   assert.equal(buildWorkspaceCommandArguments({ ...request, workers: 11 })[
     args.indexOf('--workers') + 1], '11', 'validation must not silently reduce requested workers');
   assert.equal(clearCompletedRows(full, 24).clearedRows, 24);
@@ -106,7 +110,7 @@ test('extended mandatory selection passes a full document through the common PC 
   for (const row of rows) {
     const [id, height, hex, , queue] = row.split('\t');
     const request = { ...createDefaultWorkspaceRequest(), lines: Number(height),
-      boardMask: BigInt(`0x${hex}`), queue, holdEnabled: false, workers: 1,
+      boardMask: BigInt(`0x${hex}`), queue, holdEnabled: false, workers: 11,
       scoreMode: 'minimum-cover', pinnedSolutionKeys: ['ctk2|selected-source-key'],
       pinnedSolutionDocument: 'ctk3_selected', pinnedSourceSetHash: 'cts1:0123456789abcdef' };
     assert.deepEqual(workspaceValidationCodes(request, 'web'), [], id);
@@ -134,10 +138,24 @@ test('extended workspace guards result and option capabilities separately from t
     assert.deepEqual(args.slice(0, 3), ['clearra', 'pc', scoreMode === 'summary' ? 'score' : scoreMode]);
     assert.equal(args[args.indexOf('--lines') + 1], '24');
     assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args);
-    assert.ok(workspaceValidationCodes({ ...request, workers: 11 }, 'web')
-      .includes('pc_extended_browser_workers_unavailable'), 'do not silently reduce workers');
+    assert.deepEqual(workspaceValidationCodes({ ...request, workers: 11 }, 'web')
+      .filter(code => code.startsWith('pc_extended_')), []);
+    const parallelArgs = buildWorkspaceCommandArguments({ ...request, workers: 11 });
+    assert.equal(parallelArgs[parallelArgs.indexOf('--workers') + 1], '11', 'do not silently reduce workers');
   }
-  for (const change of [{ queueKnowledge: 'visible-7' },
+  const visible = { ...base, queue: 'IIIIII', queueKnowledge: 'visible-7', workers: 11 };
+  assert.deepEqual(workspaceValidationCodes(visible, 'web'), []);
+  assert.deepEqual(workspaceValidationCodes(visible, 'desktop'), []);
+  const visibleArgs = buildWorkspaceCommandArguments(visible);
+  assert.equal(visibleArgs[visibleArgs.indexOf('--queue-knowledge') + 1], 'visible-7');
+  assert.equal(visibleArgs[visibleArgs.indexOf('--workers') + 1], '11');
+  assert.ok(workspaceValidationCodes({ ...visible, scoreMode: 'failed-queue' }, 'web')
+    .includes('pc_extended_options_unavailable'), 'only ordinary all/unique has observation-policy authority');
+  for (const scoreMode of ['minimum-cover', 'score-minimals']) {
+    assert.ok(workspaceValidationCodes({ ...visible, scoreMode }, 'web')
+      .includes('visible-seven-minimum-cover-unsupported'), 'typed minimum policies remain oracle-only');
+  }
+  for (const change of [
     { tablebaseEnabled: true }, { precomputeBuildDependencies: true }, { backend: 'hybrid' }]) {
     assert.ok(workspaceValidationCodes({ ...base, ...change }, 'web')
       .includes('pc_extended_options_unavailable'));

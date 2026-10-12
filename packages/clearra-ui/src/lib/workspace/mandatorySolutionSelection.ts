@@ -26,7 +26,10 @@ export function toggleMandatorySolution(
   current: MandatorySolutionSelection, key: string, sourceHash: string,
   encode: (keys: string[]) => string
 ): MandatorySolutionSelection {
-  if (!/^cts1:[0-9a-f]{16}$/u.test(sourceHash) || !key.startsWith('ctk1|')) {
+  // The existing CTK3 encoder validates the complete drawing after this
+  // source-identity gate. Extended PC results use a four-word CTK2 key and
+  // must reach that same encoder, never a separate pinned-ID shortcut.
+  if (!/^cts1:[0-9a-f]{16}$/u.test(sourceHash) || !/^ctk[12]\|/u.test(key)) {
     throw new TypeError('Mandatory selection requires a complete canonical solution source');
   }
   if (current.pinnedSourceSetHash && current.pinnedSourceSetHash !== sourceHash) {

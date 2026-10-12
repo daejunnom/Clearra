@@ -72,7 +72,6 @@ export type WorkspaceValidationCode =
   | 'pc-score-finder-fixed-queue-required'
   | 'target_lines_invalid'
   | 'pc_extended_result_unavailable'
-  | 'pc_extended_browser_workers_unavailable'
   | 'pc_extended_options_unavailable'
   | 'scenario_outside_target'
   | 'scenario_not_tileable'
@@ -473,7 +472,7 @@ export function automaticPcTargetLines(
 
 export function workspaceValidationCodes(
   request: SolverWorkspaceRequest,
-  runtime: 'web' | 'desktop'
+  _runtime: 'web' | 'desktop'
 ): WorkspaceValidationCode[] {
   assertGuiScoreMode(request.scoreMode);
   const errors: WorkspaceValidationCode[] = [];
@@ -489,11 +488,12 @@ export function workspaceValidationCodes(
     if (!['tiling', 'off', 'minimum-cover', 'failed-queue', 'summary', 'score-finder', 'score-minimals', 'path'].includes(execution.scoreMode)) {
       errors.push('pc_extended_result_unavailable');
     }
-    if (runtime === 'web' && execution.workers !== 1) {
-      errors.push('pc_extended_browser_workers_unavailable');
-    }
+    // Full-height CPU producer/verifier/merger capabilities preserve requested
+    // workers on both surfaces. Only ordinary all/unique enumeration has an
+    // observation-policy owner; typed reducers still require the supplied queue.
     if (!['cpu', 'auto'].includes(execution.backend) || execution.tablebaseEnabled ||
-        execution.precomputeBuildDependencies || execution.queueKnowledge !== 'oracle') {
+        execution.precomputeBuildDependencies ||
+        (execution.queueKnowledge !== 'oracle' && execution.scoreMode !== 'off')) {
       errors.push('pc_extended_options_unavailable');
     }
   }
