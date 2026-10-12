@@ -442,7 +442,8 @@ fn pc_path_preserves_b2b_in_opening_and_full_height_scenarios_without_score() {
 #[test]
 fn pc_path_b2b_does_not_admit_noncanonical_objective_score_tie_trace_or_count() {
     let profile = SpinProfileSelection::AllSpin;
-    let source = "clearra pc path --lines 2 --queue IOTSZ --no-hold --preserve-b2b --spin-profile all-spin";
+    let source =
+        "clearra pc path --lines 2 --queue IOTSZ --no-hold --preserve-b2b --spin-profile all-spin";
     let exact = || CliCommandParser::parse(source).expect(source);
     for objective in [
         ObjectivePolicy::unique(),

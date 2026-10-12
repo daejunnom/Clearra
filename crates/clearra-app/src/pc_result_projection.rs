@@ -553,8 +553,19 @@ fn validate_pc_path_common_request_contract(
     observation_policy: QueueObservationPolicy,
     execution_policy: &PcExecutionPolicy,
 ) -> Result<(), &'static str> {
-    if objective != ObjectivePolicy::all() || objective.score().requested() {
-        return Err("pc path requires the all non-scoring objective without constraints");
+    // This common App boundary must match canonical CLI/Web lowering. B2B
+    // selects a subset of the same physical replay family; it is not a score
+    // objective and must neither be erased nor widened to arbitrary policies.
+    let constraints = objective.execution_constraints();
+    let expected = if constraints.preserves_back_to_back() {
+        ObjectivePolicy::all().with_back_to_back_preservation(constraints.spin_profile())
+    } else {
+        ObjectivePolicy::all()
+    };
+    if objective != expected || objective.score().requested() {
+        return Err(
+            "pc path requires the all non-scoring objective with only canonical B2B constraints",
+        );
     }
     if count_policy != PcCountPolicy::CountAll {
         return Err("pc path requires all build variants");
@@ -1246,9 +1257,64 @@ mod tests {
     };
 
     use super::{
-        validate_opening_pc_result_projection, validate_pc_score_common_request_contract,
-        validate_scenario_pc_result_projection, PcResultProjection,
+        validate_opening_pc_result_projection, validate_pc_path_common_request_contract,
+        validate_pc_score_common_request_contract, validate_scenario_pc_result_projection,
+        PcResultProjection,
     };
+
+    #[test]
+    fn pc_path_app_contract_preserves_b2b_without_admitting_score_tie_trace_or_count() {
+        let execution = clearra_pc_graph::request::PcExecutionPolicy::default();
+        for objective in [
+            ObjectivePolicy::all(),
+            ObjectivePolicy::all().with_back_to_back_preservation(SpinProfileSelection::TSpins),
+            ObjectivePolicy::all().with_back_to_back_preservation(SpinProfileSelection::AllSpin),
+        ] {
+            assert!(validate_pc_path_common_request_contract(
+                objective,
+                PcCountPolicy::CountAll,
+                PcSolutionProbabilityPolicy::Omit,
+                QueueObservationPolicy::FullQueueOracle,
+                &execution,
+            )
+            .is_ok());
+            assert!(validate_pc_path_common_request_contract(
+                objective,
+                PcCountPolicy::CountUnique,
+                PcSolutionProbabilityPolicy::Omit,
+                QueueObservationPolicy::FullQueueOracle,
+                &execution,
+            )
+            .is_err());
+        }
+        for objective in [
+            ObjectivePolicy::unique(),
+            ObjectivePolicy::minimum_cover(),
+            ObjectivePolicy::tiling(),
+            ObjectivePolicy::all().with_score_summary(),
+            ObjectivePolicy::new(
+                ObjectiveKind::All,
+                TiePolicy::LowestCandidateId,
+                TracePolicy::Keep,
+            ),
+            ObjectivePolicy::new(
+                ObjectiveKind::All,
+                TiePolicy::StableInputOrder,
+                TracePolicy::Discard,
+            ),
+        ] {
+            for profile in [SpinProfileSelection::TSpins, SpinProfileSelection::AllSpin] {
+                assert!(validate_pc_path_common_request_contract(
+                    objective.with_back_to_back_preservation(profile),
+                    PcCountPolicy::CountAll,
+                    PcSolutionProbabilityPolicy::Omit,
+                    QueueObservationPolicy::FullQueueOracle,
+                    &execution,
+                )
+                .is_err());
+            }
+        }
+    }
 
     #[test]
     fn score_minimals_owns_the_score_only_minimum_cover_objective_domain() {
