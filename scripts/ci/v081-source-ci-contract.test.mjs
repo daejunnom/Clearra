@@ -468,8 +468,11 @@ test('Desktop native proof reuses installed data before read-only admission and 
 
 test('real Discord result proof uses the existing CLI and production runner with no fake executor', () => {
   const job = workflow.slice(workflow.indexOf('\n  native-products:'), workflow.indexOf('\n  wasm-abi:'));
-  const proof = job.slice(job.indexOf('- name: Verify real CLI products'),
-    job.indexOf('- name: Verify real Desktop native jobs'));
+  const proofStart = job.indexOf('- name: Verify real CLI products');
+  const proofEnd = job.indexOf('- name: Prepare only locked CTK3 dependencies', proofStart);
+  assert.ok(proofStart >= 0 && proofEnd > proofStart,
+    'inspect the real CLI product step, not the following dependency installation');
+  const proof = job.slice(proofStart, proofEnd);
   assert.ok(proof.startsWith('- name: Verify real CLI products'));
   assert.ok(proof.includes("steps.compute-assets.outcome == 'success'"));
   assert.ok(proof.includes('CLEARRA_REAL_COMPUTE_SOURCE_COMMIT: ${{ github.sha }}'));

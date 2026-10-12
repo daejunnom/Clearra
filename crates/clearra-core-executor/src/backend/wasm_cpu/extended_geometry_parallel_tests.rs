@@ -1,3 +1,4 @@
+use super::super::{checked_compiler_completion_future_bytes, ExtendedFamilyCompiler};
 use super::*;
 use crate::backend::wasm_cpu::{extended_geometry::ExtendedGeometryAdvance, piece_index};
 use clearra_core_domain::{board::standard_pc_board::Board256Mask, piece::piece_kind::PieceKind};

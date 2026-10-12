@@ -172,7 +172,7 @@ impl ExtendedBuildProbabilitySession {
         // Slots without initial work may steal a queued branch or remain idle;
         // `parallel_active_workers` separately reports useful participation.
         for index in 0..workers {
-            let mut engine = self.new_shared_pc_verifier_with_resources(
+            let engine = self.new_shared_pc_verifier_with_resources(
                 self.memory_bound,
                 Some(private_memory.owner(index)),
             )?;

@@ -62,6 +62,7 @@ on:
       - "tests/fixtures/contracts/extended_solution_keys.v1.tsv"
       - "tests/fixtures/contracts/extended_pc_surface_input.v1.tsv"
       - "tests/fixtures/contracts/extended_pc_replay_witness.v1.mjs"
+      - "tests/fixtures/contracts/extended_pc_replay_witness.v1.d.mts"
       - "packages/clearra-ui/src/lib/workspace/pcPathReplayPresentation.ts"
       - "packages/clearra-ui/test/pcPathReplayRenderParity.test.mjs"
       - "apps/clearra-discord-bot/src/viewer/pc-path-replay.mjs"

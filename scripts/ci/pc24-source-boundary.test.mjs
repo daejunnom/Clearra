@@ -93,7 +93,7 @@ test('native feature compilation cannot exhaust the ordinary surface owner or dr
 
 test('extended Tiling has its own typed exact producer without relabelling Build coverage', () => {
   const source = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_tiling.rs');
-  assert.ok(source.includes('ExtendedGeometrySearch::new(universe, &family, &catalog)'));
+  assert.match(source, /ExtendedGeometrySearch::new_bounded\(\s*universe,\s*&family,\s*&catalog,\s*execution_admission\.memory_bound\(\),\s*geometry_other,?\s*\)/u);
   assert.ok(source.includes('ExtendedInverseCatalog::compile_bounded'));
   assert.ok(source.includes('admit_budget_bound_search_execution_under_terminal_authority'));
   assert.ok(source.includes('pc_tiling_family_publication_contract_is_valid'));
@@ -296,7 +296,7 @@ test('ordinary native extended PC shares owners but retains its own exact BuildU
   assert.ok(runner.includes('for _ in 0..submitted'));
   assert.ok(runner.includes('segment.first_ordinal != ordinal'));
   assert.ok(runner.includes('self.merge_pc_verifier(worker.engine)'));
-  assert.ok(runner.includes('self.complete()'));
+  assert.ok(runner.includes('self.complete_with_control(control)?'));
   assert.ok(!runner.includes('CoreExecutionResult::new'));
   assert.ok(!runner.includes('terminal_authority'));
   assert.ok(workflow.includes('--features parallel --test extended_pc_family'));

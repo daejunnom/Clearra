@@ -135,7 +135,7 @@ impl WasmFullHeightPcProducer {
             .memory_bound()
             .with_cap(replica_cap)
             .map_err(WasmCpuSearchError::resource_admission)?;
-        let mut engine = ExtendedBuildProbabilitySession::new_pc_family(
+        let engine = ExtendedBuildProbabilitySession::new_pc_family(
             problem,
             pc_field(problem)?,
             bound,
@@ -228,7 +228,7 @@ impl WasmFullHeightPcProducer {
                     .ensure_memory_bound(
                         ((self.candidates.len() + 1) as u128)
                             .checked_mul((2 * size_of::<[u8; 32]>()) as u128)
-                            .ok_or_else(projection_error_exact)?,
+                            .ok_or_else(projection_error)?,
                     )
                     .map_err(typed_error)?;
                 self.candidates
@@ -779,9 +779,6 @@ fn invalid(reason: &'static str) -> WasmCpuSearchError {
 }
 fn projection_error() -> WasmCpuSearchError {
     invalid("extended_pc_distributed_memory_projection_overflow")
-}
-fn projection_error_exact() -> WasmExactSearchError {
-    WasmExactSearchError::InvalidProblem("extended_pc_distributed_memory_projection_overflow")
 }
 fn storage_error() -> WasmCpuSearchError {
     invalid("extended_pc_distributed_storage_unavailable")

@@ -21,8 +21,8 @@ use crate::{
 
 use super::super::{
     extended_board::ExtendedBoard, extended_geometry::ExtendedParallelGeometryPlan,
-    WasmCandidatePacket, WasmCandidateProducerAdvance, WasmDistributedBackendExecution,
-    WasmDistributedGeometrySummary, WasmDistributedProgress,
+    kick_profiles::replay_profile_ids, WasmCandidatePacket, WasmCandidateProducerAdvance,
+    WasmDistributedBackendExecution, WasmDistributedGeometrySummary, WasmDistributedProgress,
 };
 use super::{
     ExactSearchAdvance, ExecutionControl, ExtendedGeometryAdvance, ExtendedGeometrySearch,
@@ -1062,7 +1062,7 @@ fn snapshot(problem: &SearchProblem, workers: usize) -> Result<[u8; 32], WasmCpu
     for word in problem.initial_board().occupied_words() {
         hash.update(word.to_le_bytes());
     }
-    let (kick, rule) = super::super::replay_profile_ids(problem);
+    let (kick, rule) = replay_profile_ids(problem);
     hash.update(kick.to_le_bytes());
     hash.update(rule.to_le_bytes());
     hash.update(universe.pattern_universe_id().get().to_le_bytes());
@@ -1377,7 +1377,7 @@ mod tests {
             "extended_tiling_distributed_root_receipt_mismatch"
         );
         let control = ExecutionControl::default();
-        control.cancel();
+        control.cancellation.handle().cancel();
         assert_eq!(
             merger.finish(&summary, 3, &control).unwrap_err(),
             "wasm_cpu_search_cancelled"

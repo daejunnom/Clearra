@@ -334,7 +334,7 @@ impl PieceOrderLanguageCache {
     }
 
     #[cfg(test)]
-    pub fn edge_count(&self, reference: u32) -> Option<usize> {
+    pub fn node_edge_count(&self, reference: u32) -> Option<usize> {
         self.nodes
             .get(reference as usize)
             .map(|node| usize::from(node.edge_count))
@@ -669,7 +669,7 @@ mod tests {
 
         let root = cache.intern_node(false, 1).expect("wide language node");
 
-        assert_eq!(cache.edge_count(root), Some(384));
+        assert_eq!(cache.node_edge_count(root), Some(384));
         for piece_code in 1..=3 {
             let edges = cache
                 .edges_for_piece(root, piece_code)

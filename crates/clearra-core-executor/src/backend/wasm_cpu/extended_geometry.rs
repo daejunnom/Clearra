@@ -3,7 +3,9 @@ use std::{collections::HashMap, sync::Arc};
 
 #[path = "extended_geometry_parallel.rs"]
 mod parallel;
-pub(super) use parallel::{ExtendedParallelGeometryBranch, ExtendedParallelGeometryPlan};
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+pub(super) use parallel::ExtendedParallelGeometryBranch;
+pub(super) use parallel::ExtendedParallelGeometryPlan;
 
 use clearra_supply::pattern_universe::{
     piece_multiset_group::PackingMultisetFamily, MaterializedPatternUniverse,
