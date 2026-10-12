@@ -181,6 +181,9 @@ jobs:
       - name: Verify GUI and Discord canonical argv execute and publish the complete full-height family
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-cli-command --test extended_pc_surfaces -- --test-threads=1
+      - name: Verify closed replay ingress retains B2B without score or tie overrides
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-cli-command --lib pc_path_ -- --test-threads=1
       - name: Verify score identities share one full-height dictionary and preserve compact rows
         if: ${{ !cancelled() }}
         run: |

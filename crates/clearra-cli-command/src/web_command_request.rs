@@ -942,7 +942,18 @@ impl WebCommandRequest {
         match self.pc_result_projection {
             PcResultProjection::Standard => unreachable!("standard projection returned above"),
             PcResultProjection::PathFamilyV2(_) => {
-                if self.objective != ObjectivePolicy::all()
+                // B2B preservation filters the same physical replay family;
+                // it must not be mistaken for a different objective. Retain
+                // the closed score/tie/trace contract rather than checking
+                // only the objective kind or discarding the constraint.
+                let constraints = self.objective.execution_constraints();
+                let expected_objective = if constraints.preserves_back_to_back() {
+                    ObjectivePolicy::all()
+                        .with_back_to_back_preservation(constraints.spin_profile())
+                } else {
+                    ObjectivePolicy::all()
+                };
+                if self.objective != expected_objective
                     || self.count_policy != PcCountPolicy::CountAll
                 {
                     return Err(invalid("pc path requires objective all and count all"));

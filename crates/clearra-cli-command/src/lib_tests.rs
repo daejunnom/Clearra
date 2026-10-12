@@ -386,6 +386,92 @@ fn pc_path_binds_the_complete_replay_family_contract_without_score_or_ties() {
 }
 
 #[test]
+fn pc_path_preserves_b2b_in_opening_and_full_height_scenarios_without_score() {
+    let mut inputs = vec![
+        "--lines 2 --queue IOTSZ --no-hold".to_owned(),
+        "--lines 1 --board-mask 0x3f0 --height 1 --pieces 1 --queue I --hold empty".to_owned(),
+    ];
+    inputs.extend(
+        include_str!("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let fields: Vec<_> = line.split('\t').collect();
+                format!(
+                    "--lines {} --board-mask 0x{} --height {} --pieces {} --queue {} --no-hold",
+                    fields[1], fields[2], fields[1], fields[3], fields[4]
+                )
+            }),
+    );
+    for input in inputs {
+        for (name, profile) in [
+            ("t-spins", SpinProfileSelection::TSpins),
+            ("all-spin", SpinProfileSelection::AllSpin),
+        ] {
+            let source = format!(
+                "clearra pc path {input} --spin-profile {name} --preserve-b2b --backend cpu --workers 1"
+            );
+            let request = CliCommandParser::parse(&source)
+                .expect(&source)
+                .to_app_request()
+                .expect(&source);
+            assert_eq!(
+                request.product_capability_contract(),
+                Some(ProductCapabilityContract::PcPath),
+                "{source}"
+            );
+            let objective = match request.command() {
+                AppCommand::Pc(command) => command.query().objective(),
+                AppCommand::Scenario(command) => {
+                    assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+                    assert_eq!(command.query().retained_trace_limit(), 1);
+                    command.query().objective()
+                }
+                command => panic!("expected PC replay for {source}, got {command:?}"),
+            };
+            assert_eq!(
+                objective,
+                ObjectivePolicy::all().with_back_to_back_preservation(profile),
+                "{source}"
+            );
+            assert!(!objective.score().requested(), "{source}");
+        }
+    }
+}
+
+#[test]
+fn pc_path_b2b_does_not_admit_noncanonical_objective_score_tie_trace_or_count() {
+    let profile = SpinProfileSelection::AllSpin;
+    let source = "clearra pc path --lines 2 --queue IOTSZ --no-hold --preserve-b2b --spin-profile all-spin";
+    let exact = || CliCommandParser::parse(source).expect(source);
+    for objective in [
+        ObjectivePolicy::unique(),
+        ObjectivePolicy::minimum_cover(),
+        ObjectivePolicy::tiling(),
+        ObjectivePolicy::all().with_score_summary(),
+        ObjectivePolicy::new(
+            ObjectiveKind::All,
+            TiePolicy::LowestCandidateId,
+            TracePolicy::Keep,
+        ),
+        ObjectivePolicy::new(
+            ObjectiveKind::All,
+            TiePolicy::StableInputOrder,
+            TracePolicy::Discard,
+        ),
+    ] {
+        assert!(exact()
+            .with_objective(objective.with_back_to_back_preservation(profile))
+            .to_app_request()
+            .is_err());
+    }
+    assert!(exact()
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .to_app_request()
+        .is_err());
+}
+
+#[test]
 fn pc_path_rejects_semantic_and_resource_overrides() {
     for suffix in [
         "--objective all",

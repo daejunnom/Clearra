@@ -478,6 +478,26 @@ test('full-height score ingress admits connected source layouts without removing
   assert.ok(workflow.includes('--lib full_height_score_key_projection -- --test-threads=1'));
 });
 
+test('replay ingress retains B2B constraints without weakening the exact objective contract', () => {
+  const request = read('crates/clearra-cli-command/src/web_command_request.rs');
+  const match = request.indexOf('match self.pc_result_projection {');
+  const start = request.indexOf('PcResultProjection::PathFamilyV2(_) => {', match);
+  const end = request.indexOf('PcResultProjection::TilingFamilyV1(_) => {', start);
+  assert.ok(start >= 0 && end > start, 'closed replay lowering must exist');
+  const path = request.slice(start, end);
+  assert.ok(path.includes('constraints.preserves_back_to_back()'));
+  assert.ok(path.includes('.with_back_to_back_preservation(constraints.spin_profile())'));
+  assert.ok(path.includes('self.objective != expected_objective'));
+  assert.ok(path.includes('self.count_policy != PcCountPolicy::CountAll'));
+  assert.doesNotMatch(path, /self\.objective\s*!=\s*ObjectivePolicy::all\(\)/u,
+    'comparing against the unconstrained objective discards connected B2B requests');
+  const tests = read('crates/clearra-cli-command/src/lib_tests.rs');
+  assert.ok(tests.includes('pc_path_preserves_b2b_in_opening_and_full_height_scenarios_without_score'));
+  assert.ok(tests.includes('pc_path_b2b_does_not_admit_noncanonical_objective_score_tie_trace_or_count'));
+  assert.ok(jobSection('inverse-lock-clear').includes('--lib pc_path_ -- --test-threads=1'));
+  assert.ok(jobSection('inverse-lock-clear').includes('--test extended_pc_surfaces -- --test-threads=1'));
+});
+
 test('PC pinned drawings have their own full-height codec and cannot select an unproved or ambiguous source', () => {
   const decoder = read('crates/clearra-app/src/pc_pinned_solution_document.rs');
   const parser = read('crates/clearra-cli-command/src/web_command_parser.rs');
