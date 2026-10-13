@@ -82,10 +82,23 @@ Assert-ArtifactPathCondition ($LASTEXITCODE -eq 0 -and ($independentOutput -join
 $slot = New-TransientBuildDir 'probe'
 [IO.File]::WriteAllText((Join-Path $slot 'old.txt'),'fixture')
 Assert-ArtifactPathCondition (Test-ArtifactPathThrows { New-TransientBuildDir 'probe' }) 'active_transient_slot_cannot_be_replaced'
+Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Complete-ClearraBuildTransaction }) 'active_powershell_scratch_blocks_outer_completion'
+Assert-ArtifactPathCondition (Test-Path -LiteralPath (Join-Path $slot 'old.txt')) 'active_powershell_scratch_is_preserved'
 Remove-TransientBuildDir $slot
 $slotAgain = New-TransientBuildDir 'probe'
 Assert-ArtifactPathCondition ($slotAgain -eq $slot -and -not (Test-Path -LiteralPath (Join-Path $slot 'old.txt'))) 'transient_reuses_only_its_fixed_slot'
 Remove-TransientBuildDir $slotAgain
+$legacyScratchLease = Join-Path $experimentRoot 'transient/.legacy.lock'
+[IO.File]::WriteAllText($legacyScratchLease, '{}')
+Assert-ArtifactPathCondition (Test-ArtifactPathThrows { New-TransientBuildDir 'legacy' }) 'legacy_scratch_lease_is_not_stolen'
+Assert-ArtifactPathCondition (Test-Path -LiteralPath $legacyScratchLease) 'legacy_scratch_lease_is_preserved'
+Remove-Item -LiteralPath $legacyScratchLease
+$interruptedScratchLease = Join-Path $experimentRoot 'wasm-stage.lock'
+[IO.File]::WriteAllText($interruptedScratchLease, '{}')
+Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Complete-ClearraBuildTransaction }) 'outer_completion_preserves_unresolved_inner_staging_lease'
+Assert-ArtifactPathCondition ((Test-Path -LiteralPath $interruptedScratchLease) -and (Test-Path -LiteralPath $oldDependency)) 'inner_staging_failure_does_not_delete_compiler_cache'
+# This fixture created the exact injected lease. No real stale-owner recovery.
+Remove-Item -LiteralPath $interruptedScratchLease
 Complete-ClearraBuildTransaction
 Exit-ClearraBuildArtifactCacheUsage
 Assert-ArtifactPathCondition (-not (Test-ClearraBuildTransactionOwner)) 'owner_public_predicate_false_after_exit'

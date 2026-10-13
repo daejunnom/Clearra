@@ -29,24 +29,38 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        with:
+          node-version: 22.23.2
       - name: Install pinned Rust
+        id: rust
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --target wasm32-unknown-unknown
       - name: Verify product and local-only feature boundaries
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo fmt -p clearra-core-executor --check
-          cargo check --locked -p clearra-core-executor
-          cargo check --locked -p clearra-core-executor --features parallel
-          cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo fmt -p clearra-core-executor --check ::: \
+            cargo check --locked -p clearra-core-executor ::: \
+            cargo check --locked -p clearra-core-executor --features parallel ::: \
+            cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown
       - name: Test changed worker ownership and accelerator paths
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-core-executor --lib v081_ --features parallel,local-search-ab,qualification-reference -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --lib backend::wasm_cpu::reachability --features parallel,local-search-ab,qualification-reference -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --lib row_frame::tests --features parallel,local-search-ab,qualification-reference -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --lib legal_board::tests --features parallel,local-search-ab,qualification-reference -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --lib conditioned_ --features parallel,local-search-ab,qualification-reference -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-core-executor --lib v081_ --features parallel,local-search-ab,qualification-reference -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --lib backend::wasm_cpu::reachability --features parallel,local-search-ab,qualification-reference -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --lib row_frame::tests --features parallel,local-search-ab,qualification-reference -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --lib legal_board::tests --features parallel,local-search-ab,qualification-reference -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --lib conditioned_ --features parallel,local-search-ab,qualification-reference -- --test-threads=1
       - name: Fetch existing immutable qualified packs for solver smoke, not generation
+        id: conditioned-assets
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -56,6 +70,7 @@ jobs:
             --pattern 'conditioned-srs-x.cllr' --pattern 'conditioned-jstris-180.cllr' \
             --pattern 'conditioned-no-kick.cllr' --dir "$GITHUB_WORKSPACE/_local/artifacts/v081-peer-signed-smoke"
       - name: Verify signed full-owner and bounded-peer composition in the real solver
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.conditioned-assets.outcome == 'success' }}
         env:
           CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-peer-signed-smoke
         run: cargo test --locked -p clearra-core-executor --lib v081_signed_conditioned_pack_owner_peer_solver_smoke --features parallel,local-search-ab,qualification-reference -- --ignored --test-threads=1
@@ -70,44 +85,55 @@ jobs:
       CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         with:
           node-version: 22.23.2
       - name: Install pinned Rust
+        id: rust
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
       - name: Prepare the exact bounded asset-test root before compiling
+        id: test-root
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         shell: bash
         run: |
           test "$CLEARRA_FOCUSED_TEST_OUTPUT_ROOT" = "$GITHUB_WORKSPACE/_local/artifacts/accelerator-store-tests"
           mkdir -p "$CLEARRA_FOCUSED_TEST_OUTPUT_ROOT"
       - name: Typecheck integrated native products and benchmark facade
         id: native-check
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo check --locked -p clearra-cli -p clearra-gui-host --tests --no-default-features --features clearra-cli/wasm-cpu-runtime
-          cargo check --locked -p clearra-cli --features wasm-cpu-runtime
-          cargo check --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime,local-search-ab
-          cargo check --locked -p clearra-pc4-qualifier --all-targets
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo check --locked -p clearra-cli -p clearra-gui-host --tests --no-default-features --features clearra-cli/wasm-cpu-runtime ::: \
+            cargo check --locked -p clearra-cli --features wasm-cpu-runtime ::: \
+            cargo check --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime,local-search-ab ::: \
+            cargo check --locked -p clearra-pc4-qualifier --all-targets
       - name: Test typed policy parity without the monolithic App test binary
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' && steps.test-root.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-pc-graph --lib pc_execution_policy -- --test-threads=1
-          cargo test --locked -p clearra-cli-command --lib exact_accelerator -- --test-threads=1
-          cargo test --locked -p clearra-cli-command --lib shared_parser_preserves_all_accelerator -- --test-threads=1
-          cargo test --locked -p clearra-gui-host --lib gui_exact_accelerators --no-default-features -- --test-threads=1
-          cargo test --locked -p clearra-gui-host --lib gui_setup_request_preserves_independent --no-default-features -- --test-threads=1
-          cargo test --locked -p clearra-gui-host --test exact_accelerator_surface_parity --no-default-features -- --test-threads=1
-          cargo test --locked -p clearra-app --test exact_accelerator_policy --no-default-features -- --test-threads=1
-          cargo test --locked -p clearra-accelerator-activation --lib -- --test-threads=1
-          cargo test --locked -p clearra-accelerator-product-host --lib -- --test-threads=1
-          cargo test --locked -p clearra-accelerator-product-host --bin clearra-accelerator-release-gate -- --test-threads=1
-          cargo test --locked -p clearra-accelerator-runtime --lib -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-pc-graph --lib pc_execution_policy -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-cli-command --lib exact_accelerator -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-cli-command --lib shared_parser_preserves_all_accelerator -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-gui-host --lib gui_exact_accelerators --no-default-features -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-gui-host --lib gui_setup_request_preserves_independent --no-default-features -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-gui-host --test exact_accelerator_surface_parity --no-default-features -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-app --test exact_accelerator_policy --no-default-features -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-accelerator-activation --lib -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-accelerator-product-host --lib -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-accelerator-product-host --bin clearra-accelerator-release-gate -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-accelerator-runtime --lib -- --test-threads=1
       - name: Test real PC and Build reducer results with independent accelerators
-        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.test-root.outcome == 'success' }}
         run: cargo test --locked -p clearra-app --test exact_accelerator_product_execution --no-default-features --features parallel -- --test-threads=1
       - name: Fetch the unchanged SRS+ signed pair for App result smoke
         id: app-assets
-        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -117,14 +143,14 @@ jobs:
           gh release download conditioned-data-v081-20260924-rc1 --repo daejunnom/Clearra \
             --pattern 'conditioned-srs-plus.cllr' --dir "$GITHUB_WORKSPACE/_local/artifacts/v081-peer-signed-smoke"
       - name: Verify signed admission and real App result parity without an alternate solver
-        if: ${{ !cancelled() && steps.native-check.outcome == 'success' && steps.app-assets.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.test-root.outcome == 'success' && steps.app-assets.outcome == 'success' }}
         env:
           CLEARRA_SIGNED_APP_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-peer-signed-smoke
         run: cargo test --locked -p clearra-app --test exact_accelerator_product_execution --no-default-features --features parallel -- --ignored --test-threads=1
       - name: Test explicit asset lifecycle and repair
-        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' && steps.test-root.outcome == 'success' }}
         run: |
-          failed=0
+          checks=()
           for filter in \
             accelerator_asset_store::repair_tests \
             accelerator_gui_bridge \
@@ -134,24 +160,21 @@ jobs:
             exact_accelerator_flags \
             tie_snapshot::tests \
             product_execution_failure_does_not_reclassify_explicit_runtime_refusals; do
-            if cargo test --locked -p clearra-cli --lib "$filter" --no-default-features -- --test-threads=1; then
-              :
-            else
-              failed=$((failed + 1))
-              echo "::error::Focused CLI test family failed: $filter"
-            fi
+            if test "${#checks[@]}" -gt 0; then checks+=(:::); fi
+            checks+=(cargo test --locked -p clearra-cli --lib "$filter" --no-default-features -- --test-threads=1)
           done
-          test "$failed" -eq 0
+          node scripts/ci/run-independent-checks.mjs -- "${checks[@]}"
       - name: Test bounded generation and parser proofs, not full profile regeneration
-        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-pc4-qualifier --lib conditioned_local_candidate_validation::tests -- --test-threads=1
-          cargo test --locked -p clearra-pc4-qualifier --lib conditioned_local_relation_generation::tests -- --test-threads=1
-          cargo test --locked -p clearra-pc4-qualifier --lib reverse_domain_membership_matches_complete_forward_enumeration -- --test-threads=1
-          cargo test --locked -p clearra-pc4-qualifier --lib final_bundle_and_catalog_are_bound_without_granting_product_authority -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-pc4-qualifier --lib conditioned_local_candidate_validation::tests -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-pc4-qualifier --lib conditioned_local_relation_generation::tests -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-pc4-qualifier --lib reverse_domain_membership_matches_complete_forward_enumeration -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-pc4-qualifier --lib final_bundle_and_catalog_are_bound_without_granting_product_authority -- --test-threads=1
       - name: Build one ordinary CLI for the real compute-data adapter, without benchmark features
         id: compute-cli
-        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         run: cargo build --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime
       - name: Provision unchanged signed compute data and verify real CLI policy parity, not a container
         id: compute-assets
@@ -176,14 +199,15 @@ jobs:
           CLEARRA_CONDITIONED_REACHABILITY_DIRECTORY: ${{ github.workspace }}/_local/artifacts/v081-compute-data-smoke/conditioned-reachability
         run: node --test apps/clearra-discord-bot/test/realCliProductProjection.test.mjs
       - name: Prepare only locked CTK3 dependencies for full-height native surface readback
-        if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' }}
+        id: ctk3-deps
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: |
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts
           node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
       - name: Read back the same CLI through all full-height Discord product hops without publishing
-        if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' && steps.ctk3-deps.outcome == 'success' }}
         env:
           CLEARRA_REAL_PC24_CLI: ${{ github.workspace }}/build/cargo/default/debug/clearra
           CLEARRA_REAL_PC24_SOURCE_COMMIT: ${{ github.sha }}
@@ -198,10 +222,11 @@ jobs:
           test "$CLEARRA_LEGAL_BOARD_DIRECTORY" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke/legal-board"
           test "$CLEARRA_CONDITIONED_REACHABILITY_DIRECTORY" = "$GITHUB_WORKSPACE/_local/artifacts/v081-compute-data-smoke/conditioned-reachability"
           mkdir -p "$GITHUB_WORKSPACE/_local/artifacts/v081-desktop-native-smoke"
-          cargo test --locked -p clearra-cli --test desktop_signed_accelerator_execution --no-default-features --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1
-          cargo test --locked -p clearra-cli --test desktop_full_height_products --no-default-features --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-cli --test desktop_signed_accelerator_execution --no-default-features --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1 ::: \
+            cargo test --locked -p clearra-cli --test desktop_full_height_products --no-default-features --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1
       - name: Recheck the same native data layer read-only as an unprivileged user, not an accepted image
-        if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.compute-cli.outcome == 'success' && steps.compute-assets.outcome == 'success' }}
         shell: bash
         env:
           CLEARRA_REAL_COMPUTE_CLI: ${{ github.workspace }}/build/cargo/default/debug/clearra
@@ -268,18 +293,28 @@ jobs:
       product_wire_ready: ${{ steps.real-wire.outcome == 'success' && steps.wire-upload.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        with:
+          node-version: 22.23.2
       - name: Install pinned Rust and WASM target
+        id: rust
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
       - name: Preserve fail-operational reset and typed accelerator admission
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo check --locked -p clearra-wasm-abi --target wasm32-unknown-unknown
-          cargo test --locked -p clearra-wasm-abi --lib reset_rejects_a_borrowed_runtime_without_a_second_panic -- --test-threads=1
-          cargo test --locked -p clearra-wasm-abi --lib accelerator_ -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo check --locked -p clearra-wasm-abi --target wasm32-unknown-unknown ::: \
+            cargo test --locked -p clearra-wasm-abi --lib reset_rejects_a_borrowed_runtime_without_a_second_panic -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-wasm-abi --lib accelerator_ -- --test-threads=1
       - name: Produce real minimum portfolios for UI wire smoke
         id: real-wire
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         env:
           CLEARRA_REAL_PORTFOLIO_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-product-page-smoke
         run: |
@@ -307,35 +342,47 @@ jobs:
       CLEARRA_REAL_PORTFOLIO_SOURCE_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         with:
           node-version: 22.23.2
       - uses: actions/download-artifact@v4
+        id: wire-download
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         with:
           name: v081-real-product-wire-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ github.workspace }}/_local/artifacts/v081-product-page-smoke
       - name: Install locked UI test dependencies without scripts
+        id: ui-deps
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: |
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           test "$(pnpm --version)" = "11.5.0"
           pnpm install --frozen-lockfile --ignore-scripts
       - name: Consume real Rust results through production UI validation and whole-set copy
+        if: ${{ !cancelled() && steps.ui-deps.outcome == 'success' && steps.wire-download.outcome == 'success' }}
         run: |
           test "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR" = "$GITHUB_WORKSPACE/_local/artifacts/v081-product-page-smoke"
           test -s "$CLEARRA_REAL_PORTFOLIO_SMOKE_DIR/portfolio-wire-smoke.json"
           node --test packages/clearra-ui/test/realPortfolioWire.test.mjs
       - name: Install pinned Chromium for actual portfolio clipboard
+        id: browser-tools
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: |
           mkdir -p "$RUNNER_TEMP/clearra-browser-tools"
           npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
           "$RUNNER_TEMP/clearra-browser-tools/node_modules/.bin/playwright" install --with-deps chromium
           echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
       - name: Copy the full Rust-produced selected set from a visible member page in Chromium
+        if: ${{ !cancelled() && steps.ui-deps.outcome == 'success' && steps.wire-download.outcome == 'success' && steps.browser-tools.outcome == 'success' }}
         run: node scripts/tools/v081-portfolio-browser-copy-acceptance.mjs
       - name: Exercise the production Desktop panel against bounded Tauri IPC replies in Chromium
+        if: ${{ !cancelled() && steps.ui-deps.outcome == 'success' && steps.browser-tools.outcome == 'success' }}
         run: node scripts/tools/v081-desktop-accelerator-panel-browser-acceptance.mjs
 
   surfaces:
@@ -344,31 +391,42 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         with:
           node-version: 22.23.2
       - name: Verify focused CI path and failure contracts
-        run: node --test scripts/ci/v081-source-ci-contract.test.mjs scripts/ci/readonly-runtime-libraries.test.mjs
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        run: node --test scripts/ci/v081-source-ci-contract.test.mjs scripts/ci/readonly-runtime-libraries.test.mjs scripts/ci/run-independent-checks.test.mjs scripts/ci/independent-feedback-workflows.test.mjs
       - name: Install locked UI dependencies without scripts
+        id: ui-deps
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: |
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           test "$(pnpm --version)" = "11.5.0"
           pnpm install --frozen-lockfile --ignore-scripts
       - name: Test exact harness, lifecycle, and immutable compute packaging
+        if: ${{ !cancelled() && steps.ui-deps.outcome == 'success' }}
         run: |
-          node --test scripts/benchmark/v081-accelerator-abba-core.test.mjs scripts/benchmark/v081-worker-memory-accounting.test.mjs scripts/benchmark/v081-product-memo-abba-core.test.mjs
-          node --test apps/clearra-web/test/acceleratorDownloadStream.test.mjs apps/clearra-desktop/test/acceleratorLifecycleClient.test.mjs
-          node --test apps/clearra-discord-bot/test/accelerator-image.test.mjs apps/clearra-discord-bot/test/exact-accelerator-command.test.mjs
-          node --test scripts/tools/build-clearra-frontend.test.mjs scripts/release/accepted-pages-build.test.mjs
-          pnpm --filter @clearra/ui test
+          node scripts/ci/run-independent-checks.mjs -- \
+            node --test scripts/benchmark/v081-accelerator-abba-core.test.mjs scripts/benchmark/v081-worker-memory-accounting.test.mjs scripts/benchmark/v081-product-memo-abba-core.test.mjs ::: \
+            node --test apps/clearra-web/test/acceleratorDownloadStream.test.mjs apps/clearra-desktop/test/acceleratorLifecycleClient.test.mjs ::: \
+            node --test apps/clearra-discord-bot/test/accelerator-image.test.mjs apps/clearra-discord-bot/test/exact-accelerator-command.test.mjs ::: \
+            node --test scripts/tools/build-clearra-frontend.test.mjs scripts/release/accepted-pages-build.test.mjs ::: \
+            node scripts/tools/managed-transient-directory.contract.mjs ::: \
+            pnpm --filter @clearra/ui test
       - name: Verify Web worker types, heartbeats, and proof handoffs without a WASM build
+        if: ${{ !cancelled() && steps.ui-deps.outcome == 'success' }}
         working-directory: apps/clearra-web
         run: |
-          pnpm exec tsc --noEmit -p tsconfig.contract.json
-          node ../../scripts/tools/run-typescript-contracts.mjs ./test
+          node ../../scripts/ci/run-independent-checks.mjs -- \
+            pnpm exec tsc --noEmit -p tsconfig.contract.json ::: \
+            node ../../scripts/tools/run-typescript-contracts.mjs ./test
 
   wasm-realms:
     if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007') && github.ref_type == 'branch'
@@ -381,14 +439,21 @@ jobs:
       CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR: ${{ github.workspace }}/_local/artifacts/v081-peer-signed-smoke
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         with:
           node-version: 22.23.2
       - name: Install pinned Rust and WASM target
+        id: rust
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
       - name: Prepare the Rust manager and explicit functional output roots
+        id: manager
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         run: |
           cargo build --locked --release -p clearra-manage
           manager="$GITHUB_WORKSPACE/build/cargo/default/release/clearra-manage"
@@ -396,13 +461,19 @@ jobs:
           "$manager" storage verify --path "$CLEARRA_REAL_ACCELERATOR_WASM_DIR"
           "$manager" storage verify --path "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR"
       - name: Install the pinned managed ABI binding tool
+        id: abi-tool
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         shell: pwsh
         run: |
           & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build ordinary product WASM once, without profiling or benchmark features
+        id: product-wasm
+        if: ${{ !cancelled() && steps.manager.outcome == 'success' && steps.abi-tool.outcome == 'success' }}
         run: node scripts/tools/build-clearra-wasm.mjs --destination "$CLEARRA_REAL_ACCELERATOR_WASM_DIR"
       - name: Fetch only unchanged qualified relation packs for real WASM execution
+        id: conditioned-assets
+        if: ${{ !cancelled() && steps.manager.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -412,34 +483,40 @@ jobs:
             --pattern 'conditioned-srs-x.cllr' --pattern 'conditioned-jstris-180.cllr' \
             --pattern 'conditioned-no-kick.cllr' --dir "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR"
       - name: Fetch only unchanged qualified legal-board packs for actual synopsis peers
+        id: legal-assets
+        if: ${{ !cancelled() && steps.manager.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          mkdir -p "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR"
           gh release download legal-board-data-v081-20260924-rc1 --repo daejunnom/Clearra \
             --pattern 'legal-board-srs-v2.cllb' --pattern 'legal-board-srs-plus-v2.cllb' \
             --pattern 'legal-board-srs-x-v2.cllb' --pattern 'legal-board-jstris-180-v2.cllb' \
             --pattern 'legal-board-no-kick-v2.cllb' --dir "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR"
       - name: Execute actual WASM owner and two isolated peer realms without browser claims
+        if: ${{ !cancelled() && steps.product-wasm.outcome == 'success' && steps.conditioned-assets.outcome == 'success' && steps.legal-assets.outcome == 'success' }}
         run: |
           test "$CLEARRA_REAL_ACCELERATOR_WASM_DIR" = "$GITHUB_WORKSPACE/_local/artifacts/v081-browser-peer-smoke/wasm"
           test -s "$CLEARRA_REAL_ACCELERATOR_WASM_DIR/clearra_wasm.manifest.json"
           test "$CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR" = "$GITHUB_WORKSPACE/_local/artifacts/v081-peer-signed-smoke"
           node --test apps/clearra-web/test/realAcceleratorRealms.test.mjs
       - name: Install locked dependencies for the actual production Web verifier consumer
-        if: ${{ !cancelled() }}
+        id: ui-deps
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: |
           corepack enable
           pnpm install --frozen-lockfile --ignore-scripts
       - name: Execute the production Web pool and verifier worker with the same WASM and signed packs
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.product-wasm.outcome == 'success' && steps.conditioned-assets.outcome == 'success' && steps.legal-assets.outcome == 'success' && steps.ui-deps.outcome == 'success' }}
         run: node scripts/tools/run-real-web-verifier-pool-smoke.mjs
       - name: Install pinned Chromium for the signed accelerator browser boundary
-        if: ${{ !cancelled() }}
+        id: browser-tools
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: |
           mkdir -p "$RUNNER_TEMP/clearra-browser-tools"
           npm install --prefix "$RUNNER_TEMP/clearra-browser-tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
           "$RUNNER_TEMP/clearra-browser-tools/node_modules/.bin/playwright" install --with-deps chromium
           echo "CLEARRA_BROWSER_TOOLS_ROOT=$RUNNER_TEMP/clearra-browser-tools" >> "$GITHUB_ENV"
       - name: Exercise actual browser UI, signed WASM admission, and cross-tab asset storage
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.product-wasm.outcome == 'success' && steps.conditioned-assets.outcome == 'success' && steps.legal-assets.outcome == 'success' && steps.ui-deps.outcome == 'success' && steps.browser-tools.outcome == 'success' }}
         run: node scripts/tools/v081-accelerator-signed-browser-acceptance.mjs

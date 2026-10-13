@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { acquireBuildOwner } from './clearra-build-owner.mjs';
+import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 import { assertDefaultBenchmarkRustEnvironment } from './benchmark-rust-environment.mjs';
 import { assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, canonicalBuildRoot, nativeBuildPath } from './clearra-build-policy.mjs';
 
@@ -123,6 +124,21 @@ test('a moving compiler input cannot seal a reusable experiment snapshot', async
   const next = await acquireBuildOwner(options);
   assert.equal(next.transaction.incremental_seed_session_id, null);
   await next.finish(false);
+});
+
+test('an outer owner cannot complete or retire an unresolved inner staging slot', async t => {
+  const options = await fixture(t);
+  const owner = await acquireBuildOwner(options);
+  const staging = await acquireManagedTransientDirectory(join(owner.transaction.transaction_root, 'wasm-stage'));
+  const retainedFile = join(staging.path, 'keep.txt');
+  await writeFile(retainedFile, 'still owned');
+  await assert.rejects(owner.finish(true), /unresolved build scratch lease/u);
+  await assert.rejects(acquireBuildOwner(options), /unresolved build scratch lease/u);
+  assert.equal(await readFile(retainedFile, 'utf8'), 'still owned');
+  await staging.release();
+  const recovered = await acquireBuildOwner(options);
+  assert.equal(recovered.transaction.incremental_seed_session_id, null);
+  await recovered.finish(false);
 });
 
 test('independent owners cannot steal a purpose; nested owner reuses it', async t => {

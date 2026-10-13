@@ -20,32 +20,58 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         with:
           node-version: 22.23.2
       - name: Install the exact Rust toolchain
+        id: rust
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         shell: pwsh
         run: >-
           rustup toolchain install 1.98.1 --profile minimal
           --component rustfmt --component clippy
-      - name: Build and test the Rust manager
+      - name: Test the Rust manager and Node responder independently
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         shell: pwsh
         run: |
-          cargo test --locked -p clearra-manage
-          node --test scripts/runtime/clearra-node-gc.test.mjs
+          node scripts/ci/run-independent-checks.mjs -- `
+            cargo test --locked -p clearra-manage --no-fail-fast ::: `
+            node --test scripts/runtime/clearra-node-gc.test.mjs scripts/ci/run-independent-checks.test.mjs scripts/tools/clearra-build-policy.test.mjs ::: `
+            node scripts/tools/managed-transient-directory.contract.mjs
+          exit $LASTEXITCODE
+      - name: Build the Rust manager even after an independent test failure
+        id: manager
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        shell: pwsh
+        run: |
           cargo build --locked --release -p clearra-manage
-          $manager = 'build/cargo/default/release/clearra-manage.exe'
-          & $manager --root . storage audit
-          & $manager --root . runtime audit
+          exit $LASTEXITCODE
+      - name: Audit real Windows manager storage and runtime independently
+        if: ${{ !cancelled() && steps.manager.outcome == 'success' && steps.node.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          node scripts/ci/run-independent-checks.mjs -- `
+            build/cargo/default/release/clearra-manage.exe --root . storage audit ::: `
+            build/cargo/default/release/clearra-manage.exe --root . runtime audit
+          exit $LASTEXITCODE
       - name: Verify Windows Job Object ownership
+        if: ${{ !cancelled() && steps.manager.outcome == 'success' }}
         shell: pwsh
         run: |
           $manager = 'build/cargo/default/release/clearra-manage.exe'
           & $manager --root . runtime run --producer management-test --profile control --timeout 30 -- `
             pwsh -NoProfile -NonInteractive -Command "Write-Output 'job-object-ok'"
           if ($LASTEXITCODE -ne 0) { throw 'normal Job Object fixture failed' }
+      - name: Verify managed Windows Node GC acknowledgement
+        if: ${{ !cancelled() && steps.manager.outcome == 'success' && steps.node.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $manager = 'build/cargo/default/release/clearra-manage.exe'
           $nodeOutput = & $manager --root . runtime run --producer management-node-gc --profile control --timeout 30 -- `
             node -e "setTimeout(() => {}, 3000)" 2>&1
           if ($LASTEXITCODE -ne 0) {
@@ -58,6 +84,11 @@ jobs:
           $nodeReceipt = Get-Content -LiteralPath $receiptLine.Substring('clearra_runtime_receipt='.Length) -Raw | ConvertFrom-Json
           if (-not $nodeReceipt.outcome.cooperative_gc_available) { throw 'managed Node GC responder is missing' }
           if ($nodeReceipt.outcome.last_owned_memory_bytes -le 0) { throw 'current Job Object memory was not observed' }
+      - name: Verify Windows timeout enforcement after other fixture failures
+        if: ${{ !cancelled() && steps.manager.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $manager = 'build/cargo/default/release/clearra-manage.exe'
           $previousErrorAction = $ErrorActionPreference
           $ErrorActionPreference = 'Continue'
           & $manager --root . runtime run --producer management-test --profile control --timeout 1 -- `
@@ -69,23 +100,31 @@ jobs:
 
   management-policy:
     name: Clearra management policy
-    needs: windows-runtime
+    # No artifact is consumed from Windows: that job's failure must not hide
+    # independently runnable Linux, workspace, or source-policy diagnostics.
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         with:
           node-version: 22.23.2
       - name: Install the exact Rust toolchain
+        id: rust
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: >-
           rustup toolchain install 1.98.1 --profile minimal
           --component rustfmt --component clippy
           --target wasm32-unknown-unknown
       - name: Bind exact Corepack pnpm
+        id: pnpm
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         shell: pwsh
         run: |
           corepack enable
@@ -93,10 +132,12 @@ jobs:
           if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
       - name: Resolve the exact pnpm store
         id: pnpm-store
+        if: ${{ !cancelled() && steps.pnpm.outcome == 'success' }}
         shell: pwsh
         run: |
           "path=$(pnpm store path --silent)" >> $env:GITHUB_OUTPUT
       - name: Cache the pnpm and Cargo download stores
+        if: ${{ !cancelled() && steps.pnpm-store.outcome == 'success' }}
         uses: actions/cache@v4
         with:
           path: |
@@ -105,20 +146,38 @@ jobs:
             ~/.cargo/git
           key: clearra-management-v2-${{ runner.os }}-${{ runner.arch }}-rust-1.98.1-node-22.23.2-pnpm-11.5.0-${{ hashFiles('Cargo.lock', 'pnpm-lock.yaml') }}
       - name: Verify the focused management contract
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-manage
-          node --test scripts/runtime/clearra-node-gc.test.mjs
-          cargo clippy --locked -p clearra-manage -- -D warnings
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-manage --no-fail-fast ::: \
+            node --test scripts/runtime/clearra-node-gc.test.mjs scripts/ci/run-independent-checks.test.mjs scripts/ci/independent-feedback-workflows.test.mjs scripts/tools/clearra-build-policy.test.mjs ::: \
+            node scripts/tools/managed-transient-directory.contract.mjs ::: \
+            cargo clippy --locked -p clearra-manage -- -D warnings
+      - name: Build the Linux manager independently of test and lint results
+        id: manager
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        run: |
           cargo build --locked --release -p clearra-manage
           manager="build/cargo/default/release/clearra-manage"
           echo "CLEARRA_MANAGE_BIN=$GITHUB_WORKSPACE/$manager" >> "$GITHUB_ENV"
-          "$manager" --root . storage audit
-          "$manager" --root . storage verify --path _local/artifacts/test/management-policy
-          "$manager" --root . runtime audit
+      - name: Audit real Linux manager storage and runtime independently
+        if: ${{ !cancelled() && steps.manager.outcome == 'success' && steps.node.outcome == 'success' }}
+        run: |
+          node scripts/ci/run-independent-checks.mjs -- \
+            "$CLEARRA_MANAGE_BIN" --root . storage audit ::: \
+            "$CLEARRA_MANAGE_BIN" --root . storage verify --path _local/artifacts/test/management-policy ::: \
+            "$CLEARRA_MANAGE_BIN" --root . runtime audit
+      - name: Reject the removed Git domain without hiding independent checks
+        if: ${{ !cancelled() && steps.manager.outcome == 'success' }}
+        run: |
+          manager="$CLEARRA_MANAGE_BIN"
           if "$manager" --root . git inventory; then
             echo 'Rust manager unexpectedly accepted the removed Git domain' >&2
             exit 1
           fi
+      - name: Verify active sources do not use retired management entrypoints
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        run: |
           test ! -e scripts/management/clearra_manage.py
           test -e scripts/management/history/python-v1/clearra_manage.py
           if git grep -n -E 'scripts/management/(clearra_manage|clearra_runtime|clearra_process_wrapper)\.py|clearra-build-root-required' -- README.md docs package.json scripts apps ':!scripts/management/history/**'; then
@@ -126,29 +185,41 @@ jobs:
             exit 1
           fi
       - name: Install the frozen workspace without lifecycle scripts
+        id: workspace-deps
+        if: ${{ !cancelled() && steps.pnpm.outcome == 'success' }}
         run: |
           pnpm install --frozen-lockfile --ignore-scripts
           git diff --exit-code
           pnpm install --frozen-lockfile --ignore-scripts
           git diff --exit-code
       - name: Validate package and workflow behavior
+        if: ${{ !cancelled() && steps.workspace-deps.outcome == 'success' }}
         run: |
-          pnpm --filter ctk3 run test
-          pnpm --filter @clearra/ui run test
-          pnpm --filter @clearra/discord-bot run test:built
-          node --test scripts/tools/managed-shell-builds.test.mjs scripts/windows/clearra-local-services-watchdog.test.mjs
-          node --test --test-name-pattern="bare Cargo writes under the declared build root" scripts/tools/clearra-build-policy.test.mjs
-          pwsh -NoProfile -File scripts/architecture/validate_managed_build_contract.test.ps1
-          pwsh -NoProfile -File scripts/test_artifact_path_policy.ps1
-          bash -n scripts/runtime/clearra-wsl-sanitize.sh scripts/runtime/clearra-wsl-session.sh scripts/runtime/clearra-wsl-provision.sh scripts/runtime/clearra-wsl-guest.sh
+          node scripts/ci/run-independent-checks.mjs -- \
+            pnpm --filter ctk3 run test ::: \
+            pnpm --filter @clearra/ui run test ::: \
+            pnpm --filter @clearra/discord-bot run test:built ::: \
+            node --test scripts/tools/managed-shell-builds.test.mjs scripts/windows/clearra-local-services-watchdog.test.mjs ::: \
+            pwsh -NoProfile -File scripts/architecture/validate_managed_build_contract.test.ps1 ::: \
+            pwsh -NoProfile -File scripts/test_artifact_path_policy.ps1 ::: \
+            bash -n scripts/runtime/clearra-wsl-sanitize.sh scripts/runtime/clearra-wsl-session.sh scripts/runtime/clearra-wsl-provision.sh scripts/runtime/clearra-wsl-guest.sh ::: \
+            node --test scripts/tools/accepted-ctk3-dist.test.mjs ::: \
+            node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/cloud/accepted-build-inputs.test.mjs ::: \
+            node scripts/tools/validate-release-cli-smokes.mjs
+      - name: Produce a bounded Discord package without publishing
+        id: discord-package
+        if: ${{ !cancelled() && steps.workspace-deps.outcome == 'success' }}
+        run: |
           pnpm deploy --filter @clearra/discord-bot --prod build/discord-container/ci-deploy
-          pnpm --dir build/discord-container/ci-deploy exec node --input-type=module -e "await import('./src/clearra/command.mjs'); await import('./src/job-service/server.mjs'); await import('ctk3')"
-          node --test scripts/tools/accepted-ctk3-dist.test.mjs
-          node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/cloud/accepted-build-inputs.test.mjs
-          node scripts/tools/validate-release-cli-smokes.mjs
-      - name: Verify locked Rust workspace
+      - name: Read back only the successfully produced Discord package
+        if: ${{ !cancelled() && steps.discord-package.outcome == 'success' }}
         run: |
-          cargo fmt --all --check
-          cargo check --workspace --locked
-          cargo metadata --locked --manifest-path apps/clearra-desktop/src-tauri/Cargo.toml --format-version 1 > /dev/null
-          git diff --exit-code
+          pnpm --dir build/discord-container/ci-deploy exec node --input-type=module -e "await import('./src/clearra/command.mjs'); await import('./src/job-service/server.mjs'); await import('ctk3')"
+      - name: Verify locked Rust workspace
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
+        run: |
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo fmt --all --check ::: \
+            cargo check --workspace --locked ::: \
+            cargo metadata --locked --manifest-path apps/clearra-desktop/src-tauri/Cargo.toml --format-version 1 --no-deps ::: \
+            git diff --exit-code

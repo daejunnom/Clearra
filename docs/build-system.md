@@ -69,16 +69,20 @@ Clearra/build/
     wasm-stage/                        unpublished staging
   products/<UTC-timestamp>-<session>/     newest five completed generations
     cargo-target/
-  .leases/                              active ownership only
+  .leases/                              active or unresolved ownership
 ```
 
 A purpose is the canonical source root, not the command, package or executable.
 Its ID is the first 24 hexadecimal characters of SHA-256 over the normalized
 absolute root; Windows case and WSL mount aliases normalize identically.
-A new independent experiment removes the previous **whole** current generation,
-including hashed dependencies and incremental variants. Nested commands share
-one generation. Independent owners of the same purpose are rejected; different
-source roots may build in parallel under the one physical root.
+A new independent experiment reuses only a completed schema-4 compiler cache
+whose OS, architecture, toolchain and compiler-context identity match. Cargo
+fingerprints invalidate changed source inputs; the owner records the previous
+session and input snapshot as cache seeds, not as validation evidence. Scratch
+outside `cargo-target/` is retired at the next admitted owner. Failed, legacy or
+context-mismatched generations cannot seed a cache and are replaced only after
+ownership checks. Nested commands share one generation. Independent owners of
+the same purpose are rejected; different source roots may build in parallel.
 
 Products are explicitly selected with `CLEARRA_BUILD_PURPOSE=product` or
 `-Purpose product` / `--purpose product`. Only owner-confirmed completion counts
@@ -96,8 +100,11 @@ active record or lease fails before compiling and requires explicit cleanup.
 The shared schema binds `CLEARRA_BUILD_ROOT`, `CLEARRA_BUILD_PURPOSE`,
 `CLEARRA_BUILD_SOURCE_ROOT`, source/session IDs, owner PID,
 `CLEARRA_BUILD_TRANSACTION_ROOT` and the exact canonical `CARGO_TARGET_DIR`.
-`RUSTC_WRAPPER` validates ownership and compiler output paths. Repository
-Cargo configuration rejects unmanaged Cargo before compilation. Use
+`RUSTC_WRAPPER` validates ownership and compiler output paths for managed
+transactions. Ordinary direct Cargo is also supported: `.cargo/config.toml`
+keeps its output in the declared `build/cargo/default` root and enables
+incremental reuse there. The management policy is not a blanket Cargo blocker.
+For purpose-owned isolation and bounded generation retention, use
 `scripts/tools/invoke-clearra-build.ps1` or the Node counterpart
 `scripts/tools/invoke-clearra-build.mjs` (also used by Bookworm).
 On Windows the owner prepares a tiny native argv launcher inside the same
@@ -120,12 +127,70 @@ node scripts/tools/invoke-clearra-build.mjs --source-root "$PWD" \
   --purpose experiment -- cargo check --locked -p clearra-cli-command
 ```
 
-The owner sets `CARGO_INCREMENTAL=0`. Clean independent generations trade
-rebuild speed for the requested storage bound. Compiler reuse belongs inside
-one owner; global dependency downloads/toolchains are not build generations.
-CI must not restore compiled trees into new generations. Related producer,
+Managed experiments set `CARGO_INCREMENTAL=1`; products set
+`CARGO_INCREMENTAL=0`. A cache hit never grants a test pass or release authority.
+Global dependency downloads/toolchains are not build generations. CI must not
+restore an unbound compiled tree into a product generation. Related producer,
 verification and consumer commands share one owner step rather than inheriting
-expired owner state from a previous step.
+expired owner state from a previous step. Direct Cargo's single default cache
+is separate from managed five-product/one-experiment retention; clean it only
+with an explicitly reviewed Cargo profile cleanup, never by deleting selected
+dependency/fingerprint files behind an active compiler.
+
+### Shared lifecycle policy and transient slots
+
+The reference policies in Accelerate (`AGENTS.md`, `docs/ENGINEERING-STANDARDS.md`,
+`45edfe125398710b7d8e17cf467afbd62baf9fb8`), RoveZero
+(`AGENTS.md`, `docs/ENGINEERING-STANDARDS.md`,
+`b5ba853585cb5a78f81159f733a86cdfe085936b`) and MMMM
+(`docs/build-system.md`, `tools/mmmm-xtask/src/storage.rs`,
+`580bab7e418ebb8a7ab4a334277d88f22477a031`) share these boundaries:
+
+- Fixed checkout/purpose slots, with OS/architecture/toolchain compatibility;
+  no per-commit, PID or random-directory accumulation of compiler caches.
+- Dependency caches, compiler caches and scratch are not retained reports,
+  accepted exports, installed assets or user data.
+- Active, interrupted and unknown owners are protected. PID disappearance or
+  elapsed time is not descendant-drain proof and does not authorize eviction.
+- Cleanup checks the exact owned path, link boundaries and lease identity.
+  A cleanup failure remains a failure and never changes a failed build to a pass.
+
+Clearra keeps its declared roots and five successful product generations; MMMM's
+project-specific byte quotas are not copied into a larger Rust workspace.
+Schema-2 transient sidecars bind the exact slot, OS, architecture, PID and random
+**token**, not a random directory name. Normal release removes scratch or marks
+it complete for the next owner. Acquisition refuses legacy/invalid/stale leases
+and non-owned directories without deleting them. Release rechecks both sidecars
+before removal. Link-containing trees and oversized cleanup inventories are
+refused; recovery is an explicit reviewed maintenance operation. The sidecars
+stay outside staged payloads and are not release assets.
+
+Both Node and PowerShell build owners check unresolved scratch leases before
+completion, cache reuse and whole-generation retirement. An outer command exit
+cannot silently authorize deleting an interrupted inner staging slot.
+PowerShell `New-TransientBuildDir`/`Remove-TransientBuildDir` use the same schema-2
+implementation with a verified parent-process handoff inside the active build
+transaction. Busy admission is explicit instead of a 30-minute retry loop.
+Legacy `.prefix.lock` files are protected as unresolved ownership, not migrated
+or deleted implicitly. The retirement check covers direct WASM staging and the
+purpose slots under `transient/`, without inspecting Cargo's private locks.
+
+The caller must drain its owned consumers before releasing a transient slot.
+This helper does not kill descendants or infer their liveness; risky work still
+uses the Rust supervisor and its owned-tree contract. This policy update does
+not perform a disk cleanup, migrate cache roots or disturb other projects.
+
+### Independent CI diagnostics
+
+Source-feedback jobs use `scripts/ci/run-independent-checks.mjs` for independent
+argv groups. It attempts all groups after ordinary failures (including a crash
+or launch failure), reports each result and exits nonzero if any failed.
+Explicit SIGINT/SIGTERM cancellation stops new attempts. It does not run a shell,
+retry checks or create acceptance evidence. Producer prerequisites stay explicit
+in Actions step guards: missing CLI/WASM, locked dependencies, signed packs or
+browser tools block only their real consumers. A failed unrelated format, unit
+test or lint cannot suppress other available tests. Independent Windows/Linux
+management jobs do not wait on each other; their failures remain visible.
 
 Publication is separate from compilation. The current 4194 WASM, accepted
 release exports and deployed files keep their publication contracts.

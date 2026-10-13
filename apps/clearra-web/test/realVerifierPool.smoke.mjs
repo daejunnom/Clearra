@@ -16,9 +16,15 @@ import { DurableDelegationAuthority, MemoryDelegationJournal }
   from '../src/workers/DurableDelegationJournal.ts';
 import { buildWorkspaceCommand, createDefaultWorkspaceRequest }
   from '../../../packages/clearra-ui/src/lib/workspace/solverWorkspaceModel.ts';
-import { validateProductResultPayload, validateSolutionSetArtifactPayload }
+import { loadCoveragePortfolioExactPage, validateProductResultPayload, validateSolutionSetArtifactPayload }
   from '../../../packages/clearra-ui/src/lib/workspace/productResultPager.ts';
-import { encodeCtkSolutionKeySegment }
+import { tryCreateCoveragePortfolioExportKeySource }
+  from '../../../packages/clearra-ui/src/lib/workspace/coveragePortfolioExportSource.ts';
+import { encodeSolutionKeySourceForClipboard }
+  from '../../../packages/clearra-ui/src/lib/workspace/solutionExportAsync.ts';
+import { decodeCtk3 }
+  from '../../../packages/clearra-ui/src/lib/workspace/ctk3Codec.ts';
+import { encodeCtkSolutionKeySegment, parseSolutionKey, solutionPageToCtk3Page }
   from '../../../packages/clearra-ui/src/lib/workspace/solutionExport.ts';
 
 const profiles = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
@@ -203,6 +209,45 @@ function productProjection(terminal) {
     probability: report.coverage_probability
   };
 }
+async function productProjectionWithLazyCopy(terminal) {
+  const projection = productProjection(terminal);
+  if (projection.kind !== 'pc-score-portfolio.v2') return projection;
+  // Completion deliberately publishes no CTK3 artifact. Exercise the same
+  // retained page source and whole-alternative export adapter as the GUI,
+  // without restoring encoding to the solver or borrowing private Core keys.
+  assert.equal(projection.artifact, null, 'score portfolio completion must keep copy lazy');
+  assert.equal(wasm.product_page_available(), true, 'the actual WASM page owner must remain live');
+  const payload = projection.product.content.payload;
+  assert.equal(payload.page_handle_available, true);
+  const { set_contract: _, page_handle_available: __, ...referencePage } = payload;
+  const isCurrent = () => wasm.product_page_available();
+  const loadMemberPage = async (alternative, member, _signal, maximumWorkSteps = 10_000) =>
+    wasm.product_page_get(alternative, member, maximumWorkSteps);
+  const initialPage = await loadCoveragePortfolioExactPage({
+    loadMemberPage,
+    alternativeIndex: payload.alternative_index,
+    memberPageNumber: '1',
+    isCurrent,
+    expectation: {
+      setIdentitySha256: payload.set_identity_sha256,
+      candidateMapSha256: payload.candidate_map_sha256,
+      alternativeIndex: payload.alternative_index,
+      memberPageNumber: '1',
+      referencePage,
+      requireSameAlternativeMetadata: true
+    }
+  });
+  assert.ok(initialPage, 'the canonical portfolio must replay through the actual page owner');
+  const activation = tryCreateCoveragePortfolioExportKeySource({ initialPage, loadMemberPage, isCurrent });
+  assert.equal(activation.error, null);
+  assert.ok(activation.keySource, 'the nonempty score portfolio must expose its whole-set copy source');
+  projection.lazyCopy = {
+    keyCount: activation.keySource.keyCount,
+    keys: await activation.keySource.readKeys(0, activation.keySource.keyCount),
+    ctk3: await encodeSolutionKeySourceForClipboard(activation.keySource, 'ctk')
+  };
+  return projection;
+}
 function assertFullHeightScoreReadback(projection, expectedKeys) {
   // These small tracked fixtures have exactly one concrete source field.
   // Compare the public score owner with the independently executed ordinary
@@ -248,14 +293,16 @@ function assertFullHeightScoreReadback(projection, expectedKeys) {
       assert.equal(publicResult.optimal_cardinality, '1');
       assert.equal(publicResult.total_member_pages, '1');
       assert.deepEqual(publicResult.members.map(member => member.normalized_solution_key), expectedKeys);
-      const artifact = projection.artifact;
-      assert.ok(artifact, 'the nonempty canonical score portfolio must retain its public copy artifact');
-      assert.equal(artifact.source_result_kind, projection.kind);
-      assert.equal(artifact.completeness, 'complete');
-      assert.equal(artifact.solution_count, publicResult.members.length);
-      const ctk3 = artifact.formats.find(format => format.format === 'ctk3');
-      assert.equal(ctk3?.state, 'available');
-      assert.equal(ctk3.page_count, publicResult.members.length);
+      assert.equal(projection.artifact, null, 'copy must not be encoded on product completion');
+      assert.equal(projection.lazyCopy.keyCount, publicResult.members.length);
+      assert.deepEqual(projection.lazyCopy.keys, expectedKeys);
+      const decoded = decodeCtk3(projection.lazyCopy.ctk3);
+      assert.equal(decoded.pages.length, publicResult.members.length);
+      assert.deepEqual(decoded.pages, expectedKeys.map(key => {
+        const page = parseSolutionKey(key);
+        assert.ok(page, 'the independent full-height source must be exportable');
+        return solutionPageToCtk3Page(page);
+      }), 'lazy GUI copy must contain the complete canonical field, including rows above 6L');
       break;
     }
     default: assert.fail(`unreviewed score readback: ${projection.kind}`);
@@ -332,7 +379,7 @@ async function distributed(text, activated, {
     if (activated.synopsis) assert.ok(after.legal > before.legal, 'real synopsis admission must not silently fall back');
     if (activated.pack) assert.ok(after.relation > before.relation, 'real relation admission must not silently fall back');
     if (expectedVisibleSeven) assertVisibleSevenAuthority(terminal);
-    return projectTerminal(terminal);
+    return await projectTerminal(terminal);
   } finally { cancelOnConsume = null; runner.dispose(); }
 }
 try {
@@ -436,7 +483,7 @@ try {
         backend: 'cpu', rule: 'srs-plus', legalBoardEnabled: false, conditionedReachabilityEnabled: false };
       const serial = buildWorkspaceCommand({ ...request, workers: 1 });
       const parallel = buildWorkspaceCommand({ ...request, workers: 3 });
-      const baseline = productProjection(await new WasmJobRunner(wasm).run(serial, () => {}));
+      const baseline = await productProjectionWithLazyCopy(await new WasmJobRunner(wasm).run(serial, () => {}));
       assert.equal(baseline.kind, kind, `${id}/${mode} must reach its exact typed product presenter`);
       if (mode === 'score' || mode === 'score-finder' || mode === 'score-minimals') {
         assertFullHeightScoreReadback(baseline, scoreSourceKeys);
@@ -445,7 +492,7 @@ try {
         `${id}/${mode} must expose the product-owned GUI payload instead of a raw scalar-only result`);
       const actual = await distributed(parallel, { synopsis: null, pack: null },
         { expectedRootTasks: mode === 'tiling', expectedFullHeight: mode !== 'tiling',
-          projectTerminal: productProjection });
+          projectTerminal: productProjectionWithLazyCopy });
       assert.deepEqual(actual, baseline, `${id}/${mode}/full-height Web product and export`);
       console.log(`real_web_full_height_product=passed fixture=${id} mode=${mode} workers=3`);
     }

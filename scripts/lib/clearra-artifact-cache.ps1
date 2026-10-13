@@ -79,6 +79,7 @@ function Preserve-ClearraExperimentCompilerCache($Record, $Lease) {
     $cargo = Join-Path $verified.transaction_root 'cargo-target'
     if (-not (Test-Path -LiteralPath $cargo -PathType Container)) { return $false }
     Assert-ClearraBuildTreeNoReparse $verified.transaction_root
+    Assert-ClearraBuildScratchRetired $verified.transaction_root
     foreach ($entry in Get-ChildItem -LiteralPath $verified.transaction_root -Force) {
         if ($entry.Name -in @('.clearra-build-transaction.json','cargo-target')) { continue }
         Remove-Item -LiteralPath $entry.FullName -Recurse -Force
@@ -232,6 +233,7 @@ function Complete-ClearraBuildTransaction {
     }
     if ($record.status -eq 'complete') { return }
     if ($record.status -ne 'active') { throw 'Only an active transaction may be completed.' }
+    Assert-ClearraBuildScratchRetired $record.transaction_root
     $finalSnapshot = Get-ClearraWorkspaceBuildSignature $record.source_root
     if ($finalSnapshot.source_snapshot_sha256 -ne $record.compiler_snapshot_sha256 -or
         $finalSnapshot.input_file_count -ne $record.compiler_input_file_count -or

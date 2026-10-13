@@ -171,52 +171,28 @@ function Get-StartTestsTransientBuildRoots {
 function New-TransientBuildDir([string]$Prefix) {
     $base = (Get-StartTestsTransientBuildRoots | Select-Object -First 1)
     if ([string]::IsNullOrWhiteSpace($base)) {
-        throw "No transient build root is available; pass -CoreCBuildDir explicitly."
+        throw 'No managed transient build root is available.'
     }
     if ($Prefix -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
         throw "Transient build prefix contains unsupported path characters: $Prefix"
     }
-    $slotRoot = [System.IO.Path]::GetFullPath((Join-Path $base 'transient'))
-    $path = [System.IO.Path]::GetFullPath((Join-Path $slotRoot $Prefix))
+    $slotRoot = [IO.Path]::GetFullPath((Join-Path $base 'transient'))
+    $path = [IO.Path]::GetFullPath((Join-Path $slotRoot $Prefix))
     Assert-ClearraPathInBuildTransaction $path $base (Resolve-ClearraBuildSourceRoot) | Out-Null
     Ensure-ClearraBuildArtifactCache
-    New-Item -ItemType Directory -Force -Path $slotRoot | Out-Null
     if ($script:ClearraTransientBuildSlotLocks.ContainsKey($path)) {
         throw "Transient build slot is already active in this process: $path"
     }
-
-    $lockPath = Join-Path $slotRoot ".$Prefix.lock"
-    $deadline = [DateTime]::UtcNow.AddMinutes(30)
-    $lock = $null
-    do {
-        try {
-            $lock = [System.IO.File]::Open(
-                $lockPath,
-                [System.IO.FileMode]::OpenOrCreate,
-                [System.IO.FileAccess]::ReadWrite,
-                [System.IO.FileShare]::None
-            )
-        } catch [System.IO.IOException] {
-            if ([DateTime]::UtcNow -ge $deadline) {
-                throw "Timed out waiting for transient build slot: $path"
-            }
-            Start-Sleep -Milliseconds 250
-        }
-    } while ($null -eq $lock)
-
-    try {
-        if (Test-Path -LiteralPath $path) {
-            Assert-ClearraBuildTreeNoReparse $path
-            Remove-Item -LiteralPath $path -Recurse -Force
-        }
-        New-Item -ItemType Directory -Force -Path $path | Out-Null
-        $script:ClearraTransientBuildSlotLocks[$path] = $lock
-        return $path
-    } catch {
-        $lock.Dispose()
-        Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
-        throw
+    # The shared helper validates the live build transaction, binds the lease
+    # to this PowerShell parent and refuses interrupted/unknown predecessors.
+    $leaseText = @(& node (Join-Path $PSScriptRoot '../tools/managed-transient-directory.mjs') --acquire-for-parent $path)
+    if ($LASTEXITCODE -ne 0) { throw "Transient build slot acquisition failed: $path" }
+    $lease = ($leaseText -join "`n") | ConvertFrom-Json
+    if ($lease.pid -ne $PID -or $lease.directory -ne $path -or $lease.state -ne 'active') {
+        throw 'Transient parent handoff identity mismatch; lease is preserved.'
     }
+    $script:ClearraTransientBuildSlotLocks[$path] = $lease
+    return $path
 }
 function Get-StartTestsPersistentBuildDir([string]$Name) {
     $base = (Get-StartTestsTransientBuildRoots | Select-Object -First 1)
@@ -251,47 +227,20 @@ function Assert-ClearraCanonicalCargoTargetDir([string]$Path) {
     return $canonical
 }
 function Remove-TransientBuildDir([string]$BuildDir) {
-    if ([string]::IsNullOrWhiteSpace($BuildDir)) {
-        return
+    if ([string]::IsNullOrWhiteSpace($BuildDir)) { return }
+    $buildPath = [IO.Path]::GetFullPath($BuildDir)
+    if (-not $script:ClearraTransientBuildSlotLocks.ContainsKey($buildPath)) { return }
+    $lease = $script:ClearraTransientBuildSlotLocks[$buildPath]
+    $base = Get-ClearraBuildTransactionRoot
+    Assert-ClearraPathInBuildTransaction $buildPath $base (Resolve-ClearraBuildSourceRoot) | Out-Null
+    if ($lease.pid -ne $PID -or $lease.directory -ne $buildPath -or $lease.state -ne 'active') {
+        throw 'Transient cleanup owner mismatch; lease is preserved.'
     }
-    $buildPath = [System.IO.Path]::GetFullPath($BuildDir)
-    $isAllowed = $false
-    $lockPath = $null
-    foreach ($root in Get-StartTestsTransientBuildRoots) {
-        if ([string]::IsNullOrWhiteSpace($root)) {
-            continue
-        }
-        $rootPath = [System.IO.Path]::GetFullPath($root)
-        $comparison = if (Test-StartTestsWindows) {
-            [System.StringComparison]::OrdinalIgnoreCase
-        } else {
-            [System.StringComparison]::Ordinal
-        }
-        $slotRoot = [System.IO.Path]::GetFullPath((Join-Path $rootPath 'transient')).TrimEnd('\', '/')
-        $parent = [System.IO.Path]::GetFullPath((Split-Path -Parent $buildPath)).TrimEnd('\', '/')
-        if ($parent.Equals($slotRoot, $comparison) -and
-            $script:ClearraTransientBuildSlotLocks.ContainsKey($buildPath)) {
-            $isAllowed = $true
-            $lockPath = Join-Path $slotRoot ".$([System.IO.Path]::GetFileName($buildPath)).lock"
-            break
-        }
-    }
-
-    try {
-        if ($isAllowed) {
-            Assert-ClearraPathInBuildTransaction $buildPath (Get-ClearraBuildTransactionRoot) (Resolve-ClearraBuildSourceRoot) | Out-Null
-            if (Test-Path -LiteralPath $buildPath) { Assert-ClearraBuildTreeNoReparse $buildPath }
-            Remove-Item -LiteralPath $buildPath -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    } finally {
-        if ($script:ClearraTransientBuildSlotLocks.ContainsKey($buildPath)) {
-            $script:ClearraTransientBuildSlotLocks[$buildPath].Dispose()
-            $script:ClearraTransientBuildSlotLocks.Remove($buildPath)
-        }
-        if (-not [string]::IsNullOrWhiteSpace($lockPath)) {
-            Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
-        }
-    }
+    # Callers have finished their owned consumers before this explicit release.
+    # A failed cleanup keeps both the on-disk lease and this process's binding.
+    & node (Join-Path $PSScriptRoot '../tools/managed-transient-directory.mjs') --release-for-parent $buildPath $lease.token
+    if ($LASTEXITCODE -ne 0) { throw "Transient cleanup failed; unresolved lease is preserved: $buildPath" }
+    $script:ClearraTransientBuildSlotLocks.Remove($buildPath)
 }
 function Resolve-CoreCBuildDirForStartTests(
     [string]$Root,

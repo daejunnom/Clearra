@@ -6,6 +6,7 @@ import { lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } fr
 import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareRustcLauncher } from './prepare-clearra-rustc-launcher.mjs';
+import { assertManagedTransientSlotsRetired } from './managed-transient-directory.mjs';
 import { BUILD_TRANSACTION_MARKER, BUILD_TRANSACTION_SCHEMA, FORBIDDEN_BUILD_ALIASES, assertBuildRecord, assertBuildPathWithin, assertNoBuildLinks, assertManagedBuildTransaction,
   buildPathIdentity, buildSourceId, canonicalBuildRoot, nativeBuildPath } from './clearra-build-policy.mjs';
 
@@ -136,6 +137,7 @@ async function removeOwnedGeneration(marker, root) {
     if (current[key] !== marker[key]) throw new Error('Build generation ownership changed before retirement');
   }
   if (buildPathIdentity(marker.transaction_root) === buildPathIdentity(root)) throw new Error('Cannot remove the whole build root');
+  await assertManagedTransientSlotsRetired(transactionRoot);
   await rm(transactionRoot, { recursive: true, force: false });
 }
 async function retainExperimentCompilerCache(marker, root) {
@@ -148,6 +150,7 @@ async function retainExperimentCompilerCache(marker, root) {
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
   assertNoBuildLinks(target);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
+  await assertManagedTransientSlotsRetired(transactionRoot);
   for (const entry of await readdir(transactionRoot, { withFileTypes: true })) {
     if ([BUILD_TRANSACTION_MARKER, 'cargo-target'].includes(entry.name)) continue;
     const path = resolve(transactionRoot, entry.name);
@@ -289,6 +292,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
     let snapshotError;
     if (success) {
       try {
+        await assertManagedTransientSlotsRetired(transactionRoot);
         const finalSnapshot = await buildCompilerSnapshot(sourceRoot, environment);
         if (finalSnapshot.sourceSha256 !== marker.compiler_snapshot_sha256 ||
             finalSnapshot.inputFileCount !== marker.compiler_input_file_count ||

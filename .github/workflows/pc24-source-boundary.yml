@@ -58,6 +58,8 @@ on:
       - "apps/clearra-discord-bot/test/extended-solution-key.test.mjs"
       - "crates/clearra-geometry/**"
       - "scripts/ci/pc24-source-boundary.test.mjs"
+      - "scripts/ci/run-independent-checks*.mjs"
+      - "scripts/ci/independent-feedback-workflows.test.mjs"
       - "tests/fixtures/contracts/pc_target_frame_parity.v1.tsv"
       - "tests/fixtures/contracts/extended_solution_keys.v1.tsv"
       - "tests/fixtures/contracts/extended_pc_surface_input.v1.tsv"
@@ -91,71 +93,79 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         with:
           node-version: 22.23.2
       - name: Install pinned Rust
+        id: rust
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
       - name: Verify the bounded non-publishing feedback contract
-        run: node --test scripts/ci/pc24-source-boundary.test.mjs
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        run: node --test scripts/ci/pc24-source-boundary.test.mjs scripts/ci/run-independent-checks.test.mjs scripts/ci/independent-feedback-workflows.test.mjs
       - name: Check target-frame and compiler source format
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-core-executor -p clearra-replay -p clearra-render -p clearra-accelerator-product-host -p clearra-postprocess -p clearra-output -p clearra-fumen -p clearra-host-contract -p clearra-cli -p clearra-cli-command -p clearra-app -p clearra-validation -p clearra-wasm -p clearra-wasm-abi --check
       - name: Test four-word physical replay without changing compact trk1 identities
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-replay --lib -- --test-threads=1
       - name: Test common exact score traversal and full-height score cells without claiming surface authority
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
           cargo test --locked -p clearra-postprocess --no-default-features --lib score_batch:: -- --test-threads=1
       - name: Test allocation-free CTK2 identities and unchanged compact identities
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
           cargo test --locked -p clearra-core-domain --lib solution:: -- --test-threads=1
       - name: Test native CTK3 publication from the same four-word identities
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-output --no-default-features --lib artifact::solution_document::tests -- --test-threads=1
       - name: Test four-word Fumen fields without changing compact search identities
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
           cargo test --locked -p clearra-fumen --lib adapter:: -- --test-threads=1
       - name: Test typed twenty-four-line export refusal without truncating CTK3
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-output --no-default-features --lib full_height_document_keeps_ctk3_and_reports_fumens_real_limit -- --test-threads=1
       - name: Preserve exact empty minimum selection without an invented canonical witness
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-host-contract --lib empty_portfolio_retains_canonical_policy -- --test-threads=1
       - name: Test the public App and CLI height-limit reasons
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-host-contract --lib solution_set_artifact_payload -- --test-threads=1
-          cargo test --locked -p clearra-app --lib extended_document_error_tests -- --test-threads=1
-          cargo test --locked -p clearra-cli --lib unsupported_fumen_height_preserves_its_explicit_cli_error -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-host-contract --lib solution_set_artifact_payload -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-app --lib extended_document_error_tests -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-cli --lib unsupported_fumen_height_preserves_its_explicit_cli_error -- --test-threads=1
       - name: Test compact minimum ingress does not acquire unsupported extended authority
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-cli-command --test pinned_pc -- --test-threads=1
       - name: Test fixed-width kick codec without changing its wire semantics
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-pc-graph --lib request::continuation_kick_profile_codec::tests -- --test-threads=1
       - name: Test bounded full-height Opening labels without enumerating PC solutions
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
           cargo test --locked -p clearra-pc-graph --lib partition:: -- --test-threads=1
       - name: Verify the compact six-line and extended twenty-four-line layout boundary without enumeration
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-geometry --lib layout::standard_pc_layout::tests -- --test-threads=1
       - name: Test compact and four-word input normalization without truncation
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-pc-graph --lib request::pc_scenario_query::tests -- --test-threads=1
       - name: Test the real full-height compiler input instead of a Board64 placeholder
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-problem --test extended_pc_execution -- --test-threads=1
       - name: Verify even empty-origin targets without enabling unconnected result products
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-validation --lib validators::pc_query_validator::tests -- --test-threads=1
       - name: Verify ordinary PC memory owners without widening Build or typed reducer authority
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-problem --lib ordinary_pc_family_memory_projection_ -- --test-threads=1
 
   inverse-lock-clear:
@@ -164,92 +174,110 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        with:
+          node-version: 22.23.2
       - name: Install pinned native and WASM Rust targets
+        id: rust
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy --target wasm32-unknown-unknown
       - name: Compile the same four-word execution bridge for WASM
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown
-          cargo check --locked -p clearra-output --no-default-features --target wasm32-unknown-unknown
-          cargo check --locked -p clearra-wasm-abi --target wasm32-unknown-unknown
-          cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo check --locked -p clearra-core-executor --target wasm32-unknown-unknown ::: \
+            cargo check --locked -p clearra-output --no-default-features --target wasm32-unknown-unknown ::: \
+            cargo check --locked -p clearra-wasm-abi --target wasm32-unknown-unknown ::: \
+            cargo check --locked -p clearra-wasm --target wasm32-unknown-unknown
       - name: Verify real extended PC Tiling App products and cooperative terminals
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-app --no-default-features --test extended_pc_tiling -- --test-threads=1
       - name: Verify full-height PC family with actual BuildUp and supply-language evaluation
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-core-executor --no-default-features --test extended_pc_family -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --test extended_pc_observation -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-core-executor --no-default-features --test extended_pc_family -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --test extended_pc_observation -- --test-threads=1
       - name: Verify raw full-height worker transfers cannot create typed product authority
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-core-executor --no-default-features --lib pc_distributed::tests -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --lib extended_pc_tiling::distributed::tests -- --test-threads=1
-          cargo test --locked -p clearra-wasm --lib full_height_pc_and_tiling_ -- --test-threads=1
-          cargo test --locked -p clearra-wasm --lib full_height_tiling_empty_finish_sentinel -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-core-executor --no-default-features --lib pc_distributed::tests -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --lib extended_pc_tiling::distributed::tests -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-wasm --lib full_height_pc_and_tiling_ -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-wasm --lib full_height_tiling_empty_finish_sentinel -- --test-threads=1
       - name: Verify canonical full-height CLI execution without a native-C or tablebase fallback
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --test extended_pc_tiling -- --test-threads=1
       - name: Verify GUI and Discord canonical argv execute and publish the complete full-height family
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-cli-command --test extended_pc_surfaces -- --test-threads=1
       - name: Verify closed replay ingress retains B2B without score or tie overrides
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-cli-command --lib pc_path_ -- --test-threads=1
-          cargo test --locked -p clearra-app --no-default-features --lib pc_path_app_contract_preserves_b2b -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-cli-command --lib pc_path_ -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-app --no-default-features --lib pc_path_app_contract_preserves_b2b -- --test-threads=1
       - name: Verify the same full-height VisibleSeven input and direct cooperative policy evidence
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-cli-command --test extended_pc_observation -- --test-threads=1
       - name: Verify score identities share one full-height dictionary and preserve compact rows
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-app --no-default-features --lib pc_score_solution_identity -- --test-threads=1
-          cargo test --locked -p clearra-app --no-default-features --lib pc_score_postprocess -- --test-threads=1
-          cargo test --locked -p clearra-app --no-default-features --lib pc_score_minimum_cover_contract_tests -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-app --no-default-features --lib pc_score_solution_identity -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-app --no-default-features --lib pc_score_postprocess -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-app --no-default-features --lib pc_score_minimum_cover_contract_tests -- --test-threads=1
       - name: Verify PC drawing selection keeps all four words without widening compact Build documents
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-app --no-default-features --lib pc_pinned_solution_document -- --test-threads=1
-          cargo test --locked -p clearra-app --no-default-features --lib build_colored_target_document -- --test-threads=1
-          cargo test --locked -p clearra-cli-command --lib pc_pinned_minimals -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-app --no-default-features --lib pc_pinned_solution_document -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-app --no-default-features --lib build_colored_target_document -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-cli-command --lib pc_pinned_minimals -- --test-threads=1
       - name: Verify compact and full-height score ingress bounds without enumerating a sixty-piece PC
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-cli-command --lib pc_score_ -- --test-threads=1
       - name: Verify actual full-height score keys survive the bounded WASM payload adapter
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-wasm --lib full_height_score_key_projection -- --test-threads=1
       - name: Verify full-height replay masks and the original compact page source without changing ordering
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-wasm --lib empty_minimum_projection_keeps_canonical_policy -- --test-threads=1
-          cargo test --locked -p clearra-wasm --lib pinned_minimum_projection_preserves_owned_keys -- --test-threads=1
-          cargo test --locked -p clearra-wasm --lib full_height_replay_payload -- --test-threads=1
-          cargo test --locked -p clearra-app --no-default-features --lib pc_replay_page_source -- --test-threads=1
-          cargo test --locked -p clearra-app --no-default-features --lib pc_path_board_mask -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-wasm --lib empty_minimum_projection_keeps_canonical_policy -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-wasm --lib pinned_minimum_projection_preserves_owned_keys -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-wasm --lib full_height_replay_payload -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-app --no-default-features --lib pc_replay_page_source -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-app --no-default-features --lib pc_path_board_mask -- --test-threads=1
       - name: Verify exact empty native minimum output instead of an unsupported presenter response
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --lib minimum_renderer_preserves_an_exact_empty_optimum -- --test-threads=1
-          cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --test canonical_witness_contract extended_pc_minimum_preserves_exact_empty_optimum -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --lib minimum_renderer_preserves_an_exact_empty_optimum -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --test canonical_witness_contract extended_pc_minimum_preserves_exact_empty_optimum -- --test-threads=1
       - name: Check changed App command validation and renderer owners without hiding global release lint
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo clippy --locked --no-deps -p clearra-app -p clearra-cli-command -p clearra-validation -p clearra-render --all-targets --no-default-features -- -D warnings
       - name: Verify renderer pixel grouping remains byte exact
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-render --lib -- --test-threads=1
       - name: Verify native CLI assembly retains the shared full-height Opening input contract
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime --lib assemble::pc_query_assembler::tests -- --test-threads=1
       - name: Verify shared signed catalog owners without regenerating qualified assets
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-accelerator-product-host --lib -- --test-threads=1
-          cargo clippy --locked -p clearra-accelerator-product-host --all-targets -- -D warnings
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-accelerator-product-host --lib -- --test-threads=1 ::: \
+            cargo clippy --locked -p clearra-accelerator-product-host --all-targets -- -D warnings
       - name: Check compact and full-height replay postprocess targets
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo clippy --locked -p clearra-replay -p clearra-postprocess --all-targets -- -D warnings
 
   # The former 15-minute owner finished the actual surface proofs but expired
@@ -262,42 +290,53 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        with:
+          node-version: 22.23.2
       - name: Install pinned native Rust and Clippy
+        id: rust
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Verify exact extended family splits and bounded native Tiling workers
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_geometry::parallel::tests -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_observation -- --test-threads=1
-          cargo test --locked -p clearra-app --no-default-features --features parallel --test extended_pc_tiling -- --test-threads=1
-          cargo clippy --locked -p clearra-replay -p clearra-postprocess -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings
-          cargo clippy --locked --no-deps -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- -D warnings
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_geometry::parallel::tests -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_observation -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-app --no-default-features --features parallel --test extended_pc_tiling -- --test-threads=1 ::: \
+            cargo clippy --locked -p clearra-replay -p clearra-postprocess -p clearra-core-executor -p clearra-app --no-default-features --features parallel --lib -- -D warnings ::: \
+            cargo clippy --locked --no-deps -p clearra-core-executor --no-default-features --features parallel --test extended_pc_family -- -D warnings
       - name: Verify complete PC evidence memory is admitted before row and snapshot construction
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib resource::aggregate_execution_budget::tests -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib restricting_a_realm_cap_preserves_the_exact_parent_lease -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_bounded_geometry_ -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_build_order_preallocation_refusal_keeps_private_vectors_unchanged -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_build_order_debit_shares_one_request_without_allocating_a_graph -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib geometry_family::tests -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_coverage_preflight -- --test-threads=1
-          cargo test --locked -p clearra-core-domain --lib typed_execution_exhaustion_preserves_started_but_not_complete -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib pc_family_evidence_admits_snapshot_row_slots_and_owned_bitsets_before_construction -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib build_pc_resource_projection_field_inventory_is_exhaustive -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib resource::aggregate_execution_budget::tests -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib restricting_a_realm_cap_preserves_the_exact_parent_lease -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_bounded_geometry_ -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_build_order_preallocation_refusal_keeps_private_vectors_unchanged -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_build_order_debit_shares_one_request_without_allocating_a_graph -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib geometry_family::tests -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib extended_coverage_preflight -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-domain --lib typed_execution_exhaustion_preserves_started_but_not_complete -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib pc_family_evidence_admits_snapshot_row_slots_and_owned_bitsets_before_construction -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib build_pc_resource_projection_field_inventory_is_exhaustive -- --test-threads=1
       - name: Verify immutable compact and extended page owners and bounded catalog admission
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: |
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib tiling_solution_store::tests -- --test-threads=1
-          cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib bounded_catalog_keeps_exact_identity_and_refuses_before_growth -- --test-threads=1
+          node scripts/ci/run-independent-checks.mjs -- \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib tiling_solution_store::tests -- --test-threads=1 ::: \
+            cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib bounded_catalog_keeps_exact_identity_and_refuses_before_growth -- --test-threads=1
       - name: Verify one-placement Build and forced extended PC completion without large enumeration
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-core-executor --no-default-features --features parallel --test extended_pc_ilc -- --test-threads=1
       - name: Verify CTK2 catalog reconstruction keeps the full source board and target height
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}
         run: cargo test --locked -p clearra-core-executor --no-default-features --features parallel --lib shared_extended_identity_resolves_only_matching_full_height_catalog_rows -- --test-threads=1
 
   document-wire:
@@ -306,30 +345,38 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         with:
           node-version: 22.23.2
       - name: Bind pinned pnpm and install without lifecycle scripts
+        id: ui-deps
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: |
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts
           git diff --exit-code
       - name: Build only the CTK3 test dependency
+        id: ctk3-deps
+        if: ${{ !cancelled() && steps.ui-deps.outcome == 'success' }}
         run: node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
       - name: Check shared UI contracts and whole-set clipboard publication
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.ctk3-deps.outcome == 'success' }}
         run: |
-          pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json
-          pnpm --filter @clearra/ui exec node --input-type=module -e "import { readFileSync } from 'node:fs'; import { parse } from 'svelte/compiler'; for (const path of ['src/lib/workspace/SolverWorkspace.svelte','src/lib/workspace/WorkspaceBoardEditor.svelte']) parse(readFileSync(path, 'utf8'), { filename: path, modern: true });"
-          node scripts/tools/run-typescript-contracts.mjs packages/clearra-ui/test/extendedSolutionKey.contract.ts packages/clearra-ui/test/solutionExport.contract.ts packages/clearra-ui/test/productResultPager.contract.ts packages/clearra-ui/test/pcReplayPager.contract.ts
-          node --test packages/clearra-ui/test/workspaceCommandSerialization.test.mjs
-          node --test packages/clearra-ui/test/mandatorySolutionFullHeight.test.mjs
+          node scripts/ci/run-independent-checks.mjs -- \
+            pnpm --filter @clearra/ui exec tsc --noEmit -p tsconfig.contract.json ::: \
+            pnpm --filter @clearra/ui exec node --input-type=module -e "import { readFileSync } from 'node:fs'; import { parse } from 'svelte/compiler'; for (const path of ['src/lib/workspace/SolverWorkspace.svelte','src/lib/workspace/WorkspaceBoardEditor.svelte']) parse(readFileSync(path, 'utf8'), { filename: path, modern: true });" ::: \
+            node scripts/tools/run-typescript-contracts.mjs packages/clearra-ui/test/extendedSolutionKey.contract.ts packages/clearra-ui/test/solutionExport.contract.ts packages/clearra-ui/test/productResultPager.contract.ts packages/clearra-ui/test/pcReplayPager.contract.ts ::: \
+            node --test packages/clearra-ui/test/workspaceCommandSerialization.test.mjs ::: \
+            node --test packages/clearra-ui/test/mandatorySolutionFullHeight.test.mjs
       - name: Check Discord CTK3 projection against the same wire cases
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.ctk3-deps.outcome == 'success' }}
         run: node --test apps/clearra-discord-bot/test/extended-solution-key.test.mjs apps/clearra-discord-bot/test/ctk3-result.test.mjs apps/clearra-discord-bot/test/slash-command-input.test.mjs apps/clearra-discord-bot/test/field-modal.test.mjs apps/clearra-discord-bot/test/typed-product-result.test.mjs
       - name: Verify the same full-height GUI and Discord replay frames and GIF bytes at 500ms
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.ctk3-deps.outcome == 'success' }}
         run: node --test apps/clearra-discord-bot/test/pc-path-replay.test.mjs packages/clearra-ui/test/pcPathReplayRenderParity.test.mjs

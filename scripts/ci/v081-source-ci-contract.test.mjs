@@ -132,8 +132,16 @@ test('full-height score readback validates public owners without retaining priva
   assert.ok(!web.includes('Number.isFinite(field.average_score)'));
   assert.ok(web.includes('publicResult.members.map(member => member.normalized_solution_key), expectedKeys'));
   assert.ok(web.includes('publicResult.canonical_winner.candidate_id'));
-  assert.ok(web.includes('artifact.solution_count, publicResult.members.length'));
-  assert.ok(web.includes('ctk3.page_count, publicResult.members.length'));
+  assert.ok(web.includes("assert.equal(projection.artifact, null, 'copy must not be encoded on product completion')"));
+  assert.ok(web.includes('wasm.product_page_available()'));
+  assert.ok(web.includes('wasm.product_page_get(alternative, member, maximumWorkSteps)'));
+  assert.ok(web.includes('tryCreateCoveragePortfolioExportKeySource({ initialPage, loadMemberPage, isCurrent })'));
+  assert.ok(web.includes("encodeSolutionKeySourceForClipboard(activation.keySource, 'ctk')"));
+  assert.ok(web.includes('assert.deepEqual(projection.lazyCopy.keys, expectedKeys)'));
+  assert.ok(web.includes('decoded.pages.length, publicResult.members.length'));
+  assert.ok(web.includes('solutionPageToCtk3Page(page)'));
+  assert.ok(web.includes('projectTerminal: productProjectionWithLazyCopy'));
+  assert.ok(web.includes('return await projectTerminal(terminal)'));
   assert.ok(web.includes('assert.deepEqual(actual, baseline, `${id}/${mode}/full-height Web product and export`)'));
 });
 
@@ -268,10 +276,12 @@ test('CI uses the existing narrow Rust fixture root and checks it before compila
 
 test('an asset-test failure remains failure without suppressing independent proof feedback', () => {
   assert.ok(!workflow.includes('continue-on-error:'));
-  assert.match(workflow, /if cargo test --locked -p clearra-cli --lib "\$filter"[\s\S]*failed=\$\(\(failed \+ 1\)\)/u);
-  assert.ok(workflow.includes('test "$failed" -eq 0'));
+  assert.ok(workflow.includes('checks+=(cargo test --locked -p clearra-cli --lib "$filter" --no-default-features -- --test-threads=1)'));
+  assert.ok(workflow.includes('node scripts/ci/run-independent-checks.mjs -- "${checks[@]}"'));
   const proofStep = workflow.slice(workflow.indexOf('- name: Test bounded generation and parser proofs'));
-  assert.ok(proofStep.startsWith("- name: Test bounded generation and parser proofs, not full profile regeneration\n        if: ${{ !cancelled() && steps.native-check.outcome == 'success' }}\n"));
+  assert.ok(proofStep.startsWith("- name: Test bounded generation and parser proofs, not full profile regeneration\n        if: ${{ !cancelled() && steps.rust.outcome == 'success' && steps.node.outcome == 'success' }}\n"));
+  assert.ok(proofStep.includes('node scripts/ci/run-independent-checks.mjs --'));
+  assert.ok(!proofStep.includes("steps.native-check.outcome == 'success'"));
 });
 
 test('CI exercises the authoritative CLI ingress and real Desktop/Discord accelerator paths', () => {

@@ -241,6 +241,13 @@ function Assert-ClearraBuildTreeNoReparse([string]$Path) {
     }
 }
 
+function Assert-ClearraBuildScratchRetired([string]$Path) {
+    & node (Join-Path $PSScriptRoot '../tools/managed-transient-directory.mjs') --check-retired $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unresolved or unknown build scratch ownership is preserved; explicit recovery is required.'
+    }
+}
+
 function Remove-ClearraOwnedBuildTransaction($Record, $Lease) {
     if ($null -eq $Lease) { throw 'A verified active owner lease is required for transaction cleanup.' }
     $leaseIdentity = Read-ClearraBuildLease (Get-ClearraBuildLeasePath $Record)
@@ -255,6 +262,7 @@ function Remove-ClearraOwnedBuildTransaction($Record, $Lease) {
         throw 'Build cleanup ownership changed.'
     }
     Assert-ClearraBuildTreeNoReparse $path
+    Assert-ClearraBuildScratchRetired $path
     $stillOwned = Read-ClearraBuildLease $Lease.Path
     if ($stillOwned.session_id -ne $leaseIdentity.session_id -or $stillOwned.owner_pid -ne $PID) {
         throw 'Build cleanup lease changed during validation.'
