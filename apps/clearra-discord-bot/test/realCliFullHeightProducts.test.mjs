@@ -127,7 +127,11 @@ function verifyProduct(raw, projected, input) {
       break;
     case 'chance':
       assert.equal(Number(raw.summary.covered_pattern_count), 1);
-      assert.equal(Number(raw.summary.probability), 1);
+      // The WASM-backed CLI preserves its canonical union-probability field;
+      // an unsupported legacy alias must not be manufactured by a presenter.
+      assert.equal(Number(raw.summary.coverage_probability), 1);
+      assert.equal(raw.summary.probability_complete, true);
+      assert.equal(Object.hasOwn(raw.summary, 'probability'), false);
       break;
     case '':
       assert.equal(raw.summary.solution_keys_complete, true);

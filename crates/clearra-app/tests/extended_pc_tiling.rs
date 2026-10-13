@@ -139,6 +139,10 @@ fn full_height_distributed_failed_queue_requires_the_original_problem_owner() {
             }
         }
         let (result, evidence) = completed.expect("bounded request-owned failed-queue evidence");
+        // Completion transfers the immutable proof, not the producer's live
+        // execution lease. Match the WASM coordinator's drop-before-App seam;
+        // retaining this producer would deny the subsequent direct request.
+        drop(producer);
         let finite = match context.prepare_distributed_search(request.clone().with_resource_budget(
             clearra_host_contract::ResourceBudget::new(1, None, Some(256)),
         )) {
@@ -185,6 +189,7 @@ fn full_height_distributed_failed_queue_requires_the_original_problem_owner() {
             .pc_failed_queue_v2()
             .unwrap();
         let direct = context.run(request);
+        assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
         let expected = direct
             .product_capability_result()
             .unwrap()

@@ -150,7 +150,26 @@ function productProjection(terminal) {
   assert.equal(terminal.response.status, 'success', JSON.stringify(terminal.response.diagnostics));
   assert.deepEqual(terminal.response.runtime_identity, manifest.build.runtime_identity);
   const report = terminal.search_report;
-  for (const field of ['count_complete', 'solution_keys_complete']) assert.equal(report[field], true, field);
+  const kind = terminal.response.result?.kind;
+  const fields = new Map(report.summary_fields);
+  assert.equal(report.count_complete, true, 'the product source must be complete');
+  const coverageOnly = kind === 'pc-failed-queue.v2' || kind === 'pc-probability.v2';
+  if (coverageOnly) {
+    // CoverageSummary proves the original queue universe, not a materialized
+    // solution family. Requiring keys here would change the product contract.
+    assert.equal(fields.get('search_output_policy'), 'coverage-summary');
+    for (const field of ['solution_count_calculated', 'solution_set_materialized', 'solution_keys_complete']) {
+      assert.equal(report[field], false, `${kind}/${field}`);
+    }
+    for (const field of ['coverage_calculated', 'probability_calculated', 'probability_complete']) {
+      assert.equal(report[field], true, `${kind}/${field}`);
+    }
+    assert.deepEqual(report.normalized_solution_keys, []);
+    assert.equal(terminal.response.solution_set_artifact ?? null, null);
+    if (kind === 'pc-failed-queue.v2') assert.equal(fields.get('failed_queue_contract'), 'exact-coverage-complement');
+  } else {
+    assert.equal(report.solution_keys_complete, true, `${kind}/solution_keys_complete`);
+  }
   if (terminal.response.product_result_payload) {
     assert.equal(validateProductResultPayload(terminal.response.product_result_payload), null,
       'the exact runtime product must be accepted by its production GUI payload boundary');
@@ -160,7 +179,11 @@ function productProjection(terminal) {
       'the exact runtime copy artifact must be accepted by the production GUI');
   }
   return {
-    kind: terminal.response.result?.kind,
+    kind,
+    coverageProduct: coverageOnly ? Object.fromEntries([...fields]
+      .filter(([key]) => key === 'search_output_policy' || key === 'total_pattern_count' ||
+        key === 'probability_complete' || key.startsWith('failed_'))
+      .sort(([left], [right]) => left.localeCompare(right))) : null,
     product: terminal.response.product_result_payload ?? null,
     artifact: terminal.response.solution_set_artifact ?? null,
     keys: report.normalized_solution_keys,

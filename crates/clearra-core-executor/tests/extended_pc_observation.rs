@@ -154,10 +154,11 @@ fn full_height_visible_seven_preserves_explicitly_unavailable_per_solution_polic
 fn full_height_visible_seven_preserves_b2b_filtered_language_and_original_denominator() {
     for height in [7, 8, 12, 24] {
         let query = forced_query(height, srs_plus())
+            .with_count_policy(PcCountPolicy::CountAll)
             .with_objective(
                 ObjectivePolicy::all().with_back_to_back_preservation(SpinProfileSelection::TSpins),
-            )
-            .with_count_policy(PcCountPolicy::CountAll);
+            );
+        assert!(query.objective().execution_constraints().requested());
         let reference = run(&query);
         let visible =
             run(&query.with_queue_observation_policy(QueueObservationPolicy::VisibleSeven));

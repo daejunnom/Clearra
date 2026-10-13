@@ -91,6 +91,24 @@ test('independent recovery feedback prepares dependencies even after a formattin
   assert.ok(!chain.includes('continue-on-error:'));
 });
 
+test('full-height surface readback preserves coverage-only authority and canonical probability spelling', () => {
+  const readSource = path => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+  const web = readSource('apps/clearra-web/test/realVerifierPool.smoke.mjs');
+  assert.ok(web.includes("kind === 'pc-failed-queue.v2' || kind === 'pc-probability.v2'"));
+  assert.ok(web.includes("assert.equal(fields.get('search_output_policy'), 'coverage-summary')"));
+  assert.ok(web.includes('assert.deepEqual(report.normalized_solution_keys, [])'));
+  assert.ok(web.includes("assert.equal(fields.get('failed_queue_contract'), 'exact-coverage-complement')"));
+  assert.ok(web.includes('coverageProduct: coverageOnly ? Object.fromEntries'));
+  const discord = readSource('apps/clearra-discord-bot/test/realCliFullHeightProducts.test.mjs');
+  assert.ok(discord.includes('assert.equal(Number(raw.summary.coverage_probability), 1)'));
+  assert.ok(discord.includes("assert.equal(Object.hasOwn(raw.summary, 'probability'), false)"));
+  const desktop = readSource('crates/clearra-cli/tests/desktop_full_height_products.rs');
+  assert.ok(desktop.includes('assert_eq!(summary["coverage_probability"], 1.0)'));
+  assert.ok(desktop.includes('assert!(summary.get("probability").is_none())'));
+  assert.ok(!discord.includes('Number(raw.summary.probability), 1'));
+  assert.ok(!desktop.includes('assert_eq!(summary["probability"], 1.0)'));
+});
+
 test('the production Web pool smoke consumes one real WASM build and unchanged signed packs', () => {
   const realmJob = workflow.slice(workflow.indexOf('\n  wasm-realms:'));
   assert.equal(realmJob.split('node scripts/tools/build-clearra-wasm.mjs').length - 1, 1);

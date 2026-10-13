@@ -269,6 +269,26 @@ test('native CLI assembly does not reintroduce a six-line limit before App', () 
   assert.ok(workflow.includes('--lib assemble::pc_query_assembler::tests'));
 });
 
+test('full-height fixtures apply Scenario objectives last and release execution owners before readback', () => {
+  const family = read('crates/clearra-core-executor/tests/extended_pc_family.rs');
+  const tiling = family.slice(family.indexOf('fn full_height_parallel_tiling_preserves_requested_width_and_shared_finite_node_debit()'));
+  assert.match(tiling, /with_count_policy\(PcCountPolicy::CountUnique\)\s*\.with_objective\(ObjectivePolicy::tiling\(\)\)/u);
+  assert.ok(tiling.includes('assert_eq!(serial_problem.objective(), ObjectivePolicy::tiling())'));
+  const observation = read('crates/clearra-core-executor/tests/extended_pc_observation.rs');
+  const b2b = observation.slice(observation.indexOf('fn full_height_visible_seven_preserves_b2b_filtered_language_and_original_denominator()'));
+  assert.match(b2b, /with_count_policy\(PcCountPolicy::CountAll\)\s*\.with_objective\(/u);
+  assert.ok(b2b.includes('assert!(query.objective().execution_constraints().requested())'));
+  const app = read('crates/clearra-app/tests/extended_pc_tiling.rs');
+  const ingress = app.slice(app.indexOf('fn full_height_distributed_failed_queue_requires_the_original_problem_owner()'),
+    app.indexOf('fn full_height_tiling_opening_keeps_a_distinct_typed_ingress_without_enumeration()'));
+  assert.ok(ingress.indexOf('drop(producer)') > 0);
+  assert.ok(ingress.indexOf('drop(producer)') < ingress.indexOf('let direct = context.run(request)'));
+  assert.ok(ingress.includes('assert_eq!(direct.status(), AppStatus::Success, "{direct:?}")'));
+  const wasm = read('crates/clearra-wasm/src/distributed_runtime.rs');
+  assert.ok(wasm.includes('let execution_options = if product == "tiling" {'));
+  assert.ok(wasm.includes('--no-hold {execution_options}'));
+});
+
 test('native extended Tiling shares exact family owners and joins jobs inside one admitted request', () => {
   const backend = read('crates/clearra-core-executor/src/backend/wasm_cpu_search_backend.rs');
   const authority = read('crates/clearra-app/src/pc_tiling_family_result.rs');

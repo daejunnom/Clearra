@@ -1250,10 +1250,13 @@ fn full_height_parallel_tiling_preserves_requested_width_and_shared_finite_node_
         return;
     }
     let (base, _, _) = forced_query(24, srs_plus());
+    // Scenario's count setter selects a default objective. Apply the explicit
+    // geometry-only objective last, as the canonical pc.tiling parser does.
     let base = base
-        .with_objective(ObjectivePolicy::tiling())
-        .with_count_policy(PcCountPolicy::CountUnique);
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::tiling());
     let serial_problem = ProblemCompiler::compile_scenario_pc_tiling(&base).unwrap();
+    assert_eq!(serial_problem.objective(), ObjectivePolicy::tiling());
     let serial =
         WasmCpuSearchBackend::execute_with_control(&serial_problem, &ExecutionControl::default())
             .unwrap();

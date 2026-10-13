@@ -5463,10 +5463,17 @@ mod build_probability_partial_ingress_tests {
             return;
         }
         for product in ["", "tiling"] {
+            // Tiling is geometry-only: the closed command intentionally has
+            // no rule, tablebase, or BuildUp dependency options.
+            let execution_options = if product == "tiling" {
+                ""
+            } else {
+                "--rule srs-plus --no-tablebase --no-build-dependency-dag"
+            };
             let command = format!(
                 "clearra pc {product} --lines {} --height {} --board-mask 0x{} \
-                --pieces {} --queue {} --no-hold --rule srs-plus --no-tablebase \
-                --no-build-dependency-dag --backend cpu --workers {workers}",
+                --pieces {} --queue {} --no-hold {execution_options} \
+                --backend cpu --workers {workers}",
                 input[1], input[1], input[2], input[3], input[4]
             );
             let reference = runtime

@@ -1196,9 +1196,11 @@ mod retained_capacity {
             )
             .with_exact_pieces(Some(4))
             .with_allow_hold(false)
-            .with_objective(ObjectivePolicy::tiling())
-            .with_count_policy(PcCountPolicy::CountUnique);
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_objective(ObjectivePolicy::tiling());
             let tiling = ProblemCompiler::compile_scenario_pc_tiling(&query).unwrap();
+            assert_eq!(tiling.objective(), ObjectivePolicy::tiling());
+            assert_eq!(tiling.count_policy(), PcCountPolicy::CountUnique);
             assert_eq!(
                 tiling.checked_pc_tiling_pointee_retained_bytes(),
                 manual_expected(&tiling)

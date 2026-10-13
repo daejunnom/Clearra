@@ -336,7 +336,9 @@ fn compare_payload(event: &Value, native: &Value, input: &[&str], product: &str,
             assert_eq!(report["probability_complete"], true);
             if product == "chance" {
                 assert_eq!(summary["covered_pattern_count"], 1);
-                assert_eq!(summary["probability"], 1.0);
+                assert_eq!(summary["coverage_probability"], 1.0);
+                assert_eq!(summary["probability_complete"], true);
+                assert!(summary.get("probability").is_none());
             } else {
                 assert_eq!(summary["failed_pattern_count"], 0);
                 assert_eq!(summary["failed_queue_probability"], 0.0);
