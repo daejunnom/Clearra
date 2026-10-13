@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { prepareRustcLauncher } from './prepare-clearra-rustc-launcher.mjs';
 import { assertManagedTransientSlotsRetired } from './managed-transient-directory.mjs';
 import { BUILD_TRANSACTION_MARKER, BUILD_TRANSACTION_SCHEMA, FORBIDDEN_BUILD_ALIASES, assertBuildRecord, assertBuildPathWithin, assertNoBuildLinks, assertManagedBuildTransaction,
-  buildPathIdentity, buildSourceId, canonicalBuildRoot, nativeBuildPath } from './clearra-build-policy.mjs';
+  buildPathIdentity, buildSourceId, canonicalBuildRoot, canonicalNativeBuildPath, nativeBuildPath } from './clearra-build-policy.mjs';
 
 const authorityRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const buildInputRoots = ['apps', 'assets', 'core-c', 'crates', 'packages', 'scripts', 'tests', 'tools'];
@@ -198,7 +198,7 @@ async function assertCleanProductCatalog(root) {
   }
 }
 export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', environment = process.env } = {}) {
-  sourceRoot = resolve(sourceRoot);
+  sourceRoot = canonicalNativeBuildPath(sourceRoot);
   if (!['experiment', 'product'].includes(purpose)) throw new Error('Unknown Clearra build purpose');
   if (environment.CLEARRA_BUILD_SESSION_ID) {
     const transaction = assertManagedBuildTransaction({ environment, sourceRoot });

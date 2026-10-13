@@ -4,11 +4,12 @@ import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile, symlink } from 
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { acquireBuildOwner } from './clearra-build-owner.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 import { assertDefaultBenchmarkRustEnvironment } from './benchmark-rust-environment.mjs';
-import { assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, canonicalBuildRoot, nativeBuildPath } from './clearra-build-policy.mjs';
+import { assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, canonicalBuildRoot, canonicalNativeBuildPath, nativeBuildPath } from './clearra-build-policy.mjs';
 
 function cleanBuildEnvironment() {
   const environment = { ...process.env };
@@ -66,6 +67,24 @@ test('Windows native compiler guard preserves argv beyond the cmd limit', { skip
     });
     assert.equal(result.status, 0, result.stderr || result.error?.message);
   } finally { await owner.finish(true); }
+});
+
+test('Windows owner canonicalizes existing prefixes without admitting junctions', { skip: process.platform !== 'win32' }, async t => {
+  const options = await fixture(t);
+  const nativeTemporary = realpathSync.native(options.temporary);
+  assert.equal(canonicalNativeBuildPath(options.sourceRoot), join(nativeTemporary, 'source'));
+  const expectedRoot = join(nativeTemporary, 'cache', 'Clearra', 'build');
+  assert.equal(canonicalBuildRoot(options.environment), expectedRoot);
+  await assert.rejects(stat(options.environment.LOCALAPPDATA), { code: 'ENOENT' });
+  const link = join(options.temporary, 'linked-source');
+  await symlink(options.sourceRoot, link, 'junction');
+  assert.throws(() => canonicalNativeBuildPath(join(link, 'not-created')), /symlink|junction/u);
+  const owner = await acquireBuildOwner(options);
+  try {
+    assert.equal(owner.transaction.source_root, join(nativeTemporary, 'source'));
+    assert.equal(owner.environment.CLEARRA_BUILD_ROOT, expectedRoot);
+    assert.doesNotThrow(() => assertManagedBuildTransaction({ environment: owner.environment, sourceRoot: options.sourceRoot }));
+  } finally { await owner.finish(false); }
 });
 
 test('outside target and compiler overrides fail before directory creation', async t => {
@@ -231,13 +250,16 @@ test('Node and PowerShell reuse the same lease without nested completion', { ski
   const paths = fileURLToPath(new URL('./clearra-build-paths.mjs', import.meta.url));
   const childEnv = { ...cleanBuildEnvironment(), ...owner.environment, CLEARRA_TEST_HELPER: helper, CLEARRA_TEST_PATHS: paths };
   const probe = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
-    "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; [pscustomobject]@{actual=[IO.Path]::GetFullPath($env:RUSTC_WRAPPER);expected=(Get-ClearraExpectedRustcWrapper);transaction=$env:CLEARRA_BUILD_TRANSACTION_ROOT;windows=(Test-StartTestsWindows)} | ConvertTo-Json -Compress"],
+    "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; [pscustomobject]@{actual=[IO.Path]::GetFullPath($env:RUSTC_WRAPPER);expected=(Get-ClearraExpectedRustcWrapper);source=[IO.Path]::GetFullPath($env:CLEARRA_BUILD_SOURCE_ROOT);cargo=[IO.Path]::GetFullPath($env:CARGO_TARGET_DIR);root=(Get-ClearraCanonicalBuildRoot);transaction=$env:CLEARRA_BUILD_TRANSACTION_ROOT;windows=(Test-StartTestsWindows)} | ConvertTo-Json -Compress"],
     { env: childEnv, encoding: 'utf8', windowsHide: true });
   assert.equal(probe.status, 0, probe.stderr + probe.stdout);
   const guardProjection = JSON.parse(probe.stdout);
   assert.equal(guardProjection.windows, true, JSON.stringify(guardProjection));
   assert.equal(buildPathIdentity(guardProjection.transaction), buildPathIdentity(owner.transaction.transaction_root), JSON.stringify(guardProjection));
   assert.equal(buildPathIdentity(guardProjection.actual), buildPathIdentity(guardProjection.expected), JSON.stringify(guardProjection));
+  assert.equal(buildPathIdentity(guardProjection.source), buildPathIdentity(owner.transaction.source_root), JSON.stringify(guardProjection));
+  assert.equal(buildPathIdentity(guardProjection.cargo), buildPathIdentity(owner.transaction.cargo_target_dir), JSON.stringify(guardProjection));
+  assert.equal(buildPathIdentity(guardProjection.root), buildPathIdentity(owner.environment.CLEARRA_BUILD_ROOT), JSON.stringify(guardProjection));
   for (const wrapper of [owner.environment.RUSTC_WRAPPER, owner.environment.RUSTC_WRAPPER.replaceAll('\\', '/')]) {
     const nested = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
       "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:CLEARRA_BUILD_SOURCE_ROOT; if(Test-ClearraBuildTransactionOwner){throw 'nested became owner'}; Get-ClearraCargoTargetDir; Exit-ClearraBuildArtifactCacheUsage"],

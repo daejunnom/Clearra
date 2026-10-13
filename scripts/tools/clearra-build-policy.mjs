@@ -1,7 +1,7 @@
 // One physical build root. Validation never creates or retires a generation.
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync } from 'node:fs';
-import { dirname, isAbsolute, posix, resolve, win32 } from 'node:path';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, posix, resolve, win32 } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -43,6 +43,25 @@ export function nativeBuildPath(value, platform = process.platform) {
   }
   return resolve(value);
 }
+export function canonicalNativeBuildPath(value, platform = process.platform) {
+  const absolute = nativeBuildPath(value, platform);
+  if (platform !== 'win32' || process.platform !== 'win32') return absolute;
+  // Node's lexical resolve keeps RUNNER~1 while .NET GetFullPath expands it.
+  // Publish one native spelling before deriving a new source/transaction ID.
+  // Never resolve a junction into an allowed root: reject links first, then
+  // expand the existing prefix without creating the missing output suffix.
+  assertNoBuildLinks(absolute);
+  const missing = [];
+  let prefix = absolute;
+  for (;;) {
+    try { return resolve(realpathSync.native(prefix), ...missing.toReversed()); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const parent = dirname(prefix);
+    if (parent === prefix) throw new Error(`Cannot resolve a native Clearra build path: ${value}`);
+    missing.push(basename(prefix));
+    prefix = parent;
+  }
+}
 export function canonicalBuildRoot(environment = process.env, platform = process.platform) {
   if (platform === 'win32') {
     if (environment.GITHUB_ACTIONS === 'true') {
@@ -54,10 +73,10 @@ export function canonicalBuildRoot(environment = process.env, platform = process
       if (win32.parse(runnerTemp).root.toLowerCase() !== win32.parse(workspace).root.toLowerCase()) {
         throw new Error('GitHub Windows RUNNER_TEMP must share the checkout volume');
       }
-      return win32.resolve(runnerTemp, 'Clearra', 'build');
+      return canonicalNativeBuildPath(win32.resolve(runnerTemp, 'Clearra', 'build'), platform);
     }
     if (!environment.LOCALAPPDATA) throw new Error('LOCALAPPDATA is required for the fixed Clearra build root');
-    return win32.resolve(environment.LOCALAPPDATA, 'Clearra', 'build');
+    return canonicalNativeBuildPath(win32.resolve(environment.LOCALAPPDATA, 'Clearra', 'build'), platform);
   }
   if (environment.WSL_DISTRO_NAME || environment.WSL_INTEROP) {
     if (/^[A-Za-z]:[\\/]/u.test(environment.LOCALAPPDATA ?? '')) return nativeBuildPath(win32.resolve(environment.LOCALAPPDATA, 'Clearra', 'build'), platform);
@@ -147,7 +166,7 @@ export function assertManagedBuildTransaction({ environment = process.env, platf
     const actual = pathFields.has(field) ? buildPathIdentity(environment[name]) : environment[name];
     if (expected !== actual) throw new Error(`Clearra build transaction binding mismatch: ${name}`);
   }
-  if (sourceRoot && buildPathIdentity(sourceRoot) !== buildPathIdentity(marker.source_root)) throw new Error('Clearra build source root does not match its owner');
+  if (sourceRoot && buildPathIdentity(canonicalNativeBuildPath(sourceRoot, platform)) !== buildPathIdentity(marker.source_root)) throw new Error('Clearra build source root does not match its owner');
   const sourceId = buildSourceId(marker.source_root);
   if (marker.source_id !== sourceId || !/^[a-f0-9]{32}$/u.test(marker.session_id)) throw new Error('Clearra build purpose/session identity is invalid');
   const rootIdentity = buildPathIdentity(expectedRoot);
