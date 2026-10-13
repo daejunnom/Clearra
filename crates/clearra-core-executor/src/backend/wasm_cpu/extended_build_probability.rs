@@ -2274,7 +2274,7 @@ impl ExtendedBuildProbabilitySession {
         let problem = Arc::clone(&self.problem);
         let mut admitted_peak = 0_u128;
         let result = observation.evaluate_with_memory_guard(&problem, control, |future| {
-            let future = owned.checked_add(future).unwrap_or(u128::MAX);
+            let future = owned.saturating_add(future);
             self.ensure_memory_bound(future)?;
             let peak = self
                 .checked_retained_bytes_with_coexisting_owners()

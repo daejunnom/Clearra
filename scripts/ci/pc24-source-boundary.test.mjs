@@ -285,7 +285,8 @@ test('full-height fixtures apply Scenario objectives last and release execution 
   assert.ok(ingress.indexOf('drop(producer)') < ingress.indexOf('let direct = context.run(request)'));
   assert.ok(ingress.includes('assert_eq!(direct.status(), AppStatus::Success, "{direct:?}")'));
   const wasm = read('crates/clearra-wasm/src/distributed_runtime.rs');
-  assert.ok(wasm.includes('let execution_options = if product == "tiling" {'));
+  assert.match(wasm, /let execution_options = match product \{\s*"tiling" => "",/u);
+  assert.ok(wasm.includes('--rule srs-plus --no-tablebase --no-build-dependency-dag --failed-count 1'));
   assert.ok(wasm.includes('--no-hold {execution_options}'));
 });
 

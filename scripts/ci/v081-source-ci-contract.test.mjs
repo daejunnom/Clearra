@@ -111,6 +111,22 @@ test('full-height surface readback preserves coverage-only authority and canonic
   assert.ok(!desktop.includes('assert_eq!(summary["probability"], 1.0)'));
 });
 
+test('full-height score readback validates public owners without retaining private Core keys', () => {
+  const web = readFileSync(new URL('../../apps/clearra-web/test/realVerifierPool.smoke.mjs', import.meta.url), 'utf8');
+  assert.ok(web.includes("['pc-score-summary.v2', 'pc-fixed-score-witness.v2', 'pc-score-portfolio.v2'].includes(kind)"));
+  assert.ok(web.includes('} else if (scoreProduct) {'));
+  assert.ok(web.includes('assert.equal(report.solution_keys_complete, true, `${kind}/solution_keys_complete`)'));
+  assert.ok(web.includes('validateProductResultPayload(terminal.response.product_result_payload)'));
+  assert.ok(web.includes('assertFullHeightScoreReadback(baseline, scoreSourceKeys)'));
+  assert.ok(web.includes('publicResult.fields.map(field => field.normalized_field_key), expectedKeys'));
+  assert.ok(web.includes('Number.isFinite(publicResult.overall_score)'));
+  assert.ok(web.includes('publicResult.members.map(member => member.normalized_solution_key), expectedKeys'));
+  assert.ok(web.includes('publicResult.canonical_winner.candidate_id'));
+  assert.ok(web.includes('artifact.solution_count, publicResult.members.length'));
+  assert.ok(web.includes('ctk3.page_count, publicResult.members.length'));
+  assert.ok(web.includes('assert.deepEqual(actual, baseline, `${id}/${mode}/full-height Web product and export`)'));
+});
+
 test('the production Web pool smoke consumes one real WASM build and unchanged signed packs', () => {
   const realmJob = workflow.slice(workflow.indexOf('\n  wasm-realms:'));
   assert.equal(realmJob.split('node scripts/tools/build-clearra-wasm.mjs').length - 1, 1);

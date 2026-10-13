@@ -37,9 +37,7 @@ impl ExtendedParallelGeometryBranch {
         let result = self
             .enumerator
             .next_candidate_with_allocation_guard(catalog, |bytes| {
-                let total = coexisting_private_bytes
-                    .checked_add(bytes)
-                    .unwrap_or(u128::MAX);
+                let total = coexisting_private_bytes.saturating_add(bytes);
                 owner.ensure(total).map_err(|report| {
                     refused = Some(report);
                 })

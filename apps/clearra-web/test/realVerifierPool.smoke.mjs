@@ -154,6 +154,7 @@ function productProjection(terminal) {
   const fields = new Map(report.summary_fields);
   assert.equal(report.count_complete, true, 'the product source must be complete');
   const coverageOnly = kind === 'pc-failed-queue.v2' || kind === 'pc-probability.v2';
+  const scoreProduct = ['pc-score-summary.v2', 'pc-fixed-score-witness.v2', 'pc-score-portfolio.v2'].includes(kind);
   if (coverageOnly) {
     // CoverageSummary proves the original queue universe, not a materialized
     // solution family. Requiring keys here would change the product contract.
@@ -167,6 +168,15 @@ function productProjection(terminal) {
     assert.deepEqual(report.normalized_solution_keys, []);
     assert.equal(terminal.response.solution_set_artifact ?? null, null);
     if (kind === 'pc-failed-queue.v2') assert.equal(fields.get('failed_queue_contract'), 'exact-coverage-complement');
+  } else if (scoreProduct) {
+    // App validates the complete score derivation under its parent lease, then
+    // drops private Core keys/graphs. The typed public payload owns fields,
+    // winners or the canonical minimum portfolio, not the raw search report.
+    assert.ok(terminal.response.product_result_payload, `${kind}/public score authority`);
+    for (const field of ['solution_count_calculated', 'solution_set_materialized', 'solution_keys_complete']) {
+      assert.equal(report[field], false, `${kind}/private ${field}`);
+    }
+    assert.deepEqual(report.normalized_solution_keys, []);
   } else {
     assert.equal(report.solution_keys_complete, true, `${kind}/solution_keys_complete`);
   }
@@ -192,6 +202,58 @@ function productProjection(terminal) {
     covered: report.covered_pattern_count,
     probability: report.coverage_probability
   };
+}
+function assertFullHeightScoreReadback(projection, expectedKeys) {
+  // These small tracked fixtures have exactly one concrete source field.
+  // Compare the public score owner with the independently executed ordinary
+  // SRS+ family so equal serial/distributed omissions cannot pass this smoke.
+  assert.equal(expectedKeys.length, 1);
+  const payload = projection.product;
+  const publicResult = payload.content.payload;
+  switch (projection.kind) {
+    case 'pc-score-summary.v2':
+      assert.equal(payload.contract, 'pc.score');
+      assert.equal(payload.content.payload_kind, 'pc-score-field-summary');
+      assert.equal(publicResult.complete, true);
+      assert.deepEqual(publicResult.fields.map(field => field.normalized_field_key), expectedKeys);
+      assert.equal(publicResult.solution_field_count, expectedKeys.length.toString());
+      assert.equal(publicResult.materialized_pattern_count, '1');
+      assert.equal(publicResult.scored_pattern_count, '1');
+      assert.equal(publicResult.failed_pc_pattern_count, '0');
+      assert.ok(Number.isFinite(publicResult.overall_score));
+      for (const field of publicResult.fields) {
+        assert.equal(field.score_complete, true);
+        assert.equal(field.pattern_count, publicResult.materialized_pattern_count);
+        assert.ok(Number.isFinite(field.average_score));
+      }
+      break;
+    case 'pc-fixed-score-witness.v2':
+      assert.equal(payload.contract, 'pc.score-finder');
+      assert.equal(payload.content.payload_kind, 'score-pattern-winner-family');
+      assert.equal(publicResult.canonical_selection, 'smallest-canonical-candidate-id');
+      assert.equal(publicResult.equality, 'score-only-attack-informational');
+      assert.equal(publicResult.canonical_winner.candidate_id, '1');
+      assert.deepEqual([...new Set(publicResult.winners.map(winner => winner.normalized_solution_key))], expectedKeys);
+      break;
+    case 'pc-score-portfolio.v2': {
+      assert.equal(payload.contract, 'pc.score-minimals');
+      assert.equal(payload.content.payload_kind, 'coverage-portfolio');
+      assert.equal(publicResult.alternative_index, '1');
+      assert.equal(publicResult.optimal_cardinality, '1');
+      assert.equal(publicResult.total_member_pages, '1');
+      assert.deepEqual(publicResult.members.map(member => member.normalized_solution_key), expectedKeys);
+      const artifact = projection.artifact;
+      assert.ok(artifact, 'the nonempty canonical score portfolio must retain its public copy artifact');
+      assert.equal(artifact.source_result_kind, projection.kind);
+      assert.equal(artifact.completeness, 'complete');
+      assert.equal(artifact.solution_count, publicResult.members.length);
+      const ctk3 = artifact.formats.find(format => format.format === 'ctk3');
+      assert.equal(ctk3?.state, 'available');
+      assert.equal(ctk3.page_count, publicResult.members.length);
+      break;
+    }
+    default: assert.fail(`unreviewed score readback: ${projection.kind}`);
+  }
 }
 function command(profile, workers, legal, relation, input = 'existing') {
   const args = input === 'existing'
@@ -301,6 +363,7 @@ try {
   // transport; identical serial results are not a grant from a source string.
   for (const row of extendedRows) {
     const [id, height, boardHex, pieces, queue] = row.split('\t');
+    let scoreSourceKeys = null;
     for (const profile of profiles) {
       const base = `clearra pc --lines ${height} --height ${height} --board-mask 0x${boardHex} ` +
         `--pieces ${pieces} --queue ${queue} --no-hold --count unique --backend cpu ` +
@@ -309,6 +372,7 @@ try {
       assert.ok(baseline.keys.length > 0, `${id}/${profile} must execute the connected physical family`);
       assert.ok(baseline.keys.every(key => key.startsWith(`ctk2|height=${height}|initial=`)),
         'full-height keys retain all four words instead of using a compact truncation');
+      if (profile === 'srs-plus') scoreSourceKeys = baseline.keys;
       const sentBefore = transports.reduce((count, transport) => count + transport.sent.filter(type => type === 'consume').length, 0);
       const actual = await distributed(`${base} --workers 3`, { synopsis: null, pack: null }, { expectedFullHeight: true });
       assert.deepEqual(actual, baseline, `${id}/${profile}/full-height Web family`);
@@ -363,11 +427,14 @@ try {
       // FixedSequence in WebCommandRequest, not a seven-bag opening preset.
       const request = { ...createDefaultWorkspaceRequest(), lines: Number(height),
         boardMask: BigInt(`0x${boardHex}`), queue, holdEnabled: false, scoreMode,
-        backend: 'cpu', legalBoardEnabled: false, conditionedReachabilityEnabled: false };
+        backend: 'cpu', rule: 'srs-plus', legalBoardEnabled: false, conditionedReachabilityEnabled: false };
       const serial = buildWorkspaceCommand({ ...request, workers: 1 });
       const parallel = buildWorkspaceCommand({ ...request, workers: 3 });
       const baseline = productProjection(await new WasmJobRunner(wasm).run(serial, () => {}));
       assert.equal(baseline.kind, kind, `${id}/${mode} must reach its exact typed product presenter`);
+      if (mode === 'score' || mode === 'score-finder' || mode === 'score-minimals') {
+        assertFullHeightScoreReadback(baseline, scoreSourceKeys);
+      }
       if (mode !== 'tiling' && mode !== 'failed-queue') assert.ok(baseline.product,
         `${id}/${mode} must expose the product-owned GUI payload instead of a raw scalar-only result`);
       const actual = await distributed(parallel, { synopsis: null, pack: null },
