@@ -220,11 +220,17 @@ function assertFullHeightScoreReadback(projection, expectedKeys) {
       assert.equal(publicResult.materialized_pattern_count, '1');
       assert.equal(publicResult.scored_pattern_count, '1');
       assert.equal(publicResult.failed_pc_pattern_count, '0');
-      assert.ok(Number.isFinite(publicResult.overall_score));
+      // Scores are decimal text at the Rust/GUI wire boundary. Validate that
+      // type before parsing; never treat a missing/null value as numeric zero.
+      assert.equal(typeof publicResult.overall_score, 'string');
+      assert.ok(publicResult.overall_score.length > 0);
+      assert.ok(Number.isFinite(Number(publicResult.overall_score)));
       for (const field of publicResult.fields) {
         assert.equal(field.score_complete, true);
         assert.equal(field.pattern_count, publicResult.materialized_pattern_count);
-        assert.ok(Number.isFinite(field.average_score));
+        assert.equal(typeof field.average_score, 'string');
+        assert.ok(field.average_score.length > 0);
+        assert.ok(Number.isFinite(Number(field.average_score)));
       }
       break;
     case 'pc-fixed-score-witness.v2':

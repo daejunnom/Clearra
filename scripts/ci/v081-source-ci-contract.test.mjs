@@ -119,7 +119,17 @@ test('full-height score readback validates public owners without retaining priva
   assert.ok(web.includes('validateProductResultPayload(terminal.response.product_result_payload)'));
   assert.ok(web.includes('assertFullHeightScoreReadback(baseline, scoreSourceKeys)'));
   assert.ok(web.includes('publicResult.fields.map(field => field.normalized_field_key), expectedKeys'));
-  assert.ok(web.includes('Number.isFinite(publicResult.overall_score)'));
+  const wire = readFileSync(new URL('../../packages/clearra-ui/src/lib/wasm/wasmCommandClient.ts', import.meta.url), 'utf8');
+  assert.ok(wire.includes('overall_score: string;'));
+  assert.ok(wire.includes('average_score: string;'));
+  assert.ok(web.includes("assert.equal(typeof publicResult.overall_score, 'string')"));
+  assert.ok(web.includes('publicResult.overall_score.length > 0'));
+  assert.ok(web.includes('Number.isFinite(Number(publicResult.overall_score))'));
+  assert.ok(web.includes("assert.equal(typeof field.average_score, 'string')"));
+  assert.ok(web.includes('field.average_score.length > 0'));
+  assert.ok(web.includes('Number.isFinite(Number(field.average_score))'));
+  assert.ok(!web.includes('Number.isFinite(publicResult.overall_score)'));
+  assert.ok(!web.includes('Number.isFinite(field.average_score)'));
   assert.ok(web.includes('publicResult.members.map(member => member.normalized_solution_key), expectedKeys'));
   assert.ok(web.includes('publicResult.canonical_winner.candidate_id'));
   assert.ok(web.includes('artifact.solution_count, publicResult.members.length'));
