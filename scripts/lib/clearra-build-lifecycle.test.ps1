@@ -92,7 +92,9 @@ $legacyScratchLease = Join-Path $experimentRoot 'transient/.legacy.lock'
 [IO.File]::WriteAllText($legacyScratchLease, '{}')
 Assert-ArtifactPathCondition (Test-ArtifactPathThrows { New-TransientBuildDir 'legacy' }) 'legacy_scratch_lease_is_not_stolen'
 Assert-ArtifactPathCondition (Test-Path -LiteralPath $legacyScratchLease) 'legacy_scratch_lease_is_preserved'
-Remove-Item -LiteralPath $legacyScratchLease
+# Unix dotfiles are hidden to PowerShell too. Only this test-created exact leaf
+# is removed; this does not grant automatic recovery of real legacy leases.
+Remove-Item -LiteralPath $legacyScratchLease -Force
 $interruptedScratchLease = Join-Path $experimentRoot 'wasm-stage.lock'
 [IO.File]::WriteAllText($interruptedScratchLease, '{}')
 Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Complete-ClearraBuildTransaction }) 'outer_completion_preserves_unresolved_inner_staging_lease'

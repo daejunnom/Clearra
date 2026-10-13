@@ -21,7 +21,9 @@ function Get-ClearraBuildPurpose {
 
 function Get-ClearraExpectedRustcWrapper {
     if ((Test-StartTestsWindows) -and -not [string]::IsNullOrWhiteSpace($env:CLEARRA_BUILD_TRANSACTION_ROOT)) {
-        return Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'build-tools/clearra-rustc-guard.exe'
+        # Normalize both sides of the Node/PowerShell boundary before comparing
+        # the exact wrapper. A managed wrapper is not an allowlist by filename.
+        return [IO.Path]::GetFullPath((Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'build-tools/clearra-rustc-guard.exe'))
     }
     $name = if (Test-StartTestsWindows) { 'clearra-rustc-guard.cmd' } else { 'clearra-rustc-guard.sh' }
     return [IO.Path]::GetFullPath((Join-Path $script:ClearraPathPolicyRepositoryRoot "scripts/tools/$name"))
@@ -41,8 +43,12 @@ function Assert-ClearraBuildEnvironmentBeforeMutation([string]$RepositoryRoot) {
     }
     if (-not [string]::IsNullOrWhiteSpace($env:RUSTC_WRAPPER)) {
         $wrapper = [IO.Path]::GetFullPath($env:RUSTC_WRAPPER)
-        if (-not $wrapper.Equals((Get-ClearraExpectedRustcWrapper), (Get-ClearraBuildPathComparison))) {
-            throw 'Unmanaged RUSTC_WRAPPER chaining is not supported; use the official build owner.'
+        $expectedWrapper = [IO.Path]::GetFullPath((Get-ClearraExpectedRustcWrapper))
+        if (-not $wrapper.Equals($expectedWrapper, (Get-ClearraBuildPathComparison))) {
+            # These are public generated/source paths, not credential contents.
+            # Keep enough evidence to distinguish a missing transaction binding
+            # from a spelling mismatch or a genuinely foreign compiler wrapper.
+            throw "Unmanaged RUSTC_WRAPPER chaining is not supported; use the official build owner. actual=$wrapper expected=$expectedWrapper"
         }
     }
 }

@@ -230,10 +230,27 @@ test('Node and PowerShell reuse the same lease without nested completion', { ski
   const helper = fileURLToPath(new URL('../lib/clearra-path-helpers.ps1', import.meta.url));
   const paths = fileURLToPath(new URL('./clearra-build-paths.mjs', import.meta.url));
   const childEnv = { ...cleanBuildEnvironment(), ...owner.environment, CLEARRA_TEST_HELPER: helper, CLEARRA_TEST_PATHS: paths };
-  const nested = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
-    "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:CLEARRA_BUILD_SOURCE_ROOT; if(Test-ClearraBuildTransactionOwner){throw 'nested became owner'}; Get-ClearraCargoTargetDir; Exit-ClearraBuildArtifactCacheUsage"], { env: childEnv, encoding: 'utf8', windowsHide: true });
-  assert.equal(nested.status, 0, nested.stderr + nested.stdout);
-  assert.equal(buildPathIdentity(nested.stdout.trim()), buildPathIdentity(owner.transaction.cargo_target_dir));
+  const probe = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+    "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; [pscustomobject]@{actual=[IO.Path]::GetFullPath($env:RUSTC_WRAPPER);expected=(Get-ClearraExpectedRustcWrapper);transaction=$env:CLEARRA_BUILD_TRANSACTION_ROOT;windows=(Test-StartTestsWindows)} | ConvertTo-Json -Compress"],
+    { env: childEnv, encoding: 'utf8', windowsHide: true });
+  assert.equal(probe.status, 0, probe.stderr + probe.stdout);
+  const guardProjection = JSON.parse(probe.stdout);
+  assert.equal(guardProjection.windows, true, JSON.stringify(guardProjection));
+  assert.equal(buildPathIdentity(guardProjection.transaction), buildPathIdentity(owner.transaction.transaction_root), JSON.stringify(guardProjection));
+  assert.equal(buildPathIdentity(guardProjection.actual), buildPathIdentity(guardProjection.expected), JSON.stringify(guardProjection));
+  for (const wrapper of [owner.environment.RUSTC_WRAPPER, owner.environment.RUSTC_WRAPPER.replaceAll('\\', '/')]) {
+    const nested = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+      "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:CLEARRA_BUILD_SOURCE_ROOT; if(Test-ClearraBuildTransactionOwner){throw 'nested became owner'}; Get-ClearraCargoTargetDir; Exit-ClearraBuildArtifactCacheUsage"],
+      { env: { ...childEnv, RUSTC_WRAPPER: wrapper }, encoding: 'utf8', windowsHide: true });
+    assert.equal(nested.status, 0, JSON.stringify(guardProjection) + '\n' + nested.stderr + nested.stdout);
+    assert.equal(buildPathIdentity(nested.stdout.trim()), buildPathIdentity(owner.transaction.cargo_target_dir));
+  }
+  const foreign = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+    "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:CLEARRA_BUILD_SOURCE_ROOT"],
+    { env: { ...childEnv, RUSTC_WRAPPER: join(options.temporary, 'other-wrapper.exe') }, encoding: 'utf8', windowsHide: true });
+  assert.notEqual(foreign.status, 0);
+  assert.match(foreign.stderr, /Unmanaged RUSTC_WRAPPER/u);
+  assert.equal(assertManagedBuildTransaction({ environment: owner.environment }).session_id, owner.transaction.session_id);
   await owner.finish(true);
   const environment = { ...cleanBuildEnvironment(), ...options.environment, CLEARRA_TEST_SOURCE: options.sourceRoot, CLEARRA_TEST_HELPER: helper, CLEARRA_TEST_PATHS: paths };
   const reverse = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
