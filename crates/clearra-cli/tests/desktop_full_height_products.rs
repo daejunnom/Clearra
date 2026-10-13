@@ -96,7 +96,6 @@ fn arguments(input: &[&str], profile: &str, product: &str, b2b: bool) -> Vec<Str
             profile,
             "--workers",
             "1",
-            "--no-tablebase",
             "--no-legal-board",
             "--no-conditioned-reachability",
         ]
@@ -105,7 +104,12 @@ fn arguments(input: &[&str], profile: &str, product: &str, b2b: bool) -> Vec<Str
     );
     // --board-mask/--height/--pieces select the shared CLI grammar, which
     // already lowers --queue to a fixed sequence for the ordinary PC product.
-    if product != "score-minimals" {
+    // Finder excludes TB semantics; all three score products own CPU execution.
+    // Keep the request valid before either native CLI or Desktop lowering.
+    if product != "score-finder" {
+        args.push("--no-tablebase".to_owned());
+    }
+    if !matches!(product, "score" | "score-minimals" | "score-finder") {
         args.extend(["--backend".to_owned(), "cpu".to_owned()]);
     }
     if product == "failed-queue" {

@@ -1245,6 +1245,8 @@ fn full_height_parallel_preserves_requested_width_for_a_single_candidate_family(
 #[test]
 #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 fn full_height_parallel_tiling_preserves_requested_width_and_shared_finite_node_debit() {
+    use clearra_core_executor::WasmCpuTerminalResourceAuthority;
+
     let hardware = std::thread::available_parallelism().map_or(1, usize::from);
     if hardware < 2 {
         return;
@@ -1257,9 +1259,30 @@ fn full_height_parallel_tiling_preserves_requested_width_and_shared_finite_node_
         .with_objective(ObjectivePolicy::tiling());
     let serial_problem = ProblemCompiler::compile_scenario_pc_tiling(&base).unwrap();
     assert_eq!(serial_problem.objective(), ObjectivePolicy::tiling());
-    let serial =
-        WasmCpuSearchBackend::execute_with_control(&serial_problem, &ExecutionControl::default())
+    // Tiling has a separate terminal owner. The generic unowned PC-family API
+    // intentionally rejects it; exercise the same parent-owned route as App.
+    let execute_tiling = |problem: clearra_problem::SearchProblem| {
+        let authority =
+            WasmCpuTerminalResourceAuthority::try_acquire_full_capacity_with_compute_units(
+                problem.backend_policy().workers(),
+            )
             .unwrap();
+        WasmCpuSearchBackend::execute_shared_under_authority_with_control_and_terminal(
+            Arc::new(problem),
+            0,
+            &authority,
+            &ExecutionControl::default(),
+            |result, terminal| {
+                let result = result.unwrap();
+                terminal
+                    .expect("Tiling completion retains its parent memory authority")
+                    .validate_public_result_memory(&result)
+                    .unwrap();
+                result
+            },
+        )
+    };
+    let serial = execute_tiling(serial_problem);
     let query = base.with_execution_policy(
         PcExecutionPolicy::default()
             .with_workers(2)
@@ -1267,8 +1290,7 @@ fn full_height_parallel_tiling_preserves_requested_width_and_shared_finite_node_
             .with_max_nodes(100_000),
     );
     let problem = ProblemCompiler::compile_scenario_pc_tiling(&query).unwrap();
-    let result =
-        WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default()).unwrap();
+    let result = execute_tiling(problem);
     assert_eq!(result.usize_field("workers_used"), Some(2));
     assert_eq!(result.usize_field("parallel_active_workers"), Some(1));
     assert_eq!(

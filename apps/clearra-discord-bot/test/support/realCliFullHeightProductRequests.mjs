@@ -35,10 +35,14 @@ export function realCliFullHeightProductRequests(profile) {
     arguments: ['pc', ...(product ? [product] : []), '--lines', String(input.height),
       '--height', String(input.height), '--board-mask', `0x${input.mask}`,
       '--pieces', String(input.pieces), '--queue', input.queue, '--no-hold', '--rule', profile,
-      '--no-tablebase', '--no-legal-board', '--no-conditioned-reachability',
+      ...(product === 'score-finder' ? [] : ['--no-tablebase']),
+      '--no-legal-board', '--no-conditioned-reachability',
       // The full-height scenario options select the shared CLI grammar:
       // --queue is already fixed, unlike the native legacy opening default.
-      ...(product === 'score-minimals' ? [] : ['--backend', 'cpu']),
+      // Every closed score product owns CPU execution. Finder additionally
+      // excludes TB semantics; do not depend on Discord stripping an invalid
+      // fixture option before the native/desktop grammar sees it.
+      ...(['score', 'score-minimals', 'score-finder'].includes(product) ? [] : ['--backend', 'cpu']),
       ...(preserveB2b ? ['--preserve-b2b', '--spin-profile', 't-spins'] : []),
       ...(product === 'failed-queue' ? ['--failed-count', '1'] : [])],
   })));

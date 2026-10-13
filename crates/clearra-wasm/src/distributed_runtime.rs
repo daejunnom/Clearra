@@ -4483,6 +4483,24 @@ fn request_needs_distributed_execution(request: &AppRequest) -> bool {
         AppCommand::Pc(command) => command.query().execution_policy().workers(),
         AppCommand::Path(command) => command.query().execution_policy().workers(),
         AppCommand::Scenario(command) => command.query().execution_policy().workers(),
+        AppCommand::Percent(command)
+            if command.pc_failed_queue_origin().is_some()
+                && request.product_capability_contract()
+                    == Some(ProductCapabilityContract::PcFailedQueue) =>
+        {
+            // Canonical failed-queue lowers to Percent, not Pc/Scenario. Only
+            // its connected full-height family can transfer complete coverage
+            // to the original typed owner; compact/legacy Percent stay serial.
+            match (command.query(), command.opening_query()) {
+                (Some(query), None) if query.initial_board().visible_height() > 6 => {
+                    query.execution_policy().workers()
+                }
+                (None, Some(query)) if query.target().lines() > 6 => {
+                    query.execution_policy().workers()
+                }
+                _ => return false,
+            }
+        }
         AppCommand::BuildProbability(command) => {
             if command.query().finesse_score().is_some() {
                 return false;
@@ -5445,6 +5463,61 @@ mod build_probability_partial_ingress_tests {
     }
 
     #[test]
+    fn full_height_pc_and_tiling_request_gate_preserves_failed_queue_domain() {
+        let workers = admitted_workers_for_host(2, 4);
+        if workers < 2 {
+            return;
+        }
+        let runtime = WasmCommandRuntime::default()
+            .with_host_capabilities(crate::WasmHostCapabilities::new(4, false, false));
+        let input: Vec<_> =
+            include_str!("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv")
+                .lines()
+                .find(|line| line.starts_with("forced-8L\t"))
+                .unwrap()
+                .split('\t')
+                .collect();
+        let command = format!(
+            "clearra pc failed-queue --lines {} --height {} --board-mask 0x{} \
+            --pieces {} --queue {} --no-hold --rule srs-plus --no-tablebase \
+            --workers {workers} --failed-count 1",
+            input[1], input[1], input[2], input[3], input[4]
+        );
+        let request = runtime
+            .prepare_command_text(&command)
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(request_needs_distributed_execution(&request));
+        let AppCommand::Percent(percent) = request.command() else {
+            panic!("failed-queue must retain its Percent command and typed product owner");
+        };
+        let legacy = AppRequest::new(AppCommand::Percent(
+            clearra_app::PercentAppCommand::failed_queue(percent.query().unwrap().clone()),
+        ));
+        assert!(!request_needs_distributed_execution(&legacy));
+        for (lines, eligible) in [(4, false), (8, true)] {
+            let opening = format!(
+                "clearra pc failed-queue --lines {lines} --queue {} \
+                --rule srs-plus --no-tablebase --workers {workers} --failed-count 1",
+                "I".repeat(lines * 5 / 2)
+            );
+            let request = runtime
+                .prepare_command_text(&opening)
+                .unwrap()
+                .into_parts()
+                .0;
+            assert_eq!(request_needs_distributed_execution(&request), eligible);
+        }
+        let single = runtime
+            .prepare_command_text(&command.replace(&format!("--workers {workers}"), "--workers 1"))
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(!request_needs_distributed_execution(&single));
+    }
+
+    #[test]
     fn full_height_pc_and_tiling_use_raw_protocol_and_original_terminal_family() {
         let runtime = WasmCommandRuntime::default().with_host_capabilities(
             crate::WasmHostCapabilities::new(4, false, false).with_product_retention_budget(
@@ -5462,13 +5535,15 @@ mod build_probability_partial_ingress_tests {
         if workers < 2 {
             return;
         }
-        for product in ["", "tiling"] {
+        for product in ["", "tiling", "failed-queue"] {
             // Tiling is geometry-only: the closed command intentionally has
             // no rule, tablebase, or BuildUp dependency options.
-            let execution_options = if product == "tiling" {
-                ""
-            } else {
-                "--rule srs-plus --no-tablebase --no-build-dependency-dag"
+            let execution_options = match product {
+                "tiling" => "",
+                "failed-queue" => {
+                    "--rule srs-plus --no-tablebase --no-build-dependency-dag --failed-count 1"
+                }
+                _ => "--rule srs-plus --no-tablebase --no-build-dependency-dag",
             };
             let command = format!(
                 "clearra pc {product} --lines {} --height {} --board-mask 0x{} \
@@ -5568,7 +5643,20 @@ mod build_probability_partial_ingress_tests {
                 actual.normalized_solution_set_hash,
                 expected.normalized_solution_set_hash
             );
-            for field in ["unique_solution_count", "count_complete", "board_height"] {
+            assert_eq!(actual.covered_pattern_count, expected.covered_pattern_count);
+            assert_eq!(actual.coverage_probability, expected.coverage_probability);
+            for field in [
+                "unique_solution_count",
+                "count_complete",
+                "board_height",
+                "search_output_policy",
+                "coverage_probability",
+                "covered_pattern_count",
+                "total_pattern_count",
+                "failed_queue_contract",
+                "failed_pattern_count",
+                "failed_pattern_count_complete",
+            ] {
                 let value = |report: &crate::WasmSearchReport| {
                     report
                         .summary_fields
@@ -5577,6 +5665,13 @@ mod build_probability_partial_ingress_tests {
                         .map(|(_, value)| value.clone())
                 };
                 assert_eq!(value(actual), value(expected), "{product}/{field}");
+            }
+            if product == "failed-queue" {
+                let fields: std::collections::BTreeMap<_, _> =
+                    actual.summary_fields.iter().cloned().collect();
+                assert_eq!(fields["failed_queue_contract"], "exact-coverage-complement");
+                assert_eq!(fields["search_output_policy"], "coverage-summary");
+                assert!(actual.normalized_solution_keys.is_empty());
             }
         }
     }

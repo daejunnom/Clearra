@@ -309,6 +309,13 @@ test('native extended Tiling shares exact family owners and joins jobs inside on
     .includes('extended_parallel_tiling_real_cli_keeps_complete_keys_and_full_height'));
   assert.ok(read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_geometry_parallel_tests.rs')
     .includes('extended_parallel_product_splits_preserve_sixty_row_prefix_and_continuations'));
+  const family = read('crates/clearra-core-executor/tests/extended_pc_family.rs');
+  const tilingTest = family.slice(family.indexOf('fn full_height_parallel_tiling_preserves_requested_width'),
+    family.indexOf('fn full_height_pc_cancellation_precedes_result_publication'));
+  assert.ok(tilingTest.includes('execute_shared_under_authority_with_control_and_terminal('));
+  assert.ok(tilingTest.includes('.validate_public_result_memory(&result)'));
+  assert.ok(!tilingTest.includes('WasmCpuSearchBackend::execute_with_control('),
+    'Tiling must exercise its actual parent-owned terminal, not the unowned PC-family compatibility API');
 });
 
 test('ordinary native extended PC shares owners but retains its own exact BuildUp terminal', () => {
@@ -365,7 +372,7 @@ test('full-height Web products preserve distinct PC and Tiling distribution owne
   assert.ok(prepared.includes('distributed_pc_failed_queue_finite_completion_unavailable'));
   assert.ok(workflow.includes('--lib pc_distributed::tests'));
   assert.ok(workflow.includes('--lib extended_pc_tiling::distributed::tests'));
-  assert.ok(workflow.includes('--lib full_height_pc_and_tiling_use_raw_protocol'));
+  assert.ok(workflow.includes('--lib full_height_pc_and_tiling_ -- --test-threads=1'));
   assert.ok(workflow.includes('--lib full_height_tiling_empty_finish_sentinel'));
   assert.ok(workflow.includes('--test extended_pc_observation'));
   assert.ok(workflow.includes('--lib resource::aggregate_execution_budget::tests'));
@@ -458,6 +465,17 @@ test('full-height failed queue consumes only request-owned complete coverage and
     'full_height_failed_queue_cancellation_never_returns_unsat_or_a_failure_list',
     'full_height_native_parallel_failed_queue_keeps_complete_source_coverage_and_worker_identity',
   ]) assert.ok(tests.includes(`fn ${name}()`));
+  const runtime = read('crates/clearra-wasm/src/distributed_runtime.rs');
+  const gate = runtime.slice(runtime.indexOf('fn request_needs_distributed_execution('),
+    runtime.indexOf('fn score_product_worker_count('));
+  assert.ok(gate.includes('AppCommand::Percent(command)'));
+  assert.ok(gate.includes('command.pc_failed_queue_origin().is_some()'));
+  assert.ok(gate.includes('Some(ProductCapabilityContract::PcFailedQueue)'));
+  assert.ok(gate.includes('query.initial_board().visible_height() > 6'));
+  assert.ok(gate.includes('query.target().lines() > 6'));
+  assert.ok(runtime.includes('fn full_height_pc_and_tiling_request_gate_preserves_failed_queue_domain()'));
+  assert.ok(runtime.includes('for product in ["", "tiling", "failed-queue"]'));
+  assert.ok(runtime.includes('assert!(!request_needs_distributed_execution(&legacy))'));
 });
 
 test('full-height physical execution does not truncate masks or acquire replay-family authority', () => {

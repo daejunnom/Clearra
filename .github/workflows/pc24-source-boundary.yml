@@ -187,7 +187,7 @@ jobs:
         run: |
           cargo test --locked -p clearra-core-executor --no-default-features --lib pc_distributed::tests -- --test-threads=1
           cargo test --locked -p clearra-core-executor --no-default-features --lib extended_pc_tiling::distributed::tests -- --test-threads=1
-          cargo test --locked -p clearra-wasm --lib full_height_pc_and_tiling_use_raw_protocol -- --test-threads=1
+          cargo test --locked -p clearra-wasm --lib full_height_pc_and_tiling_ -- --test-threads=1
           cargo test --locked -p clearra-wasm --lib full_height_tiling_empty_finish_sentinel -- --test-threads=1
       - name: Verify canonical full-height CLI execution without a native-C or tablebase fallback
         if: ${{ !cancelled() }}

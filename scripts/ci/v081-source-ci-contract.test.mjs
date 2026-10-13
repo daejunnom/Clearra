@@ -8,6 +8,8 @@ import test from 'node:test';
 import { prepareClearraArguments } from '../../apps/clearra-discord-bot/src/clearra/command.mjs';
 import { realCliProductProjectionRequests, realCliProjectionProfiles, realPcScoreTargetCases, realSetupScoreDocument }
   from '../../apps/clearra-discord-bot/test/support/realCliProductProjectionRequests.mjs';
+import { realCliFullHeightProductRequests }
+  from '../../apps/clearra-discord-bot/test/support/realCliFullHeightProductRequests.mjs';
 
 const workflow = readFileSync(new URL('../../.github/workflows/v081-selective-source-ci.yml', import.meta.url), 'utf8').replace(/\r\n/gu, '\n');
 const recoveryWorkflow = readFileSync(new URL('../../.github/workflows/recovery-build-regression.yml', import.meta.url), 'utf8').replace(/\r\n/gu, '\n');
@@ -591,6 +593,33 @@ test('the 1--6L score fixtures bind initial area and exact queue instead of empt
   const app = readFileSync(new URL('../../crates/clearra-app/tests/exact_accelerator_product_execution.rs', import.meta.url), 'utf8');
   assert.ok(app.includes('minimum_request(height, false, false, true, 1)'));
   assert.ok(app.includes('minimum_request(height, legal, conditioned, true, workers)'));
+});
+
+test('full-height native and Discord score inputs obey product-owned execution before adapter stripping', () => {
+  let count = 0;
+  for (const profile of realCliProjectionProfiles) {
+    for (const request of realCliFullHeightProductRequests(profile)) {
+      const prepared = prepareClearraArguments(request.arguments, { workers: 1,
+        logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true });
+      if (['score', 'score-minimals', 'score-finder'].includes(request.product)) {
+        for (const forbidden of ['--backend', '--no-backend-fallback', '--count', '--objective', '--max-patterns']) {
+          assert.ok(!request.arguments.includes(forbidden), `${request.product} owns ${forbidden}`);
+          assert.ok(!prepared.includes(forbidden));
+        }
+      }
+      if (request.product === 'score-finder') {
+        for (const forbidden of ['--tablebase', '--no-tablebase', '--tb', '--no-tb', '--score-profile', '--spin-profile']) {
+          assert.ok(!request.arguments.includes(forbidden), 'Finder owns score and excludes TB semantics');
+          assert.ok(!prepared.includes(forbidden));
+        }
+      }
+      count += 1;
+    }
+  }
+  assert.equal(count, 200);
+  const desktop = readFileSync(new URL('../../crates/clearra-cli/tests/desktop_full_height_products.rs', import.meta.url), 'utf8');
+  assert.ok(desktop.includes('if !matches!(product, "score" | "score-minimals" | "score-finder")'));
+  assert.ok(desktop.includes('if product != "score-finder"'));
 });
 
 test('the shared Setup-score fixture is bound to an actual Rust decoder proof without JS dependencies', () => {
