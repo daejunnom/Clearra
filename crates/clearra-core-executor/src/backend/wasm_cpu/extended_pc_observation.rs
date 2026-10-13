@@ -50,6 +50,7 @@ impl ExtendedPcObservationLanguage {
 
     /// Called only after the parent verified the exact shared problem/catalog
     /// binding of the worker. Root IDs are rebound by exact edge comparison.
+    #[cfg(any(test, all(feature = "parallel", not(target_family = "wasm"))))]
     pub fn merge_from(&mut self, source: &Self) -> Result<(), WasmExactSearchError> {
         let imported = self
             .language
@@ -245,6 +246,7 @@ impl ExtendedPcObservationLanguage {
             .checked_add(32 * 1024)
     }
 
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     pub fn checked_merge_future_bytes(&self, source: &Self) -> Option<u128> {
         self.checked_retained_bytes()?
             .checked_add(source.checked_retained_bytes()?)?

@@ -5474,7 +5474,7 @@ mod build_probability_partial_ingress_tests {
                 .unwrap();
             assert_eq!(
                 reference.app_response().status(),
-                clearra_app::AppStatus::Success
+                clearra_host_contract::AppStatus::Success
             );
             let mut coordinator =
                 match WasmDistributedCoordinator::prepare(&runtime, &command).unwrap() {
@@ -5549,7 +5549,7 @@ mod build_probability_partial_ingress_tests {
             let result = coordinator.finish(workers).unwrap();
             assert_eq!(
                 result.app_response().status(),
-                clearra_app::AppStatus::Success
+                clearra_host_contract::AppStatus::Success
             );
             let expected = reference.search_report().unwrap();
             let actual = result.search_report().unwrap();

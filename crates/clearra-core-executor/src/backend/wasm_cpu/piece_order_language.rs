@@ -121,6 +121,7 @@ impl PieceOrderLanguageCache {
     /// Imports worker-local roots by exact node/edge equality. A numeric root
     /// is scoped to its source owner and must never be copied into another
     /// cache without rebinding all child references first.
+    #[cfg(any(test, all(feature = "parallel", not(target_family = "wasm"))))]
     pub fn import_roots(
         &mut self,
         source: &Self,

@@ -156,7 +156,7 @@ jobs:
         run: cargo test --locked -p clearra-validation --lib validators::pc_query_validator::tests -- --test-threads=1
       - name: Verify ordinary PC memory owners without widening Build or typed reducer authority
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p clearra-problem --lib ordinary_pc_family_memory_projection_counts_opening_and_scenario_owners -- --test-threads=1
+        run: cargo test --locked -p clearra-problem --lib ordinary_pc_family_memory_projection_ -- --test-threads=1
 
   inverse-lock-clear:
     if: github.ref == 'refs/heads/codex/converge-pc24-integration-20261005' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || github.ref == 'refs/heads/codex/pc24-target-boundary-20261006' || github.ref == 'refs/heads/codex/converge-pc24-family-20261006' || github.ref == 'refs/heads/codex/converge-v081-document-frame-20261006' || github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007'

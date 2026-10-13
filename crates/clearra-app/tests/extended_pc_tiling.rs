@@ -148,7 +148,8 @@ fn full_height_distributed_failed_queue_requires_the_original_problem_owner() {
         let finite = finite.complete_failed_queue(result.clone(), evidence.clone(), &control);
         assert_eq!(finite.status(), AppStatus::Unsupported);
         assert!(finite.product_capability_result().is_none());
-        assert!(finite.pc_failed_queue_execution_evidence().is_none());
+        assert!(finite.result().is_none());
+        assert!(finite.public_result_payload().is_none());
         assert!(finite
             .error()
             .unwrap()
@@ -160,7 +161,8 @@ fn full_height_distributed_failed_queue_requires_the_original_problem_owner() {
         // failed-queue product or a completed complement proof.
         assert_eq!(mismatched.status(), AppStatus::Unsupported);
         assert!(mismatched.product_capability_result().is_none());
-        assert!(mismatched.pc_failed_queue_execution_evidence().is_none());
+        assert!(mismatched.result().is_none());
+        assert!(mismatched.public_result_payload().is_none());
         assert!(mismatched
             .error()
             .unwrap()
@@ -168,11 +170,12 @@ fn full_height_distributed_failed_queue_requires_the_original_problem_owner() {
             .contains("distributed_pc_failed_queue_authority_mismatch"));
 
         let stop = ExecutionControl::default();
-        stop.cancel();
+        stop.cancellation.handle().cancel();
         let stopped = cancelled.complete_failed_queue(result.clone(), evidence.clone(), &stop);
         assert_ne!(stopped.status(), AppStatus::Success);
         assert!(stopped.product_capability_result().is_none());
-        assert!(stopped.pc_failed_queue_execution_evidence().is_none());
+        assert!(stopped.result().is_none());
+        assert!(stopped.public_result_payload().is_none());
 
         let accepted = original.complete_failed_queue(result, evidence, &control);
         assert_eq!(accepted.status(), AppStatus::Success, "{accepted:?}");

@@ -135,7 +135,9 @@ pub(super) fn checked_pc_family_problem_nested_retained_bytes(
 ) -> Option<u128> {
     // Constructor validation owns execution compatibility. This projection
     // only counts owners and does not revalidate kicks in the solver loop.
-    let pointee = if problem.objective().score().requested() {
+    let pointee = if problem.output_policy() == SearchOutputPolicy::TilingOnly {
+        problem.checked_pc_tiling_pointee_retained_bytes()?
+    } else if problem.objective().score().requested() {
         problem.checked_pc_score_pointee_retained_bytes()?
     } else {
         problem.checked_pc_family_pointee_retained_bytes()?

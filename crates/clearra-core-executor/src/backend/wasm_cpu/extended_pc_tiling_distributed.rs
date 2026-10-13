@@ -253,6 +253,9 @@ impl WasmFullHeightTilingProducer {
                 return Err(invalid("candidate_budget_exceeded"));
             }
             if let Some(plan) = plan {
+                if plan.candidate_count != expected {
+                    return Err(invalid("extended_tiling_distributed_family_count_mismatch"));
+                }
                 self.owner.ensure_memory(
                     external,
                     (plan.branches.len() as u128) * size_of::<RootReceipt>() as u128

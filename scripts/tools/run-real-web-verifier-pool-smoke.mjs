@@ -23,6 +23,13 @@ const manifest = JSON.parse(await readFile(join(process.env.CLEARRA_REAL_ACCELER
   'clearra_wasm.manifest.json'), 'utf8'));
 assert.ok(clearraWasmBuildContractsEqual(manifest.build, await createClearraWasmBuildContract(repository)),
   'the current source and explicit runtime identity must match the ordinary WASM fixture');
+// Bundling relocates import.meta.url to the managed output root. Bind this
+// tracked input to the source checkout before opening that output transaction.
+const fullHeightInput = join(repository, 'tests', 'fixtures', 'contracts',
+  'extended_pc_surface_input.v1.tsv');
+assertNoBuildLinks(fullHeightInput);
+assert.equal(await realpath(fullHeightInput), fullHeightInput);
+await readFile(fullHeightInput, 'utf8');
 // Reject missing/stale inputs before opening or retiring any managed build slot.
 const owner = enterManagedBuildOrRelaunch(repository, [self]);
 const output = join(owner.transaction, 'functional-web-verifier-pool');
@@ -35,4 +42,5 @@ await build({ absWorkingDir: repository, bundle: true, format: 'esm', platform: 
   entryPoints: ['apps/clearra-web/test/realVerifierPool.smoke.mjs',
     'apps/clearra-web/test/helpers/nodeVerifierRealm.mjs'] });
 process.env.CLEARRA_REAL_VERIFIER_BOOT = join(output, 'nodeVerifierRealm.mjs');
+process.env.CLEARRA_REAL_FULL_HEIGHT_INPUT = fullHeightInput;
 await import(pathToFileURL(join(output, 'realVerifierPool.smoke.mjs')).href);

@@ -115,6 +115,11 @@ test('the production Web pool smoke consumes one real WASM build and unchanged s
   assert.ok(launcher.indexOf('assert.ok(clearraWasmBuildContractsEqual') <
     launcher.indexOf('const owner = enterManagedBuildOrRelaunch'));
   assert.ok(launcher.includes("outExtension: { '.js': '.mjs' }"));
+  assert.ok(launcher.includes('process.env.CLEARRA_REAL_FULL_HEIGHT_INPUT = fullHeightInput'));
+  assert.ok(launcher.indexOf('assert.equal(await realpath(fullHeightInput), fullHeightInput)') <
+    launcher.indexOf('const owner = enterManagedBuildOrRelaunch'));
+  assert.ok(consumer.includes('const fullHeightInput = process.env.CLEARRA_REAL_FULL_HEIGHT_INPUT'));
+  assert.ok(!consumer.includes("new URL('../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv', import.meta.url)"));
 });
 
 test('signed browser acceptance searches qualified profiles and fails open after pointer corruption', () => {

@@ -103,11 +103,8 @@ fn arguments(input: &[&str], profile: &str, product: &str, b2b: bool) -> Vec<Str
         .into_iter()
         .map(str::to_owned),
     );
-    if product.is_empty() {
-        // Bare pc's legacy default is observed 7-bag input, not this forced
-        // fixed II/III/IIIIII supply. Preserve the distinction explicitly.
-        args.push("--fixed-queue".to_owned());
-    }
+    // --board-mask/--height/--pieces select the shared CLI grammar, which
+    // already lowers --queue to a fixed sequence for the ordinary PC product.
     if product != "score-minimals" {
         args.extend(["--backend".to_owned(), "cpu".to_owned()]);
     }

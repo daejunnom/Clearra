@@ -162,12 +162,24 @@ fn full_height_observation_does_not_silently_rebind_oracle_only_typed_products()
             let Ok(request) = parsed.to_app_request() else {
                 continue;
             };
-            let AppCommand::Scenario(scenario) = request.command() else {
-                panic!("full-height input must not be converted to compact oracle input");
+            let query = match request.command() {
+                AppCommand::Scenario(scenario) => scenario.query(),
+                AppCommand::Percent(percent) if product == "failed-queue" => percent
+                    .query()
+                    .expect("the failed-queue command must retain its scenario query"),
+                _ => panic!("full-height input must not be converted to compact oracle input"),
             };
             assert_eq!(
-                scenario.query().queue_observation_policy(),
+                query.queue_observation_policy(),
                 QueueObservationPolicy::VisibleSeven
+            );
+            assert_eq!(
+                query.initial_board().visible_height(),
+                input[1].parse::<u16>().unwrap()
+            );
+            assert_eq!(
+                query.remaining_queue().as_fixed_sequence().unwrap().len(),
+                input[3].parse::<usize>().unwrap()
             );
             assert_ne!(
                 context.run(request).status(),

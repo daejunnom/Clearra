@@ -155,8 +155,8 @@ fn extended_pc_minimum_preserves_exact_empty_optimum_instead_of_runtime_unsuppor
     for profile in ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"] {
         for preserve_b2b in [false, true] {
             let command = format!(
-                "clearra --format json pc minimals --lines 7 --height 7 --board-mask 0x{} --pieces {} --queue {} --no-hold --workers 1 --backend cpu --rule {profile} --spin-profile t-spins --no-tablebase --no-legal-board --no-conditioned-reachability {}",
-                input[2], input[3], input[4], if preserve_b2b { "--preserve-b2b" } else { "" },
+                "clearra --format json pc minimals --lines 7 --height 7 --board-mask 0x{} --pieces {} --queue {} --no-hold --workers 1 --backend cpu --rule {profile} --no-tablebase --no-legal-board --no-conditioned-reachability {}",
+                input[2], input[3], input[4], if preserve_b2b { "--preserve-b2b --spin-profile t-spins" } else { "" },
             );
             let arguments = command.split_whitespace().collect::<Vec<_>>();
             let value = run_json(&arguments);

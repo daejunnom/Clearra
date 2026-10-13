@@ -36,9 +36,8 @@ export function realCliFullHeightProductRequests(profile) {
       '--height', String(input.height), '--board-mask', `0x${input.mask}`,
       '--pieces', String(input.pieces), '--queue', input.queue, '--no-hold', '--rule', profile,
       '--no-tablebase', '--no-legal-board', '--no-conditioned-reachability',
-      // Bare pc retains its legacy observed-bag default. II is an explicit
-      // fixed sequence here; do not bypass queue-observation validation.
-      ...(product === '' ? ['--fixed-queue'] : []),
+      // The full-height scenario options select the shared CLI grammar:
+      // --queue is already fixed, unlike the native legacy opening default.
       ...(product === 'score-minimals' ? [] : ['--backend', 'cpu']),
       ...(preserveB2b ? ['--preserve-b2b', '--spin-profile', 't-spins'] : []),
       ...(product === 'failed-queue' ? ['--failed-count', '1'] : [])],

@@ -816,9 +816,10 @@ mod retained_capacity {
                     || failed_source
                     || path_source)
                 || self.objective.score().requested()
-                || self
+                || (self
                     .queue_observation_policy()
                     .requires_observation_policy()
+                    && !ordinary_source)
                 || self.backend_policy().tablebase_requested()
                 || self.backend_policy().precompute_build_dependencies()
             {
@@ -1144,6 +1145,68 @@ mod retained_capacity {
                 constrained.checked_pc_family_pointee_retained_bytes(),
                 manual_expected(&constrained)
             );
+        }
+
+        #[test]
+        fn ordinary_pc_family_memory_projection_preserves_visible_seven_without_typed_authority() {
+            use clearra_supply::QueueObservationPolicy;
+
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(8, 0),
+                fixed_queue(32),
+                PieceWindow::new(4),
+            )
+            .with_exact_pieces(Some(4))
+            .with_allow_hold(false)
+            .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven);
+            for objective in [ObjectivePolicy::all(), ObjectivePolicy::unique()] {
+                let ordinary =
+                    ProblemCompiler::compile_scenario_pc(&query.clone().with_objective(objective))
+                        .unwrap();
+                assert_eq!(
+                    ordinary.checked_pc_family_pointee_retained_bytes(),
+                    manual_expected(&ordinary)
+                );
+                assert!(ordinary
+                    .checked_pc_family_pointee_retained_bytes()
+                    .is_some());
+            }
+            assert!(ProblemCompiler::compile_scenario_pc(
+                &query
+                    .clone()
+                    .with_objective(ObjectivePolicy::minimum_cover()),
+            )
+            .is_err());
+            let ordinary = ProblemCompiler::compile_scenario_pc(
+                &query
+                    .with_objective(ObjectivePolicy::all())
+                    .with_count_policy(PcCountPolicy::CountAll),
+            )
+            .unwrap();
+            let path = ordinary.with_pc_path_v2_evidence();
+            assert!(path.checked_pc_family_pointee_retained_bytes().is_none());
+        }
+
+        #[test]
+        fn ordinary_pc_family_memory_projection_keeps_tiling_in_its_own_projection() {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(8, 0),
+                fixed_queue(32),
+                PieceWindow::new(4),
+            )
+            .with_exact_pieces(Some(4))
+            .with_allow_hold(false)
+            .with_objective(ObjectivePolicy::tiling())
+            .with_count_policy(PcCountPolicy::CountUnique);
+            let tiling = ProblemCompiler::compile_scenario_pc_tiling(&query).unwrap();
+            assert_eq!(
+                tiling.checked_pc_tiling_pointee_retained_bytes(),
+                manual_expected(&tiling)
+            );
+            assert!(tiling.checked_pc_tiling_pointee_retained_bytes().is_some());
+            assert!(tiling.checked_pc_family_pointee_retained_bytes().is_none());
+            let generic = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            assert!(generic.checked_pc_tiling_pointee_retained_bytes().is_none());
         }
 
         #[test]

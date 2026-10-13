@@ -932,6 +932,7 @@ impl ExtendedGeometrySearch {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn advance(&mut self, catalog: &ExtendedInverseCatalog) -> ExtendedGeometryAdvance {
         self.advance_with_node_budget(catalog, None, None)
             .expect("unbounded Geometry does not perform memory admission")

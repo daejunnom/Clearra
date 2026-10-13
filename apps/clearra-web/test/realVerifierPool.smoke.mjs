@@ -25,6 +25,12 @@ const profiles = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
 const counts = [245, 246, 289, 246, 175];
 const caps = { logicalProcessorCount: 4, webGpuAvailable: false, crossOriginIsolated: false,
   transferByteCap: 64 * 1024 * 1024, productRetentionByteCap: 128 * 1024 * 1024 };
+const fullHeightInput = process.env.CLEARRA_REAL_FULL_HEIGHT_INPUT;
+assert.ok(fullHeightInput, 'the launcher must bind the tracked full-height input before bundling');
+assertNoBuildLinks(fullHeightInput);
+assert.equal(await realpath(fullHeightInput), fullHeightInput);
+const extendedRows = (await readFile(fullHeightInput, 'utf8'))
+  .split(/\r?\n/u).filter(line => line && !line.startsWith('#'));
 const wasmRoot = await realpath(process.env.CLEARRA_REAL_ACCELERATOR_WASM_DIR);
 const assetRoot = await realpath(process.env.CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR);
 assertNoBuildLinks(join(wasmRoot, 'clearra_wasm.manifest.json'));
@@ -270,8 +276,6 @@ try {
   // all but 2-6 pieces while retaining real occupancy above the compact frame.
   // Each profile uses its own primitive kicks and the production opaque batch
   // transport; identical serial results are not a grant from a source string.
-  const extendedRows = (await readFile(new URL('../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv', import.meta.url), 'utf8'))
-    .split(/\r?\n/u).filter(line => line && !line.startsWith('#'));
   for (const row of extendedRows) {
     const [id, height, boardHex, pieces, queue] = row.split('\t');
     for (const profile of profiles) {

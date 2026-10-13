@@ -1237,7 +1237,7 @@ fn full_height_parallel_preserves_requested_width_for_a_single_candidate_family(
     let result =
         WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default()).unwrap();
     assert_eq!(result.usize_field("workers_used"), Some(2));
-    assert_eq!(result.usize_field("parallel_active_workers"), Some(1));
+    assert_eq!(result.usize_field("cpu_parallel_active_workers"), Some(1));
     assert_eq!(result.normalized_solution_keys().len(), 1);
     assert_eq!(result.bool_field("count_complete"), Some(true));
 }
@@ -1250,6 +1250,9 @@ fn full_height_parallel_tiling_preserves_requested_width_and_shared_finite_node_
         return;
     }
     let (base, _, _) = forced_query(24, srs_plus());
+    let base = base
+        .with_objective(ObjectivePolicy::tiling())
+        .with_count_policy(PcCountPolicy::CountUnique);
     let serial_problem = ProblemCompiler::compile_scenario_pc_tiling(&base).unwrap();
     let serial =
         WasmCpuSearchBackend::execute_with_control(&serial_problem, &ExecutionControl::default())

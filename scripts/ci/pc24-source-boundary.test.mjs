@@ -250,8 +250,11 @@ test('Opening inputs retain the whole target rather than a six-line or twenty-li
     'crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_tiling.rs',
   ]) assert.ok(read(path).includes('SearchProblemPreset::ScenarioPc | SearchProblemPreset::OpeningPc'));
   assert.ok(workflow.includes('cargo test --locked -p clearra-validation --lib validators::pc_query_validator::tests'));
-  assert.ok(workflow.includes('--lib ordinary_pc_family_memory_projection_counts_opening_and_scenario_owners'));
+  assert.ok(workflow.includes('--lib ordinary_pc_family_memory_projection_ -- --test-threads=1'));
+  assert.ok(read('crates/clearra-problem/src/search_problem.rs').includes(
+    'ordinary_pc_family_memory_projection_preserves_visible_seven_without_typed_authority'));
   const session = read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_search.rs');
+  assert.match(session, /if problem\.output_policy\(\) == SearchOutputPolicy::TilingOnly[\s\S]*problem\.checked_pc_tiling_pointee_retained_bytes\(\)\?/u);
   assert.match(session, /if problem\.objective\(\)\.score\(\)\.requested\(\)[\s\S]*problem\.checked_pc_score_pointee_retained_bytes\(\)\?[\s\S]*problem\.checked_pc_family_pointee_retained_bytes\(\)\?/u);
   assert.match(read('crates/clearra-core-executor/src/backend/wasm_cpu/extended_build_probability.rs'),
     /checked_pc_family_problem_nested_retained_bytes\(\s*&self\.problem/u);
