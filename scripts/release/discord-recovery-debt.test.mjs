@@ -1113,9 +1113,9 @@ test("one-time bootstrap scans every completed debt regardless run-number orderi
 
 test("one-time bootstrap cutoff is bound to the exact current attempt start, not queue creation", () => {
   const queuedBeforeButStartedAfter = currentRun({
-    created_at: "2026-09-27T17:12:22Z",
-    run_started_at: "2026-09-27T17:12:24Z",
-    updated_at: "2026-09-27T17:12:25Z",
+    created_at: "2026-10-29T17:12:22Z",
+    run_started_at: "2026-10-29T17:12:24Z",
+    updated_at: "2026-10-29T17:12:25Z",
   });
   assert.throws(
     () => planDiscordRecoveryDebt(
@@ -1130,8 +1130,8 @@ test("one-time bootstrap cutoff is bound to the exact current attempt start, not
     ),
     (error) => {
       assert.match(error.message, /bootstrap has expired/u);
-      assert.match(error.message, /expired_at=2026-09-27T17:12:23Z/u);
-      assert.match(error.message, /attempt_started_at=2026-09-27T17:12:24Z/u);
+      assert.match(error.message, /expired_at=2026-10-29T17:12:23Z/u);
+      assert.match(error.message, /attempt_started_at=2026-10-29T17:12:24Z/u);
       assert.match(error.message, /separately reviewed and authorized bootstrap policy change/u);
       assert.match(error.message, /no-runtime-mutation recovery does not renew checkpoint authority/u);
       return true;
@@ -1139,9 +1139,9 @@ test("one-time bootstrap cutoff is bound to the exact current attempt start, not
   );
 
   const exactBoundary = currentRun({
-    created_at: "2026-09-27T17:12:22Z",
-    run_started_at: "2026-09-27T17:12:23Z",
-    updated_at: "2026-09-27T17:12:24Z",
+    created_at: "2026-10-29T17:12:22Z",
+    run_started_at: "2026-10-29T17:12:23Z",
+    updated_at: "2026-10-29T17:12:24Z",
   });
   const accepted = planDiscordRecoveryDebt(
     { total_count: 1, workflow_runs: [exactBoundary] },
@@ -1155,9 +1155,9 @@ test("one-time bootstrap cutoff is bound to the exact current attempt start, not
 
 test("source-reviewed bootstrap renewal retains the original epoch and every unresolved debt", () => {
   const current = currentRun({
-    created_at: "2026-09-19T16:53:50Z",
-    run_started_at: "2026-09-19T16:53:55Z",
-    updated_at: "2026-09-19T16:54:00Z",
+    created_at: "2026-10-15T16:53:50Z",
+    run_started_at: "2026-10-15T16:53:55Z",
+    updated_at: "2026-10-15T16:54:00Z",
   });
   const runList = { total_count: 1, workflow_runs: [current] };
   const attempts = {
@@ -1186,9 +1186,9 @@ test("source-reviewed bootstrap renewal retains the original epoch and every unr
 test("successful no-runtime-mutation recovery cannot renew an expired bootstrap", () => {
   const input = catalogs();
   const current = currentRun({
-    created_at: "2026-09-28T01:48:00Z",
-    run_started_at: "2026-09-28T01:48:06Z",
-    updated_at: "2026-09-28T01:48:11Z",
+    created_at: "2026-10-30T01:48:00Z",
+    run_started_at: "2026-10-30T01:48:06Z",
+    updated_at: "2026-10-30T01:48:11Z",
   });
   input.runList.workflow_runs[0] = current;
   input.primaryAttempts.attempts[1] = current;
@@ -1250,9 +1250,9 @@ test("durable annotated receipt folds expired Actions history only before Discor
 
 test("bootstrap handles legacy tags but expires; fake or mutable v0.8 receipts never checkpoint", () => {
   const current = currentRun({
-    created_at: "2026-09-28T00:00:00Z",
-    run_started_at: "2026-09-28T00:00:01Z",
-    updated_at: "2026-09-28T00:00:02Z",
+    created_at: "2026-10-30T00:00:00Z",
+    run_started_at: "2026-10-30T00:00:01Z",
+    updated_at: "2026-10-30T00:00:02Z",
   });
   const base = {
     runList: { total_count: 1, workflow_runs: [current] },
