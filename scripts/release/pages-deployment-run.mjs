@@ -48,7 +48,7 @@ export async function resolvePagesDeploymentRun(options, dependencies = {}) {
     if (result !== null) return result;
     if (waitedSeconds >= waitSeconds) {
       if (waitSeconds === 0) {
-        throw new Error("Pages deployment authority requires exactly one successful exact-SHA run");
+        throw new Error("Pages deployment authority requires a successful exact-SHA run");
       }
       throw new Error("Pages deployment authority was unavailable before the bounded wait expired");
     }
@@ -61,7 +61,7 @@ export async function resolvePagesDeploymentRun(options, dependencies = {}) {
 export function validatePagesDeploymentRunList(value, options) {
   const result = selectPagesDeploymentRunList(value, options);
   if (result === null) {
-    throw new Error("Pages deployment authority requires exactly one successful exact-SHA run");
+    throw new Error("Pages deployment authority requires a successful exact-SHA run");
   }
   return result;
 }
@@ -102,18 +102,16 @@ function selectPagesDeploymentRunList(value, options) {
     ) {
       throw new Error("Pages deployment run differs from the exact same-repository authority");
     }
-    if (attempt !== "1") {
-      throw new Error("Pages deployment rerun attempts are forbidden");
-    }
     if (run_.status === "completed" && run_.conclusion === "success") {
       successful.push({ id, attempt });
     }
   }
-  if (successful.length > 1) {
-    throw new Error("Pages deployment authority requires exactly one successful exact-SHA run");
-  }
   if (successful.length === 0) return null;
-  const result = successful[0];
+  const result = successful.sort((left, right) => {
+    const order = BigInt(right.id) - BigInt(left.id) ||
+      BigInt(right.attempt) - BigInt(left.attempt);
+    return order > 0n ? 1 : order < 0n ? -1 : 0;
+  })[0];
   return Object.freeze({
     id: result.id,
     attempt: result.attempt,

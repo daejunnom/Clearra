@@ -50,9 +50,6 @@ export async function resolveDiscordAcceptanceTrigger(context, dependencies = {}
   if (!SHA.test(sourceCommit ?? '') || sourceCommit !== currentMain) {
     throw new Error('Discord source must be exact current main');
   }
-  if (expectedRunAttempt && expectedRunAttempt !== '1') {
-    throw new Error('Canonical Release reruns cannot authorize Discord deployment');
-  }
   const acceptance = await resolveCanonicalAcceptanceRun({
     repository, sourceCommit, expectedCount: 1, expectedRunId, expectedRunAttempt,
   }, dependencies);

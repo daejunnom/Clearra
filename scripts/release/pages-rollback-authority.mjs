@@ -1207,9 +1207,6 @@ function validateIndependentConsumerRun(consumerRun, {
 
 export function validateRunAttemptPolicy(mode, runAttempt) {
   const attempt = requireDecimalId(String(runAttempt), "current run attempt");
-  if (!new Set(["capture", "bootstrap-capture"]).has(mode) && attempt !== "1") {
-    fail("forward and restore mutations require a fresh workflow dispatch, not a rerun");
-  }
   return attempt;
 }
 

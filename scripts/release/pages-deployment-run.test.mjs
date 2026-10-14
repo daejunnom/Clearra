@@ -32,7 +32,7 @@ function run(overrides = {}) {
   };
 }
 
-test("resolves exactly one first-attempt same-SHA Pages deployment", async () => {
+test("resolves a successful same-SHA Pages deployment", async () => {
   const calls = [];
   const result = await resolvePagesDeploymentRun(
     { repository: REPOSITORY, sourceCommit: SOURCE },
@@ -78,7 +78,7 @@ test("boundedly waits for the exact Pages deployment without weakening selection
   assert.equal(responses.length, 0);
 });
 
-test("bounded Pages wait expires exactly and never turns ambiguity into authority", async () => {
+test("bounded Pages wait expires exactly and successful redispatch does not block selection", async () => {
   const sleeps = [];
   let calls = 0;
   await assert.rejects(
@@ -97,37 +97,32 @@ test("bounded Pages wait expires exactly and never turns ambiguity into authorit
   assert.equal(calls, 3);
   assert.deepEqual(sleeps, [15_000, 5_000]);
 
-  let ambiguitySleeps = 0;
-  await assert.rejects(
-    resolvePagesDeploymentRun(
-      { repository: REPOSITORY, sourceCommit: SOURCE, waitSeconds: "30" },
-      {
-        run: async () => JSON.stringify({
-          total_count: 2,
-          workflow_runs: [run(), run({ id: 702 })],
-        }),
-        sleep: async () => { ambiguitySleeps += 1; },
-      },
-    ),
-    /exactly one successful/u,
+  let extraSleeps = 0;
+  const latest = await resolvePagesDeploymentRun(
+    { repository: REPOSITORY, sourceCommit: SOURCE, waitSeconds: "30" },
+    {
+      run: async () => JSON.stringify({
+        total_count: 2, workflow_runs: [run(), run({ id: 702 })],
+      }),
+      sleep: async () => { extraSleeps += 1; },
+    },
   );
-  assert.equal(ambiguitySleeps, 0);
+  assert.equal(latest.id, "702");
+  assert.equal(extraSleeps, 0);
 });
 
-test("fails closed for ambiguous, truncated, rerun, or foreign Pages histories", () => {
+test("selects successful reruns but rejects truncated or foreign Pages histories", () => {
   const options = { repository: REPOSITORY, sourceCommit: SOURCE };
   assert.throws(
     () => validatePagesDeploymentRunList({ total_count: 2, workflow_runs: [run()] }, options),
     /complete and non-truncated/u,
   );
-  assert.throws(
-    () => validatePagesDeploymentRunList({ total_count: 2, workflow_runs: [run(), run({ id: 2 })] }, options),
-    /exactly one successful/u,
-  );
-  assert.throws(
-    () => validatePagesDeploymentRunList({ total_count: 1, workflow_runs: [run({ run_attempt: 2 })] }, options),
-    /rerun attempts are forbidden/u,
-  );
+  assert.equal(validatePagesDeploymentRunList({
+    total_count: 2, workflow_runs: [run(), run({ id: 2 })],
+  }, options).id, "701");
+  assert.equal(validatePagesDeploymentRunList({
+    total_count: 1, workflow_runs: [run({ run_attempt: 2 })],
+  }, options).attempt, "2");
   assert.throws(
     () => validatePagesDeploymentRunList({
       total_count: 1,

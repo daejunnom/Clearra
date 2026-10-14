@@ -46,7 +46,6 @@ for (const [name, mutate] of [
   ['pull-request event', c => { c.eventName = 'pull_request'; }],
   ['moved main', c => { c.currentMain = '8'.repeat(40); }],
   ['noncompletion action', c => { c.event.action = 'requested'; }],
-  ['rerun authority', c => { c.event.workflow_run.run_attempt = 2; }],
   ['imprecise run ID', c => { c.event.workflow_run.id = Number.MAX_SAFE_INTEGER + 1; }],
   ['nonmain receiver', c => { c.ref = 'refs/heads/candidate'; }],
 ]) {
@@ -61,12 +60,28 @@ for (const [name, runs] of [
   ['no accepted run', []],
   ['different run than triggering event', [run({ id: 124 })]],
   ['unverified success', [run({ conclusion: 'failure' })]],
-  ['duplicate canonical successes', [run(), run({ id: 124 })]],
 ]) {
   test(`${name} cannot authorize automatic deployment`, async () => {
     await assert.rejects(resolveDiscordAcceptanceTrigger(context(), api(runs)));
   });
 }
+
+test('other successful runs do not invalidate the bound triggering acceptance', async () => {
+  const result = await resolveDiscordAcceptanceTrigger(context(), api([run(), run({ id: 124 })]));
+  assert.equal(result.acceptedRunId, '123');
+});
+
+test('a successful rerun remains bound to its own exact attempt', async () => {
+  const input = context();
+  input.event.workflow_run.run_attempt = 2;
+  const provider = api([run({ run_attempt: 2 })]);
+  const execute = provider.run;
+  provider.run = (command, args) =>
+    args.some(arg => String(arg).endsWith('/attempts/1'))
+      ? JSON.stringify(run({ conclusion: 'failure' }))
+      : execute(command, args);
+  assert.equal((await resolveDiscordAcceptanceTrigger(input, provider)).acceptedRunAttempt, '2');
+});
 
 test('manual recovery can bind the same exact run and attempt or use the existing unique-acceptance lookup', async () => {
   for (const inputs of [

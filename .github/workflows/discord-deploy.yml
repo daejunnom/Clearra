@@ -26,7 +26,7 @@ on:
         required: false
         type: string
       accepted_run_attempt:
-        description: Optional canonical acceptance attempt; must be 1 and paired with run ID
+        description: Optional successful canonical acceptance attempt, paired with run ID
         required: false
         type: string
 

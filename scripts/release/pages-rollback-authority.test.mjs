@@ -880,19 +880,12 @@ test("capture names are unique per authority, run, and rerun attempt", () => {
   assert.notEqual(first, retry);
 });
 
-test("capture reruns are unique while forward and restore require a fresh dispatch", () => {
-  assert.equal(validateRunAttemptPolicy("capture", "2"), "2");
-  assert.equal(validateRunAttemptPolicy("bootstrap-capture", "2"), "2");
-  assert.equal(validateRunAttemptPolicy("forward", "1"), "1");
-  assert.equal(validateRunAttemptPolicy("restore", "1"), "1");
-  assert.throws(
-    () => validateRunAttemptPolicy("forward", "2"),
-    /fresh workflow dispatch/u,
-  );
-  assert.throws(
-    () => validateRunAttemptPolicy("restore", "2"),
-    /fresh workflow dispatch/u,
-  );
+test("every positive run attempt stays explicitly bound for capture, forward and restore", () => {
+  for (const mode of ["capture", "bootstrap-capture", "forward", "restore"]) {
+    assert.equal(validateRunAttemptPolicy(mode, "1"), "1");
+    assert.equal(validateRunAttemptPolicy(mode, "2"), "2");
+    assert.throws(() => validateRunAttemptPolicy(mode, "0"), /run attempt/u);
+  }
 });
 
 test("capture report seals actual artifact ID, digest, run attempt, tar hash, and retention", async () => {
