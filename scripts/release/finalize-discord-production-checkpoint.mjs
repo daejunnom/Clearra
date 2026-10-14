@@ -41,6 +41,7 @@ import {
   CURRENT_PRODUCT_TAG,
   CURRENT_PRODUCT_VERSION,
 } from "./current-product-release.mjs";
+import { DISCORD_PRIMARY_WORKFLOW_ID } from "./discord-workflow-identities.mjs";
 
 export const DISCORD_PRODUCTION_CHECKPOINT_RECEIPT_SCHEMA_ID =
   "clearra.discord-production-checkpoint-receipt.v1";
@@ -588,7 +589,7 @@ export function validateCompletedDiscordRun(run, identity) {
   if (
     String(run.id ?? "") !== identity.discordWorkflowRunId ||
     String(run.run_attempt ?? "") !== identity.discordWorkflowRunAttempt ||
-    run.name !== "Deploy Discord Production" ||
+    run.workflow_id !== DISCORD_PRIMARY_WORKFLOW_ID ||
     run.path !== DISCORD_WORKFLOW_PATH || run.event !== "workflow_run" ||
     run.head_branch !== "main" || run.head_sha !== identity.sourceCommit ||
     run.status !== "completed" || run.conclusion !== "success" ||

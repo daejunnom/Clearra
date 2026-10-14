@@ -122,6 +122,7 @@ function primaryRun(overrides = {}) {
     id: 100,
     run_attempt: 1,
     run_number: 10,
+    workflow_id: 346430888,
     name: "Deploy Discord Production",
     path: ".github/workflows/discord-deploy.yml",
     event: "workflow_dispatch",
@@ -157,6 +158,7 @@ function recoveryRun(overrides = {}) {
     id: 300,
     run_attempt: 1,
     run_number: 30,
+    workflow_id: 346430884,
     name: "Recover Discord Production",
     path: ".github/workflows/discord-deploy-recovery.yml",
     event: "workflow_run",
@@ -269,6 +271,27 @@ const identity = {
     discord_deploy_workflow_absent: true,
   },
 };
+
+test("recovery debt retains exact workflow IDs when run display titles change", () => {
+  const input = catalogs();
+  for (const run of [...input.runList.workflow_runs, ...input.primaryAttempts.attempts]) {
+    run.name = `Discord production · ${run.head_sha}`;
+  }
+  input.recoveryAttempts.attempts[0].name = "Recovery for an exact original run";
+  const plan = planDiscordRecoveryDebt(
+    input.runList, input.primaryAttempts, input.recoveryAttempts, input.artifactPages, identity,
+  );
+  assert.equal(plan.debts.length, 1);
+  for (const section of ["primaryAttempts", "recoveryAttempts"]) {
+    for (const workflow_id of [undefined, 1]) {
+      const invalid = structuredClone(input);
+      invalid[section].attempts[0].workflow_id = workflow_id;
+      assert.throws(() => planDiscordRecoveryDebt(
+        invalid.runList, invalid.primaryAttempts, invalid.recoveryAttempts, invalid.artifactPages, identity,
+      ), /foreign authority/u);
+    }
+  }
+});
 
 function recoveryJobCatalog(runtime, overrides = {}) {
   const authoritySteps = [

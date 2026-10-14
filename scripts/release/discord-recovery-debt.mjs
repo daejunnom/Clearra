@@ -8,6 +8,10 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { workflowRunTimestampOrderIsValid } from "./workflow-run-timestamps.mjs";
 import { validateRecoveryResultChronology } from "./recovery-result-chronology.mjs";
+import {
+  DISCORD_PRIMARY_WORKFLOW_ID,
+  DISCORD_RECOVERY_WORKFLOW_ID,
+} from "./discord-workflow-identities.mjs";
 
 import {
   canonicalJson,
@@ -33,9 +37,7 @@ export const DISCORD_RECOVERY_DEBT_CLEARANCE_SCHEMA_ID =
 export const DISCORD_RECOVERY_DEBT_CHECKPOINT_SCHEMA_ID =
   "clearra.discord-recovery-debt-checkpoint.v1";
 
-const PRIMARY_NAME = "Deploy Discord Production";
 const PRIMARY_PATH = ".github/workflows/discord-deploy.yml";
-const RECOVERY_NAME = "Recover Discord Production";
 const RECOVERY_PATH = ".github/workflows/discord-deploy-recovery.yml";
 const REPOSITORY_ID = 1309293231;
 const SHA = /^[0-9a-f]{40}$/u;
@@ -948,7 +950,7 @@ function validateRunIdentity(run, kind, expectedRepository) {
   }
   const isPrimary = kind === "primary";
   if (
-    run.name !== (isPrimary ? PRIMARY_NAME : RECOVERY_NAME) ||
+    run.workflow_id !== (isPrimary ? DISCORD_PRIMARY_WORKFLOW_ID : DISCORD_RECOVERY_WORKFLOW_ID) ||
     run.path !== (isPrimary ? PRIMARY_PATH : RECOVERY_PATH) ||
     (isPrimary ? !PRIMARY_EVENTS.has(run.event) : !RECOVERY_EVENTS.has(run.event)) ||
     run.head_branch !== "main" ||

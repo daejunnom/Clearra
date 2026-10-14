@@ -47,6 +47,7 @@ function run(overrides = {}) {
     id: Number(RUN_ID),
     run_attempt: Number(RUN_ATTEMPT),
     run_number: 41,
+    workflow_id: 346430888,
     created_at: "2026-08-31T00:00:00Z",
     run_started_at: "2026-08-31T00:00:10Z",
     updated_at: "2026-08-31T00:00:20Z",
@@ -305,6 +306,26 @@ test("recovery run catalog snapshot seal rejects added, deleted, and hidden reru
     ),
     /changed during attempt collection/u,
   );
+});
+
+test("primary run authority follows workflow ID and path, not its display title", () => {
+  const dynamic = run({ name: `Discord production · ${SOURCE}` });
+  const snapshot = entry => ({ total_count: 1, workflow_runs: [entry] });
+  assert.equal(validatePrimaryRunCatalogSnapshots(snapshot(run()), snapshot(dynamic), REPOSITORY).size, 1);
+  const authority = resolveDiscordRecoveryAuthority(dynamic, { total_count: 0, artifacts: [] }, {
+    ...options, jobList: jobList(),
+  });
+  assert.equal(authority.recovery_required, false);
+  for (const mutation of [
+    { workflow_id: undefined }, { workflow_id: 346430884 },
+    { path: ".github/workflows/foreign.yml" },
+  ]) {
+    const foreign = run(mutation); // A matching old display title grants no authority.
+    assert.throws(() => validatePrimaryRunCatalogSnapshots(snapshot(foreign), snapshot(foreign), REPOSITORY),
+      /foreign authority/u);
+    assert.throws(() => resolveDiscordRecoveryAuthority(foreign, { total_count: 0, artifacts: [] }, options),
+      /exact completed primary authority/u);
+  }
 });
 
 test("pending concurrency waits require exact empty jobs while approval waits remain ambiguous", () => {

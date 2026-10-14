@@ -20,6 +20,7 @@ import {
 import { validateDiscordCatalogRestoreReport } from
   "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs";
 import { CURRENT_PRODUCT_TAG } from "./current-product-release.mjs";
+import { DISCORD_PRIMARY_WORKFLOW_ID } from "./discord-workflow-identities.mjs";
 
 export const DISCORD_RECOVERY_AUTHORITY_SCHEMA_ID =
   "clearra.discord-deployment-recovery-authority.v1";
@@ -333,7 +334,7 @@ export function resolveDiscordRecoveryAuthority(run, artifactList, options) {
   if (
     runId !== expectedRunId ||
     runAttempt !== expectedRunAttempt ||
-    run.name !== PRIMARY_WORKFLOW_NAME ||
+    run.workflow_id !== DISCORD_PRIMARY_WORKFLOW_ID ||
     run.path !== PRIMARY_WORKFLOW_PATH ||
     !PRIMARY_EVENTS.has(run.event) ||
     run.head_branch !== "main" ||
@@ -1828,7 +1829,7 @@ function normalizePrimaryAttempt(entry, repository, label) {
     (runStartedAt !== null && (createdAt > runStartedAt || runStartedAt > updatedAt))
   ) throw new Error(`Discord recovery ${label} timestamps are internally inconsistent`);
   if (
-    entry.name !== PRIMARY_WORKFLOW_NAME ||
+    entry.workflow_id !== DISCORD_PRIMARY_WORKFLOW_ID ||
     entry.path !== PRIMARY_WORKFLOW_PATH ||
     entry.head_branch !== "main" ||
     entry.repository?.id !== CLEARRA_REPOSITORY_ID ||

@@ -61,6 +61,7 @@ function completedRun(overrides = {}) {
   return {
     id: Number(RUN_ID),
     run_attempt: Number(RUN_ATTEMPT),
+    workflow_id: 346430888,
     name: "Deploy Discord Production",
     path: ".github/workflows/discord-deploy.yml",
     event: "workflow_run",
@@ -158,6 +159,19 @@ test("rejects an in-progress or unsuccessful Discord checkpoint run", () => {
     ),
     /predates its start/u,
   );
+});
+
+test("checkpoint finalization binds workflow ID and path independently of run-name", () => {
+  assert.doesNotThrow(() => validateCompletedDiscordRun(
+    completedRun({ name: `Discord production · ${SOURCE_COMMIT}` }), IDENTITY,
+  ));
+  for (const mutation of [
+    { workflow_id: undefined }, { workflow_id: 346430884 },
+    { path: ".github/workflows/foreign.yml" },
+  ]) {
+    assert.throws(() => validateCompletedDiscordRun(completedRun(mutation), IDENTITY),
+      /not exact completed success/u);
+  }
 });
 
 test("rejects missing, duplicate, foreign, expired, or wrong-attempt candidate artifacts", () => {
