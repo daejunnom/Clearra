@@ -4,6 +4,12 @@ on:
   push:
     branches: ["codex/v081-selective-source-ci-20260927", "codex/v081-main-convergence-20260928", "codex/converge-v081-linear-20260928", "codex/converge-main-product-fixes-20261005", "codex/converge-v081-extended-pc-products-20261007"]
   workflow_dispatch:
+    inputs:
+      complete_functional_gate:
+        description: Include Core and real WASM ABI-to-portfolio UI checks on the PC24 candidate, without publishing or benchmarks
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -17,6 +23,9 @@ concurrency:
 # explicitly download only unchanged qualified packs: five relations in Core,
 # five legal-board/relation pairs in real WASM and the native compute adapter,
 # and the selected SRS+ pair in the App job. No image or Cloud Run is published.
+# The PC24 branch normally uses its separate Core build owners. An explicit
+# manual functional run also exercises the retained accelerator/ABI/UI chain;
+# ordinary small source pushes do not silently acquire those extra builds.
 env:
   CLEARRA_BUILD_PURPOSE: experiment
   RUST_MIN_STACK: "16777216"
@@ -24,7 +33,7 @@ env:
 
 jobs:
   core:
-    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005') && github.ref_type == 'branch'
+    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || (github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007' && github.event_name == 'workflow_dispatch' && inputs.complete_functional_gate == true)) && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -283,7 +292,7 @@ jobs:
             '
 
   wasm-abi:
-    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005') && github.ref_type == 'branch'
+    if: (github.ref == 'refs/heads/codex/v081-selective-source-ci-20260927' || github.ref == 'refs/heads/codex/v081-main-convergence-20260928' || github.ref == 'refs/heads/codex/converge-v081-linear-20260928' || github.ref == 'refs/heads/codex/converge-main-product-fixes-20261005' || (github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007' && github.event_name == 'workflow_dispatch' && inputs.complete_functional_gate == true)) && github.ref_type == 'branch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

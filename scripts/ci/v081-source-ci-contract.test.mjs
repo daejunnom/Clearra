@@ -40,11 +40,10 @@ test('all convergence branches run the non-publishing v0.8.1 and recovery gates'
 
 test('the PC24 candidate runs GUI roots and actual native surface readback with separate compile owners', () => {
   const candidate = 'refs/heads/codex/converge-v081-extended-pc-products-20261007';
-  for (const [job, enabled] of [['core', false], ['native-products', true], ['wasm-abi', false],
-    ['surfaces', true], ['wasm-realms', true]]) {
+  for (const job of ['native-products', 'surfaces', 'wasm-realms']) {
     const start = workflow.indexOf(`\n  ${job}:`);
     const guard = workflow.slice(start, workflow.indexOf('\n    runs-on:', start));
-    assert.equal(guard.includes(candidate), enabled, `${job}: separate exact source build ownership`);
+    assert.ok(guard.includes(candidate), `${job}: preserve ordinary source feedback`);
   }
   const consumer = readFileSync(new URL('../../apps/clearra-web/test/realVerifierPool.smoke.mjs', import.meta.url), 'utf8');
   assert.ok(consumer.includes(".replace('--solution-probabilities ', '')"));
@@ -57,6 +56,28 @@ test('the PC24 candidate runs GUI roots and actual native surface readback with 
   for (const phase of ['draining', 'postprocessing', 'merging']) {
     assert.ok(browser.includes(`sample.phases.includes('${phase}')`));
   }
+});
+
+test('complete functional feedback explicitly opts into Core and the real ABI-to-UI chain', () => {
+  const dispatch = workflow.slice(workflow.indexOf('  workflow_dispatch:'), workflow.indexOf('\npermissions:'));
+  assert.match(dispatch, /complete_functional_gate:\n\s+description: [^\n]+\n\s+type: boolean\n\s+required: false\n\s+default: false/u);
+  const manual = "(github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007' && github.event_name == 'workflow_dispatch' && inputs.complete_functional_gate == true)";
+  for (const job of ['core', 'wasm-abi']) {
+    const start = workflow.indexOf(`\n  ${job}:`);
+    const guard = workflow.slice(start, workflow.indexOf('\n    runs-on:', start));
+    assert.ok(guard.includes(manual), `${job}: candidate expansion requires an explicit typed manual input`);
+    assert.equal(guard.split('refs/heads/codex/converge-v081-extended-pc-products-20261007').length - 1, 1,
+      `${job}: no second unconditional candidate branch alternative`);
+    assert.ok(guard.includes("github.ref_type == 'branch'"));
+  }
+  const consumerStart = workflow.indexOf('\n  product-wire-ui:');
+  const consumerGuard = workflow.slice(consumerStart, workflow.indexOf('\n    runs-on:', consumerStart));
+  assert.ok(consumerGuard.includes('needs: wasm-abi'));
+  assert.ok(consumerGuard.includes("needs.wasm-abi.outputs.product_wire_ready == 'true'"));
+  assert.ok(!consumerGuard.includes('complete_functional_gate'), 'manual input never replaces actual fixture producer success');
+  assert.ok(workflow.includes('permissions:\n  contents: read'));
+  assert.ok(!workflow.includes('--benchmark-provenance'));
+  assert.ok(!workflow.includes('--stage-profiling'));
 });
 
 test('full-height native readback reuses the exact CLI and keeps the real Desktop host as a separate surface', () => {
