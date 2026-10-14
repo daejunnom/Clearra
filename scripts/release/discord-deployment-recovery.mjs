@@ -1848,10 +1848,12 @@ function validatePrimaryRunAttemptCatalog(value, latestById, repository) {
       ) throw new Error("Discord recovery run-attempt catalog ordering authority is inconsistent");
     }
     const final = entries.at(-1);
+    // The list API is discovery, not attempt chronology. GitHub can project a
+    // different run_started_at here (including for skipped workflow_run runs).
+    // Freshness decisions use the exact attempt endpoint's validated timestamps.
     if (
       final.attempt !== latest.attempt || final.status !== latest.status ||
-      final.conclusion !== latest.conclusion || final.event !== latest.event ||
-      final.runStartedAt !== latest.runStartedAt
+      final.conclusion !== latest.conclusion || final.event !== latest.event
     ) throw new Error("Discord recovery latest run attempt differs from the complete catalog");
   }
   return result;

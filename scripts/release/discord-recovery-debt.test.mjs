@@ -899,6 +899,7 @@ test("a real mutation still requires and audits its exact completed recovery", a
   try {
     const planPath = join(root, "plan.json");
     await writeFile(planPath, `${JSON.stringify(plan)}\n`);
+    await mkdir(join(root, "400"));
     await assert.rejects(auditDiscordRecoveryDebt(planPath, root, identity), /regular file/u);
   } finally {
     await rm(root, { recursive: true, force: true });
