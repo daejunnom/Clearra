@@ -376,6 +376,14 @@ async function browserAcceptance() {
             warmupPolicy: { backend: 'cpu', cpuWarmup: options.cpuWarmup === true, gpuWarmup: false } });
           const result = await terminal;
           return { result, phases };
+        } catch (error) {
+          const context = {
+            profile, legalBoard: legal, conditionedReachability: relation,
+            input, requestedWorkers, cpuWarmup: options.cpuWarmup === true,
+            phases, lastProgress,
+          };
+          throw new Error(`${error instanceof Error ? error.message : String(error)}; ` +
+            `browser_case=${JSON.stringify(context)}`, { cause: error });
         } finally {
           clearTimeout(timeout);
           if (onError) rootWorker.removeEventListener('error', onError);

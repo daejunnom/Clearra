@@ -696,6 +696,7 @@ class VerifierClient {
   private createWorker(): Worker {
     const worker = this.workerFactory();
     worker.onmessage = (event: MessageEvent<VerifierResponse>) => {
+      if (this.worker !== worker) return;
       const response = event.data;
       if (response.type === 'conditioned-queries') {
         const broker = this.relationBroker;
@@ -756,7 +757,12 @@ class VerifierClient {
         pending.stallDeadlineAt = this.requestStallDeadline(pending.operation);
         void pending.delegation.authority
           .heartbeat(pending.delegation.token)
-          .catch((error) => this.release(asError(error)));
+          .catch((error) => {
+            // A renewal can settle after this immutable result was sealed or
+            // the client was reused. Only its still-pending request may fail
+            // this worker; an old lease cannot terminate a replacement task.
+            if (this.pending.get(requestId) === pending) this.release(asError(error));
+          });
         return;
       }
       if (response.type === 'partial') {
@@ -919,25 +925,29 @@ class VerifierClient {
         this.pendingStarts.delete(taskId);
       })
       .catch((error) => {
-        if (this.pendingStarts.get(taskId) === pending) this.pendingStarts.delete(taskId);
+        if (this.pendingStarts.get(taskId) !== pending) return;
+        this.pendingStarts.delete(taskId);
         this.release(asError(error));
       });
   }
 
   private async completeDelegation(delegation: ActiveDelegation): Promise<void> {
     const sealed = await sealVerifierResponse('initialize', delegation, [], { type: 'ready' });
-    const decision = delegation.authority.resultApplicationDecision(
+    delegation.authority.resultApplicationDecision(
       delegation.token,
       sealed.resultSha256
     );
-    if (decision === 'apply-once') {
-      this.initialized = true;
-    } else {
-      this.initialized = true;
-    }
     await this.transportProfile.measure('completed', 'initialize', () =>
       this.transportProfile.measure('result_applied', 'initialize', () =>
         delegation.authority.resultAppliedAndCompleted(delegation.token)));
+    // WASM ready is not yet a committed execution capability. In particular,
+    // ready-subset finalization must not carry a still-committing initializer
+    // into the next query. Each worker remains progressively usable as soon
+    // as its own durable transaction completes, without joining its siblings.
+    if (this.initializationDelegation !== delegation || !this.worker) {
+      throw new VerifierRetiredError();
+    }
+    this.initialized = true;
   }
 
   private async failDelegation(

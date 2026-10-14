@@ -772,6 +772,38 @@ assert.equal(prewarmGateWorkers.filter((worker) => worker.terminated).length, 2)
 }
 
 {
+  const authority = await DurableDelegationAuthority.recover(new MemoryDelegationJournal());
+  const entered = signal();
+  const release = signal();
+  const originalTerminal = authority.resultAppliedAndCompleted.bind(authority);
+  authority.resultAppliedAndCompleted = async (token) => {
+    if (token.taskId.endsWith(':initialize')) {
+      entered.resolve();
+      await release.promise;
+    }
+    await originalTerminal(token);
+  };
+  const worker = new FakeVerifierWorker(false);
+  const committedReadyPool = new ClearraVerifierPool(() => worker as unknown as Worker,
+    { delegationAuthority: authority });
+  const initialization = committedReadyPool.initialize(new ArrayBuffer(0), 1, undefined,
+    'committed-ready-owner');
+  void initialization.catch(() => undefined);
+  try {
+    await bounded('initialization waits for its durable terminal pair', entered.promise);
+    assert.equal(committedReadyPool.progressSnapshot().readyWorkers, 0,
+      'a ready message alone must not admit an uncommitted execution capability');
+    release.resolve();
+    await bounded('committed initializer becomes progressively ready', initialization);
+    assert.equal(committedReadyPool.progressSnapshot().readyWorkers, 1);
+    await bounded('committed ready worker finishes', committedReadyPool.finish(() => undefined));
+  } finally {
+    release.resolve();
+    committedReadyPool.cancel();
+  }
+}
+
+{
   class TerminalFailureWorker extends FakeVerifierWorker {
     consumePosts = 0;
     constructor() { super(false); }
@@ -953,6 +985,45 @@ class HeartbeatVerifierWorker extends FakeVerifierWorker {
     this.pendingConsume = null;
     if (!this.terminated) super.handleExecutable(message);
   }
+}
+
+for (const completedBeforeRenewalFailure of [false, true]) {
+  const authority = await DurableDelegationAuthority.recover(new MemoryDelegationJournal());
+  const renewalEntered = signal();
+  let rejectRenewal!: (error: Error) => void;
+  const renewal = new Promise<boolean>((_resolve, reject) => { rejectRenewal = reject; });
+  authority.heartbeat = () => { renewalEntered.resolve(); return renewal; };
+  const worker = new HeartbeatVerifierWorker();
+  const guardedPool = new ClearraVerifierPool(() => worker as unknown as Worker,
+    { delegationAuthority: authority });
+  try {
+    await bounded('renewal initialize', guardedPool.initialize(new ArrayBuffer(0), 1, undefined,
+      'renewal-reuse-owner'));
+    await guardedPool.enqueue(Uint8Array.of(4).buffer, () => undefined);
+    await bounded('renewal consume started', worker.consumeStarted.promise);
+    worker.heartbeat();
+    await bounded('renewal callback is outstanding', renewalEntered.promise);
+    if (completedBeforeRenewalFailure) {
+      worker.releaseConsume();
+      await bounded('result commits before old renewal rejects', guardedPool.waitForIdle());
+      await bounded('old query drains', guardedPool.completeAtomicTasks());
+      await bounded('the same worker initializes a new query', guardedPool.initialize(
+        new ArrayBuffer(0), 1, undefined, 'renewal-reuse-owner'));
+      rejectRenewal(new Error('late previous-query renewal failure'));
+      // The client registered its rejection callback before this observer.
+      // Await that microtask boundary, not a wall-time sleep or retry.
+      await renewal.catch(() => undefined);
+      assert.equal(worker.terminated, false,
+        'a completed request cannot release the worker now owned by a new query');
+      assert.equal(guardedPool.progressSnapshot().readyWorkers, 1);
+      await bounded('replacement query still finishes', guardedPool.finish(() => undefined));
+    } else {
+      const rejected = assert.rejects(guardedPool.waitForIdle(), /active renewal failure/);
+      rejectRenewal(new Error('active renewal failure'));
+      await bounded('active renewal failure remains fail-closed', rejected);
+      assert.equal(worker.terminated, true);
+    }
+  } finally { guardedPool.cancel(); }
 }
 
 for (const stopHeartbeats of [false, true]) {

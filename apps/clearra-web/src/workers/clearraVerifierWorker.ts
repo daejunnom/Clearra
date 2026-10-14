@@ -113,6 +113,10 @@ self.onmessage = (event: MessageEvent<VerifierRequest>) => {
 };
 
 async function handleRequest(request: VerifierRequest) {
+  // The run grant carries the fence, not consume/finish's request ID. Retain
+  // the authorized staged request so an execution failure rejects the actual
+  // pending transaction instead of being reported as an initializer failure.
+  let failureRequest: VerifierRequest = request;
   try {
     if (request.type === 'cancel-exact-task') {
       if (executionKind === 'exact-at-most') cancelledExactRequests.add(request.requestId);
@@ -131,6 +135,7 @@ async function handleRequest(request: VerifierRequest) {
         throw new Error('executable start ACK is absent, stale, or mismatched');
       }
       stagedExecutables.delete(request.taskId);
+      failureRequest = staged;
       await executeAuthorized(staged);
       return;
     }
@@ -243,6 +248,7 @@ async function handleRequest(request: VerifierRequest) {
       return;
     }
     const failure = verifierFailure(error, wasm);
+    const failedOperation = failureRequest.type;
     initialized = false;
     try {
       wasm?.distributed_reset();
@@ -251,9 +257,9 @@ async function handleRequest(request: VerifierRequest) {
     }
     post({
       type: 'failed',
-      requestId: 'requestId' in request ? request.requestId : undefined,
+      requestId: 'requestId' in failureRequest ? failureRequest.requestId : undefined,
       code: failure.code,
-      message: failure.message
+      message: `${failure.message}; verifier operation: ${failedOperation}; execution: ${executionKind}`
     });
   }
 }
