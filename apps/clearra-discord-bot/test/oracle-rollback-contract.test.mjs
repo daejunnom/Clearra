@@ -9,22 +9,23 @@ const scriptsDirectory = resolve(import.meta.dirname, "..", "scripts");
 const restorePath = resolve(scriptsDirectory, "restore-oracle-release");
 const releaseDigestPath = resolve(scriptsDirectory, "release-tree-digest.mjs");
 
-test("Oracle rollback static gate tracks the executable restoration contract", async () => {
-  const [source, gate] = await Promise.all([
-    readFile(restorePath, "utf8"),
-    readFile(resolve(scriptsDirectory, "../../../scripts/architecture/validate_release_static_contract.ps1"), "utf8"),
-  ]);
-  const block = gate.match(/foreach \(\$required in @\(\s*'Prior Oracle release does not match its captured tree digest\.'([\s\S]*?)\)\) \{\s*if \(\$oracleRestore\.IndexOf/u);
-  assert.ok(block, "the static gate must retain the fail-closed restore contract");
-  const markers = [...block[0].matchAll(/^\s*'([^']+)'[,]?\s*$/gmu)].map((match) => match[1]);
-  assert.ok(markers.length >= 9);
-  for (const marker of markers) {
-    assert.ok(source.includes(marker), `static rollback marker drifted: ${marker}`);
-  }
-  for (const marker of ["wait_for_prior_process() {", 'while [ "$attempts" -lt 60 ]', '"$process_cwd" = "$prior_release/apps/clearra-discord-bot"']) {
-    assert.ok(markers.some((entry) => entry.includes(marker)), `static readiness protection missing: ${marker}`);
-  }
-});
+test(
+  "Oracle rollback rejects invalid captured identities before any service transition",
+  { timeout: 30_000 },
+  async () => {
+    // Exercise the production script, not the text layout of a static validator.
+    // Invalid recovery inputs must leave the existing service and files intact.
+    await runRestoreScenarios([
+      "release-digest-mismatch",
+      "settings-digest-mismatch",
+      "invalid-digest",
+      "release-outside-root",
+      "settings-outside-namespace",
+      "settings-symlink",
+      "settings-owner-mismatch",
+    ]);
+  },
+);
 
 test("Oracle rollback leaves only a fully verified restored service active", async () => {
   const source = await readFile(restorePath, "utf8");
@@ -79,56 +80,60 @@ test(
   "Oracle rollback keeps the service stopped after every partial or unverified restore",
   { timeout: 30_000 },
   async () => {
-    const [source, releaseDigest] = await Promise.all([
-      readFile(restorePath, "utf8"),
-      readFile(releaseDigestPath, "utf8"),
+    await runRestoreScenarios([
+      "success",
+      "delayed-ready",
+      "settings-failure",
+      "start-failure",
+      "is-active-failure",
+      "pid-failure",
+      "cwd-failure",
     ]);
-    const harnessDirectory = await mkdtemp(
-      resolve(tmpdir(), "clearra-oracle-rollback-contract-"),
-    );
-    try {
-      const harnessRestore = instrumentRestoreForSandbox(source);
-      await Promise.all([
-        writeFile(resolve(harnessDirectory, "restore-oracle-release"), harnessRestore),
-        writeFile(resolve(harnessDirectory, "release-tree-digest.mjs"), releaseDigest),
-        writeFile(resolve(harnessDirectory, "run-restore-contract.sh"), executableHarness),
-      ]);
-
-      const shellDirectory = bashPath(harnessDirectory);
-      for (const scenario of [
-        "success",
-        "delayed-ready",
-        "settings-failure",
-        "start-failure",
-        "is-active-failure",
-        "pid-failure",
-        "cwd-failure",
-      ]) {
-        const result = spawnSync(
-          "bash",
-          [resolveShell(shellDirectory, "run-restore-contract.sh"), shellDirectory, scenario],
-          {
-            encoding: "utf8",
-            timeout: 20_000,
-            windowsHide: true,
-          },
-        );
-        assert.equal(
-          result.status,
-          0,
-          [
-            `rollback executable contract failed for ${scenario}`,
-            result.error?.stack ?? "",
-            result.stdout,
-            result.stderr,
-          ].filter(Boolean).join("\n"),
-        );
-      }
-    } finally {
-      await rm(harnessDirectory, { recursive: true, force: true });
-    }
   },
 );
+
+async function runRestoreScenarios(scenarios) {
+  const [source, releaseDigest] = await Promise.all([
+    readFile(restorePath, "utf8"),
+    readFile(releaseDigestPath, "utf8"),
+  ]);
+  const harnessDirectory = await mkdtemp(
+    resolve(tmpdir(), "clearra-oracle-rollback-contract-"),
+  );
+  try {
+    const harnessRestore = instrumentRestoreForSandbox(source);
+    await Promise.all([
+      writeFile(resolve(harnessDirectory, "restore-oracle-release"), harnessRestore),
+      writeFile(resolve(harnessDirectory, "release-tree-digest.mjs"), releaseDigest),
+      writeFile(resolve(harnessDirectory, "run-restore-contract.sh"), executableHarness),
+    ]);
+
+    const shellDirectory = bashPath(harnessDirectory);
+    for (const scenario of scenarios) {
+      const result = spawnSync(
+        "bash",
+        [resolveShell(shellDirectory, "run-restore-contract.sh"), shellDirectory, scenario],
+        {
+          encoding: "utf8",
+          timeout: 20_000,
+          windowsHide: true,
+        },
+      );
+      assert.equal(
+        result.status,
+        0,
+        [
+          `rollback executable contract failed for ${scenario}`,
+          result.error?.stack ?? "",
+          result.stdout,
+          result.stderr,
+        ].filter(Boolean).join("\n"),
+      );
+    }
+  } finally {
+    await rm(harnessDirectory, { recursive: true, force: true });
+  }
+}
 
 function instrumentRestoreForSandbox(source) {
   const replacements = [
@@ -219,7 +224,11 @@ FAKE_ID
 cat > "$bin_directory/stat" <<'FAKE_STAT'
 #!/bin/sh
 if [ "$1" = "-c" ] && [ "$2" = "%u" ]; then
-  printf '%s\n' 0
+  if [ "$CLEARRA_TEST_SCENARIO" = "settings-owner-mismatch" ]; then
+    printf '%s\n' 1000
+  else
+    printf '%s\n' 0
+  fi
   exit 0
 fi
 exec /usr/bin/stat "$@"
@@ -320,13 +329,51 @@ export CLEARRA_TEST_PRIOR_RELEASE="$prior_release"
 PATH="$bin_directory:$PATH"
 export PATH
 
+# The currently selected service is active before a restore is attempted.
+: > "$CLEARRA_TEST_ACTIVE"
 release_sha=$(node "$harness_directory/release-tree-digest.mjs" "$prior_release")
 settings_sha=$(sha256sum -- "$settings_backup" | awk '{print $1}')
+prior_release_argument="$prior_release"
+settings_backup_argument="$settings_backup"
+expected_preflight_error=
+case "$scenario" in
+  release-digest-mismatch)
+    printf '%s\n' 'export const tampered = true;' >> "$prior_release/apps/clearra-discord-bot/src/admin/main.mjs"
+    expected_preflight_error='Prior Oracle release does not match its captured tree digest.'
+    ;;
+  settings-digest-mismatch)
+    printf '%s\n' 'TAMPERED=true' >> "$settings_backup"
+    expected_preflight_error='Prior Oracle settings backup does not match its captured digest.'
+    ;;
+  invalid-digest)
+    release_sha=invalid
+    expected_preflight_error='Captured Oracle release/settings digests are invalid.'
+    ;;
+  release-outside-root)
+    prior_release_argument="$fixture_root/outside-release"
+    cp -R -- "$prior_release" "$prior_release_argument"
+    expected_preflight_error='Prior Oracle release is outside the immutable release root.'
+    ;;
+  settings-outside-namespace)
+    settings_backup_argument="$settings_directory/unapproved-backup"
+    cp -- "$settings_backup" "$settings_backup_argument"
+    expected_preflight_error='Prior Oracle settings backup is outside the approved backup namespace.'
+    ;;
+  settings-symlink)
+    settings_backup_argument="$settings_directory/settings.pre-symlink"
+    ln -s -- "$settings_backup" "$settings_backup_argument"
+    expected_preflight_error='Oracle settings backup must not be a symlink.'
+    ;;
+  settings-owner-mismatch)
+    expected_preflight_error='Prior Oracle settings backup must be root-owned.'
+    ;;
+esac
+
 set +e
 /bin/sh "$harness_directory/restore-oracle-release" \
-  "$prior_release" \
+  "$prior_release_argument" \
   "$release_sha" \
-  "$settings_backup" \
+  "$settings_backup_argument" \
   "$settings_sha" \
   > "$state_directory/stdout" \
   2> "$state_directory/stderr"
@@ -340,6 +387,19 @@ fail_contract() {
   cat "$CLEARRA_TEST_LOG" >&2 || true
   exit 1
 }
+
+if [ -n "$expected_preflight_error" ]; then
+  [ "$restore_status" -ne 0 ] || fail_contract
+  grep -Fx -- "$expected_preflight_error" "$state_directory/stderr" >/dev/null || fail_contract
+  [ ! -e "$CLEARRA_TEST_LOG" ] || fail_contract
+  [ ! -e "$CLEARRA_TEST_MV_COUNT" ] || fail_contract
+  [ -f "$CLEARRA_TEST_ACTIVE" ] || fail_contract
+  [ "$(readlink -f -- "$fixture_root/opt/clearra/current")" = "$candidate_release" ] || fail_contract
+  grep -Fx 'CURRENT=old' "$settings_path" >/dev/null || fail_contract
+  ! grep -Fx 'oracle_restore=passed' "$state_directory/stdout" >/dev/null || fail_contract
+  printf '%s\n' "scenario=$scenario passed"
+  exit 0
+fi
 
 [ -f "$CLEARRA_TEST_LOG" ] || fail_contract
 if [ "$scenario" = "success" ] || [ "$scenario" = "delayed-ready" ]; then

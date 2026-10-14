@@ -7,11 +7,19 @@ on:
       - '.github/workflows/discord-recovery-pr-checks.yml'
       - 'scripts/release/**'
       - 'scripts/tools/run-release-regression-tests*'
+      - 'apps/clearra-discord-bot/scripts/**'
+      - 'apps/clearra-discord-bot/src/job-service/runtime-identity.mjs'
+      - 'apps/clearra-discord-bot/test/accepted-source-preflight.test.mjs'
+      - 'apps/clearra-discord-bot/test/oracle-rollback-contract.test.mjs'
   pull_request:
     paths:
       - '.github/workflows/discord-recovery-pr-checks.yml'
       - 'scripts/release/**'
       - 'scripts/tools/run-release-regression-tests*'
+      - 'apps/clearra-discord-bot/scripts/**'
+      - 'apps/clearra-discord-bot/src/job-service/runtime-identity.mjs'
+      - 'apps/clearra-discord-bot/test/accepted-source-preflight.test.mjs'
+      - 'apps/clearra-discord-bot/test/oracle-rollback-contract.test.mjs'
   workflow_dispatch:
 
 # Unprivileged regression feedback only. No production Environment, OIDC,
@@ -50,3 +58,8 @@ jobs:
           scripts/release/discord-deployment-recovery.test.mjs
           scripts/release/discord-recovery-debt.test.mjs
           scripts/release/finalize-discord-production-checkpoint.test.mjs
+      - name: Exercise accepted-source and executable Oracle rollback contracts
+        run: >-
+          node --test scripts/release/canonical-acceptance-run.test.mjs
+          apps/clearra-discord-bot/test/accepted-source-preflight.test.mjs
+          apps/clearra-discord-bot/test/oracle-rollback-contract.test.mjs

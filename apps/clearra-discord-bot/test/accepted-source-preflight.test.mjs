@@ -85,6 +85,77 @@ test("accepted-source preflight requires exact main, canonical acceptance, and a
   assert.equal(calls[4][2].method, "GET");
 });
 
+test("accepted-source preflight accepts multiple successful exact-source canonical runs", async () => {
+  const result = await verifyAcceptedSource(
+    { sourceCommit: SOURCE_COMMIT, repository: REPOSITORY },
+    {
+      run(command, arguments_) {
+        if (command === "git" && arguments_[0] === "fetch") return "";
+        if (command === "git") return `${SOURCE_COMMIT}\n`;
+        return canonicalAcceptance(canonicalRun(), canonicalRun({ id: 124 }));
+      },
+    },
+  );
+  // The shared resolver selects the latest eligible success (or a pinned run).
+  // Multiple valid successes do not weaken exact-source or runtime checks.
+  assert.deepEqual(result, { repository: REPOSITORY, sourceCommit: SOURCE_COMMIT });
+});
+
+for (const [label, overrides] of [
+  ["source", { head_sha: "8".repeat(40) }],
+  ["branch", { head_branch: "candidate" }],
+  ["workflow", { path: ".github/workflows/other.yml" }],
+  ["event", { event: "push" }],
+]) {
+  test(`accepted-source preflight rejects mismatched ${label} even beside a valid success`, async () => {
+    await assert.rejects(
+      verifyAcceptedSource(
+        { sourceCommit: SOURCE_COMMIT, repository: REPOSITORY },
+        {
+          run(command, arguments_) {
+            if (command === "git" && arguments_[0] === "fetch") return "";
+            if (command === "git") return `${SOURCE_COMMIT}\n`;
+            return canonicalAcceptance(canonicalRun(), canonicalRun({ id: 124, ...overrides }));
+          },
+        },
+      ),
+      /differs from the exact canonical run authority/u,
+    );
+  });
+}
+
+test("accepted-source preflight rejects truncated acceptance history", async () => {
+  await assert.rejects(
+    verifyAcceptedSource(
+      { sourceCommit: SOURCE_COMMIT, repository: REPOSITORY },
+      {
+        run(command, arguments_) {
+          if (command === "git" && arguments_[0] === "fetch") return "";
+          if (command === "git") return `${SOURCE_COMMIT}\n`;
+          return JSON.stringify({ total_count: 2, workflow_runs: [canonicalRun()] });
+        },
+      },
+    ),
+    /complete and non-truncated/u,
+  );
+});
+
+test("accepted-source preflight rejects an exact-source run without successful acceptance", async () => {
+  await assert.rejects(
+    verifyAcceptedSource(
+      { sourceCommit: SOURCE_COMMIT, repository: REPOSITORY },
+      {
+        run(command, arguments_) {
+          if (command === "git" && arguments_[0] === "fetch") return "";
+          if (command === "git") return `${SOURCE_COMMIT}\n`;
+          return canonicalAcceptance(canonicalRun({ conclusion: "failure" }));
+        },
+      },
+    ),
+    /exactly 1 successful exact-SHA canonical run/u,
+  );
+});
+
 test("accepted-source preflight fails closed on stale source, missing acceptance, or runtime drift", async () => {
   await assert.rejects(
     verifyAcceptedSource(
@@ -110,20 +181,6 @@ test("accepted-source preflight fails closed on stale source, missing acceptance
           if (command === "git" && arguments_[0] === "fetch") return "";
           if (command === "git") return `${SOURCE_COMMIT}\n`;
           return canonicalAcceptance();
-        },
-      },
-    ),
-    /exactly 1 successful exact-SHA canonical run/u,
-  );
-
-  await assert.rejects(
-    verifyAcceptedSource(
-      { sourceCommit: SOURCE_COMMIT, repository: REPOSITORY },
-      {
-        run(command, arguments_) {
-          if (command === "git" && arguments_[0] === "fetch") return "";
-          if (command === "git") return `${SOURCE_COMMIT}\n`;
-          return canonicalAcceptance(canonicalRun(), canonicalRun({ id: 124 }));
         },
       },
     ),
