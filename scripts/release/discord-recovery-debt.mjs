@@ -22,6 +22,7 @@ import {
 } from "./canonical-release-evidence.mjs";
 import {
   validateDiscordRecoveryAuthorityReport,
+  validateNoPrestageArtifactAuthority,
   verifyDiscordRecoveryEvidence,
 } from "./discord-deployment-recovery.mjs";
 import {
@@ -31,7 +32,7 @@ import {
 } from "./finalize-discord-production-checkpoint.mjs";
 
 export const DISCORD_RECOVERY_DEBT_PLAN_SCHEMA_ID =
-  "clearra.discord-recovery-debt-plan.v1";
+  "clearra.discord-recovery-debt-plan.v2";
 export const DISCORD_RECOVERY_DEBT_CLEARANCE_SCHEMA_ID =
   "clearra.discord-recovery-debt-clearance.v1";
 export const DISCORD_RECOVERY_DEBT_CHECKPOINT_SCHEMA_ID =
@@ -303,24 +304,25 @@ function validateCheckpointTag(entry, repository) {
   });
 }
 
-function validateRecoveryJobCatalog(value) {
-  requirePlainObject(value, "Discord recovery job catalog");
-  requireExactKeys(value, ["schema_id", "runs"], "Discord recovery job catalog");
-  if (value.schema_id !== "clearra.discord-recovery-job-catalog.v1" || !Array.isArray(value.runs)) {
-    throw new Error("Discord recovery job catalog is invalid");
+function validateJobCatalog(value, kind) {
+  const label = `Discord ${kind} job catalog`;
+  requirePlainObject(value, label);
+  requireExactKeys(value, ["schema_id", "runs"], label);
+  if (value.schema_id !== `clearra.discord-${kind}-job-catalog.v1` || !Array.isArray(value.runs)) {
+    throw new Error(`${label} is invalid`);
   }
   const result = new Map();
   for (const entry of value.runs) {
-    requirePlainObject(entry, "Discord recovery job catalog entry");
+    requirePlainObject(entry, `${label} entry`);
     requireExactKeys(
       entry,
       ["workflow_run_id", "workflow_run_attempt", "pages"],
-      "Discord recovery job catalog entry",
+      `${label} entry`,
     );
-    const key = `${requireDecimal(entry.workflow_run_id, "recovery job run ID")}:` +
-      requireDecimal(entry.workflow_run_attempt, "recovery job run attempt");
+    const key = `${requireDecimal(entry.workflow_run_id, `${kind} job run ID`)}:` +
+      requireDecimal(entry.workflow_run_attempt, `${kind} job run attempt`);
     if (result.has(key) || !Array.isArray(entry.pages) || entry.pages.length === 0) {
-      throw new Error("Discord recovery job catalog is ambiguous");
+      throw new Error(`${label} is ambiguous`);
     }
     result.set(key, entry.pages);
   }
@@ -544,11 +546,13 @@ function compareSemverTags(left, right) {
 // Pages and acceptance can upload artifacts while this gate runs. Enumerate the
 // recovery workflow and each of its runs, whose artifacts own recovery evidence,
 // instead of paginating the mutable repository-wide artifact feed. Every scoped
-// page still has to be complete, and a changed recovery catalog fails closed.
-export async function collectDiscordRecoveryArtifacts(repository, readPages = githubPages) {
+// page still has to be complete. A new unrelated recovery is not authority over
+// these exact parent attempts and does not invalidate an otherwise valid read.
+export async function collectDiscordRecoveryArtifacts(repository, readPages = githubPages, parentKeys = null) {
   if (repository !== "daejunnom/Clearra") {
     throw new Error("Discord recovery artifact collection requires the exact repository");
   }
+  if (parentKeys?.size === 0) return [{ total_count: 0, artifacts: [] }];
   const endpoint = `repos/${repository}/actions/workflows/discord-deploy-recovery.yml/runs?branch=main&per_page=100`;
   const readCatalog = async () => {
     const runs = flattenRunPages(await readPages(endpoint), "Discord recovery run catalog");
@@ -575,19 +579,19 @@ export async function collectDiscordRecoveryArtifacts(repository, readPages = gi
         }
         if (ids.has(id)) throw new Error("Discord scoped artifact catalog contains duplicate artifacts");
         ids.add(id);
-        artifacts.push(artifact);
+        const parent = parseRecoveryArtifact(String(artifact.name ?? ""));
+        if (parentKeys === null || parent && parentKeys.has(
+          `${parent.primaryRunId}:${parent.primaryRunAttempt}`,
+        )) artifacts.push(artifact);
       }
     }
-  }
-  if (canonicalJson(before) !== canonicalJson(await readCatalog())) {
-    throw new Error("Discord recovery run catalog changed during artifact collection");
   }
   // Existing consumers receive one complete catalog of recovery-run artifacts.
   // This is discovery metadata only; the debt audit still verifies every report.
   return [{ total_count: artifacts.length, artifacts }];
 }
 
-export function planDiscordRecoveryDebt(runList, primaryAttempts, recoveryAttempts, artifactPages, options) {
+function resolvePrimaryRecoveryHistory(runList, primaryAttempts, options) {
   const repository = requirePattern(options?.repository, REPOSITORY, "repository");
   const currentRunId = requireDecimal(options?.workflowRunId, "current workflow run ID");
   const currentRunAttempt = requireDecimal(
@@ -617,19 +621,64 @@ export function planDiscordRecoveryDebt(runList, primaryAttempts, recoveryAttemp
     throw new Error("Discord current attempt does not follow the exact debt checkpoint");
   }
 
-  const debts = [...attempts.values()]
+  const failedAttempts = [...attempts.values()]
     .filter((entry) =>
       entry.key !== current.key &&
       entry.status === "completed" &&
       RECOVERABLE.has(entry.conclusion) &&
       entry.updatedAt > checkpointAt)
     .sort(compareAttempts);
-  const recoveries = validateAttemptEnvelope(recoveryAttempts, "recovery", repository);
-  const recoveryJobs = validateRecoveryJobCatalog(options?.recoveryJobCatalog);
+  const primaryJobs = options?.primaryJobCatalog === undefined
+    ? new Map()
+    : validateJobCatalog(options.primaryJobCatalog, "primary");
+  for (const key of primaryJobs.keys()) {
+    if (!attempts.has(key)) throw new Error("Discord primary job catalog contains foreign authority");
+  }
+  const debts = [];
+  const nonMutatingAttempts = [];
+  for (const failed of failedAttempts) {
+    const pages = primaryJobs.get(failed.key);
+    if (pages) {
+      try {
+        validateNoPrestageArtifactAuthority(pages, {
+          repository, sourceCommit: failed.sourceCommit,
+          workflowRunId: failed.runId, workflowRunAttempt: failed.attempt,
+        });
+        // Reuse the existing mutation-boundary proof, not a separate Recover
+        // workflow for an attempt that never staged or activated anything.
+        nonMutatingAttempts.push({
+          primary_workflow_run_id: failed.runId,
+          primary_workflow_run_attempt: failed.attempt,
+          source_commit: failed.sourceCommit,
+          workflow_event: failed.event,
+          workflow_conclusion: failed.conclusion,
+          job_pages: pages,
+        });
+        continue;
+      } catch {
+        // Missing, incomplete, foreign, or possibly mutating job evidence does
+        // not prove safety. Keep the full existing recovery requirement below.
+      }
+    }
+    debts.push(failed);
+  }
+  return { repository, currentRunId, currentRunAttempt, currentSource, checkpoint,
+    debts, nonMutatingAttempts };
+}
+
+export function planDiscordRecoveryDebt(runList, primaryAttempts, recoveryAttempts, artifactPages, options) {
+  const { repository, currentRunId, currentRunAttempt, currentSource, checkpoint,
+    debts, nonMutatingAttempts } = resolvePrimaryRecoveryHistory(runList, primaryAttempts, options);
+  // An old pre-mutation failure needs no resolution artifact and no recovery
+  // run at all. Only actual or unproven mutations enter recovery discovery.
+  const recoveries = debts.length === 0 ? new Map()
+    : validateAttemptEnvelope(recoveryAttempts, "recovery", repository);
+  const recoveryJobs = debts.length === 0 ? new Map()
+    : validateJobCatalog(options?.recoveryJobCatalog, "recovery");
   for (const key of recoveryJobs.keys()) {
     if (!recoveries.has(key)) throw new Error("Discord recovery job catalog contains foreign authority");
   }
-  const artifacts = flattenArtifactPages(artifactPages);
+  const artifacts = debts.length === 0 ? [] : flattenArtifactPages(artifactPages);
   const candidatesByDebt = new Map(debts.map((debt) => [debt.key, new Map()]));
 
   for (const artifact of artifacts) {
@@ -638,7 +687,7 @@ export function planDiscordRecoveryDebt(runList, primaryAttempts, recoveryAttemp
     const debtKey = `${parsed.primaryRunId}:${parsed.primaryRunAttempt}`;
     const candidateMap = candidatesByDebt.get(debtKey);
     if (!candidateMap) continue;
-    const debt = attempts.get(debtKey);
+    const debt = debts.find((entry) => entry.key === debtKey);
     if (parsed.sourceCommit !== null && parsed.sourceCommit !== debt.sourceCommit) {
       throw new Error("Discord recovery result artifact source differs from its debt parent");
     }
@@ -722,6 +771,7 @@ export function planDiscordRecoveryDebt(runList, primaryAttempts, recoveryAttemp
     current_workflow_run_attempt: currentRunAttempt,
     current_source_commit: currentSource,
     checkpoint,
+    non_mutating_attempts: nonMutatingAttempts,
     debts: plannedDebts,
     downloads: [...downloads.values()].sort((left, right) => compareIds(
       left.artifact_id,
@@ -733,6 +783,20 @@ export function planDiscordRecoveryDebt(runList, primaryAttempts, recoveryAttemp
 export async function auditDiscordRecoveryDebt(planPath, reportRoot, options) {
   const plan = await readJsonFile(planPath, "Discord recovery-debt plan");
   validateDebtPlan(plan, options);
+  for (const entry of plan.non_mutating_attempts) {
+    requireExactKeys(entry, [
+      "primary_workflow_run_id", "primary_workflow_run_attempt", "source_commit",
+      "workflow_event", "workflow_conclusion", "job_pages",
+    ], "Discord non-mutating attempt");
+    if (!PRIMARY_EVENTS.has(entry.workflow_event) || !RECOVERABLE.has(entry.workflow_conclusion)) {
+      throw new Error("Discord non-mutating attempt has invalid original authority");
+    }
+    validateNoPrestageArtifactAuthority(entry.job_pages, {
+      repository: plan.repository, sourceCommit: entry.source_commit,
+      workflowRunId: entry.primary_workflow_run_id,
+      workflowRunAttempt: entry.primary_workflow_run_attempt,
+    });
+  }
   const cleared = [];
   for (const debt of plan.debts) {
     const qualifying = [];
@@ -867,7 +931,8 @@ export async function auditDiscordRecoveryDebt(planPath, reportRoot, options) {
 function validateDebtPlan(plan, options) {
   requireExactKeys(plan, [
     "schema_id", "repository", "current_workflow_run_id",
-    "current_workflow_run_attempt", "current_source_commit", "checkpoint", "debts", "downloads",
+    "current_workflow_run_attempt", "current_source_commit", "checkpoint",
+    "non_mutating_attempts", "debts", "downloads",
     "report_sha256",
   ], "Discord recovery-debt plan");
   verifyCanonicalReportHash(plan, "Discord recovery-debt plan");
@@ -883,7 +948,7 @@ function validateDebtPlan(plan, options) {
     plan.checkpoint?.schema_id !== DISCORD_RECOVERY_DEBT_CHECKPOINT_SCHEMA_ID ||
     plan.checkpoint?.repository !== plan.repository ||
     plan.checkpoint?.current_source_commit !== plan.current_source_commit ||
-    !Array.isArray(plan.debts) ||
+    !Array.isArray(plan.non_mutating_attempts) || !Array.isArray(plan.debts) ||
     !Array.isArray(plan.downloads)
   ) {
     throw new Error("Discord recovery-debt plan differs from the exact current authority");
@@ -1244,6 +1309,7 @@ function parseCli() {
       "source-commit": { type: "string" },
       "run-list": { type: "string" },
       "primary-attempts": { type: "string" },
+      "primary-job-catalog": { type: "string" },
       "recovery-attempts": { type: "string" },
       "recovery-job-catalog": { type: "string" },
       "artifact-list": { type: "string" },
@@ -1268,28 +1334,27 @@ async function main() {
       sourceCommit: values["source-commit"],
     };
     if (positionals[0] === "collect-artifacts") {
-      await writeCanonicalNew(values.output, await collectDiscordRecoveryArtifacts(values.repository));
+      const context = await readPrimaryRecoveryContext(values, identity);
+      const { debts } = resolvePrimaryRecoveryHistory(
+        await readJsonFile(values["run-list"], "primary run catalog"),
+        await readJsonFile(values["primary-attempts"], "primary attempt catalog"),
+        context,
+      );
+      const parents = new Set(debts.map((entry) => entry.key));
+      await writeCanonicalNew(values.output,
+        await collectDiscordRecoveryArtifacts(values.repository, githubPages, parents));
     } else if (positionals[0] === "plan") {
-      const sourceCommit = requirePattern(values["source-commit"], SHA, "source commit");
       const plan = planDiscordRecoveryDebt(
         await readJsonFile(values["run-list"], "primary run catalog"),
         await readJsonFile(values["primary-attempts"], "primary attempt catalog"),
         await readJsonFile(values["recovery-attempts"], "recovery attempt catalog"),
         await readJsonFile(values["artifact-list"], "artifact catalog"),
         {
-          ...identity,
-          tagAuthority: await readJsonFile(
-            values["tag-authority"],
-            "production tag authority catalog",
-          ),
+          ...await readPrimaryRecoveryContext(values, identity),
           recoveryJobCatalog: await readJsonFile(
             values["recovery-job-catalog"],
             "recovery job catalog",
           ),
-          reachableTags: gitOutput([
-            "tag", "--merged", sourceCommit, "--list", "v[0-9]*.[0-9]*.[0-9]*",
-          ]).split(/\r?\n/u).filter(Boolean),
-          bootstrapProof: buildBootstrapProof(sourceCommit),
         },
       );
       await writeCanonicalNew(values.output, plan);
@@ -1311,6 +1376,19 @@ async function main() {
     );
     process.exitCode = 2;
   }
+}
+
+async function readPrimaryRecoveryContext(values, identity) {
+  const sourceCommit = requirePattern(values["source-commit"], SHA, "source commit");
+  return {
+    ...identity,
+    tagAuthority: await readJsonFile(values["tag-authority"], "production tag authority catalog"),
+    primaryJobCatalog: await readJsonFile(values["primary-job-catalog"], "primary job catalog"),
+    reachableTags: gitOutput([
+      "tag", "--merged", sourceCommit, "--list", "v[0-9]*.[0-9]*.[0-9]*",
+    ]).split(/\r?\n/u).filter(Boolean),
+    bootstrapProof: buildBootstrapProof(sourceCommit),
+  };
 }
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) await main();

@@ -107,6 +107,26 @@ jobs:
           done
           jq -s '{schema_id:"clearra.discord-primary-attempt-catalog.v1",attempts:.}' \
             "$debt_root/primary-attempts.jsonl" > "$debt_root/primary-attempts.json"
+          # A failed authority/candidate job is not a runtime or catalog change.
+          # Read the original attempt's jobs directly; do not dispatch a Recover
+          # workflow just to certify an attempt that never crossed that boundary.
+          : > "$debt_root/primary-jobs.jsonl"
+          jq -r '.attempts[] | select(.status == "completed" and
+            (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")) |
+            [(.id | tostring), (.run_attempt | tostring)] | @tsv' \
+            "$debt_root/primary-attempts.json" | sort -u | \
+          while IFS=$'\t' read -r run_id attempt; do
+            primary_jobs="$debt_root/primary-jobs-$run_id-$attempt.json"
+            gh api --paginate --slurp --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt/jobs?per_page=100" \
+              > "$primary_jobs"
+            jq -cn --arg run "$run_id" --arg attempt "$attempt" \
+              --slurpfile pages "$primary_jobs" \
+              '{workflow_run_id:$run,workflow_run_attempt:$attempt,pages:$pages[0]}' \
+              >> "$debt_root/primary-jobs.jsonl"
+          done
+          jq -s '{schema_id:"clearra.discord-primary-job-catalog.v1",runs:.}' \
+            "$debt_root/primary-jobs.jsonl" > "$debt_root/primary-jobs.json"
           : > "$debt_root/production-tags.jsonl"
           while IFS= read -r tag; do
             [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
@@ -175,6 +195,11 @@ jobs:
             "$debt_root/production-tags.jsonl" > "$debt_root/production-tags.json"
           node scripts/release/discord-recovery-debt.mjs collect-artifacts \
             --repository "$GITHUB_REPOSITORY" \
+            --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --source-commit "$SOURCE_COMMIT" --run-list "$debt_root/primary-runs.json" \
+            --primary-attempts "$debt_root/primary-attempts.json" \
+            --primary-job-catalog "$debt_root/primary-jobs.json" \
+            --tag-authority "$debt_root/production-tags.json" \
             --output "$debt_root/repository-artifacts.json"
           : > "$debt_root/recovery-attempts.jsonl"
           : > "$debt_root/recovery-jobs.jsonl"
@@ -208,6 +233,7 @@ jobs:
             --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --source-commit "$SOURCE_COMMIT" \
             --run-list "$debt_root/primary-runs.json" \
             --primary-attempts "$debt_root/primary-attempts.json" \
+            --primary-job-catalog "$debt_root/primary-jobs.json" \
             --tag-authority "$debt_root/production-tags.json" \
             --recovery-attempts "$debt_root/recovery-attempts.json" \
             --recovery-job-catalog "$debt_root/recovery-jobs.json" \

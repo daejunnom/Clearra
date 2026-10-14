@@ -241,6 +241,76 @@ test("recovery accepts GitHub list/exact-attempt updated-at projection skew", ()
   assert.equal(authority.freshness_proof.original_workflow_run_id, RUN_ID);
 });
 
+test("recovery reads the real historical primary attempt's one-second creation skew", () => {
+  // REST attempt 38532792891/1 was already skipped before the original failed
+  // deployment. The list projection is ordered; this exact-attempt projection
+  // has the same one-second skew already supported by recovery-debt planning.
+  const historical = run({
+    id: 38532792891, run_attempt: 1, run_number: 89,
+    event: "workflow_run", conclusion: "skipped",
+    created_at: "2026-10-14T08:06:21Z",
+    run_started_at: "2026-10-14T08:06:20Z",
+    updated_at: "2026-10-14T08:06:22Z",
+  });
+  const original = run({
+    run_attempt: 1, run_number: 90,
+    created_at: "2026-10-14T21:15:39Z",
+    run_started_at: "2026-10-14T21:15:39Z",
+    updated_at: "2026-10-14T21:18:30Z",
+  });
+  const catalog = runAttemptCatalog([historical, original]);
+  const before = structuredClone(catalog);
+  const authority = resolveDiscordRecoveryAuthority(original,
+    { total_count: 0, artifacts: [] }, {
+      ...options, workflowRunAttempt: "1",
+      runList: { total_count: 2, workflow_runs: [
+        { ...historical, run_started_at: historical.created_at }, original,
+      ] },
+      runAttemptCatalog: catalog,
+      jobList: jobList({ workflowRunAttempt: "1" }),
+    });
+  assert.equal(authority.recovery_required, false);
+  assert.deepEqual(catalog, before, "REST timestamps must not be restamped");
+});
+
+test("original recovery and its sealed freshness proof use the existing bounded timestamp policy", () => {
+  const original = run({
+    run_attempt: 1, created_at: "2026-08-31T00:00:11Z",
+  });
+  const pending = run({
+    id: 705, run_attempt: 1, run_number: 45,
+    status: "pending", conclusion: null,
+    created_at: "2026-08-31T00:01:01Z",
+    run_started_at: "2026-08-31T00:01:00Z",
+    updated_at: "2026-08-31T00:01:01Z",
+  });
+  const inputs = {
+    ...options, workflowRunAttempt: "1",
+    runList: { total_count: 2, workflow_runs: [original, pending] },
+    runAttemptCatalog: runAttemptCatalog([original, pending]),
+    jobList: jobList({ workflowRunAttempt: "1" }),
+    runJobCatalog: runJobCatalog([{ workflowRunId: 705, pages: [{ total_count: 0, jobs: [] }] }]),
+  };
+  const authority = resolveDiscordRecoveryAuthority(original,
+    { total_count: 0, artifacts: [] }, inputs);
+  const proof = authority.freshness_proof.potential_superseders[0];
+  assert.equal(proof.created_at, pending.created_at);
+  assert.equal(proof.run_started_at, pending.run_started_at);
+  assert.doesNotThrow(() => validateDiscordRecoveryAuthorityReport(authority, {
+    ...inputs, sourceCommit: SOURCE,
+    workflowEvent: "workflow_dispatch", workflowConclusion: "cancelled",
+  }));
+
+  for (const times of [
+    { created_at: "2026-08-31T00:00:11.001Z" },
+    { run_started_at: "2026-08-31T00:00:20.001Z" },
+  ]) {
+    const invalid = { ...original, ...times };
+    assert.throws(() => resolveDiscordRecoveryAuthority(invalid,
+      { total_count: 0, artifacts: [] }, inputs), /timestamps are internally inconsistent/u);
+  }
+});
+
 test("primary run authority follows workflow ID and path, not its display title", () => {
   const dynamic = run({ name: `Discord production · ${SOURCE}` });
   const authority = resolveDiscordRecoveryAuthority(dynamic, { total_count: 0, artifacts: [] }, {

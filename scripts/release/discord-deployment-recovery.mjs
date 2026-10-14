@@ -21,6 +21,7 @@ import { validateDiscordCatalogRestoreReport } from
   "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs";
 import { CURRENT_PRODUCT_TAG } from "./current-product-release.mjs";
 import { DISCORD_PRIMARY_WORKFLOW_ID } from "./discord-workflow-identities.mjs";
+import { workflowRunTimestampOrderIsValid } from "./workflow-run-timestamps.mjs";
 
 export const DISCORD_RECOVERY_AUTHORITY_SCHEMA_ID =
   "clearra.discord-deployment-recovery-authority.v1";
@@ -322,7 +323,7 @@ export function resolveDiscordRecoveryAuthority(run, artifactList, options) {
   const runCreatedAt = requireGitHubTimestamp(run.created_at, "workflow run created-at");
   const runStartedAt = requireGitHubTimestamp(run.run_started_at, "workflow run started-at");
   const runUpdatedAt = requireGitHubTimestamp(run.updated_at, "workflow run updated-at");
-  if (runCreatedAt > runStartedAt || runStartedAt > runUpdatedAt) {
+  if (!workflowRunTimestampOrderIsValid(runCreatedAt, runStartedAt, runUpdatedAt)) {
     throw new Error("Discord recovery workflow run timestamps are internally inconsistent");
   }
   if (
@@ -635,7 +636,7 @@ function validateFreshnessProofReport(value, expected) {
     const startedAt = decision.run_started_at === null
       ? null
       : requireGitHubTimestamp(decision.run_started_at, "freshness run-started-at");
-    if (createdAt > updatedAt || (startedAt !== null && (createdAt > startedAt || startedAt > updatedAt))) {
+    if (!workflowRunTimestampOrderIsValid(createdAt, startedAt, updatedAt)) {
       throw new Error("Discord recovery freshness decision timestamps are inconsistent");
     }
     if (decision.decision === "queued-behind-shared-group") {
@@ -1777,10 +1778,9 @@ function normalizePrimaryAttempt(entry, repository, label) {
     ? null
     : requireGitHubTimestamp(entry.run_started_at, `${label} run-started-at`);
   const updatedAt = requireGitHubTimestamp(entry.updated_at, `${label} updated-at`);
-  if (
-    createdAt > updatedAt ||
-    (runStartedAt !== null && (createdAt > runStartedAt || runStartedAt > updatedAt))
-  ) throw new Error(`Discord recovery ${label} timestamps are internally inconsistent`);
+  if (!workflowRunTimestampOrderIsValid(createdAt, runStartedAt, updatedAt)) {
+    throw new Error(`Discord recovery ${label} timestamps are internally inconsistent`);
+  }
   if (
     entry.workflow_id !== DISCORD_PRIMARY_WORKFLOW_ID ||
     entry.path !== PRIMARY_WORKFLOW_PATH ||

@@ -79,7 +79,7 @@ test("recovery artifact discovery ignores concurrent Pages uploads by reading on
   });
   assert.deepEqual(await collectDiscordRecoveryArtifacts(REPOSITORY, reader.read),
     [{ total_count: 1, artifacts: [artifact] }]);
-  assert.equal(reader.calls.length, 4);
+  assert.equal(reader.calls.length, 3);
   assert.ok(reader.calls.every((endpoint) => !endpoint.includes("/actions/artifacts?")));
 });
 
@@ -100,21 +100,38 @@ test("scoped recovery artifact discovery keeps completeness, uniqueness, and own
   }
 });
 
-test("scoped discovery rejects incomplete, foreign, duplicated, or changing recovery run catalogs", async () => {
+test("scoped discovery rejects incomplete, foreign, or duplicated recovery run catalogs", async () => {
   const run = recoveryRun();
   const complete = [{ total_count: 1, workflow_runs: [run] }];
-  for (const [runs, after, message] of [
-    [[{ total_count: 2, workflow_runs: [run] }], complete, /catalog is incomplete/u],
-    [[{ total_count: 2, workflow_runs: [run, run] }], complete, /duplicate runs/u],
-    [[{ total_count: 1, workflow_runs: [primaryRun()] }], complete, /foreign authority/u],
-    [complete, [{ total_count: 1, workflow_runs: [recoveryRun({ run_attempt: 2 })] }], /changed during/u],
-    [complete, [{ total_count: 2, workflow_runs: [run, recoveryRun({ id: 301 })] }], /changed during/u],
+  for (const [runs, message] of [
+    [[{ total_count: 2, workflow_runs: [run] }], /catalog is incomplete/u],
+    [[{ total_count: 2, workflow_runs: [run, run] }], /duplicate runs/u],
+    [[{ total_count: 1, workflow_runs: [primaryRun()] }], /foreign authority/u],
   ]) {
-    const reader = scopedArtifactReader({ runs, after, artifactPages: { 300: [{ total_count: 0, artifacts: [] }] } });
+    const reader = scopedArtifactReader({ runs, after: complete, artifactPages: { 300: [{ total_count: 0, artifacts: [] }] } });
     await assert.rejects(collectDiscordRecoveryArtifacts(REPOSITORY, reader.read), message);
   }
   await assert.rejects(collectDiscordRecoveryArtifacts("foreign/repo", () => assert.fail("must not query")), /exact repository/u);
   await assert.rejects(collectDiscordRecoveryArtifacts(REPOSITORY, () => { throw new Error("API failed"); }), /API failed/u);
+});
+
+test("discovery does not impose a global history freeze or look up proven non-mutating failures", async () => {
+  const artifact = resolutionArtifact();
+  const unrelated = resolutionArtifact({
+    id: 401,
+    name: "discord-recovery-resolution-run-101-attempt-1-recovery-run-300-attempt-1",
+  });
+  const reader = scopedArtifactReader({
+    runs: [{ total_count: 1, workflow_runs: [recoveryRun()] }],
+    after: [{ total_count: 2, workflow_runs: [recoveryRun(), recoveryRun({ id: 301 })] }],
+    artifactPages: { 300: [{ total_count: 2, artifacts: [artifact, unrelated] }] },
+  });
+  assert.deepEqual(await collectDiscordRecoveryArtifacts(REPOSITORY, reader.read, new Set(["100:1"])),
+    [{ total_count: 1, artifacts: [artifact] }]);
+  assert.equal(reader.calls.filter((endpoint) => endpoint.includes("/workflows/")).length, 1);
+  assert.deepEqual(await collectDiscordRecoveryArtifacts(REPOSITORY,
+    () => assert.fail("a non-mutating history must not query Recover"), new Set()),
+  [{ total_count: 0, artifacts: [] }]);
 });
 
 function primaryRun(overrides = {}) {
@@ -447,6 +464,21 @@ function noMutationProof() {
       { job_id: "900", job_name: "promote", job_status: "completed", job_conclusion: "failure", steps: [prestage] },
       { job_id: "903", job_name: "sync-observe", job_status: "completed", job_conclusion: "skipped", steps: [] },
     ],
+  };
+}
+
+function primaryJobCatalog(proof = noMutationProof()) {
+  const jobs = proof.primary_jobs.map((job) => ({
+    id: Number(job.job_id),
+    run_id: 100, run_attempt: 1, head_sha: FAILED_SOURCE, head_branch: "main",
+    name: job.job_name, status: job.job_status, conclusion: job.job_conclusion,
+    html_url: `https://github.com/${REPOSITORY}/actions/runs/100/job/${job.job_id}`,
+    steps: structuredClone(job.steps),
+  }));
+  return {
+    schema_id: "clearra.discord-primary-job-catalog.v1",
+    runs: [{ workflow_run_id: "100", workflow_run_attempt: "1",
+      pages: [{ total_count: jobs.length, jobs }] }],
   };
 }
 
@@ -799,6 +831,94 @@ test("one successful parent-bound no-op resolution clears exact prior debt", asy
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("a fresh deployment needs no old Recover run for a proven pre-mutation failure", async () => {
+  const input = catalogs([]);
+  const jobs = primaryJobCatalog();
+  // The authority failure reported by the user never reached either promote or
+  // sync-observe. No Recovery workflow/artifacts need exist for this attempt.
+  for (const job of jobs.runs[0].pages[0].jobs) {
+    if (job.name === "authority") job.conclusion = "failure";
+    else { job.conclusion = "skipped"; job.steps = []; }
+  }
+  const before = structuredClone(jobs);
+  const plan = planDiscordRecoveryDebt(input.runList, input.primaryAttempts, null, null,
+    { ...identity, primaryJobCatalog: jobs });
+  assert.deepEqual(plan.debts, []);
+  assert.deepEqual(plan.downloads, []);
+  assert.equal(plan.non_mutating_attempts.length, 1);
+  assert.equal(plan.non_mutating_attempts[0].primary_workflow_run_id, "100");
+  assert.deepEqual(jobs, before, "original GitHub job evidence must not be rewritten");
+  const root = await mkdtemp(join(tmpdir(), "clearra-debt-original-jobs-"));
+  try {
+    const planPath = join(root, "plan.json");
+    await writeFile(planPath, `${JSON.stringify(plan)}\n`);
+    const clearance = await auditDiscordRecoveryDebt(planPath, root, identity);
+    assert.deepEqual(clearance.cleared_debts, []);
+    // Even a rehashed plan cannot turn evidence of a mutation into a no-op.
+    const invalid = structuredClone(plan);
+    invalid.non_mutating_attempts[0].job_pages[0].jobs.find((job) => job.name === "sync-observe")
+      .steps.push({ name: CATALOG_MUTATION, number: 1, status: "completed", conclusion: "failure" });
+    await writeFile(planPath, `${JSON.stringify(reseal(invalid))}\n`);
+    await assert.rejects(auditDiscordRecoveryDebt(planPath, root, identity), /dependency topology/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("no-mutation classification is not inferred from failure, missing jobs, or stale recovery artifacts", () => {
+  const input = catalogs([]);
+  const invalidCatalogs = [primaryJobCatalog(liveTransitionProof()), primaryJobCatalog(),
+    primaryJobCatalog(), primaryJobCatalog(), primaryJobCatalog()];
+  invalidCatalogs[1].runs[0].pages[0].jobs.pop();
+  invalidCatalogs[2].runs[0].pages[0].jobs[0].head_sha = CURRENT_SOURCE;
+  invalidCatalogs[3].runs[0].pages[0].jobs.find((job) => job.name === "sync-observe").steps = [
+    { name: CATALOG_MUTATION, number: 1, status: "completed", conclusion: "failure" },
+  ];
+  invalidCatalogs[4].runs[0].pages[0].jobs.find((job) => job.name === "promote").steps.push(
+    { name: "Unknown possible mutation", number: 10, status: "completed", conclusion: "success" },
+  );
+  for (const jobs of [undefined, ...invalidCatalogs]) {
+    assert.throws(() => planDiscordRecoveryDebt(input.runList, input.primaryAttempts,
+      { schema_id: "clearra.discord-recovery-attempt-catalog.v1", attempts: [] },
+      { total_count: 0, artifacts: [] }, { ...identity, primaryJobCatalog: jobs }),
+    /100\/1 lacks a successful parent-bound resolution/u);
+  }
+});
+
+test("a real mutation still requires and audits its exact completed recovery", async () => {
+  const input = catalogs([resolutionArtifact(), resultArtifact()]);
+  const plan = planDiscordRecoveryDebt(input.runList, input.primaryAttempts,
+    input.recoveryAttempts, input.artifactPages,
+    debtIdentity(true, { primaryJobCatalog: primaryJobCatalog(liveTransitionProof()) }));
+  assert.equal(plan.non_mutating_attempts.length, 0);
+  assert.equal(plan.debts.length, 1);
+  assert.equal(plan.downloads.length, 2);
+  const root = await mkdtemp(join(tmpdir(), "clearra-debt-mutated-"));
+  try {
+    const planPath = join(root, "plan.json");
+    await writeFile(planPath, `${JSON.stringify(plan)}\n`);
+    await assert.rejects(auditDiscordRecoveryDebt(planPath, root, identity), /regular file/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a later non-mutating attempt cannot erase an earlier unresolved mutation", () => {
+  const original = primaryRun();
+  const retry = primaryRun({ run_attempt: 2,
+    run_started_at: "2026-08-31T00:02:01Z", updated_at: "2026-08-31T00:02:10Z" });
+  const current = currentRun();
+  const jobs = primaryJobCatalog();
+  jobs.runs[0].workflow_run_attempt = "2";
+  for (const job of jobs.runs[0].pages[0].jobs) job.run_attempt = 2;
+  assert.throws(() => planDiscordRecoveryDebt(
+    { total_count: 2, workflow_runs: [retry, current] },
+    { schema_id: "clearra.discord-primary-attempt-catalog.v1", attempts: [original, retry, current] },
+    { schema_id: "clearra.discord-recovery-attempt-catalog.v1", attempts: [] },
+    { total_count: 0, artifacts: [] }, { ...identity, primaryJobCatalog: jobs }),
+  /100\/1 lacks a successful parent-bound resolution/u);
 });
 
 test("a manually dispatched trusted recovery can clear exact prior debt", async () => {
