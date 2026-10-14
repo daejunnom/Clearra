@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { readFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { createRequire } from 'node:module';
+import { assertRecoveryGallery } from './recovery-gallery-contract.mjs';
 const require = createRequire(resolve(process.env.CLEARRA_BROWSER_TOOLS_ROOT, 'package.json'));
 const { chromium } = require('playwright');
 const root = resolve(process.argv[2] || 'apps/clearra-web/build');
@@ -27,6 +28,7 @@ const server = createServer(async (req, res) => {
 await new Promise((ok, fail) => { server.once('error', fail); server.listen(4194, '127.0.0.1', ok); });
 const browser = await chromium.launch({ headless: true });
 const results = [];
+const failures = [];
 function gpuShim(mode) {
   const body = mode === 'null' ? 'Promise.resolve(null)' : mode === 'reject' ? "Promise.reject(new Error('simulated adapter refusal'))" : 'new Promise(() => {})';
   return `Object.defineProperty(navigator, 'gpu', { configurable: true, value: { requestAdapter: () => ${body} } });`;
@@ -221,11 +223,27 @@ try {
         assert.equal(await recovery.locator('.invalid-evidence').count(), 0);
         await exchange.check();
         await runRecovery('different-piece repayment enabled');
-        await paths.locator('[data-recovery-path="recovery"]').waitFor();
-        assert.equal(await paths.locator('.pc-path-replay-gif img').count(), 1);
+        await paths.waitFor({ state: 'visible' });
+        const recoveryCards = paths.locator(':scope > li');
+        const recoveryRecords = await recoveryCards.evaluateAll(nodes => nodes.map(node => ({
+          key: node.dataset.solutionKey, status: node.dataset.recoveryPath
+        })));
+        // Empty Start admits both the middle I and its mirror. They cover the
+        // same queue; neither the complete geometry set nor the probability
+        // may be replaced by an arbitrary representative card.
+        assertRecoveryGallery(recoveryRecords, 'recovery', [
+          { middleMask: 0xfn, resultMask: afterMiddleResult },
+          { middleMask: 0x3c0n, resultMask: afterMiddleResult }
+        ]);
+        for (const card of await recoveryCards.all()) {
+          const image = card.locator('.pc-path-replay-gif img');
+          await image.waitFor({ state: 'visible' });
+          await image.evaluate(node => node.decode());
+        }
+        assert.equal(await paths.locator('.pc-path-replay-gif img').count(), recoveryRecords.length);
         assert.equal(await paths.locator('details,code,.frame-count').count(), 0);
-        assert.equal(await paths.locator('code').count(), 0);
         assert.equal(await recovery.locator('.invalid-evidence,.invalid-replay').count(), 0);
+        assert.deepEqual(await recovery.locator('.recovery-metrics strong').allTextContents(), ['0%', '100%', '0%']);
         await early.selectOption('0');
         await runRecovery('zero early placements disables the same exchange route');
         assert.equal(await recovery.locator('.recovery-path-gallery>li').count(), 0);
@@ -274,15 +292,22 @@ try {
       assert.deepEqual(errors, []);
       results.push({ mode, result: 'passed', solutionCount: 18 });
     } catch (error) {
-      await page.screenshot({ path: resolve(reportRoot, `failed-${mode}.png`), fullPage: true });
+      const failure = error instanceof Error ? error : new Error(String(error));
+      await page.screenshot({ path: resolve(reportRoot, `failed-${mode}.png`), fullPage: true })
+        .catch(captureError => errors.push(`screenshot capture failed: ${captureError.message}`));
       const text = await page.locator('body').innerText().catch(() => 'unavailable');
-      await writeFile(resolve(reportRoot, `failed-${mode}.txt`), `${error.stack}\n${errors.join('\n')}\n${text}`).catch(() => {});
-      throw error;
+      await writeFile(resolve(reportRoot, `failed-${mode}.txt`), `${failure.stack}\n${errors.join('\n')}\n${text}`).catch(() => {});
+      failures.push(failure);
+      results.push({ mode, result: 'failed', message: failure.message });
+      console.error(`surface_case=${mode} status=failed: ${failure.stack}`);
     } finally { await ctx.close(); }
   }
-  const report = { source: process.env.CLEARRA_SOURCE_COMMIT, results };
+  const report = { source: process.env.CLEARRA_SOURCE_COMMIT, results, failedCases: failures.length };
   await writeFile(resolve(reportRoot, 'results.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify(report));
+  // Each GPU mode owns a fresh context. A failed mode must remain a failure,
+  // but it need not hide the independent modes that can still execute.
+  if (failures.length) throw new AggregateError(failures, 'compiled Pages operational acceptance failed');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

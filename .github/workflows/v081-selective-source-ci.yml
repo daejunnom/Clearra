@@ -414,6 +414,9 @@ jobs:
       - name: Verify WASM import leases and public documentation before product builds
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: node --test scripts/tools/import-verified-clearra-wasm.test.mjs scripts/tools/public-command-docs.test.mjs
+      - name: Verify complete Recovery gallery expectations without product or browser prerequisites
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        run: node --test scripts/tools/recovery-gallery-contract.test.mjs
       - name: Install locked UI dependencies without scripts
         id: ui-deps
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}
