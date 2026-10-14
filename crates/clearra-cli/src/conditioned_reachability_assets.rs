@@ -493,10 +493,7 @@ mod tests {
     fn downloaded_five_profile_packs_activate_from_the_signed_catalog() {
         let directory = std::env::var_os("CLEARRA_CONDITIONED_SMOKE_DIRECTORY")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../_local/artifacts/conditioned-relation-download-smoke")
-            });
+            .expect("explicit downloaded signed-pack smoke directory is required");
         for profile in PROFILES {
             let root = accelerator_asset_store::profile_root(&directory, PRODUCT, profile);
             assert_eq!(

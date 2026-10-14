@@ -1,3 +1,5 @@
+// SRP rationale: the single change reason is owning the root Web worker protocol
+// for command, warmup, page and cancellation lifetimes; solver work stays in its runners.
 import {
   createHostCapabilitySnapshot,
   isHostCapabilitySnapshot,

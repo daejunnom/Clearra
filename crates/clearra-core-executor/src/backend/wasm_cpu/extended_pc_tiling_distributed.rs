@@ -2,6 +2,8 @@
 //! exact ILC family, then delegates deterministic disjoint Geometry branches.
 //! Workers never run BuildUp or attach PC coverage, minimum, or replay evidence.
 //! Only the original admitted Tiling owner may publish a complete family.
+//! SRP rationale: the single change reason is the geometry-only four-word Tiling
+//! delegation protocol; worker transport and merge preserve the admitted owner's authority.
 
 use std::{mem::size_of, sync::Arc};
 

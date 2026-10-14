@@ -1,3 +1,5 @@
+// SRP rationale: the single change reason is enumerating the four-word exact-cover
+// family with one set of domain, node-budget and retained-memory invariants.
 use crate::resource::{ExecutionMemoryBound, SharedExecutionNodeBudget};
 use std::{collections::HashMap, sync::Arc};
 

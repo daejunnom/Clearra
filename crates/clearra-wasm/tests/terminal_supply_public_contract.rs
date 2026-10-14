@@ -44,6 +44,16 @@ fn assert_terminal_supply_solution_set(keys: &[String]) {
 
 #[test]
 fn terminal_supply_p0_cli_app_and_wasm_json_preserve_the_exact_solution_set() {
+    // Keep the two independent public owners out of the same native debug
+    // stack frame. Their product/runtime stack budgets remain unchanged.
+    eprintln!("terminal_supply_phase=direct-app-and-json");
+    assert_terminal_supply_app_and_json();
+    eprintln!("terminal_supply_phase=worker-job-and-build-identity");
+    assert_terminal_supply_worker_identity();
+}
+
+#[inline(never)]
+fn assert_terminal_supply_app_and_json() {
     let request = WasmCommandRuntime::default()
         .compile_command_text(TERMINAL_SUPPLY_P0_COMMAND)
         .expect("terminal-supply CLI command must compile");
@@ -167,7 +177,10 @@ fn terminal_supply_p0_cli_app_and_wasm_json_preserve_the_exact_solution_set() {
         .collect::<Vec<_>>();
     assert_eq!(report_keys, result.normalized_solution_keys());
     assert_terminal_supply_solution_set(&report_keys);
+}
 
+#[inline(never)]
+fn assert_terminal_supply_worker_identity() {
     let mut worker = WasmWorkerJobRuntime::default();
     let job_id = worker
         .start_job(TERMINAL_SUPPLY_P0_COMMAND)

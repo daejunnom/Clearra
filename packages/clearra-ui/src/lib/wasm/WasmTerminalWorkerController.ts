@@ -1,3 +1,5 @@
+// SRP rationale: the single change reason is coordinating one UI-owned WASM worker
+// lifetime and its job/page events, not implementing search or result reduction.
 import type {
   ClearraProductPageWorkerEvent,
   ClearraProductPageWorkerPayload,

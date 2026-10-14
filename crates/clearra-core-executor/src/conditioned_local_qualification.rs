@@ -1,4 +1,6 @@
 //! Independent audit of the *candidate* local-relation binary.
+//! SRP rationale: the single change reason is proving a candidate local relation's
+//! primitive collision dependencies and declared context coverage, not product authority.
 //!
 //! This is compiled only for tests and qualification tools. A successful
 //! audit checks each stored source board and its reached-source collision

@@ -5,6 +5,8 @@
 //! change across an edge; it is not the request-wide inverse-lock-clear frame.
 //! This module deliberately reuses Clearra's existing geometry catalog and
 //! reachability engine instead of interpreting an edge as one preferred move.
+//! SRP rationale: the single change reason is materializing one PC4 graph edge as
+//! exact Clearra ILC placements and witnesses without granting preferred-move authority.
 
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::registry::piece_registry::PieceRotationShape;

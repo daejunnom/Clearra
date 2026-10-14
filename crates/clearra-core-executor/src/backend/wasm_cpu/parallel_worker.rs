@@ -1,3 +1,5 @@
+// SRP rationale: the single change reason is executing one compact native branch
+// worker, including its private frontier, memory accounting and mergeable result evidence.
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{

@@ -1,4 +1,6 @@
 //! Local-only candidate producer for board-conditioned entry/first-exit records.
+//! SRP rationale: the single change reason is producing a local-relation candidate
+//! from a declared query domain with its binding and primitive-audit evidence.
 //!
 //! This is deliberately separate from the older spawn-to-lock producer. A
 //! selected query set and record-by-record primitive audit do not prove that a

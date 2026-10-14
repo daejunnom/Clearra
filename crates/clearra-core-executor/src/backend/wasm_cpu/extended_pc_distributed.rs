@@ -1,6 +1,8 @@
 //! Browser distribution of the *PC* four-word family. The existing extended
 //! ILC packets and BuildUp evaluator are reused without granting Build authority
 //! to PC reducers. Only the complete coordinator can issue product evidence.
+//! SRP rationale: the single change reason is the four-word PC delegation protocol,
+//! including request-bound worker verification and the coordinator's complete-family merge.
 
 #[path = "extended_pc_distributed_wire.rs"]
 mod wire;

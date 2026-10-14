@@ -4266,7 +4266,9 @@ mod tests {
                         key, coverage,
                     )])
             }),
-            "wasm_extended_finesse_solution_key_header_invalid"
+            // The shared canonical codec rejects noncanonical spelling before
+            // the decoded identity can reach the target/catalog binding check.
+            "wasm_extended_finesse_solution_key_encoding_invalid"
         );
         assert_eq!(
             rejected_partial_reason(&problem, field, |partial| {
@@ -4280,7 +4282,7 @@ mod tests {
                         key, coverage,
                     )])
             }),
-            "wasm_extended_finesse_solution_key_placement_invalid"
+            "wasm_extended_finesse_solution_key_encoding_invalid"
         );
         assert_eq!(
             rejected_partial_reason(&problem, field, |partial| {
@@ -4298,7 +4300,7 @@ mod tests {
                         key, coverage,
                     )])
             }),
-            "wasm_extended_finesse_solution_key_piece_invalid"
+            "wasm_extended_finesse_solution_key_encoding_invalid"
         );
     }
 

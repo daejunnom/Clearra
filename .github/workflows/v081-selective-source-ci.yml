@@ -532,3 +532,48 @@ jobs:
       - name: Exercise actual browser UI, signed WASM admission, and cross-tab asset storage
         if: ${{ !cancelled() && steps.product-wasm.outcome == 'success' && steps.conditioned-assets.outcome == 'success' && steps.legal-assets.outcome == 'success' && steps.ui-deps.outcome == 'success' && steps.browser-tools.outcome == 'success' }}
         run: node scripts/tools/v081-accelerator-signed-browser-acceptance.mjs
+
+  native-contract-regressions:
+    if: github.ref == 'refs/heads/codex/converge-v081-extended-pc-products-20261007' && github.ref_type == 'branch'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        id: source
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        id: node
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        with:
+          node-version: 22.23.2
+      - name: Install pinned Rust for existing native contract tests
+        id: rust
+        if: ${{ !cancelled() && steps.source.outcome == 'success' }}
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Check the actual product-diagnostics and cohesive-module boundaries without a product build
+        if: ${{ !cancelled() && steps.node.outcome == 'success' && steps.rust.outcome == 'success' }}
+        run: >-
+          node scripts/ci/run-independent-checks.mjs --
+          powershell -NoProfile -File scripts/validate_architecture.ps1 -TaskName "No Product Debt Architecture" :::
+          powershell -NoProfile -File scripts/validate_architecture.ps1 -TaskName "SRP Policy Architecture"
+      - name: Test the existing validation and exact memory-wire regressions, not the complete RustExact shard
+        if: ${{ !cancelled() && steps.node.outcome == 'success' && steps.rust.outcome == 'success' }}
+        run: >-
+          node scripts/ci/run-independent-checks.mjs --
+          cargo test --locked -p clearra-app --lib app_context::tests:: --features bitmap-render,online-pc4-tablebase,parallel -- --test-threads=1 :::
+          cargo test --locked -p clearra-core-executor --lib extended_requested_partials_reject_missing_duplicate_foreign_shape_and_domain_surfaces --features parallel -- --test-threads=1 :::
+          cargo test --locked -p clearra-core-executor --lib extended_retained_bytes_count_owned_problem_nested_heap_once --features parallel -- --test-threads=1
+      - name: Test the real Desktop replay job and cancel-page boundary on the native host stack
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        env:
+          RUST_MIN_STACK: "2097152"
+        run: cargo test --locked -p clearra-gui-host --lib desktop_pc_replay_pending_slices_cancel_without_publishing_partial_or_late_pages --features wasm-cpu-runtime -- --test-threads=1
+      - name: Test the existing native WASM host contracts without relaxing their stack budgets
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        env:
+          RUST_MIN_STACK: "2097152"
+        run: cargo test --locked -p clearra-wasm --test terminal_supply_public_contract --test wasm_host_contract --test pc_minimals_stack_contract -- --test-threads=1

@@ -39,6 +39,15 @@ fn field(key: &str, value: &str) -> (String, String) {
     (key.to_owned(), value.to_owned())
 }
 
+fn invalid_execution_policy_request() -> AppRequest {
+    // Zero workers violates the execution policy independently of the supported
+    // target height. The former 8L fixture became valid with full-height PC.
+    AppRequest::new(AppCommand::Pc(PcAppCommand::new(
+        OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(0)),
+    )))
+}
+
 mod case_app_pc_request_runs_without_cli_parser {
     use super::*;
 
@@ -155,13 +164,11 @@ mod case_app_response_contains_diagnostics_and_render_model {
             assert!(valid.error().is_some());
         }
 
-        let invalid =
-            AppContext::default().run(AppRequest::new(AppCommand::Pc(PcAppCommand::new(
-                OpeningPcSearchQuery::new(PcTarget::new(8).expect("8L target")),
-            ))));
+        let invalid = AppContext::default().run(invalid_execution_policy_request());
         assert_eq!(invalid.status(), AppStatus::ValidationFailed);
         assert!(invalid.render_model().is_none());
         assert!(invalid.diagnostics().has_errors());
+        assert!(!invalid.resource_report().solver_executed());
     }
 }
 
@@ -170,12 +177,11 @@ mod case_app_request_runs_validation_before_execution {
 
     #[test]
     fn app_request_runs_validation_before_execution() {
-        let request = AppRequest::new(AppCommand::Pc(PcAppCommand::new(
-            OpeningPcSearchQuery::new(PcTarget::new(8).expect("8L target")),
-        )));
+        let request = invalid_execution_policy_request();
 
         let report = AppContext::default().validate_request(&request);
         assert!(report.has_errors());
+        assert!(report.contains_code(DiagnosticCode::EPcQueryInvalid));
 
         let response = AppContext::default().run(request);
         assert_eq!(response.status(), AppStatus::ValidationFailed);
@@ -253,10 +259,7 @@ mod case_diagnostic_error_prevents_execution {
 
     #[test]
     fn diagnostic_error_prevents_execution() {
-        let response =
-            AppContext::default().run(AppRequest::new(AppCommand::Pc(PcAppCommand::new(
-                OpeningPcSearchQuery::new(PcTarget::new(8).expect("8L target")),
-            ))));
+        let response = AppContext::default().run(invalid_execution_policy_request());
 
         assert_eq!(response.status(), AppStatus::ValidationFailed);
         assert_eq!(response.command(), Some(AppCommandKind::Pc));

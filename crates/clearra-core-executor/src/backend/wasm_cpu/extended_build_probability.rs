@@ -4147,11 +4147,17 @@ mod tests {
 
         assert!(source_nested > 0);
         assert!(owned_nested > 0);
+        assert!(!session.shared_immutable_owners);
+        assert_eq!(Arc::strong_count(&session.problem), 1);
         assert_eq!(
             session.checked_retained_bytes(),
             session
                 .checked_non_problem_retained_bytes()
-                .and_then(|bytes| bytes.checked_add(owned_nested))
+                // The Arc pointee is no longer inline in the session. Count
+                // its whole allocation once, plus the conservative 32-byte
+                // Arc header/alignment allowance, not only its nested heap.
+                .and_then(|bytes| bytes.checked_add(owned_pointee))
+                .and_then(|bytes| bytes.checked_add(32))
         );
         assert_eq!(
             crate::backend::wasm_cpu::build_probability::

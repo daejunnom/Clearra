@@ -4331,8 +4331,8 @@ mod product_pages {
     #[cfg(all(test, feature = "wasm-cpu-runtime"))]
     mod pc_replay_tests {
         use super::*;
-        use clearra_app::{AppContext, AppCoreExecutorService, AppServices, CooperativeAppAdvance};
-        use clearra_core_domain::execution_cancellation::ExecutionControl;
+        use crate::{GuiJob, GuiJobId, GuiJobRunner};
+        use clearra_app::{AppContext, AppCoreExecutorService, AppServices, AppStatus};
 
         fn bridge_with_replay_source() -> DesktopTauriCommandBridge {
             let context = AppContext::new(
@@ -4341,33 +4341,28 @@ mod product_pages {
             let request = clearra_cli_command::CliCommandParser::parse(
                 "clearra pc path --board-mask 0x0 --height 2 --lines 2 --pieces 5 --queue IIOOO --no-hold --backend cpu --workers 1",
             ).unwrap().to_app_request().unwrap();
-            let mut execution = context.start_cooperative_execution(request);
-            let control = ExecutionControl::default();
-            for _ in 0..10_000 {
-                match execution.advance(64, &control) {
-                    CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
-                    CooperativeAppAdvance::Completed(response) => {
-                        let source = response.public_page_source_owner().expect("replay source");
-                        let mut bridge = DesktopTauriCommandBridge::default();
-                        bridge.product_page_store =
-                            Some(ProductPageStore::from_source(source).unwrap());
-                        assert!(
-                            bridge
-                                .product_page_store
-                                .as_ref()
-                                .unwrap()
-                                .pc_replay()
-                                .unwrap()
-                                .source()
-                                .geometry_count()
-                                >= 2
-                        );
-                        return bridge;
-                    }
-                    other => panic!("unexpected replay source state: {other:?}"),
-                }
-            }
-            panic!("tiny Desktop replay source exceeded its test-only work bound");
+            // Produce the immutable source through the real Desktop job owner,
+            // including its worker stack/lifetime, not on libtest's host stack.
+            let result = GuiJobRunner::spawn(GuiJob::new(GuiJobId::new(1), request), context)
+                .join()
+                .expect("Desktop replay source job must finish");
+            let response = result.response().expect("Desktop replay source response");
+            assert_eq!(response.status(), AppStatus::Success);
+            let source = response.public_page_source_owner().expect("replay source");
+            let mut bridge = DesktopTauriCommandBridge::default();
+            bridge.product_page_store = Some(ProductPageStore::from_source(source).unwrap());
+            assert!(
+                bridge
+                    .product_page_store
+                    .as_ref()
+                    .unwrap()
+                    .pc_replay()
+                    .unwrap()
+                    .source()
+                    .geometry_count()
+                    >= 2
+            );
+            bridge
         }
 
         #[test]

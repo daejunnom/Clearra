@@ -1,4 +1,6 @@
 //! Bounded actual PC completion, not an empty 24L/sixty-piece enumeration.
+//! SRP rationale: the single change reason is the complete full-height PC family
+//! contract, including bounded replay, native worker ownership and canonical parity.
 use clearra_core_domain::{
     board::standard_pc_board::Board256Mask, execution_cancellation::ExecutionControl,
     pc::pc_target::PcTarget, piece::piece_kind::PieceKind, solution::ExtendedTilingSolutionKey,
