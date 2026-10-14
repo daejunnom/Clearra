@@ -12,7 +12,8 @@ use clearra_core_domain::{
 use clearra_host_contract::ProductBuildIdentity;
 use clearra_pc_graph::request::{PcCountPolicy, RequestedSearchBackend};
 use clearra_wasm::{
-    serialize_search_report_from_app_response, WasmCommandRuntime, WasmWorkerJobRuntime,
+    serialize_search_report_from_app_response, WasmCommandRuntime, WasmWorkerAdvanceStatus,
+    WasmWorkerJobRuntime,
 };
 use serde_json::Value;
 
@@ -44,6 +45,16 @@ fn assert_terminal_supply_solution_set(keys: &[String]) {
 
 #[test]
 fn terminal_supply_p0_cli_app_and_wasm_json_preserve_the_exact_solution_set() {
+    std::thread::Builder::new()
+        .name("terminal-supply-wasm-runtime-2mib".to_owned())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(assert_terminal_supply_contract)
+        .expect("spawn the explicit two MiB terminal-supply contract")
+        .join()
+        .expect("terminal-supply public runtime exceeded its two MiB stack contract");
+}
+
+fn assert_terminal_supply_contract() {
     // Keep the two independent public owners out of the same native debug
     // stack frame. Their product/runtime stack budgets remain unchanged.
     eprintln!("terminal_supply_phase=direct-app-and-json");
@@ -190,25 +201,64 @@ fn assert_terminal_supply_worker_identity() {
         .start_job(TERMINAL_SUPPLY_P0_COMMAND)
         .expect("terminal-supply browser worker job");
     eprintln!("terminal_supply_phase=worker-advance");
-    while !worker
-        .advance_job(job_id, 16_384)
-        .expect("advance terminal-supply browser worker job")
-        .is_terminal()
-    {}
+    let mut events = Vec::new();
+    let mut last_progress = None;
+    let mut completed = false;
+    for advance in 0..10_000 {
+        let status = worker
+            .advance_job(job_id, 16_384)
+            .expect("advance terminal-supply browser worker job");
+        // The actual host drains progress after each cooperative turn. Keep
+        // those real JSON envelopes, including the one final response, while
+        // printing only stage changes for a native stack-abort diagnostic.
+        let events_json = worker
+            .drain_events_json(job_id)
+            .expect("terminal-supply browser worker event JSON");
+        let batch: Vec<Value> =
+            serde_json::from_str(&events_json).expect("valid browser event JSON");
+        for event in &batch {
+            if let Some(label) = event["progress"]["label"].as_str() {
+                if last_progress.as_deref() != Some(label) {
+                    eprintln!("terminal_supply_worker_stage={label} advance={advance}");
+                    last_progress = Some(label.to_owned());
+                }
+            }
+        }
+        events.extend(batch);
+        if status.is_terminal() {
+            assert_eq!(status, WasmWorkerAdvanceStatus::Completed);
+            completed = true;
+            break;
+        }
+    }
+    assert!(
+        completed,
+        "tiny terminal-supply fixture exceeded its test-only work bound"
+    );
     eprintln!("terminal_supply_phase=worker-terminal-json");
-    let events_json = worker
-        .drain_events_json(job_id)
-        .expect("terminal-supply browser worker event JSON");
-    let events: Value = serde_json::from_str(&events_json).expect("valid browser event JSON");
-    let final_response = events
+    let final_events = events
+        .iter()
+        .filter(|event| event["event"] == "final_response")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        final_events.len(),
+        1,
+        "exactly one terminal response is required"
+    );
+    let final_response = &final_events[0]["response"];
+    let worker_report = &final_events[0]["search_report"];
+    let worker_keys = worker_report["normalized_solution_keys"]
         .as_array()
-        .and_then(|events| {
-            events
-                .iter()
-                .find(|event| event["event"] == "final_response")
-        })
-        .map(|event| &event["response"])
-        .expect("terminal-supply final Host response");
+        .expect("complete actual Worker solution keys")
+        .iter()
+        .map(|key| key.as_str().expect("Worker solution key string").to_owned())
+        .collect::<Vec<_>>();
+    assert_terminal_supply_solution_set(&worker_keys);
+    assert_eq!(
+        worker_report["normalized_solution_set_hash"],
+        TERMINAL_SUPPLY_P0_EXPECTED_NORMALIZED_SET_HASH
+    );
+    assert_eq!(worker_report["solution_keys_complete"], true);
     let identity = final_response["runtime_identity"]
         .as_object()
         .expect("WASM Host runtime_identity object");

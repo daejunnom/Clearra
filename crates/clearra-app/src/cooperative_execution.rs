@@ -247,6 +247,22 @@ struct CooperativePostprocessExecution {
     product_capability_contract: Option<ValidatedProductCapabilityContract>,
 }
 
+impl CooperativePostprocessExecution {
+    fn has_plain_pc_response(&self) -> bool {
+        self.product_capability_contract.is_none()
+            && self.pc_score_session.is_none()
+            && self.build_probability_session.is_none()
+            && match &self.response_kind {
+                CooperativeSearchResponseKind::Pc(projection)
+                | CooperativeSearchResponseKind::Scenario {
+                    result_projection: projection,
+                    ..
+                } => projection.projection().is_standard(),
+                _ => false,
+            }
+    }
+}
+
 struct CooperativeMinimumFinalizeExecution {
     response: AppResponse,
     command_kind: AppCommandKind,
@@ -2695,6 +2711,47 @@ impl CooperativeAppExecution {
         self.advance_inner_with_minimum_memory_guard(work_budget, control, Some(memory_guard))
     }
 
+    // Ordinary PC post-processing must not reserve the spill frame of every
+    // mutually exclusive Build/score/portfolio finalizer. Reuse the exact same
+    // postprocessor and response projector without changing owner layout or
+    // introducing an allocation on each cooperative advance.
+    #[inline(never)]
+    fn advance_plain_pc_postprocess(
+        &self,
+        mut postprocess: CooperativePostprocessExecution,
+        control: &ExecutionControl,
+    ) -> CooperativeAppAdvance {
+        if control.is_cancelled() {
+            return CooperativeAppAdvance::Cancelled;
+        }
+        let result = postprocess
+            .result
+            .take()
+            .expect("postprocess result exists");
+        let result = self
+            .context()
+            .services()
+            .core_executor()
+            .postprocess_search_result(result, control);
+        control.report_progress("postprocess", 1, Some(1));
+        let response = match result {
+            Ok(result) => response_from_search(postprocess.response_kind, result),
+            Err(CoreExecutionError::Cancelled) => return CooperativeAppAdvance::Cancelled,
+            Err(error) => core_execution_error_response(error),
+        };
+        let response = if postprocess.validation_report.is_empty() {
+            response
+        } else {
+            response.with_validation_diagnostics(postprocess.validation_report)
+        };
+        CooperativeAppAdvance::Completed(self.context().finalize_response_with_product_capability(
+            response,
+            postprocess.command_kind,
+            &postprocess.output_policy,
+            postprocess.product_capability_contract,
+        ))
+    }
+
     fn advance_inner_with_minimum_memory_guard(
         &mut self,
         work_budget: usize,
@@ -3007,6 +3064,9 @@ impl CooperativeAppExecution {
                 })
             }
             CooperativeExecutionState::Postprocess(mut postprocess) => {
+                if postprocess.has_plain_pc_response() {
+                    return self.advance_plain_pc_postprocess(postprocess, control);
+                }
                 advance_postprocess_in_isolated_frame(move || {
                     if postprocess
                         .product_capability_contract
