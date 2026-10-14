@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
@@ -12,6 +12,7 @@ import {
   importVerifiedClearraWasmDirectory,
   inspectVerifiedClearraWasmDirectory,
 } from './import-verified-clearra-wasm.mjs';
+import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 
 const MANIFEST = 'clearra_wasm.manifest.json';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -119,10 +120,36 @@ test('managed producer lock prevents concurrent import without altering current 
   await generation(options);
   await importVerifiedClearraWasmDirectory(options);
   const prior = await readFile(resolve(options.destinationDirectory, MANIFEST));
-  await writeFile(resolve(options.root, 'public', '.clearra-wasm-stage.lock'), JSON.stringify({ pid: process.pid }));
-  await assert.rejects(importVerifiedClearraWasmDirectory(options), /already active/u);
-  assert.deepEqual(await readFile(resolve(options.destinationDirectory, MANIFEST)), prior);
+  const incoming = await generation(options, 2);
+  const staging = await acquireManagedTransientDirectory(resolve(await realpath(resolve(options.root, 'public')), '.clearra-wasm-stage'));
+  const lockPath = `${staging.path}.lock`;
+  const recordPath = `${staging.path}.owner.json`;
+  try {
+    const lock = await readFile(lockPath);
+    const record = await readFile(recordPath);
+    await assert.rejects(importVerifiedClearraWasmDirectory(options), /already active/u);
+    assert.deepEqual(await readFile(resolve(options.destinationDirectory, MANIFEST)), prior);
+    assert.deepEqual(await readFile(lockPath), lock);
+    assert.deepEqual(await readFile(recordPath), record);
+  } finally { await staging.release(); }
+  const imported = await importVerifiedClearraWasmDirectory(options);
+  assert.equal(imported.generation, incoming.wasm.sha256);
 });
+
+for (const [kind, lease] of [['PID-only', JSON.stringify({ pid: process.pid })], ['malformed', 'not-json']]) {
+  test(`an unresolved ${kind} producer lease preserves the current manifest and lock`, async (t) => {
+    const options = await fixture(t);
+    await generation(options);
+    await importVerifiedClearraWasmDirectory(options);
+    const prior = await readFile(resolve(options.destinationDirectory, MANIFEST));
+    await generation(options, 2);
+    const lockPath = resolve(options.root, 'public', '.clearra-wasm-stage.lock');
+    await writeFile(lockPath, lease);
+    await assert.rejects(importVerifiedClearraWasmDirectory(options), /unresolved or invalid lease/u);
+    assert.deepEqual(await readFile(resolve(options.destinationDirectory, MANIFEST)), prior);
+    assert.equal(await readFile(lockPath, 'utf8'), lease);
+  });
+}
 
 test('destination cannot be the managed staging path and its existing contents survive', async (t) => {
   const options = await fixture(t);

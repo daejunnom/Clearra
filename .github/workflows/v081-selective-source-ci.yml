@@ -411,6 +411,9 @@ jobs:
       - name: Verify focused CI path and failure contracts
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: node --test scripts/ci/v081-source-ci-contract.test.mjs scripts/ci/readonly-runtime-libraries.test.mjs scripts/ci/run-independent-checks.test.mjs scripts/ci/independent-feedback-workflows.test.mjs
+      - name: Verify WASM import leases and public documentation before product builds
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        run: node --test scripts/tools/import-verified-clearra-wasm.test.mjs scripts/tools/public-command-docs.test.mjs
       - name: Install locked UI dependencies without scripts
         id: ui-deps
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}

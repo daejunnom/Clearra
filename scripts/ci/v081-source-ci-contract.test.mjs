@@ -80,6 +80,19 @@ test('complete functional feedback explicitly opts into Core and the real ABI-to
   assert.ok(!workflow.includes('--stage-profiling'));
 });
 
+test('release import and public-document regressions run before unrelated product prerequisites', () => {
+  const surfaces = workflow.slice(workflow.indexOf('\n  surfaces:'), workflow.indexOf('\n  wasm-realms:'));
+  const start = surfaces.indexOf('      - name: Verify WASM import leases and public documentation before product builds');
+  const dependencies = surfaces.indexOf('      - name: Install locked UI dependencies without scripts');
+  assert.ok(start >= 0 && dependencies > start);
+  const check = surfaces.slice(start, dependencies);
+  assert.ok(check.includes("if: ${{ !cancelled() && steps.node.outcome == 'success' }}"));
+  assert.ok(check.includes('node --test scripts/tools/import-verified-clearra-wasm.test.mjs scripts/tools/public-command-docs.test.mjs'));
+  assert.ok(!check.includes('steps.ui-deps'));
+  assert.ok(!check.includes('cargo '));
+  assert.ok(!check.includes('continue-on-error:'));
+});
+
 test('full-height native readback reuses the exact CLI and keeps the real Desktop host as a separate surface', () => {
   const native = workflow.slice(workflow.indexOf('\n  native-products:'), workflow.indexOf('\n  wasm-abi:'));
   assert.ok(native.includes('CLEARRA_REAL_PC24_CLI: ${{ github.workspace }}/build/cargo/default/debug/clearra'));

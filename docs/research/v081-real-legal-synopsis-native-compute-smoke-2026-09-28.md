@@ -72,12 +72,12 @@ synopsis는 음성 필터만 제공하며 positive 값에 도달성 권위를 �
 ordinary CLI의 절대 경로와 40자리 compile source identity를 명시한다.
 
 네트워크 provision은 `CLEARRA_REAL_COMPUTE_MODE=provision`의 명시 경로만 허용한다.
-기본은 `verify`다. 자산/CLI/source 세 입력이 모두 없을 때만 일반 테스트에서
+기본은 기설치 자료 검증 모드다. 자산/CLI/source 세 입력이 모두 없을 때만 일반 테스트에서
 skip하고, 일부만 제공한 잘못된 설정은 실패한다. 기존 두 signed Release의
 다섯 profile을 실제 CLI download로 설치하며 사용자 전역 저장소는 변경하지 않는다.
 
 production adapter는 첫 다운로드 전에 열 개 signed catalog slot과 크기 상한을
-검사하고 설치 세대·바이트 수·catalog identity를 대조한다. 설치 후 실제 `verify`
+검사하고 설치 세대·바이트 수·catalog identity를 대조한다. 설치 후 실제 기설치 자료 검증
 경로와 별도 status snapshot을 통해 같은 열 개 generation을 확인한다. 이어서
 위 eligible empty 4L 및 outside initial 4L 입력을 다섯 profile에서 각각 네 정책
 조합(off/off, legal만, relation만, 둘 다)으로 실행한다.
@@ -117,7 +117,7 @@ owned tree stopped, descendant 0, memory-pressure event 0, automatic retry false
 WASM producer는 여전히 한 번이며 peer에는 작은 synopsis만 전달한다.
 `native-products`는 exact CI SHA를 identity로 쓰는 ordinary CLI 하나를 만들고
 위 실제 adapter 테스트를 실행한다. 이후 같은 자산 디렉터리만 쓰기 금지로
-바꾸어 `nobody` 사용자에게 실제 `verify`를 실행시킨다. 이 마지막 Linux 권한
+바꾸어 `nobody` 사용자에게 실제 기설치 자료 검증 모드를 실행시킨다. 이 마지막 Linux 권한
 검사는 준비된 CI 경로이며 로컬 Windows에서 실행됐다고 기록하지 않는다.
 실패는 그대로 유지하고 다른 독립 source feedback을 차단하지 않는다.
 

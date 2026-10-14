@@ -93,7 +93,7 @@ home/전체 checkout 권한 또는 manager 정책은 넓히지 않는다.
 이 bundle만 읽기 전용 bind mount로 공개 Ubuntu 24.04의 resolved image ID에
 제공한다. 기존 CLI를 빌드한 job도 Ubuntu 24.04로 고정한다. nobody UID/GID,
 read-only root, network none, no-new-privileges, capability 제거와 finite 4GiB/
-64-PID 경계 안에서 실제 production `verify`를 실행한다. 기존 container 이름은
+64-PID 경계 안에서 실제 production 기설치 자료 검증 모드를 실행한다. 기존 container 이름은
 거절하고 owned run/attempt container만 종료 trap으로 정리한다. Bash pipefail로
 의존 library 복사 중 실패도 유지한다.
 
@@ -142,7 +142,7 @@ OPFS/IndexedDB, Tauri IPC, active-session peak와 릴리스 권위로 확대하�
 [run 36349394915](https://github.com/daejunnom/Clearra/actions/runs/36349394915)은
 exact `26630d246e54642875c3486a5d95bccb1cd53e3d`에서 다섯 job이 성공했다.
 `native-products`도 success이며 동일 signed data의 native adapter, 실제
-Desktop job과 마지막 Linux read-only 비특권 `verify` step 모두 통과했다.
+Desktop job과 마지막 Linux read-only 비특권 자료 검증 step 모두 통과했다.
 dependency parser 수정 후 실제 resolved Ubuntu fixture를 사용했으며 Docker
 실행의 network-none/read-only/nobody/capability 제거 경계를 유지했다.
 

@@ -16,7 +16,7 @@ production solver와 Discord의 canonical-only 선택, 닫힌 Build 옵션 regis
 ## 실제 실행 소비자
 
 `realCliProductProjection.test.mjs`는 명시한 ordinary CLI와 이미 설치한 열 개
-서명 slot만 사용한다. 같은 자료를 production adapter의 `verify`로 검사하며
+서명 slot만 사용한다. 같은 자료를 production adapter의 기설치 자료 검증 모드로 검사하며
 재다운로드하거나 generation을 교체하지 않는다. 지정 binary는 repository의
 기존 Cargo debug/release 경로, 자료는 기존 declared smoke root로 제한한다.
 일부 환경값만 지정하거나 compiled runtime identity가 exact source SHA와 다르면

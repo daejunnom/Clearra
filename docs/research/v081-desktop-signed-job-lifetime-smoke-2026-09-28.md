@@ -97,7 +97,7 @@ read-only 검증은 runner home/전체 checkout의 권한을 넓히지 않는다
 검사한 run/attempt 전용 `/tmp/Clearra` 경로에 공개 스크립트·동일 CLI·서명 데이터만
 복사하고 실행 파일/스크립트 bytes를 대조한다. 전용 bundle의 write를 제거하고
 nobody의 script read, CLI execute, data non-writable을 선행 확인한 뒤 production
-`verify`를 실행한다. 이 Linux 수정의 실제 통과 여부는 새 CI로 확인해야 한다.
+기설치 자료 검증 모드를 실행한다. 이 Linux 수정의 실제 통과 여부는 새 CI로 확인해야 한다.
 
 CI source 계약 11개, 새 Rust test formatting과 diff 검사는 통과했다. main 병합,
 배포, 4194 교체, 벤치마크, v0.9.0 업그레이드는 하지 않았다.
