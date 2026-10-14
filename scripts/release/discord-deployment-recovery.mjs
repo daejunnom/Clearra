@@ -1760,54 +1760,6 @@ export function validateDiscordRecoveryFreshness(value, options) {
   });
 }
 
-export function validatePrimaryRunCatalogSnapshots(before, after, repositoryValue) {
-  const repository = requirePattern(repositoryValue, REPOSITORY, "repository");
-  const normalizeSnapshot = (value, label) => {
-    const pages = Array.isArray(value) ? value : [value];
-    if (pages.length === 0) throw new Error(`Discord recovery ${label} is unavailable`);
-    let totalCount = null;
-    const byId = new Map();
-    for (const [index, page] of pages.entries()) {
-      requirePlainObject(page, `Discord recovery ${label} page ${index}`);
-      if (!Number.isSafeInteger(page.total_count) || page.total_count < 0 ||
-          !Array.isArray(page.workflow_runs)) {
-        throw new Error(`Discord recovery ${label} is invalid`);
-      }
-      if (totalCount === null) totalCount = page.total_count;
-      if (page.total_count !== totalCount) {
-        throw new Error(`Discord recovery ${label} page totals differ`);
-      }
-      for (const entry of page.workflow_runs) {
-        const normalized = normalizePrimaryAttempt(entry, repository, label);
-        if (byId.has(normalized.id)) {
-          throw new Error(`Discord recovery ${label} contains duplicate run IDs`);
-        }
-        byId.set(normalized.id, normalized);
-      }
-    }
-    if (byId.size !== totalCount) {
-      throw new Error(`Discord recovery ${label} must be complete and non-truncated`);
-    }
-    return byId;
-  };
-  const first = normalizeSnapshot(before, "before run catalog snapshot");
-  const second = normalizeSnapshot(after, "after run catalog snapshot");
-  if (first.size !== second.size) {
-    throw new Error("Discord recovery run catalog changed during attempt collection");
-  }
-  for (const [id, left] of first) {
-    const right = second.get(id);
-    if (!right || left.attempt !== right.attempt || left.runNumber !== right.runNumber ||
-        left.createdAt !== right.createdAt || left.runStartedAt !== right.runStartedAt ||
-        left.updatedAt !== right.updatedAt || left.status !== right.status ||
-        left.conclusion !== right.conclusion || left.event !== right.event ||
-        left.sourceCommit !== right.sourceCommit) {
-      throw new Error("Discord recovery run catalog changed during attempt collection");
-    }
-  }
-  return second;
-}
-
 function normalizePrimaryAttempt(entry, repository, label) {
   requirePlainObject(entry, `${label} entry`);
   const id = requireDecimalId(entry.id, `${label} run ID`);
@@ -2474,8 +2426,6 @@ function parseCli() {
       "run-metadata": { type: "string" },
       "artifact-list": { type: "string" },
       "run-list": { type: "string" },
-      "run-list-before": { type: "string" },
-      "run-list-after": { type: "string" },
       "run-attempt-catalog": { type: "string" },
       "job-list": { type: "string" },
       "run-job-catalog": { type: "string" },
@@ -2513,14 +2463,7 @@ async function main() {
   const { values, positionals } = parseCli();
   try {
     if (positionals.length !== 1) throw new Error("one Discord recovery operation is required");
-    if (positionals[0] === "validate-run-catalog-snapshots") {
-      validatePrimaryRunCatalogSnapshots(
-        await readJsonFile(values["run-list-before"], "workflow run catalog before snapshot"),
-        await readJsonFile(values["run-list-after"], "workflow run catalog after snapshot"),
-        values.repository,
-      );
-      process.stdout.write("discord_recovery=run_catalog_snapshots_stable\n");
-    } else if (positionals[0] === "resolve") {
+    if (positionals[0] === "resolve") {
       const authority = resolveDiscordRecoveryAuthority(
         await readJsonFile(values["run-metadata"], "workflow run metadata"),
         await readJsonFile(values["artifact-list"], "workflow artifact list"),

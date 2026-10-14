@@ -278,6 +278,13 @@ function captureFixture() {
 test("full Pages and WASM identity contract is required", () => {
   const valid = pagesIdentity();
   validateLivePagesIdentity(valid.identity, valid.manifest, SNAPSHOT);
+  const withMirrors = structuredClone(valid);
+  withMirrors.identity.files.push(...Array.from({ length: 5 }, (_entry, index) => ({
+    path: `accel/lb/profile-${index}.bin`, size: 32 * 1024 * 1024,
+    sha256: "e".repeat(64),
+  })));
+  withMirrors.identity.files.sort((left, right) => left.path.localeCompare(right.path, "en"));
+  validateLivePagesIdentity(withMirrors.identity, withMirrors.manifest, SNAPSHOT);
   const reconstructed = reconstructedPagesIdentity();
   validatePagesIdentity(reconstructed.identity, reconstructed.manifest, SNAPSHOT);
   assert.throws(
@@ -307,8 +314,8 @@ test("full Pages and WASM identity contract is required", () => {
     },
     (value) => {
       value.identity.files = [
-        { path: "a", size: (32 * 1024 * 1024) + 1, sha256: "c".repeat(64) },
-        { path: "b", size: (32 * 1024 * 1024) + 1, sha256: "d".repeat(64) },
+        { path: "a", size: (256 * 1024 * 1024) + 1, sha256: "c".repeat(64) },
+        { path: "b", size: (256 * 1024 * 1024) + 1, sha256: "d".repeat(64) },
       ];
     },
     (value) => { value.identity.files[0].extra = true; },
@@ -754,21 +761,18 @@ test("legacy public identity absence probe rejects redirects", async () => {
   assert.match(statusProbe, /redirect: "error"/u);
 });
 
-test("canonical acceptance requires one exact success and rejects duplicate or wrong authority", () => {
+test("canonical acceptance selects an exact success without rejecting prior successes", () => {
   validateCanonicalRuns(
     { total_count: 1, workflow_runs: [canonicalRun()] },
     SNAPSHOT,
   );
-  assert.throws(
-    () => validateCanonicalRuns(
-      {
-        total_count: 2,
-        workflow_runs: [canonicalRun(), canonicalRun({ id: 2 })],
-      },
-      SNAPSHOT,
-    ),
-    /exactly 1/u,
-  );
+  assert.equal(validateCanonicalRuns(
+    {
+      total_count: 2,
+      workflow_runs: [canonicalRun(), canonicalRun({ id: 2 })],
+    },
+    SNAPSHOT,
+  ).id, "2");
   assert.throws(
     () => validateCanonicalRuns(
       { total_count: 1, workflow_runs: [canonicalRun({ event: "push" })] },

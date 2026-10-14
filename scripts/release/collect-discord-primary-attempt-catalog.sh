@@ -7,15 +7,17 @@ authority_root="$2"
 [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
 [[ -d "$authority_root" && ! -L "$authority_root" ]]
 
-before="$authority_root/primary-run-catalog-before.json"
-after="$authority_root/primary-run-catalog-after.json"
 attempts_jsonl="$authority_root/primary-attempts.jsonl"
 attempts="$authority_root/primary-attempts.json"
 catalog="$authority_root/primary-run-catalog.json"
 
+# The recovery workflow holds the shared production concurrency group. Capture
+# one complete catalog, then verify its exact attempts and mutation evidence.
+# A second list can include newly queued or skipped, non-mutating runs; equality
+# of those repository-wide lists is not recovery authority.
 gh api --paginate --slurp --method GET \
   "repos/$repository/actions/workflows/discord-deploy.yml/runs?branch=main&per_page=100" \
-  > "$before"
+  > "$catalog"
 : > "$attempts_jsonl"
 jq -e -r '
   (.[0].total_count // -1) as $total |
@@ -25,7 +27,7 @@ jq -e -r '
   select(($runs | length) == $total) |
   select(($runs | map(.id) | unique | length) == $total) |
   $runs[] | [(.id | tostring), (.run_attempt | tostring)] | @tsv
-' "$before" | sort -u | while IFS=$'\t' read -r run_id max_attempt; do
+' "$catalog" | sort -u | while IFS=$'\t' read -r run_id max_attempt; do
   [[ "$run_id" =~ ^[1-9][0-9]*$ && "$max_attempt" =~ ^[1-9][0-9]*$ ]]
   for ((attempt = 1; attempt <= max_attempt; attempt += 1)); do
     gh api --method GET \
@@ -36,9 +38,3 @@ jq -e -r '
 done
 jq -s '{schema_id:"clearra.discord-deployment-primary-attempt-catalog.v1",attempts:.}' \
   "$attempts_jsonl" > "$attempts"
-gh api --paginate --slurp --method GET \
-  "repos/$repository/actions/workflows/discord-deploy.yml/runs?branch=main&per_page=100" \
-  > "$after"
-node scripts/release/discord-deployment-recovery.mjs validate-run-catalog-snapshots \
-  --repository "$repository" --run-list-before "$before" --run-list-after "$after"
-mv --no-clobber "$after" "$catalog"

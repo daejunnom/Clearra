@@ -11,7 +11,6 @@ import {
   DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS,
   resolveDiscordRecoveryAuthority,
   sealDiscordRecoveryResult,
-  validatePrimaryRunCatalogSnapshots,
   validateDiscordRecoveryAuthorityReport,
   verifyDiscordRecoveryResult,
 } from "./discord-deployment-recovery.mjs";
@@ -242,55 +241,8 @@ test("recovery accepts GitHub list/exact-attempt updated-at projection skew", ()
   assert.equal(authority.freshness_proof.original_workflow_run_id, RUN_ID);
 });
 
-test("recovery run catalog snapshot seal rejects added, deleted, and hidden rerun drift", () => {
-  const snapshot = (...runs) => ({ total_count: runs.length, workflow_runs: runs });
-  assert.equal(
-    validatePrimaryRunCatalogSnapshots(snapshot(run()), snapshot(run()), REPOSITORY).size,
-    1,
-  );
-  const added = run({ id: 702, run_number: 42 });
-  assert.throws(
-    () => validatePrimaryRunCatalogSnapshots(snapshot(run()), snapshot(run(), added), REPOSITORY),
-    /changed during attempt collection/u,
-  );
-  assert.throws(
-    () => validatePrimaryRunCatalogSnapshots(snapshot(run(), added), snapshot(run()), REPOSITORY),
-    /changed during attempt collection/u,
-  );
-  assert.throws(
-    () => validatePrimaryRunCatalogSnapshots(
-      snapshot(run()),
-      snapshot(run({
-        run_attempt: 4,
-        run_started_at: "2026-08-31T00:01:00Z",
-        updated_at: "2026-08-31T00:01:20Z",
-      })),
-      REPOSITORY,
-    ),
-    /changed during attempt collection/u,
-  );
-  assert.throws(
-    () => validatePrimaryRunCatalogSnapshots(
-      snapshot(run()),
-      snapshot(run({ updated_at: "2026-08-31T00:00:21Z" })),
-      REPOSITORY,
-    ),
-    /changed during attempt collection/u,
-  );
-  assert.throws(
-    () => validatePrimaryRunCatalogSnapshots(
-      snapshot(run()),
-      snapshot(run({ event: "workflow_run" })),
-      REPOSITORY,
-    ),
-    /changed during attempt collection/u,
-  );
-});
-
 test("primary run authority follows workflow ID and path, not its display title", () => {
   const dynamic = run({ name: `Discord production · ${SOURCE}` });
-  const snapshot = entry => ({ total_count: 1, workflow_runs: [entry] });
-  assert.equal(validatePrimaryRunCatalogSnapshots(snapshot(run()), snapshot(dynamic), REPOSITORY).size, 1);
   const authority = resolveDiscordRecoveryAuthority(dynamic, { total_count: 0, artifacts: [] }, {
     ...options, jobList: jobList(),
   });
@@ -300,8 +252,6 @@ test("primary run authority follows workflow ID and path, not its display title"
     { path: ".github/workflows/foreign.yml" },
   ]) {
     const foreign = run(mutation); // A matching old display title grants no authority.
-    assert.throws(() => validatePrimaryRunCatalogSnapshots(snapshot(foreign), snapshot(foreign), REPOSITORY),
-      /foreign authority/u);
     assert.throws(() => resolveDiscordRecoveryAuthority(foreign, { total_count: 0, artifacts: [] }, options),
       /exact completed primary authority/u);
   }
@@ -318,8 +268,6 @@ test("pending concurrency waits require exact empty jobs while approval waits re
     });
   for (const run_started_at of [null, pending.run_started_at]) {
     const entry = { ...pending, run_started_at };
-    const snapshot = { total_count: 2, workflow_runs: [run(), entry] };
-    assert.equal(validatePrimaryRunCatalogSnapshots(snapshot, snapshot, REPOSITORY).size, 2);
     const authority = resolve(entry, [{ total_count: 0, jobs: [] }]);
     assert.equal(authority.freshness_proof.potential_superseders[0].decision,
       "pending-exact-no-jobs-behind-shared-group");
@@ -337,9 +285,6 @@ test("pending concurrency waits require exact empty jobs while approval waits re
   }
   assert.throws(() => resolve({ ...pending, conclusion: "success" }, [{ total_count: 0, jobs: [] }]),
     /status\/conclusion is inconsistent/u);
-  const before = { total_count: 1, workflow_runs: [pending] };
-  const after = { total_count: 1, workflow_runs: [{ ...pending, status: "in_progress" }] };
-  assert.throws(() => validatePrimaryRunCatalogSnapshots(before, after, REPOSITORY), /changed during/u);
 });
 
 test("recovery attempt history requires completed prior attempts and one invariant event", () => {
