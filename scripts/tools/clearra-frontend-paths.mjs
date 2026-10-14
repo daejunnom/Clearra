@@ -173,7 +173,7 @@ export async function fetchQualifiedFrontendAccelerator(asset, fetcher = fetch) 
   return bytes;
 }
 
-export async function stageFrontendAcceleratorAssets(paths, sourceRoot = repositoryRoot) {
+export async function stageFrontendAcceleratorAssets(paths, sourceRoot = repositoryRoot, fetcher = fetch) {
   for (const asset of await frontendAcceleratorAssets(sourceRoot)) {
     const destination = resolve(paths.publicDir, `.${asset.pathname}`);
     assertBuildPathWithin(destination, paths.publicDir);
@@ -184,7 +184,7 @@ export async function stageFrontendAcceleratorAssets(paths, sourceRoot = reposit
       if (present.isFile() && present.size === asset.bytes &&
           createHash('sha256').update(await readFile(destination)).digest('hex') === asset.digest) continue;
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const bytes = await fetchQualifiedFrontendAccelerator(asset);
+    const bytes = await fetchQualifiedFrontendAccelerator(asset, fetcher);
     const temporary = `${destination}.${process.pid}.partial`;
     assertNoBuildLinks(temporary);
     try {

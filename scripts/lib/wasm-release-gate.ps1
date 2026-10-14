@@ -344,6 +344,13 @@ function Invoke-WasmBuildTestGate {
         ) 'clearra-wasm exact worker probe'
         $env:CLEARRA_WEB_PUBLIC_DIR = $webPublicDir
 
+        # The direct Vite path must carry the same signed accelerator mirrors as
+        # the ordinary frontend build. Keep the accepted WASM generation intact.
+        Invoke-WasmReleaseCommand $nodeCommand.Source @(
+            (Join-Path $Root 'scripts/tools/stage-clearra-pages-accelerators.mjs'),
+            '--public-dir', $webPublicDir
+        ) 'clearra-web qualified accelerator mirrors'
+
         # Source-only worker tests intentionally do not prepare SvelteKit. This
         # product leaf owns the sync and IDE type forwarder before Vite loads
         # tsconfig.json. Reuse the exact staged WASM; do not compile it again.

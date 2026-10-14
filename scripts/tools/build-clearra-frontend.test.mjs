@@ -10,6 +10,7 @@ import test from 'node:test';
 import { frontendOptions, frontendPlan, executeFrontendPlan } from './build-clearra-frontend.mjs';
 import { fetchQualifiedFrontendAccelerator, frontendAcceleratorAssets,
   frontendPaths, frontendUiSourceAliases, writeFrontendTypeForwarder } from './clearra-frontend-paths.mjs';
+import { stagePagesAccelerators } from './stage-clearra-pages-accelerators.mjs';
 import { validateManagedFrontendSource } from './validate-managed-frontend-source.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -116,6 +117,77 @@ test('Pages mirrors only qualified profile assets and rejects changed Release by
     /differs from signed source catalog/u);
   await assert.rejects(fetchQualifiedFrontendAccelerator({ ...asset, bytes: bytes.length - 1 }, fetcher),
     /size or status differs/u);
+});
+
+test('Pages acceptance stages both immutable products once, repairs corruption and preserves accepted WASM', async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'clearra-pages-mirrors-'));
+  const fixtureSource = resolve(directory, 'source');
+  const owner = { transaction: resolve(directory, 'transaction') };
+  const publicDir = resolve(owner.transaction, 'public');
+  const configDir = resolve(fixtureSource, 'config');
+  const payloads = new Map();
+  const requests = [];
+  const options = {
+    sourceRoot: fixtureSource,
+    validateOwner: ({ sourceRoot }) => { assert.equal(sourceRoot, fixtureSource); return owner; },
+    fetcher: async url => {
+      requests.push(url);
+      return new Response(payloads.get(url));
+    },
+  };
+  try {
+    await mkdir(configDir, { recursive: true });
+    for (const [product, file, extension] of [
+      ['exact-legal-board', 'legal-board-product-catalog.v1.json', 'cllb'],
+      ['board-conditioned-reachability', 'conditioned-reachability-product-catalog.v1.json', 'cllr'],
+    ]) {
+      const profiles = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'].map(profile => {
+        const bytes = new TextEncoder().encode(`${product}/${profile}`);
+        const url = `https://github.com/daejunnom/Clearra/releases/download/fixture/${profile}.${extension}`;
+        payloads.set(url, bytes);
+        return { profile, status: 'qualified', metadata: {
+          payload_bytes: String(bytes.byteLength),
+          payload_identity: createHash('sha256').update(bytes).digest('hex'), url,
+        } };
+      });
+      await writeFile(resolve(configDir, file), JSON.stringify({ product, profiles }));
+    }
+    const wasm = resolve(publicDir, 'wasm/accepted-producer-receipt.json');
+    await mkdir(dirname(wasm), { recursive: true });
+    await writeFile(wasm, 'unchanged accepted producer identity');
+    const assets = await frontendAcceleratorAssets(fixtureSource);
+
+    await stagePagesAccelerators(publicDir, options);
+    assert.equal(requests.length, 10);
+    for (const asset of assets) {
+      assert.deepEqual(new Uint8Array(await readFile(resolve(publicDir, `.${asset.pathname}`))), payloads.get(asset.url));
+    }
+    await stagePagesAccelerators(publicDir, options);
+    assert.equal(requests.length, 10, 'verified existing bytes must not be downloaded again');
+
+    const first = assets[0];
+    await writeFile(resolve(publicDir, `.${first.pathname}`), 'x'.repeat(first.bytes));
+    await stagePagesAccelerators(publicDir, options);
+    assert.equal(requests.length, 11, 'only the corrupt digest must be repaired');
+    assert.equal(requests.at(-1), first.url);
+    assert.deepEqual(new Uint8Array(await readFile(resolve(publicDir, `.${first.pathname}`))), payloads.get(first.url));
+
+    await rm(resolve(publicDir, `.${first.pathname}`));
+    await assert.rejects(stagePagesAccelerators(publicDir, {
+      ...options, fetcher: async () => new Response(new Uint8Array(first.bytes)),
+    }), /differs from signed source catalog/u);
+    await assert.rejects(readFile(resolve(publicDir, `.${first.pathname}`)), { code: 'ENOENT' });
+    assert.equal(await readFile(wasm, 'utf8'), 'unchanged accepted producer identity');
+
+    const outside = resolve(directory, 'outside');
+    await assert.rejects(stagePagesAccelerators(outside, options), /outside its selected root/u);
+    await assert.rejects(stat(outside), { code: 'ENOENT' });
+    await assert.rejects(stagePagesAccelerators(publicDir, {
+      ...options, validateOwner: () => { throw new Error('expired build owner'); },
+    }), /expired build owner/u);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('web and desktop bundle every declared UI export from original workspace source', async () => {
@@ -294,12 +366,13 @@ test('Pages acceptance owns managed sync after verified WASM and before direct V
   const sourceTest = leaf.indexOf("'clearra-web worker contracts'");
   const probe = leaf.indexOf("'clearra-wasm exact worker probe'");
   const stage = leaf.indexOf('$env:CLEARRA_WEB_PUBLIC_DIR = $webPublicDir');
+  const mirrors = leaf.indexOf("'scripts/tools/stage-clearra-pages-accelerators.mjs'");
   const sync = leaf.indexOf("'--filter', '@clearra/web', 'run', 'sync'");
   const vite = leaf.indexOf("'--filter', '@clearra/web', 'exec', 'vite', 'build', '--configLoader', 'runner'");
   const browser = leaf.indexOf("'clearra-browser operational acceptance'");
   assert.ok(sourceTest >= 0 && probe > sourceTest && stage > probe);
-  assert.ok(sync > stage && vite > sync && browser > vite,
-    'verified WASM must feed a successful managed sync before Vite/browser acceptance');
+  assert.ok(mirrors > stage && sync > mirrors && vite > sync && browser > vite,
+    'verified WASM and qualified mirrors must feed a successful managed sync before Vite/browser acceptance');
   assert.doesNotMatch(leaf.slice(stage, vite), /Invoke-WasmProductArtifactBuild/u,
     'frontend preparation must not recompile or relabel the accepted WASM');
 });
