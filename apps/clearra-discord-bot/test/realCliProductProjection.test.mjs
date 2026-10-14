@@ -12,6 +12,7 @@ import { ClearraDirectExecutor } from '../src/clearra/direct-executor.mjs';
 import { prepareComputeAccelerators } from '../scripts/provision-v081-accelerators.mjs';
 import { realCliProductProjectionRequests, realCliProjectionProfiles as profiles }
   from './support/realCliProductProjectionRequests.mjs';
+import { assertFixtureCoverage } from './support/fixtureCoverage.mjs';
 
 const executable = process.env.CLEARRA_REAL_COMPUTE_CLI;
 const assetRoot = process.env.CLEARRA_REAL_COMPUTE_ASSET_ROOT;
@@ -64,11 +65,12 @@ test('real CLI minimum, score, replay, Setup-score and Build results survive pro
     interactionDeadlineMs: 150_000, maxOutputBytes: 1024 * 1024,
     maxArtifactBytes: 1024 * 1024, terminationGraceMs: 1_000,
   });
-  let completed = 0;
+  const planned = new Map(profiles.map(profile => [profile, realCliProductProjectionRequests(profile)]));
+  const completed = [];
   for (const profile of profiles) {
     let setupBaseline;
     const scoreTargetBaselines = new Map();
-    for (const input of realCliProductProjectionRequests(profile)) {
+    for (const input of planned.get(profile)) {
       const arguments_ = input.arguments;
       const prepared = prepareClearraArguments(arguments_, { workers: 1,
         logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true });
@@ -137,11 +139,12 @@ test('real CLI minimum, score, replay, Setup-score and Build results survive pro
         `${profile}/${input.name}/${input.policy}: actual CLI/Discord result drift`);
       assert.equal(assertDiscordCanonicalOnlyResult(actual).stdout, actual.stdout,
         'canonical projection must remain stable across runner/direct/client hops');
-      completed += 1;
+      completed.push([profile, input.name, input.kind, input.policy]);
     }
     assert.deepEqual([...scoreTargetBaselines.keys()], [1, 2, 3, 4, 5, 6]);
     t.diagnostic(`${profile}: PC three products, 1--6L initial-field score minima and Setup-score/four policies, Build default, actual CLI/Discord parity`);
   }
-  assert.equal(completed, 205);
+  assertFixtureCoverage(completed, [...planned].flatMap(([profile, inputs]) =>
+    inputs.map(input => [profile, input.name, input.kind, input.policy])), 'real CLI/Discord products');
   assert.deepEqual(installedSnapshot(), before, 'result projection must not replace asset generations');
 });

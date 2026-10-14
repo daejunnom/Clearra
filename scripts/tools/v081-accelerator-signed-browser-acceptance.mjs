@@ -640,6 +640,10 @@ async function browserAcceptance() {
         probabilities: report.solution_probabilities,
       };
     };
+    assert.deepEqual(Object.keys(execution.results), profiles,
+      'every qualified profile must have its own actual browser result');
+    assert.equal(execution.ordinaryRootRuns.length, 5,
+      'one serial baseline and four warm-worker repetitions must actually complete');
     const existingCounts = { srs: 245, 'srs-plus': 246, 'srs-x': 289,
       'jstris-180': 246, 'no-kick': 175 };
     const ordinaryBaseline = compact(execution.ordinaryRootRuns[0]);

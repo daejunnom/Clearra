@@ -17,6 +17,7 @@ import { buildCanonicalPcPathReplayDocument, PC_PATH_REPLAY_FRAME_DELAY_MS }
   from '../src/viewer/pc-path-replay.mjs';
 import { realCliProjectionProfiles } from './support/realCliProductProjectionRequests.mjs';
 import { realCliFullHeightProductRequests } from './support/realCliFullHeightProductRequests.mjs';
+import { assertFixtureCoverage } from './support/fixtureCoverage.mjs';
 
 const executable = process.env.CLEARRA_REAL_PC24_CLI;
 const sourceCommit = process.env.CLEARRA_REAL_PC24_SOURCE_COMMIT;
@@ -157,9 +158,11 @@ test('real full-height CLI families survive Discord runner and render all physic
     searchWorkersPerSession: 1, useAllLogicalProcessors: false, searchTimeoutMs: 120_000,
     interactionDeadlineMs: 150_000, maxOutputBytes: 1024 * 1024,
     maxArtifactBytes: 1024 * 1024, terminationGraceMs: 1_000 });
-  let completed = 0;
+  const planned = new Map(realCliProjectionProfiles.map(profile =>
+    [profile, realCliFullHeightProductRequests(profile)]));
+  const completed = [];
   for (const profile of realCliProjectionProfiles) {
-    for (const input of realCliFullHeightProductRequests(profile)) {
+    for (const input of planned.get(profile)) {
       const stdout = invoke(prepareClearraArguments(input.arguments, { workers: 1,
         logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true }));
       const raw = JSON.parse(stdout);
@@ -173,12 +176,13 @@ test('real full-height CLI families survive Discord runner and render all physic
       assert.deepEqual(JSON.parse(actual.stdout), projected,
         `${profile}/${input.name}/${input.product}/b2b=${input.preserveB2b}: actual CLI/Discord product drift`);
       assert.equal(assertDiscordCanonicalOnlyResult(actual).stdout, actual.stdout);
-      completed += 1;
+      completed.push([profile, input.name, input.product, input.kind, input.preserveB2b]);
     }
     t.diagnostic(`${profile}: bounded 7/8/12/24L, eight actual products, preserving-B2B/empty, complete keys and 500ms replay`);
   }
-  assert.equal(completed, 200);
+  assertFixtureCoverage(completed, [...planned].flatMap(([profile, inputs]) => inputs.map(input =>
+    [profile, input.name, input.product, input.kind, input.preserveB2b])), 'real full-height CLI/Discord products');
   assert.equal(createHash('sha256').update(await readFile(executable)).digest('hex'), digest,
     'the built binary must not change during exact-source readback');
-  t.diagnostic(`source=${sourceCommit} cli_sha256=${digest} cases=${completed} release_authority=false`);
+  t.diagnostic(`source=${sourceCommit} cli_sha256=${digest} cases=${completed.length} release_authority=false`);
 });

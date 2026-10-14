@@ -8,8 +8,10 @@ import test from 'node:test';
 import { prepareClearraArguments } from '../../apps/clearra-discord-bot/src/clearra/command.mjs';
 import { realCliProductProjectionRequests, realCliProjectionProfiles, realPcScoreTargetCases, realSetupScoreDocument }
   from '../../apps/clearra-discord-bot/test/support/realCliProductProjectionRequests.mjs';
-import { realCliFullHeightProductRequests }
+import { realCliFullHeightInputs, realCliFullHeightProductRequests }
   from '../../apps/clearra-discord-bot/test/support/realCliFullHeightProductRequests.mjs';
+import { assertFixtureCoverage }
+  from '../../apps/clearra-discord-bot/test/support/fixtureCoverage.mjs';
 
 const workflow = readFileSync(new URL('../../.github/workflows/v081-selective-source-ci.yml', import.meta.url), 'utf8').replace(/\r\n/gu, '\n');
 const recoveryWorkflow = readFileSync(new URL('../../.github/workflows/recovery-build-regression.yml', import.meta.url), 'utf8').replace(/\r\n/gu, '\n');
@@ -19,6 +21,7 @@ const signedMetadata = [
   'config/legal-board-product-catalog.v1.json',
   'config/conditioned-reachability-product-catalog.v1.json',
 ];
+const scoreExecutionOverrides = ['--backend', '--no-backend-fallback', '--count', '--objective', '--max-patterns'];
 
 test('all convergence branches run the non-publishing v0.8.1 and recovery gates', () => {
   const branches = ['codex/v081-main-convergence-20260928', 'codex/converge-v081-linear-20260928', 'codex/converge-main-product-fixes-20261005'];
@@ -127,57 +130,10 @@ test('independent recovery feedback prepares dependencies even after a formattin
   assert.ok(!chain.includes('continue-on-error:'));
 });
 
-test('full-height surface readback preserves coverage-only authority and canonical probability spelling', () => {
-  const readSource = path => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
-  const web = readSource('apps/clearra-web/test/realVerifierPool.smoke.mjs');
-  assert.ok(web.includes("kind === 'pc-failed-queue.v2' || kind === 'pc-probability.v2'"));
-  assert.ok(web.includes("assert.equal(fields.get('search_output_policy'), 'coverage-summary')"));
-  assert.ok(web.includes('assert.deepEqual(report.normalized_solution_keys, [])'));
-  assert.ok(web.includes("assert.equal(fields.get('failed_queue_contract'), 'exact-coverage-complement')"));
-  assert.ok(web.includes('coverageProduct: coverageOnly ? Object.fromEntries'));
-  const discord = readSource('apps/clearra-discord-bot/test/realCliFullHeightProducts.test.mjs');
-  assert.ok(discord.includes('assert.equal(Number(raw.summary.coverage_probability), 1)'));
-  assert.ok(discord.includes("assert.equal(Object.hasOwn(raw.summary, 'probability'), false)"));
-  const desktop = readSource('crates/clearra-cli/tests/desktop_full_height_products.rs');
-  assert.ok(desktop.includes('assert_eq!(summary["coverage_probability"], 1.0)'));
-  assert.ok(desktop.includes('assert!(summary.get("probability").is_none())'));
-  assert.ok(!discord.includes('Number(raw.summary.probability), 1'));
-  assert.ok(!desktop.includes('assert_eq!(summary["probability"], 1.0)'));
-});
-
-test('full-height score readback validates public owners without retaining private Core keys', () => {
-  const web = readFileSync(new URL('../../apps/clearra-web/test/realVerifierPool.smoke.mjs', import.meta.url), 'utf8');
-  assert.ok(web.includes("['pc-score-summary.v2', 'pc-fixed-score-witness.v2', 'pc-score-portfolio.v2'].includes(kind)"));
-  assert.ok(web.includes('} else if (scoreProduct) {'));
-  assert.ok(web.includes('assert.equal(report.solution_keys_complete, true, `${kind}/solution_keys_complete`)'));
-  assert.ok(web.includes('validateProductResultPayload(terminal.response.product_result_payload)'));
-  assert.ok(web.includes('assertFullHeightScoreReadback(baseline, scoreSourceKeys)'));
-  assert.ok(web.includes('publicResult.fields.map(field => field.normalized_field_key), expectedKeys'));
-  const wire = readFileSync(new URL('../../packages/clearra-ui/src/lib/wasm/wasmCommandClient.ts', import.meta.url), 'utf8');
-  assert.ok(wire.includes('overall_score: string;'));
-  assert.ok(wire.includes('average_score: string;'));
-  assert.ok(web.includes("assert.equal(typeof publicResult.overall_score, 'string')"));
-  assert.ok(web.includes('publicResult.overall_score.length > 0'));
-  assert.ok(web.includes('Number.isFinite(Number(publicResult.overall_score))'));
-  assert.ok(web.includes("assert.equal(typeof field.average_score, 'string')"));
-  assert.ok(web.includes('field.average_score.length > 0'));
-  assert.ok(web.includes('Number.isFinite(Number(field.average_score))'));
-  assert.ok(!web.includes('Number.isFinite(publicResult.overall_score)'));
-  assert.ok(!web.includes('Number.isFinite(field.average_score)'));
-  assert.ok(web.includes('publicResult.members.map(member => member.normalized_solution_key), expectedKeys'));
-  assert.ok(web.includes('publicResult.canonical_winner.candidate_id'));
-  assert.ok(web.includes("assert.equal(projection.artifact, null, 'copy must not be encoded on product completion')"));
-  assert.ok(web.includes('wasm.product_page_available()'));
-  assert.ok(web.includes('wasm.product_page_get(alternative, member, maximumWorkSteps)'));
-  assert.ok(web.includes('tryCreateCoveragePortfolioExportKeySource({ initialPage, loadMemberPage, isCurrent })'));
-  assert.ok(web.includes("encodeSolutionKeySourceForClipboard(activation.keySource, 'ctk')"));
-  assert.ok(web.includes('assert.deepEqual(projection.lazyCopy.keys, expectedKeys)'));
-  assert.ok(web.includes('decoded.pages.length, publicResult.members.length'));
-  assert.ok(web.includes('solutionPageToCtk3Page(page)'));
-  assert.ok(web.includes('projectTerminal: productProjectionWithLazyCopy'));
-  assert.ok(web.includes('return await projectTerminal(terminal)'));
-  assert.ok(web.includes('assert.deepEqual(actual, baseline, `${id}/${mode}/full-height Web product and export`)'));
-});
+// Coverage/probability/score/copy values belong to the actual full-height
+// Web pool, native CLI/Discord and Desktop readbacks required below. Reading
+// those tests' assertion text here only couples two tests to implementation
+// names; it does not execute a result or strengthen artifact authority.
 
 test('the production Web pool smoke consumes one real WASM build and unchanged signed packs', () => {
   const realmJob = workflow.slice(workflow.indexOf('\n  wasm-realms:'));
@@ -210,68 +166,10 @@ test('the production Web pool smoke consumes one real WASM build and unchanged s
   assert.ok(!consumer.includes("new URL('../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv', import.meta.url)"));
 });
 
-test('signed browser acceptance searches qualified profiles and fails open after pointer corruption', () => {
-  const browser = readFileSync(new URL('../tools/v081-accelerator-signed-browser-acceptance.mjs', import.meta.url), 'utf8');
-  assert.ok(browser.includes("['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']"));
-  assert.ok(browser.includes('assert.equal(assets.length, profiles.length * 2)'));
-  assert.ok(browser.includes('await profileSelect.selectOption(String(index))'));
-  assert.ok(browser.includes('await secondProfile.selectOption(String(index))'));
-  assert.ok(browser.includes('`--solution-probabilities --backend cpu --workers ${workers} --rule ${profile} --no-tablebase `'));
-  assert.ok(browser.includes('results[profile].existing = {'));
-  assert.ok(browser.includes("results[profile].setup = {"));
-  assert.ok(browser.includes("input === 'setup-score'"));
-  assert.ok(browser.includes("assert.deepEqual(ranking(setup.activated), ranking(setup.baseline)"));
-  assert.ok(browser.includes('results[profile].build = {};'));
-  assert.ok(browser.includes('for (const mode of Object.keys(buildResultSurfaces))'));
-  assert.ok(browser.includes("results[profile].buildAllSolutions = results[profile].build['all-solutions']"));
-  assert.ok(!browser.includes("if (profile !== 'srs-plus')"));
-  assert.ok(!browser.includes("results['srs-plus'].build = {}"));
-  assert.ok(browser.includes('assert.deepEqual(compact(pair.activated), baseline,'));
-  assert.ok(browser.includes("input.startsWith('build-probability:')"));
-  assert.ok(browser.includes("input === 'build-minimum'"));
-  for (const mode of ['all-solutions', 'complete-replay-paths', 'minimum-solutions',
-    'field-average-score', 'fixed-queue-maximum-score', 'highest-score-minimum-set']) {
-    assert.ok(browser.includes(`'${mode}'`), `${mode}: real browser execution must remain covered`);
-  }
-  assert.ok(browser.includes('execution.results[profile].build[mode]'));
-  assert.ok(browser.includes('Object.keys(execution.results[profile].build), Object.keys(buildResultSurfaces)'));
-  assert.ok(browser.includes('assert.deepEqual(productSearchMeaning(pair.activated), productSearchMeaning(pair.baseline)'));
-  assert.ok(browser.includes('BuildProbabilityResult.svelte'));
-  assert.ok(browser.includes('projectWorkspaceSearchReport('));
-  assert.ok(browser.includes('response.resource_report?.execution_availability'));
-  assert.ok(browser.includes('response.resource_report?.result_completeness'));
-  assert.ok(browser.includes('loadProductMemberPage = memberPage'));
-  assert.ok(browser.includes('loadSolutionPage = solutionPage'));
-  assert.ok(browser.includes("rootWorker.postMessage({ type: 'load_product_page', requestId, action,"));
-  assert.ok(browser.includes("rootWorker.postMessage({ type: 'load_solution_page', requestId, offset, limit })"));
-  assert.ok(browser.includes("Object.defineProperty(navigator, 'deviceMemory', { configurable: true, value: 0.5 })"));
-  assert.ok(browser.includes('a low-memory status check must not download an unusable asset'));
-  assert.ok(browser.includes("snapshot.wasmTransferByteCap !== 16 * 1024 * 1024"));
-  assert.ok(browser.includes("compact(execution.results['srs-x'].eligible.baseline)"));
-  assert.ok(browser.includes('the oversized asset must not silently claim a negative proof'));
-  assert.ok(browser.includes('activated: await run(profile, true, true, input, mode)'));
-  assert.ok(browser.includes('releasePages: () => rootWorker.postMessage({ type: \'release_product_pages\' })'));
-  assert.ok(browser.includes("? '.path-representative' : 'li[data-solution-key]'"));
-  assert.ok(browser.includes('document.querySelector(`${surfaceSelector} ${visibleResultSelector}`)'));
-  assert.ok(browser.includes('assert.equal(report.solution_keys_complete, true'));
-  assert.ok(browser.includes('assert.deepEqual(compact(build.activated), buildBaseline'));
-  assert.ok(browser.includes('realCliProductProjectionRequests(profile)'));
-  assert.ok(browser.includes("['minimum', 'score-minimum', 'replay', ...realPcScoreTargetCases.map(input => input.name)]"));
-  assert.ok(browser.includes('targetLines: baseline.targetLines'));
-  assert.ok(browser.includes('payload.content.payload.members.length, 1'));
-  assert.ok(browser.includes('results[profile].products[name] = {'));
-  assert.ok(browser.includes('Object.entries(pcProductInputs[profile])'));
-  assert.ok(browser.includes('productSearchMeaning(pair.activated)'));
-  assert.ok(!browser.includes('assert.deepEqual(compact(pair.activated), compact(pair.baseline)'));
-  assert.ok(browser.includes('assert.deepEqual(pair.activated.result.response.product_result_payload,'));
-  assert.ok(browser.includes("'srs-x': 289"));
-  assert.ok(browser.includes('assert.deepEqual(activated, baseline'));
-  assert.ok(browser.includes("await corrupt('exact-legal-board')"));
-  assert.ok(browser.includes("await corrupt('board-conditioned-reachability')"));
-  assert.ok(browser.includes("assert.equal(summary(corruption.legalAfter).get('legal_board_verified_negative_prunes'), '0'"));
-  assert.ok(browser.includes("assert.equal(summary(corruption.relationAfter).get('conditioned_reachability_snapshot_active'), 'false'"));
-  assert.ok(browser.includes("assert.equal(assetRequests.length, assets.length, 'a search must read OPFS"));
-});
+// Signed admission, corruption, all five profiles, Build modes and actual
+// rendering remain mandatory in the browser execution itself. Its required
+// invocation and producer guards are tested in independent-feedback-workflows;
+// do not duplicate the browser's assertion implementation as substring checks.
 
 test('embedded signed metadata retains canonical LF bytes without parser normalization', () => {
   for (const path of signedMetadata) {
@@ -598,27 +496,40 @@ test('real Discord result proof uses the existing CLI and production runner with
 });
 
 test('every actual Discord product fixture obeys the existing closed command registry', () => {
-  let count = 0;
+  assert.deepEqual(realCliProjectionProfiles, ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']);
+  const policies = ['false:false', 'true:false', 'false:true', 'true:true'];
+  const products = [
+    ['minimum', 'pc-minimum-cover.v2'], ['score-minimum', 'pc-score-portfolio.v2'],
+    ['replay', 'pc-path-family.v2'], ['setup-score', 'setup-score-ranking.v1'],
+    ...[1, 2, 3, 4, 5, 6].map(height => [`score-minimum-${height}l`, 'pc-score-portfolio.v2']),
+  ];
   for (const profile of realCliProjectionProfiles) {
     const requests = realCliProductProjectionRequests(profile);
-    assert.equal(requests.length, 41);
+    assertFixtureCoverage(requests.map(request => [request.name, request.kind, request.policy]),
+      [...products.flatMap(([name, kind]) => policies.map(policy => [name, kind, policy])),
+        ['build-cover', 'build-coverage-portfolio.v2', 'default']], `${profile}/compact fixture`);
     for (const request of requests) {
       const prepared = prepareClearraArguments(request.arguments, { workers: 1,
         logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true });
+      assert.equal(request.arguments[request.arguments.indexOf('--rule') + 1], profile);
       assert.ok(prepared.includes('--include-solution-data'));
       assert.deepEqual(prepared.slice(-3), ['--format', 'json', '--include-solution-data']);
-      count += 1;
+      if (request.policy !== 'default') {
+        const [legal, conditioned] = request.policy.split(':');
+        for (const [enabled, on, off] of [[legal, '--legal-board', '--no-legal-board'],
+          [conditioned, '--conditioned-reachability', '--no-conditioned-reachability']]) {
+          assert.ok(request.arguments.includes(enabled === 'true' ? on : off),
+            `${request.name}/${request.policy}: policy must change the actual input`);
+          assert.ok(!request.arguments.includes(enabled === 'true' ? off : on));
+        }
+      }
     }
     const scoreRequests = requests.filter(request => request.kind === 'pc-score-portfolio.v2');
-    assert.equal(scoreRequests.length, 28);
     for (const request of scoreRequests) {
-      for (const forbidden of ['--backend', '--no-backend-fallback', '--count', '--objective', '--max-patterns'])
+      for (const forbidden of scoreExecutionOverrides)
         assert.ok(!request.arguments.includes(forbidden), 'score product owns its execution controls');
     }
     const setupRequests = requests.filter(request => request.name === 'setup-score');
-    assert.equal(setupRequests.length, 4);
-    assert.deepEqual(setupRequests.map(request => request.policy),
-      ['false:false', 'true:false', 'false:true', 'true:true']);
     for (const request of setupRequests) {
       assert.equal(request.arguments[request.arguments.indexOf('--document') + 1], realSetupScoreDocument);
       assert.ok(!request.arguments.includes('--backend'));
@@ -632,8 +543,18 @@ test('every actual Discord product fixture obeys the existing closed command reg
       assert.throws(() => prepareClearraArguments([...build.arguments, flag]), /does not expose/u);
     }
   }
-  assert.equal(count, 205);
   assert.throws(() => realCliProductProjectionRequests('unknown-profile'), /unknown/u);
+});
+
+test('semantic coverage refuses missing, duplicate and relabelled cases even with the same total', () => {
+  const expected = [['minimum', 'false:false'], ['minimum', 'true:true']];
+  assertFixtureCoverage([...expected].reverse(), expected, 'reordered');
+  for (const invalid of [expected.slice(0, 1), [expected[0], expected[0]],
+    [expected[0], ['replay', 'true:true']], [...expected, ['replay', 'true:true']]]) {
+    assert.throws(() => assertFixtureCoverage(invalid, expected, 'broken coverage'));
+  }
+  assert.throws(() => assertFixtureCoverage([], [], 'vacuous coverage'));
+  assert.throws(() => assertFixtureCoverage([expected[0]], [expected[0], expected[0]], 'broken specification'));
 });
 
 test('the 1--6L score fixtures bind initial area and exact queue instead of empty odd targets', () => {
@@ -653,26 +574,33 @@ test('the 1--6L score fixtures bind initial area and exact queue instead of empt
       cells += 6;
     }
     assert.equal(height * 10 - cells, input.requiredPieces * 4);
-    for (const profile of realCliProjectionProfiles) {
-      const requests = realCliProductProjectionRequests(profile).filter(request => request.name === input.name);
-      assert.equal(requests.length, 4);
-      assert.deepEqual(requests.map(request => request.policy),
-        ['false:false', 'true:false', 'false:true', 'true:true']);
-    }
   }
-  const app = readFileSync(new URL('../../crates/clearra-app/tests/exact_accelerator_product_execution.rs', import.meta.url), 'utf8');
-  assert.ok(app.includes('minimum_request(height, false, false, true, 1)'));
-  assert.ok(app.includes('minimum_request(height, legal, conditioned, true, workers)'));
 });
 
 test('full-height native and Discord score inputs obey product-owned execution before adapter stripping', () => {
-  let count = 0;
+  assert.deepEqual([...new Set(realCliFullHeightInputs.map(input => input.height))].sort((a, b) => a - b),
+    [7, 8, 12, 24]);
+  const products = [
+    ['', 'pc-scenario'], ['chance', 'pc-probability.v2'],
+    ['failed-queue', 'pc-failed-queue.v2'], ['minimals', 'pc-minimum-cover.v2'],
+    ['score', 'pc-score-summary.v2'], ['score-minimals', 'pc-score-portfolio.v2'],
+    ['score-finder', 'pc-fixed-score-witness.v2'], ['path', 'pc-path-family.v2'],
+  ];
   for (const profile of realCliProjectionProfiles) {
-    for (const request of realCliFullHeightProductRequests(profile)) {
+    const requests = realCliFullHeightProductRequests(profile);
+    assertFixtureCoverage(requests.map(request =>
+      [request.name, request.product, request.kind, request.preserveB2b]),
+    realCliFullHeightInputs.flatMap(input => [
+      ...products.map(([product, kind]) => [input.name, product, kind, false]),
+      [input.name, 'minimals', 'pc-minimum-cover.v2', true],
+      [input.name, 'path', 'pc-path-family.v2', true],
+    ]), `${profile}/full-height fixture`);
+    for (const request of requests) {
       const prepared = prepareClearraArguments(request.arguments, { workers: 1,
         logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true });
+      assert.equal(request.arguments[request.arguments.indexOf('--rule') + 1], profile);
       if (['score', 'score-minimals', 'score-finder'].includes(request.product)) {
-        for (const forbidden of ['--backend', '--no-backend-fallback', '--count', '--objective', '--max-patterns']) {
+        for (const forbidden of scoreExecutionOverrides) {
           assert.ok(!request.arguments.includes(forbidden), `${request.product} owns ${forbidden}`);
           assert.ok(!prepared.includes(forbidden));
         }
@@ -683,13 +611,8 @@ test('full-height native and Discord score inputs obey product-owned execution b
           assert.ok(!prepared.includes(forbidden));
         }
       }
-      count += 1;
     }
   }
-  assert.equal(count, 200);
-  const desktop = readFileSync(new URL('../../crates/clearra-cli/tests/desktop_full_height_products.rs', import.meta.url), 'utf8');
-  assert.ok(desktop.includes('if !matches!(product, "score" | "score-minimals" | "score-finder")'));
-  assert.ok(desktop.includes('if product != "score-finder"'));
 });
 
 test('the shared Setup-score fixture is bound to an actual Rust decoder proof without JS dependencies', () => {
