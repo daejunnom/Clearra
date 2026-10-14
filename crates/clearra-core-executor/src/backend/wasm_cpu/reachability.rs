@@ -2976,10 +2976,7 @@ mod tests {
     fn generated_five_profile_packs_reach_the_real_build_frame_lookup() {
         let directory = std::env::var_os("CLEARRA_CONDITIONED_CANDIDATE_DIR")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../_local/artifacts/conditioned-relation-product-candidates")
-            });
+            .expect("explicit generated candidate-pack directory is required");
         for (profile, name) in [
             (KickTableProfileId::Srs90, "srs"),
             (KickTableProfileId::SrsPlus, "srs-plus"),

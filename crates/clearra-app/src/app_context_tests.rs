@@ -181,7 +181,9 @@ mod case_app_request_runs_validation_before_execution {
 
         let report = AppContext::default().validate_request(&request);
         assert!(report.has_errors());
-        assert!(report.contains_code(DiagnosticCode::EPcQueryInvalid));
+        assert!(report
+            .validation()
+            .contains_code(DiagnosticCode::EPcQueryInvalid));
 
         let response = AppContext::default().run(request);
         assert_eq!(response.status(), AppStatus::ValidationFailed);

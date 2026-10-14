@@ -1,10 +1,10 @@
 //! Native/direct facade over the SAME bounded replay manifest used by hosts.
-//! No eager full-height trace family or separate CLI/Discord reducer is built.
+//! No eager compact/full-height trace family or separate CLI/Discord reducer is built.
 use super::*;
 use clearra_core_executor::CoreExecutionError;
 
 impl AppContext {
-    pub(super) fn finalize_full_height_replay_response(
+    pub(super) fn finalize_pc_replay_response(
         &self,
         response: AppResponse,
         command: clearra_host_contract::AppCommandKind,

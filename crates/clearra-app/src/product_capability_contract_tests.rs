@@ -422,6 +422,58 @@ fn run_paged_path(request: AppRequest) -> AppResponse {
 }
 
 #[test]
+fn pc_replay_page_source_matches_direct_and_cooperative_for_compact_family() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let request = paged_path_request_at_height(2, "[OI]O", 0xfc3f0, 2, false);
+    let context =
+        AppContext::new(AppServices::default().with_core_executor(
+            AppCoreExecutorService::wasm_cpu().with_product_retention_budget(
+                crate::ProductRetentionBudget::new(64 * 1024 * 1024),
+            ),
+        ));
+    let direct = context.run(request.clone());
+    assert_eq!(
+        direct.status(),
+        AppStatus::Success,
+        "direct compact replay failed: {:?}",
+        direct.error()
+    );
+    let direct_source = Arc::clone(
+        direct
+            .product_capability_result()
+            .and_then(|result| result.pc_path_family_v2())
+            .and_then(|report| report.page_source())
+            .expect("direct replay must own the same lazy graph source as the cooperative host"),
+    );
+    drop(direct);
+    let cooperative = run_paged_path(request);
+    assert_eq!(cooperative.status(), AppStatus::Success);
+    let cooperative_source = cooperative
+        .product_capability_result()
+        .and_then(|result| result.pc_path_family_v2())
+        .and_then(|report| report.page_source())
+        .expect("cooperative replay source");
+    assert!(direct_source.geometry_count() > 0);
+    assert!(direct_source.witness_count() > 0);
+    assert_eq!(
+        direct_source.identity_sha256(),
+        cooperative_source.identity_sha256()
+    );
+    assert_eq!(
+        direct_source.geometry_count(),
+        cooperative_source.geometry_count()
+    );
+    assert_eq!(
+        direct_source.witness_count(),
+        cooperative_source.witness_count()
+    );
+    assert_eq!(
+        direct_source.first_members(),
+        cooperative_source.first_members()
+    );
+}
+
+#[test]
 fn cooperative_pc_replay_pages_preserve_pattern_family_and_full_copy() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let request = paged_path_request_at_height(2, "[OI]O", 0xfc3f0, 2, false);

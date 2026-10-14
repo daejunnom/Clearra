@@ -65,9 +65,16 @@ function Invoke-WasmProductSourceContracts {
         '-p', 'clearra-wasm',
         '--lib', '--tests'
     ) 'clearra-wasm source contract compilation'
-    Invoke-WasmReleaseCommand $CargoPath @(
-        'test', '--locked', '-p', 'clearra-wasm',
+    # Cargo stops after a failing integration-test executable. Keep the two
+    # independent host contracts observable even when one process aborts; the
+    # shared runner preserves failure and Cargo reuses the same native build.
+    Invoke-WasmReleaseCommand $NodePath @(
+        (Join-Path $Root 'scripts/ci/run-independent-checks.mjs'), '--',
+        $CargoPath, 'test', '--locked', '-p', 'clearra-wasm',
         '--test', 'terminal_supply_public_contract',
+        '--', '--test-threads=1', '--nocapture',
+        ':::',
+        $CargoPath, 'test', '--locked', '-p', 'clearra-wasm',
         '--test', 'wasm_host_contract',
         '--', '--test-threads=1'
     ) 'clearra-wasm source and host contract execution'

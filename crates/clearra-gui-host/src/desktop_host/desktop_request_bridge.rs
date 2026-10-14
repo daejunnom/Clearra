@@ -4347,7 +4347,13 @@ mod product_pages {
                 .join()
                 .expect("Desktop replay source job must finish");
             let response = result.response().expect("Desktop replay source response");
-            assert_eq!(response.status(), AppStatus::Success);
+            assert_eq!(
+                response.status(),
+                AppStatus::Success,
+                "Desktop replay source failed: {:?}; diagnostics={:?}",
+                response.error(),
+                response.diagnostics()
+            );
             let source = response.public_page_source_owner().expect("replay source");
             let mut bridge = DesktopTauriCommandBridge::default();
             bridge.product_page_store = Some(ProductPageStore::from_source(source).unwrap());

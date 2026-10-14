@@ -149,12 +149,16 @@ impl AppContext {
             && product_capability_contract
                 .as_ref()
                 .is_some_and(|c| c.contract() == ProductCapabilityContract::PcPath)
-            && response
-                .render_model()
-                .and_then(crate::render::AppRenderModel::core_result)
-                .is_some_and(|core| core.pc_full_height_replay_evidence().is_some())
+            && (self
+                .services
+                .core_executor()
+                .supports_cooperative_wasm_search()
+                || response
+                    .render_model()
+                    .and_then(crate::render::AppRenderModel::core_result)
+                    .is_some_and(|core| core.pc_full_height_replay_evidence().is_some()))
         {
-            return self.finalize_full_height_replay_response(
+            return self.finalize_pc_replay_response(
                 response,
                 command_kind,
                 &output_policy,

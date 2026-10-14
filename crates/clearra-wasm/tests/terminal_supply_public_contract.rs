@@ -54,6 +54,7 @@ fn terminal_supply_p0_cli_app_and_wasm_json_preserve_the_exact_solution_set() {
 
 #[inline(never)]
 fn assert_terminal_supply_app_and_json() {
+    eprintln!("terminal_supply_phase=compile-command");
     let request = WasmCommandRuntime::default()
         .compile_command_text(TERMINAL_SUPPLY_P0_COMMAND)
         .expect("terminal-supply CLI command must compile");
@@ -95,11 +96,13 @@ fn assert_terminal_supply_app_and_json() {
         ]
     );
 
+    eprintln!("terminal_supply_phase=direct-app-run");
     let response = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     )
     .run(request);
     assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    eprintln!("terminal_supply_phase=app-result-and-json");
 
     let result = response
         .render_model()
@@ -181,15 +184,18 @@ fn assert_terminal_supply_app_and_json() {
 
 #[inline(never)]
 fn assert_terminal_supply_worker_identity() {
+    eprintln!("terminal_supply_phase=worker-start");
     let mut worker = WasmWorkerJobRuntime::default();
     let job_id = worker
         .start_job(TERMINAL_SUPPLY_P0_COMMAND)
         .expect("terminal-supply browser worker job");
+    eprintln!("terminal_supply_phase=worker-advance");
     while !worker
         .advance_job(job_id, 16_384)
         .expect("advance terminal-supply browser worker job")
         .is_terminal()
     {}
+    eprintln!("terminal_supply_phase=worker-terminal-json");
     let events_json = worker
         .drain_events_json(job_id)
         .expect("terminal-supply browser worker event JSON");

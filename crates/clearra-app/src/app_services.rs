@@ -493,6 +493,21 @@ impl AppCoreExecutorService {
         result: CoreExecutionResult,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        if self.supports_cooperative_wasm_search()
+            && result.bool_field("postprocess_pc_path_requested") == Some(true)
+            && (result.bool_field("execution_constraint_preserve_b2b") != Some(true)
+                || result.bool_field("execution_constraint_materialized") == Some(true))
+        {
+            if control.is_cancelled() {
+                return Err(CoreExecutionError::Cancelled);
+            }
+            // Direct and cooperative PC replay share one checked graph source.
+            // Eager trace materialization here loses the lazy page owner and
+            // repeats the source/projection work before App can bind it.
+            // Unmaterialized execution constraints still take the existing
+            // filtering path below; page ownership never waives that proof.
+            return Ok(result);
+        }
         let result = self.materialize_terminal_replay_partition(result, control)?;
         let pc_save_requested = result.bool_field("postprocess_pc_save_requested") == Some(true);
         let mut memory_guard = |_: &CoreExecutionResult, _: u128| Ok(());
