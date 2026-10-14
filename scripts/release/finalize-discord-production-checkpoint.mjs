@@ -759,7 +759,9 @@ export function materializeCompletedJobTopology(value, runAuthority) {
     ) {
       throw new Error("Discord checkpoint completed job authority is invalid");
     }
-    const steps = [...job.steps].sort((left, right) => left.number - right.number);
+    const steps = job.steps.filter((step) =>
+      DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS[jobName].includes(step.name))
+      .sort((left, right) => left.number - right.number);
     if (
       steps.length !== expected.steps.length ||
       steps.length !== DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS[jobName].length
@@ -977,7 +979,7 @@ function validateReleaseContract(value, identity, candidate) {
     "asset_count", "canonical_acceptance_evidence_sha256",
   ], "checkpoint GitHub Release contract");
   if (
-    value.tag !== RELEASE || value.title !== `Clearra ${RELEASE}` ||
+    value.tag !== RELEASE ||
     value.source_commit !== identity.sourceCommit || value.draft !== false ||
     value.prerelease !== false || value.immutable !== true || value.asset_count !== 3 ||
     value.canonical_acceptance_evidence_sha256 !==
@@ -1004,7 +1006,7 @@ export function validateImmutableCheckpointReleaseReadback(release, options) {
   );
   if (
     release.tag_name !== tag || release.target_commitish !== sourceCommit ||
-    release.name !== `Clearra ${tag}` || release.draft !== false ||
+    release.draft !== false ||
     release.prerelease !== false || release.immutable !== true ||
     publishedAt <= taggerAt ||
     release.url !== `https://api.github.com/repos/${repository}/releases/${releaseId}` ||

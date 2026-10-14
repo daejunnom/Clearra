@@ -80,14 +80,22 @@ test("queues capture and Pages only after exact success and canonical history ve
   assert.equal(f.messages.filter((message) => message.startsWith("Dispatched")).length, 2);
 });
 
-test("rejects foreign, malformed, branch and rerun queue inputs before API access", async () => {
+test("rejects foreign, malformed and non-main queue inputs before API access", async () => {
   for (const change of [{ repository: "other/Clearra" }, { sourceCommit: "main" },
-    { snapshotSha: "HEAD" }, { acceptanceRunId: "1e2" }, { attempt: "2" },
+    { snapshotSha: "HEAD" }, { acceptanceRunId: "1e2" }, { attempt: "0" },
     { ref: "refs/tags/v0.8.0" }]) {
     const f = fixture();
     await assert.rejects(queuePagesPublication({ ...options, ...change }, f.dependencies), /exact main/u);
     assert.equal(f.calls.length, 0);
   }
+});
+
+test("a rerun remains bound to the successful acceptance attempt", async () => {
+  const f = fixture({ mutateRun: run => ({ ...run, run_attempt: 2 }) });
+  await queuePagesPublication({ ...options, attempt: "2" }, f.dependencies);
+  for (const call of f.calls.filter(call => call.kind === "verify"))
+    assert.equal(call.input.expectedRunAttempt, "2");
+  assert.equal(f.posts().length, 2);
 });
 
 test("failed, cancelled and timed-out acceptance never starts rollback or Pages", async () => {
@@ -98,8 +106,8 @@ test("failed, cancelled and timed-out acceptance never starts rollback or Pages"
   }
 });
 
-test("verifies every run identity including first attempt rather than trusting its success label", async () => {
-  for (const change of [{ id: 11 }, { run_attempt: 2 }, { head_sha: snapshotSha },
+test("verifies every run identity and a positive attempt rather than trusting its success label", async () => {
+  for (const change of [{ id: 11 }, { run_attempt: 0 }, { head_sha: snapshotSha },
     { head_branch: "other" }, { path: ".github/workflows/candidate-preflight.yml" },
     { event: "push" }, { repository: { full_name: "other/Clearra" } }]) {
     const f = fixture({ mutateRun: (run) => ({ ...run, ...change }) });

@@ -50,14 +50,11 @@ test("skips an invalid newer candidate and uses an independently valid older att
   assert.equal(result.runId, "100");
 });
 
-test("never reuses a successful prior canonical run or an active prior run", async () => {
-  await assert.rejects(
-    resolveReusableAcceptedWasmBuild(options(), dependencies([
-      run(CURRENT_RUN, { status: "in_progress", conclusion: null, created_at: time(30) }),
-      run("200", { conclusion: "success", created_at: time(20) }),
-    ])),
-    /existing successful canonical run/u,
-  );
+test("a prior canonical success does not block execution but is not borrowed as acceptance", async () => {
+  assert.equal(await resolveReusableAcceptedWasmBuild(options(), dependencies([
+    run(CURRENT_RUN, { status: "in_progress", conclusion: null, created_at: time(30) }),
+    run("200", { conclusion: "success", created_at: time(20) }),
+  ])), null);
   const activeOnly = await resolveReusableAcceptedWasmBuild(options(), dependencies([
     run(CURRENT_RUN, { status: "in_progress", conclusion: null, created_at: time(30) }),
     run("200", { status: "in_progress", conclusion: null, created_at: time(20) }),
@@ -108,7 +105,7 @@ test("expired, ambiguous, wrong-run, or failed-upload artifacts have no reuse au
   assert.equal(failedUpload, null);
 });
 
-test("rejects truncated history, foreign identity, reruns, and a missing current run", async () => {
+test("rejects truncated history, foreign identity, and a missing current run", async () => {
   await assert.rejects(
     resolveReusableAcceptedWasmBuild(options(), {
       ...dependencies([]),
@@ -122,13 +119,10 @@ test("rejects truncated history, foreign identity, reruns, and a missing current
     ])),
     /exact canonical workflow identity/u,
   );
-  await assert.rejects(
-    resolveReusableAcceptedWasmBuild(
-      { ...options(), currentRunAttempt: "2" },
-      dependencies([run(CURRENT_RUN, { run_attempt: 2 })]),
-    ),
-    /first canonical run attempt/u,
-  );
+  assert.equal(await resolveReusableAcceptedWasmBuild(
+    { ...options(), currentRunAttempt: "2" },
+    dependencies([run(CURRENT_RUN, { run_attempt: 2, status: "in_progress", conclusion: null })]),
+  ), null);
   await assert.rejects(
     resolveReusableAcceptedWasmBuild(options(), dependencies([run("200")])),
     /one active current run/u,

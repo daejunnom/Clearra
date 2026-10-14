@@ -11,7 +11,7 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 const DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const ID = /^[1-9][0-9]*$/u;
 const MAX_FILES = 1_024;
-const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_IDENTITY_BYTES = 8 * 1024 * 1024;
 const MIN_RETENTION_MS = 89 * 24 * 60 * 60 * 1_000;
 
@@ -27,11 +27,12 @@ export function acceptedPagesArtifactName(sourceCommit, runId, runAttempt = "1")
 
 export function resolveAcceptedPagesArtifact({ sourceCommit, acceptedRun, artifactPages }) {
   const sha = required(sourceCommit, SHA, "source commit");
-  if (String(acceptedRun?.run_attempt) !== "1" || acceptedRun?.head_sha !== sha || acceptedRun?.status !== "completed" || acceptedRun?.conclusion !== "success" || acceptedRun?.event !== "workflow_dispatch" || acceptedRun?.head_branch !== "main" || acceptedRun?.path !== ".github/workflows/release-cli.yml") {
-    fail("accepted Pages source must be the successful canonical attempt-1 run");
+  if (!ID.test(String(acceptedRun?.run_attempt)) || acceptedRun?.head_sha !== sha || acceptedRun?.status !== "completed" || acceptedRun?.conclusion !== "success" || acceptedRun?.event !== "workflow_dispatch" || acceptedRun?.head_branch !== "main" || acceptedRun?.path !== ".github/workflows/release-cli.yml") {
+    fail("accepted Pages source must be the successful canonical run");
   }
   const runId = required(String(acceptedRun.id), ID, "accepted run ID");
-  const expectedName = acceptedPagesArtifactName(sha, runId, "1");
+  const runAttempt = required(String(acceptedRun.run_attempt), ID, "accepted run attempt");
+  const expectedName = acceptedPagesArtifactName(sha, runId, runAttempt);
   if (!Array.isArray(artifactPages) || artifactPages.length < 2) fail("accepted Pages artifact pagination is incomplete");
   const flattened = [];
   for (let index = 0; index < artifactPages.length; index += 1) {
@@ -51,7 +52,7 @@ export function resolveAcceptedPagesArtifact({ sourceCommit, acceptedRun, artifa
   }
   return Object.freeze({
     accepted_run_id: runId,
-    accepted_run_attempt: "1",
+    accepted_run_attempt: runAttempt,
     accepted_artifact_id: required(String(artifact.id), ID, "accepted artifact ID"),
     accepted_artifact_name: expectedName,
     accepted_artifact_digest: artifact.digest,
@@ -65,16 +66,16 @@ export function validateCanonicalCaptureEvidence(value, { sourceCommit } = {}) {
   requireExactKeys(value, ["accepted_run_id", "accepted_run_attempt", "accepted_artifact_id", "accepted_artifact_name", "accepted_artifact_digest", "accepted_artifact_api_readback_sha256", "accepted_artifact_created_at", "accepted_artifact_expires_at", "identity", "identity_sha256", "identity_bytes_sha256", "identity_bytes_size", "file_set_sha256", "file_count", "total_bytes", "initial_public_readback", "preartifact_public_readback"], "canonical Pages capture evidence");
   const sha = required(sourceCommit ?? value.identity?.sourceCommit, SHA, "canonical source commit");
   required(value.accepted_run_id, ID, "accepted run ID");
-  if (value.accepted_run_attempt !== "1") fail("canonical Pages capture requires accepted attempt 1");
+  required(value.accepted_run_attempt, ID, "accepted run attempt");
   required(value.accepted_artifact_id, ID, "accepted artifact ID");
-  if (value.accepted_artifact_name !== acceptedPagesArtifactName(sha, value.accepted_run_id, "1")) fail("accepted artifact name is not exact-run-bound");
+  if (value.accepted_artifact_name !== acceptedPagesArtifactName(sha, value.accepted_run_id, value.accepted_run_attempt)) fail("accepted artifact name is not exact-run-bound");
   required(value.accepted_artifact_digest, DIGEST, "accepted artifact digest");
   required(value.accepted_artifact_api_readback_sha256, SHA256, "accepted artifact API hash");
   const created = Date.parse(value.accepted_artifact_created_at);
   const expires = Date.parse(value.accepted_artifact_expires_at);
   if (!Number.isFinite(created) || !Number.isFinite(expires) || expires - created < MIN_RETENTION_MS) fail("accepted artifact evidence is not durable");
   if (canonicalSha256(value.identity) !== value.identity_sha256) fail("canonical identity hash differs");
-  if (String(value.identity.acceptedRunId) !== value.accepted_run_id || String(value.identity.acceptedRunAttempt) !== "1" || value.identity.sourceCommit !== sha) fail("canonical identity differs from accepted authority");
+  if (String(value.identity.acceptedRunId) !== value.accepted_run_id || String(value.identity.acceptedRunAttempt) !== value.accepted_run_attempt || value.identity.sourceCommit !== sha) fail("canonical identity differs from accepted authority");
   const files = value.identity.files;
   if (!Array.isArray(files) || files.length !== value.file_count || files.length === 0 || files.length > MAX_FILES) fail("canonical file count is invalid");
   const total = files.reduce((sum, file) => sum + file.size, 0);
@@ -149,7 +150,7 @@ export async function readCanonicalPublicResponse(response, maximumBytes) {
 async function main() {
   const mode = process.argv[2];
   if (mode === "verify-public") {
-    const result = await verifyCanonicalBuildAndPublic({ buildPath: process.env.CANONICAL_BUILD_PATH, sourceCommit: process.env.SNAPSHOT_SHA, acceptedRunId: process.env.ACCEPTED_RUN_ID, acceptedRunAttempt: "1", basePath: process.env.PAGES_BASE_PATH, pageUrl: process.env.PAGES_URL, cacheBuster: `${process.env.GITHUB_RUN_ID}-${process.env.PAGES_AUTHORITY_PHASE}` });
+    const result = await verifyCanonicalBuildAndPublic({ buildPath: process.env.CANONICAL_BUILD_PATH, sourceCommit: process.env.SNAPSHOT_SHA, acceptedRunId: process.env.ACCEPTED_RUN_ID, acceptedRunAttempt: process.env.ACCEPTED_RUN_ATTEMPT, basePath: process.env.PAGES_BASE_PATH, pageUrl: process.env.PAGES_URL, cacheBuster: `${process.env.GITHUB_RUN_ID}-${process.env.PAGES_AUTHORITY_PHASE}` });
     const output = Buffer.from(canonicalJson(result)).toString("base64");
     await appendFile(process.env.GITHUB_OUTPUT, `canonical_readback_base64=${output}\n`, "utf8");
     return;

@@ -327,9 +327,7 @@ export function validateFastFixQualificationLedger(value) {
     throw new Error("fast-fix baseline must precede the qualification source");
   }
   requireDecimalId(value.baseline.run_id, "baseline run ID");
-  if (String(value.baseline.run_attempt) !== "1") {
-    throw new Error("baseline run must be attempt 1");
-  }
+  requireDecimalId(value.baseline.run_attempt, "baseline run attempt");
   requireSha256(
     value.baseline.ledger_report_sha256,
     "baseline ledger report digest",
@@ -482,9 +480,6 @@ function validateImpactBaseline(value, sourceCommit) {
     value.baseline_run_attempt,
     "deployment impact baseline run attempt",
   );
-  if (runAttempt !== "1") {
-    throw new Error("deployment impact baseline must be attempt 1");
-  }
   const ledgerReportSha256 = requireSha256(
     value.baseline_ledger_report_sha256,
     "deployment impact baseline ledger report digest",
@@ -631,9 +626,6 @@ function validateAuthority(authority, { acceptedLedgerWorkflow = false } = {}) {
     authority.runAttempt,
     "qualification run attempt",
   );
-  if (runAttempt !== "1") {
-    throw new Error("fast-fix qualification forbids rerun attempts");
-  }
   return Object.freeze({ repository, sourceCommit, workflowPath, runId, runAttempt });
 }
 

@@ -61,17 +61,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Require attempt 1, exact current main, and no earlier exact-source run
+      - name: Require the exact current main source
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$GITHUB_RUN_ATTEMPT" == '1' ]] || {
-            echo 'fast-fix qualification forbids workflow reruns; use a new source commit after failure' >&2
-            exit 2
-          }
           [[ "$GITHUB_REF" == 'refs/heads/main' && "$GITHUB_REF_TYPE" == 'branch' ]] || {
             echo 'fast-fix qualification must be dispatched from main' >&2
             exit 2
@@ -83,16 +79,6 @@ jobs:
           git fetch --force --tags origin main
           [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" && "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || {
             echo 'qualification source is not exact current main' >&2
-            exit 2
-          }
-          gh api --paginate --slurp \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/fast-fix-qualification.yml/runs?event=workflow_dispatch&branch=main&per_page=100" \
-            > "$RUNNER_TEMP/fast-fix-runs.json"
-          prior_attempts="$(jq --arg sha "$SOURCE_COMMIT" --argjson current "$GITHUB_RUN_ID" \
-            '[.[] | .workflow_runs[] | select(.head_sha == $sha and .id != $current)] | length' \
-            "$RUNNER_TEMP/fast-fix-runs.json")"
-          [[ "$prior_attempts" == '0' ]] || {
-            echo 'exact source already has a fast-fix qualification run; use a new source commit after failure' >&2
             exit 2
           }
       - name: Resolve the latest accepted component ledger before classification
@@ -110,7 +96,7 @@ jobs:
               echo 'baseline ledger run ID and artifact name must be supplied together' >&2
               exit 2
             }
-            [[ "$REQUESTED_BASELINE_ARTIFACT_NAME" =~ ^accepted-component-ledger-[0-9a-f]{40}-run-[1-9][0-9]*-attempt-1$ ]] || {
+            [[ "$REQUESTED_BASELINE_ARTIFACT_NAME" =~ ^accepted-component-ledger-[0-9a-f]{40}-run-[1-9][0-9]*-attempt-[1-9][0-9]*$ ]] || {
               echo 'baseline ledger artifact name is invalid' >&2
               exit 2
             }
@@ -122,7 +108,7 @@ jobs:
             '[.[] | .workflow_runs[] |
               select((.path == ".github/workflows/component-ledger-bootstrap.yml" or
                       .path == ".github/workflows/fast-fix-production-finalizer.yml") and
-                     .run_attempt == 1 and .conclusion == "success")] |
+                     .run_attempt >= 1 and .conclusion == "success")] |
              if length == 0 then "" else (max_by(.id).id | tostring) end' \
             "$RUNNER_TEMP/all-main-dispatch-runs.json")"
           if [[ -z "$latest_accepted_run" ]]; then
@@ -137,12 +123,13 @@ jobs:
             echo 'baseline is not the last successful accepted component ledger run' >&2
             exit 2
           }
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$latest_accepted_run/attempts/1" \
+          baseline_attempt="$(jq -r --argjson id "$latest_accepted_run" '[.[] | .workflow_runs[] | select(.id == $id)][0].run_attempt' "$RUNNER_TEMP/all-main-dispatch-runs.json")"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$latest_accepted_run/attempts/$baseline_attempt" \
             > "$RUNNER_TEMP/baseline-run.json"
           baseline_sha="$(jq -r '.head_sha // empty' "$RUNNER_TEMP/baseline-run.json")"
           baseline_path="$(jq -r '.path // empty' "$RUNNER_TEMP/baseline-run.json")"
-          jq -e --argjson id "$latest_accepted_run" \
-            '.id == $id and .run_attempt == 1 and .event == "workflow_dispatch" and
+          jq -e --argjson id "$latest_accepted_run" --argjson attempt "$baseline_attempt" \
+            '.id == $id and .run_attempt == $attempt and .event == "workflow_dispatch" and
              .head_branch == "main" and .head_repository.full_name == env.GITHUB_REPOSITORY and
              .status == "completed" and .conclusion == "success"' \
             "$RUNNER_TEMP/baseline-run.json" >/dev/null
@@ -163,7 +150,7 @@ jobs:
             echo 'baseline source is not an ancestor of the qualification source' >&2
             exit 2
           }
-          expected_name="accepted-component-ledger-${baseline_sha}-run-${latest_accepted_run}-attempt-1"
+          expected_name="accepted-component-ledger-${baseline_sha}-run-${latest_accepted_run}-attempt-${baseline_attempt}"
           [[ -z "$REQUESTED_BASELINE_ARTIFACT_NAME" || "$REQUESTED_BASELINE_ARTIFACT_NAME" == "$expected_name" ]] || {
             echo 'baseline ledger artifact name differs from its exact source/run authority' >&2
             exit 2
@@ -193,7 +180,7 @@ jobs:
           echo "baseline_source_commit=$baseline_sha" >> "$GITHUB_OUTPUT"
           echo "baseline_workflow_path=$baseline_path" >> "$GITHUB_OUTPUT"
           echo "baseline_run_id=$latest_accepted_run" >> "$GITHUB_OUTPUT"
-          echo 'baseline_run_attempt=1' >> "$GITHUB_OUTPUT"
+          echo "baseline_run_attempt=$baseline_attempt" >> "$GITHUB_OUTPUT"
           echo "baseline_artifact_name=$expected_name" >> "$GITHUB_OUTPUT"
       - name: Download the latest accepted component ledger
         if: steps.baseline.outputs.has_baseline == 'true'
@@ -305,23 +292,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$GITHUB_RUN_ATTEMPT" == '1' ]] || exit 2
           git fetch --no-tags --depth=1 origin main
           [[ "$(git rev-parse origin/main)" == "$SOURCE_COMMIT" ]] || {
             echo 'main moved after qualification classification' >&2
-            exit 2
-          }
-          node scripts/release/canonical-acceptance-run.mjs \
-            --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$SOURCE_COMMIT" --require zero
-          gh api --paginate --slurp \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/release-cli.yml/runs?event=workflow_dispatch&branch=main&per_page=100" \
-            > "$RUNNER_TEMP/canonical-runs.json"
-          prior_canonical_runs="$(jq --arg sha "$SOURCE_COMMIT" \
-            '[.[] | .workflow_runs[] | select(.head_sha == $sha)] | length' \
-            "$RUNNER_TEMP/canonical-runs.json")"
-          [[ "$prior_canonical_runs" == '0' ]] || {
-            echo 'the exact source already has a canonical run; use a new source commit after failure' >&2
             exit 2
           }
           node scripts/release/fast-fix-qualification-evidence.mjs promotion \

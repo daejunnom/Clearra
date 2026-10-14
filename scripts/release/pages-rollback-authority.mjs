@@ -55,11 +55,11 @@ export const LEGACY_BOOTSTRAP_RELEASE_TAG = LEGACY_PAGES_RELEASE_TAG;
 const MINIMUM_RETENTION_MS = 89 * 24 * 60 * 60 * 1000;
 const HTTP_READ_TIMEOUT_MS = 30_000;
 const MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024;
-export const MAX_PAGES_ROLLBACK_ARCHIVE_BYTES = 64 * 1024 * 1024;
-export const MAX_PAGES_ROLLBACK_TAR_BYTES = 64 * 1024 * 1024;
+export const MAX_PAGES_ROLLBACK_ARCHIVE_BYTES = 512 * 1024 * 1024;
+export const MAX_PAGES_ROLLBACK_TAR_BYTES = 512 * 1024 * 1024;
 const MAX_CAPTURE_REPORT_BYTES = 2 * 1024 * 1024;
 const MAX_MODERN_PAGES_FILE_COUNT = 1_024;
-const MAX_MODERN_PAGES_TOTAL_BYTES = 64 * 1024 * 1024;
+const MAX_MODERN_PAGES_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_MODERN_PAGES_PATH_LENGTH = 512;
 const MODERN_PAGES_PATH_PATTERN = /^[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*$/u;
 const EXPECTED_CONTRACT = Object.freeze({
@@ -2130,6 +2130,7 @@ async function main() {
     });
     await appendFile(env("GITHUB_OUTPUT"), [
       `accepted_run_id=${artifactAuthority.accepted_run_id}`,
+      `accepted_run_attempt=${artifactAuthority.accepted_run_attempt}`,
       `accepted_artifact_id=${artifactAuthority.accepted_artifact_id}`,
       `accepted_artifact_name=${artifactAuthority.accepted_artifact_name}`,
       `canonical_artifact_authority_base64=${Buffer.from(canonicalJson(artifactAuthority)).toString("base64")}`,

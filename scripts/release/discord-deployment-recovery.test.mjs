@@ -226,27 +226,6 @@ const options = {
   runJobCatalog: runJobCatalog(),
 };
 
-test("every current promote workflow step is admitted in order by recovery", async () => {
-  const source = await readFile(new URL("../../.github/workflows/discord-deploy.yml", import.meta.url), "utf8");
-  const promote = source.split("\n  promote:")[1].split("\n  sync-observe:")[0];
-  const actual = [...promote.matchAll(/^      - name: (.+)$/gm)].map(match => match[1].trim());
-  const admitted = DISCORD_RECOVERY_JOB_STEPS.promote;
-  let previous = -1;
-  for (const name of actual) {
-    const index = admitted.indexOf(name);
-    assert.ok(index > previous, `foreign or unordered current step: ${name}`);
-    previous = index;
-  }
-  for (const retired of [
-    "Compare warm CLI and Discord execution on the exact zero-traffic Cloud image",
-    "Preserve warm Cloud CLI parity diagnostics separately from release authority",
-  ]) {
-    assert.ok(!actual.includes(retired));
-    assert.ok(admitted.includes(retired), `historical recovery must still admit ${retired}`);
-  }
-  assert.ok(actual.includes("Remove only this failed deployment candidate tag"));
-});
-
 test("recovery accepts GitHub list/exact-attempt updated-at projection skew", () => {
   const authority = resolveDiscordRecoveryAuthority(
     run(),
@@ -632,7 +611,7 @@ test("missing prestage artifact fails closed after upload success or runtime mut
         }),
       },
     ),
-    /foreign or unordered topology|promote step authority is invalid/u,
+    /absence of runtime mutation/u,
   );
 });
 

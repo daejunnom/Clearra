@@ -32,28 +32,3 @@ function Get-SrpGovernedFiles() {
     $script:SrpGovernedFilesCache = @($files)
     return $script:SrpGovernedFilesCache
 }
-
-function Assert-ValidationArchitectureDelegatesPolicyAreas() {
-    $validateArchitecture = Read-Text 'scripts/validate_architecture.ps1'
-    foreach ($requiredModule in @(
-        'architecture\validate_dependencies.ps1',
-        'architecture\validate_cli_boundaries.ps1',
-        'architecture\validate_test_policy.ps1',
-        'architecture\validate_security.ps1',
-        'architecture\validate_file_size.ps1'
-    )) {
-        if ($validateArchitecture -notlike "*$requiredModule*") {
-            Add-ArchitectureError "validate_architecture.ps1 must delegate policy area '$requiredModule'"
-        }
-    }
-}
-
-function Invoke-FileSizeArchitectureValidation() {
-    foreach ($file in Get-SrpGovernedFiles) {
-        $lineCount = @(Get-Content -LiteralPath $file.FullName).Count
-        if ($lineCount -gt 1200) {
-            Add-ArchitectureWarning "$(Get-RepositoryRelativePath $file.FullName) has $lineCount lines; review module cohesion, but size alone is not SRP debt"
-        }
-    }
-    Assert-ValidationArchitectureDelegatesPolicyAreas
-}

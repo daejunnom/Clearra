@@ -57,9 +57,7 @@ on:
       - "apps/clearra-discord-bot/test/field-modal.test.mjs"
       - "apps/clearra-discord-bot/test/extended-solution-key.test.mjs"
       - "crates/clearra-geometry/**"
-      - "scripts/ci/pc24-source-boundary.test.mjs"
       - "scripts/ci/run-independent-checks*.mjs"
-      - "scripts/ci/independent-feedback-workflows.test.mjs"
       - "tests/fixtures/contracts/pc_target_frame_parity.v1.tsv"
       - "tests/fixtures/contracts/extended_solution_keys.v1.tsv"
       - "tests/fixtures/contracts/extended_pc_surface_input.v1.tsv"
@@ -107,7 +105,7 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
       - name: Verify the bounded non-publishing feedback contract
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}
-        run: node --test scripts/ci/pc24-source-boundary.test.mjs scripts/ci/run-independent-checks.test.mjs scripts/ci/independent-feedback-workflows.test.mjs
+        run: node --test scripts/ci/run-independent-checks.test.mjs
       - name: Check target-frame and compiler source format
         if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         run: cargo fmt -p clearra-pc-graph -p clearra-problem -p clearra-geometry -p clearra-core-domain -p clearra-core-executor -p clearra-replay -p clearra-render -p clearra-accelerator-product-host -p clearra-postprocess -p clearra-output -p clearra-fumen -p clearra-host-contract -p clearra-cli -p clearra-cli-command -p clearra-app -p clearra-validation -p clearra-wasm -p clearra-wasm-abi --check

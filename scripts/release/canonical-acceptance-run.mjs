@@ -32,14 +32,41 @@ export function validateCanonicalAcceptanceLookup(value, options) {
   if (!Array.isArray(value.workflow_runs)) {
     throw new Error(`${label}.workflow_runs must be an array`);
   }
-  if (value.total_count !== expectedCount || value.workflow_runs.length !== expectedCount) {
+  if (value.workflow_runs.length !== value.total_count ||
+      (expectedCount === 0 && value.total_count !== 0) ||
+      (expectedCount === 1 && value.total_count === 0)) {
     throw new Error(
       `${label} must contain exactly ${expectedCount} successful exact-SHA canonical run(s)`,
     );
   }
   if (expectedCount === 0) return null;
 
-  const run = value.workflow_runs[0];
+  // More than one successful attempt is not a failure. Consume the pinned
+  // identity when supplied, otherwise the latest successful exact-source run.
+  for (const run of value.workflow_runs) {
+    requirePlainObject(run, "canonical run");
+    if (run.event !== "workflow_dispatch" || run.status !== "completed" ||
+        run.conclusion !== "success" || run.head_branch !== "main" ||
+        run.head_sha !== sourceCommit || run.path !== WORKFLOW_PATH) {
+      throw new Error(`${label} does not contain the exact canonical run identity`);
+    }
+    decimalId(run.id, "canonical run ID");
+    decimalId(run.run_attempt, "canonical run attempt");
+  }
+  let eligible = value.workflow_runs;
+  if (expectedRunId) {
+    eligible = eligible.filter(run => String(run.id) === expectedRunId);
+    if (eligible.length === 0) throw new Error(`${label} run ID differs from the bound acceptance`);
+  }
+  if (expectedRunAttempt) {
+    eligible = eligible.filter(run => String(run.run_attempt) === expectedRunAttempt);
+    if (eligible.length === 0) throw new Error(`${label} run attempt differs from the bound acceptance`);
+  }
+  const run = [...eligible].sort((left, right) => {
+    const runOrder = BigInt(right.id) - BigInt(left.id);
+    const order = runOrder || BigInt(right.run_attempt) - BigInt(left.run_attempt);
+    return order > 0n ? 1 : order < 0n ? -1 : 0;
+  })[0];
   requirePlainObject(run, `${label}.workflow_runs[0]`);
   if (
     run.event !== "workflow_dispatch" ||
@@ -53,9 +80,6 @@ export function validateCanonicalAcceptanceLookup(value, options) {
   }
   const id = decimalId(run.id, `${label} run ID`);
   const attempt = decimalId(run.run_attempt, `${label} run attempt`);
-  if (attempt !== "1") {
-    throw new Error(`${label} must use the first workflow attempt; reruns are forbidden`);
-  }
   if (expectedRunId && id !== expectedRunId) {
     throw new Error(`${label} run ID differs from the bound acceptance`);
   }

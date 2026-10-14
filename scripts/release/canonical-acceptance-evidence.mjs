@@ -160,7 +160,6 @@ const SURFACE_OWNERS = Object.freeze(new Map([
 ]));
 const REQUIRED_JOBS = Object.freeze(new Map([
   ["metadata", Object.freeze([
-    "Require exact main and zero prior canonical success",
     "Bind the exact canonical acceptance run",
   ])],
   ["ctk3", Object.freeze([
@@ -979,9 +978,6 @@ function validateAuthority(value) {
     runId: decimalId(value?.runId, "run ID"),
     runAttempt: decimalId(value?.runAttempt, "run attempt"),
   };
-  if (authority.runAttempt !== "1") {
-    throw new Error("canonical acceptance evidence forbids workflow reruns");
-  }
   return Object.freeze(authority);
 }
 

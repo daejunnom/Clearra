@@ -600,14 +600,14 @@ test("forward identity manifest rejects duplicate, unsafe, excessive-count, and 
   );
   await rejectFiles(
     [
-      descriptor("a.bin", 32 * 1024 * 1024 + 1),
-      descriptor("b.bin", 32 * 1024 * 1024),
+      descriptor("a.bin", 256 * 1024 * 1024 + 1),
+      descriptor("b.bin", 256 * 1024 * 1024),
     ],
     /payload bytes exceed/u,
     "aggregate byte cap",
   );
   await rejectFiles(
-    [descriptor("too-large.bin", 64 * 1024 * 1024 + 1)],
+    [descriptor("too-large.bin", 512 * 1024 * 1024 + 1)],
     /invalid or unsorted/u,
     "per-file byte cap",
   );

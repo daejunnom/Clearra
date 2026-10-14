@@ -279,7 +279,7 @@ test("recovery debt retains exact workflow IDs when run display titles change", 
   }
   input.recoveryAttempts.attempts[0].name = "Recovery for an exact original run";
   const plan = planDiscordRecoveryDebt(
-    input.runList, input.primaryAttempts, input.recoveryAttempts, input.artifactPages, identity,
+    input.runList, input.primaryAttempts, input.recoveryAttempts, input.artifactPages, debtIdentity(),
   );
   assert.equal(plan.debts.length, 1);
   for (const section of ["primaryAttempts", "recoveryAttempts"]) {
@@ -287,7 +287,7 @@ test("recovery debt retains exact workflow IDs when run display titles change", 
       const invalid = structuredClone(input);
       invalid[section].attempts[0].workflow_id = workflow_id;
       assert.throws(() => planDiscordRecoveryDebt(
-        invalid.runList, invalid.primaryAttempts, invalid.recoveryAttempts, invalid.artifactPages, identity,
+        invalid.runList, invalid.primaryAttempts, invalid.recoveryAttempts, invalid.artifactPages, debtIdentity(),
       ), /foreign authority/u);
     }
   }

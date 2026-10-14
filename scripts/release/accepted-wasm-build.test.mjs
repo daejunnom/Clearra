@@ -185,7 +185,7 @@ test("rebinds byte-identical exact-source payload under the current run authorit
   }
 });
 
-test("WASM rebinding rejects reruns, overlap, tampering, source drift, and an existing destination", async () => {
+test("WASM rebinding preserves attempt identity and rejects overlap, tampering, source drift, and an existing destination", async () => {
   const fixture = await createFixture();
   const destination = `${fixture.root}-rejected`;
   try {
@@ -200,14 +200,16 @@ test("WASM rebinding rejects reruns, overlap, tampering, source drift, and an ex
       rebindAcceptedWasmBuild(
         fixture.root, destination, SOURCE_COMMIT, RUN_ID, "2", "123457", "1",
       ),
-      /requires first-attempt canonical runs/u,
+      /run attempt/u,
     );
-    await assert.rejects(
-      rebindAcceptedWasmBuild(
-        fixture.root, destination, SOURCE_COMMIT, RUN_ID, "1", "123457", "2",
-      ),
-      /requires first-attempt canonical runs/u,
+    await rebindAcceptedWasmBuild(
+      fixture.root, destination, SOURCE_COMMIT, RUN_ID, "1", "123457", "2",
     );
+    assert.equal(
+      (await verifyAcceptedWasmBuild(destination, SOURCE_COMMIT, "123457", "2")).run_attempt,
+      "2",
+    );
+    await rm(destination, { recursive: true, force: true });
     await assert.rejects(
       rebindAcceptedWasmBuild(
         fixture.root, fixture.root, SOURCE_COMMIT, RUN_ID, "1", "123457", "1",

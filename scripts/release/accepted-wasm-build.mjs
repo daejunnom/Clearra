@@ -165,9 +165,6 @@ export async function rebindAcceptedWasmBuild(
     currentRunId,
     currentRunAttempt,
   );
-  if (previousAuthority.runAttempt !== "1" || currentAuthority.runAttempt !== "1") {
-    throw new Error("accepted WASM reuse requires first-attempt canonical runs");
-  }
   if (
     previousAuthority.runId === currentAuthority.runId &&
     previousAuthority.runAttempt === currentAuthority.runAttempt

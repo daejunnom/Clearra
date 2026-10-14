@@ -243,15 +243,12 @@ test("common changes produce a non-mutating canonical dispatch request receipt",
   assert.equal(report.target_workflow_path, ".github/workflows/release-cli.yml");
 });
 
-test("rerun attempts and pre-v0.9 PC4 fast qualification are rejected", () => {
-  assert.throws(
-    () => createComponentQualification(
+test("successful rerun identity is retained while pre-v0.9 PC4 fast qualification is rejected", () => {
+  assert.equal(createComponentQualification(
       { ...candidateAuthority, runAttempt: "2" },
       "pages",
       COMPONENT_QUALIFICATION_COMMANDS.get("pages"),
-    ),
-    /forbids rerun/u,
-  );
+    ).run_attempt, "2");
   assert.throws(
     () => componentReport("pc4_lookup_service"),
     /not implemented before v0\.9/u,

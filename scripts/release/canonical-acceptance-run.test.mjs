@@ -80,14 +80,12 @@ test("canonical acceptance binds exactly one complete run identity", () => {
   }
 });
 
-test("canonical acceptance rejects duplicate success and malformed counts", () => {
-  assert.throws(
-    () => validateCanonicalAcceptanceLookup(
-      lookup([canonicalRun(), canonicalRun({ id: 124 })]),
-      { sourceCommit: SOURCE_COMMIT, expectedCount: 1 },
-    ),
-    /exactly 1/u,
-  );
+test("canonical acceptance selects an exact successful run without a uniqueness gate", () => {
+  const multiple = lookup([canonicalRun(), canonicalRun({ id: 124 })]);
+  assert.equal(validateCanonicalAcceptanceLookup(multiple,
+    { sourceCommit: SOURCE_COMMIT, expectedCount: 1 }).id, "124");
+  assert.equal(validateCanonicalAcceptanceLookup(multiple,
+    { sourceCommit: SOURCE_COMMIT, expectedCount: 1, expectedRunId: "123" }).id, "123");
   assert.throws(
     () => validateCanonicalAcceptanceLookup(
       { total_count: 1, workflow_runs: [] },
@@ -123,14 +121,11 @@ test("canonical acceptance rejects a different bound run or attempt", () => {
   );
 });
 
-test("canonical acceptance rejects every workflow rerun attempt", () => {
-  assert.throws(
-    () => validateCanonicalAcceptanceLookup(
-      lookup([canonicalRun({ run_attempt: 2 })]),
-      { sourceCommit: SOURCE_COMMIT, expectedCount: 1 },
-    ),
-    /reruns are forbidden/u,
-  );
+test("canonical acceptance permits a successful bound rerun", () => {
+  assert.equal(validateCanonicalAcceptanceLookup(
+    lookup([canonicalRun({ run_attempt: 2 })]),
+    { sourceCommit: SOURCE_COMMIT, expectedCount: 1, expectedRunAttempt: "2" },
+  ).attempt, "2");
 });
 
 test("resolver preserves a hidden first-attempt success after a failed rerun", async () => {
@@ -172,21 +167,15 @@ test("resolver preserves a hidden first-attempt success after a failed rerun", a
   );
 });
 
-test("resolver rejects duplicate successes across workflow attempt history", async () => {
-  await assert.rejects(
-    resolveCanonicalAcceptanceHistory({
-      sourceCommit: SOURCE_COMMIT,
-      expectedCount: 1,
-    }, {
-      async listRuns() {
-        return lookup([canonicalRun({ run_attempt: 2 })]);
-      },
-      async getAttempt() {
-        return canonicalRun();
-      },
-    }),
-    /exactly 1/u,
-  );
+test("resolver selects the latest successful attempt without rejecting older successes", async () => {
+  const result = await resolveCanonicalAcceptanceHistory({
+    sourceCommit: SOURCE_COMMIT,
+    expectedCount: 1,
+  }, {
+    async listRuns() { return lookup([canonicalRun({ run_attempt: 2 })]); },
+    async getAttempt() { return canonicalRun(); },
+  });
+  assert.equal(result.attempt, "2");
 });
 
 test("resolver rejects truncated or cross-owned workflow attempt history", async () => {

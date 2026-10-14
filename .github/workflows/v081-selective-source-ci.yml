@@ -408,9 +408,9 @@ jobs:
         if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         with:
           node-version: 22.23.2
-      - name: Verify focused CI path and failure contracts
+      - name: Verify product fixtures and runtime library behavior
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}
-        run: node --test scripts/ci/v081-source-ci-contract.test.mjs scripts/ci/readonly-runtime-libraries.test.mjs scripts/ci/run-independent-checks.test.mjs scripts/ci/independent-feedback-workflows.test.mjs
+        run: node --test scripts/ci/v081-source-ci-contract.test.mjs scripts/ci/readonly-runtime-libraries.test.mjs scripts/ci/run-independent-checks.test.mjs
       - name: Verify WASM import leases and public documentation before product builds
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: node --test scripts/tools/import-verified-clearra-wasm.test.mjs scripts/tools/public-command-docs.test.mjs
@@ -562,7 +562,7 @@ jobs:
         run: >-
           node scripts/ci/run-independent-checks.mjs --
           powershell -NoProfile -File scripts/validate_architecture.ps1 -TaskName "No Product Debt Architecture" :::
-          powershell -NoProfile -File scripts/validate_architecture.ps1 -TaskName "SRP Policy Architecture"
+          powershell -NoProfile -File scripts/validate_architecture.ps1 -TaskName "PowerShell Syntax"
       - name: Test the existing validation and exact memory-wire regressions, not the complete RustExact shard
         if: ${{ !cancelled() && steps.node.outcome == 'success' && steps.rust.outcome == 'success' }}
         run: >-

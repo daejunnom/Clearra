@@ -36,7 +36,7 @@ export async function readCloudInputManifest(path, expectedHash) {
   requireExactKeys(manifest, ['schema_id', 'repository', 'version', 'base_path',
     'source_commit', 'accepted_run_id', 'accepted_run_attempt', 'files'], 'Cloud input manifest');
   if (manifest.schema_id !== CLOUD_INPUT_SCHEMA || !SHA.test(manifest.source_commit) ||
-      !ID.test(manifest.accepted_run_id) || manifest.accepted_run_attempt !== '1' ||
+      !ID.test(manifest.accepted_run_id) || !ID.test(manifest.accepted_run_attempt) ||
       !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(manifest.repository) ||
       !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(manifest.version) ||
       manifest.base_path !== `/${manifest.repository.split('/')[1]}` ||
@@ -202,7 +202,7 @@ async function main() {
     'exact-source-archive', 'output-directory', 'input-directory', 'manifest-sha256',
   ].map((key) => [key, { type: 'string' }])) });
   const expected = { sourceCommit: values['source-commit'], runId: values['run-id'], runAttempt: values['run-attempt'] };
-  if (!SHA.test(expected.sourceCommit ?? '') || !ID.test(expected.runId ?? '') || expected.runAttempt !== '1' || positionals.length !== 1) {
+  if (!SHA.test(expected.sourceCommit ?? '') || !ID.test(expected.runId ?? '') || !ID.test(expected.runAttempt ?? '') || positionals.length !== 1) {
     throw new Error('Cloud accepted-input command requires exact source/run/attempt');
   }
   if (positionals[0] === 'create') {

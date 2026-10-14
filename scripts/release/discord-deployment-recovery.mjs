@@ -197,39 +197,33 @@ const RECOVERY_JOB_STEP_NAMES = Object.freeze({
 });
 
 const SUCCESSFUL_JOB_STEP_NAMES = Object.freeze({
-  authority: RECOVERY_JOB_STEP_NAMES.authority,
-  "Prepare immutable Discord candidate inputs": new Set([
-    "Set up job",
-    "Check out the exact accepted source for candidate preparation",
-    "Set up Node.js for immutable candidate preparation",
-    "Bind exact Corepack pnpm for candidate preparation",
-    "Resolve the exact pnpm store",
-    "Cache only the exact pnpm store",
-    "Download the exact pre-candidate recovery-debt clearance",
-    "Resolve one successful exact-SHA Pages deployment before candidate work",
-    "Download the exact Pages deployment authority before candidate work",
-    "Verify Pages authority before Cloud packaging",
-    "Authenticate the Cloud-Build-only identity",
-    "Set up gcloud for Cloud-Build-only preparation",
-    "Download canonical acceptance evidence without rebuilding products",
-    "Download the already accepted CTK3 distribution",
-    "Verify accepted evidence and package only runtime dependencies",
-    "Download the already accepted Linux CLI",
-    "Seal accepted Cloud build inputs without recompilation",
-    "Package accepted products in Cloud Build without recompilation",
-    "Seal the approval-free accepted-input and immutable-build state",
-    "Upload sealed prepared state",
-    "Post Authenticate the Cloud-Build-only identity",
-    "Post Cache only the exact pnpm store",
-    "Post Set up Node.js for immutable candidate preparation",
-    "Post Check out the exact accepted source for candidate preparation",
-    "Complete job",
+  authority: new Set([
+    "Classify deployment impact from the last production tag",
+    "Reject unresolved earlier Discord recovery debt before candidate work",
+    "Upload exact recovery-debt clearance before candidate work",
   ]),
-  promote: new Set([...PRIMARY_PROMOTE_STEP_NAMES].filter((name) => ![
-    "Compare warm CLI and Discord execution on the exact zero-traffic Cloud image",
-    "Preserve warm Cloud CLI parity diagnostics separately from release authority",
-  ].includes(name))),
-  "sync-observe": RECOVERY_JOB_STEP_NAMES["sync-observe"],
+  "Prepare immutable Discord candidate inputs": new Set([
+    "Download the exact pre-candidate recovery-debt clearance",
+    "Upload sealed prepared state",
+  ]),
+  promote: new Set([
+    PRESTAGE_UPLOAD_STEP,
+    RUNTIME_MUTATION_STEPS[0],
+    LIVE_UPLOAD_STEP,
+    RUNTIME_MUTATION_STEPS[1],
+    "Upload sealed promoted state",
+  ]),
+  "sync-observe": new Set([
+    "Resolve one successful exact-SHA Pages deployment before global mutation",
+    "Verify Pages authority before Discord global mutation",
+    CATALOG_CAPTURE_STEP,
+    CATALOG_UPLOAD_STEP,
+    CATALOG_MUTATION_STEP,
+    "Upload durable sync and sole canonical observation evidence",
+    DISCORD_CHECKPOINT_JOB_CAPTURE_STEP,
+    DISCORD_CHECKPOINT_CANDIDATE_SEAL_STEP,
+    DISCORD_CHECKPOINT_CANDIDATE_UPLOAD_STEP,
+  ]),
 });
 
 export const DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_NAMES = PRIMARY_JOB_NAMES;
@@ -892,6 +886,10 @@ function validatePromoteStepProofReport(value, mode) {
     promote.job_id !== value.job_id || promote.job_status !== value.job_status ||
     promote.job_conclusion !== value.job_conclusion
   ) throw new Error("Discord promote proof differs from its sealed primary topology");
+  if (["none", "prestage"].includes(mode) &&
+      promote.steps.some((step) => !PRIMARY_PROMOTE_STEP_NAMES.has(step.name))) {
+    throw new Error("Discord recovery cannot prove absence of runtime mutation from an unknown promote step");
+  }
   if (mode === "none") {
     if (
       prestage?.conclusion === "success" || live?.conclusion === "success" ||
@@ -935,8 +933,7 @@ function validateSealedPrimaryJobs(value) {
       requireDecimalId(job.job_id, "sealed primary job ID") !== job.job_id ||
       job.job_status !== "completed" || !JOB_CONCLUSIONS.has(job.job_conclusion)
     ) throw new Error("Discord sealed primary job proof is invalid");
-    const expected = [...RECOVERY_JOB_STEP_NAMES[job.job_name]];
-    let priorIndex = -1;
+    const names = new Set();
     let priorNumber = 0;
     for (const step of job.steps) {
       requirePlainObject(step, "Discord sealed primary step proof");
@@ -945,13 +942,12 @@ function validateSealedPrimaryJobs(value) {
         ["name", "number", "status", "conclusion"],
         "Discord sealed primary step proof",
       );
-      const expectedIndex = expected.indexOf(step.name);
       if (
-        expectedIndex < 0 || expectedIndex <= priorIndex ||
+        typeof step.name !== "string" || names.has(step.name) ||
         !Number.isSafeInteger(step.number) || step.number <= priorNumber ||
         step.status !== "completed" || !JOB_CONCLUSIONS.has(step.conclusion)
       ) throw new Error("Discord sealed primary step proof is foreign or unordered");
-      priorIndex = expectedIndex;
+      names.add(step.name);
       priorNumber = step.number;
     }
     result.set(job.job_name, job);
@@ -1004,6 +1000,9 @@ export function validateNoPrestageArtifactAuthority(value, options) {
     promote.conclusion === "success" || !isZeroStepTerminal(sync)
   ) throw new Error("Discord no-prestage authority violates the closed dependency topology");
   const steps = promote.steps;
+  if (steps.some((step) => !PRIMARY_PROMOTE_STEP_NAMES.has(step.name))) {
+    throw new Error("Discord recovery cannot prove absence of runtime mutation from an unknown promote step");
+  }
   const upload = steps.find((step) => step.name === PRESTAGE_UPLOAD_STEP);
   if (!upload && !isZeroStepTerminal(promote)) {
     throw new Error("Discord recovery promote job lacks the expected prestage upload step");
@@ -1034,6 +1033,9 @@ export function validatePrestageOnlyArtifactAuthority(value, options) {
     promote.conclusion === "success" || !isZeroStepTerminal(sync)
   ) throw new Error("Discord prestage-only authority violates the closed dependency topology");
   const steps = promote.steps;
+  if (steps.some((step) => !PRIMARY_PROMOTE_STEP_NAMES.has(step.name))) {
+    throw new Error("Discord recovery cannot prove absence of runtime mutation from an unknown promote step");
+  }
   const prestageUpload = steps.find((step) => step.name === PRESTAGE_UPLOAD_STEP);
   if (prestageUpload?.conclusion !== "success") {
     throw new Error("Discord prestage artifact exists without its successful upload step");
@@ -1152,21 +1154,17 @@ function getExactPrimaryJobAuthority(value, options) {
     throw new Error("Discord recovery promote job conclusion is invalid");
   }
   for (const job of jobs) {
-    const expected = [...RECOVERY_JOB_STEP_NAMES[job.name]];
-    let priorIndex = -1;
     let priorNumber = 0;
     const names = new Set();
     for (const step of job.steps) {
-      const expectedIndex = expected.indexOf(step.name);
       if (
-        expectedIndex < 0 || expectedIndex <= priorIndex || names.has(step.name) ||
+        typeof step.name !== "string" || names.has(step.name) ||
         !Number.isSafeInteger(step.number) || step.number <= priorNumber ||
         step.status !== "completed" || !JOB_CONCLUSIONS.has(step.conclusion)
       ) {
         throw new Error("Discord recovery job-step authority contains foreign or unordered topology");
       }
       names.add(step.name);
-      priorIndex = expectedIndex;
       priorNumber = step.number;
     }
   }
@@ -1180,7 +1178,6 @@ function getExactPrimaryJobAuthority(value, options) {
     if (
       typeof step.name !== "string" ||
       seenStepNames.has(step.name) ||
-      !PRIMARY_PROMOTE_STEP_NAMES.has(step.name) ||
       !Number.isSafeInteger(step.number) ||
       step.number < 1 ||
       step.status !== "completed" ||
@@ -1252,20 +1249,22 @@ export function validateDiscordCheckpointCandidatePrerequisites(value, options) 
   for (const name of PRIMARY_JOB_NAMES) {
     const job = byName.get(name);
     const expected = [...SUCCESSFUL_JOB_STEP_NAMES[name]];
+    const relevantSteps = job.steps.filter((step) =>
+      SUCCESSFUL_JOB_STEP_NAMES[name].has(step.name));
     if (name !== "sync-observe") {
       if (job.status !== "completed" || job.conclusion !== "success") {
         throw new Error("Discord checkpoint prerequisite deployment job did not succeed");
       }
-      validateExactStepSequence(job.steps, expected, { requireAll: true });
-      validateSuccessfulStepConclusions(name, job.steps);
-      proofJobs.push(sealCheckpointPrerequisiteJob(job, job.steps));
+      validateExactStepSequence(relevantSteps, expected, { requireAll: true });
+      validateSuccessfulStepConclusions(name, relevantSteps);
+      proofJobs.push(sealCheckpointPrerequisiteJob(job, relevantSteps));
       continue;
     }
     if (job.status !== "in_progress" || job.conclusion !== null) {
       throw new Error("Discord checkpoint producer must run inside the exact active sync job");
     }
     const captureIndex = expected.indexOf(DISCORD_CHECKPOINT_JOB_CAPTURE_STEP);
-    const completedPrefix = job.steps.filter((step) =>
+    const completedPrefix = relevantSteps.filter((step) =>
       step.status === "completed" || step.status === "in_progress");
     validateExactStepSequence(completedPrefix, expected.slice(0, captureIndex + 1), {
       requireAll: true,
@@ -1274,7 +1273,7 @@ export function validateDiscordCheckpointCandidatePrerequisites(value, options) 
     validateSuccessfulStepConclusions(name, completedPrefix, {
       finalInProgressName: DISCORD_CHECKPOINT_JOB_CAPTURE_STEP,
     });
-    for (const step of job.steps.slice(completedPrefix.length)) {
+    for (const step of relevantSteps.slice(completedPrefix.length)) {
       const index = expected.indexOf(step.name);
       if (
         index <= captureIndex || !["queued", "pending"].includes(step.status) ||
@@ -1467,7 +1466,9 @@ export function validateSuccessfulDiscordDeploymentAuthority(value, options) {
       throw new Error("Discord production checkpoint requires every exact primary job to succeed");
     }
     const expected = [...SUCCESSFUL_JOB_STEP_NAMES[name]];
-    const actual = [...job.steps].sort((left, right) => left.number - right.number);
+    const actual = job.steps.filter((step) =>
+      SUCCESSFUL_JOB_STEP_NAMES[name].has(step.name))
+      .sort((left, right) => left.number - right.number);
     if (
       actual.length !== expected.length ||
       actual.some((step, index) =>

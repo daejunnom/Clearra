@@ -1,10 +1,10 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 
-// Preserve the existing Discord public-document non-discovery policy exactly.
+// Check actual hidden command spellings, not ordinary engineering prose.
 // This owner needs neither CTK3 nor any product module/build.
 export const HIDDEN_COMMAND_DESCRIPTION =
-  /--diagnostics|(?:^|[\s`])\/verify(?=$|[\s`])|\$verify|>verify|diagnostic\.verify|VerifyKicks|`Verify`|\b(?:clearra|sfinder)\s+verify\b|\bverify\s+kicks\b|\bhidden\s+verify\b|\bverification\s+(?:scope|commands)\b|\b(?:reserved|hidden|internal|non-search)\s+diagnostic(?:s|\s+probes?)?\b|\bdiagnostic\s+(?:root|route|modal|boundary|probes?|feature)\b|\bdiagnostics?\s+intentionally\b/iu;
+  /--diagnostics|(?:^|[\s`])\/verify(?=$|[\s`])|\$verify|>verify|diagnostic\.verify|VerifyKicks|`Verify`|\b(?:clearra|sfinder)\s+verify\b|\bverify\s+kicks\b/iu;
 
 export function findPublicCommandDocViolations(documents) {
   const violations = [];

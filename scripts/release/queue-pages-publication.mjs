@@ -16,10 +16,10 @@ const PENDING = new Set(["queued", "in_progress", "waiting", "pending", "request
 // acceptance receipt, restores Pages, modifies a release, or rebuilds artifacts.
 export async function queuePagesPublication(options, dependencies) {
   const { sourceCommit, snapshotSha, acceptanceRunId, repository, ref, attempt } = options;
-  if (repository !== REPOSITORY || ref !== "refs/heads/main" || attempt !== "1" ||
+  if (repository !== REPOSITORY || ref !== "refs/heads/main" || !ID.test(attempt ?? "") ||
       !SHA.test(sourceCommit ?? "") || !SHA.test(snapshotSha ?? "") ||
       !ID.test(acceptanceRunId ?? "")) {
-    throw new Error("Pages queue requires exact main, full commits and first-attempt run IDs");
+    throw new Error("Pages queue requires exact main, full commits and positive run IDs");
   }
   const { api, verifyCanonical, now, pause, record } = dependencies;
   const deadline = now() + LEASE_MS;
@@ -40,7 +40,7 @@ export async function queuePagesPublication(options, dependencies) {
       withinLease();
       await currentMain();
       const run = await api("GET", `${base}/actions/runs/${id}`);
-      if (String(run?.id) !== id || String(run?.run_attempt) !== "1" ||
+      if (String(run?.id) !== id || !ID.test(String(run?.run_attempt)) ||
           run?.head_sha !== sourceCommit || run?.head_branch !== "main" ||
           run?.event !== "workflow_dispatch" ||
           run?.path !== `.github/workflows/${workflow}` ||
@@ -51,7 +51,7 @@ export async function queuePagesPublication(options, dependencies) {
         if (run.conclusion !== "success") {
           throw new Error(`Pages queue stopped after ${workflow}: ${run.conclusion}`);
         }
-        return;
+        return String(run.run_attempt);
       }
       if (!PENDING.has(run.status) || run.conclusion !== null) {
         throw new Error(`Pages queue rejected the ${workflow} execution state`);
@@ -77,10 +77,10 @@ export async function queuePagesPublication(options, dependencies) {
   };
   const verify = () => verifyCanonical({
     repository, sourceCommit, expectedCount: 1,
-    expectedRunId: acceptanceRunId, expectedRunAttempt: "1",
+    expectedRunId: acceptanceRunId, expectedRunAttempt: acceptedAttempt,
   });
 
-  await waitFor("release-cli.yml", acceptanceRunId);
+  const acceptedAttempt = await waitFor("release-cli.yml", acceptanceRunId);
   await verify();
   const captureRunId = await dispatch("pages-rollback.yml", {
     mode: "capture", snapshot_sha: snapshotSha, expected_current_main: sourceCommit,

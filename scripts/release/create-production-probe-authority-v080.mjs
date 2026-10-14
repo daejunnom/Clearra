@@ -299,7 +299,7 @@ function validateState(value, stage, sourceCommit) {
     value.schema_id !== STATE_SCHEMA ||
     value.stage !== stage ||
     value.source_commit !== sourceCommit ||
-    value.workflow_run_attempt !== "1" ||
+    !/^[1-9][0-9]*$/u.test(value.workflow_run_attempt ?? "") ||
     !/^[1-9][0-9]*$/u.test(value.workflow_run_id ?? "") ||
     !/^[1-9][0-9]*$/u.test(value.accepted_run_id ?? "") ||
     !/^[1-9][0-9]*$/u.test(value.accepted_run_attempt ?? "") ||

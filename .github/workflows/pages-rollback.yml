@@ -56,6 +56,7 @@ jobs:
     outputs:
       legacy_initial_evidence_base64: ${{ steps.authority.outputs.legacy_evidence_base64 }}
       accepted_run_id: ${{ steps.authority.outputs.accepted_run_id }}
+      accepted_run_attempt: ${{ steps.authority.outputs.accepted_run_attempt }}
       accepted_artifact_id: ${{ steps.authority.outputs.accepted_artifact_id }}
       accepted_artifact_name: ${{ steps.authority.outputs.accepted_artifact_name }}
       canonical_artifact_authority_base64: ${{ steps.authority.outputs.canonical_artifact_authority_base64 }}
@@ -166,6 +167,7 @@ jobs:
           CANONICAL_BUILD_PATH: canonical-pages-build
           SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
           ACCEPTED_RUN_ID: ${{ needs.capture-authority.outputs.accepted_run_id }}
+          ACCEPTED_RUN_ATTEMPT: ${{ needs.capture-authority.outputs.accepted_run_attempt }}
           PAGES_BASE_PATH: /${{ github.event.repository.name }}
           PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
           PAGES_AUTHORITY_PHASE: initial
@@ -219,6 +221,7 @@ jobs:
           CANONICAL_BUILD_PATH: canonical-pages-build
           SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
           ACCEPTED_RUN_ID: ${{ needs.capture-authority.outputs.accepted_run_id }}
+          ACCEPTED_RUN_ATTEMPT: ${{ needs.capture-authority.outputs.accepted_run_attempt }}
           PAGES_BASE_PATH: /${{ github.event.repository.name }}
           PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
           PAGES_AUTHORITY_PHASE: preartifact

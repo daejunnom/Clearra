@@ -26,15 +26,25 @@ function artifact() {
 
 function run() { return { id: 55, run_attempt: 1, head_sha: SHA, status: "completed", conclusion: "success", event: "workflow_dispatch", head_branch: "main", path: ".github/workflows/release-cli.yml" }; }
 
-test("canonical artifact resolution is attempt-1, complete-pagination, unique, durable, and exact-name bound", () => {
+test("canonical artifact resolution is attempt-bound, complete-pagination, unique, durable, and exact-name bound", () => {
   const acceptedRun = run();
   const pages = [{ total_count: 1, artifacts: [artifact()] }, { total_count: 1, artifacts: [] }];
   const result = resolveAcceptedPagesArtifact({ sourceCommit: SHA, acceptedRun, artifactPages: pages });
   assert.equal(result.accepted_artifact_id, "77");
   assert.equal(result.accepted_run_attempt, "1");
-  assert.throws(() => resolveAcceptedPagesArtifact({ sourceCommit: SHA, acceptedRun: { ...acceptedRun, run_attempt: 2 }, artifactPages: pages }), /attempt-1/u);
+  assert.throws(() => resolveAcceptedPagesArtifact({ sourceCommit: SHA, acceptedRun: { ...acceptedRun, run_attempt: 2 }, artifactPages: pages }), /exactly one/u);
   assert.throws(() => resolveAcceptedPagesArtifact({ sourceCommit: SHA, acceptedRun, artifactPages: [pages[0]] }), /pagination/u);
   assert.throws(() => resolveAcceptedPagesArtifact({ sourceCommit: SHA, acceptedRun, artifactPages: [{ total_count: 2, artifacts: [artifact(), { ...artifact(), id: 78 }] }, { total_count: 2, artifacts: [] }] }), /exactly one/u);
+});
+
+test("a successful rerun reads only its own Pages build", () => {
+  const acceptedRun = { ...run(), run_attempt: 2 };
+  const currentArtifact = { ...artifact(), name: acceptedPagesArtifactName(SHA, "55", "2") };
+  const result = resolveAcceptedPagesArtifact({ sourceCommit: SHA, acceptedRun,
+    artifactPages: [{ total_count: 2, artifacts: [artifact(), currentArtifact] },
+      { total_count: 2, artifacts: [] }] });
+  assert.equal(result.accepted_run_attempt, "2");
+  assert.equal(result.accepted_artifact_name, currentArtifact.name);
 });
 
 test("canonical evidence seals full identity bytes and descriptor set across two public reads", () => {

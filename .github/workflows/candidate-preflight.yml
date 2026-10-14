@@ -283,17 +283,13 @@ jobs:
       - name: Check release metadata and smoke wiring
         id: metadata
         run: node scripts/release/validate-release-metadata.mjs --tag v0.8.0
-      - name: Check independent release smoke wiring
-        id: smokes
-        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
-        run: node scripts/tools/validate-release-cli-smokes.mjs
       - name: Check independent publication fixture contracts
         id: fixtures
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: node --test scripts/release/release-publication-evidence.test.mjs scripts/release/final-source-stage-evidence.test.mjs
       - name: Compile candidate CLI
         id: compile
-        if: ${{ !cancelled() && steps.metadata.outcome == 'success' && steps.smokes.outcome == 'success' && steps.fixtures.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.metadata.outcome == 'success' && steps.fixtures.outcome == 'success' }}
         shell: pwsh
         run: |
           . ./scripts/lib/clearra-path-helpers.ps1

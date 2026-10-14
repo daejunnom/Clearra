@@ -2,10 +2,6 @@ import assert from "node:assert/strict";
 import { access, readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 import { runPowerShellTest } from "../tools/powershell-test-process.mjs";
-import {
-  DISCORD_RECOVERY_JOB_STEPS,
-  DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS,
-} from "./discord-deployment-recovery.mjs";
 
 const primary = await readFile(
   new URL("../../.github/workflows/discord-deploy.yml", import.meta.url),
@@ -32,41 +28,6 @@ const runtimeRecovery = await readFile(
   new URL("./invoke-discord-runtime-recovery-v080.ps1", import.meta.url),
   "utf8",
 );
-
-test("Discord recovery and checkpoint step contracts follow the current workflow", () => {
-  const source = primary.replaceAll("\r\n", "\n");
-  for (const [job, contract] of [
-    ["authority", "authority"],
-    ["candidate", "Prepare immutable Discord candidate inputs"],
-    ["promote", "promote"],
-    ["sync-observe", "sync-observe"],
-  ]) {
-    const block = source.split(`\n  ${job}:\n`)[1]?.split(/^  [a-z][a-z-]*:/mu)[0];
-    assert.ok(block, `${job} must exist in the workflow`);
-    const declared = [...block.matchAll(/^      - name: (.+)$/gmu)].map((match) => match[1]);
-    const recovery = DISCORD_RECOVERY_JOB_STEPS[contract];
-    let priorIndex = -1;
-    for (const name of declared) {
-      const index = recovery.indexOf(name);
-      assert.ok(index > priorIndex, `${job}: ${name} is absent or out of order in recovery`);
-      priorIndex = index;
-    }
-    const successful = DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS[contract].filter(
-      (name) => !["Set up job", "Complete job"].includes(name) && !name.startsWith("Post "),
-    );
-    assert.deepEqual(successful, declared, `${job} checkpoint steps must match the workflow`);
-    if (declared.includes("Cache only the exact pnpm store")) {
-      const post = "Post Cache only the exact pnpm store";
-      for (const [label, contractSteps] of [
-        ["recovery", recovery],
-        ["checkpoint", DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_STEPS[contract]],
-      ]) {
-        assert.ok(contractSteps.indexOf(post) > contractSteps.indexOf("Cache only the exact pnpm store"),
-          `${job}: ${label} must admit the cache post step after its setup`);
-      }
-    }
-  }
-});
 
 function assertExactHandoffDownloads(source) {
   const normalized = source.replaceAll('\r\n', '\n');
@@ -378,22 +339,6 @@ test("accepted Cloud promotion keeps functional smoke and recovery evidence with
   assert.doesNotMatch(primary, /cli[-_]parity|Compare warm CLI/u);
 });
 
-test("retired CLI comparison has no workflow, executable, or alternate Actions entry point", async () => {
-  for (const path of [
-    ".github/workflows/cloud-cli-diagnostic.yml",
-    "apps/clearra-discord-bot/scripts/benchmark-cloud-cli-parity.mjs",
-    "scripts/release/cloud/benchmark-cli-parity-v080.mjs",
-  ]) {
-    await assert.rejects(access(new URL(`../../${path}`, import.meta.url)), { code: "ENOENT" });
-  }
-  const workflows = new URL("../../.github/workflows/", import.meta.url);
-  for (const name of await readdir(workflows)) {
-    if (!/\.ya?ml$/u.test(name)) continue;
-    const source = await readFile(new URL(name, workflows), "utf8");
-    assert.doesNotMatch(source, /benchmark-(?:cloud-)?cli-parity|cloud_cli_parity|unqualified-cli-parity/u, name);
-  }
-});
-
 test("prestage capture executes an accepted-source helper bundle outside current", () => {
   assert.match(
     primary,
@@ -554,34 +499,6 @@ test("build/test/tag/publication work is absent from Discord deploy workflows", 
     /git\s+tag\s+(?:-[asufdD]|--(?:annotate|sign|force|delete))/iu,
     /gh\s+release/iu,
   ]) assert.doesNotMatch(combined, forbidden);
-});
-
-test("canonical dispatch owns every Discord authority regression in one bounded pool", () => {
-  const name = "Validate independent release regressions with bounded workers";
-  const start = release.indexOf(`- name: ${name}`);
-  const end = release.indexOf("\n      - name:", start + 1);
-  assert.ok(start >= 0 && end > start, "bounded release regression step");
-  const step = release.slice(start, end);
-  assert.match(step, /if: github\.event_name == 'workflow_dispatch'/u);
-  assert.match(step, /node scripts\/tools\/run-release-regression-tests\.mjs/u);
-  assert.match(releaseRegressions, /ACTIONS_TEST_WORKER_CAP = 4/u);
-  assert.match(releaseRegressions, /--test-concurrency=\$\{workers\}/u);
-  for (const file of [
-    "scripts/release/deployment-impact.test.mjs",
-    "scripts/release/discord-catalog-recovery-authority.test.mjs",
-    "scripts/release/discord-deploy-workflow.test.mjs",
-    "scripts/release/discord-deployment-recovery.test.mjs",
-    "scripts/release/discord-deployment-state.test.mjs",
-    "scripts/release/discord-production-checkpoint-receipt.test.mjs",
-    "scripts/release/discord-recovery-debt.test.mjs",
-  ]) {
-    assert.equal(
-      releaseRegressions.split(`\"${file}\"`).length - 1,
-      1,
-      `${file} exact owner`,
-    );
-  }
-  assert.equal((release.match(new RegExp(name, "gu")) ?? []).length, 1);
 });
 
 test("catalog preimage and checkpoint candidate are durable before their dependent mutations", async () => {

@@ -268,7 +268,7 @@ test("rejects a failed candidate upload and artifact timestamps outside its step
   );
 });
 
-test("seals all four completed Discord jobs and every contract step into the receipt topology", () => {
+test("seals deployment authority steps without binding auxiliary step labels", () => {
   const contract = createDiscordSuccessfulDeploymentTopologyContract();
   const response = {
     total_count: contract.jobs.length,
@@ -300,6 +300,17 @@ test("seals all four completed Discord jobs and every contract step into the rec
     sealed.map((job) => [job.job_name, job.steps.length]),
     contract.jobs.map((job) => [job.job_name, job.steps.length]),
   );
+  const cosmetic = structuredClone(response);
+  for (const job of cosmetic.jobs) {
+    for (const step of job.steps) step.number += 1;
+    job.steps.unshift({ name: "Renamed setup or cache step", number: 1,
+      status: "completed", conclusion: "success",
+      started_at: job.started_at, completed_at: job.started_at });
+  }
+  assert.deepEqual(materializeCompletedJobTopology(cosmetic, {
+    completedAt: Date.parse("2026-08-31T00:21:01Z"),
+  }).map(job => job.steps.map(step => step.name)),
+  sealed.map(job => job.steps.map(step => step.name)));
   const missingStep = structuredClone(response);
   missingStep.jobs[3].steps.pop();
   assert.throws(

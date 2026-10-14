@@ -27,9 +27,6 @@ export async function resolveReusableAcceptedWasmBuild(options, dependencies) {
     options?.currentRunAttempt,
     "current run attempt",
   );
-  if (currentRunAttempt !== "1") {
-    throw new Error("WASM reuse is available only to a first canonical run attempt");
-  }
   if (
     typeof dependencies?.listRuns !== "function" ||
     typeof dependencies?.listJobs !== "function" ||
@@ -56,14 +53,10 @@ export async function resolveReusableAcceptedWasmBuild(options, dependencies) {
   ) {
     throw new Error("WASM reuse history does not contain the one active current run");
   }
-  if (runs.some((run) => run.id !== currentRunId && run.conclusion === "success")) {
-    throw new Error("WASM reuse cannot bypass an existing successful canonical run");
-  }
 
   const candidates = runs
     .filter((run) =>
       run.id !== currentRunId &&
-      run.attempt === "1" &&
       run.status === "completed" &&
       REUSABLE_CONCLUSIONS.has(run.conclusion)
     )

@@ -40,7 +40,8 @@ const FORWARD_VERSION = CURRENT_PRODUCT_VERSION;
 const HTTP_READ_TIMEOUT_MS = 30_000;
 const MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_FORWARD_PUBLIC_FILE_COUNT = 1_024;
-const MAX_FORWARD_PUBLIC_TOTAL_BYTES = 64 * 1024 * 1024;
+// Qualified legal-board/relation mirrors are part of the published payload.
+const MAX_FORWARD_PUBLIC_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_FORWARD_PUBLIC_PATH_LENGTH = 512;
 const FORWARD_PUBLIC_PATH = /^[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*$/u;
 const MODES = new Set(["forward", "restore"]);

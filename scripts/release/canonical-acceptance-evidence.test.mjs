@@ -96,7 +96,6 @@ const SHARD_TOOLCHAINS = Object.freeze({
 
 const REQUIRED_JOB_STEPS = Object.freeze(new Map([
   ["metadata", [
-    "Require exact main and zero prior canonical success",
     "Bind the exact canonical acceptance run",
   ]],
   ["ctk3", [
