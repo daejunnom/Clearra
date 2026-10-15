@@ -800,12 +800,21 @@ jobs:
           node scripts/tools/accepted-ctk3-dist.mjs --verify packages/ctk3/dist --expected-source-commit $env:CLEARRA_SOURCE_COMMIT --expected-run-id $env:GITHUB_RUN_ID --expected-run-attempt $env:GITHUB_RUN_ATTEMPT
           if ($LASTEXITCODE -ne 0) { throw "accepted CTK3 replay parity input rejected" }
       - name: Run canonical release acceptance Pages shard
+        id: pages_acceptance
         env:
           CLEARRA_WEB_BASE_PATH: /${{ github.event.repository.name }}
           CLEARRA_ACCEPTED_WASM_DIR: ${{ runner.temp }}\clearra-accepted-wasm
           CLEARRA_ACCEPTED_RUN_ID: ${{ github.run_id }}
           CLEARRA_ACCEPTED_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Pages -ExecutionSurface Trusted
+      - name: Preserve failed Pages operational browser diagnostics
+        if: ${{ failure() && steps.pages_acceptance.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pages-operational-diagnostics-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clearra-surface-acceptance
+          if-no-files-found: warn
+          retention-days: 7
       - name: Stamp and verify the accepted Pages build
         shell: pwsh
         run: |

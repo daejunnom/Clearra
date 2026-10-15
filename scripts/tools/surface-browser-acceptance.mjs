@@ -29,6 +29,15 @@ await new Promise((ok, fail) => { server.once('error', fail); server.listen(4194
 const browser = await chromium.launch({ headless: true });
 const results = [];
 const failures = [];
+function recordDiagnostic(entries, entry) {
+  if (entries.length < 16) entries.push(entry);
+}
+function diagnosticUrl(value) {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`.slice(0, 2048);
+  } catch { return 'unavailable'; }
+}
 function gpuShim(mode) {
   const body = mode === 'null' ? 'Promise.resolve(null)' : mode === 'reject' ? "Promise.reject(new Error('simulated adapter refusal'))" : 'new Promise(() => {})';
   return `Object.defineProperty(navigator, 'gpu', { configurable: true, value: { requestAdapter: () => ${body} } });`;
@@ -134,7 +143,24 @@ try {
     const ctx = await context(mode);
     const page = await ctx.newPage();
     const errors = [];
+    const browserConsole = [];
+    const failedRequests = [];
+    const httpErrors = [];
     page.on('pageerror', error => errors.push(error.stack || String(error)));
+    page.on('console', message => {
+      if (message.type() === 'error' || message.type() === 'warning') {
+        recordDiagnostic(browserConsole, { type: message.type(), text: message.text().slice(0, 2048) });
+      }
+    });
+    page.on('requestfailed', request => recordDiagnostic(failedRequests, {
+      url: diagnosticUrl(request.url()),
+      error: (request.failure()?.errorText || 'unknown').slice(0, 2048)
+    }));
+    page.on('response', response => {
+      if (response.status() >= 400) recordDiagnostic(httpErrors, {
+        url: diagnosticUrl(response.url()), status: response.status()
+      });
+    });
     try {
       await page.goto(`http://127.0.0.1:4194${base}/?tool=pc`);
       await page.locator('.product-tabs').waitFor();
@@ -297,9 +323,21 @@ try {
         .catch(captureError => errors.push(`screenshot capture failed: ${captureError.message}`));
       const text = await page.locator('body').innerText().catch(() => 'unavailable');
       await writeFile(resolve(reportRoot, `failed-${mode}.txt`), `${failure.stack}\n${errors.join('\n')}\n${text}`).catch(() => {});
+      const diagnostic = {
+        source: process.env.CLEARRA_SOURCE_COMMIT,
+        mode, url: diagnosticUrl(page.url()), failure: failure.message,
+        pageErrors: errors.slice(0, 16).map(error => error.slice(0, 2048)),
+        browserConsole, failedRequests, httpErrors, body: text.slice(0, 16384)
+      };
+      await writeFile(resolve(reportRoot, `failed-${mode}.json`), JSON.stringify(diagnostic, null, 2) + '\n')
+        .catch(captureError => console.error(`surface_diagnostic_write=failed mode=${mode} reason=${captureError.message}`));
       failures.push(failure);
       results.push({ mode, result: 'failed', message: failure.message });
       console.error(`surface_case=${mode} status=failed: ${failure.stack}`);
+      console.error(`surface_diagnostic=${JSON.stringify({ ...diagnostic,
+        pageErrors: diagnostic.pageErrors.slice(0, 4), browserConsole: browserConsole.slice(0, 4),
+        failedRequests: failedRequests.slice(0, 4), httpErrors: httpErrors.slice(0, 4), body: text.slice(0, 4096)
+      })}`);
     } finally { await ctx.close(); }
   }
   const report = { source: process.env.CLEARRA_SOURCE_COMMIT, results, failedCases: failures.length };
