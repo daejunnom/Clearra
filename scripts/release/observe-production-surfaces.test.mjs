@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  canonicalJson,
   canonicalSha256,
   sealCanonicalReport,
 } from "./canonical-release-evidence.mjs";
