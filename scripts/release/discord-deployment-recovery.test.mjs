@@ -264,7 +264,8 @@ test("recovery reads the real historical primary attempt's one-second creation s
     { total_count: 0, artifacts: [] }, {
       ...options, workflowRunAttempt: "1",
       runList: { total_count: 2, workflow_runs: [
-        { ...historical, run_started_at: historical.created_at }, original,
+        { ...historical, created_at: "2026-10-14T08:06:20Z",
+          run_started_at: "2026-10-14T08:06:20Z" }, original,
       ] },
       runAttemptCatalog: catalog,
       jobList: jobList({ workflowRunAttempt: "1" }),

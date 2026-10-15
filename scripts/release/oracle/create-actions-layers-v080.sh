@@ -24,7 +24,8 @@ output_root="$(cd "$output_root" && pwd -P)"
 [[ "$accepted_ctk3_root" != "$repository_root/packages/ctk3/dist" ]] || usage
 accepted_ctk3_verifier="$repository_root/scripts/tools/accepted-ctk3-dist.mjs"
 [[ -f "$accepted_ctk3_verifier" && ! -L "$accepted_ctk3_verifier" ]] || usage
-dependency_root="$repository_root/node_modules/tetris-fumen"
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+dependency_root="$(node "$script_directory/resolve-runtime-dependency.mjs" "$repository_root")"
 [[ -d "$dependency_root" && ! -L "$dependency_root" ]] || {
   printf '%s\n' 'the installed production tetris-fumen dependency is unavailable' >&2
   exit 66

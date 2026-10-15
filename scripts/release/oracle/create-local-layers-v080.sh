@@ -111,7 +111,8 @@ if [[ -e "$repository_root/apps/clearra-discord-bot/src/admin/config.mjs" ]]; th
   }
 fi
 
-dependency_root="$repository_root/node_modules/tetris-fumen"
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+dependency_root="$(node "$script_directory/resolve-runtime-dependency.mjs" "$repository_root")"
 [[ -d "$dependency_root" && ! -L "$dependency_root" ]] || {
   printf '%s\n' 'the production tetris-fumen dependency is unavailable' >&2
   exit 66

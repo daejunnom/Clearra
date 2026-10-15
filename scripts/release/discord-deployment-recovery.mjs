@@ -1842,14 +1842,14 @@ function validatePrimaryRunAttemptCatalog(value, latestById, repository) {
     for (const [index, entry] of entries.entries()) {
       if (
         entry.attempt !== String(index + 1) || entry.runNumber !== latest.runNumber ||
-        entry.sourceCommit !== latest.sourceCommit || entry.createdAt !== latest.createdAt ||
+        entry.sourceCommit !== latest.sourceCommit ||
         entry.event !== latest.event ||
         (index < entries.length - 1 && entry.status !== "completed")
-      ) throw new Error("Discord recovery run-attempt catalog ordering authority is inconsistent");
+      ) throw new Error(`Discord recovery run-attempt catalog ordering authority is inconsistent for ${id}/${entry.attempt}`);
     }
     const final = entries.at(-1);
     // The list API is discovery, not attempt chronology. GitHub can project a
-    // different run_started_at here (including for skipped workflow_run runs).
+    // different created_at/run_started_at for skipped workflow_run executions.
     // Freshness decisions use the exact attempt endpoint's validated timestamps.
     if (
       final.attempt !== latest.attempt || final.status !== latest.status ||
