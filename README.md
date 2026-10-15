@@ -273,7 +273,7 @@ SvelteKit/Tauri -> clearra-gui-host -> clearra-app -> AppResponse
 ```
 
 On a source-execution-capable development host, start it with
-`pnpm --filter @clearra/desktop run tauri -- dev`.
+`pnpm --filter @clearra/desktop run tauri dev`.
 
 The tagged Windows GUI is the same product surface packaged as one Tauri
 executable; no separate CLI window or frontend directory is distributed.

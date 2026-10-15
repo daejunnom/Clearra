@@ -1070,7 +1070,7 @@ jobs:
           . ./scripts/lib/clearra-path-helpers.ps1
           Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose product
           try {
-            pnpm --filter @clearra/desktop run tauri -- build --no-bundle
+            pnpm --filter @clearra/desktop run tauri build --no-bundle
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $version = '${{ needs.metadata.outputs.version }}'
             $gui = Join-Path $env:CARGO_TARGET_DIR 'release\clearra-desktop.exe'
