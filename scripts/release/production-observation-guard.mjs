@@ -1,5 +1,5 @@
 import { canonicalSha256 } from "./canonical-release-evidence.mjs";
-import { fetchJsonBounded, validateCloudHealth } from "./production-surface-probe-adapter.mjs";
+import { fetchJsonBounded, validateCloudHealth } from "./production-http-reads.mjs";
 
 // Public HTTP reads only: no gcloud, SSH, Job submission, or extra authority.
 // Missing webhook coverage is reconciled once a minute during the finite window.

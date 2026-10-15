@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   canonicalSha256,
@@ -99,6 +101,35 @@ test("evidence retry requires all four current identities and a new Oracle opera
   await assert.rejects(verifyProductionObservationStillCurrent({ report, spec, probes }), /cloud changed/u);
   delete probes.oracle;
   await assert.rejects(verifyProductionObservationStillCurrent({ report, spec, probes }), /required identity set/u);
+});
+
+test("the real observation CLI reaches its probe children without a top-level await import deadlock", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "clearra-observation-cli-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const adapterPath = join(root, "probe.mjs");
+  const adapter = 'process.stderr.write("private probe diagnostic"); process.exitCode = 42;\n';
+  await writeFile(adapterPath, adapter);
+  const spec = validProbeSpec(1200);
+  for (const probe of spec.probes) {
+    probe.runtime = "node";
+    probe.path = adapterPath;
+    probe.sha256 = createHash("sha256").update(adapter).digest("hex");
+  }
+  const specPath = join(root, "probe-spec.json");
+  await writeFile(specPath, `${canonicalJson(spec)}\n`);
+  const result = spawnSync(process.execPath, [
+    fileURLToPath(new URL("./observe-production-surfaces.mjs", import.meta.url)),
+    "--source-commit", COMMIT,
+    "--probe-spec", specPath,
+    "--output", join(root, "observation.json"),
+  ], { encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024, windowsHide: true });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 2, "the CLI must propagate a handled probe failure, not exit 13");
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr,
+    /production_observation=failed reason=(?:cloud|discord|oracle|pages) production surface probe did not exit successfully \(exit=42, signal=none\)/u);
+  assert.doesNotMatch(result.stderr, /unsettled top-level await|private probe diagnostic/u);
 });
 
 test('a failed child identifies its surface and exit without reflecting stderr', async (t) => {

@@ -17,8 +17,6 @@ import { DiscordRestClient } from "../../apps/clearra-discord-bot/src/discord/re
 import {
   ARTIFACT_SCHEMA_VERSION,
   CONTRACT_SCHEMA_VERSION,
-  normalizeRuntimeIdentity,
-  RUNTIME_IDENTITY_SCHEMA,
   SUPPLY_SEMANTICS_ID,
 } from "../../apps/clearra-discord-bot/src/job-service/runtime-identity.mjs";
 import {
@@ -48,6 +46,9 @@ import {
   validateSurfaceProbeResult,
 } from "./observe-production-surfaces.mjs";
 import { CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
+import { fetchJsonBounded, validateCloudHealth } from "./production-http-reads.mjs";
+
+export { fetchJsonBounded, validateCloudHealth };
 
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/u;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
@@ -56,9 +57,7 @@ const PROJECT_ID = /^[a-z][a-z0-9-]{4,61}[a-z0-9]$/u;
 const REGION = /^[a-z]+(?:-[a-z0-9]+)+[0-9]$/u;
 const VERSION = CURRENT_PRODUCT_VERSION;
 const PAGES_IDENTITY_SCHEMA = "clearra.pages.identity.v2";
-const MAX_HTTP_BYTES = 2 * 1024 * 1024;
 const MAX_CONTROL_PLANE_BYTES = 4 * 1024 * 1024;
-const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 const DEFAULT_CONTROL_PLANE_TIMEOUT_MS = 30_000;
 
 export async function probeDiscordProductionSurface({
@@ -575,42 +574,6 @@ function requireReadyRevision(revision) {
   }
 }
 
-export function validateCloudHealth(value, sourceCommit, label) {
-  requireExactKeys(value, [
-    "status",
-    "activeJobs",
-    "workerLimit",
-    "runtime",
-  ], label);
-  if (
-    value.status !== "ok" ||
-    !Number.isSafeInteger(value.activeJobs) ||
-    value.activeJobs < 0 ||
-    value.workerLimit !== 8
-  ) {
-    throw new Error(`${label} service status is invalid`);
-  }
-  requireExactKeys(value.runtime, [
-    "schema",
-    "sourceCommit",
-    "engineBuildId",
-    "contractSchemaVersion",
-    "supplySemanticsId",
-    "artifactSchemaVersion",
-  ], `${label} runtime identity`);
-  const runtime = normalizeRuntimeIdentity(value.runtime);
-  if (
-    runtime.schema !== RUNTIME_IDENTITY_SCHEMA ||
-    runtime.sourceCommit !== sourceCommit ||
-    runtime.engineBuildId !== sourceCommit ||
-    runtime.contractSchemaVersion !== CONTRACT_SCHEMA_VERSION ||
-    runtime.supplySemanticsId !== SUPPLY_SEMANTICS_ID ||
-    runtime.artifactSchemaVersion !== ARTIFACT_SCHEMA_VERSION
-  ) {
-    throw new Error(`${label} runtime identity differs from the release source`);
-  }
-}
-
 function validatePagesIdentity(value, {
   sourceCommit,
   basePath,
@@ -696,61 +659,6 @@ async function runJsonCommand(executable, arguments_, timeoutMs, maxBytes, label
     return value;
   } catch {
     throw new Error(`${label} did not return one JSON object`);
-  }
-}
-
-export async function fetchJsonBounded(url, label, {
-  fetchImplementation = fetch, timeoutMs = DEFAULT_HTTP_TIMEOUT_MS, signal,
-} = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    let response;
-    try {
-      response = await fetchImplementation(url, {
-        method: "GET", redirect: "error", cache: "no-store",
-        headers: {
-          accept: "application/json", "cache-control": "no-cache, no-store, max-age=0",
-          pragma: "no-cache",
-        },
-        signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
-      });
-    } catch {
-      throw new Error(`${label} request failed`);
-    }
-    if (!response.ok) throw new Error(`${label} returned HTTP ${response.status}`);
-    const declaredLength = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_HTTP_BYTES) {
-      throw new Error(`${label} exceeded its response bound`);
-    }
-    const chunks = [];
-    let length = 0;
-    if (response.body) {
-      const reader = response.body.getReader();
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          length += value.byteLength;
-          if (length > MAX_HTTP_BYTES) throw new Error(`${label} exceeded its response bound`);
-          chunks.push(value);
-        }
-      } finally { reader.releaseLock(); }
-    }
-    try {
-      const bytes = Buffer.concat(chunks, length);
-      const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-      requirePlainObject(value, label);
-      return value;
-    } catch {
-      throw new Error(`${label} did not return one UTF-8 JSON object`);
-    }
-  } catch (error) {
-    if (controller.signal.aborted) throw new Error(`${label} request timed out`);
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    controller.abort();
   }
 }
 
