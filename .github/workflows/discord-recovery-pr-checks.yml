@@ -57,6 +57,7 @@ jobs:
           scripts/release/discord-deploy-workflow.test.mjs
           scripts/release/discord-deployment-recovery.test.mjs
           scripts/release/discord-recovery-debt.test.mjs
+          scripts/release/discord-production-checkpoint-receipt.test.mjs
           scripts/release/finalize-discord-production-checkpoint.test.mjs
       - name: Exercise accepted-source and executable Oracle rollback contracts
         run: >-

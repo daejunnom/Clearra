@@ -29,7 +29,8 @@ import {
   observeProductionSurfaces,
   PRODUCTION_SURFACE_PROBE_SCHEMA_ID,
 } from "./observe-production-surfaces.mjs";
-import { retryEvidenceWrite, snapshotEvidenceUpload } from "./production-evidence-retry.mjs";
+import { checkpointInputsFromEnvironment, retryEvidenceWrite, snapshotEvidenceUpload } from "./production-evidence-retry.mjs";
+import { CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 
 const REPOSITORY = "daejunnom/Clearra";
 export const SOURCE = "1".repeat(40);
@@ -41,6 +42,31 @@ const HASH = "a".repeat(64);
 const APPLICATION_ID = "223456789012345678";
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+test("production evidence preflight and retry bind the current release and keep both run identities", () => {
+  const root = resolve("fixture-workspace");
+  const env = {
+    GITHUB_REPOSITORY: REPOSITORY,
+    SOURCE_COMMIT: SOURCE,
+    GITHUB_RUN_ID: RUN_ID,
+    GITHUB_RUN_ATTEMPT: RUN_ATTEMPT,
+    ACCEPTED_RUN_ID,
+    ACCEPTED_RUN_ATTEMPT,
+    DISCORD_APPLICATION_ID: APPLICATION_ID,
+    CATALOG_ARTIFACT_ID: "9900",
+    CATALOG_ARTIFACT_DIGEST: `sha256:${HASH}`,
+  };
+  const options = checkpointInputsFromEnvironment(root, env);
+  assert.equal(options.version, CURRENT_PRODUCT_VERSION);
+  assert.equal(options.sourceCommit, SOURCE);
+  assert.equal(options.workflowRunId, RUN_ID);
+  assert.equal(options.workflowRunAttempt, RUN_ATTEMPT);
+  assert.equal(options.acceptedRunId, ACCEPTED_RUN_ID);
+  assert.equal(options.acceptedRunAttempt, ACCEPTED_RUN_ATTEMPT);
+  assert.notEqual(options.workflowRunId, options.acceptedRunId);
+  assert.equal(options.canonicalAcceptanceEvidence,
+    resolve(root, "promoted/prepared/canonical-acceptance/clearra-canonical-acceptance-evidence.v1.json"));
+});
+
 test("evidence I/O retry requires a live revalidation and never retries invalid or uncertain state", async () => {
   const calls = [];
   const transient = () => Object.assign(new Error("temporary I/O"), { code: "EIO" });

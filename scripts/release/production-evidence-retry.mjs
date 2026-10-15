@@ -9,6 +9,7 @@ import { canonicalJson, sealCanonicalReport, verifyCanonicalReportHash } from ".
 import { verifyDiscordDeploymentState } from "./discord-deployment-state.mjs";
 import { prepareDiscordProductionCheckpointInputs, validateDiscordProductionCheckpointCandidate } from "./discord-production-checkpoint-receipt.mjs";
 import { createCommandProbes, verifyProductionObservationStillCurrent } from "./observe-production-surfaces.mjs";
+import { CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 
 const SYNC_BINDINGS = Object.freeze({
   discord_catalog: "sync/discord-catalog.json",
@@ -36,7 +37,7 @@ export function checkpointInputsFromEnvironment(root, env = process.env) {
     repository: env.GITHUB_REPOSITORY, sourceCommit: env.SOURCE_COMMIT,
     workflowRunId: env.GITHUB_RUN_ID, workflowRunAttempt: env.GITHUB_RUN_ATTEMPT,
     acceptedRunId: env.ACCEPTED_RUN_ID, acceptedRunAttempt: env.ACCEPTED_RUN_ATTEMPT,
-    version: "0.8.0", basePath: "/Clearra", applicationId: env.DISCORD_APPLICATION_ID,
+    version: CURRENT_PRODUCT_VERSION, basePath: "/Clearra", applicationId: env.DISCORD_APPLICATION_ID,
     catalogArtifactId: env.CATALOG_ARTIFACT_ID, catalogArtifactDigest: `sha256:${digest}`,
     canonicalAcceptanceEvidence: path("promoted/prepared/canonical-acceptance/clearra-canonical-acceptance-evidence.v1.json"),
     recoveryDebtClearance: path("promoted/prepared/recovery-debt/recovery-debt-clearance.json"),
