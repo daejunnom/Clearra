@@ -158,16 +158,17 @@ export async function recoverReleasePublication(options, dependencies = {}) {
   );
   if (plan.status === "already-published") return plan;
 
+  const runGh = dependencies.runGh ?? runGhApi;
   const uploadAssets = dependencies.uploadAssets ?? (async (paths) => {
-    await runGhApi(
+    await runGh(
       ["release", "upload", authority.tag, ...paths, "--repo", authority.repository],
       "release recovery missing asset upload",
       1024 * 1024,
     );
   });
   const publishDraft = dependencies.publishDraft ?? (async () => {
-    await runGhApi(
-      ["release", "edit", authority.tag, "--draft=false", "--repo", authority.repository],
+    await runGh(
+      ["release", "edit", authority.tag, "--draft=false", "--latest", "--repo", authority.repository],
       "release recovery draft publication",
       1024 * 1024,
     );

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import {
@@ -85,8 +86,25 @@ test("failed tag attempts recover only an exact accepted partial draft before pu
     productsDirectory: "products",
   }, {
     verifyAcceptanceEvidence: async () => undefined,
-    uploadAssets: async (paths) => { uploaded.push(...paths); },
-    publishDraft: async () => { publishedDraft = true; },
+    runGh: async (args) => {
+      if (args[1] === "upload") {
+        assert.deepEqual(args, [
+          "release", "upload", "v0.8.1",
+          resolve("products", accepted[1].name),
+          resolve("products", accepted[2].name),
+          "--repo", REPOSITORY,
+        ]);
+        uploaded.push(...args.slice(3, -2));
+      } else {
+        assert.equal(uploaded.length, 2);
+        assert.equal(releaseRead, 2, "publish only after complete draft readback");
+        assert.deepEqual(args, [
+          "release", "edit", "v0.8.1", "--draft=false", "--latest",
+          "--repo", REPOSITORY,
+        ]);
+        publishedDraft = true;
+      }
+    },
     apiGet: async (path) => {
       if (path === `/actions/runs/${RUN_ID}/attempts/1`) {
         return publicationRun({ attempt: 1, status: "completed", conclusion: "failure" });

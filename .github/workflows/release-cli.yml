@@ -141,12 +141,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Bind exact Corepack pnpm
-        shell: pwsh
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+      - name: Install the pinned pnpm without Corepack transport
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
       - name: Install JavaScript workspace
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Validate accepted CTK3 artifact contract
@@ -176,12 +175,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Bind exact Corepack pnpm
-        shell: bash
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          test "$(pnpm --version)" = '11.5.0'
+      - name: Install the pinned pnpm without Corepack transport
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
       - name: Download accepted CTK3 distribution
         uses: actions/download-artifact@v4
         with:
@@ -222,12 +220,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Bind exact Corepack pnpm
-        shell: pwsh
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+      - name: Install the pinned pnpm without Corepack transport
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
       - name: Download accepted CTK3 distribution
         uses: actions/download-artifact@v4
         with:
@@ -253,12 +250,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Bind exact Corepack pnpm
-        shell: pwsh
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+      - name: Install the pinned pnpm without Corepack transport
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
       - name: Archive the exact accepted source on Windows
         shell: pwsh
         run: |
@@ -362,12 +358,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Bind exact Corepack pnpm
-        shell: pwsh
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+      - name: Install the pinned pnpm without Corepack transport
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
       - id: release_toolchain_cache
         name: Restore canonical release toolchain cache
         uses: actions/cache/restore@v4
@@ -577,12 +572,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Bind exact Corepack pnpm
-        shell: pwsh
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+      - name: Install the pinned pnpm without Corepack transport
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
       - name: Download accepted CTK3 distribution
         uses: actions/download-artifact@v4
         with:
@@ -783,12 +777,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Bind exact Corepack pnpm
-        shell: pwsh
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+      - name: Install the pinned pnpm without Corepack transport
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
       - name: Download accepted WASM build
         uses: actions/download-artifact@v4
         with:
@@ -1054,12 +1047,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Bind exact Corepack pnpm
-        shell: pwsh
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.5.0 --activate
-          if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
+      - name: Install the pinned pnpm without Corepack transport
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+          run_install: false
       - uses: actions/cache@v4
         with:
           path: |
@@ -1279,7 +1271,7 @@ jobs:
               --generate-notes \
               --title "Clearra $GITHUB_REF_NAME" \
               --draft
-            gh release edit "$GITHUB_REF_NAME" --draft=false
+            gh release edit "$GITHUB_REF_NAME" --draft=false --latest
           fi
           immutable="$(gh api --method GET \
             -H 'X-GitHub-Api-Version: 2026-03-10' \
