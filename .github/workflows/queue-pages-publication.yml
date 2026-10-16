@@ -1,6 +1,10 @@
 name: Queue validated Pages publication
 
 on:
+  workflow_run:
+    workflows: ["Publish Product Release"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       acceptance_run_id:
@@ -23,13 +27,20 @@ concurrency:
 
 jobs:
   queue:
-    if: github.repository == 'daejunnom/Clearra' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'daejunnom/Clearra' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'workflow_dispatch' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-latest
     timeout-minutes: 125
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2

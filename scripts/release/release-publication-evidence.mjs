@@ -40,7 +40,9 @@ export const RELEASE_PUBLICATION_FINAL_AUTHORITY_SCHEMA_ID =
 
 const RELEASE = CURRENT_PRODUCT_TAG;
 const VERSION = CURRENT_PRODUCT_VERSION;
-const WORKFLOW_PATH = ".github/workflows/release-cli.yml";
+const WORKFLOW_PATH = ".github/workflows/publish-approved-release.yml";
+const LEGACY_WORKFLOW_PATH = ".github/workflows/release-cli.yml";
+const PUBLICATION_WORKFLOW_PATHS = new Set([WORKFLOW_PATH, LEGACY_WORKFLOW_PATH]);
 const FINALIZER_WORKFLOW_PATH = ".github/workflows/finalize-release-publication.yml";
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const DECIMAL_ID = /^[1-9][0-9]*$/u;
@@ -309,7 +311,7 @@ export async function collectReleasePublicationReceipt(options, dependencies = {
     repository: authority.repository,
     release: authority.tag,
     source_commit: authority.sourceCommit,
-    workflow_path: WORKFLOW_PATH,
+    workflow_path: run.path,
     workflow_run_id: authority.workflowRunId,
     workflow_run_attempt: authority.workflowRunAttempt,
     accepted_run_id: acceptanceEvidence.run_id,
@@ -338,7 +340,7 @@ export async function collectReleasePublicationReceipt(options, dependencies = {
     },
     github_release: {
       release_id: String(release.id),
-      published_at: canonicalTimestamp(release.published_at, "GitHub Release publication time"),
+      published_at: normalizeGithubReleaseTimestamp(release.published_at),
       immutable: true,
       draft: false,
       prerelease: false,
@@ -522,9 +524,12 @@ export async function collectReleasePublicationEvidenceBundle(options, dependenc
     "annotated release tag object",
   );
   validateAnnotatedTagObject(annotatedTag, authority, tagObjectSha);
+  const artifactRunAuthority = {
+    ...authority, publisherBranch: run.head_branch, publisherSourceCommit: run.head_sha,
+  };
   const receiptArtifactListing = resolveReceiptArtifact(
     receiptArtifacts,
-    authority,
+    artifactRunAuthority,
   );
   const receiptArtifact = await apiGet(
     `/actions/artifacts/${receiptArtifactListing.artifactId}`,
@@ -532,7 +537,7 @@ export async function collectReleasePublicationEvidenceBundle(options, dependenc
   );
   const receiptArtifactAuthority = validateReceiptArtifact(
     receiptArtifact,
-    authority,
+    artifactRunAuthority,
     receiptArtifactListing.artifactId,
     receiptArtifactListing.artifactDigest,
   );
@@ -550,6 +555,9 @@ export async function collectReleasePublicationEvidenceBundle(options, dependenc
     expectedWorkflowRunId: authority.workflowRunId,
     expectedWorkflowRunAttempt: authority.workflowRunAttempt,
   });
+  if (receipt.workflow_path !== run.path) {
+    throw new Error("publication receipt differs from its publisher workflow");
+  }
   const acceptanceEvidence = receipt.canonical_acceptance_evidence;
   const assets = validateReleaseReadback(
     release,
@@ -591,7 +599,7 @@ export async function collectReleasePublicationEvidenceBundle(options, dependenc
     repository: authority.repository,
     release: authority.tag,
     source_commit: authority.sourceCommit,
-    workflow_path: WORKFLOW_PATH,
+    workflow_path: run.path,
     workflow_run_id: authority.workflowRunId,
     workflow_run_attempt: authority.workflowRunAttempt,
     accepted_run_id: acceptanceEvidence.run_id,
@@ -634,10 +642,7 @@ export async function collectReleasePublicationEvidenceBundle(options, dependenc
     },
     github_release: {
       release_id: String(release.id),
-      published_at: canonicalTimestamp(
-        release.published_at,
-        "GitHub Release publication time",
-      ),
+      published_at: normalizeGithubReleaseTimestamp(release.published_at),
       immutable: true,
       draft: false,
       prerelease: false,
@@ -811,7 +816,7 @@ export async function resolveReleasePublicationFinalAuthority(
     repository: authority.repository,
     release: authority.tag,
     source_commit: authority.sourceCommit,
-    publication_workflow_path: WORKFLOW_PATH,
+    publication_workflow_path: selected.report.workflow_path,
     publication_workflow_run_id: authority.workflowRunId,
     publication_workflow_run_attempt: authority.workflowRunAttempt,
     finalizer_workflow_path: FINALIZER_WORKFLOW_PATH,
@@ -877,7 +882,7 @@ export function validateReleasePublicationFinalAuthority(value, {
   }
   verifyCanonicalReportHash(value, "release publication final authority");
   if (
-    value.release !== RELEASE || value.publication_workflow_path !== WORKFLOW_PATH ||
+    value.release !== RELEASE || !PUBLICATION_WORKFLOW_PATHS.has(value.publication_workflow_path) ||
     value.finalizer_workflow_path !== FINALIZER_WORKFLOW_PATH ||
     value.status !== "resolved"
   ) {
@@ -924,6 +929,7 @@ export function validateReleasePublicationFinalAuthority(value, {
     }
   }
   if (publicationEvidence !== undefined && (
+    value.publication_workflow_path !== publicationEvidence.workflow_path ||
     value.publication_evidence_sha256 !== publicationEvidence.report_sha256 ||
     value.publication_evidence_file_sha256 !== publicationEvidenceFileSha256 ||
     publicationEvidence.finalizer_workflow.run_id !== value.finalizer_workflow_run_id ||
@@ -933,6 +939,7 @@ export function validateReleasePublicationFinalAuthority(value, {
     throw new Error("release publication evidence differs from its final artifact authority");
   }
   if (publicationReceipt !== undefined && (
+    value.publication_workflow_path !== publicationReceipt.workflow_path ||
     value.publication_receipt_sha256 !== publicationReceipt.report_sha256 ||
     value.publication_receipt_file_sha256 !== publicationReceiptFileSha256
   )) {
@@ -1044,6 +1051,7 @@ export function validateReleasePublicationEvidence(
       acceptanceEvidence: boundAcceptance,
     });
     if (
+      value.workflow_path !== receipt.workflow_path ||
       value.publication_receipt.report_sha256 !== receipt.report_sha256 ||
       value.publication_receipt.schema_id !== receipt.schema_id ||
       value.publication_receipt.artifact_name !== receipt.receipt_artifact_name ||
@@ -1075,7 +1083,7 @@ function validatePublicationIdentity(value, {
   requirePattern(value.accepted_run_attempt, DECIMAL_ID, "accepted run attempt");
   requireSha256(value.acceptance_evidence_sha256, "canonical acceptance evidence SHA-256");
   if (
-    value.release !== RELEASE || value.workflow_path !== WORKFLOW_PATH ||
+    value.release !== RELEASE || !PUBLICATION_WORKFLOW_PATHS.has(value.workflow_path) ||
     value.status !== expectedStatus
   ) {
     throw new Error("release publication identity is invalid");
@@ -1246,8 +1254,8 @@ function resolveReceiptArtifact(list, authority) {
   if (
     artifact.expired !== false ||
     String(artifact?.workflow_run?.id ?? "") !== authority.workflowRunId ||
-    artifact?.workflow_run?.head_branch !== authority.tag ||
-    artifact?.workflow_run?.head_sha !== authority.sourceCommit
+    artifact?.workflow_run?.head_branch !== (authority.publisherBranch ?? authority.tag) ||
+    artifact?.workflow_run?.head_sha !== (authority.publisherSourceCommit ?? authority.sourceCommit)
   ) {
     throw new Error("publication receipt artifact listing differs from the exact tag run");
   }
@@ -1271,8 +1279,8 @@ function validateReceiptArtifact(
     !artifact.archive_download_url.startsWith("https://") ||
     artifact?.expired !== false ||
     String(artifact?.workflow_run?.id ?? "") !== authority.workflowRunId ||
-    artifact?.workflow_run?.head_branch !== authority.tag ||
-    artifact?.workflow_run?.head_sha !== authority.sourceCommit ||
+    artifact?.workflow_run?.head_branch !== (authority.publisherBranch ?? authority.tag) ||
+    artifact?.workflow_run?.head_sha !== (authority.publisherSourceCommit ?? authority.sourceCommit) ||
     !Number.isSafeInteger(retentionSeconds) ||
     retentionSeconds < MINIMUM_RECEIPT_RETENTION_SECONDS
   ) {
@@ -1324,10 +1332,7 @@ async function readPriorPublicationAttempts(apiGet, authority) {
     if (
       String(run?.id ?? "") !== authority.workflowRunId ||
       String(run?.run_attempt ?? "") !== priorAttempt ||
-      run?.event !== "push" ||
-      run?.head_branch !== authority.tag ||
-      run?.head_sha !== authority.sourceCommit ||
-      run?.path !== WORKFLOW_PATH ||
+      !publicationRunIdentityMatches(run, authority) ||
       run?.status !== "completed" ||
       typeof run?.conclusion !== "string" ||
       run.conclusion.length === 0 ||
@@ -1348,14 +1353,35 @@ function validatePublicationRun(run, authority, { active }) {
   if (
     String(run?.id ?? "") !== authority.workflowRunId ||
     String(run?.run_attempt ?? "") !== authority.workflowRunAttempt ||
-    run?.event !== "push" ||
-    run?.head_branch !== authority.tag ||
-    run?.head_sha !== authority.sourceCommit ||
-    run?.path !== WORKFLOW_PATH ||
+    !publicationRunIdentityMatches(run, authority) ||
     !statusIsValid
   ) {
     throw new Error("publication workflow run differs from the exact tag authority");
   }
+}
+
+function publicationRunIdentityMatches(run, authority) {
+  if (run?.path === LEGACY_WORKFLOW_PATH) {
+    return run.event === "push" && run.head_branch === authority.tag &&
+      run.head_sha === authority.sourceCommit;
+  }
+  // The trusted main controller can repair evidence for an older immutable
+  // application. It never becomes the approved application source: the tag,
+  // accepted run and all three asset hashes remain bound to sourceCommit.
+  return run?.path === WORKFLOW_PATH &&
+    ["workflow_dispatch", "workflow_run"].includes(run.event) &&
+    run.head_branch === "main" && GIT_OBJECT_ID.test(run.head_sha ?? "") &&
+    run.repository?.full_name === authority.repository &&
+    run.head_repository?.full_name === authority.repository;
+}
+
+export function normalizeGithubReleaseTimestamp(value) {
+  if (typeof value !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u.test(value)) {
+    throw new Error("GitHub Release publication time must be an exact UTC API timestamp");
+  }
+  const normalized = value.includes(".") ? value : value.replace(/Z$/u, ".000Z");
+  return canonicalTimestamp(normalized, "GitHub Release publication time");
 }
 
 function validateAnnotatedTagRef(value, tag) {
@@ -1393,7 +1419,7 @@ function validateReleaseReadback(release, authority, acceptedArtifacts) {
   ) {
     throw new Error("GitHub Release readback is not one immutable three-asset release");
   }
-  canonicalTimestamp(release.published_at, "GitHub Release publication time");
+  normalizeGithubReleaseTimestamp(release.published_at);
   const acceptedByName = new Map(acceptedArtifacts.map((artifact) => [artifact.name, artifact]));
   const assets = release.assets.map((asset) => {
     const accepted = acceptedByName.get(asset?.name);
@@ -2159,7 +2185,7 @@ async function main() {
       ...common,
       acceptanceEvidence: acceptanceInput.value,
       productsDirectory: values.products,
-    }, githubActionsDependencies("push"));
+    }, githubActionsDependencies());
     process.stdout.write(
       `release_publication_recovery=${result.status} asset_count=${result.recovered_asset_count}\n`,
     );
@@ -2178,7 +2204,7 @@ async function main() {
       ...common,
       acceptanceEvidence: acceptanceInput.value,
       productsDirectory: values.products,
-    }, githubActionsDependencies("push"));
+    }, githubActionsDependencies());
     const fileSha256 = await writeCanonicalJsonNew(values.output, receipt);
     process.stdout.write(
       `${RELEASE_PUBLICATION_RECEIPT_SCHEMA_ID} ${receipt.report_sha256} ${fileSha256}\n`,

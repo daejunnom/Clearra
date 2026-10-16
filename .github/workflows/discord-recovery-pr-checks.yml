@@ -62,6 +62,9 @@ jobs:
       - name: Exercise accepted-source and executable Oracle rollback contracts
         run: >-
           node --test scripts/release/canonical-acceptance-run.test.mjs
+          scripts/release/approved-release-source.test.mjs
+          scripts/release/release-publication-evidence.test.mjs
+          scripts/release/queue-pages-publication.test.mjs
           scripts/release/oracle/create-actions-layers-v080.test.mjs
           apps/clearra-discord-bot/test/accepted-source-preflight.test.mjs
           apps/clearra-discord-bot/test/oracle-rollback-contract.test.mjs

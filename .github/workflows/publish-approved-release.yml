@@ -1,0 +1,163 @@
+name: Publish Approved Release
+run-name: Approved Release · Discord ${{ github.event.workflow_run.id || inputs.discord_run_id }}
+
+# A publication retry consumes prior accepted artifacts and completed production
+# evidence. It never dispatches ReleaseAcceptance, Pages, Discord or Recover.
+on:
+  workflow_run:
+    workflows: ["Deploy Discord Production"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      discord_run_id:
+        description: Successful Discord deployment run owning the approved application
+        required: true
+        type: string
+      discord_run_attempt:
+        description: Exact successful Discord deployment attempt
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: approved-product-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'daejunnom/Clearra' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          filter: blob:none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Resolve approved application independently of the publication controller
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release/approved-release-source.mjs
+      - name: Download approved standalone products without rebuilding
+        if: steps.source.outputs.publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: clearra-*-v${{ steps.source.outputs.version }}-run-${{ steps.source.outputs.accepted_run_id }}-attempt-${{ steps.source.outputs.accepted_run_attempt }}
+          path: ${{ runner.temp }}/clearra-approved-release/products
+          merge-multiple: true
+          run-id: ${{ steps.source.outputs.accepted_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download canonical acceptance evidence
+        if: steps.source.outputs.publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: canonical-acceptance-evidence-${{ steps.source.outputs.source_commit }}-run-${{ steps.source.outputs.accepted_run_id }}-attempt-${{ steps.source.outputs.accepted_run_attempt }}
+          path: ${{ runner.temp }}/clearra-approved-release/acceptance
+          run-id: ${{ steps.source.outputs.accepted_run_id }}
+          github-token: ${{ github.token }}
+      - name: Publish or verify immutable approved Release
+        if: steps.source.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
+          RELEASE_TAG: ${{ steps.source.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.source.outputs.version }}
+          ACCEPTED_RUN_ID: ${{ steps.source.outputs.accepted_run_id }}
+          ACCEPTED_RUN_ATTEMPT: ${{ steps.source.outputs.accepted_run_attempt }}
+          DISCORD_RUN_ID: ${{ steps.source.outputs.discord_run_id }}
+          DISCORD_RUN_ATTEMPT: ${{ steps.source.outputs.discord_run_attempt }}
+          CHECKPOINT_ARTIFACT_ID: ${{ steps.source.outputs.artifact_id }}
+          CHECKPOINT_ARTIFACT_DIGEST: ${{ steps.source.outputs.artifact_digest }}
+          TAG_EXISTS: ${{ steps.source.outputs.tag_exists }}
+          RELEASE_EXISTS: ${{ steps.source.outputs.release_exists }}
+          RELEASE_IMMUTABLE: ${{ steps.source.outputs.release_immutable }}
+          RELEASE_IMMUTABILITY_CONFIRMED: ${{ vars.CLEARRA_IMMUTABLE_RELEASES_ENABLED }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/clearra-approved-release/acceptance/clearra-canonical-acceptance-evidence.v1.json"
+          products="$RUNNER_TEMP/clearra-approved-release/products"
+          node scripts/release/canonical-acceptance-evidence.mjs verify \
+            --report "$evidence" --repository "$GITHUB_REPOSITORY" \
+            --version "$RELEASE_VERSION" --source-commit "$SOURCE_COMMIT" \
+            --run-id "$ACCEPTED_RUN_ID" --run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --base-path "/${{ github.event.repository.name }}" --products "$products"
+          if [[ "$RELEASE_IMMUTABILITY_CONFIRMED" != 'true' ]]; then
+            echo 'repository release immutability must be enabled' >&2
+            exit 2
+          fi
+          if [[ "$RELEASE_IMMUTABLE" != 'true' ]]; then
+            remote_main="$(git ls-remote --exit-code origin refs/heads/main)"
+            if [[ "$remote_main" != "$SOURCE_COMMIT"$'\trefs/heads/main' ]]; then
+              echo 'fresh publication requires the exact current main application' >&2
+              exit 2
+            fi
+          fi
+          if [[ "$TAG_EXISTS" != 'true' ]]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            node scripts/release/finalize-discord-production-checkpoint.mjs tag \
+              --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" \
+              --source-commit "$SOURCE_COMMIT" \
+              --accepted-run-id "$ACCEPTED_RUN_ID" --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+              --discord-run-id "$DISCORD_RUN_ID" --discord-run-attempt "$DISCORD_RUN_ATTEMPT" \
+              --artifact-id "$CHECKPOINT_ARTIFACT_ID" --artifact-digest "$CHECKPOINT_ARTIFACT_DIGEST"
+          fi
+          node scripts/release/finalize-discord-production-checkpoint.mjs verify-tag \
+            --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --source-commit "$SOURCE_COMMIT" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --acceptance-evidence "$evidence"
+          mapfile -t assets < <(find "$products" -maxdepth 1 -type f -print | sort)
+          if [[ "${#assets[@]}" -ne 3 ]]; then
+            echo 'expected exactly three approved product assets' >&2
+            exit 2
+          fi
+          if [[ "$RELEASE_EXISTS" == 'true' && "$RELEASE_IMMUTABLE" != 'true' ]]; then
+            if [[ "$GITHUB_RUN_ATTEMPT" == '1' ]]; then
+              echo 'an existing draft requires an explicit retry, never blind replacement' >&2
+              exit 2
+            fi
+            node scripts/release/release-publication-evidence.mjs recover \
+              --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --source-commit "$SOURCE_COMMIT" \
+              --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --acceptance-evidence "$evidence" --products "$products"
+          elif [[ "$RELEASE_EXISTS" != 'true' ]]; then
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --target "$SOURCE_COMMIT" \
+              --generate-notes --title "Clearra $RELEASE_TAG" --draft
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi
+          immutable="$(gh api --method GET "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.immutable')"
+          if [[ "$immutable" != 'true' ]]; then
+            echo 'published release is not immutable' >&2
+            exit 2
+          fi
+          node scripts/release/finalize-discord-production-checkpoint.mjs verify-release \
+            --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --source-commit "$SOURCE_COMMIT" \
+            --accepted-run-id "$ACCEPTED_RUN_ID" --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
+            --acceptance-evidence "$evidence"
+          mkdir "$RUNNER_TEMP/clearra-approved-release/receipt"
+          node scripts/release/release-publication-evidence.mjs capture \
+            --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --acceptance-evidence "$evidence" --products "$products" \
+            --output "$RUNNER_TEMP/clearra-approved-release/receipt/clearra-release-publication-receipt.v1.json"
+      - name: Upload canonical publication receipt
+        if: steps.source.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-publication-receipt-${{ steps.source.outputs.source_commit }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clearra-approved-release/receipt/clearra-release-publication-receipt.v1.json
+          if-no-files-found: error
+          retention-days: 90

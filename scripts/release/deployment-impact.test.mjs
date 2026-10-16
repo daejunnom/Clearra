@@ -9,6 +9,19 @@ import {
   selectProductionBaseline,
 } from "./deployment-impact.mjs";
 
+test("publication-only evidence repairs never request product redeployment", () => {
+  for (const path of [".github/workflows/publish-approved-release.yml",
+    ".github/workflows/finalize-release-publication.yml", "scripts/release/approved-release-source.mjs",
+    "scripts/release/release-publication-evidence.mjs"]) {
+    const impact = classifyDeploymentImpact([path]);
+    assert.equal(impact.releaseInfrastructureChanged, true);
+    assert.equal(impact.deployPages, false);
+    assert.equal(impact.deployDiscord, false);
+    assert.equal(impact.deployCli, false);
+    assert.equal(impact.deployGui, false);
+  }
+});
+
 test("Pages-only changes select Pages without Discord, GUI desktop, or CLI", () => {
   const impact = classifyDeploymentImpact([
     "apps/clearra-web/src/routes/+page.svelte",

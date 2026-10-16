@@ -13,6 +13,7 @@ import {
   expectedReleasePublicationEvidenceArtifactName,
   extractReleasePublicationReceiptFromArtifactZip,
   inspectReleasePublicationFinalizerAttempt,
+  normalizeGithubReleaseTimestamp,
   planReleasePublicationRecovery,
   recoverReleasePublication,
   resolveReleasePublicationFinalAuthority,
@@ -32,6 +33,65 @@ const REPOSITORY = "daejunnom/Clearra";
 const RUN_ID = "123";
 const RUN_ATTEMPT = "1";
 const FINALIZER_RUN_ID = "999";
+
+test("GitHub wire seconds normalize only at the API boundary; internal receipts stay canonical", async () => {
+  for (const value of ["2026-10-16T11:33:01Z", "2026-10-16T11:33:01.000Z"]) {
+    assert.equal(normalizeGithubReleaseTimestamp(value), "2026-10-16T11:33:01.000Z");
+  }
+  for (const value of ["2026-02-30T00:00:00Z", "2026-10-16", "2026-10-16T11:33:60Z",
+    "2026-10-16T11:33:01+00:00", "2026-10-16T11:33:01.0Z", null]) {
+    assert.throws(() => normalizeGithubReleaseTimestamp(value), /timestamp/u);
+  }
+  const original = fakeApi();
+  const receipt = await collectReleasePublicationReceipt(authority(acceptanceEvidence()), {
+    apiGet: async path => {
+      const value = await original(path);
+      return path === "/releases/tags/v0.8.1" ? { ...value, published_at: "2026-08-30T00:01:00Z" } : value;
+    },
+  });
+  assert.equal(receipt.github_release.published_at, "2026-08-30T00:01:00.000Z");
+  const changed = structuredClone(receipt);
+  changed.github_release.published_at = "2026-08-30T00:01:00Z";
+  const { report_sha256: _hash, ...unsigned } = changed;
+  assert.throws(() => validateReleasePublicationReceipt(sealCanonicalReport(unsigned)), /canonical ISO/u);
+});
+
+test("publication-only main controller repairs an older immutable application's receipt without reacceptance", async () => {
+  const controller = "b".repeat(40);
+  const wrap = base => async path => {
+    const value = await base(path);
+    if (path === `/actions/runs/${RUN_ID}/attempts/1`) return { ...value,
+      path: ".github/workflows/publish-approved-release.yml", event: "workflow_dispatch",
+      head_branch: "main", head_sha: controller,
+      repository: { full_name: REPOSITORY }, head_repository: { full_name: REPOSITORY } };
+    if (path === "/actions/artifacts/9001") return { ...value,
+      workflow_run: { ...value.workflow_run, head_branch: "main", head_sha: controller } };
+    if (path === `/actions/runs/${RUN_ID}/artifacts?per_page=100`) return { ...value,
+      artifacts: value.artifacts.map(artifact => ({ ...artifact,
+        workflow_run: { ...artifact.workflow_run, head_branch: "main", head_sha: controller } })) };
+    return value;
+  };
+  const receipt = await collectReleasePublicationReceipt(authority(acceptanceEvidence()), { apiGet: wrap(fakeApi()) });
+  assert.equal(receipt.workflow_path, ".github/workflows/publish-approved-release.yml");
+  assert.equal(receipt.source_commit, COMMIT);
+  const archive = createStoredZip(`${canonicalJson(receipt)}\n`);
+  const evidence = await collectReleasePublicationEvidence(authority(), {
+    apiGet: wrap(fakeApi({ runStatus: "completed", runConclusion: "success",
+      artifactDigest: `sha256:${sha256(archive)}` })),
+    downloadArtifact: async () => archive,
+  });
+  assert.equal(evidence.source_commit, COMMIT);
+  assert.equal(evidence.workflow_path, receipt.workflow_path);
+  for (const mutation of [{ event: "pull_request" }, { head_branch: "other" },
+    { repository: { full_name: "fork/Clearra" } }, { head_sha: "HEAD" }]) {
+    await assert.rejects(collectReleasePublicationReceipt(authority(acceptanceEvidence()), {
+      apiGet: async path => {
+        const value = await wrap(fakeApi())(path);
+        return path === `/actions/runs/${RUN_ID}/attempts/1` ? { ...value, ...mutation } : value;
+      },
+    }), /publication workflow run/u);
+  }
+});
 
 test("local resolver uses closed gh api argv without reading a token environment variable", async () => {
   const calls = [];
@@ -351,9 +411,9 @@ test("receipt ZIP extraction rejects missing extra and link-shaped entries", asy
   );
 });
 
-test("tag retry recovery and workflow-run finalization remain event-bound and input-free", () => {
+test("publication retries are separate from acceptance and finalization is exact-publisher-bound", () => {
   const releaseWorkflow = readFileSync(
-    new URL("../../.github/workflows/release-cli.yml", import.meta.url),
+    new URL("../../.github/workflows/publish-approved-release.yml", import.meta.url),
     "utf8",
   );
   const finalizerWorkflow = readFileSync(
@@ -361,6 +421,12 @@ test("tag retry recovery and workflow-run finalization remain event-bound and in
     "utf8",
   );
   assertPublicationWorkflowContract(releaseWorkflow, finalizerWorkflow);
+  const acceptance = readFileSync(new URL("../../.github/workflows/release-cli.yml", import.meta.url), "utf8");
+  assert.doesNotMatch(acceptance, /^ {2}(?:publish|push):/mu);
+  assert.doesNotMatch(acceptance, /gh release |contents: write|finalize-discord-production-checkpoint\.mjs/u);
+  assert.doesNotMatch(releaseWorkflow, /cargo |pnpm |npm ci|gh workflow run/u);
+  assert.match(releaseWorkflow, /workflows: \["Deploy Discord Production"\]/u);
+  assert.match(finalizerWorkflow, /workflows: \["Publish Approved Release"\]/u);
   assert.throws(
     () => assertPublicationWorkflowContract(
       releaseWorkflow.replace(

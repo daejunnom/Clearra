@@ -2,7 +2,7 @@ name: Finalize Release Publication Evidence
 
 on:
   workflow_run:
-    workflows: ["Publish Product Release"]
+    workflows: ["Publish Approved Release"]
     types: [completed]
 
 permissions:
@@ -17,8 +17,9 @@ jobs:
   finalize:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      startsWith(github.event.workflow_run.head_branch, 'v') &&
+      (github.event.workflow_run.event == 'workflow_run' ||
+       github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
@@ -29,14 +30,69 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Finalize exact completed tag-run publication evidence
+      - name: Resolve this completed publisher's receipt, not a tag-triggered gate
+        id: receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN_ID: ${{ github.event.workflow_run.id }}
+          ORIGINAL_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+          listing="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID/artifacts?per_page=100")"
+          jq -e '.total_count == (.artifacts | length) and .total_count <= 100' <<< "$listing" >/dev/null
+          names="$(jq -r --arg run "$ORIGINAL_RUN_ID" --arg attempt "$ORIGINAL_RUN_ATTEMPT" \
+            '[.artifacts[] | select(.expired == false) | .name | select(test(
+              "^release-publication-receipt-[0-9a-f]{40}-run-" + $run + "-attempt-" + $attempt + "$"))] | join("\n")' <<< "$listing")"
+          if [[ -z "$names" ]]; then
+            jobs="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID/attempts/$ORIGINAL_RUN_ATTEMPT/jobs?per_page=100")"
+            jq -e '[.jobs[].steps[] | select(.name == "Upload canonical publication receipt")] |
+              length == 1 and .[0].conclusion == "skipped"' <<< "$jobs" >/dev/null
+            echo 'has_receipt=false' >> "$GITHUB_OUTPUT"
+            echo 'No publication receipt: the immutable version was already published for another source.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            if [[ "$(printf '%s\n' "$names" | wc -l)" != '1' ]]; then
+              echo 'ambiguous publication receipts' >&2
+              exit 2
+            fi
+            echo 'has_receipt=true' >> "$GITHUB_OUTPUT"
+            echo "artifact_name=$names" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download this publisher's exact receipt
+        if: steps.receipt.outputs.has_receipt == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.receipt.outputs.artifact_name }}
+          path: ${{ runner.temp }}/clearra-publication-receipt
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Read approved application identity from the verified receipt
+        if: steps.receipt.outputs.has_receipt == 'true'
+        id: application
+        env:
+          ORIGINAL_RUN_ID: ${{ github.event.workflow_run.id }}
+          ORIGINAL_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile, appendFile } from 'node:fs/promises';
+          import { validateReleasePublicationReceipt } from './scripts/release/release-publication-evidence.mjs';
+          const env = process.env;
+          const receipt = validateReleasePublicationReceipt(JSON.parse(await readFile(
+            `${env.RUNNER_TEMP}/clearra-publication-receipt/clearra-release-publication-receipt.v1.json`, 'utf8')), {
+            expectedRepository: env.GITHUB_REPOSITORY,
+            expectedWorkflowRunId: env.ORIGINAL_RUN_ID,
+            expectedWorkflowRunAttempt: env.ORIGINAL_RUN_ATTEMPT,
+          });
+          await appendFile(env.GITHUB_OUTPUT, `source_commit=${receipt.source_commit}\ntag=${receipt.release}\n`);
+          NODE
+      - name: Finalize exact completed publisher-run evidence
+        if: steps.receipt.outputs.has_receipt == 'true'
         id: finalization
         env:
           GH_TOKEN: ${{ github.token }}
           ORIGINAL_RUN_ID: ${{ github.event.workflow_run.id }}
           ORIGINAL_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-          ORIGINAL_SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
-          ORIGINAL_TAG: ${{ github.event.workflow_run.head_branch }}
+          ORIGINAL_SOURCE_COMMIT: ${{ steps.application.outputs.source_commit }}
+          ORIGINAL_TAG: ${{ steps.application.outputs.tag }}
         shell: bash
         run: |
           node scripts/release/release-publication-evidence.mjs finalize \

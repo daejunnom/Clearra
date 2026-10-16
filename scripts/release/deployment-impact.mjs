@@ -53,6 +53,17 @@ export function classifyDeploymentImpact(paths) {
       isTestSnapshotPath(path)
     ) continue;
     if ([
+      ".github/workflows/publish-approved-release.yml",
+      ".github/workflows/finalize-release-publication.yml",
+      "scripts/release/approved-release-source.mjs",
+      "scripts/release/release-publication-evidence.mjs",
+    ].includes(path)) {
+      // Public artifact/evidence plumbing does not change a running surface.
+      // In particular a publication repair must not redeploy Discord or Pages.
+      releaseInfrastructure = true;
+      continue;
+    }
+    if ([
       ".github/workflows/discord-deploy.yml",
       ".github/workflows/discord-deploy-recovery.yml",
     ].includes(path)) {

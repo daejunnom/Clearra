@@ -9,6 +9,7 @@ export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
   "scripts/release/accepted-wasm-build.test.mjs",
   "scripts/release/reusable-accepted-wasm-build.test.mjs",
   "scripts/release/accepted-pages-build.test.mjs",
+  "scripts/release/approved-release-source.test.mjs",
   "scripts/release/canonical-acceptance-evidence.test.mjs",
   "scripts/release/canonical-acceptance-run.test.mjs",
   "scripts/release/candidate-preflight-workflow.test.mjs",

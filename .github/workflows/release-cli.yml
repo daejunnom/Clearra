@@ -1,12 +1,10 @@
 name: Publish Product Release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 concurrency:
@@ -92,10 +90,6 @@ jobs:
             echo 'workspace package version is missing' >&2
             exit 2
           fi
-          if [[ "$GITHUB_REF_TYPE" == 'tag' && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            printf 'tag %s does not match workspace version %s\n' "$GITHUB_REF_NAME" "$version" >&2
-            exit 2
-          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Validate every product version and changelog surface
         if: github.event_name == 'workflow_dispatch'
@@ -112,25 +106,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]; then
-            echo "accepted_run_id=$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
-            echo "accepted_run_attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$GITHUB_REF_TYPE" != 'tag' ]]; then
-            echo 'release workflow only accepts canonical dispatch or tag publication events' >&2
-            exit 2
-          fi
-          git fetch --no-tags --depth=1 origin main
-          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
-            echo 'release tag must point at the exact current main commit' >&2
-            exit 2
-          fi
-          node scripts/release/canonical-acceptance-run.mjs \
-            --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$GITHUB_SHA" \
-            --require one \
-            --format github-output >> "$GITHUB_OUTPUT"
+          echo "accepted_run_id=$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "accepted_run_attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
   ctk3:
     if: github.event_name == 'workflow_dispatch'
@@ -1190,127 +1167,3 @@ jobs:
         env:
           CLEARRA_DIAGNOSTIC_NEEDS: ${{ toJSON(needs) }}
         run: node scripts/release/release-failure-summary.mjs
-
-  publish:
-    if: always() && github.ref_type == 'tag' && needs.metadata.result == 'success'
-    needs:
-      [metadata, release-acceptance, linux-cli, windows-cli, windows-gui, discord-bot]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: clearra-*-v${{ needs.metadata.outputs.version }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
-          path: dist
-          merge-multiple: true
-          run-id: ${{ needs.metadata.outputs.accepted_run_id }}
-          github-token: ${{ github.token }}
-      - name: Download canonical acceptance evidence
-        uses: actions/download-artifact@v4
-        with:
-          name: canonical-acceptance-evidence-${{ github.sha }}-run-${{ needs.metadata.outputs.accepted_run_id }}-attempt-${{ needs.metadata.outputs.accepted_run_attempt }}
-          path: canonical-acceptance-evidence
-          run-id: ${{ needs.metadata.outputs.accepted_run_id }}
-          github-token: ${{ github.token }}
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ACCEPTED_RUN_ID: ${{ needs.metadata.outputs.accepted_run_id }}
-          ACCEPTED_RUN_ATTEMPT: ${{ needs.metadata.outputs.accepted_run_attempt }}
-          RELEASE_IMMUTABILITY_CONFIRMED: ${{ vars.CLEARRA_IMMUTABLE_RELEASES_ENABLED }}
-        shell: bash
-        run: |
-          git fetch --no-tags --depth=1 origin main
-          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
-            echo 'release tag is no longer the exact current main commit' >&2
-            exit 2
-          fi
-          node scripts/release/canonical-acceptance-run.mjs \
-            --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$GITHUB_SHA" \
-            --require one \
-            --expected-run-id "$ACCEPTED_RUN_ID" \
-            --expected-run-attempt "$ACCEPTED_RUN_ATTEMPT"
-          node scripts/release/canonical-acceptance-evidence.mjs verify \
-            --report canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json \
-            --repository "$GITHUB_REPOSITORY" \
-            --version "${{ needs.metadata.outputs.version }}" \
-            --source-commit "$GITHUB_SHA" \
-            --run-id "$ACCEPTED_RUN_ID" \
-            --run-attempt "$ACCEPTED_RUN_ATTEMPT" \
-            --base-path "/${{ github.event.repository.name }}" \
-            --products dist
-          if [[ "$RELEASE_IMMUTABILITY_CONFIRMED" != 'true' ]]; then
-            echo 'repository release immutability has not been confirmed by the approved administrator' >&2
-            exit 2
-          fi
-          node scripts/release/verify-remote-annotated-tag.mjs \
-            --tag "$GITHUB_REF_NAME" \
-            --expected-commit "$GITHUB_SHA"
-          node scripts/release/finalize-discord-production-checkpoint.mjs verify-tag \
-            --repository "$GITHUB_REPOSITORY" \
-            --tag "$GITHUB_REF_NAME" \
-            --source-commit "$GITHUB_SHA" \
-            --accepted-run-id "$ACCEPTED_RUN_ID" \
-            --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
-            --acceptance-evidence canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json
-          mapfile -t assets < <(find dist -maxdepth 1 -type f -print | sort)
-          if [[ "${#assets[@]}" -ne 3 ]]; then
-            printf 'expected three standalone release assets, found %s\n' "${#assets[@]}" >&2
-            printf '%s\n' "${assets[@]}" >&2
-            exit 2
-          fi
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            if [[ "$GITHUB_RUN_ATTEMPT" == '1' ]]; then
-              echo "release $GITHUB_REF_NAME already exists on the first tag attempt" >&2
-              exit 2
-            fi
-            node scripts/release/release-publication-evidence.mjs recover \
-              --repository "$GITHUB_REPOSITORY" \
-              --tag "$GITHUB_REF_NAME" \
-              --source-commit "$GITHUB_SHA" \
-              --workflow-run-id "$GITHUB_RUN_ID" \
-              --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
-              --acceptance-evidence canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json \
-              --products dist
-          else
-            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-              --verify-tag \
-              --target "$GITHUB_SHA" \
-              --generate-notes \
-              --title "Clearra $GITHUB_REF_NAME" \
-              --draft
-            gh release edit "$GITHUB_REF_NAME" --draft=false --latest
-          fi
-          immutable="$(gh api --method GET \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
-            --jq '.immutable')"
-          if [[ "$immutable" != 'true' ]]; then
-            echo 'published release is not immutable' >&2
-            exit 2
-          fi
-          node scripts/release/finalize-discord-production-checkpoint.mjs verify-release \
-            --repository "$GITHUB_REPOSITORY" \
-            --tag "$GITHUB_REF_NAME" \
-            --source-commit "$GITHUB_SHA" \
-            --accepted-run-id "$ACCEPTED_RUN_ID" \
-            --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
-            --acceptance-evidence canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json
-          mkdir publication-receipt
-          node scripts/release/release-publication-evidence.mjs capture \
-            --repository "$GITHUB_REPOSITORY" \
-            --tag "$GITHUB_REF_NAME" \
-            --source-commit "$GITHUB_SHA" \
-            --workflow-run-id "$GITHUB_RUN_ID" \
-            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --acceptance-evidence canonical-acceptance-evidence/clearra-canonical-acceptance-evidence.v1.json \
-            --products dist \
-            --output publication-receipt/clearra-release-publication-receipt.v1.json
-      - name: Upload canonical publication receipt
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-publication-receipt-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: publication-receipt/clearra-release-publication-receipt.v1.json
-          if-no-files-found: error
-          retention-days: 90

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { queuePagesPublication } from "./queue-pages-publication.mjs";
+import { queuePagesPublication, pagesQueueCompletionInput, pagesSnapshotSource, pagesPublicationRequired } from "./queue-pages-publication.mjs";
 import { classifyDeploymentImpact } from "./deployment-impact.mjs";
 
 const repository = "daejunnom/Clearra";
@@ -162,10 +162,11 @@ test("Pages owns completion after the queue validates its dispatch receipt", asy
   assert.equal(f.posts().length, 2);
 });
 
-test("the queue has manual-only scope, bounded lifetime and no direct publication permission", () => {
+test("the queue fans out from acceptance alongside Discord with bounded unprivileged orchestration", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/queue-pages-publication.yml", import.meta.url), "utf8");
-  assert.match(workflow, /on:\s+workflow_dispatch:/u);
-  assert.doesNotMatch(workflow, /^ {2}(?:push|pull_request|workflow_run|schedule):/mu);
+  assert.match(workflow, /on:\s+workflow_run:\s+workflows: \["Publish Product Release"\]/u);
+  assert.match(workflow, /^ {2}workflow_dispatch:/mu);
+  assert.doesNotMatch(workflow, /^ {2}(?:push|pull_request|schedule):/mu);
   assert.match(workflow, /permissions:\s+contents: read\s+actions: write/u);
   assert.doesNotMatch(workflow, /pages: write|contents: write|id-token: write|uses: actions\/deploy-pages/u);
   assert.match(workflow, /group: queued-pages-publication/u);
@@ -174,6 +175,43 @@ test("the queue has manual-only scope, bounded lifetime and no direct publicatio
   assert.match(workflow, /persist-credentials: false/u);
   assert.match(workflow, /run: node scripts\/release\/queue-pages-publication.mjs/u);
   assert.doesNotMatch(workflow, /npm ci|cargo |wasm-bindgen|continue-on-error/u);
+});
+
+test("automatic Pages completion routing rejects foreign, failed and stale acceptance", () => {
+  const event = { action: "completed", repository: { full_name: repository }, workflow_run: {
+    id: 10, run_attempt: 1, head_sha: sourceCommit, head_branch: "main",
+    head_repository: { full_name: repository }, event: "workflow_dispatch", status: "completed",
+    conclusion: "success", path: ".github/workflows/release-cli.yml" } };
+  const context = { repository, ref: "refs/heads/main", sourceCommit, event };
+  assert.deepEqual(pagesQueueCompletionInput(context), { sourceCommit, acceptanceRunId: "10", expectedAcceptanceAttempt: "1" });
+  for (const mutation of [{ conclusion: "failure" }, { head_sha: snapshotSha }, { event: "push" },
+    { path: ".github/workflows/discord-deploy.yml" }, { head_repository: { full_name: "fork/Clearra" } }]) {
+    assert.throws(() => pagesQueueCompletionInput({ ...context, event: { ...event,
+      workflow_run: { ...event.workflow_run, ...mutation } } }), /successful canonical main/u);
+  }
+});
+
+test("active Pages snapshot discovery is exact and cannot replace rollback byte verification", () => {
+  const identity = { schema: "clearra.pages.identity.v2", sourceCommit: snapshotSha,
+    engineBuildId: snapshotSha, basePath: "/Clearra" };
+  assert.equal(pagesSnapshotSource(identity), snapshotSha);
+  for (const mutation of [{ sourceCommit: "HEAD" }, { engineBuildId: sourceCommit },
+    { basePath: "/other" }, { schema: "other" }]) {
+    assert.throws(() => pagesSnapshotSource({ ...identity, ...mutation }), /rollback snapshot/u);
+  }
+});
+
+test("a completion event cannot silently switch acceptance attempts", async () => {
+  const f = fixture({ mutateRun: run => ({ ...run, run_attempt: 2 }) });
+  await assert.rejects(queuePagesPublication({ ...options, expectedAcceptanceAttempt: "1" }, f.dependencies),
+    /attempt changed/u);
+  assert.equal(f.posts().length, 0);
+});
+
+test("automatic fan-out preserves Discord's exact-SHA Pages prerequisite without redeploying on publication-only repairs", () => {
+  assert.equal(pagesPublicationRequired(classifyDeploymentImpact(["apps/clearra-discord-bot/src/discord/path-command.mjs"])), true);
+  assert.equal(pagesPublicationRequired(classifyDeploymentImpact(["apps/clearra-web/src/routes/+page.svelte"])), true);
+  assert.equal(pagesPublicationRequired(classifyDeploymentImpact(["scripts/release/release-publication-evidence.mjs"])), false);
 });
 
 test("queue-only changes do not request unrelated CLI or Discord deployment", () => {
