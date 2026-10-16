@@ -1185,13 +1185,17 @@ function requireCleanExactMainCheckout(runGit, { repository, sourceCommit, tag }
   if (runGit.text(["cat-file", "-t", sourceCommit]).trim() !== "commit") {
     throw new Error("checkpoint source is not a commit");
   }
-  const localTag = runGit.optional(["show-ref", "--verify", `refs/tags/${tag}`]);
-  if (localTag.status === 0) throw new Error("checkpoint release tag already exists locally");
-  if (localTag.status !== 1) throw new Error("local checkpoint tag query failed");
+  assertLocalCheckpointTagAbsent(runGit, tag);
   runGit.bytes(["fetch", "--no-tags", "--depth=1", "origin", "main"]);
   if (runGit.text(["rev-parse", "refs/remotes/origin/main"]).trim() !== sourceCommit) {
     throw new Error("fetched origin/main differs from the release source");
   }
+}
+
+export function assertLocalCheckpointTagAbsent(runGit, tag) {
+  const localTag = runGit.optional(["show-ref", "--verify", "--quiet", `refs/tags/${requireReleaseTag(tag)}`]);
+  if (localTag.status === 0) throw new Error("checkpoint release tag already exists locally");
+  if (localTag.status !== 1) throw new Error("local checkpoint tag query failed");
 }
 
 function assertRemoteMainAndAbsentTag(runGit, sourceCommit, tag) {

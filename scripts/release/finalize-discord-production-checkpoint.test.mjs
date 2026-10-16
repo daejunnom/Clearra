@@ -24,6 +24,7 @@ import {
   validateDiscordCheckpointCandidatePrerequisites,
 } from "./discord-deployment-recovery.mjs";
 import {
+  assertLocalCheckpointTagAbsent,
   DISCORD_PRODUCTION_CHECKPOINT_RECEIPT_SCHEMA_ID,
   materializeCompletedJobTopology,
   parseCanonicalReceiptBytes,
@@ -519,6 +520,27 @@ test("preserves exact canonical receipt bytes through local and remote annotated
     });
     const sourceCommit = git(["-C", checkout, "rev-parse", "HEAD"])
       .toString("utf8").trim();
+    const localGit = {
+      optional(args) {
+        const result = spawnSync("git", ["-C", checkout, ...args], {
+          encoding: "utf8", windowsHide: true, shell: false,
+        });
+        assert.ifError(result.error);
+        assert.equal(result.signal, null);
+        return result;
+      },
+    };
+    assertLocalCheckpointTagAbsent(localGit, "v0.8.1");
+    assert.throws(() => assertLocalCheckpointTagAbsent({
+      optional(args) {
+        const result = spawnSync("git", ["-C", join(root, "missing-checkout"), ...args], {
+          encoding: "utf8", windowsHide: true, shell: false,
+        });
+        assert.ifError(result.error);
+        assert.equal(result.signal, null);
+        return result;
+      },
+    }, "v0.8.1"), /local checkpoint tag query failed/u);
     git([
       "-C", checkout, "tag", "-a", "--cleanup=verbatim", "-F", "-",
       "v0.8.1", sourceCommit,
@@ -527,6 +549,8 @@ test("preserves exact canonical receipt bytes through local and remote annotated
     }, message);
     const tagObject = git(["-C", checkout, "rev-parse", "refs/tags/v0.8.1"])
       .toString("utf8").trim();
+    assert.throws(() => assertLocalCheckpointTagAbsent(localGit, "v0.8.1"),
+      /checkpoint release tag already exists locally/u);
     const local = parseRawTagObject(git(["-C", checkout, "cat-file", "tag", tagObject]));
     assert.equal(local.targetCommit, sourceCommit);
     assert.deepEqual(local.message, message);
