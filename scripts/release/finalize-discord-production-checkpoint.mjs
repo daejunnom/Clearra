@@ -29,7 +29,7 @@ import {
   DISCORD_PRODUCTION_CHECKPOINT_CANDIDATE_FILE,
   checkpointCandidateArtifactName,
   validateDiscordProductionCheckpointCandidate,
-} from "./discord-production-checkpoint-receipt.mjs";
+} from "./discord-production-checkpoint.mjs";
 import {
   DISCORD_CHECKPOINT_CANDIDATE_UPLOAD_STEP,
   DISCORD_SUCCESSFUL_DEPLOYMENT_JOB_NAMES,

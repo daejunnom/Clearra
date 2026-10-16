@@ -7,7 +7,7 @@ import { setTimeout as wait } from "node:timers/promises";
 import { runBoundedCommand } from "./bounded-command.mjs";
 import { canonicalJson, sealCanonicalReport, verifyCanonicalReportHash } from "./canonical-release-evidence.mjs";
 import { verifyDiscordDeploymentState } from "./discord-deployment-state.mjs";
-import { prepareDiscordProductionCheckpointInputs, validateDiscordProductionCheckpointCandidate } from "./discord-production-checkpoint-receipt.mjs";
+import { prepareDiscordProductionCheckpointInputs, validateDiscordProductionCheckpointCandidate } from "./discord-production-checkpoint.mjs";
 import { createCommandProbes, verifyProductionObservationStillCurrent } from "./observe-production-surfaces.mjs";
 import { CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 

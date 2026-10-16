@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -30,7 +31,13 @@ import {
   PRODUCTION_SURFACE_PROBE_SCHEMA_ID,
 } from "./observe-production-surfaces.mjs";
 import { checkpointInputsFromEnvironment, retryEvidenceWrite, snapshotEvidenceUpload } from "./production-evidence-retry.mjs";
-import { CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
+import { CURRENT_PRODUCT_VERSION, expectedProductArtifactName } from "./current-product-release.mjs";
+import { CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES } from "./canonical-acceptance-evidence.mjs";
+import { sealDiscordCatalogRecoveryAuthority } from "./discord-catalog-recovery-authority.mjs";
+import {
+  captureDiscordCatalogSnapshot,
+  createCanonicalDiscordCatalog,
+} from "../../apps/clearra-discord-bot/scripts/discord-command-catalog-release.mjs";
 
 const REPOSITORY = "daejunnom/Clearra";
 export const SOURCE = "1".repeat(40);
@@ -65,6 +72,40 @@ test("production evidence preflight and retry bind the current release and keep 
   assert.notEqual(options.workflowRunId, options.acceptedRunId);
   assert.equal(options.canonicalAcceptanceEvidence,
     resolve(root, "promoted/prepared/canonical-acceptance/clearra-canonical-acceptance-evidence.v1.json"));
+});
+
+test("the real checkpoint CLI seals and verifies exact inputs without a retry-module import deadlock", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "clearra-checkpoint-cli-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const options = await checkpointCliFixture(root);
+  const cli = fileURLToPath(new URL("./discord-production-checkpoint-receipt.mjs", import.meta.url));
+  const output = join(root, "candidate.json");
+  const run = (operation, overrides = {}) => spawnSync(process.execPath, [
+    cli, operation, ...Object.entries({ ...options, output, ...overrides })
+      .flatMap(([name, value]) => [`--${name}`, value]),
+  ], { encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024, windowsHide: true });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const sealed = run("seal-candidate");
+    assert.ifError(sealed.error);
+    assert.equal(sealed.signal, null);
+    assert.equal(sealed.status, 0, sealed.stderr);
+    assert.match(sealed.stdout, /^discord_checkpoint_candidate=sealed sha256=[0-9a-f]{64}\n$/u);
+    assert.equal(sealed.stderr, "");
+    const bytes = await readFile(output, "utf8");
+    const candidate = JSON.parse(bytes);
+    validateDiscordProductionCheckpointCandidate(candidate, identity());
+    assert.equal(bytes, `${canonicalJson(candidate)}\n`);
+    const verified = run("verify-candidate", { report: output });
+    assert.ifError(verified.error);
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.equal(verified.stdout, `discord_checkpoint_candidate=verified sha256=${candidate.report_sha256}\n`);
+  }
+  const rejectedOutput = join(root, "foreign-candidate.json");
+  const rejected = run("seal-candidate", { "accepted-run-id": "99", output: rejectedOutput });
+  assert.ifError(rejected.error);
+  assert.equal(rejected.status, 2);
+  assert.match(rejected.stderr, /canonical acceptance evidence differs from the bound run attempt/u);
+  await assert.rejects(readFile(rejectedOutput), { code: "ENOENT" });
 });
 
 test("evidence I/O retry requires a live revalidation and never retries invalid or uncertain state", async () => {
@@ -349,6 +390,120 @@ export async function candidateFixture(prerequisiteProof) {
     expected_artifact_name: checkpointCandidateArtifactName(SOURCE, RUN_ID, RUN_ATTEMPT),
     expected_artifact_leaf: DISCORD_PRODUCTION_CHECKPOINT_CANDIDATE_FILE,
   });
+}
+
+async function checkpointCliFixture(root) {
+  const write = async (name, value) => {
+    const path = join(root, `${name}.json`);
+    await writeFile(path, `${canonicalJson(value)}\n`);
+    return path;
+  };
+  const jobs = checkpointJobList();
+  const observationStartedAt = jobs.jobs.find(({ name }) => name === "sync-observe").steps
+    .find(({ name }) => name === "Authority-bound global sync and sole canonical four-surface observation").started_at;
+  const acceptance = sealCanonicalReport({
+    schema_id: "clearra.canonical-acceptance-evidence.v1",
+    repository: REPOSITORY, release_version: CURRENT_PRODUCT_VERSION, pages_base_path: "/Clearra",
+    source_commit: SOURCE, run_id: ACCEPTED_RUN_ID, run_attempt: ACCEPTED_RUN_ATTEMPT,
+    workflow_path: ".github/workflows/release-cli.yml", status: "passed",
+    jobs: CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES.map((name, index) => ({
+      name, job_id: String(9000 + index), status: "passed",
+    })),
+    accepted_inputs: {
+      ctk3_manifest_sha256: HASH, pages_identity_sha256: HASH,
+      wasm_build_receipt_sha256: HASH, gate_index_sha256: HASH,
+    },
+    final_source_fragments: {
+      toolchains: { source_commit: SOURCE, manifest_sha256: HASH, rust: "fixture", node: "fixture", wasm_bindgen: "fixture" },
+      canonical_gate: {
+        id: `release-acceptance-run-${ACCEPTED_RUN_ID}-attempt-${ACCEPTED_RUN_ATTEMPT}`,
+        sha256: HASH, source_commit: SOURCE, status: "passed", readiness_open_count: 0,
+      },
+      surface_reports: ["desktop", "discord", "native", "wasm"].map(surface => ({
+        id: `${surface}-run-${ACCEPTED_RUN_ID}-attempt-${ACCEPTED_RUN_ATTEMPT}`,
+        sha256: HASH, source_commit: SOURCE, surface, status: "passed",
+      })),
+      release_artifacts: ["linux-cli", "windows-cli", "windows-gui"].map((role, index) => ({
+        role, name: expectedProductArtifactName(role), sha256: HASH, size_bytes: index + 1, source_commit: SOURCE,
+      })),
+    },
+  });
+  const catalog = createCanonicalDiscordCatalog({ sourceCommit: SOURCE, commands: [
+    { name: "help", description: "Help" }, { type: 3, name: "Get original GIF" },
+  ] });
+  const prior = await captureDiscordCatalogSnapshot({
+    rest: { async getGlobalCommands() { return catalog.commands; } },
+    applicationId: APPLICATION_ID, sourceCommit: SOURCE,
+    observedAt: new Date(Date.parse(observationStartedAt) - 10_000).toISOString(),
+  });
+  const syncAuthority = sealCanonicalReport({
+    schema_id: "clearra.discord.command-sync-authority.v1", source_commit: SOURCE,
+    repository: REPOSITORY, release_version: CURRENT_PRODUCT_VERSION, pages_base_path: "/Clearra",
+    accepted_run_id: ACCEPTED_RUN_ID, accepted_run_attempt: ACCEPTED_RUN_ATTEMPT,
+    accepted_ctk3_manifest_sha256: HASH,
+    canonical_acceptance_evidence_sha256: acceptance.report_sha256,
+    canonical_acceptance_evidence_file_sha256: fileSha(acceptance),
+    command_catalog_sha256: catalog.catalog_sha256, command_catalog_file_sha256: fileSha(catalog),
+  });
+  const syncReport = sealCanonicalReport({
+    schema_id: "clearra.discord.command-catalog-sync.v1", source_commit: SOURCE, application_id: APPLICATION_ID,
+    started_at: new Date(Date.parse(observationStartedAt) - 9_000).toISOString(),
+    ended_at: new Date(Date.parse(observationStartedAt) - 8_000).toISOString(),
+    status: "synchronized", changed: false, command_count: catalog.command_count,
+    expected_catalog_sha256: catalog.catalog_sha256, accepted_run_id: ACCEPTED_RUN_ID,
+    accepted_run_attempt: ACCEPTED_RUN_ATTEMPT, accepted_ctk3_manifest_sha256: HASH,
+    canonical_acceptance_evidence_sha256: acceptance.report_sha256,
+    canonical_acceptance_evidence_file_sha256: fileSha(acceptance),
+    command_catalog_file_sha256: fileSha(catalog), command_sync_authority_sha256: syncAuthority.report_sha256,
+    command_sync_authority_file_sha256: fileSha(syncAuthority), prior_snapshot_sha256: prior.snapshot_sha256,
+    prior_catalog_sha256: prior.catalog_sha256, current_before_sha256: prior.catalog_sha256,
+    current_after_sha256: catalog.catalog_sha256,
+  });
+  const priorPath = await write("prior", prior);
+  const catalogPath = await write("catalog", catalog);
+  const syncAuthorityPath = await write("sync-authority", syncAuthority);
+  const catalogAuthority = await sealDiscordCatalogRecoveryAuthority({
+    ...identity(), applicationId: APPLICATION_ID, priorSnapshot: priorPath,
+    desiredCatalog: catalogPath, syncAuthority: syncAuthorityPath,
+  });
+  const clearance = sealCanonicalReport({
+    schema_id: "clearra.discord-recovery-debt-clearance.v1", repository: REPOSITORY,
+    current_workflow_run_id: RUN_ID, current_workflow_run_attempt: RUN_ATTEMPT, current_source_commit: SOURCE,
+    checkpoint_sha256: HASH, plan_sha256: HASH, cleared_debts: [],
+  });
+  const probes = probeSet(observationStartedAt, syncReport);
+  const discordProbe = probes.discord;
+  probes.discord = async context => {
+    const result = await discordProbe(context);
+    Object.assign(result.identity, {
+      command_catalog_prior_snapshot_sha256: prior.snapshot_sha256,
+      command_catalog_readback_sha256: catalog.catalog_sha256,
+      accepted_ctk3_manifest_sha256: HASH,
+      canonical_acceptance_evidence_sha256: acceptance.report_sha256,
+      canonical_acceptance_evidence_file_sha256: fileSha(acceptance),
+      command_catalog_file_sha256: fileSha(catalog), command_sync_authority_sha256: syncAuthority.report_sha256,
+      command_sync_authority_file_sha256: fileSha(syncAuthority),
+    });
+    result.freshness.readback_sha256 = catalog.catalog_sha256;
+    return result;
+  };
+  const observation = await observeProductionSurfaces({
+    sourceCommit: SOURCE, durationSeconds: 1200, intervalSeconds: 1200,
+    clock: fakeClock(observationStartedAt), probes, probeSpec: probeSpec(),
+  });
+  return {
+    repository: REPOSITORY, "source-commit": SOURCE, "workflow-run-id": RUN_ID,
+    "workflow-run-attempt": RUN_ATTEMPT, "accepted-run-id": ACCEPTED_RUN_ID,
+    "accepted-run-attempt": ACCEPTED_RUN_ATTEMPT, version: CURRENT_PRODUCT_VERSION,
+    "base-path": "/Clearra", "application-id": APPLICATION_ID,
+    "catalog-artifact-id": "9900", "catalog-artifact-digest": `sha256:${HASH}`,
+    "canonical-acceptance-evidence": await write("acceptance", acceptance),
+    "recovery-debt-clearance": await write("clearance", clearance),
+    "catalog-recovery-authority": await write("catalog-authority", catalogAuthority),
+    "prior-catalog-snapshot": priorPath, "desired-catalog": catalogPath, "sync-authority": syncAuthorityPath,
+    "sync-report": await write("sync-report", syncReport),
+    "production-observation": await write("observation", observation), "job-list": await write("jobs", jobs),
+  };
 }
 
 function probeSpec() {
