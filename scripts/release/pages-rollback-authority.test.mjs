@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { canonicalSha256, sealCanonicalReport } from "./canonical-release-evidence.mjs";
 import {
@@ -115,6 +117,95 @@ function pagesIdentity(sha = SNAPSHOT) {
     },
   };
 }
+
+test("real capture CLI works before and after Release publication without weakening source or WASM identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "clearra-pages-capture-cli-"));
+  const entry = new URL("./pages-rollback-authority.mjs", import.meta.url);
+  const page = pagesIdentity();
+  page.identity.version = "0.8.1";
+  page.identity.acceptedRunId = "555";
+  const environment = {
+    PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+    TMP: root, TEMP: root, TMPDIR: root,
+    PAGES_AUTHORITY_MODE: "capture", PAGES_AUTHORITY_PHASE: "initial",
+    AUTHORITY_SHA: AUTHORITY, SNAPSHOT_SHA: SNAPSHOT, CURRENT_PAGES_SHA: SNAPSHOT,
+    GITHUB_REPOSITORY: "daejunnom/Clearra", GITHUB_RUN_ID: "12345", GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_REF: "refs/heads/main", GITHUB_SHA: AUTHORITY,
+    GH_TOKEN: "test-only-read-authority", GITHUB_API_URL: "https://api.github.com",
+    GITHUB_OUTPUT: join(root, "output.txt"),
+  };
+  const invoke = (published, mutation = null) => {
+    const fixture = { published, mutation, snapshot: SNAPSHOT, authority: AUTHORITY, page,
+      canonical: canonicalRun(), entry: entry.href, entryPath: fileURLToPath(entry) };
+    return spawnSync(process.execPath, ["--input-type=module", "--eval", `
+      const fixture = ${JSON.stringify(fixture)};
+      const requests = [];
+      globalThis.fetch = async (input, options) => {
+        const url = new URL(input);
+        requests.push(url.pathname);
+        if (options?.method && options.method !== 'GET') throw new Error('capture must stay read-only');
+        let value;
+        if (url.hostname === 'api.github.com') {
+          const path = url.pathname.replace('/repos/daejunnom/Clearra', '');
+          if (path === '/git/ref/heads/main') value = { object: { sha:
+            fixture.mutation === 'main' ? fixture.snapshot : fixture.authority } };
+          else if (path === '/actions/runs/12345') value = {
+            id: 12345, run_attempt: 1, event: 'workflow_dispatch', head_branch: 'main',
+            head_sha: fixture.authority, path: '.github/workflows/pages-rollback.yml' };
+          else if (path === '/compare/' + fixture.snapshot + '...' + fixture.authority) value = { status: 'ahead' };
+          else if (path === '/actions/workflows/release-cli.yml/runs') {
+            const sha = url.searchParams.get('head_sha');
+            value = { total_count: 1, workflow_runs: [{ ...fixture.canonical,
+              id: sha === fixture.snapshot ? 555 : 777, head_sha: sha,
+              conclusion: fixture.mutation === 'acceptance' ? 'failure' : 'success' }] };
+          } else if (path === '/actions/runs/555/artifacts') {
+            const artifacts = url.searchParams.get('page') === '1' ? [{
+              id: 67890, name: 'accepted-pages-build-' + fixture.snapshot + '-run-555-attempt-1',
+              workflow_run: { id: 555, head_sha: fixture.snapshot }, expired: false,
+              digest: 'sha256:' + '3'.repeat(64), created_at: '2026-08-01T00:00:00Z',
+              expires_at: '2026-11-01T00:00:00Z' }] : [];
+            value = { total_count: 1, artifacts };
+          } else if (path === '/pages') value = { html_url: 'https://daejunnom.github.io/Clearra/' };
+          else if (path === '/git/ref/tags/v0.8.1' || path === '/releases/tags/v0.8.1') {
+            return new Response('{}', { status: fixture.published ? 200 : 404 });
+          } else throw new Error('unexpected GitHub read: ' + path);
+        } else if (url.origin === 'https://daejunnom.github.io') {
+          if (url.pathname === '/Clearra/clearra-build-identity.json') value = fixture.page.identity;
+          else if (url.pathname === '/Clearra/wasm/clearra_wasm.manifest.json') {
+            value = fixture.page.manifest;
+            if (fixture.mutation === 'wasm') value = { build: { runtime_identity: {
+              ...value.build.runtime_identity, source_commit: fixture.authority } } };
+          } else throw new Error('unexpected public Pages read');
+        } else throw new Error('network escaped the test fixture');
+        return new Response(JSON.stringify(value), { status: 200 });
+      };
+      process.on('exit', () => console.log('capture_reads=' + JSON.stringify(requests)));
+      process.argv[1] = fixture.entryPath;
+      await import(fixture.entry);
+    `], { env: environment, encoding: "utf8", timeout: 15_000,
+      maxBuffer: 1024 * 1024, windowsHide: true });
+  };
+  try {
+    for (const published of [false, true]) {
+      const result = invoke(published);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /pages_rollback_authority=passed mode=capture phase=initial/u);
+      const requests = JSON.parse(result.stdout.split("capture_reads=")[1].trim());
+      assert.equal(requests.some(path => path.endsWith('/tags/v0.8.1')), false);
+    }
+    const output = await readFile(environment.GITHUB_OUTPUT, "utf8");
+    assert.match(output, /accepted_artifact_id=67890/u);
+    assert.match(output, /accepted_run_id=555/u);
+    for (const [mutation, reason] of [["main", /remote main SHA differs/u],
+      ["acceptance", /canonical run|canonical.*identity/u], ["wasm", /WASM manifest does not match/u]]) {
+      const result = invoke(true, mutation);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, reason);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 function reconstructedPagesIdentity(sha = SNAPSHOT) {
   const { identity, manifest } = pagesIdentity(sha);

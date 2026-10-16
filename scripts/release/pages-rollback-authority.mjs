@@ -44,13 +44,11 @@ import {
   CLEARRA_CONTRACT_SCHEMA_VERSION,
   CLEARRA_SUPPLY_SEMANTICS_ID,
 } from "../tools/clearra-wasm-build-contract.mjs";
-import { CURRENT_PRODUCT_TAG } from "./current-product-release.mjs";
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const DECIMAL_ID_PATTERN = /^[1-9][0-9]*$/u;
-const RELEASE_TAG = CURRENT_PRODUCT_TAG;
 export const LEGACY_BOOTSTRAP_RELEASE_TAG = LEGACY_PAGES_RELEASE_TAG;
 const MINIMUM_RETENTION_MS = 89 * 24 * 60 * 60 * 1000;
 const HTTP_READ_TIMEOUT_MS = 30_000;
@@ -1443,17 +1441,6 @@ function apiClient({ repository, token, apiUrl }) {
         signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
       }), label);
     },
-    async requireAbsent(path, label) {
-      const response = await fetch(`${base}${path}`, {
-        headers,
-        cache: "no-store",
-        redirect: "error",
-        signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
-      });
-      if (response.status !== 404) {
-        fail(`${label} must be absent before a pre-release Pages rollback`);
-      }
-    },
   };
 }
 
@@ -2300,9 +2287,6 @@ async function main() {
       currentPagesSha,
     });
   }
-
-  await api.requireAbsent(`/git/ref/tags/${RELEASE_TAG}`, `${RELEASE_TAG} tag`);
-  await api.requireAbsent(`/releases/tags/${RELEASE_TAG}`, `${RELEASE_TAG} release`);
 
   if (mode === "capture" || mode === "bootstrap-capture") {
     for (const [label, value] of Object.entries(captureReportFields)) {
