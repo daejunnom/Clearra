@@ -573,6 +573,7 @@ async function browserAcceptance() {
       // transports. Toggle only accelerators/prewarm, not the candidate universe.
       const ordinaryRootWorker = new Worker('/workers/clearraWorker.ts', { type: 'module' });
       const ordinaryRootRuns = [];
+      const singleBagRuns = [];
       try {
         const ordinaryArgs = ['pc', '--lines', '4', '--height', '4', '--board-mask', '0x3c0f03c0f',
           '--pieces', '6', '--patterns', 'P7', '--hold', 'empty', '--count', 'unique',
@@ -587,6 +588,20 @@ async function browserAcceptance() {
             : ordinaryArgs;
           ordinaryRootRuns.push(await runOnWorker(ordinaryRootWorker, 'srs-plus', repeat % 2 === 0,
             repeat % 2 === 0, flags, { cpuWarmup: true }));
+        }
+        // The complete seven-piece bag has one natural multiset root. It must
+        // use streaming CPU verification, not collapse to a one-worker root
+        // plan or reuse the preceding job's PcRoots packet interpretation.
+        // Omit --backend here to exercise the PC parser's new CPU default.
+        const singleBagArgs = ['pc', '--lines', '4', '--height', '4', '--board-mask', '0x30080f67',
+          '--pieces', '7', '--patterns', 'P7', '--hold', 'empty', '--count', 'unique',
+          '--rule', 'srs-plus', '--no-tablebase', '--no-legal-board',
+          '--no-conditioned-reachability'];
+        singleBagRuns.push(await runOnWorker(ordinaryRootWorker, 'srs-plus', false, false,
+          singleBagArgs, { workers: 1 }));
+        for (const cpuWarmup of [false, true]) {
+          singleBagRuns.push(await runOnWorker(ordinaryRootWorker, 'srs-plus', false, false,
+            singleBagArgs, { cpuWarmup }));
         }
       } finally {
         ordinaryRootWorker.postMessage({ type: 'dispose_runtime' });
@@ -618,7 +633,7 @@ async function browserAcceptance() {
         await new Promise(resolve => setTimeout(resolve, 100));
         rootWorker.terminate();
       }
-      return { results, workers, corruption, ordinaryRootRuns };
+      return { results, workers, corruption, ordinaryRootRuns, singleBagRuns };
     }, { profiles, setupScoreDocument: realSetupScoreDocument, pcProductInputs, buildResultSurfaces })
       .catch(error => {
         throw new Error(`signed browser product execution failed; page_errors=${JSON.stringify(errors.slice(-3))}`,
@@ -656,6 +671,20 @@ async function browserAcceptance() {
       assert.equal(sample.result.search_report.cpu_parallel_execution, true);
     }
     console.log(`browser_ordinary_full_solution_repeats=passed repeats=4 workers=${execution.workers}`);
+    assert.equal(execution.singleBagRuns.length, 3,
+      'the seven-piece field needs its own serial baseline and two real warm-owner repeats');
+    const singleBagBaseline = compact(execution.singleBagRuns[0]);
+    assert.equal(singleBagBaseline.keys.length, 22);
+    for (const [repeat, sample] of execution.singleBagRuns.slice(1).entries()) {
+      assert.deepEqual(compact(sample), singleBagBaseline, `single-bag CPU repeat ${repeat}`);
+      assert.ok(sample.phases.includes('draining'), 'streaming Geometry must drain actual verifier work');
+      assert.ok(sample.phases.includes('postprocessing'), 'single-bag verifiers must reach postprocessing');
+      assert.ok(sample.phases.includes('merging'), 'the exact single-bag family must reach its terminal merger');
+      assert.equal(sample.result.search_report.cpu_parallel_execution, true);
+      assert.equal(sample.result.search_report.workers_used, execution.workers,
+        'a single multiset root must not reduce the requested CPU capacity');
+    }
+    console.log(`browser_single_bag_cpu_repeats=passed repeats=2 solutions=22 workers=${execution.workers}`);
     for (const profile of profiles) {
       for (const scope of ['eligible', 'existing']) {
         const pair = execution.results[profile][scope];

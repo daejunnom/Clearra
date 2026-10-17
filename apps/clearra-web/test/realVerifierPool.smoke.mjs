@@ -341,7 +341,7 @@ async function assets(profile, legal, relation) {
 }
 async function distributed(text, activated, {
   cancel = false, expectedRootTasks = false, expectedFullHeight = false,
-  expectedVisibleSeven = false, projectTerminal = result
+  expectedStreamingPc = false, expectedVisibleSeven = false, projectTerminal = result
 } = {}) {
   const admissions = () => transports.reduce((sum, transport) => ({
     legal: sum.legal + transport.admitted.legal, relation: sum.relation + transport.admitted.relation
@@ -358,6 +358,12 @@ async function distributed(text, activated, {
       'the requested root-partition product must exercise its actual root producer');
     if (expectedRootTasks) assert.equal(plan.verificationRequired, true,
       'root-partition products must execute their actual remote worker');
+    if (expectedStreamingPc) {
+      assert.equal(plan.rootTaskParallel, false,
+        'one complete bag must stream candidates instead of admitting one multiset root');
+      assert.equal(plan.verificationRequired, true,
+        'a streaming PC family must still cross the actual remote verifier boundary');
+    }
     if (expectedFullHeight) {
       assert.equal(plan.rootTaskParallel, false, 'full-height streams are not compact natural-root packets');
       assert.equal(plan.verificationRequired, true, 'full-height BuildUp must use the actual remote verifier');
@@ -410,6 +416,46 @@ try {
   const restartedOrdinary = await distributed(ordinaryText, { synopsis: null, pack: null }, { expectedRootTasks: true });
   assert.deepEqual(restartedOrdinary, ordinaryBaseline, 'a cancelled ordinary root job cannot contaminate its replacement');
   console.log('real_web_pc_root_cancel_restart=passed');
+
+  // This user field needs all seven P7 pieces. Unlike the six-piece fixture
+  // above, its multiset domain has only one root. Exercise the GUI command
+  // builder, then the real independently initialized Web verifier transports.
+  const singleBagRequest = { ...createDefaultWorkspaceRequest(), lines: 4,
+    boardMask: 0x30080f67n, queue: 'P7', workers: 3,
+    legalBoardEnabled: false, conditionedReachabilityEnabled: false };
+  const singleBagText = buildWorkspaceCommand(singleBagRequest);
+  assert.match(singleBagText, /--backend cpu(?:\s|$)/u,
+    'the GUI command must select CPU without inheriting automatic GPU selection');
+  const singleBagBaseline = result(await new WasmJobRunner(wasm).run(
+    buildWorkspaceCommand({ ...singleBagRequest, workers: 1 }), () => {}));
+  assert.equal(singleBagBaseline.keys.length, 22);
+  for (let repeat = 0; repeat < 3; repeat++) {
+    if (repeat === 1) {
+      pool.cancel();
+      await Promise.all(transports.map(transport => transport.exited));
+      nextPrewarmDelayMs = 250;
+    }
+    const sentBefore = transports.reduce((sum, transport) =>
+      sum + transport.sent.filter(type => type === 'consume').length, 0);
+    const actual = await distributed(singleBagText, { synopsis: null, pack: null },
+      { expectedStreamingPc: true });
+    assert.deepEqual(actual, singleBagBaseline, `complete-bag-stream-repeat-${repeat}`);
+    const sentAfter = transports.reduce((sum, transport) =>
+      sum + transport.sent.filter(type => type === 'consume').length, 0);
+    assert.ok(sentAfter > sentBefore, 'complete-bag candidates must reach a remote verifier');
+  }
+  nextPrewarmDelayMs = 0;
+  await distributed(singleBagText, { synopsis: null, pack: null },
+    { cancel: true, expectedStreamingPc: true });
+  await Promise.all(transports.map(transport => transport.exited));
+  assert.deepEqual(await distributed(singleBagText, { synopsis: null, pack: null },
+    { expectedStreamingPc: true }), singleBagBaseline,
+  'a cancelled streaming PC job cannot contaminate its replacement');
+  assert.deepEqual(await distributed(ordinaryText, { synopsis: null, pack: null },
+    { expectedRootTasks: true }), ordinaryBaseline,
+  'the same pool must return from streaming candidates to natural-root packets');
+  console.log('real_web_pc_single_bag_stream_reuse_cancel_restart=passed solutions=22 workers=3');
+
   // Do not enumerate an enormous empty 24L field. These tracked fixtures fill
   // all but 2-6 pieces while retaining real occupancy above the compact frame.
   // Each profile uses its own primitive kicks and the production opaque batch
