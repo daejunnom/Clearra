@@ -139,6 +139,7 @@ try {
   const manifest = JSON.parse(await readFile(resolve(root, 'wasm/clearra_wasm.manifest.json'), 'utf8'));
   assert.equal(manifest.build.runtime_identity.source_commit, process.env.CLEARRA_SOURCE_COMMIT);
   let reference;
+  let completeBagReference;
   for (const mode of ['null', 'reject', 'timeout']) {
     const ctx = await context(mode);
     const page = await ctx.newPage();
@@ -171,6 +172,38 @@ try {
       assert.equal(nav[index - 1], '?tool=build-probability');
       assert.equal(nav[index + 1], '?tool=damage');
       assert.ok(!nav.includes('?tool=build'), 'internal Build tools remain reachable only by explicit routes');
+
+      // This field consumes all seven P7 pieces and has only one natural
+      // multiset root. Test the real compiled GUI, not just a worker-only
+      // command. GPU discovery may be absent, rejected, or never resolve;
+      // none of those states may hold up the CPU-default product request.
+      const logicalProcessors = await page.evaluate(() => navigator.hardwareConcurrency);
+      assert.ok(Number.isSafeInteger(logicalProcessors) && logicalProcessors >= 2,
+        'the compiled GUI parallel regression requires at least two logical processors');
+      await page.locator('.dimension-field input').fill('4');
+      await page.locator('.fumen-import input:not([type="file"])').fill('ctk3_w0kCMBhw9oAAAzRb');
+      await page.locator('.fumen-import button').last().click();
+      assert.equal(await readPaintedMask(page, 0, 4), 0x30080f67n,
+        'the user CTK field must reach the real GUI without changing its physical cells');
+      await page.locator('.workspace-queue-input').fill('P7');
+      const everyCpu = page.getByRole('checkbox', { name: 'Use every logical processor', exact: true });
+      await everyCpu.check();
+      for (let repeat = 0; repeat < 2; repeat++) {
+        await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(),
+          `${mode}: complete P7 bag repeat ${repeat}`);
+        const completeBag = await completedKeys(page, 22, `${mode}: complete P7 bag repeat ${repeat}`);
+        if (completeBagReference) assert.deepEqual(completeBag, completeBagReference,
+          'CPU worker reuse and GPU discovery states must preserve canonical solution order');
+        else completeBagReference = completeBag;
+      }
+      await everyCpu.uncheck();
+      await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(),
+        `${mode}: complete P7 bag with the default CPU policy`);
+      assert.deepEqual(await completedKeys(page, 22, `${mode}: complete P7 bag default policy`),
+        completeBagReference, 'the reserved-processor policy must preserve the same exact family');
+      results.push({ case: 'complete P7 bag CPU reuse', mode, result: 'passed',
+        solutionCount: 22, logicalProcessors, repetitions: 3 });
+
       await page.locator('.fumen-import input:not([type="file"])').fill('ctk3_w0kCQBhwwAEHHABh4Q');
       await page.locator('.fumen-import button').last().click();
       await page.locator('.workspace-queue-input').fill('STOILJZ');
