@@ -19,6 +19,12 @@ function assertIsolated(source) {
 
 test('candidate workflow has only isolated read-only preflight authority', () => assertIsolated(workflow));
 
+test('CPU Geometry hotfix uses the full manual gate, not legacy focused diagnostics', () => {
+  assert.match(workflow, /github\.ref == 'refs\/heads\/codex\/pc-cpu-geometry-hotfix-v082'/u);
+  assert.match(workflow, /refs\/heads\/codex\/pc-cpu-geometry-hotfix-v082\)\s+\[\[ "\$GITHUB_EVENT_NAME" == 'workflow_dispatch' && "\$REQUEST_FULL_GATE" == 'true' \]\]/u);
+  assert.match(workflow, /branches: \["codex\/v0\.8\.0-preflight-20260906-rng"\]/u);
+});
+
 for (const [name, mutate] of [
   ['write token', (source) => source.replace('contents: read', 'contents: write')],
   ['credential persistence', (source) => source.replace('persist-credentials: false', 'persist-credentials: true')],

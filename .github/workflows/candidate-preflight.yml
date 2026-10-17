@@ -24,7 +24,10 @@ concurrency:
 # evidence and cannot publish a release or change Pages/Discord/Cloud traffic.
 jobs:
   candidate-source:
-    if: github.ref == 'refs/heads/codex/v0.8.0-preflight-20260906-rng' && github.ref_type == 'branch'
+    if: >-
+      github.ref_type == 'branch' &&
+      (github.ref == 'refs/heads/codex/v0.8.0-preflight-20260906-rng' ||
+       github.ref == 'refs/heads/codex/pc-cpu-geometry-hotfix-v082')
     runs-on: ubuntu-latest
     outputs:
       full_gate: ${{ steps.source.outputs.full_gate }}
@@ -39,7 +42,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF" == 'refs/heads/codex/v0.8.0-preflight-20260906-rng' && "$GITHUB_REF_TYPE" == 'branch' ]]
+          [[ "$GITHUB_REF_TYPE" == 'branch' ]]
+          case "$GITHUB_REF" in
+            refs/heads/codex/v0.8.0-preflight-20260906-rng) ;;
+            refs/heads/codex/pc-cpu-geometry-hotfix-v082)
+              [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' && "$REQUEST_FULL_GATE" == 'true' ]]
+              ;;
+            *) exit 2 ;;
+          esac
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           case "$GITHUB_EVENT_NAME" in
             push) echo 'full_gate=false' >> "$GITHUB_OUTPUT" ;;
