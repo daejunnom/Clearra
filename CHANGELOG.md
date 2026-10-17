@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.8.2 - 2026-10-17
+
+- Default PC search to CPU across CLI, Web, desktop and Discord ingress; keep
+  explicit GPU implementations available without selecting or prewarming them
+  from the PC GUI.
+- Keep single-multiset PC requests such as a complete P7 bag on the existing
+  streaming CPU producer with parallel exact verification instead of silently
+  collapsing the complete solution family to one serial worker.
+- Remove legal-board, conditioned reachability, PC4 Tablebase and exact asset
+  management controls from the GUI without deleting engine assets or CLI tools.
+
 ## 0.8.1 - 2026-09-20
 
 - Keep exact CPU search operational when browser WebGPU has no usable adapter,

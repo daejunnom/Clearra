@@ -14,24 +14,13 @@
   import QueuePatternHelp from './QueuePatternHelp.svelte';
   import WorkspaceControlPanel from './WorkspaceControlPanel.svelte';
   import WorkerAuthorityStatus from './WorkerAuthorityStatus.svelte';
-  import Pc4DownloadControl from './Pc4DownloadControl.svelte';
-  import AcceleratorDownloadControl from './AcceleratorDownloadControl.svelte';
   import type { WorkerAuthorityReport } from '../wasm';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let request: SolverWorkspaceRequest;
   export let language: WorkspaceLanguage;
   export let validationCodes: WorkspaceValidationCode[] = [];
-  export let tablebaseControlAvailable = false;
   export let dependencyDagControlAvailable = false;
-  export let tablebaseStatus: 'disabled' | 'loading' | 'ready' | 'unavailable' = 'disabled';
-  export let tablebaseByteLength = 0;
-  export let tablebaseProfiles: Array<{
-    profile: string;
-    status: 'ready' | 'unavailable';
-    reason?: string;
-    pcSearchTargetLines?: number[];
-  }> = [];
   export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: SolverWorkspaceRequest }>();
@@ -45,7 +34,6 @@
     request.scoreMode === 'score-finder' ||
     request.scoreMode === 'score-minimals';
   $: scoreMinimalsOnly = request.scoreMode === 'score-minimals';
-  $: pcTablebaseAvailable = pcTablebaseAvailableFor(request.rule, request.lines);
 
   function patch(change: Partial<SolverWorkspaceRequest>) {
     const next = updateWorkspaceDraft(request, change);
@@ -53,56 +41,6 @@
     dispatch('change', targetIdentityChanged
       ? { ...next, tablebaseEnabled: false }
       : next);
-  }
-
-  function pcTablebaseAvailableFor(
-    rule: SolverWorkspaceRequest['rule'],
-    lines: number
-  ): boolean {
-    return tablebaseProfiles.some(profile =>
-      profile.profile === rule &&
-      profile.status === 'ready' &&
-      profile.pcSearchTargetLines?.includes(lines)
-    );
-  }
-
-  $: displayedTablebaseStatus = pcTablebaseAvailable
-    ? tablebaseStatus
-    : tablebaseStatus === 'loading'
-      ? 'loading'
-      : tablebaseStatus === 'ready' || tablebaseStatus === 'unavailable'
-        ? 'unavailable'
-        : 'disabled';
-  $: tablebaseStatusLabel = tablebaseMessage(
-    displayedTablebaseStatus,
-    tablebaseByteLength,
-    language
-  );
-
-  function tablebaseMessage(
-    status: typeof tablebaseStatus,
-    byteLength: number,
-    currentLanguage: WorkspaceLanguage
-  ): string {
-    if (status === 'ready') {
-      return workspaceMessage(currentLanguage, 'tablebaseReady', {
-        size: tablebaseSize(byteLength)
-      });
-    }
-    if (status === 'loading') {
-      const loading = workspaceMessage(currentLanguage, 'tablebaseLoading');
-      return byteLength === 0 ? loading : `${loading} · ${tablebaseSize(byteLength)}`;
-    }
-    if (status === 'unavailable') {
-      return workspaceMessage(currentLanguage, 'tablebaseUnavailable');
-    }
-    return workspaceMessage(currentLanguage, 'tablebaseDisabled');
-  }
-
-  function tablebaseSize(byteLength: number): string {
-    return byteLength < 1024 * 1024
-      ? `${(byteLength / 1024).toFixed(1)} KiB`
-      : `${(byteLength / (1024 * 1024)).toFixed(1)} MiB`;
   }
 
 </script>
@@ -218,35 +156,6 @@
       </label>
       <WorkerAuthorityStatus authority={workerAuthority} {language} />
     </div>
-    {#if tablebaseControlAvailable}
-      <div class="tablebase-control">
-        <label class="workspace-switch-label">
-          <input
-            type="checkbox"
-            checked={request.tablebaseEnabled}
-            disabled={tilingOnly || pathOnly || fixedScoreProduct}
-            on:change={(event) => patch({
-              tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
-            })}
-          />
-          <span class="workspace-switch" aria-hidden="true"></span>
-          <span>{label('tablebase')}</span>
-        </label>
-        <small class="workspace-field-help">{label('tablebaseHelp')}</small>
-        <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
-        <Pc4DownloadControl {language} />
-        {#if request.tablebaseEnabled && tablebaseProfiles.length > 0}
-          <ul class="tablebase-profiles">
-            {#each tablebaseProfiles as slot}
-              <li>{({'srs': 'SRS', 'srs-plus': 'SRS+', 'srs-x': 'SRS-X', 'jstris-180': 'Jstris 180', 'no-kick': 'No kick'} as Record<string, string>)[slot.profile] ?? slot.profile}:
-                {label(slot.status === 'ready' && slot.pcSearchTargetLines?.includes(request.lines)
-                  ? 'tablebaseAvailable'
-                  : 'tablebaseUnavailable')}</li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-    {/if}
     {#if dependencyDagControlAvailable}
       <div class="dependency-dag-control">
         <label class="workspace-switch-label">
@@ -264,34 +173,6 @@
         <small class="workspace-field-help">{label('precomputeBuildDependenciesHelp')}</small>
       </div>
     {/if}
-    <div class="accelerator-control">
-      <label class="workspace-switch-label">
-        <input
-          type="checkbox"
-          checked={request.legalBoardEnabled}
-          disabled={tilingOnly}
-          on:change={(event) => patch({
-            legalBoardEnabled: (event.currentTarget as HTMLInputElement).checked
-          })}
-        />
-        <span class="workspace-switch" aria-hidden="true"></span>
-        <span>{label('exactLegalBoard')}</span>
-      </label>
-      <label class="workspace-switch-label">
-        <input
-          type="checkbox"
-          checked={request.conditionedReachabilityEnabled}
-          disabled={tilingOnly}
-          on:change={(event) => patch({
-            conditionedReachabilityEnabled: (event.currentTarget as HTMLInputElement).checked
-          })}
-        />
-        <span class="workspace-switch" aria-hidden="true"></span>
-        <span>{label('conditionedReachability')}</span>
-      </label>
-      <small class="workspace-field-help">{label('exactAcceleratorsHelp')}</small>
-      <AcceleratorDownloadControl {language} />
-    </div>
   </section>
 
   {#if validationCodes.length}
@@ -306,20 +187,15 @@
 <style>
   .policy-toggle { grid-template-columns: 1fr; }
   .b2b-preservation-control { display: grid; gap: 5px; }
-  .tablebase-control, .dependency-dag-control, .accelerator-control {
+  .dependency-dag-control {
     align-content: start;
     display: grid;
     gap: 5px;
     margin-top: 14px;
     min-width: 0;
   }
-  .accelerator-control { margin-top: 18px; }
-  .tablebase-control + .dependency-dag-control { margin-top: 18px; }
-  .tablebase-control :global(.workspace-field-help),
   .dependency-dag-control :global(.workspace-field-help) {
     display: block;
     overflow-wrap: anywhere;
   }
-  .tablebase-status { color: #3f5c57; font-size: 11px; font-weight: 700; }
-  .tablebase-profiles { margin: 0; padding-left: 18px; font-size: 11px; }
 </style>

@@ -368,7 +368,7 @@ mod policy {
     impl From<SearchDefaults> for PcExecutionPolicy {
         fn from(defaults: SearchDefaults) -> Self {
             Self {
-                requested_backend: RequestedSearchBackend::Auto,
+                requested_backend: RequestedSearchBackend::Cpu,
                 worker_policy: WorkerPolicy::Auto,
                 automatic_worker_limit: None,
                 worker_hardware_limit: WorkerPolicy::hardware_worker_limit(),
@@ -387,7 +387,7 @@ mod policy {
                 max_patterns: defaults.execution_max_patterns(),
                 max_memory_mib: defaults.execution_max_memory_mib(),
                 gpu_device: GpuDeviceSelection::Auto,
-                backend_fallback: BackendFallbackPolicy::Allow,
+                backend_fallback: BackendFallbackPolicy::Deny,
             }
         }
     }

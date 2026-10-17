@@ -26,7 +26,7 @@ fn opening_query_owns_empty_field_pc_search_contract() {
     assert!(query.verified_kick_profile().is_none());
     assert_eq!(
         query.execution_policy().requested_backend(),
-        RequestedSearchBackend::Auto
+        RequestedSearchBackend::Cpu
     );
     assert!(query.execution_policy().deterministic());
     assert_eq!(

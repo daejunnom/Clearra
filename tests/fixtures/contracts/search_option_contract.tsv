@@ -15,7 +15,7 @@ pc	preserve-b2b	boolean	off|on	invalid	off	off	named	/pc path	preserve-b2b	--pre
 pc	initial-b2b	integer	0|1|65535	65536	0	0	named	/pc score	initial-b2b	--initial-b2b	direct-scoring-state	score-only
 pc	solution-probabilities	boolean	off|on	invalid	off	off	named	/pc path	solution-probabilities	--solution-probabilities	direct-per-solution-projection	unavailable-with-tiling-or-failed-queue
 pc	best-save-projection	enum	best-witness	aggregate	-	-	excluded	-	-	none	translator-currently-reuses-saves-and-cannot-prove-best-witness	requires-distinct-result-projection
-pc	backend	enum	auto|cpu|gpu|hybrid	invalid	auto	auto	excluded	-	host-policy	none	host-owned-execution-policy	does-not-change-search-result
+pc	backend	enum	auto|cpu|gpu|hybrid	invalid	cpu	cpu	excluded	-	host-policy	none	host-owned-execution-policy	does-not-change-search-result
 pc	fallback	enum	default|allow|deny	allow+deny	default	default	excluded	-	host-policy	none	host-owned-execution-policy	does-not-change-search-result
 pc	workers	integer	1|2|64	0	adaptive	auto	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result
 pc	logical-processors	boolean	off|on	invalid	off	off	excluded	-	host-policy	none	host-owned-performance-policy	does-not-change-search-result

@@ -96,7 +96,7 @@ export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
     preserveB2B: false,
     initialB2B: 0,
     solutionProbabilities: false,
-    backend: 'auto',
+    backend: 'cpu',
     gpuDevice: 'auto',
     workers: defaultWorkerCount(),
     useAllLogicalProcessors: false,
@@ -119,6 +119,9 @@ export function normalizeWorkspaceRequest(
   request: SolverWorkspaceRequest
 ): SolverWorkspaceRequest {
   assertGuiScoreMode(request.scoreMode);
+  // PC products use the exact CPU path. Retain GPU engines and transport
+  // options for explicit non-GUI callers, but never select them implicitly.
+  request = { ...request, backend: 'cpu', gpuDevice: 'auto' };
   if (request.scoreMode === 'tiling') {
     return {
       ...request,

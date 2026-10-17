@@ -13,7 +13,7 @@
   import { getContext, onDestroy, onMount } from 'svelte';
 
   import {
-    DEFAULT_RUNTIME_WARMUP_POLICY,
+    CPU_ONLY_RUNTIME_WARMUP_POLICY,
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     automaticWorkerAuthority,
     sharedBrowserHostCapabilitySnapshot,
@@ -127,7 +127,7 @@
     workerController.prewarm(
       request.workers,
       false,
-      DEFAULT_RUNTIME_WARMUP_POLICY,
+      CPU_ONLY_RUNTIME_WARMUP_POLICY,
       automaticWorkerAuthority(
         hostCapabilitySnapshot,
         request.useAllLogicalProcessors
@@ -150,7 +150,7 @@
       holdEnabled: state.holdEnabled,
       rule: state.rule,
       scoreMode: 'off',
-      backend: 'auto',
+      backend: 'cpu',
       gpuDevice: 'auto',
       tablebaseEnabled: false,
       precomputeBuildDependencies: false
@@ -169,10 +169,6 @@
 
   function updateRequest(next: SolverWorkspaceRequest) {
     invalidSharedLink = false;
-    const scoreCpuOnly =
-      next.scoreMode === 'summary' ||
-      next.scoreMode === 'score-finder' ||
-      next.scoreMode === 'score-minimals';
     const requestedUseAll = next.useAllLogicalProcessors;
     const useAllChanged = requestedUseAll !== request.useAllLogicalProcessors;
     const scoreModeChanged = next.scoreMode !== request.scoreMode;
@@ -200,7 +196,7 @@
           ).workersEffective
         : next.workers,
       useAllLogicalProcessors: requestedUseAll,
-      backend: scoreCpuOnly ? 'cpu' : 'auto',
+      backend: 'cpu',
       gpuDevice: 'auto',
       tablebaseEnabled: false,
       precomputeBuildDependencies: false
@@ -209,7 +205,7 @@
       workerController.prewarm(
         request.workers,
         false,
-        DEFAULT_RUNTIME_WARMUP_POLICY,
+        CPU_ONLY_RUNTIME_WARMUP_POLICY,
         automaticWorkerAuthority(
           hostCapabilitySnapshot,
           request.useAllLogicalProcessors

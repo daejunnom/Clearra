@@ -4,8 +4,8 @@ use super::*;
 fn mvp_execution_policy_comes_from_profile_defaults() {
     let policy = PcExecutionPolicy::mvp_default();
 
-    assert_eq!(policy.requested_backend(), RequestedSearchBackend::Auto);
-    assert_eq!(policy.backend(), RequestedSearchBackend::Auto);
+    assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
+    assert_eq!(policy.backend(), RequestedSearchBackend::Cpu);
     assert_eq!(policy.worker_policy(), WorkerPolicy::Auto);
     assert!(policy.workers() >= 1);
     assert_eq!(policy.workers_requested(), None);
@@ -27,8 +27,8 @@ fn mvp_execution_policy_comes_from_profile_defaults() {
         SearchDefaults::MVP1.execution_max_memory_mib()
     );
     assert_eq!(policy.gpu_device(), &GpuDeviceSelection::Auto);
-    assert_eq!(policy.backend_fallback(), BackendFallbackPolicy::Allow);
-    assert!(policy.allow_backend_fallback());
+    assert_eq!(policy.backend_fallback(), BackendFallbackPolicy::Deny);
+    assert!(!policy.allow_backend_fallback());
     assert!(!policy.precompute_build_dependencies());
     assert!(policy.exact_legal_board_enabled());
     assert!(policy.conditioned_reachability_enabled());

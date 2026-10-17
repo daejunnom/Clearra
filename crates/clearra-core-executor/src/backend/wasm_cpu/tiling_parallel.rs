@@ -6,7 +6,9 @@ use std::collections::VecDeque;
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet;
 use clearra_problem::{BuildProbabilityField, SearchProblem};
-use clearra_supply::pattern_universe::PackingMultisetFamily;
+use clearra_supply::pattern_universe::{
+    MaterializedPatternUniverseStructure, PackingMultisetFamily,
+};
 
 use crate::tiling_solution_store::{pack_canonical_tiling_row_ids, PackedTilingRows};
 
@@ -862,6 +864,7 @@ impl WasmPcRootProducer {
             && problem.backend_request().max_candidates() == 0
             && problem.backend_request().max_frontier_states() == 0
             && problem.backend_request().max_memory_mib().is_none()
+            && !consumes_complete_standard_bag_source(problem)
     }
 
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
@@ -954,6 +957,30 @@ impl WasmPcRootProducer {
     pub fn root_count(&self) -> usize {
         self.root_order.len()
     }
+}
+
+// Complete standard bags with an initially empty hold have exactly one piece
+// multiset when every supplied piece is placed. They may still have many exact
+// candidates. Keep them on the streaming CPU producer so its verifier pool can
+// process those candidates in parallel. This predicate must be shared by the
+// producer and separately initialized Web verifiers: their packet kinds cannot
+// be selected independently. No catalog or family allocation is needed here.
+fn consumes_complete_standard_bag_source(problem: &SearchProblem) -> bool {
+    let Some(universe) = problem.piece_source().materialized_universe() else {
+        return false;
+    };
+    let MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len } =
+        universe.structure()
+    else {
+        return false;
+    };
+    let target_cells = usize::from(problem.initial_board().width())
+        .saturating_mul(usize::from(problem.visible_height()))
+        .saturating_sub(problem.initial_board().occupied_mask().count_ones() as usize);
+    sequence_len > 0
+        && sequence_len.is_multiple_of(7)
+        && problem.initial_hold().hold_empty()
+        && target_cells == usize::from(sequence_len) * 4
 }
 
 impl WasmPcRootResultMerger {

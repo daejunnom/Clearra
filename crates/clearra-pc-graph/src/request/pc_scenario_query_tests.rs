@@ -214,7 +214,7 @@ fn scenario_query_owns_setup_completion_contract_without_pc_target() {
     assert!(query.verified_kick_profile().is_none());
     assert_eq!(
         query.execution_policy().requested_backend(),
-        RequestedSearchBackend::Auto
+        RequestedSearchBackend::Cpu
     );
     assert!(query.execution_policy().deterministic());
     assert_eq!(

@@ -520,8 +520,8 @@ fn cli_build_queue_shapes_have_measurable_typed_request_memory() {
 fn bare_cli_pc_preserves_shared_surface_defaults_through_app_projection() {
     let parsed = CliCommandParser::parse("clearra pc").expect("bare web pc command");
     assert_eq!(parsed.lines(), 4);
-    assert_eq!(parsed.backend().as_str(), "auto");
-    assert!(parsed.allow_backend_fallback());
+    assert_eq!(parsed.backend().as_str(), "cpu");
+    assert!(!parsed.allow_backend_fallback());
 
     let request = parsed.to_app_request().expect("bare web pc AppRequest");
     let AppCommand::Pc(command) = request.command() else {
@@ -3669,7 +3669,7 @@ fn pc_and_build_backend_fallback_are_order_independent_across_the_bounded_matrix
 
 #[test]
 fn pc_and_build_backend_fallback_preserve_surface_defaults() {
-    assert_backend_fallback_policy("pc", "", "auto", true);
+    assert_backend_fallback_policy("pc", "", "cpu", false);
     assert_backend_fallback_policy("build", "", "cpu", false);
 }
 

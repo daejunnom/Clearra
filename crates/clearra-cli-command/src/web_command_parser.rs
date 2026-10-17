@@ -4967,7 +4967,7 @@ fn parse_pc_command(
     failed_queue_requested: bool,
 ) -> Result<WebCommandRequest, WebCommandError> {
     let mut lines = 4u8;
-    let mut backend = RequestedSearchBackend::Auto;
+    let mut backend = RequestedSearchBackend::Cpu;
     let mut gpu_device = GpuDeviceSelection::Auto;
     let mut backend_fallback = BackendFallbackOverride::default();
     let mut queue: Option<String> = None;

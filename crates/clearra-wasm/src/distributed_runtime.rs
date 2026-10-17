@@ -5719,6 +5719,89 @@ mod build_probability_partial_ingress_tests {
     }
 
     #[test]
+    fn pc_p7_single_multiset_keeps_cpu_verifiers_and_completes_exact_family() {
+        let workers = admitted_workers_for_host(11, 12);
+        if workers < 2 {
+            return;
+        }
+        let runtime = WasmCommandRuntime::default()
+            .with_host_capabilities(crate::WasmHostCapabilities::new(12, true, false));
+        let command = format!(
+            "clearra pc --lines 4 --height 4 --board-mask 0x30080f67 \
+             --pieces 7 --hold empty --patterns P7 --count unique --rule srs-plus \
+             --no-tablebase --no-build-dependency-dag --workers {workers}"
+        );
+        let reference = runtime
+            .run_command_text(&command.replace(&format!("--workers {workers}"), "--workers 1"))
+            .expect("single-worker CPU reference");
+        assert_eq!(
+            reference.app_response().status(),
+            clearra_host_contract::AppStatus::Success
+        );
+        let WasmDistributedPreparation::Coordinator(mut coordinator) =
+            WasmDistributedCoordinator::prepare(&runtime, &command).expect("CPU preparation")
+        else {
+            panic!("one P7 multiset still has many independently verifiable candidates");
+        };
+        assert_eq!(coordinator.worker_count(), workers);
+        assert!(matches!(
+            coordinator.producer,
+            Some(DistributedCandidateProducer::Cpu(_))
+        ));
+        assert!(!coordinator.root_task_parallel());
+        let mut verifier = WasmDistributedVerifierRuntime::prepare(&runtime, &command).unwrap();
+        let mut complete = false;
+        for _ in 0..100_000 {
+            match coordinator.advance_producer(64, 16).unwrap() {
+                WasmDistributedProducerAdvance::Pending
+                | WasmDistributedProducerAdvance::Initialization(_) => {}
+                WasmDistributedProducerAdvance::Batch(batch) => {
+                    let mut consumed = verifier.consume(&batch).unwrap();
+                    loop {
+                        if let Some(partial) = consumed.partial.take() {
+                            coordinator.absorb_partial(&partial).unwrap();
+                        }
+                        if !consumed.has_pending_work {
+                            break;
+                        }
+                        consumed = verifier.continue_work().unwrap();
+                    }
+                }
+                WasmDistributedProducerAdvance::Completed => {
+                    complete = true;
+                    break;
+                }
+                WasmDistributedProducerAdvance::Cancelled => panic!("unexpected cancellation"),
+            }
+        }
+        assert!(
+            complete,
+            "bounded P7 regression must finish producing candidates"
+        );
+        coordinator
+            .absorb_partial(&verifier.finish().unwrap())
+            .unwrap();
+        drop(verifier);
+        let result = coordinator.finish(workers).unwrap();
+        assert_eq!(
+            result.app_response().status(),
+            clearra_host_contract::AppStatus::Success
+        );
+        let actual = result.search_report().unwrap();
+        let expected = reference.search_report().unwrap();
+        assert_eq!(actual.normalized_solution_keys.len(), 22);
+        assert_eq!(
+            actual.normalized_solution_keys,
+            expected.normalized_solution_keys
+        );
+        assert_eq!(
+            actual.normalized_solution_set_hash,
+            expected.normalized_solution_set_hash
+        );
+        assert_eq!(actual.covered_pattern_count, expected.covered_pattern_count);
+    }
+
+    #[test]
     fn pc_verifier_returns_to_the_host_between_candidate_transactions() {
         let runtime = WasmCommandRuntime::default()
             .with_host_capabilities(crate::WasmHostCapabilities::new(4, false, false));

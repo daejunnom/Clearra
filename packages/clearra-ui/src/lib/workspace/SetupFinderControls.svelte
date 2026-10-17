@@ -1,6 +1,4 @@
 <script lang="ts">
-  import Pc4DownloadControl from './Pc4DownloadControl.svelte';
-  import AcceleratorDownloadControl from './AcceleratorDownloadControl.svelte';
   import { Database, Layers3 } from '@lucide/svelte';
   import { createEventDispatcher } from 'svelte';
 
@@ -24,14 +22,6 @@
   export let request: SetupFinderRequest;
   export let language: WorkspaceLanguage;
   export let validationCodes: SetupFinderValidationCode[] = [];
-  export let tablebaseControlAvailable = false;
-  export let tablebaseStatus: 'disabled' | 'loading' | 'ready' | 'unavailable' = 'disabled';
-  export let tablebaseByteLength = 0;
-  export let tablebaseProfiles: Array<{
-    profile: string;
-    status: 'ready' | 'unavailable';
-    setupSearchTargetLines?: number[];
-  }> = [];
   export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: SetupFinderRequest }>();
@@ -42,17 +32,6 @@
   $: cycle = setupCycle(request.remaining);
   $: nextRemainingCount = nextSetupCycleRemainingCount(request.remaining);
   $: qbSequenceLength = parseBrowserQueueInput(request.qbQueue)?.sequenceLength ?? 0;
-  $: setupTablebaseAvailable = setupTablebaseAvailableFor(request.rule);
-  $: tablebaseStatusLabel = tablebaseMessage(
-    setupTablebaseAvailable
-      ? tablebaseStatus
-      : tablebaseStatus === 'loading'
-        ? 'loading'
-        : tablebaseStatus === 'ready' || tablebaseStatus === 'unavailable'
-          ? 'unavailable'
-          : 'disabled',
-    tablebaseByteLength
-  );
 
   function update(change: Partial<SetupFinderRequest>) {
     const next = { ...request, ...change };
@@ -61,30 +40,6 @@
       : { ...next, tablebaseEnabled: false });
   }
 
-  function setupTablebaseAvailableFor(rule: RuleProfile): boolean {
-    return tablebaseProfiles.some(profile =>
-      profile.profile === rule &&
-      profile.status === 'ready' &&
-      profile.setupSearchTargetLines?.includes(4)
-    );
-  }
-
-  function tablebaseMessage(status: typeof tablebaseStatus, byteLength: number): string {
-    if (status === 'ready') {
-      return label('tablebaseReady', { size: tablebaseSize(byteLength) });
-    }
-    if (status === 'loading') {
-      const loading = label('tablebaseLoading');
-      return byteLength === 0 ? loading : `${loading} · ${tablebaseSize(byteLength)}`;
-    }
-    return label(status === 'unavailable' ? 'tablebaseUnavailable' : 'tablebaseDisabled');
-  }
-
-  function tablebaseSize(byteLength: number): string {
-    return byteLength < 1024 * 1024
-      ? `${(byteLength / 1024).toFixed(1)} KiB`
-      : `${(byteLength / (1024 * 1024)).toFixed(1)} MiB`;
-  }
 </script>
 
 <WorkspaceControlPanel ariaLabel={label('setupFinder')}>
@@ -185,24 +140,6 @@
       <h2 class="workspace-control-heading">
         <Layers3 size={16} strokeWidth={1.8} />{label('search')}
       </h2>
-      {#if tablebaseControlAvailable}
-        <div class="tablebase-control">
-          <label class="workspace-switch-label">
-            <input
-              type="checkbox"
-              checked={request.tablebaseEnabled}
-              on:change={(event) => update({
-                tablebaseEnabled: (event.currentTarget as HTMLInputElement).checked
-              })}
-            />
-            <span class="workspace-switch" aria-hidden="true"></span>
-            <span>{label('tablebase')}</span>
-          </label>
-          <small class="workspace-field-help">{label('setupTablebaseHelp')}</small>
-          <span class="tablebase-status" aria-live="polite">{tablebaseStatusLabel}</span>
-          <Pc4DownloadControl {language} />
-        </div>
-      {/if}
       <div class="worker-policy-control">
         <label class="workspace-switch-label">
           <input
@@ -232,32 +169,6 @@
           <option value="no-kick">No kick</option>
         </select>
       </label>
-      <div class="accelerator-control">
-        <label class="workspace-switch-label">
-          <input
-            type="checkbox"
-            checked={request.legalBoardEnabled}
-            on:change={(event) => update({
-              legalBoardEnabled: (event.currentTarget as HTMLInputElement).checked
-            })}
-          />
-          <span class="workspace-switch" aria-hidden="true"></span>
-          <span>{label('exactLegalBoard')}</span>
-        </label>
-        <label class="workspace-switch-label">
-          <input
-            type="checkbox"
-            checked={request.conditionedReachabilityEnabled}
-            on:change={(event) => update({
-              conditionedReachabilityEnabled: (event.currentTarget as HTMLInputElement).checked
-            })}
-          />
-          <span class="workspace-switch" aria-hidden="true"></span>
-          <span>{label('conditionedReachability')}</span>
-        </label>
-        <small class="workspace-field-help">{label('exactAcceleratorsHelp')}</small>
-        <AcceleratorDownloadControl {language} />
-      </div>
       <label class="workspace-field wide priority-field">
         <span>{label('setupCandidatePriority')}</span>
         <select
@@ -351,9 +262,7 @@
   .residue-facts strong { color: #173f3a; text-align: right; }
   .priority-field { margin-top: 14px; }
   .queue-knowledge-field { margin-top: 14px; }
-  .tablebase-control { display: grid; gap: 5px; margin-top: 14px; }
   .worker-policy-control { display: grid; gap: 5px; margin-top: 14px; }
-  .tablebase-status { color: #3f5c57; font-size: 11px; font-weight: 700; }
   @media (max-width: 820px) {
     .setup-control-grid { gap: 20px; grid-template-columns: 1fr; }
     .setup-control-grid .setup-finder-section + .setup-finder-section {

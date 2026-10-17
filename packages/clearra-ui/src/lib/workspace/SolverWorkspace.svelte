@@ -19,7 +19,7 @@
   } from '../host';
   import {
     clearWasmTerminalResult,
-    DEFAULT_RUNTIME_WARMUP_POLICY,
+    CPU_ONLY_RUNTIME_WARMUP_POLICY,
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     automaticWorkerAuthority,
     sharedBrowserHostCapabilitySnapshot,
@@ -143,7 +143,7 @@
       workerController.prewarm(
         workers,
         request.tablebaseEnabled,
-        DEFAULT_RUNTIME_WARMUP_POLICY,
+        CPU_ONLY_RUNTIME_WARMUP_POLICY,
         automaticWorkerAuthority(
           hostCapabilitySnapshot,
           request.useAllLogicalProcessors
@@ -191,7 +191,7 @@
       workerController.prewarm(
         draftRequest.workers,
         draftRequest.tablebaseEnabled,
-        DEFAULT_RUNTIME_WARMUP_POLICY,
+        CPU_ONLY_RUNTIME_WARMUP_POLICY,
         automaticWorkerAuthority(
           hostCapabilitySnapshot,
           draftRequest.useAllLogicalProcessors
@@ -205,15 +205,6 @@
       hostCapabilitySnapshot,
       useAllLogicalProcessors
     ).workersEffective;
-  }
-
-  function withAutomaticBackend(next: SolverWorkspaceRequest): SolverWorkspaceRequest {
-    if (next.backend === 'auto' && next.gpuDevice === 'auto') return next;
-    return {
-      ...next,
-      backend: 'auto',
-      gpuDevice: 'auto'
-    };
   }
 
   function setLines(lines: number) {
@@ -237,8 +228,8 @@
 
   async function run() {
     if (active || validationCodes.length || tablebaseBlocked) return;
-    const automaticRequest = normalizeWorkspaceRequest(withAutomaticBackend(request));
-    const normalized = normalizeWorkspaceInitialField(automaticRequest);
+    const cpuRequest = normalizeWorkspaceRequest(request);
+    const normalized = normalizeWorkspaceInitialField(cpuRequest);
     const executionRequest = normalized.request;
     if (normalized.clearedRows > 0) {
       request = {
@@ -349,11 +340,7 @@
     {request}
     {language}
     {validationCodes}
-    tablebaseControlAvailable={runtime === 'web'}
     dependencyDagControlAvailable
-    tablebaseStatus={$wasmWorkerState.tablebaseWarmup.status}
-    tablebaseByteLength={$wasmWorkerState.tablebaseWarmup.byteLength}
-    {tablebaseProfiles}
     {workerAuthority}
     on:change={(event) => updateRequest(event.detail)}
   />

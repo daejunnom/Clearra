@@ -380,7 +380,7 @@ function applyRisk(request, risk, representative) {
 test('shared fixture defaults remain explicit beside the actual Web/Desktop projections', () => {
   assert.equal(contractRow('pc', 'lines').discordDefault, 'auto');
   assert.equal(contractRow('pc', 'lines').nativeDefault, '2');
-  assert.equal(contractRow('pc', 'backend').discordDefault, 'auto');
+  assert.equal(contractRow('pc', 'backend').discordDefault, 'cpu');
   assert.equal(contractRow('pc', 'fallback').discordDefault, 'default');
   assert.equal(contractRow('build', 'backend').discordDefault, 'cpu');
   assert.equal(contractRow('build', 'fallback').discordDefault, 'deny');
@@ -398,7 +398,7 @@ test('shared fixture defaults remain explicit beside the actual Web/Desktop proj
   assert.equal(pc.lines, 4);
   assert.match(pcCommand, /--lines 4/u);
   assert.match(pcCommand, /--count unique/u);
-  assert.match(pcCommand, /--backend auto --allow-backend-fallback/u);
+  assert.match(pcCommand, /--backend cpu --no-backend-fallback/u);
   assertDesktopCliParity(pc);
 
   const buildRequest = {
@@ -466,21 +466,11 @@ test('fixture backend by fallback Cartesian representatives preserve argv and ty
       backend,
       gpuDevice: backend === 'cpu' ? '3' : '2'
     };
-    const expectedAllow = backend === 'auto';
     const command = production.buildWorkspaceCommand(pc);
     const desktopTokens = assertDesktopCliParity(pc, `PC ${backend}`);
-    assert.equal(
-      hasOption(commandTokens(command), expectedAllow
-        ? '--allow-backend-fallback'
-        : '--no-backend-fallback'),
-      true,
-      `PC ${backend}`
-    );
-    if (backend === 'cpu') {
-      assert.equal(hasOption(desktopTokens, '--gpu-device'), false, `PC ${backend}`);
-    } else {
-      assert.equal(optionValue(desktopTokens, '--gpu-device'), '2', `PC ${backend}`);
-    }
+    assert.equal(optionValue(commandTokens(command), '--backend'), 'cpu', `PC ${backend}`);
+    assert.equal(hasOption(commandTokens(command), '--no-backend-fallback'), true, `PC ${backend}`);
+    assert.equal(hasOption(desktopTokens, '--gpu-device'), false, `PC ${backend}`);
   }
 });
 
