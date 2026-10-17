@@ -8,6 +8,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { frontendOptions, frontendPlan, executeFrontendPlan } from './build-clearra-frontend.mjs';
+import { frontendDependencyPolicy } from './clearra-frontend-dependencies.mjs';
 import { fetchQualifiedFrontendAccelerator, frontendAcceleratorAssets,
   frontendPaths, frontendUiSourceAliases, writeFrontendTypeForwarder } from './clearra-frontend-paths.mjs';
 import { stagePagesAccelerators } from './stage-clearra-pages-accelerators.mjs';
@@ -89,7 +90,20 @@ test('login recovery preserves published WASM and only starts the requested loop
 
 test('the first audit page optimizes its linked-workspace runtime imports together', async () => {
   const vite = await readFile(resolve(root, 'apps/clearra-web/vite.config.ts'), 'utf8');
-  assert.match(vite, /optimizeDeps: \{ include: \['@lucide\/svelte', 'tetris-fumen', '@tauri-apps\/api\/core'\] \}/u);
+  const development = frontendDependencyPolicy('serve');
+  const ui = createRequire(resolve(root, 'packages/clearra-ui/package.json'));
+  assert.deepEqual(development.optimizeDeps.include, [
+    '@clearra/ui > @lucide/svelte', '@clearra/ui > tetris-fumen', '@clearra/ui > @tauri-apps/api/core',
+  ]);
+  for (const dependency of development.optimizeDeps.include) {
+    const [owner, entry] = dependency.split(' > ');
+    assert.equal(owner, '@clearra/ui');
+    assert.equal(typeof ui.resolve(entry), 'string', 'each nested dependency must resolve from its owner');
+  }
+  assert.equal(development.ssr.noExternal, undefined, 'development must use native CommonJS external loading');
+  assert.equal(frontendDependencyPolicy('build').ssr.noExternal, true,
+    'isolated production prerender output still needs its complete SSR bundle');
+  assert.throws(() => frontendDependencyPolicy('unknown'), /Unknown/);
   assert.match(vite, /cacheDir: frontend\.viteCacheDir/u);
   assert.match(vite, /hmr: mode === 'local-recovery' \|\| mode === 'local-audit' \? false : undefined/u);
 });
