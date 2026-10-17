@@ -49,7 +49,7 @@ fn core_executor_routes_opening_problem_to_pc_service() {
             .execution_report()
             .backend_report()
             .backend_requested(),
-        "auto"
+        "cpu"
     );
 }
 

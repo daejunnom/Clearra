@@ -181,7 +181,7 @@ mod case_pc_service_runs_search_problem_through_packing_buildup_coverage_and_out
                 .execution_report()
                 .backend_report()
                 .backend_requested(),
-            "auto"
+            "cpu"
         );
     }
 }
@@ -685,7 +685,7 @@ mod case_tiling_service_materializes_raw_geometry_without_buildup {
         assert_eq!(result.field("selected_model"), Some("bitset-algorithm-x"));
         assert_eq!(
             result.field("backend_selection_reason"),
-            Some("auto-small-scenario-cpu-geometry-exact-cover")
+            Some("user-requested")
         );
     }
 

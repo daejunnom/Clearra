@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { createClearraWasmBuildContract, serializeClearraWasmManifest } from '../tools/clearra-wasm-build-contract.mjs';
-import { preserveCandidateWasm } from './candidate-preflight-artifacts.mjs';
+import { appendCandidateWasmOutputs, preserveCandidateWasm } from './candidate-preflight-artifacts.mjs';
 
 const SOURCE = '7'.repeat(40);
 const MANIFEST = 'clearra_wasm.manifest.json';
@@ -62,6 +62,19 @@ test('an earlier gate failure with no WASM emits not-built, not verified', async
   const options = await fixture(t, false);
   assert.deepEqual(await preserveCandidateWasm(options), { ready: false, reason: 'wasm-not-built' });
   await assert.rejects(readdir(options.outputDirectory), { code: 'ENOENT' });
+});
+
+test('one artifact owner appends UTF-8 readiness and path records without PowerShell encoding', async (t) => {
+  const options = await fixture(t);
+  const output = resolve(options.repositoryRoot, 'actions-output');
+  await writeFile(output, 'previous=unchanged\n', 'utf8');
+  await appendCandidateWasmOutputs(output, { ready: false }, options.outputDirectory);
+  assert.equal(await readFile(output, 'utf8'), 'previous=unchanged\nready=false\n');
+  await appendCandidateWasmOutputs(output, { ready: true }, options.outputDirectory);
+  const bytes = await readFile(output);
+  assert.equal(bytes.includes(0), false, 'Actions records must not contain UTF-16 NUL bytes');
+  assert.equal(bytes.toString('utf8'), 'previous=unchanged\nready=false\nready=true\n' +
+    `artifact_path=${resolve(options.outputDirectory)}\n`);
 });
 
 for (const kind of ['alias', 'source', 'commit', 'existing', 'overlap', 'malformed']) {

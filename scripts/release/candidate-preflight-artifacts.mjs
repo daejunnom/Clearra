@@ -55,6 +55,14 @@ export async function preserveCandidateWasm({
   return Object.freeze({ ready: true, copiedFiles: 5 });
 }
 
+export async function appendCandidateWasmOutputs(outputFile, result, outputDirectory) {
+  // Node and Windows PowerShell must not mix UTF-8 and UTF-16 records in the
+  // same Actions output file. The artifact owner emits both records as UTF-8.
+  const output = `ready=${result.ready}\n` +
+    (result.ready ? `artifact_path=${resolve(outputDirectory)}\n` : '');
+  await appendFile(outputFile, output, 'utf8');
+}
+
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   try {
     const args = process.argv.slice(2);
@@ -64,7 +72,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
     const result = await preserveCandidateWasm({
       sourceDirectory: args[1], outputDirectory: args[3], sourceCommit: args[5],
     });
-    if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `ready=${result.ready}\n`);
+    if (process.env.GITHUB_OUTPUT) await appendCandidateWasmOutputs(process.env.GITHUB_OUTPUT, result, args[3]);
     console.log(`candidate_wasm=${result.ready ? 'verified-unqualified' : 'not-built'} copied_files=${result.copiedFiles ?? 0} release_authority=false`);
   } catch (error) {
     console.error(`candidate_wasm=failed reason=${error.message}`);

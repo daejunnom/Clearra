@@ -9,10 +9,9 @@ use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 use crate::board::C_BOARD_BACKEND_BOARD64;
 use crate::problem::{
-    C_BACKEND_AUTO, C_BACKEND_CPU, C_BAG_STANDARD_7_BAG, C_GOAL_CLEAR_TO_EMPTY,
-    C_KICK_SRS_PLUS_180, C_KICK_SRS_X, C_PIECE_I, C_PIECE_O, C_PIECE_S,
-    C_PIECE_SET_STANDARD_TETROMINOES, C_PIECE_T, C_PIECE_Z, C_RULE_SRS_PLUS, C_RULE_SRS_X,
-    C_SPAWN_STANDARD_10,
+    C_BACKEND_CPU, C_BAG_STANDARD_7_BAG, C_GOAL_CLEAR_TO_EMPTY, C_KICK_SRS_PLUS_180, C_KICK_SRS_X,
+    C_PIECE_I, C_PIECE_O, C_PIECE_S, C_PIECE_SET_STANDARD_TETROMINOES, C_PIECE_T, C_PIECE_Z,
+    C_RULE_SRS_PLUS, C_RULE_SRS_X, C_SPAWN_STANDARD_10,
 };
 
 use super::*;
@@ -86,7 +85,7 @@ fn opening_search_problem_converts_to_c_packing_problem() {
     );
     assert_eq!(compact.rule.bag_profile_id, C_BAG_STANDARD_7_BAG);
     assert_eq!(compact.goal, C_GOAL_CLEAR_TO_EMPTY);
-    assert_eq!(compact.backend.requested_backend, C_BACKEND_AUTO);
+    assert_eq!(compact.backend.requested_backend, C_BACKEND_CPU);
     assert_eq!(compact.checkpoint.label_count, 1);
     assert_eq!(compact.checkpoint.partition_count, 1);
 }

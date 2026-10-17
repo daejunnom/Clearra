@@ -129,7 +129,6 @@ jobs:
               $candidateWasmOutput = Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'unqualified-candidate-wasm'
               & node scripts/release/candidate-preflight-artifacts.mjs --from $candidateWasmSource --output $candidateWasmOutput --source-commit $env:GITHUB_SHA
               if ($LASTEXITCODE -ne 0) { throw 'Candidate WASM preservation failed' }
-              "artifact_path=$candidateWasmOutput" >> $env:GITHUB_OUTPUT
             }
             if ($gateExitCode -ne 0) { exit $gateExitCode }
             Complete-ClearraBuildTransaction
@@ -259,7 +258,6 @@ jobs:
             $candidateWasmOutput = Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'unqualified-candidate-wasm'
             & node scripts/release/candidate-preflight-artifacts.mjs --from $candidateWasmSource --output $candidateWasmOutput --source-commit $env:GITHUB_SHA
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            "artifact_path=$candidateWasmOutput" >> $env:GITHUB_OUTPUT
             Complete-ClearraBuildTransaction
           } finally {
             Exit-ClearraBuildArtifactCacheUsage
@@ -309,7 +307,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $candidateCli = Join-Path $env:CARGO_TARGET_DIR 'release/clearra'
             if (-not (Test-Path -LiteralPath $candidateCli -PathType Leaf)) { throw 'Candidate CLI was not built' }
-            "binary_path=$candidateCli" >> $env:GITHUB_OUTPUT
+            [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "binary_path=$candidateCli`n", [Text.UTF8Encoding]::new($false))
             & $candidateCli --help
             $startupExitCode = $LASTEXITCODE
             # Both checks consume this owner's binary even if the startup check failed.

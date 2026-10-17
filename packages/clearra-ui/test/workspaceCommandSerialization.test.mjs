@@ -156,9 +156,21 @@ test('extended workspace guards result and option capabilities separately from t
       .includes('visible-seven-minimum-cover-unsupported'), 'typed minimum policies remain oracle-only');
   }
   for (const change of [
-    { tablebaseEnabled: true }, { precomputeBuildDependencies: true }, { backend: 'hybrid' }]) {
+    { tablebaseEnabled: true }, { precomputeBuildDependencies: true }]) {
     assert.ok(workspaceValidationCodes({ ...base, ...change }, 'web')
       .includes('pc_extended_options_unavailable'));
+  }
+  for (const backend of ['auto', 'gpu', 'hybrid']) {
+    const request = { ...base, backend };
+    for (const surface of ['web', 'desktop']) {
+      assert.ok(!workspaceValidationCodes(request, surface)
+        .includes('pc_extended_options_unavailable'),
+      'the GUI execution boundary normalizes stale backend drafts to CPU');
+    }
+    const args = buildWorkspaceCommandArguments(request);
+    assert.equal(args[args.indexOf('--backend') + 1], 'cpu');
+    assert.equal(args.includes('--gpu-warmup'), false);
+    assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args);
   }
   for (const lines of [0, 25, 1.5]) {
     assert.ok(workspaceValidationCodes({ ...base, lines }, 'web').includes('target_lines_invalid'));
