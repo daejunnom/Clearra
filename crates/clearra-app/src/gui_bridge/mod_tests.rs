@@ -64,7 +64,7 @@ fn gui_command_preview_is_stable_and_does_not_execute() {
     let validated = GuiFormValidation::validate(&GuiFormState::default()).expect("validated");
     let preview = GuiCommandPreview::pc_opening(&validated);
 
-    assert_eq!(preview.command(), "clearra pc --lines 2 --backend auto");
+    assert_eq!(preview.command(), "clearra pc --lines 2 --backend cpu");
     assert_eq!(preview.execution_policy(), "display_only_no_subprocess");
 }
 
