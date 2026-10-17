@@ -31,7 +31,7 @@ mod case_auto_selects_geometry_exact_cover_without_fallback {
             GpuUnavailableReason::DeviceNotFound,
         ));
         let selection = PcBackendSelector::select_with_test_dependencies(
-            &PcExecutionPolicy::mvp_default(),
+            &PcExecutionPolicy::mvp_default().with_backend(RequestedSearchBackend::Auto),
             PcBackendSelectionContext::default(),
             &provider,
             PcBackendAvailability {
@@ -73,7 +73,9 @@ mod case_auto_parallel_backend_preserves_trace_enumeration {
 
     #[test]
     fn auto_parallel_backend_preserves_trace_enumeration() {
-        let policy = PcExecutionPolicy::mvp_default().with_workers(4);
+        let policy = PcExecutionPolicy::mvp_default()
+            .with_backend(RequestedSearchBackend::Auto)
+            .with_workers(4);
         let provider = FixedGpuCapabilityProvider(GpuSearchCapability::unavailable(
             GpuUnavailableReason::DeviceNotFound,
         ));
@@ -105,7 +107,7 @@ mod case_auto_keeps_cpu_geometry_exact_cover_for_small_scenarios_with_gpu_availa
     fn auto_keeps_cpu_geometry_exact_cover_for_small_scenarios_with_gpu_available() {
         let provider = FixedGpuCapabilityProvider(GpuSearchCapability::available(7));
         let selection = PcBackendSelector::select_with_test_dependencies(
-            &PcExecutionPolicy::mvp_default(),
+            &PcExecutionPolicy::mvp_default().with_backend(RequestedSearchBackend::Auto),
             PcBackendSelectionContext::scenario(PcCountPolicy::CountAll, 6),
             &provider,
             PcBackendAvailability {
@@ -131,7 +133,9 @@ mod case_auto_uses_parallel_exact_backend_for_large_search {
 
     #[test]
     fn auto_uses_parallel_exact_backend_for_large_search() {
-        let policy = PcExecutionPolicy::mvp_default().with_workers(4);
+        let policy = PcExecutionPolicy::mvp_default()
+            .with_backend(RequestedSearchBackend::Auto)
+            .with_workers(4);
         let provider = FixedGpuCapabilityProvider(GpuSearchCapability::unavailable(
             GpuUnavailableReason::DeviceNotFound,
         ));
@@ -161,7 +165,9 @@ mod case_auto_uses_parallel_exact_backend_for_materialized_multiset_family {
 
     #[test]
     fn auto_uses_parallel_exact_backend_for_materialized_multiset_family() {
-        let policy = PcExecutionPolicy::mvp_default().with_workers(4);
+        let policy = PcExecutionPolicy::mvp_default()
+            .with_backend(RequestedSearchBackend::Auto)
+            .with_workers(4);
         let provider = FixedGpuCapabilityProvider(GpuSearchCapability::available(7));
         let selection = PcBackendSelector::select_with_test_dependencies(
             &policy,
@@ -193,7 +199,7 @@ mod case_auto_requires_benchmark_qualified_gpu {
     fn auto_requires_benchmark_qualified_gpu() {
         let provider = FixedGpuCapabilityProvider(GpuSearchCapability::available_explicit_only(7));
         let selection = PcBackendSelector::select_with_test_dependencies(
-            &PcExecutionPolicy::mvp_default(),
+            &PcExecutionPolicy::mvp_default().with_backend(RequestedSearchBackend::Auto),
             PcBackendSelectionContext::scenario(PcCountPolicy::CountAll, 10),
             &provider,
             PcBackendAvailability {

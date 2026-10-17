@@ -79,7 +79,7 @@ fn gpu_without_backend_fallback_is_not_a_successful_selection_when_unavailable()
 #[test]
 fn auto_cpu_geometry_exact_cover_selection_always_reports_an_auto_selection_reason() {
     let baseline = PcBackendSelector::select_with_context(
-        &PcExecutionPolicy::mvp_default(),
+        &PcExecutionPolicy::mvp_default().with_backend(RequestedSearchBackend::Auto),
         Default::default(),
     )
     .expect("auto selection");
@@ -93,7 +93,7 @@ fn auto_cpu_geometry_exact_cover_selection_always_reports_an_auto_selection_reas
     );
 
     let small_scenario = PcBackendSelector::select_with_context(
-        &PcExecutionPolicy::mvp_default(),
+        &PcExecutionPolicy::mvp_default().with_backend(RequestedSearchBackend::Auto),
         PcBackendSelectionContext::scenario(PcCountPolicy::CountAll, 6),
     )
     .expect("small scenario auto selection");
