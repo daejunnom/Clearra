@@ -14,9 +14,9 @@ fn assembles_supported_mvp_pc_query() {
     assert_eq!(query.objective().kind(), ObjectiveKind::All);
     assert_eq!(
         query.execution_policy().requested_backend(),
-        clearra_pc_graph::request::RequestedSearchBackend::Auto
+        clearra_pc_graph::request::RequestedSearchBackend::Cpu
     );
-    assert!(query.execution_policy().allow_backend_fallback());
+    assert!(!query.execution_policy().allow_backend_fallback());
 }
 
 #[test]

@@ -202,8 +202,8 @@ mod case_app_request_contract_exposes_command_query_and_policy {
 
         assert_eq!(request.command_kind(), AppCommandKind::Pc);
         assert_eq!(request.query(), &QueryEnvelope::PcOpening);
-        assert_eq!(request.backend_policy().backend_requested(), "auto");
-        assert!(request.backend_policy().allow_backend_fallback());
+        assert_eq!(request.backend_policy().backend_requested(), "cpu");
+        assert!(!request.backend_policy().allow_backend_fallback());
         assert!(request.output_policy().include_render_model());
         assert_eq!(request.output_policy().contract().format(), "text");
         assert!(request.diagnostics_policy().include_diagnostics());

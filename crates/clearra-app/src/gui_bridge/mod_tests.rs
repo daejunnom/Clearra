@@ -14,13 +14,13 @@ fn gui_form_state_builds_pc_app_request_preview() {
     assert_eq!(preview.request_model(), "clearra-app/AppRequest");
     assert_eq!(preview.app_request_kind(), "Pc");
     assert_eq!(preview.selected_language(), "en");
-    assert_eq!(preview.selected_backend(), "auto");
+    assert_eq!(preview.selected_backend(), "cpu");
     assert_eq!(preview.selected_problem_preset(), "opening-pc");
     assert_eq!(preview.selected_lines(), 2);
     assert_eq!(preview.selected_rule(), "srs-plus");
     assert_eq!(
         preview.compiled_command_preview(),
-        "clearra pc --lines 2 --backend auto"
+        "clearra pc --lines 2 --backend cpu"
     );
     assert_eq!(preview.solver_execution(), "not_started");
 
@@ -34,7 +34,7 @@ fn gui_form_state_builds_pc_app_request_preview() {
                     .execution_policy()
                     .requested_backend()
                     .as_str(),
-                "auto"
+                "cpu"
             );
         }
         other => panic!("expected Pc AppCommand, got {other:?}"),

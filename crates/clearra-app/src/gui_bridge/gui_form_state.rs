@@ -52,6 +52,6 @@ impl GuiFormState {
 
 impl Default for GuiFormState {
     fn default() -> Self {
-        Self::new("en", "auto", "opening-pc", 2, "srs-plus")
+        Self::new("en", "cpu", "opening-pc", 2, "srs-plus")
     }
 }
