@@ -51,8 +51,15 @@ const bundle = await build({
   } }],
 });
 assert.equal(bundle.outputFiles.length, 1);
+// Keep bootstrap failures diagnosable in the job log even when an assertion
+// happens before the report directory is uploaded. This is not solver timing.
+const bootstrapRequests = [];
 const server = createServer((req, res) => {
   const path = new URL(req.url, 'http://127.0.0.1').pathname;
+  if (bootstrapRequests.length < 24) bootstrapRequests.push({ path, event: 'received' });
+  res.once('finish', () => {
+    if (bootstrapRequests.length < 24) bootstrapRequests.push({ path, event: 'finished', status: res.statusCode });
+  });
   res.setHeader('Cache-Control', 'no-store');
   if (path === '/workspace.js') res.writeHead(200, { 'Content-Type': 'text/javascript' }).end(bundle.outputFiles[0].contents);
   else if (path === '/') res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(
@@ -86,9 +93,15 @@ try {
       hasTouch: spec.touch, isMobile: spec.touch, locale: spec.language });
     const page = await context.newPage();
     page.setDefaultTimeout(10000);
+    bootstrapRequests.length = 0;
     const errors = [];
     page.on('pageerror', error => errors.push(error.stack || String(error)));
+    const failedRequests = [];
+    page.on('requestfailed', request => {
+      if (failedRequests.length < 8) failedRequests.push({ url: request.url(), error: request.failure()?.errorText });
+    });
     const flush = () => page.evaluate(() => new Promise(requestAnimationFrame));
+    let phase = 'bootstrap';
     try {
       if (process.env.CLEARRA_BROWSER_DOCUMENT_MODE === 'memory') {
         // Offline local inspection: mount the same compiled component without
@@ -96,8 +109,17 @@ try {
         await page.setContent('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div id="app"></div>');
         await page.addScriptTag({ type: 'module', content: bundle.outputFiles[0].text });
       } else {
-        await page.goto(origin);
+        // Transport readiness and component readiness are different contracts.
+        // Do not make the request-owner test depend on the document-wide load
+        // event. The cold compiled module has a finite bootstrap budget; all
+        // subsequent input assertions keep the ordinary 10-second deadline.
+        const response = await page.goto(origin, { waitUntil: 'commit' });
+        assert.equal(response?.status(), 200, 'the fixture document must be served successfully');
       }
+      phase = 'input-owner-ready';
+      await page.locator('.dimension-field input').waitFor({ state: 'visible', timeout: 30000 });
+      assert.deepEqual(errors, [], 'the compiled workspace must mount without a JavaScript error');
+      phase = 'input-interactions';
       await page.locator('.language-control button').filter({ hasText: spec.language.toUpperCase() }).click();
       await flush();
       const height = page.locator('.dimension-field input');
@@ -211,9 +233,19 @@ try {
       await page.screenshot({ path: resolve(reportRoot, `${spec.language}-${spec.width}.png`), fullPage: true });
       results.push({ ...spec, status: 'passed', heightTransition: [8, 4, 6, 4, 10], quotas: ['auto', 1, 0], supplies: ['P7','P7'], namedSwitches: Object.keys(switches), independentSwitches: true, removedLegacyControls: true });
     } catch (error) {
+      const diagnostics = { ...spec, phase, moduleBytes: bundle.outputFiles[0].contents.byteLength,
+        requests: bootstrapRequests, failedRequests, pageErrors: errors };
+      console.error('recovery_workspace_acceptance=failed ' + JSON.stringify(diagnostics));
+      let body = '';
+      try { body = await page.locator('body').innerText({ timeout: 2000 }); }
+      catch (bodyError) { body = 'Body capture unavailable: ' + String(bodyError); }
       await writeFile(resolve(reportRoot, `failed-${spec.language}-${spec.width}.txt`),
-        [String(error.stack || error), ...errors, await page.locator('body').innerText()].join('\n'));
-      await page.screenshot({ path: resolve(reportRoot, `failed-${spec.language}-${spec.width}.png`), fullPage: true });
+        [String(error.stack || error), JSON.stringify(diagnostics), body].join('\n'));
+      try {
+        await page.screenshot({ path: resolve(reportRoot, `failed-${spec.language}-${spec.width}.png`), fullPage: true, timeout: 5000 });
+      } catch (captureError) {
+        console.error('recovery_workspace_failure_capture=' + String(captureError));
+      }
       throw error;
     } finally { await context.close(); }
   }
