@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_TAG } from "./current-product-release.mjs";
 import test from "node:test";
 import { resolveApprovedReleaseSource } from "./approved-release-source.mjs";
 import { checkpointCandidateArtifactName } from "./discord-production-checkpoint.mjs";
@@ -20,10 +21,10 @@ function fixture({ historical = false, release = null, tagCommit = null, mutateR
       calls.push({ path });
       if (path === "/actions/runs/10/attempts/1") return mutateRun ? mutateRun({ ...run }) : run;
       if (path === "/git/ref/heads/main") return { object: { type: "commit", sha: context.controllerSource } };
-      if (path === "/releases/tags/v0.8.1") return release;
-      if (path === "/git/ref/tags/v0.8.1") return tagCommit === null ? null : {
-        ref: "refs/tags/v0.8.1", object: { type: "tag", sha: tagObject } };
-      if (path === `/git/tags/${tagObject}`) return { sha: tagObject, tag: "v0.8.1",
+      if (path === `/releases/tags/${CURRENT_PRODUCT_TAG}`) return release;
+      if (path === `/git/ref/tags/${CURRENT_PRODUCT_TAG}`) return tagCommit === null ? null : {
+        ref: `refs/tags/${CURRENT_PRODUCT_TAG}`, object: { type: "tag", sha: tagObject } };
+      if (path === `/git/tags/${tagObject}`) return { sha: tagObject, tag: CURRENT_PRODUCT_TAG,
         object: { type: "commit", sha: tagCommit } };
       if (path === "/actions/runs/10/artifacts?per_page=100") return { total_count: 1, artifacts: [{
         id: 30, expired: false, digest: `sha256:${"d".repeat(64)}`,
@@ -86,7 +87,7 @@ test("historical source is permitted only for read-only matching immutable evide
 });
 
 test("another source's published immutable version is preserved with no false publication receipt", async () => {
-  const f = fixture({ tagCommit: controller, release: { immutable: true, tag_name: "v0.8.1",
+  const f = fixture({ tagCommit: controller, release: { immutable: true, tag_name: CURRENT_PRODUCT_TAG,
     target_commitish: controller, draft: false, prerelease: false } });
   const result = await resolveApprovedReleaseSource(f.context, f.dependencies);
   assert.equal(result.publish, "false");

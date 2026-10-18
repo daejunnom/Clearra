@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_TAG, CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 import { createHash } from "node:crypto";
 import {
   access,
@@ -324,9 +325,9 @@ function createStageReports(sync, observation) {
     event("canonical-gate", evidence("release-acceptance", { status: "passed", readiness_open_count: 0 })),
     ...["desktop", "discord", "native", "wasm"].map((surface) =>
       event("surface-report", evidence(`${surface}-surface`, { surface, status: "passed" }))),
-    event("release-artifact", artifact("linux-cli", "Clearra-CLI-v0.8.1-linux-x86_64", 1)),
-    event("release-artifact", artifact("windows-cli", "Clearra-CLI-v0.8.1-windows-x86_64.exe", 2)),
-    event("release-artifact", artifact("windows-gui", "Clearra-GUI-v0.8.1-windows-x86_64.exe", 3)),
+    event("release-artifact", artifact("linux-cli", `Clearra-CLI-${CURRENT_PRODUCT_TAG}-linux-x86_64`, 1)),
+    event("release-artifact", artifact("windows-cli", `Clearra-CLI-${CURRENT_PRODUCT_TAG}-windows-x86_64.exe`, 2)),
+    event("release-artifact", artifact("windows-gui", `Clearra-GUI-${CURRENT_PRODUCT_TAG}-windows-x86_64.exe`, 3)),
   ];
   const deploymentEvents = [
     event("deployment-pages", {
@@ -349,9 +350,9 @@ function createStageReports(sync, observation) {
     }),
   ];
   const publicationEvents = [
-    event("tag", { name: "v0.8.1", target_commit: COMMIT, annotated: true, remote_verified: true }),
+    event("tag", { name: CURRENT_PRODUCT_TAG, target_commit: COMMIT, annotated: true, remote_verified: true }),
     event("immutable-release", {
-      tag: "v0.8.1",
+      tag: CURRENT_PRODUCT_TAG,
       source_commit: COMMIT,
       workflow_run_id: "123",
       immutable: true,
@@ -527,7 +528,7 @@ function productionIdentities(sync) {
       status: "active",
     },
     pages: {
-      source_commit: COMMIT, engine_build_id: COMMIT, version: "0.8.1",
+      source_commit: COMMIT, engine_build_id: COMMIT, version: CURRENT_PRODUCT_VERSION,
       deployment_id: "pages-1", artifact_sha256: HASH, base_path: "/Clearra",
       url: "https://daejunnom.github.io/Clearra/", status: "active",
     },

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -57,7 +58,7 @@ function identity(sourceCommit = SOURCE, files = forwardFileDescriptors()) {
     contractSchemaVersion: "clearra.search.contract.v2",
     supplySemanticsId: "clearra.supply.projected-terminal-lookahead.v1",
     artifactSchemaVersion: "clearra.solution-data.v1",
-    version: "0.8.1",
+    version: CURRENT_PRODUCT_VERSION,
   };
   return {
     ...base,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_TAG, CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -362,8 +363,8 @@ test("self-validates every completed job and step retained in the durable receip
     schema_id: DISCORD_PRODUCTION_CHECKPOINT_RECEIPT_SCHEMA_ID,
     repository: candidate.repository,
     repository_id: String(REPOSITORY_ID),
-    release: "v0.8.1",
-    version: "0.8.1",
+    release: CURRENT_PRODUCT_TAG,
+    version: CURRENT_PRODUCT_VERSION,
     source_commit: candidate.source_commit,
     accepted_workflow_path: ".github/workflows/release-cli.yml",
     accepted_workflow_run_id: candidate.accepted_workflow_run_id,
@@ -392,7 +393,7 @@ test("self-validates every completed job and step retained in the durable receip
     completed_job_topology_sha256: createHash("sha256")
       .update(canonicalJson(topology), "utf8").digest("hex"),
     tag: {
-      name: "v0.8.1",
+      name: CURRENT_PRODUCT_TAG,
       target_commit: candidate.source_commit,
       annotated: true,
       message_contract: "exact-canonical-receipt-bytes",
@@ -403,8 +404,8 @@ test("self-validates every completed job and step retained in the durable receip
       },
     },
     github_release_contract: {
-      tag: "v0.8.1",
-      title: "Clearra v0.8.1",
+      tag: CURRENT_PRODUCT_TAG,
+      title: `Clearra ${CURRENT_PRODUCT_TAG}`,
       source_commit: candidate.source_commit,
       draft: false,
       prerelease: false,
@@ -416,6 +417,51 @@ test("self-validates every completed job and step retained in the durable receip
     status: "ready-for-annotated-tag-and-immutable-release",
   });
   assert.equal(validateDiscordProductionCheckpointReceipt(receipt), receipt);
+
+  // A new release must still be able to read the previous durable checkpoint.
+  // Rebind every version-bearing nested owner, retaining all source/job/hash
+  // checks; the default creation/verification path must remain current-only.
+  const oldTag = "v0.8.1";
+  const old = structuredClone(receipt);
+  const reseal = value => {
+    delete value.report_sha256;
+    return sealCanonicalReport(value);
+  };
+  old.release = oldTag;
+  old.version = "0.8.1";
+  old.tag.name = oldTag;
+  old.github_release_contract.tag = oldTag;
+  old.github_release_contract.title = `Clearra ${oldTag}`;
+  const oldCandidate = old.checkpoint_candidate;
+  const oldObservation = oldCandidate.production_observation;
+  const pages = oldObservation.surfaces.find(value => value.surface === "pages");
+  pages.identity.version = "0.8.1";
+  pages.identity_sha256 = topologySha256(pages.identity);
+  for (const sample of pages.observations) sample.identity_sha256 = pages.identity_sha256;
+  oldCandidate.production_observation = reseal(oldObservation);
+  oldCandidate.production_observation_sha256 = oldCandidate.production_observation.report_sha256;
+  oldCandidate.production_observation_file_sha256 = createHash("sha256")
+    .update(`${canonicalJson(oldCandidate.production_observation)}\n`, "utf8").digest("hex");
+  old.checkpoint_candidate = reseal(oldCandidate);
+  old.checkpoint_candidate_artifact.candidate_report_sha256 = old.checkpoint_candidate.report_sha256;
+  old.checkpoint_candidate_artifact.file_sha256 = createHash("sha256")
+    .update(`${canonicalJson(old.checkpoint_candidate)}\n`, "utf8").digest("hex");
+  const oldReceipt = reseal(old);
+  assert.throws(() => validateDiscordProductionCheckpointReceipt(oldReceipt), /authority differs/u);
+  assert.equal(validateDiscordProductionCheckpointReceipt(oldReceipt, {
+    readbackReleaseTag: oldTag,
+  }), oldReceipt);
+  assert.throws(() => validateDiscordProductionCheckpointReceipt(oldReceipt, {
+    readbackReleaseTag: oldTag, sourceCommit: "f".repeat(40),
+  }), /authority differs/u);
+  assert.throws(() => validateDiscordProductionCheckpointReceipt(oldReceipt, {
+    readbackReleaseTag: "v0.8.0",
+  }), /authority differs/u);
+  assert.throws(() => validateDiscordProductionCheckpointReceipt(oldReceipt, {
+    readbackReleaseTag: "refs/tags/v0.8.1",
+  }), /readback release tag is invalid/u);
+  assert.throws(() => assertLocalCheckpointTagAbsent(() => assert.fail("no Git mutation"), oldTag),
+    /checkpoint finalizer accepts only/u);
 
   const missingStep = structuredClone(receipt);
   missingStep.completed_job_topology[3].steps.pop();
@@ -530,7 +576,7 @@ test("preserves exact canonical receipt bytes through local and remote annotated
         return result;
       },
     };
-    assertLocalCheckpointTagAbsent(localGit, "v0.8.1");
+    assertLocalCheckpointTagAbsent(localGit, CURRENT_PRODUCT_TAG);
     assert.throws(() => assertLocalCheckpointTagAbsent({
       optional(args) {
         const result = spawnSync("git", ["-C", join(root, "missing-checkout"), ...args], {
@@ -540,28 +586,28 @@ test("preserves exact canonical receipt bytes through local and remote annotated
         assert.equal(result.signal, null);
         return result;
       },
-    }, "v0.8.1"), /local checkpoint tag query failed/u);
+    }, CURRENT_PRODUCT_TAG), /local checkpoint tag query failed/u);
     git([
       "-C", checkout, "tag", "-a", "--cleanup=verbatim", "-F", "-",
-      "v0.8.1", sourceCommit,
+      CURRENT_PRODUCT_TAG, sourceCommit,
     ], {
       GIT_COMMITTER_DATE: "2026-08-31T00:00:40+00:00",
     }, message);
-    const tagObject = git(["-C", checkout, "rev-parse", "refs/tags/v0.8.1"])
+    const tagObject = git(["-C", checkout, "rev-parse", `refs/tags/${CURRENT_PRODUCT_TAG}`])
       .toString("utf8").trim();
-    assert.throws(() => assertLocalCheckpointTagAbsent(localGit, "v0.8.1"),
+    assert.throws(() => assertLocalCheckpointTagAbsent(localGit, CURRENT_PRODUCT_TAG),
       /checkpoint release tag already exists locally/u);
     const local = parseRawTagObject(git(["-C", checkout, "cat-file", "tag", tagObject]));
     assert.equal(local.targetCommit, sourceCommit);
     assert.deepEqual(local.message, message);
     assert.deepEqual(parseCanonicalReceiptBytes(local.message).bytes, message);
     git(["-C", checkout, "remote", "add", "origin", remote]);
-    git(["-C", checkout, "push", "origin", "refs/tags/v0.8.1:refs/tags/v0.8.1"]);
+    git(["-C", checkout, "push", "origin", `refs/tags/${CURRENT_PRODUCT_TAG}:refs/tags/${CURRENT_PRODUCT_TAG}`]);
     const listing = git([
       "-C", checkout, "ls-remote", "origin",
-      "refs/tags/v0.8.1", "refs/tags/v0.8.1^{}",
+      `refs/tags/${CURRENT_PRODUCT_TAG}`, `refs/tags/${CURRENT_PRODUCT_TAG}^{}`,
     ]).toString("utf8");
-    const remoteIdentity = validateRemoteLsRemote(listing, "v0.8.1", sourceCommit);
+    const remoteIdentity = validateRemoteLsRemote(listing, CURRENT_PRODUCT_TAG, sourceCommit);
     assert.equal(remoteIdentity.tagObjectSha, tagObject);
     const remoteObject = parseRawTagObject(git([
       "--git-dir", remote, "cat-file", "tag", remoteIdentity.tagObjectSha,
@@ -578,9 +624,9 @@ test("preserves exact canonical receipt bytes through local and remote annotated
 
 test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
   const acceptedArtifacts = [
-    ["linux-cli", "clearra-cli-linux-x64-v0.8.1", "d"],
-    ["windows-cli", "clearra-cli-windows-x64-v0.8.1.exe", "e"],
-    ["windows-gui", "clearra-gui-windows-x64-v0.8.1.exe", "f"],
+    ["linux-cli", `clearra-cli-linux-x64-${CURRENT_PRODUCT_TAG}`, "d"],
+    ["windows-cli", `clearra-cli-windows-x64-${CURRENT_PRODUCT_TAG}.exe`, "e"],
+    ["windows-gui", `clearra-gui-windows-x64-${CURRENT_PRODUCT_TAG}.exe`, "f"],
   ].map(([role, name, nibble], index) => ({
     role,
     name,
@@ -592,17 +638,35 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
   assert.doesNotThrow(() => validateImmutableCheckpointReleaseReadback(release, {
     repository: REPOSITORY,
     sourceCommit: SOURCE_COMMIT,
-    tag: "v0.8.1",
+    tag: CURRENT_PRODUCT_TAG,
     taggerAt: "2026-08-31T00:00:40Z",
     acceptedArtifacts,
   }));
+  const historical = structuredClone(release);
+  historical.tag_name = "v0.8.1";
+  historical.name = "Clearra v0.8.1";
+  historical.html_url = `https://github.com/${REPOSITORY}/releases/tag/v0.8.1`;
+  for (const asset of historical.assets) {
+    asset.browser_download_url = `https://github.com/${REPOSITORY}/releases/download/v0.8.1/${asset.name}`;
+  }
+  const readback = { repository: REPOSITORY, sourceCommit: SOURCE_COMMIT,
+    tag: "v0.8.1", readbackReleaseTag: "v0.8.1", taggerAt: "2026-08-31T00:00:40Z", acceptedArtifacts };
+  assert.doesNotThrow(() => validateImmutableCheckpointReleaseReadback(historical, readback));
+  assert.throws(() => validateImmutableCheckpointReleaseReadback(historical,
+    { ...readback, readbackReleaseTag: undefined }), /checkpoint finalizer accepts only/u);
+  assert.throws(() => validateImmutableCheckpointReleaseReadback(historical,
+    { ...readback, readbackReleaseTag: "v0.8.0" }), /readback tag authority differs/u);
+  const historicalTamper = structuredClone(historical);
+  historicalTamper.assets[0].digest = `sha256:${"0".repeat(64)}`;
+  assert.throws(() => validateImmutableCheckpointReleaseReadback(historicalTamper, readback),
+    /asset differs from accepted bytes/u);
   const nonBot = structuredClone(release);
   nonBot.author.login = "release-admin";
   assert.throws(
     () => validateImmutableCheckpointReleaseReadback(nonBot, {
       repository: REPOSITORY,
       sourceCommit: SOURCE_COMMIT,
-      tag: "v0.8.1",
+      tag: CURRENT_PRODUCT_TAG,
       taggerAt: "2026-08-31T00:00:40Z",
       acceptedArtifacts,
     }),
@@ -614,7 +678,7 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
     () => validateImmutableCheckpointReleaseReadback(mutable, {
       repository: REPOSITORY,
       sourceCommit: SOURCE_COMMIT,
-      tag: "v0.8.1",
+      tag: CURRENT_PRODUCT_TAG,
       taggerAt: "2026-08-31T00:00:40Z",
       acceptedArtifacts,
     }),
@@ -626,7 +690,7 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
     () => validateImmutableCheckpointReleaseReadback(wrongAsset, {
       repository: REPOSITORY,
       sourceCommit: SOURCE_COMMIT,
-      tag: "v0.8.1",
+      tag: CURRENT_PRODUCT_TAG,
       taggerAt: "2026-08-31T00:00:40Z",
       acceptedArtifacts,
     }),
@@ -638,7 +702,7 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
     () => validateImmutableCheckpointReleaseReadback(sameSecond, {
       repository: REPOSITORY,
       sourceCommit: SOURCE_COMMIT,
-      tag: "v0.8.1",
+      tag: CURRENT_PRODUCT_TAG,
       taggerAt: "2026-08-31T00:00:40Z",
       acceptedArtifacts,
     }),
@@ -649,7 +713,7 @@ test("rejects a non-bot or noncanonical immutable three-asset Release", () => {
 test("binds candidate product fragments fieldwise to current canonical acceptance", () => {
   const fragments = [{
     role: "linux-cli",
-    name: "clearra-cli-linux-x64-v0.8.1",
+    name: `clearra-cli-linux-x64-${CURRENT_PRODUCT_TAG}`,
     sha256: "d".repeat(64),
     size_bytes: 100,
     source_commit: SOURCE_COMMIT,
@@ -674,15 +738,15 @@ function immutableRelease(acceptedArtifacts) {
   };
   return {
     id: 900,
-    tag_name: "v0.8.1",
+    tag_name: CURRENT_PRODUCT_TAG,
     target_commitish: SOURCE_COMMIT,
-    name: "Clearra v0.8.1",
+    name: `Clearra ${CURRENT_PRODUCT_TAG}`,
     draft: false,
     prerelease: false,
     immutable: true,
     published_at: "2026-08-31T00:00:41Z",
     url: `https://api.github.com/repos/${REPOSITORY}/releases/900`,
-    html_url: `https://github.com/${REPOSITORY}/releases/tag/v0.8.1`,
+    html_url: `https://github.com/${REPOSITORY}/releases/tag/${CURRENT_PRODUCT_TAG}`,
     assets_url: `https://api.github.com/repos/${REPOSITORY}/releases/900/assets`,
     upload_url:
       `https://uploads.github.com/repos/${REPOSITORY}/releases/900/assets{?name,label}`,
@@ -696,7 +760,7 @@ function immutableRelease(acceptedArtifacts) {
       url:
         `https://api.github.com/repos/${REPOSITORY}/releases/assets/${1000 + index}`,
       browser_download_url:
-        `https://github.com/${REPOSITORY}/releases/download/v0.8.1/${artifact.name}`,
+        `https://github.com/${REPOSITORY}/releases/download/${CURRENT_PRODUCT_TAG}/${artifact.name}`,
       uploader: structuredClone(bot),
     })),
   };

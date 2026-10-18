@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_TAG, CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -79,7 +80,7 @@ function validBundle() {
   );
   const manifest = {
     schema_id: "clearra.final-source-revalidation.v1",
-    release: "v0.8.1",
+    release: CURRENT_PRODUCT_TAG,
     source: {
       commit: COMMIT,
       tree: "2".repeat(40),
@@ -118,9 +119,9 @@ function validBundle() {
       evidence("wasm-report", { surface: "wasm", status: "passed" }),
     ],
     release_artifacts: [
-      { role: "linux-cli", name: "Clearra-CLI-v0.8.1-linux-x86_64", sha256: HASH, size_bytes: 1, source_commit: COMMIT },
-      { role: "windows-cli", name: "Clearra-CLI-v0.8.1-windows-x86_64.exe", sha256: HASH, size_bytes: 2, source_commit: COMMIT },
-      { role: "windows-gui", name: "Clearra-GUI-v0.8.1-windows-x86_64.exe", sha256: HASH, size_bytes: 3, source_commit: COMMIT },
+      { role: "linux-cli", name: `Clearra-CLI-${CURRENT_PRODUCT_TAG}-linux-x86_64`, sha256: HASH, size_bytes: 1, source_commit: COMMIT },
+      { role: "windows-cli", name: `Clearra-CLI-${CURRENT_PRODUCT_TAG}-windows-x86_64.exe`, sha256: HASH, size_bytes: 2, source_commit: COMMIT },
+      { role: "windows-gui", name: `Clearra-GUI-${CURRENT_PRODUCT_TAG}-windows-x86_64.exe`, sha256: HASH, size_bytes: 3, source_commit: COMMIT },
     ],
     deployment: {
       pages: {
@@ -159,13 +160,13 @@ function validBundle() {
       report_sha256: productionObservationReport.report_sha256,
     },
     tag: {
-      name: "v0.8.1",
+      name: CURRENT_PRODUCT_TAG,
       target_commit: COMMIT,
       annotated: true,
       remote_verified: true,
     },
     immutable_release: {
-      tag: "v0.8.1",
+      tag: CURRENT_PRODUCT_TAG,
       source_commit: COMMIT,
       workflow_run_id: "123",
       immutable: true,
@@ -244,7 +245,7 @@ function productionObservation(catalogSyncReportSha256) {
     pages: {
       source_commit: COMMIT,
       engine_build_id: COMMIT,
-      version: "0.8.1",
+      version: CURRENT_PRODUCT_VERSION,
       deployment_id: "pages-1",
       artifact_sha256: HASH,
       base_path: "/Clearra",
@@ -325,7 +326,7 @@ function observationFreshness(surface, identity, sequence) {
   };
 }
 
-test("accepts exactly one fully observed v0.8.1 source identity", () => {
+test(`accepts exactly one fully observed ${CURRENT_PRODUCT_TAG} source identity`, () => {
   const bundle = validBundle();
   assert.equal(
     validateBundle(bundle, { expectedSourceCommit: COMMIT }),
@@ -349,7 +350,7 @@ test("requires exactly three named release artifacts and twenty observed minutes
   assert.throws(() => validateBundle(missingArtifact), /exactly three/u);
 
   const renamedArtifact = validBundle();
-  renamedArtifact.manifest.release_artifacts[2].name = "Clearra-GUI-v0.8.1-windows-x86_64.zip";
+  renamedArtifact.manifest.release_artifacts[2].name = `Clearra-GUI-${CURRENT_PRODUCT_TAG}-windows-x86_64.zip`;
   assert.throws(
     () => validateBundle(renamedArtifact),
     /canonical release asset/u,

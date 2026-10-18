@@ -12,20 +12,28 @@ import {
 } from "./current-product-release.mjs";
 
 test("the checked-out workspace owns one current release identity", () => {
-  assert.equal(CURRENT_PRODUCT_VERSION, "0.8.1");
-  assert.equal(CURRENT_PRODUCT_TAG, "v0.8.1");
+  const workspace = readCurrentProductRelease();
+  assert.equal(CURRENT_PRODUCT_VERSION, workspace.version);
+  assert.equal(CURRENT_PRODUCT_TAG, `v${workspace.version}`);
   assert.equal(
     expectedProductArtifactName("linux-cli"),
-    "Clearra-CLI-v0.8.1-linux-x86_64",
+    `Clearra-CLI-v${workspace.version}-linux-x86_64`,
   );
   assert.equal(
     expectedProductArtifactName("windows-cli"),
-    "Clearra-CLI-v0.8.1-windows-x86_64.exe",
+    `Clearra-CLI-v${workspace.version}-windows-x86_64.exe`,
   );
   assert.equal(
     expectedProductArtifactName("windows-gui"),
-    "Clearra-GUI-v0.8.1-windows-x86_64.exe",
+    `Clearra-GUI-v${workspace.version}-windows-x86_64.exe`,
   );
+});
+
+test("artifact names bind an explicitly selected historical release independently of the workspace", () => {
+  const historical = { version: "0.8.1", tag: "v0.8.1" };
+  assert.equal(expectedProductArtifactName("linux-cli", historical), "Clearra-CLI-v0.8.1-linux-x86_64");
+  assert.equal(expectedProductArtifactName("windows-cli", historical), "Clearra-CLI-v0.8.1-windows-x86_64.exe");
+  assert.equal(expectedProductArtifactName("windows-gui", historical), "Clearra-GUI-v0.8.1-windows-x86_64.exe");
 });
 
 test("release parsing is restricted to workspace.package", async () => {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_TAG, CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -303,7 +304,7 @@ test("release-freeze selection uses the final registry evidence entry without re
 function acceptanceEvidence(sourceCommit) {
   const authority = {
     repository: "daejunnom/Clearra",
-    version: "0.8.1",
+    version: CURRENT_PRODUCT_VERSION,
     sourceCommit,
     runId: RUN_ID,
     runAttempt: RUN_ATTEMPT,
@@ -362,9 +363,9 @@ function acceptanceEvidence(sourceCommit) {
         status: "passed",
       })),
       release_artifacts: [
-        ["linux-cli", "Clearra-CLI-v0.8.1-linux-x86_64"],
-        ["windows-cli", "Clearra-CLI-v0.8.1-windows-x86_64.exe"],
-        ["windows-gui", "Clearra-GUI-v0.8.1-windows-x86_64.exe"],
+        ["linux-cli", `Clearra-CLI-${CURRENT_PRODUCT_TAG}-linux-x86_64`],
+        ["windows-cli", `Clearra-CLI-${CURRENT_PRODUCT_TAG}-windows-x86_64.exe`],
+        ["windows-gui", `Clearra-GUI-${CURRENT_PRODUCT_TAG}-windows-x86_64.exe`],
       ].map(([role, name], index) => ({
         role,
         name,
@@ -431,7 +432,7 @@ function deploymentFixture() {
     schema_id: "clearra.discord.command-sync-authority.v1",
     source_commit: COMMIT,
     repository: "daejunnom/Clearra",
-    release_version: "0.8.1",
+    release_version: CURRENT_PRODUCT_VERSION,
     pages_base_path: "/Clearra",
     accepted_run_id: RUN_ID,
     accepted_run_attempt: RUN_ATTEMPT,
@@ -621,7 +622,7 @@ function canonicalPagesCapture(snapshot) {
     contractSchemaVersion: "clearra.search.contract.v2",
     supplySemanticsId: "clearra.supply.projected-terminal-lookahead.v1",
     artifactSchemaVersion: "clearra.solution-data.v1",
-    version: "0.8.1",
+    version: CURRENT_PRODUCT_VERSION,
     acceptedRunId: "779",
     acceptedRunAttempt: "1",
     basePath: "/Clearra",
@@ -660,7 +661,7 @@ function oracleRollbackCapture() {
     priorOracleRelease: "/opt/clearra/releases/v0.7.5-042ec21",
     priorOracleReleaseId: "v0.7.5-042ec21",
     priorOracleReleaseSha256: "a".repeat(64),
-    priorOracleSettingsBackup: `/etc/clearra-gateway/settings.pre-v0.8.1-${nonce}`,
+    priorOracleSettingsBackup: `/etc/clearra-gateway/settings.pre-${CURRENT_PRODUCT_TAG}-${nonce}`,
     priorOracleSettingsSha256: "b".repeat(64),
     priorRuntimeAuthorityKind: "clearra.rollback.legacy-health-no-runtime.v1",
     priorRuntimeAuthoritySha256: "c".repeat(64),
@@ -676,8 +677,8 @@ function oracleObservationAuthority(smoke, nonce) {
     candidateUrl: smoke.candidate_url,
     candidateRevision: smoke.candidate_revision,
     jobUrl: `${smoke.candidate_url}/jobs`,
-    oracleReleaseId: "v0.8.1-1111111",
-    activeReleasePath: "/opt/clearra/releases/v0.8.1-1111111",
+    oracleReleaseId: `${CURRENT_PRODUCT_TAG}-1111111`,
+    activeReleasePath: `/opt/clearra/releases/${CURRENT_PRODUCT_TAG}-1111111`,
     oracleReleaseSha256: "d".repeat(64),
     oracleSettingsSha256: "e".repeat(64),
     deploymentNonce: nonce,
@@ -777,7 +778,7 @@ function productionObservation({ catalog, prior, sync, smoke, pages, oracleObser
       verified_after: oracleObservation.verifiedAfter, status: "active",
     },
     pages: {
-      source_commit: COMMIT, engine_build_id: COMMIT, version: "0.8.1",
+      source_commit: COMMIT, engine_build_id: COMMIT, version: CURRENT_PRODUCT_VERSION,
       deployment_id: pages.deployment_id, artifact_sha256: pages.artifact_sha256,
       base_path: pages.base_path, url: pages.page_url, status: "active",
     },

@@ -7,13 +7,15 @@ Set-StrictMode -Version Latest
 
 $wrapper = Join-Path $PSScriptRoot 'invoke-release-deploy-v080.ps1'
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
+$currentReleaseTag = (& node (Join-Path $repositoryRoot 'scripts/release/current-product-release.mjs') --format tag).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the workspace release identity.' }
 $sourceCommit = @(& git -C $repositoryRoot rev-parse HEAD)
 if ($LASTEXITCODE -ne 0 -or $sourceCommit.Count -ne 1 -or
     $sourceCommit[0] -cnotmatch '^[0-9a-f]{40}$') {
     throw 'Oracle wrapper test could not resolve the accepted source commit.'
 }
 $sourceCommit = [string]$sourceCommit[0]
-$scriptReleaseId = "v0.8.1-$($sourceCommit.Substring(0, 7))"
+$scriptReleaseId = "$currentReleaseTag-$($sourceCommit.Substring(0, 7))"
 $scriptReleaseSha256 = 'b' * 64
 $deploymentNonce = 'a' * 64
 $candidateRevision = "clearra-current-job-v080-$($sourceCommit.Substring(0, 7))"
@@ -193,7 +195,7 @@ $rollback = @(& $wrapper `
     -PriorRelease '/opt/clearra/releases/v0.7.5-042ec21' `
     -PriorReleaseId 'v0.7.5-042ec21' `
     -PriorReleaseSha256 ('d' * 64) `
-    -PriorSettingsBackup "/etc/clearra-gateway/settings.pre-v0.8.1-$deploymentNonce" `
+    -PriorSettingsBackup "/etc/clearra-gateway/settings.pre-$currentReleaseTag-$deploymentNonce" `
     -PriorSettingsSha256 ('e' * 64) `
     -PriorRuntimeAuthorityKind 'clearra.rollback.legacy-health-no-runtime.v1' `
     -PriorRuntimeAuthoritySha256 ('f' * 64) `
@@ -959,7 +961,7 @@ function Invoke-PrestageRemoteCommand {
         [string[]]$operationArguments = @($tokens[$nodePrefix.Count..($tokens.Count - 1)])
         if ($model.OperationSlug -ceq 'capture') {
             $expectedArguments = @(
-                '--release-tag', 'v0.8.1',
+                '--release-tag', $currentReleaseTag,
                 '--prior-revision', 'clearra-current-job-v075-042ec21',
                 '--prior-runtime-authority-kind', 'clearra.rollback.legacy-health-no-runtime.v1',
                 '--deployment-nonce', [string]$model.Nonce
@@ -972,7 +974,7 @@ function Invoke-PrestageRemoteCommand {
                 priorOracleRelease = '/opt/clearra/releases/v0.7.4-042ec21'
                 priorOracleReleaseId = 'v0.7.4-042ec21'
                 priorOracleReleaseSha256 = ('d' * 64)
-                priorOracleSettingsBackup = "/etc/clearra-gateway/settings.pre-v0.8.1-$($model.Nonce)"
+                priorOracleSettingsBackup = "/etc/clearra-gateway/settings.pre-$currentReleaseTag-$($model.Nonce)"
                 priorOracleSettingsSha256 = ('e' * 64)
                 priorRuntimeAuthorityKind = 'clearra.rollback.legacy-health-no-runtime.v1'
                 priorRuntimeAuthoritySha256 = ('f' * 64)
@@ -981,7 +983,7 @@ function Invoke-PrestageRemoteCommand {
             }
         } else {
             $expectedArguments = @(
-                '--release-tag', 'v0.8.1',
+                '--release-tag', $currentReleaseTag,
                 '--cleanup-deployment-nonce', [string]$model.Nonce
             )
             if (-not (Test-ExactCommand -Actual $operationArguments -Expected $expectedArguments)) {
@@ -1354,7 +1356,7 @@ try {
         priorOracleRelease = '/opt/clearra/releases/v0.7.5-042ec21'
         priorOracleReleaseId = 'v0.7.5-042ec21'
         priorOracleReleaseSha256 = ('d' * 64)
-        priorOracleSettingsBackup = "/etc/clearra-gateway/settings.pre-v0.8.1-$deploymentNonce"
+        priorOracleSettingsBackup = "/etc/clearra-gateway/settings.pre-$currentReleaseTag-$deploymentNonce"
         priorOracleSettingsSha256 = ('e' * 64)
         priorRuntimeAuthorityKind = 'clearra.rollback.legacy-health-no-runtime.v1'
         priorRuntimeAuthoritySha256 = ('f' * 64)

@@ -204,6 +204,11 @@ export async function materializeDiscordProductionCheckpointReceipt(
 }
 
 export function validateDiscordProductionCheckpointReceipt(value, expected = {}) {
+  // New receipts are always current-release receipts. Only a read-only caller
+  // with an independently validated historical tag may select an older identity.
+  const release = expected.readbackReleaseTag === undefined
+    ? { tag: RELEASE, version: VERSION }
+    : readbackReleaseIdentity(expected.readbackReleaseTag);
   requireExactKeys(value, [
     "schema_id", "repository", "repository_id", "release", "version",
     "source_commit", "accepted_workflow_path", "accepted_workflow_run_id",
@@ -240,7 +245,7 @@ export function validateDiscordProductionCheckpointReceipt(value, expected = {})
   if (
     value.repository !== identity.repository ||
     value.repository_id !== REPOSITORY_ID ||
-    value.release !== RELEASE || value.version !== VERSION ||
+    value.release !== release.tag || value.version !== release.version ||
     value.source_commit !== identity.sourceCommit ||
     value.accepted_workflow_path !== ACCEPTANCE_WORKFLOW_PATH ||
     value.accepted_workflow_run_id !== identity.acceptedWorkflowRunId ||
@@ -272,6 +277,7 @@ export function validateDiscordProductionCheckpointReceipt(value, expected = {})
     value.checkpoint_candidate,
     {
       repository: identity.repository,
+      releaseVersion: release.version,
       sourceCommit: identity.sourceCommit,
       acceptedRunId: identity.acceptedWorkflowRunId,
       acceptedRunAttempt: identity.acceptedWorkflowRunAttempt,
@@ -318,8 +324,8 @@ export function validateDiscordProductionCheckpointReceipt(value, expected = {})
       "checkpoint observation end time",
     ),
   });
-  validateTagContract(value.tag, identity);
-  validateReleaseContract(value.github_release_contract, identity, candidate);
+  validateTagContract(value.tag, identity, release.tag);
+  validateReleaseContract(value.github_release_contract, identity, candidate, release.tag);
   return value;
 }
 
@@ -957,12 +963,12 @@ function validateCandidateArtifactReceipt(value, identity, candidate) {
   requireSha256(value.candidate_report_sha256, "checkpoint candidate report SHA-256");
 }
 
-function validateTagContract(value, identity) {
+function validateTagContract(value, identity, releaseTag) {
   requireExactKeys(value, [
     "name", "target_commit", "annotated", "message_contract", "tagger",
   ], "checkpoint annotated tag contract");
   if (
-    value.name !== RELEASE || value.target_commit !== identity.sourceCommit ||
+    value.name !== releaseTag || value.target_commit !== identity.sourceCommit ||
     value.annotated !== true ||
     value.message_contract !== "exact-canonical-receipt-bytes"
   ) {
@@ -973,13 +979,13 @@ function validateTagContract(value, identity) {
   }
 }
 
-function validateReleaseContract(value, identity, candidate) {
+function validateReleaseContract(value, identity, candidate, releaseTag) {
   requireExactKeys(value, [
     "tag", "title", "source_commit", "draft", "prerelease", "immutable",
     "asset_count", "canonical_acceptance_evidence_sha256",
   ], "checkpoint GitHub Release contract");
   if (
-    value.tag !== RELEASE ||
+    value.tag !== releaseTag ||
     value.source_commit !== identity.sourceCommit || value.draft !== false ||
     value.prerelease !== false || value.immutable !== true || value.asset_count !== 3 ||
     value.canonical_acceptance_evidence_sha256 !==
@@ -997,7 +1003,10 @@ export function validateImmutableCheckpointReleaseReadback(release, options) {
   requirePlainObject(release, "immutable checkpoint GitHub Release");
   const repository = requirePattern(options?.repository, SAFE_REPOSITORY, "repository");
   const sourceCommit = requireSourceCommit(options?.sourceCommit);
-  const tag = requireReleaseTag(options?.tag);
+  const tag = options?.readbackReleaseTag === undefined
+    ? requireReleaseTag(options?.tag)
+    : readbackReleaseIdentity(options.readbackReleaseTag).tag;
+  if (options?.tag !== tag) throw new Error("checkpoint readback tag authority differs");
   const releaseId = requireDecimal(release.id, "GitHub Release ID");
   const taggerAt = parseSecondTimestamp(options?.taggerAt, "checkpoint tagger date");
   const publishedAt = parseGithubTimestamp(
@@ -1576,6 +1585,14 @@ function requireReleaseTag(value) {
     throw new Error(`checkpoint finalizer accepts only ${RELEASE}`);
   }
   return value;
+}
+
+// Parsing a historical readback identity does not authorize creating a tag or
+// publishing a release. All mutating finalizer paths still requireReleaseTag.
+function readbackReleaseIdentity(tag) {
+  const match = typeof tag === "string" && /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/u.exec(tag);
+  if (!match) throw new Error("checkpoint readback release tag is invalid");
+  return { tag, version: match[1] };
 }
 
 function repositoryFromRemoteUrl(value) {

@@ -310,6 +310,7 @@ export function validateDiscordProductionCheckpointCandidate(value, expected = {
   verifyCanonicalReportHash(value.catalog_disposition, "checkpoint catalog disposition");
   validateProductionObservationReport(value.production_observation, {
     expectedSourceCommit: value.source_commit,
+    expectedVersion: expected.releaseVersion,
     expectedDurationSeconds: PRODUCTION_OBSERVATION_SECONDS,
     expectedIntervalSeconds: PRODUCTION_OBSERVATION_SECONDS,
     expectedObservationCount: 2,

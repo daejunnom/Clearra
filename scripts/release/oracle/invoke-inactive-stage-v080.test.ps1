@@ -4,6 +4,10 @@ param()
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$currentReleaseModule = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../current-product-release.mjs'))
+$currentReleaseTag = (& node $currentReleaseModule --format tag).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the workspace release identity.' }
+
 $wrapper = Join-Path $PSScriptRoot 'invoke-inactive-stage-v080.ps1'
 $launcher = Join-Path $PSScriptRoot 'clearra-oracle-release-deploy-v080'
 $digester = Join-Path $PSScriptRoot 'clearra-release-tree-digest.py'
@@ -144,7 +148,7 @@ try {
     $manifest = [ordered]@{
         schemaVersion = 'clearra.oracle.inactive-stage.v080.v1'
         sourceCommit = '0123456789abcdef0123456789abcdef01234567'
-        releaseId = 'v0.8.1-0123456'
+        releaseId = "$currentReleaseTag-0123456"
         active = [ordered]@{
             releasePath = '/opt/clearra/releases/v0.7.5-042ec21'
             treeSha256 = 'a' * 64
@@ -230,7 +234,7 @@ try {
     if ($audit.Count -ne 6 -or
         $audit[0] -cne 'oracle_inactive_stage_invoker=audit-ok' -or
         $audit[1] -cne 'oracle_source_commit=0123456789abcdef0123456789abcdef01234567' -or
-        $audit[2] -cne 'oracle_release_id=v0.8.1-0123456') {
+        $audit[2] -cne "oracle_release_id=$currentReleaseTag-0123456") {
         throw 'AuditOnly attestation did not match.'
     }
 

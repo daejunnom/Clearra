@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
@@ -65,7 +66,7 @@ test("Discord adapter performs one independent GET and binds the sealed catalog 
     schema_id: "clearra.discord.command-sync-authority.v1",
     source_commit: COMMIT,
     repository: "daejunnom/Clearra",
-    release_version: "0.8.1",
+    release_version: CURRENT_PRODUCT_VERSION,
     pages_base_path: "/Clearra",
     accepted_run_id: "123456789",
     accepted_run_attempt: "2",
@@ -459,7 +460,7 @@ function pagesIdentityFixture() {
     contractSchemaVersion: "clearra.search.contract.v2",
     supplySemanticsId: "clearra.supply.projected-terminal-lookahead.v1",
     artifactSchemaVersion: "clearra.solution-data.v1",
-    version: "0.8.1",
+    version: CURRENT_PRODUCT_VERSION,
     acceptedRunId: "123456789",
     acceptedRunAttempt: "2",
     basePath: "/Clearra",

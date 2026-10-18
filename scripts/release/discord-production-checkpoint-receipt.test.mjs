@@ -31,7 +31,7 @@ import {
   PRODUCTION_SURFACE_PROBE_SCHEMA_ID,
 } from "./observe-production-surfaces.mjs";
 import { checkpointInputsFromEnvironment, retryEvidenceWrite, snapshotEvidenceUpload } from "./production-evidence-retry.mjs";
-import { CURRENT_PRODUCT_VERSION, expectedProductArtifactName } from "./current-product-release.mjs";
+import { CURRENT_PRODUCT_TAG, CURRENT_PRODUCT_VERSION, expectedProductArtifactName } from "./current-product-release.mjs";
 import { CANONICAL_ACCEPTANCE_REQUIRED_JOB_NAMES } from "./canonical-acceptance-evidence.mjs";
 import { sealDiscordCatalogRecoveryAuthority } from "./discord-catalog-recovery-authority.mjs";
 import {
@@ -516,11 +516,11 @@ function probeSpec() {
     timeout_seconds: 15,
   }));
   probes[2].arguments = [
-    "-Operation", "observe-candidate", "-ScriptReleaseId", "v0.8.1-1111111",
+    "-Operation", "observe-candidate", "-ScriptReleaseId", `${CURRENT_PRODUCT_TAG}-1111111`,
     "-ScriptReleaseSha256", "d".repeat(64), "-SourceCommit", SOURCE,
     "-CandidateUrl", "https://v080---clearra-current-job.example.run.app/",
     "-CandidateRevision", "clearra-current-job-v080-1111111",
-    "-OracleReleaseId", "v0.8.1-1111111", "-OracleReleaseSha256", "d".repeat(64),
+    "-OracleReleaseId", `${CURRENT_PRODUCT_TAG}-1111111`, "-OracleReleaseSha256", "d".repeat(64),
     "-OracleSettingsSha256", "e".repeat(64), "-DeploymentNonce", "9".repeat(64),
     "-VerifiedAfter", "2026-08-30T23:59:59.000Z",
   ];
@@ -550,7 +550,7 @@ function probeSet(observationStartedAt, syncReport) {
       command_count: 2, command_names: ["1:help", "3:Get original GIF"], status: "active",
     },
     oracle: {
-      source_commit: SOURCE, release_id: "v0.8.1-1111111",
+      source_commit: SOURCE, release_id: `${CURRENT_PRODUCT_TAG}-1111111`,
       release_tree_sha256: "d".repeat(64), settings_sha256: "e".repeat(64),
       candidate_revision: "clearra-current-job-v080-1111111",
       candidate_url: "https://v080---clearra-current-job.example.run.app/",
@@ -574,7 +574,7 @@ function probeSet(observationStartedAt, syncReport) {
       tagged_url: "https://v080---clearra-current-job.example.run.app/", status: "active",
     },
     pages: {
-      source_commit: SOURCE, engine_build_id: SOURCE, version: "0.8.1",
+      source_commit: SOURCE, engine_build_id: SOURCE, version: CURRENT_PRODUCT_VERSION,
       deployment_id: "pages-123", artifact_sha256: "9".repeat(64),
       base_path: "/Clearra", url: "https://daejunnom.github.io/Clearra/", status: "active",
     },

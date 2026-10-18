@@ -153,6 +153,7 @@ export function resolveDiscordRecoveryDebtCheckpoint(
       const parsed = parseCanonicalReceiptBytes(Buffer.from(tag.message, "utf8"));
       const receipt = validateDiscordProductionCheckpointReceipt(parsed.value, {
         repository,
+        readbackReleaseTag: tag.name,
         sourceCommit: tag.targetCommit,
         tagger: tag.tagger,
       });
@@ -161,6 +162,7 @@ export function resolveDiscordRecoveryDebtCheckpoint(
       }
       const release = validateImmutableCheckpointReleaseReadback(entry.release, {
         repository,
+        readbackReleaseTag: tag.name,
         sourceCommit: tag.targetCommit,
         tag: tag.name,
         taggerAt: tag.taggerAtText,

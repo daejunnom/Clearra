@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_TAG, CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -46,7 +47,7 @@ test("GitHub wire seconds normalize only at the API boundary; internal receipts 
   const receipt = await collectReleasePublicationReceipt(authority(acceptanceEvidence()), {
     apiGet: async path => {
       const value = await original(path);
-      return path === "/releases/tags/v0.8.1" ? { ...value, published_at: "2026-08-30T00:01:00Z" } : value;
+      return path === `/releases/tags/${CURRENT_PRODUCT_TAG}` ? { ...value, published_at: "2026-08-30T00:01:00Z" } : value;
     },
   });
   assert.equal(receipt.github_release.published_at, "2026-08-30T00:01:00.000Z");
@@ -149,7 +150,7 @@ test("failed tag attempts recover only an exact accepted partial draft before pu
     runGh: async (args) => {
       if (args[1] === "upload") {
         assert.deepEqual(args, [
-          "release", "upload", "v0.8.1",
+          "release", "upload", CURRENT_PRODUCT_TAG,
           resolve("products", accepted[1].name),
           resolve("products", accepted[2].name),
           "--repo", REPOSITORY,
@@ -159,7 +160,7 @@ test("failed tag attempts recover only an exact accepted partial draft before pu
         assert.equal(uploaded.length, 2);
         assert.equal(releaseRead, 2, "publish only after complete draft readback");
         assert.deepEqual(args, [
-          "release", "edit", "v0.8.1", "--draft=false", "--latest",
+          "release", "edit", CURRENT_PRODUCT_TAG, "--draft=false", "--latest",
           "--repo", REPOSITORY,
         ]);
         publishedDraft = true;
@@ -172,13 +173,13 @@ test("failed tag attempts recover only an exact accepted partial draft before pu
       if (path === `/actions/runs/${RUN_ID}/attempts/2`) {
         return publicationRun({ attempt: 2, status: "in_progress", conclusion: null });
       }
-      if (path === "/git/ref/tags/v0.8.1") {
-        return { ref: "refs/tags/v0.8.1", object: { type: "tag", sha: TAG_OBJECT } };
+      if (path === `/git/ref/tags/${CURRENT_PRODUCT_TAG}`) {
+        return { ref: `refs/tags/${CURRENT_PRODUCT_TAG}`, object: { type: "tag", sha: TAG_OBJECT } };
       }
       if (path === `/git/tags/${TAG_OBJECT}`) {
-        return { sha: TAG_OBJECT, tag: "v0.8.1", object: { type: "commit", sha: COMMIT } };
+        return { sha: TAG_OBJECT, tag: CURRENT_PRODUCT_TAG, object: { type: "commit", sha: COMMIT } };
       }
-      if (path === "/releases/tags/v0.8.1") {
+      if (path === `/releases/tags/${CURRENT_PRODUCT_TAG}`) {
         return structuredClone([partial, complete, published][releaseRead++]);
       }
       throw new Error(`unexpected recovery API path: ${path}`);
@@ -578,7 +579,7 @@ function authority(acceptance, {
 } = {}) {
   return {
     repository: REPOSITORY,
-    tag: "v0.8.1",
+    tag: CURRENT_PRODUCT_TAG,
     sourceCommit: COMMIT,
     workflowRunId: RUN_ID,
     workflowRunAttempt: runAttempt,
@@ -601,7 +602,7 @@ function releaseAsset(artifact, id) {
 function draftRelease(assets) {
   return {
     id: 800,
-    tag_name: "v0.8.1",
+    tag_name: CURRENT_PRODUCT_TAG,
     draft: true,
     prerelease: false,
     immutable: false,
@@ -615,7 +616,7 @@ function publicationRun({ attempt, status, conclusion }) {
     id: Number(RUN_ID),
     run_attempt: attempt,
     event: "push",
-    head_branch: "v0.8.1",
+    head_branch: CURRENT_PRODUCT_TAG,
     head_sha: COMMIT,
     path: ".github/workflows/release-cli.yml",
     status,
@@ -625,9 +626,9 @@ function publicationRun({ attempt, status, conclusion }) {
 
 function acceptanceEvidence() {
   const artifacts = [
-    ["linux-cli", "Clearra-CLI-v0.8.1-linux-x86_64", "3", 101],
-    ["windows-cli", "Clearra-CLI-v0.8.1-windows-x86_64.exe", "4", 102],
-    ["windows-gui", "Clearra-GUI-v0.8.1-windows-x86_64.exe", "5", 103],
+    ["linux-cli", `Clearra-CLI-${CURRENT_PRODUCT_TAG}-linux-x86_64`, "3", 101],
+    ["windows-cli", `Clearra-CLI-${CURRENT_PRODUCT_TAG}-windows-x86_64.exe`, "4", 102],
+    ["windows-gui", `Clearra-GUI-${CURRENT_PRODUCT_TAG}-windows-x86_64.exe`, "5", 103],
   ].map(([role, name, digit, sizeBytes]) => ({
     role,
     name,
@@ -638,7 +639,7 @@ function acceptanceEvidence() {
   return sealCanonicalReport({
     schema_id: "clearra.canonical-acceptance-evidence.v1",
     repository: REPOSITORY,
-    release_version: "0.8.1",
+    release_version: CURRENT_PRODUCT_VERSION,
     pages_base_path: "/Clearra",
     source_commit: COMMIT,
     run_id: "456",
@@ -718,24 +719,24 @@ function fakeApi({
       id: Number(RUN_ID),
       run_attempt: Number(runAttempt),
       event: "push",
-      head_branch: "v0.8.1",
+      head_branch: CURRENT_PRODUCT_TAG,
       head_sha: COMMIT,
       path: ".github/workflows/release-cli.yml",
       status: runStatus,
       conclusion: runConclusion,
     }],
-    ["/git/ref/tags/v0.8.1", {
-      ref: "refs/tags/v0.8.1",
+    [`/git/ref/tags/${CURRENT_PRODUCT_TAG}`, {
+      ref: `refs/tags/${CURRENT_PRODUCT_TAG}`,
       object: { type: tagType, sha: TAG_OBJECT },
     }],
     [`/git/tags/${TAG_OBJECT}`, {
       sha: TAG_OBJECT,
-      tag: "v0.8.1",
+      tag: CURRENT_PRODUCT_TAG,
       object: { type: "commit", sha: COMMIT },
     }],
-    ["/releases/tags/v0.8.1", {
+    [`/releases/tags/${CURRENT_PRODUCT_TAG}`, {
       id: 8001,
-      tag_name: "v0.8.1",
+      tag_name: CURRENT_PRODUCT_TAG,
       draft: false,
       prerelease: false,
       immutable,
@@ -756,7 +757,7 @@ function fakeApi({
       expires_at: new Date(created + retentionDays * 24 * 60 * 60 * 1000).toISOString(),
       workflow_run: {
         id: Number(RUN_ID),
-        head_branch: "v0.8.1",
+        head_branch: CURRENT_PRODUCT_TAG,
         head_sha: artifactHead,
       },
     }],
@@ -773,7 +774,7 @@ function fakeApi({
         expired: false,
         workflow_run: {
           id: Number(RUN_ID),
-          head_branch: "v0.8.1",
+          head_branch: CURRENT_PRODUCT_TAG,
           head_sha: artifactHead,
         },
       }],
@@ -785,7 +786,7 @@ function fakeApi({
       id: Number(RUN_ID),
       run_attempt: Number(attempt),
       event: "push",
-      head_branch: "v0.8.1",
+      head_branch: CURRENT_PRODUCT_TAG,
       head_sha: COMMIT,
       path: ".github/workflows/release-cli.yml",
       status: "completed",

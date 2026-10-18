@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_TAG } from "./current-product-release.mjs";
 import test from "node:test";
 
 import {
@@ -118,7 +119,7 @@ function validPayloads() {
     ["surface-report", evidence("native", { surface: "native", status: "passed" })],
     ["release-artifact", {
       role: "linux-cli",
-      name: "Clearra-CLI-v0.8.1-linux-x86_64",
+      name: `Clearra-CLI-${CURRENT_PRODUCT_TAG}-linux-x86_64`,
       sha256: HASH,
       size_bytes: 1,
       source_commit: COMMIT,
@@ -156,9 +157,9 @@ function validPayloads() {
       status: "passed",
       report_sha256: HASH,
     }],
-    ["tag", { name: "v0.8.1", target_commit: COMMIT, annotated: true, remote_verified: true }],
+    ["tag", { name: CURRENT_PRODUCT_TAG, target_commit: COMMIT, annotated: true, remote_verified: true }],
     ["immutable-release", {
-      tag: "v0.8.1",
+      tag: CURRENT_PRODUCT_TAG,
       source_commit: COMMIT,
       workflow_run_id: "123",
       immutable: true,

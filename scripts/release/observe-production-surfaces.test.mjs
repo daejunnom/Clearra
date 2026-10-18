@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_TAG, CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -676,12 +677,12 @@ function validProbeSpec(intervalSeconds = 1) {
   }));
   probes[2].arguments = [
     "-Operation", "observe-candidate",
-    "-ScriptReleaseId", "v0.8.1-1111111",
+    "-ScriptReleaseId", `${CURRENT_PRODUCT_TAG}-1111111`,
     "-ScriptReleaseSha256", "d".repeat(64),
     "-SourceCommit", COMMIT,
     "-CandidateUrl", "https://v080---clearra-current-job.example.run.app/",
     "-CandidateRevision", "clearra-current-job-v080-1111111",
-    "-OracleReleaseId", "v0.8.1-1111111",
+    "-OracleReleaseId", `${CURRENT_PRODUCT_TAG}-1111111`,
     "-OracleReleaseSha256", "d".repeat(64),
     "-OracleSettingsSha256", "e".repeat(64),
     "-DeploymentNonce", "9".repeat(64),
@@ -718,7 +719,7 @@ function probeSet(calls) {
     },
     oracle: {
       source_commit: COMMIT,
-      release_id: "v0.8.1-1111111",
+      release_id: `${CURRENT_PRODUCT_TAG}-1111111`,
       release_tree_sha256: "d".repeat(64),
       settings_sha256: "e".repeat(64),
       candidate_revision: "clearra-current-job-v080-1111111",
@@ -755,7 +756,7 @@ function probeSet(calls) {
     pages: {
       source_commit: COMMIT,
       engine_build_id: COMMIT,
-      version: "0.8.1",
+      version: CURRENT_PRODUCT_VERSION,
       deployment_id: "pages-123",
       artifact_sha256: "9".repeat(64),
       base_path: "/Clearra",

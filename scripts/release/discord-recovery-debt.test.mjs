@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { CURRENT_PRODUCT_TAG, CURRENT_PRODUCT_VERSION } from "./current-product-release.mjs";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -641,8 +642,8 @@ const CHECKPOINT_RECEIPT = sealCanonicalReport({
   schema_id: DISCORD_PRODUCTION_CHECKPOINT_RECEIPT_SCHEMA_ID,
   repository: REPOSITORY,
   repository_id: "1309293231",
-  release: "v0.8.1",
-  version: "0.8.1",
+  release: CURRENT_PRODUCT_TAG,
+  version: CURRENT_PRODUCT_VERSION,
   source_commit: CHECKPOINT_SOURCE,
   accepted_workflow_path: ".github/workflows/release-cli.yml",
   accepted_workflow_run_id: CHECKPOINT_ACCEPTED_RUN_ID,
@@ -666,15 +667,15 @@ const CHECKPOINT_RECEIPT = sealCanonicalReport({
   completed_job_topology: CHECKPOINT_COMPLETED_TOPOLOGY,
   completed_job_topology_sha256: canonicalSha256(CHECKPOINT_COMPLETED_TOPOLOGY),
   tag: {
-    name: "v0.8.1",
+    name: CURRENT_PRODUCT_TAG,
     target_commit: CHECKPOINT_SOURCE,
     annotated: true,
     message_contract: "exact-canonical-receipt-bytes",
     tagger: CHECKPOINT_TAGGER,
   },
   github_release_contract: {
-    tag: "v0.8.1",
-    title: "Clearra v0.8.1",
+    tag: CURRENT_PRODUCT_TAG,
+    title: `Clearra ${CURRENT_PRODUCT_TAG}`,
     source_commit: CHECKPOINT_SOURCE,
     draft: false,
     prerelease: false,
@@ -700,15 +701,15 @@ validateDiscordProductionCheckpointReceipt(CHECKPOINT_RECEIPT, {
 function checkpointRelease() {
   return {
     id: 700,
-    tag_name: "v0.8.1",
+    tag_name: CURRENT_PRODUCT_TAG,
     target_commitish: CHECKPOINT_SOURCE,
-    name: "Clearra v0.8.1",
+    name: `Clearra ${CURRENT_PRODUCT_TAG}`,
     draft: false,
     prerelease: false,
     immutable: true,
     published_at: "2026-08-31T02:52:00Z",
     url: `https://api.github.com/repos/${REPOSITORY}/releases/700`,
-    html_url: `https://github.com/${REPOSITORY}/releases/tag/v0.8.1`,
+    html_url: `https://github.com/${REPOSITORY}/releases/tag/${CURRENT_PRODUCT_TAG}`,
     assets_url: `https://api.github.com/repos/${REPOSITORY}/releases/700/assets`,
     upload_url: `https://uploads.github.com/repos/${REPOSITORY}/releases/700/assets{?name,label}`,
     author: structuredClone(GITHUB_ACTIONS_BOT),
@@ -720,7 +721,7 @@ function checkpointRelease() {
       digest: `sha256:${artifact.sha256}`,
       url: `https://api.github.com/repos/${REPOSITORY}/releases/assets/${800 + index}`,
       browser_download_url:
-        `https://github.com/${REPOSITORY}/releases/download/v0.8.1/${artifact.name}`,
+        `https://github.com/${REPOSITORY}/releases/download/${CURRENT_PRODUCT_TAG}/${artifact.name}`,
       uploader: structuredClone(GITHUB_ACTIONS_BOT),
     })),
   };
@@ -730,17 +731,17 @@ function checkpointTagAuthority() {
   return {
     schema_id: "clearra.discord-production-tag-authority-catalog.v1",
     tags: [{
-      name: "v0.8.1",
+      name: CURRENT_PRODUCT_TAG,
       local_tag_object_sha: CHECKPOINT_TAG_OBJECT_SHA,
       local_target_commit: CHECKPOINT_SOURCE,
       tag_ref: {
-        ref: "refs/tags/v0.8.1",
-        url: `https://api.github.com/repos/${REPOSITORY}/git/refs/tags/v0.8.1`,
+        ref: `refs/tags/${CURRENT_PRODUCT_TAG}`,
+        url: `https://api.github.com/repos/${REPOSITORY}/git/refs/tags/${CURRENT_PRODUCT_TAG}`,
         object: { type: "tag", sha: CHECKPOINT_TAG_OBJECT_SHA },
       },
       tag_object: {
         sha: CHECKPOINT_TAG_OBJECT_SHA,
-        tag: "v0.8.1",
+        tag: CURRENT_PRODUCT_TAG,
         message: `${canonicalJson(CHECKPOINT_RECEIPT)}\n`,
         object: { type: "commit", sha: CHECKPOINT_SOURCE },
         tagger: structuredClone(CHECKPOINT_TAGGER),
@@ -754,7 +755,7 @@ function checkpointTagAuthority() {
 function checkpointIdentity(overrides = {}) {
   return {
     ...identity,
-    reachableTags: ["v0.8.1"],
+    reachableTags: [CURRENT_PRODUCT_TAG],
     tagAuthority: checkpointTagAuthority(),
     ...overrides,
   };

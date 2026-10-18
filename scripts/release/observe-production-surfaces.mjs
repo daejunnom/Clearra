@@ -279,6 +279,7 @@ export function validateProductionObservationReport(
   value,
   {
     expectedSourceCommit,
+    expectedVersion = RELEASE_VERSION,
     expectedDurationSeconds = PRODUCTION_OBSERVATION_SECONDS,
     expectedIntervalSeconds = PRODUCTION_OBSERVATION_SECONDS,
     expectedObservationCount = 2,
@@ -361,6 +362,7 @@ export function validateProductionObservationReport(
       surfaceReport.surface,
       surfaceReport.identity,
       value.source_commit,
+      expectedVersion,
     );
     requireSha256(
       surfaceReport.identity_sha256,
@@ -526,7 +528,7 @@ export async function createCommandProbes(spec) {
   return new Map(entries);
 }
 
-function validateSurfaceIdentity(surface, identity, sourceCommit) {
+function validateSurfaceIdentity(surface, identity, sourceCommit, expectedVersion = RELEASE_VERSION) {
   requirePlainObject(identity, `${surface} production identity`);
   if (surface === "discord") {
     requireExactKeys(identity, [
@@ -691,7 +693,7 @@ function validateSurfaceIdentity(surface, identity, sourceCommit) {
       "url",
       "status",
     ], "Pages production identity");
-    if (identity.engine_build_id !== sourceCommit || identity.version !== RELEASE_VERSION) {
+    if (identity.engine_build_id !== sourceCommit || identity.version !== expectedVersion) {
       throw new Error("Pages source, engine, or version identity differs");
     }
     requireNonEmptyString(identity.deployment_id, "Pages deployment ID");
