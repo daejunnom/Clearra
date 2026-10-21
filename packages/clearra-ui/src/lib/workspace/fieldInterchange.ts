@@ -170,7 +170,9 @@ export function encodeFieldDocument(
     );
     return {
       field,
-      ...(normalized.comment ? { comment: normalized.comment } : {}),
+      // CTK3 comments belong to each page. Fumen omission inherits the
+      // previous comment, so an empty CTK3 page must explicitly clear it.
+      comment: normalized.comment ?? '',
       ...(normalized.operation
         ? {
             operation: {

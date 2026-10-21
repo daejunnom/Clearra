@@ -294,6 +294,12 @@ and page flags exposed by Fumen v115. A Fumen quiz is identified by its quiz
 flag and `#Q=` comment convention. Fumen export is limited to 10 columns and 23
 visible rows; CTK3 supports Clearra's 24-row editor without that limitation.
 
+CTK3 comments are page-local. The GUI document and solution exporters emit an
+explicit empty Fumen comment when a CTK3 page has no comment; they never use
+Fumen's omitted-comment inheritance to fill an empty page. The public
+Fumen-compatible `encoder.encode(EncodePages)` API still accepts Fumen's
+intentional inheritance semantics on input.
+
 Decoders must reject unsupported revisions, invalid indexes, overlong runs,
 non-zero trailing bits, and checksum mismatches. They must not return a partial
 document after an error.

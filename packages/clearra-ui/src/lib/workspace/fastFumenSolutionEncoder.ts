@@ -49,8 +49,7 @@ export class FastColoredFumenEncoder {
   private current = new Uint8Array(FUMEN_FIELD_CELLS);
   private lastRepeatIndex = -1;
   private repeatCount = 0;
-  private previousComment: string | undefined = '';
-  private pageCount = 0;
+  private previousComment = '';
 
   append(page: SolutionExportPage) {
     if (!Number.isInteger(page.height) || page.height < 1 || page.height > 24) {
@@ -65,12 +64,10 @@ export class FastColoredFumenEncoder {
       throw new Error('fumen-height-unsupported');
     }
 
-    const currentComment =
-      page.comment !== undefined && (this.pageCount !== 0 || page.comment !== '')
-        ? page.comment
-        : undefined;
+    // Solutions are independent pages, not Fumen comment continuations.
+    const currentComment = page.comment ?? '';
     const changedComment =
-      currentComment !== undefined && currentComment !== this.previousComment
+      currentComment !== this.previousComment
         ? currentComment
         : undefined;
     const escapedComment =
@@ -84,7 +81,6 @@ export class FastColoredFumenEncoder {
     );
     if (escapedComment !== undefined) this.writeComment(escapedComment);
     this.previousComment = currentComment;
-    this.pageCount += 1;
     clearFullLines(this.current);
     const swap = this.previous;
     this.previous = this.current;

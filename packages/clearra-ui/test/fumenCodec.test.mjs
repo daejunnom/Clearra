@@ -24,6 +24,7 @@ const bundle = await build({
          decodeFieldDocument,
          decodeFumenWithinPageLimit,
          encodeFieldDocument,
+         encodeFieldDocumentAsync,
          FUMEN_MAX_PAGES,
          FUMEN_MAX_SOURCE_CHARACTERS,
          inspectFumenPageCount
@@ -103,6 +104,40 @@ test('general Fumen document export applies the same lossless comment contract',
     (error) =>
       error instanceof Error && error.message === 'fumen-comment-too-long'
   );
+});
+
+test('CTK3 to Fumen keeps comments on their own pages instead of inheriting them', async () => {
+  const comments = ['첫 페이지 😀', undefined, '같은 주석', '같은 주석', '', '#Q=[](I)OT', undefined, '마지막', undefined];
+  const source = production.encodeFieldDocument({
+    width: 10,
+    pages: comments.map((comment, index) => ({
+      height: 1,
+      cells: Array.from({ length: 10 }, (_, x) => x === index ? 'T' : null),
+      ...(comment === undefined ? {} : { comment }),
+      flags: { lock: false }
+    }))
+  }, 'ctk');
+  const document = production.decodeFieldDocument(source);
+  const expected = comments.map(comment => comment ?? '');
+
+  for (const encoded of [
+    production.encodeFieldDocument(document, 'fumen'),
+    await production.encodeFieldDocumentAsync(document, 'fumen')
+  ]) {
+    const pages = fumenDecoder.decode(encoded);
+    assert.deepEqual(pages.map(page => page.comment), expected);
+    assert.deepEqual(production.decodeFieldDocument(encoded).pages.map(page => page.comment ?? ''), expected);
+    for (let index = 0; index < pages.length; index += 1) {
+      assert.equal(pages[index].field.at(index, 0), 'T');
+      assert.equal(pages[index].flags.lock, false);
+    }
+  }
+});
+
+test('fast solution Fumen export clears omitted comments and preserves repeated comments', () => {
+  const comments = ['해법 1', undefined, undefined, '같음', '같음', '', '해법 7', undefined];
+  const encoded = production.encodeColoredFumenPages(comments.map(comment => emptyPage(comment)));
+  assert.deepEqual(fumenDecoder.decode(encoded).map(page => page.comment), comments.map(comment => comment ?? ''));
 });
 
 test('general Fumen document export enforces its page budget before conversion', () => {

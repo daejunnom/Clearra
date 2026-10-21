@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.8.3 - 2026-10-21
+
+- Keep CTK3-to-Fumen document and solution comments page-local: pages without
+  comments explicitly clear prior comments instead of inheriting them.
+- Prepare tokenless CTK3 npm Trusted Publishing from the canonical accepted
+  distribution, without rebuilding or invoking package lifecycle scripts.
+
 ## 0.8.2 - 2026-10-17
 
 - Default PC search to CPU across CLI, Web, desktop and Discord ingress; keep

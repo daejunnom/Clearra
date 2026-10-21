@@ -12,7 +12,8 @@ import {
 test("publication-only evidence repairs never request product redeployment", () => {
   for (const path of [".github/workflows/publish-approved-release.yml",
     ".github/workflows/finalize-release-publication.yml", "scripts/release/approved-release-source.mjs",
-    "scripts/release/release-publication-evidence.mjs"]) {
+    "scripts/release/release-publication-evidence.mjs", ".github/workflows/publish-ctk3.yml",
+    "scripts/release/ctk3-npm-package.mjs"]) {
     const impact = classifyDeploymentImpact([path]);
     assert.equal(impact.releaseInfrastructureChanged, true);
     assert.equal(impact.deployPages, false);

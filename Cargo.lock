@@ -145,7 +145,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "clearra-accelerator-activation"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "ed25519-dalek",
  "serde_json",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-accelerator-product-host"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-accelerator-activation",
  "serde_json",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-accelerator-runtime"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-accelerator-product-host",
  "clearra-core-executor",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-app"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-accelerator-product-host",
  "clearra-accelerator-runtime",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-build-coverage"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-coverage",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-cli"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-accelerator-product-host",
  "clearra-accelerator-runtime",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-cli-command"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-app",
  "clearra-core-domain",
@@ -269,11 +269,11 @@ dependencies = [
 
 [[package]]
 name = "clearra-core-domain"
-version = "0.8.2"
+version = "0.8.3"
 
 [[package]]
 name = "clearra-core-executor"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-accelerator-activation",
  "clearra-accelerator-product-host",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-core-ffi"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-coverage",
@@ -317,25 +317,25 @@ dependencies = [
 
 [[package]]
 name = "clearra-coverage"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
 ]
 
 [[package]]
 name = "clearra-ctk3"
-version = "0.8.2"
+version = "0.8.3"
 
 [[package]]
 name = "clearra-exact-cover"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-geometry",
 ]
 
 [[package]]
 name = "clearra-finesse"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-coverage",
@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-forward-search"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-core-executor",
@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-fumen"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-geometry",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-geometry"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-piece-registry",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-gui-host"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-app",
  "clearra-build-coverage",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-host-contract"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -412,11 +412,11 @@ dependencies = [
 
 [[package]]
 name = "clearra-i18n"
-version = "0.8.2"
+version = "0.8.3"
 
 [[package]]
 name = "clearra-invariant-tests"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-build-coverage",
  "clearra-core-domain",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-manage"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "libc",
  "serde",
@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-objectives"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-coverage",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-output"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-coverage",
@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-pc-artifact"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-core-executor",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-pc-graph"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-objectives",
@@ -503,11 +503,11 @@ dependencies = [
 
 [[package]]
 name = "clearra-pc-next-probability"
-version = "0.8.2"
+version = "0.8.3"
 
 [[package]]
 name = "clearra-pc4-qualifier"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-accelerator-activation",
  "clearra-core-domain",
@@ -521,11 +521,11 @@ dependencies = [
 
 [[package]]
 name = "clearra-pc4-tablebase"
-version = "0.8.2"
+version = "0.8.3"
 
 [[package]]
 name = "clearra-piece-registry"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-profiles",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-platform-fs"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "libc",
  "windows-sys",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-postprocess"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-coverage",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-postprocess-gpu"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-webgpu",
  "pollster",
@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-problem"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-geometry",
@@ -579,14 +579,14 @@ dependencies = [
 
 [[package]]
 name = "clearra-profiles"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
 ]
 
 [[package]]
 name = "clearra-render"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-geometry",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-replay"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-geometry",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-rules"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "serde_json",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-scoring"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-geometry",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-setup-search"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-core-executor",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-spin"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-replay",
@@ -659,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-spin-structure-search"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-piece-registry",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-supply"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-coverage",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-two-line"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-core-domain",
  "clearra-profiles",
@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-ui-schema"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-build-coverage",
  "clearra-core-domain",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-validation"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-build-coverage",
  "clearra-core-domain",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-wasm"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-app",
  "clearra-cli-command",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-wasm-abi"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "clearra-accelerator-product-host",
  "clearra-core-executor",
@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "clearra-webgpu"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "bytemuck",
  "clearra-core-domain",

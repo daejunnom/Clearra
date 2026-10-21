@@ -55,8 +55,10 @@ export function classifyDeploymentImpact(paths) {
     if ([
       ".github/workflows/publish-approved-release.yml",
       ".github/workflows/finalize-release-publication.yml",
+      ".github/workflows/publish-ctk3.yml",
       "scripts/release/approved-release-source.mjs",
       "scripts/release/release-publication-evidence.mjs",
+      "scripts/release/ctk3-npm-package.mjs",
     ].includes(path)) {
       // Public artifact/evidence plumbing does not change a running surface.
       // In particular a publication repair must not redeploy Discord or Pages.
