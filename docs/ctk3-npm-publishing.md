@@ -24,29 +24,34 @@ public repository. See the [official npm guide](https://docs.npmjs.com/trusted-p
 
 ## Prepare, then publish
 
-1. Run the canonical `Publish Product Release` acceptance for the exact current
-   main source. This is the existing application acceptance, not a second npm
-   build. Its CTK3 job builds and tests the distribution once.
-2. Dispatch `Publish CTK3 to npm` on main with that successful
-   `acceptance_run_id`, leaving `publish` false. The workflow verifies and
-   downloads the exact source/run/attempt-bound CTK3 distribution, packs it with
-   `--ignore-scripts`, and uploads a seven-day npm tarball artifact. It neither
-   executes `prepack` nor installs or rebuilds the workspace.
-3. After the npm connection is configured and a new CTK3 package version is
-   ready, dispatch with `publish` true. The isolated job publishes that run's
-   tarball using OIDC, `--ignore-scripts` and provenance.
+1. Dispatch `Publish CTK3 to npm` on main. Leave `acceptance_run_id` empty for
+   a package-only release: the workflow installs the locked CTK3 dependency
+   closure, builds and tests CTK3 once, and seals its distribution to this
+   source/run/attempt. It does not dispatch an application release, build WASM
+   or native applications, or deploy Pages/Discord.
+2. Alternatively, supply a successful canonical `Publish Product Release`
+   `acceptance_run_id` for the exact current main SHA. This reuses its already
+   built and tested CTK3 distribution without rebuilding or reinstalling the
+   workspace. It does not accept an unrelated or old-source run.
+3. Leave `publish` false to prepare only, or set it true after the npm
+   connection is configured and a new CTK3 package version is ready. Both paths
+   verify the source/run/attempt-bound distribution, pack it with
+   `--ignore-scripts`, and upload a seven-day tarball artifact. The isolated
+   publish job uses OIDC, `--ignore-scripts` and provenance on that tarball.
 
-The controller and accepted source must be the exact current main SHA. A failed,
-running, foreign, or stale-source acceptance cannot authorize publication.
+The controller and verified source must be the exact current main SHA. A failed,
+running, foreign, or stale-source canonical acceptance cannot authorize reuse.
+Package-only verification authorizes npm publication only, not whole-application
+acceptance or production deployment.
 The packed file list must exactly match the verified distribution plus
 `package.json`, `README.md` and `LICENSE`.
 
 Application and npm versions are independent. The v0.8.3 application fix is in
 the GUI export adapters; it does not change the CTK3 binary format or the npm
-codec API. `ctk3@0.1.1` already exists and must not be republished. A future
-library change needs its own package version increment before actual npm
-publication. Preparing its current tarball is harmless; do not select actual
-publication for an already-published version.
+codec API. `ctk3@0.1.1` already exists and must not be republished. The manually
+requested OIDC publication uses the next patch, `ctk3@0.1.2`, independently of
+the application version. Future publications need their own package version
+increment; never select actual publication for an already-published version.
 
 Registering a publisher and preparing a tarball are not proof of a successful
 OIDC exchange. Only a successful real npm publish establishes that connection.

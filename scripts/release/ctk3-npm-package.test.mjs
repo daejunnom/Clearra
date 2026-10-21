@@ -19,6 +19,14 @@ test('packs only the verified distribution and public package metadata', () => {
   assert.equal(validateCtk3NpmPackage(metadata, report, accepted), 'ctk3-0.1.1.tgz');
 });
 
+test('a new patch version is bound to its matching npm tarball', () => {
+  const f = fixture();
+  f.metadata.version = '0.1.2';
+  f.report[0].version = '0.1.2';
+  f.report[0].filename = 'ctk3-0.1.2.tgz';
+  assert.equal(validateCtk3NpmPackage(f.metadata, f.report, f.accepted), 'ctk3-0.1.2.tgz');
+});
+
 for (const [name, change] of [
   ['another registry package', f => { f.metadata.name = 'other'; }],
   ['foreign repository', f => { f.metadata.repository.url = 'git+https://github.com/other/fork.git'; }],
