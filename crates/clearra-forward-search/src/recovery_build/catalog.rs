@@ -20,7 +20,10 @@ use super::{
 };
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 pub(in crate::recovery_build) use plan::Plan;
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 #[derive(Clone)]
 struct Task {
@@ -55,7 +58,7 @@ impl Sum {
 }
 
 pub(super) struct Coordinator {
-    prepared: PreparedPopulation,
+    prepared: Arc<PreparedPopulation>,
     init: Vec<u8>,
     source: Source,
     diagram: Diagram,
@@ -71,15 +74,17 @@ pub(super) struct Coordinator {
 }
 impl Coordinator {
     pub fn new(
-        query: RecoveryBuildQuery,
+        prepared: Arc<PreparedPopulation>,
         init: Vec<u8>,
         workers: usize,
+        control: &ExecutionControl,
     ) -> Result<Self, ParallelError> {
-        let control = ExecutionControl::default();
-        let prepared = PreparedPopulation::new(query)?;
+        cancelled(control)?;
         let mut diagram = Diagram::default();
-        let source = Source::for_population(&mut diagram, &prepared, &control)?;
-        let producer = plan::Producer::new(&prepared.query, &source, &control)?;
+        let source = Source::for_population(&mut diagram, &prepared, control)?;
+        cancelled(control)?;
+        let producer = plan::Producer::new(&prepared.query, &source, control)?;
+        cancelled(control)?;
         Ok(Self {
             prepared,
             init,
@@ -619,7 +624,7 @@ struct Work {
     solver: Solver,
 }
 pub(super) struct Worker {
-    prepared: PreparedPopulation,
+    prepared: Arc<PreparedPopulation>,
     init: Vec<u8>,
     blueprint: Option<(Source, Diagram)>,
     geometry: Option<Geometry>,
@@ -627,9 +632,9 @@ pub(super) struct Worker {
     progress: Progress,
 }
 impl Worker {
-    pub fn new(query: RecoveryBuildQuery, init: Vec<u8>) -> Result<Self, Error> {
+    pub fn new(prepared: Arc<PreparedPopulation>, init: Vec<u8>) -> Result<Self, Error> {
         Ok(Self {
-            prepared: PreparedPopulation::new(query)?,
+            prepared,
             init,
             blueprint: None,
             geometry: None,

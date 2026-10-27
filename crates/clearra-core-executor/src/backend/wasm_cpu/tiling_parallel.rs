@@ -1623,6 +1623,8 @@ mod tests {
         let serial = WasmCpuSearchBackend::execute_with_control(&problem, &control)
             .expect("serial filtered PC result");
         let mut producer = WasmPcRootProducer::new(&problem).expect("PC root producer");
+        assert_eq!(producer.progress().geometry_nodes, 0);
+        assert_eq!(producer.progress().coverage_checks, 0);
         let mut roots = Vec::new();
         let base = loop {
             match producer.advance(&control).expect("root production") {
@@ -1632,6 +1634,8 @@ mod tests {
                         u32::try_from(packet.ordinal()).expect("root ordinal"),
                         packet.target_index(),
                     ));
+                    assert_eq!(producer.progress().geometry_nodes, roots.len());
+                    assert_eq!(producer.progress().coverage_checks, 0);
                 }
                 super::super::distributed::WasmCandidateProducerAdvance::Completed(summary) => {
                     break summary;
@@ -1656,6 +1660,8 @@ mod tests {
                 producer.absorb(&chunk).expect("root transcript");
             }
         }
+        assert_eq!(producer.progress().geometry_nodes, roots.len());
+        assert_eq!(producer.progress().coverage_checks, roots.len());
         let worker_result = worker.finish_pc().expect("root worker result");
         let mut merger = producer.into_merger().expect("PC root merger");
         merger.absorb(&worker_result).expect("worker result merge");

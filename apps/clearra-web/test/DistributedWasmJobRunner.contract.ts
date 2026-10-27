@@ -236,6 +236,44 @@ assert.deepEqual(
     'the control-only source is never counted as active compute');
 }
 
+// The tail policy counts roots already issued, not only the slower roots whose
+// worker results have returned. Compact PC and Tiling expose different fields.
+for (const testCase of [
+  { name: 'PC root with in-flight work', root: true, tiling: false, geometry: 138, coverage: 0, expected: 1, workers: 2 },
+  { name: 'Tiling root before issuance', root: true, tiling: true, geometry: 138, coverage: 0, expected: 5, workers: 2 },
+  { name: 'Tiling root tail', root: true, tiling: true, geometry: 0, coverage: 138, expected: 1, workers: 2 },
+  { name: 'Streaming verifier batching', root: false, tiling: false, geometry: 138, coverage: 0, expected: 18, workers: 3 }
+]) {
+  const sizes: number[] = [];
+  await new DistributedWasmJobRunner({
+    ...wasm,
+    distributed_progress: () => ({
+      ...wasm.distributed_progress(),
+      geometryNodes: testCase.geometry,
+      coverageChecks: testCase.coverage,
+      candidateFamilyCount: '140'
+    }),
+    distributed_produce: (_budget: number, size: number) => {
+      sizes.push(size);
+      return { status: 'completed' as const };
+    }
+  } as ClearraWasmModule, 416, `batch-counter-${testCase.name}`, {
+    logicalProcessorCount: testCase.workers,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  }, {
+    ...pool,
+    async finish() { return testCase.root ? testCase.workers : testCase.workers - 1; }
+  } as never).run('clearra pc --lines 4 --count unique', {
+    ...plan,
+    workerCount: testCase.workers,
+    rootTaskParallel: testCase.root,
+    tilingGeometryParallel: testCase.tiling
+  }, () => undefined);
+  assert.deepEqual(sizes, [testCase.expected], testCase.name);
+}
+
 // Draining and finalizing are distinct worker tasks: a finalizer wave can
 // legitimately become busy after all candidate-consume leases have drained.
 // Preserve that transition, and never count stale verifiers in coordinator merge.

@@ -18,7 +18,7 @@
     updateDesktopRequest
   } from '../stores';
   import {
-    CPU_ONLY_RUNTIME_WARMUP_POLICY,
+    CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY,
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     automaticWorkerAuthority,
     clearWasmTerminalResult,
@@ -125,7 +125,7 @@
     workerController.prewarm(
       request.workers,
       false,
-      CPU_ONLY_RUNTIME_WARMUP_POLICY,
+      CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY,
       automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors)
     );
   }

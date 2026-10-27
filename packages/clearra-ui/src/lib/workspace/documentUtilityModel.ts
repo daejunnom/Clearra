@@ -12,6 +12,11 @@ import {
 export const FIELD_DOCUMENT_MAX_INPUT_BYTES = 16 * 1024 * 1024;
 export const FIELD_DOCUMENT_MAX_PAGES = 4096;
 
+/** Blank lines do not create pages; nonblank comments retain their exact text. */
+export function fumenCommentInputs(source: string): string[] {
+  return source.split(/\r?\n/u).filter((value) => value.trim().length > 0);
+}
+
 export type DocumentUtilityTool = 'parity' | 'fumen' | 'render' | 'to-gray' | 'mirror';
 export type FieldDocumentFormat = 'ctk3' | 'fumen';
 export type DocumentUtilityFumenTransform =

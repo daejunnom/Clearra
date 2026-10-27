@@ -16,6 +16,7 @@
   } from './solutionSetAvailability';
   import {
     bindSolutionPageLoader,
+    createMaterializedSolutionExportKeySource,
     createPagedSolutionExportKeySource,
     solutionPageResultIdentity,
     type SolutionPageLoader
@@ -156,15 +157,26 @@
   $: solutionCommentByKey = buildSolutionComments(
     solutionKeys, solutionProbabilityByKey, finesseView, label, language
   );
+  $: exportableSolutionKeys =
+    solutionKeysComplete && solutionCount === solutionKeys.length ? solutionKeys : [];
   $: solutionExportKeySource = boundSolutionPageLoader && solutionCount !== null
     ? createPagedSolutionExportKeySource({
         keyCount: solutionCount,
         loadPage: boundSolutionPageLoader,
         commentForKey: (key) => solutionCommentByKey[key]
       })
-    : null;
-  $: exportableSolutionKeys =
-    solutionKeysComplete && solutionCount === solutionKeys.length ? solutionKeys : [];
+    : exportableSolutionKeys.length > 0 && Object.keys(solutionCommentByKey).length > 0
+      ? createMaterializedSolutionExportKeySource({
+          keys: exportableSolutionKeys,
+          commentForKey: (key) => solutionCommentByKey[key],
+          resultIdentity: solutionResultIdentity,
+          currentResultIdentity: () => solutionPageResultIdentity(
+            report?.normalized_solution_set_hash,
+            solutionCount,
+            solutionKeys
+          )
+        })
+      : null;
   $: showFinesseDetails = Boolean(
     finesseView && (
       finesseView.exactTotalInputs !== null ||

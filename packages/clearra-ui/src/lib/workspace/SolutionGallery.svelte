@@ -133,43 +133,57 @@
     const nextVisibleCount = Math.min(totalSolutionCount, visibleCount + PAGE_SIZE);
     loadingMore = true;
     try {
-      await ensureLoaded(
-        Math.min(totalSolutionCount, nextVisibleCount + PAGE_SIZE),
-        identity,
-        controller.signal
-      );
-      if (identity === setIdentity) pageLoadFailed = false;
+      await ensureLoaded(nextVisibleCount, identity, controller.signal);
+      if (identity !== setIdentity) return;
+      visibleCount = Math.min(loadedSolutionKeys.length, nextVisibleCount);
+      pageLoadFailed = false;
+      await tick();
+      if (identity !== setIdentity) return;
+      preparedCount = Math.min(loadedSolutionKeys.length, visibleCount + PAGE_SIZE);
+      try {
+        await ensureLoaded(
+          Math.min(totalSolutionCount, nextVisibleCount + PAGE_SIZE),
+          identity,
+          controller.signal
+        );
+      } catch {
+        // Prefetch is optional. A subsequent explicit request retries and reports failure.
+      }
     } catch (error) {
       if (isAbortError(error)) return;
       if (identity === setIdentity) pageLoadFailed = true;
-      return;
     } finally {
       if (identity === setIdentity) loadingMore = false;
     }
-    if (identity !== setIdentity) return;
-    visibleCount = Math.min(loadedSolutionKeys.length, nextVisibleCount);
-    await tick();
-    if (identity !== setIdentity) return;
-    preparedCount = Math.min(loadedSolutionKeys.length, visibleCount + PAGE_SIZE);
   }
 
   async function primeInitialPage(identity: string, controller: AbortController) {
     if (loadingMore) return;
     loadingMore = true;
     try {
-      await ensureLoaded(
-        Math.min(solutionCount, PAGE_SIZE * 2),
-        identity,
-        controller.signal
-      );
+      await ensureLoaded(Math.min(solutionCount, PAGE_SIZE), identity, controller.signal);
       if (identity !== setIdentity) return;
       visibleCount = Math.min(PAGE_SIZE, loadedSolutionKeys.length);
       pageLoadFailed = false;
+      await tick();
+      if (identity !== setIdentity) return;
+      try {
+        await ensureLoaded(Math.min(solutionCount, PAGE_SIZE * 2), identity, controller.signal);
+      } catch {
+        // The first page remains usable even if speculative loading fails.
+      }
     } catch (error) {
       if (identity === setIdentity && !isAbortError(error)) pageLoadFailed = true;
     } finally {
       if (identity === setIdentity) loadingMore = false;
     }
+  }
+
+  function retryInitialPage() {
+    if (loadingMore || !loadSolutionPage) return;
+    const controller = pageLoadController ?? new AbortController();
+    pageLoadController = controller;
+    void primeInitialPage(setIdentity, controller);
   }
 
   async function ensureLoaded(target: number, identity: string, signal: AbortSignal) {
@@ -349,6 +363,16 @@
       </div>
     {/if}
   {/if}
+{:else if pageLoadFailed}
+  <div class="invalid-solution" role="alert">
+    <AlertTriangle size={18} />
+    <span>{label('solutionPageLoadFailed')}</span>
+  </div>
+  <div class="load-more-row">
+    <button type="button" on:click={retryInitialPage} disabled={loadingMore}>
+      {label('showMore', { count: Math.min(PAGE_SIZE, solutionCount) })}
+    </button>
+  </div>
 {/if}
 
 <style>

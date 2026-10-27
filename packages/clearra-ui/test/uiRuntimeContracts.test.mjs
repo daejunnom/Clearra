@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 
-import { build } from 'esbuild';
+import { build, transform } from 'esbuild';
 
 const bundle = await build({
   bundle: true,
@@ -14,6 +15,7 @@ const bundle = await build({
     contents: `
       export {
         CPU_ONLY_RUNTIME_WARMUP_POLICY,
+        CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY,
         DEFAULT_RUNTIME_WARMUP_POLICY,
         automaticWorkerAuthority,
         createHostCapabilitySnapshot,
@@ -567,6 +569,281 @@ test('CPU-only policies suppress GPU warmup in build and forward production path
     workerSource,
     /if \(normalizedWarmupPolicy\.gpuWarmup\) void startGpuWarmupAfterWasm/u
   );
+});
+
+test('serial product warmup preserves requested worker authority and legacy policy shape', () => {
+  assert.deepEqual(
+    production.normalizeRuntimeWarmupPolicy(production.CPU_ONLY_RUNTIME_WARMUP_POLICY),
+    { backend: 'cpu', cpuWarmup: true, gpuWarmup: false }
+  );
+  assert.deepEqual(
+    production.normalizeRuntimeWarmupPolicy(production.CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY),
+    { backend: 'cpu', cpuWarmup: true, gpuWarmup: false, verifierWarmup: false }
+  );
+  const snapshot = production.createHostCapabilitySnapshot({
+    snapshotId: 'serial-policy-eight', source: 'browser-main', reportedLogicalProcessors: 8
+  });
+  for (const useAll of [false, true]) {
+    const authority = production.automaticWorkerAuthority(snapshot, useAll);
+    const worker = new FakeWorker(4);
+    const controller = new production.WasmTerminalWorkerController(() => worker, snapshot);
+    controller.prewarm(authority.workersEffective, false, production.CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY, authority);
+    production.clearWasmTerminalResult();
+    production.updateWasmCommandText(`clearra setup score --workers ${authority.workersEffective}`);
+    assert.equal(controller.run(), true);
+    for (const kind of ['prewarm_runtime', 'run_command_text']) {
+      const message = worker.messages.find((item) => item.type === kind);
+      assert.equal(message.workerAuthority.workersEffective, useAll ? 8 : 7);
+      assert.equal(message.warmupPolicy.cpuWarmup, true);
+      assert.equal(message.warmupPolicy.verifierWarmup, false);
+    }
+    controller.dispose();
+  }
+  for (const file of ['SetupScoreWorkspace.svelte', 'SpinStructureWorkspace.svelte']) {
+    const source = readFileSync(new URL(`../src/lib/workspace/${file}`, import.meta.url), 'utf8');
+    assert.match(source, /CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY/u, file);
+  }
+});
+
+test('root-only warmup loads WASM without prewarming verifiers and can later expand', async () => {
+  const source = readFileSync(
+    new URL('../../../apps/clearra-web/src/workers/clearraWorker.ts', import.meta.url), 'utf8'
+  );
+  const start = source.indexOf('function startRuntimePrewarm(');
+  const end = source.indexOf('\nfunction startGpuWarmupAfterWasm(', start);
+  assert.ok(start >= 0 && end > start);
+  const { code } = await transform(source.slice(start, end), { loader: 'ts', format: 'cjs' });
+  const peers = [];
+  const phases = [];
+  let rootLoads = 0;
+  let failRoot = false;
+  let failPeers = false;
+  let disposedPools = 0;
+  const state = {
+    normalizeRuntimeWarmupPolicy: production.normalizeRuntimeWarmupPolicy,
+    resolveWorkerAuthority: (_snapshot, workers) => ({ workersEffective: workers }),
+    hostCapabilitySnapshot: {}, MAX_EAGER_PREWARM_TOTAL_WORKERS: 9,
+    requestedPrewarmWorkerCount: 1, deferredTablebaseRequested: false,
+    tablebaseRequested: false, active: null, runtimePrewarm: null,
+    pendingRuntimePrewarm: null, failClosed: false,
+    completedPrewarmWorkerCount: 0, completedRootOnlyPrewarm: false,
+    loadedWasm: null, runtimePrewarmGeneration: 0,
+    lifecycleOwnerId: 'test', RUNTIME_PREWARM_TIMEOUT_MS: 30000,
+    setTablebaseRequested: () => {}, postRuntimePrewarmPhase: (...args) => phases.push(args),
+    loadClearraWasmModule: async () => {
+      rootLoads++;
+      if (failRoot) throw new Error('injected root load failure');
+      return { compiled_module: () => ({}) };
+    },
+    wasmHostCapabilities: () => ({}), startTablebaseWarmupAfterWasm: async () => {},
+    startGpuWarmupAfterWasm: async () => {},
+    prewarmDistributedWorkers: async (workers) => {
+      peers.push(workers);
+      if (failPeers) throw new Error('injected verifier warmup failure');
+    },
+    withTimeout: (promise) => promise,
+    disposeDistributedWorkers: () => { disposedPools++; }, console: { warn() {} }
+  };
+  const prewarm = runInNewContext(`${code}\nstartRuntimePrewarm`, state);
+  prewarm(7, false, production.CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY);
+  await state.runtimePrewarm;
+  assert.equal(rootLoads, 1);
+  assert.deepEqual(peers, []);
+  assert.equal(state.requestedPrewarmWorkerCount, 7);
+  assert.deepEqual(phases, [['started', 1], ['finished', 1]]);
+
+  // A subsequent ordinary/distributed warmup is not mistaken for the root-only one.
+  prewarm(7, false, production.CPU_ONLY_RUNTIME_WARMUP_POLICY);
+  await state.runtimePrewarm;
+  assert.deepEqual(peers, [7]);
+  assert.equal(state.requestedPrewarmWorkerCount, 7);
+  prewarm(7, false, production.CPU_ONLY_RUNTIME_WARMUP_POLICY);
+  assert.deepEqual(peers, [7]);
+  assert.equal(disposedPools, 0);
+
+  failPeers = true;
+  prewarm(8, false, production.CPU_ONLY_RUNTIME_WARMUP_POLICY);
+  await state.runtimePrewarm;
+  assert.equal(disposedPools, 1);
+  assert.equal(state.completedPrewarmWorkerCount, 0);
+  assert.equal(state.completedRootOnlyPrewarm, true);
+  failPeers = false;
+  prewarm(7, false, production.CPU_ONLY_RUNTIME_WARMUP_POLICY);
+  await state.runtimePrewarm;
+  assert.deepEqual(peers, [7, 8, 7]);
+
+  // Even at one worker, root readiness must not impersonate verifier readiness.
+  state.completedRootOnlyPrewarm = false;
+  state.completedPrewarmWorkerCount = 0;
+  peers.length = 0;
+  prewarm(1, false, production.CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY);
+  await state.runtimePrewarm;
+  prewarm(1, false, production.CPU_ONLY_RUNTIME_WARMUP_POLICY);
+  await state.runtimePrewarm;
+  assert.deepEqual(peers, [1]);
+
+  state.completedRootOnlyPrewarm = false;
+  state.completedPrewarmWorkerCount = 0;
+  state.loadedWasm = null;
+  phases.length = 0;
+  failRoot = true;
+  prewarm(7, false, production.CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY);
+  await state.runtimePrewarm;
+  assert.deepEqual(phases, [['started', 1], ['finished', 0]]);
+  assert.equal(state.completedRootOnlyPrewarm, false);
+  failRoot = false;
+  failPeers = true;
+  phases.length = 0;
+  prewarm(7, false, production.CPU_ONLY_RUNTIME_WARMUP_POLICY);
+  await state.runtimePrewarm;
+  assert.deepEqual(phases, [['started', 7], ['finished', 1]]);
+  assert.equal(state.completedRootOnlyPrewarm, true);
+  assert.equal(state.completedPrewarmWorkerCount, 0);
+});
+
+test('in-flight warmup applies only the latest policy and respects worker lifetime fences', async () => {
+  const source = readFileSync(
+    new URL('../../../apps/clearra-web/src/workers/clearraWorker.ts', import.meta.url), 'utf8'
+  );
+  const extract = (start, end) => {
+    const from = source.indexOf(`function ${start}(`);
+    const to = source.indexOf(`\nfunction ${end}(`, from);
+    assert.ok(from >= 0 && to > from);
+    return source.slice(from, to);
+  };
+  const { code } = await transform([
+    extract('startRuntimePrewarm', 'startGpuWarmupAfterWasm'),
+    extract('interruptIncompleteRuntimePrewarm', 'setTablebaseRequested'),
+    extract('disposeRuntime', 'postStarted')
+  ].join('\n'), { loader: 'ts', format: 'cjs' });
+
+  for (const scenario of ['root-to-full', 'full-to-root', 'latest-only', 'already-started', 'foreground', 'dispose']) {
+    let resolveLoad;
+    const load = new Promise((resolve) => { resolveLoad = resolve; });
+    let resolvePeers;
+    const peerGate = new Promise((resolve) => { resolvePeers = resolve; });
+    const peers = [];
+    const state = {
+      normalizeRuntimeWarmupPolicy: production.normalizeRuntimeWarmupPolicy,
+      resolveWorkerAuthority: (_snapshot, workers) => ({ workersEffective: workers }),
+      hostCapabilitySnapshot: {}, MAX_EAGER_PREWARM_TOTAL_WORKERS: 9,
+      requestedPrewarmWorkerCount: 1, deferredTablebaseRequested: false,
+      tablebaseRequested: false, active: null, runtimePrewarm: null,
+      pendingRuntimePrewarm: null, failClosed: false,
+      completedPrewarmWorkerCount: 0, completedRootOnlyPrewarm: false,
+      loadedWasm: null, runtimePrewarmGeneration: 0, gpuWarmup: null,
+      gpuWarmupGeneration: 0, gpuWarmupCompleted: false,
+      tablebaseWarmupGeneration: 0, tablebaseWarmup: null,
+      lifecycleOwnerId: 'test', RUNTIME_PREWARM_TIMEOUT_MS: 30000,
+      setTablebaseRequested: () => {}, postRuntimePrewarmPhase: () => {},
+      loadClearraWasmModule: () => load, wasmHostCapabilities: () => ({}),
+      startTablebaseWarmupAfterWasm: async () => {}, startGpuWarmupAfterWasm: async () => {},
+      prewarmDistributedWorkers: async (workers) => {
+        peers.push(workers);
+        if (scenario === 'already-started') await peerGate;
+      },
+      withTimeout: (promise) => promise, disposeDistributedWorkers: () => {},
+      releasePc4TablebaseAssets: () => {}, releaseJobResources: () => {},
+      closeFailClosedWorker: () => { state.failClosed = true; }, console
+    };
+    const api = runInNewContext(`${code}\n({ startRuntimePrewarm, interruptIncompleteRuntimePrewarm, disposeRuntime })`, state);
+    const rootOnly = production.CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY;
+    const full = production.CPU_ONLY_RUNTIME_WARMUP_POLICY;
+    api.startRuntimePrewarm(7, false, ['full-to-root', 'already-started'].includes(scenario) ? full : rootOnly);
+    const first = state.runtimePrewarm;
+    if (scenario === 'already-started') {
+      resolveLoad({ compiled_module: () => ({}) });
+      await Promise.resolve();
+      assert.deepEqual(peers, [7]);
+    }
+    api.startRuntimePrewarm(7, false, ['full-to-root', 'already-started'].includes(scenario) ? rootOnly : full);
+    if (scenario === 'latest-only') api.startRuntimePrewarm(7, false, rootOnly);
+    if (scenario === 'foreground') {
+      state.active = { id: 1 };
+      api.interruptIncompleteRuntimePrewarm();
+    }
+    if (scenario === 'dispose') api.disposeRuntime();
+    if (scenario === 'already-started') resolvePeers();
+    resolveLoad({ compiled_module: () => ({}) });
+    await first;
+    if (state.runtimePrewarm) await state.runtimePrewarm;
+    assert.deepEqual(peers, ['root-to-full', 'already-started'].includes(scenario) ? [7] : [], scenario);
+    if (scenario === 'foreground' || scenario === 'dispose') {
+      assert.equal(state.loadedWasm, null, scenario);
+      assert.equal(state.pendingRuntimePrewarm, null, scenario);
+    }
+  }
+});
+
+test('active search retains the latest warmup policy, while cancellation remains fail-closed', async () => {
+  const source = readFileSync(
+    new URL('../../../apps/clearra-web/src/workers/clearraWorker.ts', import.meta.url), 'utf8'
+  );
+  const slice = (start, end) => {
+    const from = source.indexOf(start);
+    const to = source.indexOf(end, from);
+    assert.ok(from >= 0 && to > from);
+    return source.slice(from, to);
+  };
+  const run = slice('async function runCommandText(', '\nconst ACCELERATOR_PROFILES')
+    .replaceAll('import.meta.env.MODE', "'test'");
+  const { code } = await transform([
+    run,
+    slice('function startRuntimePrewarm(', '\nfunction startGpuWarmupAfterWasm('),
+    slice('function updateRuntimeAuthority(', '\nfunction wasmHostCapabilities('),
+    slice('function cancelActiveJob(', '\nfunction disposeRuntime(')
+  ].join('\n'), { loader: 'ts', format: 'cjs' });
+  const root = production.CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY;
+  const full = production.CPU_ONLY_RUNTIME_WARMUP_POLICY;
+  for (const scenario of ['root-to-full', 'full-to-root', 'cancel']) {
+    let finishJob;
+    let reportStarted;
+    const jobStarted = new Promise((resolve) => { reportStarted = resolve; });
+    const terminal = new Promise((resolve) => { finishJob = resolve; });
+    const peers = [];
+    const wasm = { configure_host() {}, compiled_module: () => ({}) };
+    const state = {
+      isLocalSearchProfileMode: () => false,
+      normalizeRuntimeWarmupPolicy: production.normalizeRuntimeWarmupPolicy,
+      isHostCapabilitySnapshot: () => false,
+      resolveWorkerAuthority: (_snapshot, workers) => ({ workersRequested: workers, workersEffective: workers }),
+      hostCapabilitySnapshot: { wasmTransferByteCap: 1 }, workerAuthority: { workersRequested: 7, workersEffective: 7 },
+      warmupPolicy: scenario === 'full-to-root' ? full : root,
+      MAX_EAGER_PREWARM_TOTAL_WORKERS: 9, requestedPrewarmWorkerCount: 1,
+      deferredTablebaseRequested: false, tablebaseRequested: false, active: null,
+      runtimePrewarm: null, pendingRuntimePrewarm: null, runtimePrewarmGeneration: 0,
+      completedPrewarmWorkerCount: 0, completedRootOnlyPrewarm: false, failClosed: false,
+      nextJobId: 1, loadedWasm: wasm, lifecycleOwnerId: 'test', RUNTIME_PREWARM_TIMEOUT_MS: 30000,
+      setTablebaseRequested: () => {}, postStarted: () => {}, interruptIncompleteRuntimePrewarm: () => {},
+      wasmHostCapabilities: () => ({}), releaseProductPages: () => {},
+      activateLocalAccelerators: async () => ({}), startTablebaseWarmupAfterWasm: async () => {},
+      ClearraProductJobRunner: class {
+        async run() { reportStarted(); return terminal; }
+        cancel() { finishJob({ event: 'cancelled' }); }
+        dispose() {}
+      },
+      requiresFailClosedRelease: (result) => result.event === 'cancelled',
+      releaseJobResources: () => {}, emitCancelled: () => {},
+      closeFailClosedWorker: () => { state.failClosed = true; },
+      postRuntimePrewarmPhase: () => {}, loadClearraWasmModule: async () => wasm,
+      prewarmDistributedWorkers: async (workers) => { peers.push(workers); },
+      withTimeout: (promise) => promise, disposeDistributedWorkers: () => {}, console
+    };
+    const api = runInNewContext(`${code}\n({ runCommandText, startRuntimePrewarm, updateRuntimeAuthority, cancelActiveJob })`, state);
+    const running = api.runCommandText('clearra setup score', 7, false);
+    await jobStarted;
+    const latest = scenario === 'full-to-root' ? root : full;
+    api.updateRuntimeAuthority({ warmupPolicy: latest }, 7);
+    api.startRuntimePrewarm(7, false, state.warmupPolicy);
+    assert.deepEqual(peers, [], scenario);
+    if (scenario === 'cancel') api.cancelActiveJob(1);
+    else finishJob({ event: 'final_response', response: { status: 'success' } });
+    await running;
+    if (state.runtimePrewarm) await state.runtimePrewarm;
+    assert.deepEqual(peers, scenario === 'root-to-full' ? [7] : [], scenario);
+    assert.equal(state.workerAuthority.workersEffective, 7);
+    if (scenario === 'cancel') assert.equal(state.failClosed, true);
+  }
 });
 
 test('device-memory snapshot owns a conservative transfer cap and rejects before resize', () => {

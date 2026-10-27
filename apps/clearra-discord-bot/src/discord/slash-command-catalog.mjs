@@ -1814,7 +1814,7 @@ function commandListHelp(locale) {
       "위의 그룹형 명령어 사용을 권장합니다. `/path` 같은 기존 개별 명령어와 `/finesse search|score`도 계속 사용할 수 있습니다.",
       "고급 objective는 `/help arguments:objective`에서 확인할 수 있습니다.",
       "정확한 문법은 `/help arguments:<명령어> <하위-명령어>`로 확인하세요. 여러 줄 격자는 필드 옵션을 생략하고 입력 창에서 작성하며, 직접 입력은 `grid:윗줄/다음줄` 형식을 사용합니다.",
-      `PC 탐색은 1–${DISCORD_PC_FIELD_MAX_ROWS}줄의 모든 목표 높이를 지원하며, 구축·전방 탐색 필드는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄을 지원합니다. 정적 CTK3, v115 Fumen, 문서 링크도 지원하며 입력 색상은 모두 채워진 칸으로 처리합니다.`,
+      `PC 탐색은 명령어에 따라 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 또는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄의 목표 높이를 지원하며, 구축·전방 탐색 필드는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄을 지원합니다. 정적 CTK3, v115 Fumen, 문서 링크도 지원하며 입력 색상은 모두 채워진 칸으로 처리합니다.`,
     ].join("\n");
   }
   return [
@@ -1830,7 +1830,7 @@ function commandListHelp(locale) {
     "The grouped commands above are recommended. Existing names such as `/path` and `/finesse search|score` remain available.",
     "Advanced objective syntax is documented by `/help arguments:objective`.",
     "Use `/help arguments:<command> <subcommand>` for exact syntax. Omit a board option to enter a multiline grid in the guided form; direct grids use `grid:top-row/next-row`.",
-    `PC search supports every target height from 1 through ${DISCORD_PC_FIELD_MAX_ROWS} rows; build/forward fields support 1 through ${DISCORD_WIDE_FIELD_MAX_ROWS} rows. Static CTK3, v115 Fumen, and document links are also accepted; input colors mean occupied cells.`,
+    `Depending on the command, PC search supports target heights 1–${DISCORD_PC_FIELD_MAX_ROWS} or 1–${DISCORD_WIDE_FIELD_MAX_ROWS}; build/forward fields support 1 through ${DISCORD_WIDE_FIELD_MAX_ROWS} rows. Static CTK3, v115 Fumen, and document links are also accepted; input colors mean occupied cells.`,
   ].join("\n");
 }
 
@@ -1858,7 +1858,7 @@ function syntax(entry, locale = "en") {
       case "pc-path-v2":
         return `/${path} next:<큐|패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [spin-profile:<프로필>] [preserve-b2b:<on|off>]`;
       case "pc-chance-v2":
-        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>]`;
+        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>]`;
       case "pc-save-v2":
         return `/${path} next:<고정 가방 경계 패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>]`;
       case "pc-allspin-exact-v1":

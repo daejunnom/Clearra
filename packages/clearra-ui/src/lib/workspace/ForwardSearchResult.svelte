@@ -293,8 +293,8 @@
         <div class="empty"><SearchX size={20} strokeWidth={1.7} /><p>{label('noForwardSolutions')}</p></div>
       {:else}
         <div class="outcome-grid">
-          {#each preparedResults as result, index}
-            <article hidden={index >= visibleCount}>
+          {#each preparedResults.slice(0, visibleCount) as result, index}
+            <article>
               <div class="card-heading">
                 <strong>{tool === 'damage' ? label('damageRoute', { number: index + 1 }) : tool === 'spin-finder' ? label('spinResult', { number: index + 1 }) : label('renResult', { number: index + 1 })}</strong>
                 <div class="card-actions">
@@ -349,7 +349,6 @@
   dd { color: #123f3a; font-size: 17px; font-weight: 800; margin: 0; }
   .outcome-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); margin-top: 20px; }
   article { border: 1px solid #d3dbd6; border-radius: 6px; min-width: 0; padding: 14px; }
-  article[hidden] { display: none; }
   .card-heading { align-items: center; display: flex; font-size: 11px; gap: 12px; justify-content: space-between; margin-bottom: 10px; }
   .card-heading b { color: #086c64; }
   .card-actions { align-items: center; display: flex; gap: 6px; }

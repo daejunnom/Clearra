@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   bindSolutionPageLoader,
+  createMaterializedSolutionExportKeySource,
   createPagedSolutionExportKeySource,
   solutionPageResultIdentity
 } from '../src/lib/workspace/solutionPageSource.ts';
@@ -36,6 +37,23 @@ test('paged solution export reads every key beyond the materialized first hundre
     [100, 100],
     [200, 1]
   ]);
+});
+
+test('materialized solution export retains comments and rejects a replaced result', async () => {
+  const keys = ['first', 'second'];
+  const comments = { first: 'Probability: 50%', second: 'Finesse: 12' };
+  let identity = 'hash:cts1:one:count:2';
+  const source = createMaterializedSolutionExportKeySource({
+    keys,
+    commentForKey: (key) => comments[key],
+    resultIdentity: identity,
+    currentResultIdentity: () => identity
+  });
+  assert.deepEqual(await source.readKeys(0, 2), keys);
+  assert.equal(source.commentForKey('first'), comments.first);
+  assert.equal(source.commentForKey('second'), comments.second);
+  identity = 'hash:cts1:two:count:2';
+  await assert.rejects(source.readKeys(0, 1), /replaced by a newer search/);
 });
 
 test('bound page loaders reject totals and ranges that do not match the result', async () => {
@@ -145,6 +163,7 @@ test('build probability connects the bounded page source to gallery and full exp
   assert.match(resultSource, /workspaceSolutionPageAvailable\(report\)/u);
   assert.match(resultSource, /bindSolutionPageLoader\(\{/u);
   assert.match(resultSource, /createPagedSolutionExportKeySource\(\{/u);
+  assert.match(resultSource, /createMaterializedSolutionExportKeySource\(\{/u);
   assert.match(resultSource, /keySource=\{solutionExportKeySource\}/u);
   assert.match(resultSource, /\{solutionCount\}/u);
   assert.match(resultSource, /loadSolutionPage=\{boundSolutionPageLoader\}/u);

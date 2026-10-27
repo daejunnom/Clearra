@@ -893,7 +893,13 @@ fn build_probability_worker_main(
 }
 
 fn join_workers(handles: Vec<JoinHandle<()>>) -> Result<(), CoreExecutionError> {
-    if handles.into_iter().any(|handle| handle.join().is_err()) {
+    let mut panicked = false;
+    for handle in handles {
+        if handle.join().is_err() {
+            panicked = true;
+        }
+    }
+    if panicked {
         Err(CoreExecutionError::RuntimeUnavailable {
             component: "wasm_cpu_worker_panicked",
         })
@@ -908,6 +914,8 @@ fn core_error(reason: &'static str) -> CoreExecutionError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use clearra_core_domain::piece::piece_kind::PieceKind;
     use clearra_objectives::policy::{
         objective_policy::ObjectivePolicy,
@@ -922,6 +930,43 @@ mod tests {
 
     use super::*;
     use crate::{AppStatus, BuildProbabilityAppCommand, BuildProbabilityResultMode};
+
+    #[test]
+    fn join_workers_waits_for_every_sibling_after_a_panic() {
+        let panicked = thread::spawn(|| panic!("intentional worker panic"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !panicked.is_finished() {
+            assert!(Instant::now() < deadline, "panic fixture did not finish");
+            thread::yield_now();
+        }
+        let (release_tx, release_rx) = mpsc::channel();
+        let sibling = thread::spawn(move || {
+            release_rx.recv().expect("release sibling worker");
+        });
+        let (started_tx, started_rx) = mpsc::channel();
+        let (joined_tx, joined_rx) = mpsc::channel();
+        let coordinator = thread::spawn(move || {
+            started_tx.send(()).expect("report join start");
+            joined_tx
+                .send(join_workers(vec![panicked, sibling]))
+                .expect("report join result");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("join start");
+        assert!(matches!(
+            joined_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        release_tx.send(()).expect("release sibling");
+        assert!(matches!(
+            joined_rx.recv_timeout(Duration::from_secs(2)),
+            Ok(Err(CoreExecutionError::RuntimeUnavailable {
+                component: "wasm_cpu_worker_panicked"
+            }))
+        ));
+        coordinator.join().expect("join coordinator");
+    }
 
     fn one_piece_field() -> BuildProbabilityField {
         BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])

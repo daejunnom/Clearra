@@ -38,6 +38,7 @@
     decodeValidatedRenderArtifact,
     detectFieldDocumentFormat,
     documentUtilityRequestForDesktop,
+    fumenCommentInputs,
     fumenDocumentInputs,
     isBoundedCanonicalFieldDocument,
     validateFieldDocumentPayload,
@@ -109,7 +110,7 @@
   $: normalizedDocument = document.trim();
   $: detectedFormat = detectFieldDocumentFormat(normalizedDocument);
   $: fumenDocuments = fumenDocumentInputs(document, transform === 'combine');
-  $: commentValues = comments.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean);
+  $: commentValues = fumenCommentInputs(comments);
   $: validInput = tool === 'fumen'
     ? validFumenInput()
     : isBoundedCanonicalFieldDocument(normalizedDocument) &&

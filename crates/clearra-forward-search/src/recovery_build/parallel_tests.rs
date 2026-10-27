@@ -6,7 +6,7 @@ use clearra_core_domain::{
 use clearra_rules::profile::rule_profile::RuleProfileId;
 use clearra_scoring::profile::SpinProfileId;
 
-fn query() -> RecoveryBuildQuery {
+pub(super) fn query() -> RecoveryBuildQuery {
     RecoveryBuildQuery {
         chain_stages: Vec::new(),
         all_solutions: false,

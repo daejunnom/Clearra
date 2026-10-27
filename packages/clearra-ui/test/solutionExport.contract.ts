@@ -19,6 +19,7 @@ import {
   encodeSolutionPagesForClipboard
 } from '../src/lib/workspace/solutionExportAsync';
 import { encodeFieldDocumentAsync } from '../src/lib/workspace/fieldInterchange';
+import { createMaterializedSolutionExportKeySource } from '../src/lib/workspace/solutionPageSource';
 
 const pieces: SolutionPiece[] = ['I', 'O', 'T', 'S', 'Z', 'J', 'L'];
 const fullPage: SolutionExportPage = {
@@ -118,6 +119,31 @@ assert.equal(
   fumenDecoder.decode(commentedFumenFromKey)[0]?.comment,
   solutionComment
 );
+
+const secondKey = 'ctk1|initial=0000000000000000|placements=I:000000000000000f';
+const materializedComments = new Map([
+  [key, 'Probability: 50%'],
+  [secondKey, 'Finesse: 12']
+]);
+let materializedIdentity = 'current-result';
+const materializedSource = createMaterializedSolutionExportKeySource({
+  keys: [key, secondKey],
+  commentForKey: (candidate) => materializedComments.get(candidate),
+  resultIdentity: materializedIdentity,
+  currentResultIdentity: () => materializedIdentity
+});
+const materializedCtk = await encodeSolutionKeySourceForClipboard(materializedSource, 'ctk');
+assert.deepEqual(
+  decodeCtk3(materializedCtk).pages.map((page) => page.comment),
+  ['Probability: 50%', 'Finesse: 12']
+);
+const materializedFumen = await encodeSolutionKeySourceForClipboard(materializedSource, 'fumen');
+assert.deepEqual(
+  fumenDecoder.decode(materializedFumen).map((page) => page.comment),
+  ['Probability: 50%', 'Finesse: 12']
+);
+materializedIdentity = 'new-result';
+await assert.rejects(async () => materializedSource.readKeys(0, 1), /replaced by a newer search/);
 
 const p7p4TilingCount = 10_117_860;
 let oversizedCtkReads = 0;

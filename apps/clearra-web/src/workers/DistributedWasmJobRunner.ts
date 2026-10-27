@@ -454,9 +454,15 @@ export class DistributedWasmJobRunner {
 
       while (!this.cancelled) {
         const batchProgress = this.wasm.distributed_progress();
+        // Compact PC roots report issued roots in geometryNodes and completed
+        // roots in coverageChecks. Tiling roots use coverageChecks for issued
+        // roots instead; do not apply either convention to streaming producers.
+        const issuedRootCount = plan.rootTaskParallel === true && !plan.tilingGeometryParallel
+          ? batchProgress.geometryNodes
+          : batchProgress.coverageChecks;
         const candidateBatchSize = distributedCandidateBatchSize(
           batchProgress.candidateFamilyCount,
-          batchProgress.coverageChecks,
+          issuedRootCount,
           effectiveVerifierCount,
           dispatchedBatches,
           plan.rootTaskParallel === true

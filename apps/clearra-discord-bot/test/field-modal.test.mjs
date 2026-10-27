@@ -121,6 +121,20 @@ test("pc score Modal discloses approximation accuracy in both locales", () => {
   assert.match(label(korean, "score-profile").description, /profile-specific exact.*false/iu);
 });
 
+test("full-height PC score forms match the 24-row capability, including Japanese", () => {
+  for (const subcommand of ["score", "score-minimals", "score-finder"]) {
+    for (const locale of ["en", "ko", "ja"]) {
+      const modal = modalForSubcommand("pc", subcommand, [], locale);
+      const field = label(modal, "field");
+      assert.match(field.label, locale === "ja" ? /1〜24行/u : /1–24/u, `${subcommand} ${locale}`);
+      const choices = component(modal, "lines").options.map(({ value }) => value);
+      assert.equal(choices.length, 25);
+      assert.ok(choices.includes("24"));
+    }
+  }
+  assert.match(label(modalFor("score-finder", [], "en"), "field").label, /1–6 rows/u);
+});
+
 test("finesse subcommands use bounded localized guided forms", () => {
   const search = buildMissingBoardModalResponse(
     slashInteraction("finesse", [{ type: 1, name: "search", options: [] }]),

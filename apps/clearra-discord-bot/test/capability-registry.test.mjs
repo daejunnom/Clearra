@@ -649,6 +649,11 @@ test("top-level help lists the complete v0.8 grouped surface and distinguishes l
   }
   assert.match(english, /grouped commands above are recommended/i);
   assert.match(korean, /위의 그룹형 명령어 사용을 권장/u);
+  assert.match(english, /PC search supports target heights 1–6 or 1–24/u);
+  assert.match(korean, /PC 탐색은 명령어에 따라 1–6줄 또는 1–24줄/u);
+  assert.match(formatSlashCommandHelp("", "ja"), /コマンドにより1〜6行または1〜24行/u);
+  assert.match(formatSlashCommandHelp("pc chance", "ko"), /lines:1\.\.24/u);
+  assert.match(formatSlashCommandHelp("pc chance", "en"), /lines:1\.\.24/u);
 
   const canonical = formatSlashCommandHelp("pc path", "en");
   const compatibility = formatSlashCommandHelp("path", "en");

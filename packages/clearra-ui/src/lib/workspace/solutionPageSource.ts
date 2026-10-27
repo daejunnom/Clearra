@@ -25,6 +25,13 @@ export type PagedSolutionExportKeySourceOptions = {
   pageSize?: number;
 };
 
+export type MaterializedSolutionExportKeySourceOptions = {
+  keys: readonly string[];
+  commentForKey: (key: string) => string | undefined;
+  resultIdentity: string;
+  currentResultIdentity: () => string;
+};
+
 const DEFAULT_EXPORT_PAGE_SIZE = 1_000;
 
 /**
@@ -83,6 +90,23 @@ export function createPagedSolutionExportKeySource(
   };
   if (options.commentForKey) source.commentForKey = options.commentForKey;
   return source;
+}
+
+/** Uses the same identity-bound paging/export contract for an inline result. */
+export function createMaterializedSolutionExportKeySource(
+  options: MaterializedSolutionExportKeySourceOptions
+): SolutionExportKeySource {
+  const { keys, resultIdentity, currentResultIdentity, commentForKey } = options;
+  const keyCount = keys.length;
+  const loadPage = bindSolutionPageLoader({
+    keyCount,
+    resultIdentity,
+    currentResultIdentity,
+    async loadPage(offset, limit) {
+      return { keys: keys.slice(offset, offset + limit), total: keyCount };
+    }
+  });
+  return createPagedSolutionExportKeySource({ keyCount, loadPage, commentForKey });
 }
 
 export function solutionPageResultIdentity(

@@ -21,6 +21,7 @@ const fixture = `<script>
   import SolutionCopyFormatControl from './packages/clearra-ui/src/lib/workspace/SolutionCopyFormatControl.svelte';
   import SolutionGallery from './packages/clearra-ui/src/lib/workspace/SolutionGallery.svelte';
   const language = new URLSearchParams(location.search).get('language') || 'en';
+  const lazyMode = new URLSearchParams(location.search).get('lazy');
   const keys = ['ctk1|initial=0000000000000000|placements=I:000000000000000f',
     'ctk1|initial=0000000000000000|placements=I:00000000000003c0'];
   let selected = [];
@@ -29,6 +30,30 @@ const fixture = `<script>
   let busy = false;
   let ordinalBase = '0';
   let copyFormat = 'ctk';
+  let lazyAttempts = [];
+  let initialFailure = true;
+  let lazyHash = 'first';
+  let releasePending = () => {};
+  const lazyKeys = Array.from({ length: 300 }, (_, index) => keys[index % keys.length]);
+  async function loadLazyPage(offset, limit) {
+    lazyAttempts = [...lazyAttempts, offset];
+    const hashAtRequest = lazyHash;
+    if ((lazyMode === 'duplicate' && offset === 200) ||
+        (lazyMode === 'stale' && offset === 0 && hashAtRequest === 'first')) {
+      await new Promise(resolve => { releasePending = resolve; });
+    }
+    if (lazyMode === 'initial-failure' && offset === 0 && initialFailure) {
+      initialFailure = false;
+      throw new Error('fixture: first page unavailable');
+    }
+    if (lazyMode === 'prefetch-failure' && offset === 200) {
+      throw new Error('fixture: speculative page unavailable');
+    }
+    const source = lazyMode === 'stale' && hashAtRequest === 'first'
+      ? lazyKeys.map(() => keys[0])
+      : lazyMode === 'stale' ? lazyKeys.map(() => keys[1]) : lazyKeys;
+    return { keys: source.slice(offset, offset + limit), total: lazyKeys.length };
+  }
   function toggle(key) { selected = selected.includes(key) ? selected.filter(value => value !== key) : [...selected, key]; }
 </script>
 <main style="padding:12px;max-width:1800px;margin:auto;box-sizing:border-box">
@@ -40,12 +65,19 @@ const fixture = `<script>
     <svelte:fragment slot="copy"><SolutionCopyFormatControl {language} solutionKeys={keys} bind:value={copyFormat} /></svelte:fragment>
   </SolutionToolbar>
   <div style="max-width:900px">
-    <SolutionGallery {language} solutionKeys={keys} targetLines={4} allowMandatorySelection={true}
-      mandatorySolutionKeys={selected} solutionOrdinalBase={ordinalBase} {copyFormat} on:toggleMandatory={event => toggle(event.detail)} />
+    {#if lazyMode}
+      <SolutionGallery {language} solutionKeys={[]} solutionCount={300} solutionSetHash={lazyHash} loadSolutionPage={loadLazyPage} targetLines={4} />
+    {:else}
+      <SolutionGallery {language} solutionKeys={keys} targetLines={4} allowMandatorySelection={true}
+        mandatorySolutionKeys={selected} solutionOrdinalBase={ordinalBase} {copyFormat} on:toggleMandatory={event => toggle(event.detail)} />
+    {/if}
   </div>
   <button data-testid="busy" on:click={() => busy=!busy}>Busy fixture</button>
   <button data-testid="ordinal" on:click={() => ordinalBase='999999999999999999999999999999'}>Ordinal fixture</button>
+  <button data-testid="replace-result" on:click={() => lazyHash='second'}>Replace result</button>
+  <button data-testid="release-pending" on:click={() => releasePending()}>Release pending response</button>
   <output hidden data-testid="state">{JSON.stringify({ selected, runs, submitted })}</output>
+  <output hidden data-testid="lazy-attempts">{JSON.stringify(lazyAttempts)}</output>
 </main>`;
 const preprocessor = vitePreprocess();
 async function component(source, filename) {
@@ -150,6 +182,61 @@ try {
     } catch (error) {
       await page.screenshot({ path: resolve(reportRoot, `failed-${spec.language}-${spec.width}.png`), fullPage: true });
       throw error;
+    } finally { await context.close(); }
+  }
+  {
+    const context = await browser.newContext({ viewport: { width: 1024, height: 1100 } });
+    const page = await context.newPage();
+    page.setDefaultTimeout(10000);
+    try {
+      await page.goto('http://127.0.0.1:4194/?lazy=initial-failure');
+      await page.locator('.invalid-solution[role="alert"]').waitFor();
+      assert.equal(await page.locator('.solution-gallery > li').count(), 0);
+      await page.locator('.load-more-row button').click();
+      await page.waitForFunction(() => document.querySelectorAll('.solution-gallery > li').length === 100);
+      assert.equal(await page.locator('.invalid-solution[role="alert"]').count(), 0);
+      assert.deepEqual(JSON.parse(await page.getByTestId('lazy-attempts').textContent()).slice(0, 2), [0, 0]);
+
+      await page.goto('http://127.0.0.1:4194/?lazy=prefetch-failure');
+      await page.waitForFunction(() => document.querySelectorAll('.solution-gallery > li').length === 100);
+      await page.waitForFunction(() => {
+        const button = document.querySelector('.load-more-row button');
+        return button && !button.disabled;
+      });
+      await page.locator('.load-more-row button').click();
+      await page.waitForFunction(() => document.querySelectorAll('.solution-gallery > li').length === 200);
+      await page.waitForFunction(() => {
+        const attempts = JSON.parse(document.querySelector('[data-testid="lazy-attempts"]').textContent);
+        const button = document.querySelector('.load-more-row button');
+        return attempts.length === 3 && button && !button.disabled;
+      });
+      assert.equal(await page.locator('.invalid-solution[role="alert"]').count(), 0);
+      await page.locator('.load-more-row button').click();
+      await page.locator('.invalid-solution[role="alert"]').waitFor();
+      assert.equal(await page.locator('.solution-gallery > li').count(), 200);
+      assert.deepEqual(JSON.parse(await page.getByTestId('lazy-attempts').textContent()), [0, 100, 200, 200]);
+
+      await page.goto('http://127.0.0.1:4194/?lazy=duplicate');
+      await page.waitForFunction(() => document.querySelectorAll('.solution-gallery > li').length === 100 && !document.querySelector('.load-more-row button').disabled);
+      await page.locator('.load-more-row button').click();
+      await page.waitForFunction(() => JSON.parse(document.querySelector('[data-testid="lazy-attempts"]').textContent).length === 3);
+      assert.equal(await page.locator('.load-more-row button').isDisabled(), true);
+      await page.locator('.load-more-row button').evaluate(button => button.click());
+      assert.deepEqual(JSON.parse(await page.getByTestId('lazy-attempts').textContent()), [0, 100, 200]);
+      await page.getByTestId('release-pending').click();
+      await page.waitForFunction(() => !document.querySelector('.load-more-row button').disabled);
+
+      await page.goto('http://127.0.0.1:4194/?lazy=stale');
+      await page.waitForFunction(() => JSON.parse(document.querySelector('[data-testid="lazy-attempts"]').textContent).length === 1);
+      await page.getByTestId('replace-result').click();
+      await page.waitForFunction(() => document.querySelectorAll('.solution-gallery > li').length === 100);
+      const replacementKey = await page.locator('.solution-gallery > li').first().getAttribute('data-solution-key');
+      assert.equal(replacementKey, 'ctk1|initial=0000000000000000|placements=I:00000000000003c0');
+      await page.getByTestId('release-pending').click();
+      await flush(page);
+      assert.equal(await page.locator('.solution-gallery > li').first().getAttribute('data-solution-key'), replacementKey);
+      assert.equal(await page.locator('.invalid-solution[role="alert"]').count(), 0);
+      results.push({ kind: 'lazy-page-failure-and-retry', status: 'passed' });
     } finally { await context.close(); }
   }
   await writeFile(resolve(reportRoot, 'result.json'), JSON.stringify({ source: process.env.CLEARRA_SOURCE_COMMIT, cases: results }, null, 2) + '\n');

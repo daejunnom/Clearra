@@ -34,6 +34,7 @@ export type RuntimeWarmupPolicy = Readonly<{
   backend: 'auto' | 'cpu' | 'gpu' | 'hybrid';
   cpuWarmup: boolean;
   gpuWarmup: boolean;
+  verifierWarmup?: false;
 }>;
 
 export const HOST_CAPABILITY_SNAPSHOT_CONTEXT = Symbol.for(
@@ -50,6 +51,13 @@ export const CPU_ONLY_RUNTIME_WARMUP_POLICY: RuntimeWarmupPolicy = Object.freeze
   backend: 'cpu',
   cpuWarmup: true,
   gpuWarmup: false
+});
+
+// Serial browser products still warm the root WASM, but do not speculate on
+// verifier workers. Distributed plans initialize those workers on demand.
+export const CPU_ROOT_ONLY_RUNTIME_WARMUP_POLICY: RuntimeWarmupPolicy = Object.freeze({
+  ...CPU_ONLY_RUNTIME_WARMUP_POLICY,
+  verifierWarmup: false
 });
 
 type CapabilityInput = {
@@ -174,7 +182,8 @@ export function normalizeRuntimeWarmupPolicy(
   return Object.freeze({
     backend: policy.backend,
     cpuWarmup: policy.cpuWarmup === true,
-    gpuWarmup: policy.backend !== 'cpu' && policy.gpuWarmup === true
+    gpuWarmup: policy.backend !== 'cpu' && policy.gpuWarmup === true,
+    ...(policy.verifierWarmup === false ? { verifierWarmup: false as const } : {})
   });
 }
 

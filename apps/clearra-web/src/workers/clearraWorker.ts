@@ -92,8 +92,14 @@ let nextJobId = 1;
 let active: ActiveJob | null = null;
 let runtimePrewarm: Promise<void> | null = null;
 let runtimePrewarmGeneration = 0;
+let pendingRuntimePrewarm: {
+  workerCount: number;
+  tablebaseRequested: boolean;
+  warmupPolicy: RuntimeWarmupPolicy;
+} | null = null;
 let requestedPrewarmWorkerCount = 1;
 let completedPrewarmWorkerCount = 0;
+let completedRootOnlyPrewarm = false;
 let loadedWasm: ClearraWasmModule | null = null;
 let gpuWarmup: Promise<void> | null = null;
 let gpuWarmupGeneration = 0;
@@ -153,8 +159,7 @@ self.onmessage = (message: MessageEvent<ClearraWorkerMessage>) => {
   void runCommandText(
     message.data.commandText ?? '',
     workerAuthority.workersEffective,
-    message.data.tablebaseRequested ?? false,
-    warmupPolicy
+    message.data.tablebaseRequested ?? false
   );
 };
 
@@ -229,8 +234,7 @@ self.addEventListener('unhandledrejection', (event) => {
 async function runCommandText(
   commandText: string,
   prewarmWorkerCount: number,
-  requestedTablebase: boolean,
-  requestedWarmupPolicy: RuntimeWarmupPolicy
+  requestedTablebase: boolean
 ) {
   const profileStarted = isLocalSearchProfileMode(import.meta.env.MODE) ? performance.now() : null;
   if (active) {
@@ -318,7 +322,7 @@ async function runCommandText(
       startRuntimePrewarm(
         requestedPrewarmWorkerCount,
         deferredTablebaseRequested,
-        requestedWarmupPolicy
+        warmupPolicy
       );
     }
   }
@@ -498,10 +502,9 @@ function startRuntimePrewarm(
     hostCapabilitySnapshot,
     workerCount
   ).workersEffective;
-  const eagerWorkerCount = Math.min(
-    boundedWorkerCount,
-    MAX_EAGER_PREWARM_TOTAL_WORKERS
-  );
+  const eagerWorkerCount = normalizedWarmupPolicy.verifierWarmup === false
+    ? 1
+    : Math.min(boundedWorkerCount, MAX_EAGER_PREWARM_TOTAL_WORKERS);
   requestedPrewarmWorkerCount = boundedWorkerCount;
   deferredTablebaseRequested = requestedTablebase;
   if (active) {
@@ -522,7 +525,18 @@ function startRuntimePrewarm(
     postRuntimePrewarmPhase('finished', 0);
     return;
   }
-  if (runtimePrewarm || completedPrewarmWorkerCount >= eagerWorkerCount) {
+  const prewarmCompleted = normalizedWarmupPolicy.verifierWarmup === false
+    ? completedRootOnlyPrewarm || completedPrewarmWorkerCount >= 1
+    : completedPrewarmWorkerCount >= eagerWorkerCount;
+  if (runtimePrewarm) {
+    pendingRuntimePrewarm = {
+      workerCount: boundedWorkerCount,
+      tablebaseRequested: requestedTablebase,
+      warmupPolicy: normalizedWarmupPolicy
+    };
+    return;
+  }
+  if (prewarmCompleted) {
     if (loadedWasm) {
       if (normalizedWarmupPolicy.gpuWarmup) void startGpuWarmupAfterWasm(loadedWasm);
       void startTablebaseWarmupAfterWasm(loadedWasm);
@@ -530,17 +544,25 @@ function startRuntimePrewarm(
     return;
   }
   const generation = ++runtimePrewarmGeneration;
+  let rootWarmupCompleted = completedRootOnlyPrewarm;
+  let verifierWarmupCompleted = false;
   postRuntimePrewarmPhase('started', eagerWorkerCount);
   runtimePrewarm = loadClearraWasmModule(
     undefined,
     wasmHostCapabilities(hostCapabilitySnapshot)
   )
     .then(async (wasm) => {
-      loadedWasm = wasm;
       if (generation !== runtimePrewarmGeneration) return;
+      loadedWasm = wasm;
+      rootWarmupCompleted = true;
+      completedRootOnlyPrewarm = true;
       if (normalizedWarmupPolicy.gpuWarmup) void startGpuWarmupAfterWasm(wasm);
       void startTablebaseWarmupAfterWasm(wasm);
-      if (normalizedWarmupPolicy.cpuWarmup) {
+      if (
+        normalizedWarmupPolicy.cpuWarmup &&
+        normalizedWarmupPolicy.verifierWarmup !== false &&
+        pendingRuntimePrewarm?.warmupPolicy.verifierWarmup !== false
+      ) {
         await withTimeout(
           prewarmDistributedWorkers(
             eagerWorkerCount,
@@ -551,21 +573,33 @@ function startRuntimePrewarm(
           RUNTIME_PREWARM_TIMEOUT_MS,
           'distributed runtime warmup'
         );
+        verifierWarmupCompleted = true;
       }
       if (generation === runtimePrewarmGeneration) {
-        completedPrewarmWorkerCount = eagerWorkerCount;
+        if (verifierWarmupCompleted) {
+          completedPrewarmWorkerCount = eagerWorkerCount;
+        }
       }
     })
     .then(() => undefined)
     .catch((error) => {
       if (generation !== runtimePrewarmGeneration) return;
       disposeDistributedWorkers();
+      completedPrewarmWorkerCount = 0;
       console.warn('Clearra browser runtime warmup was incomplete', error);
     })
     .finally(() => {
       if (generation === runtimePrewarmGeneration) {
         runtimePrewarm = null;
-        postRuntimePrewarmPhase('finished', eagerWorkerCount);
+        postRuntimePrewarmPhase(
+          'finished',
+          verifierWarmupCompleted ? eagerWorkerCount : rootWarmupCompleted ? 1 : 0
+        );
+        const pending = pendingRuntimePrewarm;
+        pendingRuntimePrewarm = null;
+        if (pending && !active && !failClosed) {
+          startRuntimePrewarm(pending.workerCount, pending.tablebaseRequested, pending.warmupPolicy);
+        }
       }
     });
 }
@@ -603,7 +637,9 @@ function interruptIncompleteRuntimePrewarm() {
   if (!runtimePrewarm) return;
   runtimePrewarmGeneration += 1;
   runtimePrewarm = null;
+  pendingRuntimePrewarm = null;
   completedPrewarmWorkerCount = 0;
+  completedRootOnlyPrewarm = false;
   // Keep already-ready clients and their in-flight prewarm promises. The
   // foreground pool initialization can reuse each client independently and
   // schedule its first batch without joining the slowest speculative worker.
@@ -756,7 +792,9 @@ function cancelActiveJob(jobId: number | undefined) {
 function disposeRuntime() {
   runtimePrewarmGeneration++;
   runtimePrewarm = null;
+  pendingRuntimePrewarm = null;
   completedPrewarmWorkerCount = 0;
+  completedRootOnlyPrewarm = false;
   gpuWarmupGeneration++;
   gpuWarmup = null;
   gpuWarmupCompleted = false;
@@ -835,7 +873,9 @@ function closeFailClosedWorker() {
   failClosed = true;
   runtimePrewarmGeneration++;
   runtimePrewarm = null;
+  pendingRuntimePrewarm = null;
   completedPrewarmWorkerCount = 0;
+  completedRootOnlyPrewarm = false;
   gpuWarmupGeneration++;
   gpuWarmup = null;
   gpuWarmupCompleted = false;

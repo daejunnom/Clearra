@@ -7,6 +7,7 @@ import {
   decodeValidatedRenderArtifact,
   detectFieldDocumentFormat,
   documentUtilityRequestForDesktop,
+  fumenCommentInputs,
   fumenDocumentInputs,
   isBoundedCanonicalFieldDocument,
   validateFieldDocumentPayload
@@ -48,6 +49,21 @@ assert.deepEqual(
     arguments: utilityArguments
   }
 );
+
+const preservedComments = fumenCommentInputs('  한글 😀  \r\n  \r\n\t두 번째\t\nthird  ');
+assert.deepEqual(preservedComments, ['  한글 😀  ', '\t두 번째\t', 'third  ']);
+assert.deepEqual(fumenCommentInputs(' \r\n\t\n'), []);
+const whitespaceInput = { ...utilityInput, comments: preservedComments };
+const whitespaceArguments = buildDocumentUtilityCommandArguments(whitespaceInput);
+assert.deepEqual(
+  whitespaceArguments.slice(-6),
+  ['--comment', '  한글 😀  ', '--comment', '\t두 번째\t', '--comment', 'third  ']
+);
+assert.equal(
+  buildDocumentUtilityCommand(whitespaceInput),
+  'clearra utility fumen text-to-fumen --format fumen --comment "  한글 😀  " --comment "\t두 번째\t" --comment "third  "'
+);
+assert.deepEqual(documentUtilityRequestForDesktop(whitespaceInput, 'ko').arguments, whitespaceArguments);
 
 for (const capability of ['sequence', 'sequence-dependencies'] as const) {
   const operationInput = {
