@@ -3,9 +3,13 @@ import type {
   SolutionPiece
 } from './solutionExport';
 import {
+  CTK3_MAX_BUNDLE_PAGES,
   escapeFumenComment,
-  FumenCommentCodecError
+  FumenCommentCodecError,
+  FUMEN_MAX_PAGES,
+  FUMEN_MAX_SOURCE_CHARACTERS
 } from './ctk3Codec';
+import { FUMEN_BUNDLE_MAX_CHARACTERS, FUMEN_BUNDLE_MAX_DOCUMENTS } from './fumenBundleLimits';
 
 const BOARD_WIDTH = 10;
 const FUMEN_VISIBLE_HEIGHT = 23;
@@ -19,6 +23,10 @@ const COMMENT_BASE = 96;
 const COMMENT_TABLE =
   ' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~';
 const VALUE_CHUNK_SIZE = 65_536;
+// A page has at most 240 field-diff runs (2 values each), 3 action
+// values and 4,095 escaped comment characters (5 values per group of 4),
+// plus formatting separators. 6,000 safely bounds its contribution.
+const MAX_FORMATTED_PAGE_CHARACTERS = 6_000;
 
 const PIECE_CODES: Record<SolutionPiece, number> = {
   I: 1,
@@ -43,6 +51,48 @@ export function encodeFastColoredFumenPages(
   return encoder.finish();
 }
 
+/** Independent Fumen documents, separated by newlines in original page order. */
+export class SegmentedColoredFumenEncoder {
+  private encoder = new FastColoredFumenEncoder();
+  private readonly documents: string[] = [];
+  private count = 0;
+  private totalCount = 0;
+  private completedCharacters = 0;
+
+  append(page: SolutionExportPage) {
+    if (this.totalCount === CTK3_MAX_BUNDLE_PAGES) {
+      throw new Error('clipboard-output-too-large');
+    }
+    if (this.count > 0 && (
+      this.count === FUMEN_MAX_PAGES ||
+      this.encoder.encodedLength + MAX_FORMATTED_PAGE_CHARACTERS > FUMEN_MAX_SOURCE_CHARACTERS
+    )) {
+      if (this.documents.length + 1 >= FUMEN_BUNDLE_MAX_DOCUMENTS) {
+        throw new Error('clipboard-output-too-large');
+      }
+      const document = this.encoder.finish();
+      this.documents.push(document);
+      this.completedCharacters += document.length + 1;
+      this.encoder = new FastColoredFumenEncoder();
+      this.count = 0;
+    }
+    this.encoder.append(page);
+    this.count += 1;
+    this.totalCount += 1;
+    if (this.encoder.encodedLength > FUMEN_MAX_SOURCE_CHARACTERS) {
+      throw new Error('fumen-input-too-large');
+    }
+    if (this.completedCharacters + this.encoder.encodedLength > FUMEN_BUNDLE_MAX_CHARACTERS) {
+      throw new Error('clipboard-output-too-large');
+    }
+  }
+
+  finish(): string {
+    if (this.count === 0) throw new Error('invalid-page');
+    return [...this.documents, this.encoder.finish()].join('\n');
+  }
+}
+
 export class FastColoredFumenEncoder {
   private readonly values = new FumenValueWriter();
   private previous = new Uint8Array(FUMEN_FIELD_CELLS);
@@ -50,6 +100,11 @@ export class FastColoredFumenEncoder {
   private lastRepeatIndex = -1;
   private repeatCount = 0;
   private previousComment = '';
+
+  get encodedLength(): number {
+    const length = this.values.length;
+    return 5 + length + (length > 42 ? Math.ceil((length - 42) / 47) : 0);
+  }
 
   append(page: SolutionExportPage) {
     if (!Number.isInteger(page.height) || page.height < 1 || page.height > 24) {

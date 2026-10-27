@@ -5,7 +5,7 @@
   import { Pause, Play, RotateCcw } from '@lucide/svelte';
   import { onDestroy, onMount, tick } from 'svelte';
 
-  import { openFieldDocument } from './fieldInterchange';
+  import { openFieldDocumentAsync, type FieldDocumentReader } from './fieldInterchange';
   import { fieldImportFailureMessageKey } from './fieldImportFailure';
   import type { Ctk3Page } from './ctk3Codec';
   import { lockedPageCells, operationCells } from './ctkPageTools';
@@ -398,14 +398,15 @@
     const controller = new AbortController();
     fieldLoadController = controller;
     fieldInvalid = false;
-    let documentReader: ReturnType<typeof openFieldDocument> | null = null;
+    let documentReader: FieldDocumentReader | null = null;
     try {
-      documentReader = openFieldDocument(source, {
+      documentReader = await openFieldDocumentAsync(source, {
         cacheSegments: 1,
         workers: 1,
         workerFactory: null,
         signal: controller.signal
       });
+      if (controller.signal.aborted || generation !== fieldLoadGeneration || destroyed) return;
       if (documentReader.width !== 10 || documentReader.pageCount < 1) {
         throw new RangeError('Player fields must have ten columns and at least one page.');
       }

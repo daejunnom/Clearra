@@ -4,6 +4,7 @@ import {
   type Ctk3AsyncDocumentReader,
   type Ctk3AsyncEncoderOptions,
   type Ctk3DecodeWorkerFactory,
+  CTK3_MAX_BUNDLE_PAGES,
   decodeCtk3,
   decodeFumenWithinPageLimit,
   escapeFumenComment,
@@ -25,6 +26,8 @@ import {
   solutionPageToCtk3Page,
   type SolutionExportPage
 } from './solutionExport';
+import { FUMEN_BUNDLE_MAX_CHARACTERS, FUMEN_BUNDLE_MAX_DOCUMENTS } from './fumenBundleLimits';
+import { openFumenWorkerReader, type FumenReaderWorkerFactory } from './fumenDocumentReader';
 
 export type ImportedField = {
   boardMask: bigint;
@@ -45,6 +48,7 @@ export type OpenFieldDocumentOptions = {
   workers?: number;
   cacheSegments?: number;
   workerFactory?: Ctk3DecodeWorkerFactory | null;
+  fumenWorkerFactory?: FumenReaderWorkerFactory | null;
   signal?: AbortSignal;
 };
 
@@ -53,6 +57,11 @@ const FUMEN_HEIGHT = 23;
 const CLEARA_HEIGHT = 24;
 const FUMEN_WORKER_THRESHOLD = 256;
 const FUMEN_PATTERN = /v11(?:0|5)@[A-Za-z0-9+/?]+/;
+// Multi-document clipboard output has its own finite bundle budget. A single
+// document still uses the existing 16 MiB / 4096-page Fumen guards.
+const EXACT_FUMEN_PATTERN = /^v11(?:0|5)@[A-Za-z0-9+/?]+$/;
+
+type FumenBundlePart = { start: number; end: number; endPage: number };
 
 export {
   decodeFumenWithinPageLimit,
@@ -62,6 +71,19 @@ export {
 };
 
 export function decodeFieldDocument(input: string): Ctk3Document {
+  const bundle = inspectFumenBundle(input);
+  if (bundle) {
+    const count = bundle[bundle.length - 1].endPage;
+    // This synchronous API returns one fully materialized document. Large
+    // bundles must use the bounded, lazy openFieldDocument reader instead.
+    if (count > FUMEN_MAX_PAGES) throw new Error('fumen-page-limit');
+    return {
+      width: WIDTH,
+      pages: bundle.flatMap(({ start, end }) =>
+        decodeFieldDocument(input.slice(start, end)).pages
+      )
+    };
+  }
   const raw = input.trim();
   if (isCtk3(raw)) {
     return decodeCtk3(raw);
@@ -135,6 +157,9 @@ export function openFieldDocument(
   input: string,
   options: OpenFieldDocumentOptions = {}
 ): FieldDocumentReader {
+  throwIfAborted(options.signal);
+  const bundle = inspectFumenBundle(input);
+  if (bundle) return fumenBundleReader(input, bundle, options.signal);
   const raw = input.trim();
   const source = isCtk3(raw) ? raw : decodeBoundedFumenInputUrl(raw);
   if (isCtk3(source)) {
@@ -142,6 +167,154 @@ export function openFieldDocument(
     return ctkReader(source, reader);
   }
   return eagerReader(decodeFieldDocument(source));
+}
+
+/** GUI entry: inspect and decode multiline Fumen in an isolated worker. */
+export async function openFieldDocumentAsync(
+  input: string,
+  options: OpenFieldDocumentOptions = {}
+): Promise<FieldDocumentReader> {
+  throwIfAborted(options.signal);
+  // CTK has its own asynchronous indexed reader. Other multiline inputs need
+  // a separate worker: a single bounded Fumen chunk can still be expensive.
+  const raw = input.trim();
+  if (!isCtk3(raw) && raw.includes('\n')) {
+    if (input.length > FUMEN_BUNDLE_MAX_CHARACTERS) {
+      throw new Error('fumen-bundle-input-too-large');
+    }
+    const factory = options.fumenWorkerFactory === undefined
+      ? typeof Worker === 'function'
+        ? () => new Worker(new URL('./fumenDocumentWorker.ts', import.meta.url), { type: 'module' })
+        : null
+      : options.fumenWorkerFactory;
+    // Even short compressed Fumen can expand to many pages, so input length
+    // cannot justify a synchronous Fumen fallback on the UI thread. Preserve
+    // the prior bounded handling of multiline non-Fumen text.
+    if (!factory) {
+      if (raw.length <= 65_536 && !FUMEN_PATTERN.test(raw)) return openFieldDocument(input, options);
+      throw new Error('fumen-worker-unavailable');
+    }
+    return openFumenWorkerReader(input, factory, options.signal);
+  }
+  return openFieldDocument(input, options);
+}
+
+/** Parse only newline-delimited exact Fumen codes, never loose URL matches. */
+function inspectFumenBundle(input: string): FumenBundlePart[] | null {
+  if (!input.includes('\n')) return null;
+  if (input.length > FUMEN_BUNDLE_MAX_CHARACTERS) {
+    throw new Error('fumen-bundle-input-too-large');
+  }
+  const parts: FumenBundlePart[] = [];
+  let cursor = 0;
+  let pageCount = 0;
+  let recognized = false;
+  while (cursor < input.length) {
+    const newline = input.indexOf('\n', cursor);
+    let end = newline < 0 ? input.length : newline;
+    const start = cursor;
+    cursor = newline < 0 ? input.length : newline + 1;
+    if (end > start && input[end - 1] === '\r') end -= 1;
+    if (end === start) continue;
+    if (end - start > FUMEN_MAX_SOURCE_CHARACTERS) {
+      throw new Error('fumen-input-too-large');
+    }
+    const line = input.slice(start, end);
+    if (!EXACT_FUMEN_PATTERN.test(line)) {
+      if (recognized) throw new Error('invalid-fumen-input');
+      // A malformed first chunk followed by a plausible Fumen must not fall
+      // back to the legacy loose matcher and silently select the later chunk.
+      let next = cursor;
+      while (next < input.length) {
+        if (input.startsWith('v115@', next) || input.startsWith('v110@', next)) {
+          throw new Error('invalid-fumen-input');
+        }
+        const following = input.indexOf('\n', next);
+        if (following < 0) break;
+        next = following + 1;
+      }
+      return null;
+    }
+    recognized = true;
+    if (parts.length === FUMEN_BUNDLE_MAX_DOCUMENTS) {
+      throw new Error('fumen-bundle-page-limit');
+    }
+    pageCount += inspectFumenPageCount(line);
+    if (pageCount > CTK3_MAX_BUNDLE_PAGES) throw new Error('fumen-bundle-page-limit');
+    parts.push({ start, end, endPage: pageCount });
+  }
+  return parts.length > 1 ? parts : null;
+}
+
+function fumenBundleReader(
+  source: string,
+  parts: FumenBundlePart[],
+  signal?: AbortSignal
+): FieldDocumentReader {
+  const pageCount = parts[parts.length - 1].endPage;
+  let cachedPart = -1;
+  let cachedPages: Ctk3Page[] = [];
+  let closed = false;
+
+  function checkRange(start: number, count: number) {
+    throwIfAborted(signal);
+    if (closed) throw new Error('Document reader is closed.');
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(count) ||
+        start < 0 || count < 0 || start + count > pageCount) {
+      throw new RangeError('Document page range is out of range.');
+    }
+  }
+
+  function pageAt(index: number): Ctk3Page {
+    let low = 0;
+    let high = parts.length - 1;
+    while (low < high) {
+      const mid = low + Math.floor((high - low) / 2);
+      if (index < parts[mid].endPage) high = mid;
+      else low = mid + 1;
+    }
+    if (cachedPart !== low) {
+      const part = parts[low];
+      cachedPages = decodeFieldDocument(source.slice(part.start, part.end)).pages;
+      cachedPart = low;
+    }
+    const firstPage = low === 0 ? 0 : parts[low - 1].endPage;
+    return cachedPages[index - firstPage];
+  }
+
+  return {
+    width: WIDTH,
+    pageCount,
+    originalCtk: null,
+    async readPage(index) {
+      checkRange(index, 1);
+      return pageAt(index);
+    },
+    async readPages(start, count) {
+      checkRange(start, count);
+      if (count > FUMEN_MAX_PAGES) throw new Error('fumen-page-limit');
+      const pages: Ctk3Page[] = [];
+      for (let index = start; index < start + count; index += 1) {
+        throwIfAborted(signal);
+        pages.push(pageAt(index));
+      }
+      return pages;
+    },
+    async decodeAll() {
+      checkRange(0, pageCount);
+      if (pageCount > FUMEN_MAX_PAGES) throw new Error('fumen-page-limit');
+      const pages: Ctk3Page[] = [];
+      for (let index = 0; index < pageCount; index += 1) pages.push(pageAt(index));
+      return { width: WIDTH, pages };
+    },
+    close() {
+      closed = true;
+      cachedPart = -1;
+      cachedPages = [];
+      source = '';
+      parts.length = 0;
+    }
+  };
 }
 
 export function encodeFieldDocument(
@@ -212,6 +385,61 @@ export async function encodeFieldDocumentAsync(
   return encoded;
 }
 
+/** Encode a page source without materializing more than one bounded Fumen. */
+export async function encodeFumenPageSourceAsync(
+  source: {
+    readonly width: number;
+    readonly pageCount: number;
+    readonly revision?: number;
+    readPages(start: number, count: number, signal?: AbortSignal): Promise<Ctk3Page[]>;
+  },
+  options: Ctk3AsyncEncoderOptions = {}
+): Promise<string> {
+  throwIfAborted(options.signal);
+  if (source.width !== WIDTH || !Number.isSafeInteger(source.pageCount) || source.pageCount < 1) {
+    throw new Error('fumen-page-limit');
+  }
+  if (source.pageCount > CTK3_MAX_BUNDLE_PAGES) throw new Error('fumen-bundle-page-limit');
+  const pageCount = source.pageCount;
+  const revision = source.revision;
+  function checkSource(): void {
+    throwIfAborted(options.signal);
+    if (source.pageCount !== pageCount || source.revision !== revision) {
+      throw new Error('document-changed-during-export');
+    }
+  }
+  const documents: string[] = [];
+  let totalCharacters = 0;
+  async function appendRange(start: number, count: number): Promise<void> {
+    checkSource();
+    let pages = await source.readPages(start, count, options.signal);
+    checkSource();
+    if (pages.length !== count) throw new Error('Fumen page source is incomplete.');
+    let encoded = await encodeFieldDocumentAsync({ width: WIDTH, pages }, 'fumen', options);
+    checkSource();
+    if (encoded.length > FUMEN_MAX_SOURCE_CHARACTERS) {
+      if (count === 1) throw new Error('fumen-input-too-large');
+      const left = Math.floor(count / 2);
+      pages = [];
+      encoded = '';
+      await appendRange(start, left);
+      await appendRange(start + left, count - left);
+      return;
+    }
+    if (documents.length === FUMEN_BUNDLE_MAX_DOCUMENTS) throw new Error('fumen-bundle-page-limit');
+    totalCharacters += encoded.length + (documents.length ? 1 : 0);
+    if (totalCharacters > FUMEN_BUNDLE_MAX_CHARACTERS) {
+      throw new Error('fumen-bundle-input-too-large');
+    }
+    documents.push(encoded);
+  }
+  for (let start = 0; start < pageCount; start += FUMEN_MAX_PAGES) {
+    await appendRange(start, Math.min(FUMEN_MAX_PAGES, pageCount - start));
+  }
+  checkSource();
+  return documents.join('\n');
+}
+
 export function decodeFieldInput(
   input: string,
   maximumHeight = 6
@@ -233,7 +461,11 @@ export function decodeFieldInput(
     page = reader.readPage(0);
     reader.clearCache();
   } else {
-    const document = decodeFieldDocument(source);
+    // A board input intentionally selects one page, unlike document readers.
+    // Keep that contract even when a newline-delimited bundle was pasted.
+    const bundle = inspectFumenBundle(source);
+    const first = bundle ? source.slice(bundle[0].start, bundle[0].end) : source;
+    const document = decodeFieldDocument(first);
     width = document.width;
     page = document.pages[0];
   }

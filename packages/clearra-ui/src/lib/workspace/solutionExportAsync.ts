@@ -6,6 +6,8 @@ import {
 import {
   CTK3_MAX_BUNDLE_PAGES,
   encodeCtk3PageSourceAsync,
+  FUMEN_MAX_PAGES,
+  FUMEN_MAX_SOURCE_CHARACTERS,
   type Ctk3DecodeWorkerLike
 } from './ctk3Codec';
 import {
@@ -20,7 +22,8 @@ import {
   type SolutionCopyFormat,
   type SolutionExportPage
 } from './solutionExport';
-import { FastColoredFumenEncoder } from './fastFumenSolutionEncoder';
+import { SegmentedColoredFumenEncoder } from './fastFumenSolutionEncoder';
+import { FUMEN_BUNDLE_MAX_CHARACTERS, FUMEN_BUNDLE_MAX_DOCUMENTS } from './fumenBundleLimits';
 
 const WORKER_THRESHOLD = 2048;
 const FUMEN_CHUNK_SIZE = 1024;
@@ -59,6 +62,7 @@ export async function encodeSolutionKeySourceForClipboard(
 ): Promise<string> {
   throwIfAborted(options.signal);
   validateKeySource(source);
+  if (format === 'fumen') assertFumenPageCount(source.keyCount);
   await requireClipboardSizedSource(source, format, options.signal);
   return encodeSolutionKeySource(source, format, options);
 }
@@ -70,6 +74,7 @@ export async function encodeSolutionKeySource(
 ): Promise<string> {
   throwIfAborted(options.signal);
   validateKeySource(source);
+  if (format === 'fumen') assertFumenPageCount(source.keyCount);
   if (source.keyCount < WORKER_THRESHOLD) {
     const keys = await readSourceKeys(
       source,
@@ -125,6 +130,7 @@ export async function encodeSolutionKeySource(
     return await encodeFumenKeySourceWithSingleWorker(source, options.signal);
   } catch (error) {
     rethrowIfAborted(error, options.signal);
+    rethrowFumenBundleLimit(error);
     return encodeFumenKeySourceWithoutWorker(source, options.signal);
   }
 }
@@ -136,8 +142,11 @@ export async function encodeSolutionPagesForClipboard(
 ): Promise<string> {
   throwIfAborted(options.signal);
   if (!pages.length) throw new Error('invalid-page');
+  if (format === 'fumen') assertFumenPageCount(pages.length);
   if (pages.length < WORKER_THRESHOLD || typeof Worker !== 'function') {
-    const encoded = encodeSolutionPages(Array.from(pages), format);
+    const encoded = format === 'fumen'
+      ? encodeFumenPagesWithoutWorker(pages, options.signal)
+      : encodeSolutionPages(Array.from(pages), format);
     throwIfAborted(options.signal);
     return encoded;
   }
@@ -164,7 +173,8 @@ export async function encodeSolutionPagesForClipboard(
     return await encodeFumenPagesWithSingleWorker(pages, options.signal);
   } catch (error) {
     rethrowIfAborted(error, options.signal);
-    const encoded = encodeSolutionPages(Array.from(pages), format);
+    rethrowFumenBundleLimit(error);
+    const encoded = encodeFumenPagesWithoutWorker(pages, options.signal);
     throwIfAborted(options.signal);
     return encoded;
   }
@@ -177,6 +187,7 @@ export async function encodeSolutionKeysForClipboard(
 ): Promise<string> {
   throwIfAborted(options.signal);
   if (!keys.length) throw new Error('invalid-page');
+  if (format === 'fumen') assertFumenPageCount(keys.length);
   if (format === 'ctk') {
     if (keys.length <= CTK_SOLUTION_SEGMENT_SIZE) {
       const encoded = encodeCtkSolutionKeySegment(keys);
@@ -198,7 +209,7 @@ export async function encodeSolutionKeysForClipboard(
     }
   }
   if (typeof Worker !== 'function' || keys.length < WORKER_THRESHOLD) {
-    const encoded = encodeColoredFumenSolutionKeys(keys);
+    const encoded = encodeFumenKeysWithoutWorker(keys, options.signal);
     throwIfAborted(options.signal);
     return encoded;
   }
@@ -206,9 +217,64 @@ export async function encodeSolutionKeysForClipboard(
     return await encodeFumenWithSingleWorker(keys, options.signal);
   } catch (error) {
     rethrowIfAborted(error, options.signal);
-    const encoded = encodeColoredFumenSolutionKeys(keys);
+    rethrowFumenBundleLimit(error);
+    const encoded = encodeFumenKeysWithoutWorker(keys, options.signal);
     throwIfAborted(options.signal);
     return encoded;
+  }
+}
+
+function encodeFumenPagesWithoutWorker(
+  pages: readonly SolutionExportPage[],
+  signal?: AbortSignal
+): string {
+  return encodeBoundedFumenDocuments(
+    pages, (chunk) => encodeSolutionPages(Array.from(chunk), 'fumen'), signal
+  );
+}
+
+function encodeFumenKeysWithoutWorker(keys: readonly string[], signal?: AbortSignal): string {
+  return encodeBoundedFumenDocuments(keys, encodeColoredFumenSolutionKeys, signal);
+}
+
+function encodeBoundedFumenDocuments<T>(
+  items: readonly T[], encode: (chunk: readonly T[]) => string, signal?: AbortSignal
+): string {
+  const documents: string[] = [];
+  let totalCharacters = 0;
+  function append(start: number, end: number): void {
+    throwIfAborted(signal);
+    const encoded = encode(items.slice(start, end));
+    if (encoded.length <= FUMEN_MAX_SOURCE_CHARACTERS) {
+      totalCharacters += encoded.length + (documents.length > 0 ? 1 : 0);
+      if (documents.length === FUMEN_BUNDLE_MAX_DOCUMENTS || totalCharacters > FUMEN_BUNDLE_MAX_CHARACTERS) {
+        throw new SolutionExportError('clipboard-output-too-large');
+      }
+      documents.push(encoded);
+    } else if (end - start > 1) {
+      const middle = start + Math.floor((end - start) / 2);
+      append(start, middle);
+      append(middle, end);
+    } else {
+      throw new Error('fumen-input-too-large');
+    }
+  }
+  for (let offset = 0; offset < items.length; offset += FUMEN_MAX_PAGES) {
+    append(offset, Math.min(offset + FUMEN_MAX_PAGES, items.length));
+  }
+  throwIfAborted(signal);
+  return documents.join('\n');
+}
+
+function assertFumenPageCount(count: number): void {
+  if (count > CTK3_MAX_BUNDLE_PAGES) {
+    throw new SolutionExportError('clipboard-output-too-large');
+  }
+}
+
+function rethrowFumenBundleLimit(error: unknown): void {
+  if (error instanceof Error && error.message === 'clipboard-output-too-large') {
+    throw new SolutionExportError('clipboard-output-too-large');
   }
 }
 
@@ -558,7 +624,7 @@ async function encodeFumenKeySourceWithoutWorker(
   source: SolutionExportKeySource,
   signal?: AbortSignal
 ): Promise<string> {
-  const encoder = new FastColoredFumenEncoder();
+  const encoder = new SegmentedColoredFumenEncoder();
   for (let offset = 0; offset < source.keyCount; offset += LAZY_SOURCE_CHUNK_SIZE) {
     throwIfAborted(signal);
     const count = Math.min(
@@ -685,7 +751,7 @@ async function requireClipboardSizedSource(
   signal?: AbortSignal
 ): Promise<void> {
   if (
-    source.keyCount > MAX_SAFE_CLIPBOARD_PAGES ||
+    source.keyCount > (format === 'fumen' ? CTK3_MAX_BUNDLE_PAGES : MAX_SAFE_CLIPBOARD_PAGES) ||
     (format === 'ctk' && source.keyCount > CTK3_MAX_BUNDLE_PAGES)
   ) {
     throw new SolutionExportError('clipboard-output-too-large');

@@ -76,24 +76,18 @@ test('single, all, and failed-queue copy use the same clipboard adapter', () => 
   assert.match(download, /error instanceof Error \? error\.message/u);
 });
 
-test('copy-all maps a 4,097-page Fumen rejection to stable EN and KO guidance', async () => {
+test('copy-all splits 4,097 Fumen pages and retains single-document limit guidance', async () => {
   const page = { height: 1, initialMask: 0n, placements: [] };
-  await assert.rejects(
-    () =>
-      production.encodeSolutionPagesForClipboard(
-        Array.from({ length: 4_097 }, () => page),
-        'fumen'
-      ),
-    (error) => {
-      const code = error instanceof Error ? error.message : '';
-      const key = production.workspaceSolutionCopyFailureKey(code);
-      assert.equal(code, 'fumen-page-limit');
-      assert.equal(key, 'fumenExportPageLimit');
-      assert.match(production.workspaceMessage('en', key), /4,096 pages/u);
-      assert.match(production.workspaceMessage('ko', key), /4,096페이지/u);
-      return true;
-    }
+  const encoded = await production.encodeSolutionPagesForClipboard(
+    Array.from({ length: 4_097 }, () => page), 'fumen'
   );
+  const documents = encoded.split('\n');
+  assert.equal(documents.length, 2);
+  assert.ok(documents.every((document) => document.startsWith('v115@')));
+  const key = production.workspaceSolutionCopyFailureKey('fumen-page-limit');
+  assert.equal(key, 'fumenExportPageLimit');
+  assert.match(production.workspaceMessage('en', key), /4,096 pages/u);
+  assert.match(production.workspaceMessage('ko', key), /4,096페이지/u);
 });
 
 test('stable Fumen ingress failures retain user-facing EN and KO messages', () => {

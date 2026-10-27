@@ -1,9 +1,10 @@
 /// <reference lib="webworker" />
 
-import { FastColoredFumenEncoder } from './fastFumenSolutionEncoder';
+import { SegmentedColoredFumenEncoder } from './fastFumenSolutionEncoder';
 import {
   encodeCtkSolutionKeySegment,
   parseSolutionKey,
+  validatePage,
   type SolutionExportPage
 } from './solutionExport';
 
@@ -22,7 +23,7 @@ type ExportWorkerResponse =
   | { type: 'failed'; taskId?: number; jobId?: number; code: string };
 
 let fumenJobId = -1;
-let fumenEncoder: FastColoredFumenEncoder | null = null;
+let fumenEncoder: SegmentedColoredFumenEncoder | null = null;
 
 self.onmessage = (event: MessageEvent<ExportWorkerRequest>) => {
   const request = event.data;
@@ -37,7 +38,7 @@ self.onmessage = (event: MessageEvent<ExportWorkerRequest>) => {
     }
     if (request.type === 'fumen-start') {
       fumenJobId = request.jobId;
-      fumenEncoder = new FastColoredFumenEncoder();
+      fumenEncoder = new SegmentedColoredFumenEncoder();
       post({ type: 'fumen-ready', jobId: request.jobId });
       return;
     }
@@ -54,7 +55,10 @@ self.onmessage = (event: MessageEvent<ExportWorkerRequest>) => {
       return;
     }
     if (request.type === 'fumen-pages-chunk') {
-      for (const page of request.pages) fumenEncoder.append(page);
+      for (const page of request.pages) {
+        validatePage(page);
+        fumenEncoder.append(page);
+      }
       post({ type: 'fumen-chunk', jobId: request.jobId });
       return;
     }

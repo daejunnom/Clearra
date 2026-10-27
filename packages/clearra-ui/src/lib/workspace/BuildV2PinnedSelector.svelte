@@ -2,7 +2,7 @@
   import { createEventDispatcher, onDestroy } from 'svelte';
   import { componentMessage } from '../i18n/componentCatalog';
   import { encodeCtk3Compact, type Ctk3Page } from './ctk3Codec';
-  import { openFieldDocument, type FieldDocumentReader } from './fieldInterchange';
+  import { openFieldDocumentAsync, type FieldDocumentReader } from './fieldInterchange';
   import type { BuildV2Request } from './buildV2Model';
   import type { WorkspaceLanguage } from './workspaceI18n';
 
@@ -17,19 +17,25 @@
   let selected = new Map<number, Ctk3Page>();
   let error = '';
   let generation = 0;
+  let loadController: AbortController | null = null;
+  let loadingSource = '';
   $: source = [
     request.solutionFormat, request.solutionDocument,
     request.capability, request.baseMask.toString(16), request.targetMask.toString(16),
     request.height, request.queue, request.rule, request.queueKnowledge,
     request.holdEnabled, request.holdPiece
   ].join(':');
-  $: if (loadedSource && source !== loadedSource) reset();
+  $: if ((loadedSource && source !== loadedSource) ||
+    (loadController && loadingSource && source !== loadingSource)) reset();
   $: selectedCount = selected.size;
   $: pageCount = reader?.pageCount ?? 0;
   $: previewRows = page ? rows(page) : [];
 
   function reset() {
     generation += 1;
+    loadController?.abort();
+    loadController = null;
+    loadingSource = '';
     reader?.close();
     reader = null;
     loadedSource = '';
@@ -43,8 +49,18 @@
   async function load() {
     reset();
     const currentGeneration = generation;
+    const requestedSource = source;
+    const controller = new AbortController();
+    loadController = controller;
+    loadingSource = requestedSource;
     try {
-      const opened = openFieldDocument(request.solutionDocument);
+      const opened = await openFieldDocumentAsync(request.solutionDocument, {
+        signal: controller.signal
+      });
+      if (controller.signal.aborted || generation !== currentGeneration || source !== requestedSource) {
+        opened.close();
+        return;
+      }
       if (opened.width !== 10 || opened.pageCount < 1) {
         opened.close();
         throw new Error('The supplied document must contain ten-column solution pages.');
@@ -56,7 +72,12 @@
       page = first;
       pageIndex = 0;
     } catch (cause) {
-      if (generation === currentGeneration) error = String(cause);
+      if (!controller.signal.aborted && generation === currentGeneration) error = String(cause);
+    } finally {
+      if (loadController === controller) {
+        loadController = null;
+        loadingSource = '';
+      }
     }
   }
 
@@ -103,6 +124,8 @@
 
   onDestroy(() => {
     generation += 1;
+    loadController?.abort();
+    loadController = null;
     reader?.close();
   });
 </script>

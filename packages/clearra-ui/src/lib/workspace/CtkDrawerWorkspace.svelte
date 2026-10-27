@@ -55,8 +55,8 @@
     type CtkPageStripItem
   } from './ctkPageNavigation';
   import {
-    encodeFieldDocumentAsync,
-    openFieldDocument
+    encodeFumenPageSourceAsync,
+    openFieldDocumentAsync
   } from './fieldInterchange';
   import {
     buildDocumentUtilityCommand,
@@ -407,13 +407,14 @@
     try {
       throwIfAborted(lifecycleController.signal);
       const source = sourceOverride ?? pendingImportSource ?? importValue;
-      const reader = openFieldDocument(source, {
+      const reader = await openFieldDocumentAsync(source, {
         workers: documentWorkerCount,
         workerFactory: createCtkDocumentWorker,
         signal: lifecycleController.signal
       });
       nextModel = CtkDrawerDocument.fromReader(reader);
       pendingImportModel = nextModel;
+      throwIfAborted(lifecycleController.signal);
       if (nextModel.width !== 10) throw new Error('width');
       const page = normalizeImportedPage(await nextModel.readPage(0));
       throwIfAborted(lifecycleController.signal);
@@ -461,13 +462,18 @@
     window.clearTimeout(copyTimer);
     copyController?.abort();
     const controller = new AbortController();
+    const source = documentModel;
+    const revision = renderDocumentRevision;
+    const format = copyFormat;
     copyController = controller;
     copyState = 'loading';
     await nextPaint();
     try {
       throwIfAborted(controller.signal);
-      const encoded = await encodeDocument(copyFormat, controller.signal);
+      assertDocumentSnapshot(source, revision);
+      const encoded = await encodeDocument(format, controller.signal, source);
       throwIfAborted(controller.signal);
+      assertDocumentSnapshot(source, revision);
       await writeClipboardText(encoded, controller.signal);
       if (copyController !== controller || closed) return;
       setCopyState('copied');
@@ -487,12 +493,17 @@
     window.clearTimeout(downloadTimer);
     downloadController?.abort();
     const controller = new AbortController();
+    const source = documentModel;
+    const revision = renderDocumentRevision;
     downloadController = controller;
     downloadState = 'loading';
     await nextPaint();
     try {
-      const encoded = await encodeDocument('ctk', controller.signal);
       throwIfAborted(controller.signal);
+      assertDocumentSnapshot(source, revision);
+      const encoded = await encodeDocument('ctk', controller.signal, source);
+      throwIfAborted(controller.signal);
+      assertDocumentSnapshot(source, revision);
       saveCtk3Source(encoded, `clearra-${pageCount}-pages.ctk3`);
       if (downloadController !== controller || closed) return;
       setDownloadState('copied');
@@ -607,6 +618,9 @@
 
   function invalidateRenderResult() {
     renderDocumentRevision += 1;
+    const error = abortError('Document changed during export.');
+    if (copyController && !copyController.signal.aborted) copyController.abort(error);
+    if (downloadController && !downloadController.signal.aborted) downloadController.abort(error);
     if (!workerFactory) return;
     if (renderActive) cancelRender();
     clearWasmTerminalResult();
@@ -621,23 +635,28 @@
 
   async function encodeDocument(
     format: 'fumen' | 'ctk',
-    signal: AbortSignal
+    signal: AbortSignal,
+    source: CtkDrawerDocument = documentModel
   ): Promise<string> {
-    const original = format === 'ctk' ? documentModel.originalCtk : null;
+    const original = format === 'ctk' ? source.originalCtk : null;
     if (original) return original;
     if (format === 'ctk') {
-      return encodeCtk3PageSourceAsync(documentModel, {
+      return encodeCtk3PageSourceAsync(source, {
         workers: documentWorkerCount,
         workerFactory: createCtkDocumentWorker,
         signal
       });
     }
-    const materialized = await documentModel.materialize(signal);
-    throwIfAborted(signal);
-    return encodeFieldDocumentAsync(materialized, format, {
+    return encodeFumenPageSourceAsync(source, {
       signal,
       workers: documentWorkerCount
     });
+  }
+
+  function assertDocumentSnapshot(source: CtkDrawerDocument, revision: number) {
+    if (source !== documentModel || revision !== renderDocumentRevision) {
+      throw abortError('Document changed during export.');
+    }
   }
 
   function setCopyState(next: 'copied' | 'failed') {

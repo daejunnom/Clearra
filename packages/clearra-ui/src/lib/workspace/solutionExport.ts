@@ -558,7 +558,7 @@ function paintCtkMask(
   }
 }
 
-function validatePage(page: SolutionExportPage) {
+export function validatePage(page: SolutionExportPage) {
   if (!Number.isInteger(page.height) || page.height < 1 || page.height > 24) {
     throw new SolutionExportError('invalid-page');
   }

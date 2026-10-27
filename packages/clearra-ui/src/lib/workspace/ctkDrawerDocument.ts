@@ -11,6 +11,7 @@ export class CtkDrawerDocument {
   private order: number[] | null = null;
   private nextInsertedId = -1;
   private changed = false;
+  private documentRevision = 0;
 
   private constructor(
     width: number,
@@ -36,6 +37,10 @@ export class CtkDrawerDocument {
 
   get pageCount(): number {
     return this.order?.length ?? this.sourceCount;
+  }
+
+  get revision(): number {
+    return this.documentRevision;
   }
 
   get originalCtk(): string | null {
@@ -111,6 +116,7 @@ export class CtkDrawerDocument {
     if (id < 0) this.inserted.set(id, page);
     else this.overrides.set(id, page);
     this.changed = true;
+    this.documentRevision += 1;
   }
 
   insertPage(pageIndex: number, page: Ctk3Page) {
@@ -127,6 +133,7 @@ export class CtkDrawerDocument {
     this.inserted.set(id, page);
     order.splice(pageIndex, 0, id);
     this.changed = true;
+    this.documentRevision += 1;
   }
 
   removePage(pageIndex: number) {
@@ -137,6 +144,7 @@ export class CtkDrawerDocument {
     const [id] = order.splice(pageIndex, 1);
     if (id < 0) this.inserted.delete(id);
     this.changed = true;
+    this.documentRevision += 1;
   }
 
   async materialize(signal?: AbortSignal): Promise<Ctk3Document> {
