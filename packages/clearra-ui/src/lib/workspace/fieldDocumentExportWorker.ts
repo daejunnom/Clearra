@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import type { Ctk3Document } from './ctk3Codec';
-import { encodeFieldDocument } from './fieldInterchange';
+import { encodeFieldDocument } from './fieldInterchangeCore';
 
 self.onmessage = (event: MessageEvent<Ctk3Document>) => {
   try {

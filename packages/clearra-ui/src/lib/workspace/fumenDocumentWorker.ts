@@ -1,4 +1,4 @@
-import { openFieldDocument, type FieldDocumentReader } from './fieldInterchange';
+import { openFieldDocument, type FieldDocumentReader } from './fieldInterchangeCore';
 
 type Request = {
   id: number;
