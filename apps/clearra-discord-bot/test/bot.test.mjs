@@ -335,9 +335,9 @@ test("registered command metadata and every help page stay inside Discord limits
 
   const englishCommandList = formatSlashCommandHelp("", "en");
   const koreanCommandList = formatSlashCommandHelp("", "ko");
-  assert.match(englishCommandList, /every target height from 1 through 6 rows/u);
+  assert.match(englishCommandList, /PC search supports target heights 1–6 or 1–24/u);
   assert.match(englishCommandList, /support 1 through 24 rows/u);
-  assert.match(koreanCommandList, /1–6줄의 모든 목표 높이를 지원/u);
+  assert.match(koreanCommandList, /PC 탐색은 명령어에 따라 1–6줄 또는 1–24줄/u);
   assert.match(koreanCommandList, /1–24줄을 지원/u);
   assert.doesNotMatch(englishCommandList, /prefill/i);
   assert.doesNotMatch(koreanCommandList, /기본 4줄|기본 8줄/u);
