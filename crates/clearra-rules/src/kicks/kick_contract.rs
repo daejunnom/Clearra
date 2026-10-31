@@ -564,5 +564,6 @@ mod tests {
                 + jstris_verification_cases().len()
         );
         assert_eq!(report.verification_failure_count(), 0);
+        assert_eq!(srs_plus_verification_cases().len(), 80);
     }
 }

@@ -119,6 +119,8 @@ fn srs_plus_profile_entries() -> Vec<KickTableEntry> {
     entries.extend(
         PieceKind::STANDARD_TETROMINOES
             .into_iter()
+            // O keeps the same occupied cells in every orientation. Two
+            // origin-only quarter turns replace its redundant half-turn edge.
             .filter(|piece| *piece != PieceKind::O)
             .flat_map(|piece| {
                 one_eighty_transitions().into_iter().map(move |(from, to)| {

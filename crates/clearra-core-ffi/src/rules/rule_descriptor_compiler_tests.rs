@@ -47,14 +47,41 @@ fn srs_profile_compiles_to_c_descriptor() {
 }
 
 #[test]
-fn srs_plus_profile_compiles_to_c_descriptor() {
+fn srs_plus_projects_the_canonical_verified_table_to_c() {
     let problem = opening_problem_with_rule(srs_plus(), None);
 
     let descriptor = RuleDescriptorCompiler::compile(&problem).expect("descriptor");
 
     assert_eq!(descriptor.rule_profile_id, C_RULE_SRS_PLUS);
     assert_eq!(descriptor.kick_profile_id, C_KICK_SRS_PLUS_180);
-    assert_eq!(descriptor.has_verified_kick_profile, 0);
+    assert_eq!(descriptor.has_verified_kick_profile, 1);
+    assert_eq!(descriptor.verified_supports_180, 1);
+    assert_eq!(descriptor.verified_transition_count, 80);
+
+    let canonical = SrsKicks::srs_plus_profile();
+    for (expected, actual) in canonical
+        .entries()
+        .iter()
+        .zip(&descriptor.verified_transitions[..usize::from(descriptor.verified_transition_count)])
+    {
+        use super::super::kick_table_identity_mapper::{piece_code, rotation_code};
+        let transition = expected.transition();
+        assert_eq!(actual.piece, piece_code(transition.piece()));
+        assert_eq!(actual.from_rotation, rotation_code(transition.from()));
+        assert_eq!(actual.to_rotation, rotation_code(transition.to()));
+        assert_eq!(
+            usize::from(actual.sequence.count),
+            expected.sequence().len()
+        );
+        for (offset, projected) in expected
+            .sequence()
+            .offsets()
+            .iter()
+            .zip(&actual.sequence.offsets[..usize::from(actual.sequence.count)])
+        {
+            assert_eq!((projected.dx, projected.dy), (offset.dx(), offset.dy()));
+        }
+    }
 }
 
 #[test]

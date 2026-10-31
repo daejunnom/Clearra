@@ -1,0 +1,60 @@
+name: SRS+ Source Parity (Non-publishing)
+
+on:
+  push:
+    branches: ["fix/tetrio-srs-plus-canonical-20261031"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: srs-plus-parity-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+
+# Focused source feedback only. This does not grant canonical release or
+# Pages authority and never edits signed accelerator catalogs or assets.
+jobs:
+  source-parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CLEARRA_BUILD_PURPOSE: experiment
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Check changed Rust formatting
+        run: cargo +1.98.1 fmt -p clearra-rules -p clearra-core-ffi -p clearra-cli --check
+      - name: Verify canonical rules and Rust-to-C descriptors
+        run: cargo +1.98.1 test --locked -p clearra-rules -p clearra-core-ffi --lib
+      - name: Verify public kick diagnostics
+        run: cargo +1.98.1 test --locked -p clearra-cli --lib verify_command_reports_builtin_kick_contracts
+      - name: Verify C rules, reachability, and native CLI routing in a managed build
+        shell: bash
+        run: |
+          node scripts/tools/invoke-clearra-build.mjs --purpose experiment -- node --input-type=module <<'JS'
+          import { spawnSync } from 'node:child_process';
+          import { join } from 'node:path';
+          const transaction = process.env.CLEARRA_BUILD_TRANSACTION_ROOT;
+          if (!transaction) throw new Error('Managed build transaction is required');
+          const out = join(transaction, 'core-c-srs-plus');
+          const run = (command, args, env = process.env) => {
+            const result = spawnSync(command, args, { stdio: 'inherit', env });
+            if (result.error) throw result.error;
+            if (result.status !== 0) process.exit(result.status ?? 1);
+          };
+          run('cmake', ['-S', 'core-c', '-B', out, '-DBUILD_TESTING=ON', '-DCLEARRA_CORE_SPLIT_TESTS=ON', '-DCMAKE_BUILD_TYPE=Debug']);
+          run('cmake', ['--build', out, '--target', 'clearra_core', 'clearra_core_test_oracle', 'rule_profile_tests', 'candidate_tests', 'reachability_tests', '-j', '4']);
+          run('ctest', ['--test-dir', out, '--output-on-failure', '-R', '^(rule_profile_tests|candidate_tests|reachability_tests)$']);
+          run('cargo', ['+1.98.1', 'test', '--locked', '-p', 'clearra-cli', '--features', 'native-c-core', '--lib', 'run_with_args_routes_verify_kicks_command'], {
+            ...process.env,
+            RUSTFLAGS: [process.env.RUSTFLAGS, `-L native=${out}`].filter(Boolean).join(' ')
+          });
+          JS

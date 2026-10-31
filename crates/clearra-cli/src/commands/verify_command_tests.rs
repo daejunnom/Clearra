@@ -82,9 +82,6 @@ fn verify_command_reports_builtin_kick_contracts() {
     assert!(output.stdout().contains("kind: verify-kicks"));
     assert!(output.stdout().contains("srs_jlstz_transitions: 8"));
     assert!(output.stdout().contains("srs_i_transitions: 8"));
-    assert!(output.stdout().contains("srs_profile_id: srs-90"));
-    assert!(output.stdout().contains("no_kick_profile_id: no-kick"));
-    assert!(output.stdout().contains("srs_plus_profile_id: srs-plus"));
     assert!(output
         .stdout()
         .contains("srs_plus_effective_kick_model: srs-plus-180"));
@@ -92,4 +89,21 @@ fn verify_command_reports_builtin_kick_contracts() {
     assert!(output.stdout().contains("kick_verification_cases: 264"));
     assert!(output.stdout().contains("kick_verification_failures: 0"));
     assert!(!output.stdout().contains("srs_plus_extension_reason"));
+
+    // The compact text summary omits profile IDs; the structured contract
+    // retains them alongside the same verified transition and case counts.
+    let output = VerifyCommand::run(
+        &VerifyArgs::new(Some("kicks".to_owned())),
+        RenderFormat::Json,
+    );
+    assert_eq!(output.exit_code(), ExitCode::Success);
+    let report: serde_json::Value =
+        serde_json::from_str(output.stdout()).expect("verify kicks JSON response");
+    let summary = &report["summary"];
+    assert_eq!(summary["srs_profile_id"], "srs-90");
+    assert_eq!(summary["no_kick_profile_id"], "no-kick");
+    assert_eq!(summary["srs_plus_profile_id"], "srs-plus");
+    assert_eq!(summary["srs_plus_180_transitions"], 24);
+    assert_eq!(summary["kick_verification_cases"], 264);
+    assert_eq!(summary["kick_verification_failures"], 0);
 }

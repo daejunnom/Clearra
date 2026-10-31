@@ -36,12 +36,16 @@ impl RuleDescriptorCompiler {
             return compile_verified_profile(base, rule, profile);
         }
 
-        // Core C intentionally has no second, hand-maintained SRS-X table.
-        // Project the canonical Rust table through the same verified-profile
-        // ABI used by imported profiles so the public built-in catalog and the
-        // native executor share one source of truth.
-        if rule.id() == RuleProfileId::SrsX {
-            let profile = VerifiedKickTableProfile::try_new(SrsKicks::srs_x_profile())
+        // TETR.IO profiles use the canonical Rust table through the same
+        // verified-profile ABI as imported profiles. SRS+ must not silently
+        // select a separately maintained C table during native execution.
+        let canonical = match rule.id() {
+            RuleProfileId::SrsPlus => Some(SrsKicks::srs_plus_profile()),
+            RuleProfileId::SrsX => Some(SrsKicks::srs_x_profile()),
+            _ => None,
+        };
+        if let Some(canonical) = canonical {
+            let profile = VerifiedKickTableProfile::try_new(canonical)
                 .map_err(|_| FfiProblemError::UnverifiedRuleProfileRejected { rule_profile_id })?;
             return compile_verified_profile(base, rule, &profile);
         }

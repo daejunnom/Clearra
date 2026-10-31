@@ -164,7 +164,8 @@ fn packing_problem_builder_preserves_rule_profile() {
     assert_eq!(compact.rule.rule_profile_id, C_RULE_SRS_PLUS);
     assert_eq!(compact.rule.kick_profile_id, C_KICK_SRS_PLUS_180);
     assert_eq!(compact.rule.spawn_profile_id, C_SPAWN_STANDARD_10);
-    assert_eq!(compact.rule.has_verified_kick_profile, 0);
+    assert_eq!(compact.rule.has_verified_kick_profile, 1);
+    assert_eq!(compact.rule.verified_transition_count, 80);
 }
 
 #[test]

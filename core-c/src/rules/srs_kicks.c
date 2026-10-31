@@ -2,7 +2,7 @@
 
 #define SRS_90_KICK_COUNT 5u
 #define SRS_PLUS_180_KICK_COUNT 6u
-#define SRS_PLUS_I_180_KICK_COUNT 6u
+#define SRS_PLUS_I_180_KICK_COUNT 2u
 #define JSTRIS_180_KICK_COUNT 2u
 
 static const uint8_t STANDARD_PIECES[CLEARRA_RULE_STANDARD_PIECE_COUNT] = {
@@ -207,15 +207,16 @@ static ClearraCompactKickSequence srs_plus_180_sequence(
     static const int8_t lr[SRS_PLUS_180_KICK_COUNT][2] = {
         {0, 0}, {-1, 0}, {-1, 2}, {-1, 1}, {0, 2}, {0, 1}};
     static const int8_t i_zt[SRS_PLUS_I_180_KICK_COUNT][2] = {
-        {0, 0}, {0, 1}, {1, 1}, {-1, 1}, {1, 0}, {-1, 0}};
+        {0, 0}, {0, 1}};
     static const int8_t i_rl[SRS_PLUS_I_180_KICK_COUNT][2] = {
-        {1, 1}, {1, 0}, {0, 0}, {2, 0}, {0, 1}, {2, 1}};
+        {0, 0}, {1, 0}};
     static const int8_t i_tz[SRS_PLUS_I_180_KICK_COUNT][2] = {
-        {-1, -1}, {0, -1}, {0, 1}, {0, 0}, {-1, 1}, {-1, 0}};
+        {0, 0}, {0, -1}};
     static const int8_t i_lr[SRS_PLUS_I_180_KICK_COUNT][2] = {
-        {0, 0}, {-1, 0}, {-1, 2}, {-1, 1}, {0, 2}, {0, 1}};
+        {0, 0}, {-1, 0}};
 
     if (piece == CLR_PIECE_O) {
+        /* O half turns add no occupied placements; two quarter turns suffice. */
         return (ClearraCompactKickSequence){0};
     }
     if (piece == CLR_PIECE_I) {
