@@ -46,6 +46,15 @@ pass the initial origin attempt for both quarter and half turns. It does not
 select `oo_kicks`. There are therefore **84** standard transitions, including
 four O half turns with the single attempt `(0,0)`.
 
+The fixture records these 84 source transitions without changing their meaning.
+Clearra's SRS+ search profile deliberately retains **80** runtime transitions:
+it omits the four redundant O half-turn edges. Every O half turn can be replaced
+by two origin-only quarter turns. The intermediate and final occupied cells are
+identical, so this preserves occupied placements, reachability, line clears and
+PC solutions. This equivalence assumes the search does not optimize exact input
+count or model per-input timing or lock-reset limits. The raw source reference
+and the optimized runtime graph serve different purposes.
+
 This fixture describes discrete rotation geometry and candidate order. It does
 not claim equivalence for all timing, fractional gravity, lock-delay or top-out
 behavior in the complete TETR.IO engine. In particular, application-specific
@@ -58,20 +67,24 @@ compiling the original C table and the original Rust profile from the baseline.
 
 | Baseline implementation | Matching transitions | Differences |
 | --- | ---: | --- |
-| Rust SRS+ | 80 of 84 | Four O half turns were absent. |
-| C builtin SRS+ | 76 of 84 | Four I half-turn sequences differed and four O half turns were absent. |
+| Rust SRS+ | 80 of 84 | Four geometrically redundant O half turns are intentionally absent. |
+| C builtin SRS+ | 76 of 84 | Four I half-turn sequences differed; four redundant O half turns are absent. |
 
 The Rust I half-turn sequences already matched TETR.IO. Copying the old six-entry
-C sequences into Rust would introduce a regression. The corrected Rust profile
+C sequences into Rust would change first-success rotation behavior and can
+change reachable occupied placements. The original 80-transition Rust profile
 is the canonical default for Rust callers and is projected through the verified
 descriptor ABI when invoking C. Direct C callers retain a compatible builtin
-table, checked against the same source fixture. SRS, SRS-X and Jstris behavior
-are not changed by this correction.
+table with the corrected two-attempt I half turns and the same O optimization.
+Both paths are checked against the same source fixture, with the explicit O
+equivalence above. SRS, SRS-X and Jstris behavior are not changed.
 
-The existing ABI already allows 84 transitions and 12 offsets. Adding the four
-O transitions changes no public layout or ABI version. Descriptor and table
-identities must still be derived from their complete contents; previously
-generated acceleration data must pass the normal identity checks.
+The existing ABI capacity remains 84 transitions and 12 offsets; no public layout
+or ABI version changes. Restoring the original Rust transition contents preserves
+its rule fingerprint. The C descriptor changes from selecting its builtin table
+to carrying the verified Rust profile, so descriptor-derived identities must
+still be recomputed. Previously generated acceleration data must pass the normal
+identity checks for its actual generating profile and algorithm.
 
 ## Reproduction
 
@@ -98,9 +111,12 @@ O dispatch requires a fresh audit rather than silently applying this converter.
 The transition hash is SHA-256 of UTF-8 JSON for `transitions_y_up`, using sorted
 keys and separators `(',', ':')`; offset order inside each sequence is retained.
 
-The Rust rules test checks all 84 transitions and the source y conversion. The
-FFI test checks the complete canonical projection. The C `rule_profile_tests`
-checks all 84 native transitions; `candidate_tests` also checks the normalized
-I half-turn displacement geometry. `reachability_tests` exercises the native
-rotation/reachability path. The generator and fixtures are review inputs, not a
-network dependency of ordinary tests or builds.
+The Rust rules test checks all 84 source transitions and the source y conversion,
+matches the 80 runtime transitions, and verifies the two-quarter-turn substitute
+and unchanged O cells for the four omitted edges. The FFI test checks the complete
+80-transition canonical projection. The C `rule_profile_tests` applies the same
+source comparison and O omission contract to builtin and verified descriptors;
+`candidate_tests` also checks normalized I half-turn displacement geometry.
+`reachability_tests` exercises the native rotation/reachability path. The generator
+and fixtures are review inputs, not a network dependency of ordinary tests or
+builds. Temporary performance experiments are not part of this fixture package.

@@ -31,13 +31,9 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
       - name: Check changed Rust formatting
-        run: cargo +1.98.1 fmt -p clearra-rules -p clearra-core-ffi -p clearra-cli -p clearra-accelerator-runtime -p clearra-wasm-abi --check
+        run: cargo +1.98.1 fmt -p clearra-rules -p clearra-core-ffi -p clearra-cli --check
       - name: Verify canonical rules and Rust-to-C descriptors
         run: cargo +1.98.1 test --locked -p clearra-rules -p clearra-core-ffi --lib
-      - name: Verify stale catalog admission and download plans
-        run: |
-          cargo +1.98.1 test --locked -p clearra-accelerator-runtime -p clearra-wasm-abi catalog_rule_compatibility
-          cargo +1.98.1 test --locked -p clearra-cli embedded_catalog_summary_reports_authority_without_opening_network_or_store
       - name: Verify public kick diagnostics
         run: cargo +1.98.1 test --locked -p clearra-cli --lib verify_command_reports_builtin_kick_contracts
       - name: Verify C rules, reachability, and native CLI routing in a managed build

@@ -125,21 +125,17 @@ fn srs_plus_profile_preserves_symmetric_i_and_transition_specific_180_kicks() {
             .offsets(),
         offsets([(0, 0), (0, 1)])
     );
-    assert_eq!(
-        profile
-            .sequence_for(KickTransition::new(
-                PieceKind::O,
-                RotationState::Zero,
-                RotationState::Two
-            ))
-            .expect("O 0->2 origin rotation precedes disallow_kick")
-            .offsets(),
-        offsets([(0, 0)])
-    );
+    assert!(profile
+        .sequence_for(KickTransition::new(
+            PieceKind::O,
+            RotationState::Zero,
+            RotationState::Two
+        ))
+        .is_none());
 }
 
 #[test]
-fn srs_plus_matches_the_tetrio_source_fixture_for_all_84_transitions() {
+fn srs_plus_matches_the_tetrio_source_fixture_with_redundant_o_half_turns_elided() {
     let profile = SrsKicks::srs_plus_profile();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/rules/tetrio_srs_plus_standard_tetromino_kicks.json"
@@ -153,7 +149,7 @@ fn srs_plus_matches_the_tetrio_source_fixture_for_all_84_transitions() {
     assert_eq!(fixture["implicit_origin_attempt"], true);
     assert_eq!(fixture["standard_o"]["origin_rotation_allowed"], true);
     assert_eq!(fixture["standard_o"]["uses_oo_kicks"], false);
-    assert_eq!(profile.transition_count(), 84);
+    assert_eq!(profile.transition_count(), 80);
     assert_eq!(normalized.len(), 84);
     assert_eq!(profile.duplicate_transitions(), []);
 
@@ -179,6 +175,36 @@ fn srs_plus_matches_the_tetrio_source_fixture_for_all_84_transitions() {
                 tetrio_source_offsets_y_up(&fixture["families"][family][&source_transition])
             };
             assert_eq!(expected, source_expected, "source-axis conversion {key}");
+            if piece == PieceKind::O && to == from.rotated_180() {
+                assert!(profile
+                    .sequence_for(KickTransition::new(piece, from, to))
+                    .is_none());
+                let middle = from.clockwise();
+                // O's official half-turn is a redundant edge: the two
+                // quarter-turn intermediates have exactly the same cells.
+                for (a, b) in [(from, middle), (middle, to)] {
+                    assert_eq!(
+                        profile
+                            .sequence_for(KickTransition::new(piece, a, b))
+                            .expect("O quarter-turn substitute")
+                            .offsets(),
+                        expected
+                    );
+                    let shape = |rotation: RotationState| {
+                        let mut cells = fixture["standard_geometry_y_down"]["O"]["cells"]
+                            [usize::from(rotation.quarter_turns())]
+                        .as_array()
+                        .expect("O geometry")
+                        .iter()
+                        .map(|cell| (cell[0].as_i64().unwrap(), cell[1].as_i64().unwrap()))
+                        .collect::<Vec<_>>();
+                        cells.sort_unstable();
+                        cells
+                    };
+                    assert_eq!(shape(a), shape(b), "O occupied-cell equivalence");
+                }
+                continue;
+            }
             assert_eq!(
                 profile
                     .sequence_for(KickTransition::new(piece, from, to))

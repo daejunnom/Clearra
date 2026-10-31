@@ -929,7 +929,7 @@ mod case_run_with_args_routes_verify_kicks_command {
         assert!(output
             .stdout()
             .contains("srs_plus_effective_kick_model: srs-plus-180"));
-        assert!(output.stdout().contains("srs_plus_180_transitions: 28"));
+        assert!(output.stdout().contains("srs_plus_180_transitions: 24"));
     }
 }
 

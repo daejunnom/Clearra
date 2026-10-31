@@ -56,7 +56,7 @@ fn srs_plus_projects_the_canonical_verified_table_to_c() {
     assert_eq!(descriptor.kick_profile_id, C_KICK_SRS_PLUS_180);
     assert_eq!(descriptor.has_verified_kick_profile, 1);
     assert_eq!(descriptor.verified_supports_180, 1);
-    assert_eq!(descriptor.verified_transition_count, 84);
+    assert_eq!(descriptor.verified_transition_count, 80);
 
     let canonical = SrsKicks::srs_plus_profile();
     for (expected, actual) in canonical
@@ -117,7 +117,7 @@ fn imported_verified_kick_profile_compiles_to_c_descriptor() {
     assert_eq!(descriptor.kick_profile_id, C_KICK_IMPORTED);
     assert_eq!(descriptor.has_verified_kick_profile, 1);
     assert_eq!(descriptor.verified_supports_180, 1);
-    assert_eq!(descriptor.verified_transition_count, 84);
+    assert_eq!(descriptor.verified_transition_count, 80);
     assert_eq!(descriptor.verified_transitions[0].sequence.count, 5);
 }
 

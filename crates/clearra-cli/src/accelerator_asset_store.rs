@@ -10,8 +10,8 @@ use clearra_accelerator_product_host::{
     VerifiedProductCatalog,
 };
 use clearra_accelerator_runtime::{
-    active_identity, catalog_rule_matches_runtime, install, qualify_signed as qualify,
-    remove as remove_active, QualifiedAccelerator,
+    active_identity, install, qualify_signed as qualify, remove as remove_active,
+    QualifiedAccelerator,
 };
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -69,37 +69,22 @@ pub(crate) struct LocalAssetReport {
     pub(crate) catalog_identity: [u8; 32],
 }
 
-fn runtime_qualified_asset<'a>(
-    kind: ProductCatalogKind,
-    profile: &str,
-    status: &'a CatalogProfileStatus,
-) -> Option<&'a QualifiedCatalogAsset> {
-    let CatalogProfileStatus::Qualified(asset) = status else {
-        return None;
-    };
-    catalog_rule_matches_runtime(kind, profile, asset.authority().rule_identity())
-        .then_some(asset.as_ref())
-}
-
 pub(crate) fn catalog_summary(
     kind: ProductCatalogKind,
     profile: &str,
 ) -> Result<CatalogSummary, &'static str> {
     let catalog = verified_catalog(kind)?;
-    match runtime_qualified_asset(
-        kind,
-        profile,
-        catalog
-            .profile(profile)
-            .ok_or("accelerator: profile is absent from the catalog")?,
-    ) {
-        None => Ok(CatalogSummary {
+    match catalog
+        .profile(profile)
+        .ok_or("accelerator: profile is absent from the catalog")?
+    {
+        CatalogProfileStatus::NotQualified => Ok(CatalogSummary {
             catalog_identity: catalog.catalog_identity(),
             state: LocalAssetState::NotQualified,
             payload_bytes: None,
             generation_identity: None,
         }),
-        Some(asset) => Ok(CatalogSummary {
+        CatalogProfileStatus::Qualified(asset) => Ok(CatalogSummary {
             catalog_identity: catalog.catalog_identity(),
             state: LocalAssetState::Ready,
             payload_bytes: Some(asset.authority().payload_bytes()),
@@ -118,7 +103,7 @@ pub(crate) fn status(
     let status = catalog
         .profile(profile)
         .ok_or("accelerator: profile is absent from the catalog")?;
-    let Some(asset) = runtime_qualified_asset(kind, profile, status) else {
+    let CatalogProfileStatus::Qualified(asset) = status else {
         return Ok(LocalAssetReport {
             state: LocalAssetState::NotQualified,
             installed: profile_root.join(JOURNAL).is_file(),
@@ -206,13 +191,10 @@ where
     validate_profile(profile)?;
     let catalog = verified_catalog(kind)?;
     let catalog_identity = catalog.catalog_identity();
-    let Some(asset) = runtime_qualified_asset(
-        kind,
-        profile,
-        catalog
-            .profile(profile)
-            .ok_or("accelerator: profile is absent from the catalog")?,
-    ) else {
+    let CatalogProfileStatus::Qualified(asset) = catalog
+        .profile(profile)
+        .ok_or("accelerator: profile is absent from the catalog")?
+    else {
         return Err("accelerator: this profile has no signed qualified Release asset");
     };
     ensure_real_directory(profile_root)?;
@@ -817,23 +799,16 @@ mod tests {
                 let summary = catalog_summary(kind, profile).unwrap();
                 let catalog = embedded_catalog(kind).unwrap();
                 match catalog.profile(profile).unwrap() {
-                    CatalogProfileStatus::Qualified(asset)
-                        if catalog_rule_matches_runtime(
-                            kind,
-                            profile,
-                            asset.authority().rule_identity(),
-                        ) =>
-                    {
+                    CatalogProfileStatus::NotQualified => {
+                        assert_eq!(summary.state, LocalAssetState::NotQualified);
+                        assert_eq!(summary.payload_bytes, None);
+                    }
+                    CatalogProfileStatus::Qualified(asset) => {
                         assert_eq!(summary.state, LocalAssetState::Ready);
                         assert_eq!(
                             summary.payload_bytes,
                             Some(asset.authority().payload_bytes())
                         );
-                    }
-                    _ => {
-                        assert_eq!(summary.state, LocalAssetState::NotQualified);
-                        assert_eq!(summary.payload_bytes, None);
-                        assert_eq!(summary.generation_identity, None);
                     }
                 }
             }

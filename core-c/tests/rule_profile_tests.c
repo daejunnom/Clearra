@@ -84,7 +84,7 @@ static clr_rule_profile_descriptor descriptor(uint32_t rule, uint32_t kick) {
         descriptor(CLR_RULE_SRS_PLUS, CLR_KICK_SRS_PLUS_180);
     EXPECT_STATUS(clearra_rule_profile_from_descriptor(&srs_plus, &profile),
                   CLEARRA_RULE_OK);
-    EXPECT_U16(profile.kick_table.transition_count, 84);
+    EXPECT_U16(profile.kick_table.transition_count, 80);
     EXPECT_TRUE(profile.supports_180);
 
     const ClearraCompactKickSequence *i_half = 0;
@@ -268,10 +268,7 @@ static void srs_plus_capability_reported_fixture(void) {
             CLEARRA_RULE_ROTATION_SPAWN,
             CLEARRA_RULE_ROTATION_REVERSE,
             &sequence),
-        CLEARRA_RULE_OK);
-    EXPECT_U16(sequence->count, 1);
-    EXPECT_I8(sequence->offsets[0].dx, 0);
-    EXPECT_I8(sequence->offsets[0].dy, 0);
+        CLEARRA_RULE_TRANSITION_NOT_FOUND);
 
     EXPECT_STATUS(
         clearra_kick_table_sequence_for(
@@ -375,16 +372,25 @@ static void jstris_180_profile_matches_two_kick_reference_fixture(void) {
         CLEARRA_RULE_TRANSITION_NOT_FOUND);
 }
 
-static void srs_plus_matches_all_84_tetrio_source_transitions(void) {
+static bool redundant_o_half_turn(const ClearraCompactKickTransition *transition) {
+    return transition->piece == CLR_PIECE_O &&
+        (transition->to_rotation + 4u - transition->from_rotation) % 4u == 2u;
+}
+
+static void srs_plus_matches_source_with_redundant_o_half_turns_elided(void) {
     clr_rule_profile_descriptor source = descriptor(CLR_RULE_SRS_PLUS, CLR_KICK_SRS_PLUS_180);
     for (uint8_t verified = 0; verified < 2; verified++) {
         source.has_verified_kick_profile = verified;
         if (verified != 0) {
             source.verified_supports_180 = 1;
-            source.verified_transition_count = 84;
+            source.verified_transition_count = 0;
             for (uint16_t index = 0; index < 84; index++) {
                 const ClearraCompactKickTransition *fixture = &TETRIO_SRS_PLUS_FIXTURE[index];
-                clr_kick_transition_descriptor *projected = &source.verified_transitions[index];
+                if (redundant_o_half_turn(fixture)) {
+                    continue;
+                }
+                clr_kick_transition_descriptor *projected =
+                    &source.verified_transitions[source.verified_transition_count++];
                 projected->piece = fixture->piece;
                 projected->from_rotation = fixture->from_rotation;
                 projected->to_rotation = fixture->to_rotation;
@@ -397,11 +403,31 @@ static void srs_plus_matches_all_84_tetrio_source_transitions(void) {
         }
         ClearraCompactRuleProfile profile;
         EXPECT_STATUS(clearra_rule_profile_from_descriptor(&source, &profile), CLEARRA_RULE_OK);
-        EXPECT_U16(profile.kick_table.transition_count, 84);
+        EXPECT_U16(profile.kick_table.transition_count, 80);
         EXPECT_TRUE(profile.srs_plus_capability_reported);
         for (uint16_t index = 0; index < 84; index++) {
             const ClearraCompactKickTransition *expected = &TETRIO_SRS_PLUS_FIXTURE[index];
             const ClearraCompactKickSequence *actual = 0;
+            if (redundant_o_half_turn(expected)) {
+                EXPECT_U16(expected->sequence.count, 1);
+                EXPECT_I8(expected->sequence.offsets[0].dx, 0);
+                EXPECT_I8(expected->sequence.offsets[0].dy, 0);
+                EXPECT_STATUS(clearra_kick_table_sequence_for(
+                    &profile.kick_table, expected->piece, expected->from_rotation,
+                    expected->to_rotation, &actual), CLEARRA_RULE_TRANSITION_NOT_FOUND);
+                uint8_t from = expected->from_rotation;
+                for (uint8_t step = 0; step < 2; step++) {
+                    uint8_t to = (uint8_t)((from + 1u) % 4u);
+                    EXPECT_STATUS(clearra_kick_table_sequence_for(
+                        &profile.kick_table, CLR_PIECE_O, from, to, &actual), CLEARRA_RULE_OK);
+                    EXPECT_U16(actual->count, 1);
+                    EXPECT_I8(actual->offsets[0].dx, 0);
+                    EXPECT_I8(actual->offsets[0].dy, 0);
+                    from = to;
+                }
+                EXPECT_U16(from, expected->to_rotation);
+                continue;
+            }
             EXPECT_STATUS(clearra_kick_table_sequence_for(
                 &profile.kick_table, expected->piece, expected->from_rotation,
                 expected->to_rotation, &actual), CLEARRA_RULE_OK);
@@ -422,7 +448,7 @@ int main(void) {
     imported_verified_kick_profile_compiles_to_compact_descriptor_fixture();
     verified_srs_x_max_sequence_round_trips_fixture();
     srs_plus_capability_reported_fixture();
-    srs_plus_matches_all_84_tetrio_source_transitions();
+    srs_plus_matches_source_with_redundant_o_half_turns_elided();
     jstris_180_profile_matches_two_kick_reference_fixture();
     return 0;
 }

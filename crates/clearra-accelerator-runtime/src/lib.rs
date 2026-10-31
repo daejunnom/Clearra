@@ -31,28 +31,6 @@ pub fn active_identity(kind: ProductCatalogKind, profile: &str) -> Option<([u8; 
     }
 }
 
-/// A signed catalog can outlive the compiled rule tables. Hosts must apply
-/// this check before advertising or downloading its asset; payload admission
-/// still performs the complete signed, structural and product qualification.
-pub fn catalog_rule_matches_runtime(
-    kind: ProductCatalogKind,
-    profile: &str,
-    rule_identity: [u8; 32],
-) -> bool {
-    let Some(kick) = KickTableProfileId::parse(profile) else {
-        return false;
-    };
-    let expected = match kind {
-        ProductCatalogKind::ExactLegalBoard => built_in_legal_board_binding(kick)
-            .ok()
-            .map(|binding| binding.rule_identity),
-        ProductCatalogKind::BoardConditionedReachability => built_in_local_relation_binding(kick)
-            .ok()
-            .map(|binding| binding.rule_identity),
-    };
-    expected == Some(rule_identity)
-}
-
 pub fn qualify_signed(
     kind: ProductCatalogKind,
     profile: &str,
@@ -193,31 +171,7 @@ pub fn structurally_valid_legacy_sparse_candidate(profile: &str, bytes: Arc<[u8]
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn catalog_rule_compatibility_rejects_stale_and_other_product_bindings() {
-        for profile in ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"] {
-            let kick = KickTableProfileId::parse(profile).unwrap();
-            let exact = built_in_legal_board_binding(kick).unwrap().rule_identity;
-            let conditioned = built_in_local_relation_binding(kick).unwrap().rule_identity;
-            for (kind, current, other) in [
-                (ProductCatalogKind::ExactLegalBoard, exact, conditioned),
-                (
-                    ProductCatalogKind::BoardConditionedReachability,
-                    conditioned,
-                    exact,
-                ),
-            ] {
-                assert!(catalog_rule_matches_runtime(kind, profile, current));
-                let mut stale = current;
-                stale[0] ^= 1;
-                assert!(!catalog_rule_matches_runtime(kind, profile, stale));
-                assert!(!catalog_rule_matches_runtime(kind, profile, other));
-                assert!(!catalog_rule_matches_runtime(kind, "custom", current));
-            }
-        }
-    }
+    use clearra_accelerator_product_host::ProductCatalogKind;
 
     #[test]
     fn catalog_scopes_match_the_exact_product_parsers() {

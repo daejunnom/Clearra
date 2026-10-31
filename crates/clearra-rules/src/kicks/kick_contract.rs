@@ -280,13 +280,6 @@ fn srs_plus_verification_cases() -> Vec<KickVerificationCase> {
             sequence,
         ));
     }
-    for from in RotationState::ALL {
-        cases.push(KickVerificationCase::new(
-            "srs-plus-o-180-origin",
-            KickTransition::new(PieceKind::O, from, from.rotated_180()),
-            KickOffsetSequence::no_kick(),
-        ));
-    }
     cases
 }
 
@@ -543,7 +536,7 @@ mod tests {
         assert_eq!(report.srs_plus_extension_reason(), None);
         assert_eq!(
             report.srs_plus_180_transition_count(),
-            PieceKind::STANDARD_TETROMINOES.len() * 4
+            (PieceKind::STANDARD_TETROMINOES.len() - 1) * 4
         );
         assert_eq!(
             report.jstris_180_transition_count(),
@@ -571,6 +564,6 @@ mod tests {
                 + jstris_verification_cases().len()
         );
         assert_eq!(report.verification_failure_count(), 0);
-        assert_eq!(srs_plus_verification_cases().len(), 84);
+        assert_eq!(srs_plus_verification_cases().len(), 80);
     }
 }

@@ -216,8 +216,8 @@ static ClearraCompactKickSequence srs_plus_180_sequence(
         {0, 0}, {-1, 0}};
 
     if (piece == CLR_PIECE_O) {
-        /* TETR.IO tries the origin before its disallow_kick guard. */
-        return clearra_no_kick_sequence();
+        /* O half turns add no occupied placements; two quarter turns suffice. */
+        return (ClearraCompactKickSequence){0};
     }
     if (piece == CLR_PIECE_I) {
         if (from_rotation == CLEARRA_RULE_ROTATION_SPAWN &&
@@ -344,6 +344,9 @@ ClearraRuleStatus clearra_srs_plus_kick_table(ClearraCompactKickTable *out_table
     for (uint8_t piece_index = 0; piece_index < CLEARRA_RULE_STANDARD_PIECE_COUNT;
          piece_index++) {
         uint8_t piece = STANDARD_PIECES[piece_index];
+        if (piece == CLR_PIECE_O) {
+            continue;
+        }
         for (uint8_t transition_index = 0;
              transition_index < CLEARRA_RULE_180_TRANSITION_COUNT;
              transition_index++) {
