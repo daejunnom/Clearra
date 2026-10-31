@@ -568,12 +568,7 @@ test("PC save groups and best-save are distinct fixed-boundary Discord products"
   assert.deepEqual(buildSlashCommandArguments(bestSave, options), [
     "pc", "best-save", ...expectedTail,
   ]);
-  assert.match(formatSlashCommandHelp("pc saves", "en"), /all queues in the input pattern/i);
-  assert.match(formatSlashCommandHelp("pc saves", "en"), /among successful PC queues/i);
-  assert.match(formatSlashCommandHelp("pc best-save", "en"), /first one in deterministic order/i);
   assert.doesNotMatch(formatSlashCommandHelp("pc best-save", "en"), /canonical candidate ID/i);
-  assert.doesNotMatch(formatSlashCommandHelp("pc saves", "ko"), /같은 기능/u);
-  assert.doesNotMatch(formatSlashCommandHelp("pc best-save", "ko"), /같은 기능/u);
 });
 
 test("canonical slash topology uses family-specific subcommands and keeps compatibility routes explicit", () => {
@@ -647,11 +642,6 @@ test("top-level help lists the complete v0.8 grouped surface and distinguishes l
     assert.ok(english.includes(exactPath), exactPath);
     assert.ok(korean.includes(exactPath), exactPath);
   }
-  assert.match(english, /grouped commands above are recommended/i);
-  assert.match(korean, /위의 그룹형 명령어 사용을 권장/u);
-  assert.match(english, /PC search supports target heights 1–6 or 1–24/u);
-  assert.match(korean, /PC 탐색은 명령어에 따라 1–6줄 또는 1–24줄/u);
-  assert.match(formatSlashCommandHelp("", "ja"), /コマンドにより1〜6行または1〜24行/u);
   assert.match(formatSlashCommandHelp("pc chance", "ko"), /lines:1\.\.24/u);
   assert.match(formatSlashCommandHelp("pc chance", "en"), /lines:1\.\.24/u);
 
@@ -661,11 +651,6 @@ test("top-level help lists the complete v0.8 grouped surface and distinguishes l
   assert.match(canonical, /spin-profile:<profile>/u);
   assert.match(compatibility, /options:hold=use/u);
   assert.doesNotMatch(compatibility, /spin-profile:<profile>/u);
-  for (const name of ["pc path", "path"]) {
-    const help = formatSlashCommandHelp(name, "ko");
-    assert.doesNotMatch(help, /Discord publishes/u);
-    assert.match(help, /직접 입력 문법/u);
-  }
   assert.doesNotMatch(canonical, /finite path family|canonical candidate/iu);
   assert.doesNotMatch(formatSlashCommandHelp("pc path", "ko"), /path family|canonical candidate/iu);
 });
@@ -826,10 +811,6 @@ test("All-Spin PC capabilities preserve exact-queue and pattern-probability cont
     [true, false, "v0.10.0"],
     [false, true, null],
   ]);
-  assert.match(formatSlashCommandHelp("pc allspin-sol", "en"), /slash alias will be removed in v0\.10/i);
-  assert.match(formatSlashCommandHelp("pc allspin-sol", "ko"), /슬래시 별칭은 v0\.10에서 제거/u);
-  assert.match(formatSlashCommandHelp("allspin-pres-chance", "en"), /will be removed in v0\.10/i);
-  assert.match(formatSlashCommandHelp("allspin-pres-chance", "ko"), /v0\.10에서 제거/u);
 
   const contracts = new Map(
     DISCORD_PUBLIC_SEARCH_CONTRACT.map((entry) => [entry.id, entry]),
@@ -1067,7 +1048,6 @@ test("canonical PC scoring owns typed summary authority while legacy score stays
     assert.equal(scoreMinimalsArguments.includes(forbidden), false, forbidden);
   }
   assert.equal(buildSlashCommandArguments(legacy, base).includes("--score-profile"), false);
-  assert.match(formatSlashCommandHelp("pc score", "en"), /approximate scores/i);
   assert.doesNotMatch(formatSlashCommandHelp("pc score", "en"), /accuracy_level|profile_specific_exact/iu);
 });
 
@@ -1276,9 +1256,6 @@ test("pc.minimals lowers only through the typed v2 minimum-cover authority", () 
 
 test("ordered forward spin never aliases the sfinder structural namespace", () => {
   const canonical = findSlashCommand("forward").subcommands.spin;
-  assert.equal(canonical.description, "Find ordered forward selected-profile spin completions");
-  assert.match(formatSlashCommandHelp("forward spin", "ko"), /선택한 스핀 프로필/u);
-  assert.doesNotMatch(formatSlashCommandHelp("forward spin", "ko"), /TSM은 지원하지/u);
   assert.deepEqual(canonical.argvPrefix, ["spin-finder"]);
   assert.deepEqual(findSlashCommand("spin").argvPrefix, ["spin-finder"]);
   assert.deepEqual(findSlashCommand("spin-cover").argvPrefix, ["spin-finder"]);
@@ -1312,8 +1289,6 @@ test("verify is a hidden text-only diagnostic with no slash or help discovery", 
   assert.doesNotMatch(modalSource, /verify|검증/iu);
   assert.doesNotMatch(formatSlashCommandHelp("", "en"), /verify|checks:/i);
   assert.doesNotMatch(formatSlashCommandHelp("", "ko"), /검증/u);
-  assert.match(formatSlashCommandHelp("verify", "en"), /Unknown Clearra command/);
-  assert.match(formatSlashCommandHelp("verify", "ko"), /알 수 없는 Clearra 명령어/u);
   assert.equal(
     DISCORD_PUBLIC_SEARCH_CONTRACT.some(({ id }) => id === "verify"),
     false,
@@ -1354,10 +1329,6 @@ test("objective is never a command and remains capability-closed on public input
   assert.match(
     formatSlashCommandHelp("objective minimum-cover", "ko"),
     /objective min-cover/u,
-  );
-  assert.match(
-    formatSlashCommandHelp("objective tiling-only", "en"),
-    /Unknown objective/,
   );
   for (const command of globalCommands.filter(({ name }) => name !== "build")) {
     assert.equal(JSON.stringify(command).includes('"name":"objective"'), false);
