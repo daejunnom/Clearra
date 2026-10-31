@@ -39,10 +39,8 @@ jobs:
           cargo +1.98.1 test --locked -p clearra-accelerator-runtime -p clearra-wasm-abi catalog_rule_compatibility
           cargo +1.98.1 test --locked -p clearra-cli embedded_catalog_summary_reports_authority_without_opening_network_or_store
       - name: Verify public kick diagnostics
-        run: |
-          cargo +1.98.1 test --locked -p clearra-cli verify_command_reports_builtin_kick_contracts
-          cargo +1.98.1 test --locked -p clearra-cli run_with_args_routes_verify_kicks_command
-      - name: Verify C rules, placements, and reachability in a managed build
+        run: cargo +1.98.1 test --locked -p clearra-cli --lib verify_command_reports_builtin_kick_contracts
+      - name: Verify C rules, reachability, and native CLI routing in a managed build
         shell: bash
         run: |
           node scripts/tools/invoke-clearra-build.mjs --purpose experiment -- node --input-type=module <<'JS'
@@ -51,12 +49,16 @@ jobs:
           const transaction = process.env.CLEARRA_BUILD_TRANSACTION_ROOT;
           if (!transaction) throw new Error('Managed build transaction is required');
           const out = join(transaction, 'core-c-srs-plus');
-          const run = (command, args) => {
-            const result = spawnSync(command, args, { stdio: 'inherit' });
+          const run = (command, args, env = process.env) => {
+            const result = spawnSync(command, args, { stdio: 'inherit', env });
             if (result.error) throw result.error;
             if (result.status !== 0) process.exit(result.status ?? 1);
           };
           run('cmake', ['-S', 'core-c', '-B', out, '-DBUILD_TESTING=ON', '-DCLEARRA_CORE_SPLIT_TESTS=ON', '-DCMAKE_BUILD_TYPE=Debug']);
-          run('cmake', ['--build', out, '--target', 'rule_profile_tests', 'candidate_tests', 'reachability_tests', '-j', '4']);
+          run('cmake', ['--build', out, '--target', 'clearra_core', 'clearra_core_test_oracle', 'rule_profile_tests', 'candidate_tests', 'reachability_tests', '-j', '4']);
           run('ctest', ['--test-dir', out, '--output-on-failure', '-R', '^(rule_profile_tests|candidate_tests|reachability_tests)$']);
+          run('cargo', ['+1.98.1', 'test', '--locked', '-p', 'clearra-cli', '--features', 'native-c-core', '--lib', 'run_with_args_routes_verify_kicks_command'], {
+            ...process.env,
+            RUSTFLAGS: [process.env.RUSTFLAGS, `-L native=${out}`].filter(Boolean).join(' ')
+          });
           JS
