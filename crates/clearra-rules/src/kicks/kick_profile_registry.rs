@@ -237,7 +237,7 @@ impl KickProfileRegistry {
                 KickProfileCapability::new(true, true, true, false, true, None),
             )
             .with_profile_contract(
-                80,
+                84,
                 true,
                 "Clearra built-in TETR.IO SRS+ symmetric I and 180 kick table",
                 true,
@@ -339,7 +339,7 @@ mod tests {
             KickProfileRegistry::descriptor(KickTableProfileId::SrsPlus).expect("srs-plus");
         assert_eq!(srs_plus.source_kind(), KickProfileSourceKind::BuiltInExact);
         assert!(srs_plus.source_description().contains("TETR.IO SRS+"));
-        assert_eq!(srs_plus.transition_count(), 80);
+        assert_eq!(srs_plus.transition_count(), 84);
         assert!(srs_plus.first_success_order_preserved());
         assert!(srs_plus.provenance().contains("symmetric I"));
         assert!(srs_plus.verified());

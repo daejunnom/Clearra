@@ -125,13 +125,70 @@ fn srs_plus_profile_preserves_symmetric_i_and_transition_specific_180_kicks() {
             .offsets(),
         offsets([(0, 0), (0, 1)])
     );
-    assert!(profile
-        .sequence_for(KickTransition::new(
-            PieceKind::O,
-            RotationState::Zero,
-            RotationState::Two
-        ))
-        .is_none());
+    assert_eq!(
+        profile
+            .sequence_for(KickTransition::new(
+                PieceKind::O,
+                RotationState::Zero,
+                RotationState::Two
+            ))
+            .expect("O 0->2 origin rotation precedes disallow_kick")
+            .offsets(),
+        offsets([(0, 0)])
+    );
+}
+
+#[test]
+fn srs_plus_matches_the_tetrio_source_fixture_for_all_84_transitions() {
+    let profile = SrsKicks::srs_plus_profile();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/rules/tetrio_srs_plus_standard_tetromino_kicks.json"
+    ))
+    .expect("TETR.IO SRS+ fixture");
+    let normalized = fixture["transitions_y_up"]
+        .as_object()
+        .expect("84 transitions");
+
+    assert_eq!(fixture["authority"], "https://tetr.io/js/tetrio.js");
+    assert_eq!(fixture["implicit_origin_attempt"], true);
+    assert_eq!(fixture["standard_o"]["origin_rotation_allowed"], true);
+    assert_eq!(fixture["standard_o"]["uses_oo_kicks"], false);
+    assert_eq!(profile.transition_count(), 84);
+    assert_eq!(normalized.len(), 84);
+    assert_eq!(profile.duplicate_transitions(), []);
+
+    for piece in PieceKind::STANDARD_TETROMINOES {
+        for (from, to) in twelve_direction_transitions() {
+            let source_transition = format!("{}{}", from.quarter_turns(), to.quarter_turns());
+            let key = format!("{piece:?}:{source_transition}");
+            let expected = normalized[&key]
+                .as_array()
+                .expect("ordered offsets")
+                .iter()
+                .map(|pair| {
+                    KickOffset::new(
+                        i8::try_from(pair[0].as_i64().expect("dx")).expect("i8 dx"),
+                        i8::try_from(pair[1].as_i64().expect("dy")).expect("i8 dy"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let family = if piece == PieceKind::I { "i" } else { "jlstz" };
+            let source_expected = if piece == PieceKind::O {
+                offsets([(0, 0)])
+            } else {
+                tetrio_source_offsets_y_up(&fixture["families"][family][&source_transition])
+            };
+            assert_eq!(expected, source_expected, "source-axis conversion {key}");
+            assert_eq!(
+                profile
+                    .sequence_for(KickTransition::new(piece, from, to))
+                    .expect("complete SRS+ transition")
+                    .offsets(),
+                expected,
+                "TETR.IO SRS+ {key}"
+            );
+        }
+    }
 }
 
 #[test]

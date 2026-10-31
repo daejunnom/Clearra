@@ -88,8 +88,8 @@ fn verify_command_reports_builtin_kick_contracts() {
     assert!(output
         .stdout()
         .contains("srs_plus_effective_kick_model: srs-plus-180"));
-    assert!(output.stdout().contains("srs_plus_180_transitions: 24"));
-    assert!(output.stdout().contains("kick_verification_cases: 264"));
+    assert!(output.stdout().contains("srs_plus_180_transitions: 28"));
+    assert!(output.stdout().contains("kick_verification_cases: 268"));
     assert!(output.stdout().contains("kick_verification_failures: 0"));
     assert!(!output.stdout().contains("srs_plus_extension_reason"));
 }

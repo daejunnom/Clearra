@@ -2,7 +2,7 @@
 
 #define SRS_90_KICK_COUNT 5u
 #define SRS_PLUS_180_KICK_COUNT 6u
-#define SRS_PLUS_I_180_KICK_COUNT 6u
+#define SRS_PLUS_I_180_KICK_COUNT 2u
 #define JSTRIS_180_KICK_COUNT 2u
 
 static const uint8_t STANDARD_PIECES[CLEARRA_RULE_STANDARD_PIECE_COUNT] = {
@@ -207,16 +207,17 @@ static ClearraCompactKickSequence srs_plus_180_sequence(
     static const int8_t lr[SRS_PLUS_180_KICK_COUNT][2] = {
         {0, 0}, {-1, 0}, {-1, 2}, {-1, 1}, {0, 2}, {0, 1}};
     static const int8_t i_zt[SRS_PLUS_I_180_KICK_COUNT][2] = {
-        {0, 0}, {0, 1}, {1, 1}, {-1, 1}, {1, 0}, {-1, 0}};
+        {0, 0}, {0, 1}};
     static const int8_t i_rl[SRS_PLUS_I_180_KICK_COUNT][2] = {
-        {1, 1}, {1, 0}, {0, 0}, {2, 0}, {0, 1}, {2, 1}};
+        {0, 0}, {1, 0}};
     static const int8_t i_tz[SRS_PLUS_I_180_KICK_COUNT][2] = {
-        {-1, -1}, {0, -1}, {0, 1}, {0, 0}, {-1, 1}, {-1, 0}};
+        {0, 0}, {0, -1}};
     static const int8_t i_lr[SRS_PLUS_I_180_KICK_COUNT][2] = {
-        {0, 0}, {-1, 0}, {-1, 2}, {-1, 1}, {0, 2}, {0, 1}};
+        {0, 0}, {-1, 0}};
 
     if (piece == CLR_PIECE_O) {
-        return (ClearraCompactKickSequence){0};
+        /* TETR.IO tries the origin before its disallow_kick guard. */
+        return clearra_no_kick_sequence();
     }
     if (piece == CLR_PIECE_I) {
         if (from_rotation == CLEARRA_RULE_ROTATION_SPAWN &&
@@ -343,9 +344,6 @@ ClearraRuleStatus clearra_srs_plus_kick_table(ClearraCompactKickTable *out_table
     for (uint8_t piece_index = 0; piece_index < CLEARRA_RULE_STANDARD_PIECE_COUNT;
          piece_index++) {
         uint8_t piece = STANDARD_PIECES[piece_index];
-        if (piece == CLR_PIECE_O) {
-            continue;
-        }
         for (uint8_t transition_index = 0;
              transition_index < CLEARRA_RULE_180_TRANSITION_COUNT;
              transition_index++) {

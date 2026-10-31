@@ -44,6 +44,35 @@ fn hex(value: [u8; 32]) -> String {
     value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Catalog signatures bind a release, not the currently compiled rule tables.
+/// The UI and download worker must see no usable plan for an older binding.
+fn catalog_plan<T>(
+    kind: ProductCatalogKind,
+    name: &str,
+    kick: KickTableProfileId,
+    catalog_identity: [u8; 32],
+    candidate: Option<([u8; 32], T)>,
+    qualified_plan: impl FnOnce(T) -> serde_json::Value,
+) -> serde_json::Value {
+    let expected = match kind {
+        ProductCatalogKind::ExactLegalBoard => built_in_legal_board_binding(kick)
+            .ok()
+            .map(|binding| binding.rule_identity),
+        ProductCatalogKind::BoardConditionedReachability => built_in_local_relation_binding(kick)
+            .ok()
+            .map(|binding| binding.rule_identity),
+    };
+    if let Some((_, asset)) = candidate.filter(|(identity, _)| expected == Some(*identity)) {
+        return qualified_plan(asset);
+    }
+    json!({
+        "product": kind.as_str(), "profile": name, "state": "not_qualified",
+        "payload_bytes": null, "generation": null, "payload_identity": null,
+        "url": null, "catalog_identity": hex(catalog_identity),
+        "active_session_shared_bytes": null
+    })
+}
+
 /// Parse the same typed request that the executor will run. The browser host
 /// must not infer a profile or an opt-out from command-text regular expressions:
 /// defaults and command-family policies belong to the shared Rust parser.
@@ -97,7 +126,7 @@ pub(super) fn catalog(kind: u32, profile: u32) -> i32 {
         if let Err(status) = state.require_mutation_admission() {
             return status;
         }
-        let Some((kind, name, _)) = selection(kind, profile) else {
+        let Some((kind, name, kick)) = selection(kind, profile) else {
             state.set_error(
                 "accelerator_selection_invalid",
                 "unknown product or profile",
@@ -111,27 +140,34 @@ pub(super) fn catalog(kind: u32, profile: u32) -> i32 {
                 return ABI_ERROR;
             }
         };
-        let value = match catalog.profile(name) {
-            Some(CatalogProfileStatus::NotQualified) => json!({
-                "product": kind.as_str(), "profile": name, "state": "not_qualified",
-                "payload_bytes": null, "generation": null, "payload_identity": null,
-                "url": null, "catalog_identity": hex(catalog.catalog_identity()),
-                "active_session_shared_bytes": null
-            }),
-            Some(CatalogProfileStatus::Qualified(asset)) => json!({
-                "product": kind.as_str(), "profile": name, "state": "qualified",
-                "payload_bytes": asset.authority().payload_bytes(),
-                "generation": hex(asset.authority().generation_identity()),
-                "payload_identity": hex(asset.authority().payload_identity()),
-                "url": asset.authority().asset_url(),
-                "active_session_shared_bytes": asset.metadata().active_session_shared_bytes(),
-                "catalog_identity": hex(catalog.catalog_identity())
-            }),
+        let candidate = match catalog.profile(name) {
+            Some(CatalogProfileStatus::NotQualified) => None,
+            Some(CatalogProfileStatus::Qualified(asset)) => {
+                Some((asset.authority().rule_identity(), asset.as_ref()))
+            }
             None => {
                 state.set_error("accelerator_profile_missing", "profile absent from catalog");
                 return ABI_ERROR;
             }
         };
+        let value = catalog_plan(
+            kind,
+            name,
+            kick,
+            catalog.catalog_identity(),
+            candidate,
+            |asset| {
+                json!({
+                    "product": kind.as_str(), "profile": name, "state": "qualified",
+                    "payload_bytes": asset.authority().payload_bytes(),
+                    "generation": hex(asset.authority().generation_identity()),
+                    "payload_identity": hex(asset.authority().payload_identity()),
+                    "url": asset.authority().asset_url(),
+                    "active_session_shared_bytes": asset.metadata().active_session_shared_bytes(),
+                    "catalog_identity": hex(catalog.catalog_identity())
+                })
+            },
+        );
         state.set_output(value.to_string());
         ABI_OK
     })
@@ -446,4 +482,66 @@ pub(super) fn admit_negative_synopsis(profile: u32) -> i32 {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_rule_compatibility_hides_stale_and_absent_download_plans() {
+        for (name, kick) in PROFILES {
+            for kind in [
+                ProductCatalogKind::ExactLegalBoard,
+                ProductCatalogKind::BoardConditionedReachability,
+            ] {
+                let current = match kind {
+                    ProductCatalogKind::ExactLegalBoard => {
+                        built_in_legal_board_binding(kick).unwrap().rule_identity
+                    }
+                    ProductCatalogKind::BoardConditionedReachability => {
+                        built_in_local_relation_binding(kick).unwrap().rule_identity
+                    }
+                };
+                let fixture = json!({
+                    "state": "qualified", "payload_bytes": 12,
+                    "url": "https://example.invalid/accelerator"
+                });
+                let plan = catalog_plan(
+                    kind,
+                    name,
+                    kick,
+                    [0x11; 32],
+                    Some((current, fixture.clone())),
+                    |value| value,
+                );
+                assert_eq!(plan, fixture);
+
+                let mut stale = current;
+                stale[0] ^= 1;
+                for candidate in [Some((stale, ())), None] {
+                    let plan = catalog_plan(kind, name, kick, [0x11; 32], candidate, |()| {
+                        panic!("an incompatible or absent asset cannot offer a download")
+                    });
+                    assert_eq!(plan["state"], "not_qualified");
+                    assert_eq!(plan["product"], kind.as_str());
+                    assert_eq!(plan["profile"], name);
+                    assert_eq!(plan["catalog_identity"], hex([0x11; 32]));
+                    for field in [
+                        "payload_bytes",
+                        "generation",
+                        "payload_identity",
+                        "url",
+                        "active_session_shared_bytes",
+                    ] {
+                        assert_eq!(
+                            plan.get(field),
+                            Some(&serde_json::Value::Null),
+                            "unexpected or missing stale-plan field: {field}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

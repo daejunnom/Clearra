@@ -97,11 +97,11 @@ void srs_plus_i_half_turn_displacements_match_tetrio_fixture(void) {
         CLEARRA_CANDIDATE_ROTATION_ZERO,
         CLEARRA_CANDIDATE_ROTATION_RIGHT,
     };
-    static const int8_t expected[4][6][2] = {
-        {{0, -1}, {0, 0}, {1, 0}, {-1, 0}, {1, -1}, {-1, -1}},
-        {{0, 1}, {0, 0}, {-1, 0}, {1, 0}, {-1, 1}, {1, 1}},
-        {{-1, 0}, {0, 0}, {0, 2}, {0, 1}, {-1, 2}, {-1, 1}},
-        {{1, 0}, {0, 0}, {0, 2}, {0, 1}, {1, 2}, {1, 1}},
+    static const int8_t expected[4][2][2] = {
+        {{0, -1}, {0, 0}},
+        {{-1, 0}, {0, 0}},
+        {{0, 1}, {0, 0}},
+        {{1, 0}, {0, 0}},
     };
     ClearraCompactRuleProfile rule =
         candidate_test_compact_rule(CLR_RULE_SRS_PLUS, CLR_KICK_SRS_PLUS_180);
@@ -116,7 +116,7 @@ void srs_plus_i_half_turn_displacements_match_tetrio_fixture(void) {
                 to_rotations[transition],
                 &sequence),
             CLEARRA_RULE_OK);
-        EXPECT_U64(sequence->count, 6);
+        EXPECT_U64(sequence->count, 2);
         for (uint8_t kick_index = 0; kick_index < sequence->count; kick_index++) {
             int8_t normalized_dx = 0;
             int8_t normalized_dy = 0;

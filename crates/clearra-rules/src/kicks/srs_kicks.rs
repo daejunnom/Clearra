@@ -119,12 +119,16 @@ fn srs_plus_profile_entries() -> Vec<KickTableEntry> {
     entries.extend(
         PieceKind::STANDARD_TETROMINOES
             .into_iter()
-            .filter(|piece| *piece != PieceKind::O)
             .flat_map(|piece| {
                 one_eighty_transitions().into_iter().map(move |(from, to)| {
                     KickTableEntry::new(
                         KickTransition::new(piece, from, to),
-                        if piece == PieceKind::I {
+                        // TETR.IO attempts the origin rotation before checking
+                        // disallow_kick. Standard O therefore supports 180 at
+                        // the origin without using the special oo kick table.
+                        if piece == PieceKind::O {
+                            KickOffsetSequence::no_kick()
+                        } else if piece == PieceKind::I {
                             KickOffsetSequence::new(srs_plus_i_180_offsets(from, to))
                         } else {
                             KickOffsetSequence::new(srs_plus_jlstz_180_offsets(from, to))
