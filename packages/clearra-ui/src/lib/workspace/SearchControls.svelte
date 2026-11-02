@@ -34,6 +34,14 @@
     request.scoreMode === 'score-finder' ||
     request.scoreMode === 'score-minimals';
   $: scoreMinimalsOnly = request.scoreMode === 'score-minimals';
+  // Minimum products reject visible-seven rather than silently substituting
+  // oracle semantics, so their visibility control must remain editable.
+  $: queueKnowledgeAvailable =
+    !tilingOnly && !pathOnly && (!fixedScoreProduct || scoreMinimalsOnly);
+  // Score products own their own result contracts and reject this option.
+  // Preserve the draft for supported modes without displaying it as active.
+  $: solutionProbabilitiesAvailable =
+    !tilingOnly && !pathOnly && !failedQueueOnly && !fixedScoreProduct;
 
   function patch(change: Partial<SolverWorkspaceRequest>) {
     const next = updateWorkspaceDraft(request, change);
@@ -59,8 +67,9 @@
     <label class="workspace-field wide">
       <span>{label('queueKnowledge')}</span>
       <select
-        value={request.queueKnowledge}
-        disabled={tilingOnly || pathOnly || fixedScoreProduct}
+        data-pc-control="queue-visibility"
+        value={queueKnowledgeAvailable ? request.queueKnowledge : 'oracle'}
+        disabled={!queueKnowledgeAvailable}
         on:change={(event) => patch({
           queueKnowledge: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['queueKnowledge']
         })}
@@ -76,7 +85,7 @@
     <div class="workspace-field-grid">
       <label class="workspace-field">
         <span>{label('scoreMode')}</span>
-        <select value={request.scoreMode} on:change={(event) => patch({ scoreMode: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['scoreMode'] })}>
+        <select data-pc-control="result-mode" value={request.scoreMode} on:change={(event) => patch({ scoreMode: (event.currentTarget as HTMLSelectElement).value as SolverWorkspaceRequest['scoreMode'] })}>
           <option value="tiling">{label('tilingOnly')}</option>
           <option value="path">{label('pathFamily')}</option>
           <option value="off">{label('scoreOff')}</option>
@@ -133,8 +142,9 @@
       <label class="workspace-switch-label">
         <input
           type="checkbox"
-          checked={request.solutionProbabilities}
-          disabled={tilingOnly || pathOnly || failedQueueOnly || scoreMinimalsOnly}
+          data-pc-control="solution-probabilities"
+          checked={solutionProbabilitiesAvailable && request.solutionProbabilities}
+          disabled={!solutionProbabilitiesAvailable}
           on:change={(event) => patch({ solutionProbabilities: (event.currentTarget as HTMLInputElement).checked })}
         />
         <span class="workspace-switch" aria-hidden="true"></span>
@@ -145,8 +155,8 @@
       <label class="workspace-switch-label">
         <input
           type="checkbox"
+          data-pc-control="all-logical-processors"
           checked={request.useAllLogicalProcessors}
-          disabled={fixedScoreProduct}
           on:change={(event) => patch({
             useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked
           })}

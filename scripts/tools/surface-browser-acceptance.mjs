@@ -186,7 +186,48 @@ try {
       assert.equal(await readPaintedMask(page, 0, 4), 0x30080f67n,
         'the user CTK field must reach the real GUI without changing its physical cells');
       await page.locator('.workspace-queue-input').fill('P7');
-      const everyCpu = page.getByRole('checkbox', { name: 'Use every logical processor', exact: true });
+      const everyCpu = page.locator('[data-pc-control="all-logical-processors"]');
+      const resultMode = page.locator('[data-pc-control="result-mode"]');
+      const solutionProbabilities = page.locator('[data-pc-control="solution-probabilities"]');
+      const queueVisibility = page.locator('[data-pc-control="queue-visibility"]');
+      const workerAuthority = page.locator('.worker-authority');
+      await solutionProbabilities.check();
+      await queueVisibility.selectOption('visible-7');
+      for (const [scoreMode, useEveryCpu] of [
+        ['summary', true], ['score-finder', false], ['score-minimals', true]
+      ]) {
+        await resultMode.selectOption(scoreMode);
+        if (scoreMode === 'score-minimals') {
+          assert.equal(await queueVisibility.isEnabled(), true,
+            'minimum-score validation must not trap an uneditable visibility draft');
+          assert.equal(await queueVisibility.inputValue(), 'visible-7');
+          assert.equal(await page.locator('.workspace-validation li').count(), 1);
+          await queueVisibility.selectOption('oracle');
+          await page.locator('.workspace-validation li').waitFor({ state: 'hidden' });
+        } else {
+          assert.equal(await queueVisibility.isDisabled(), true);
+          assert.equal(await queueVisibility.inputValue(), 'oracle',
+            `${scoreMode} must display its actual queue policy`);
+        }
+        assert.equal(await solutionProbabilities.isDisabled(), true,
+          `${scoreMode} must not offer a probability option its command rejects`);
+        assert.equal(await solutionProbabilities.isChecked(), false,
+          `${scoreMode} must not display the retained draft as active`);
+        assert.equal(await everyCpu.isEnabled(), true,
+          `${scoreMode} must permit the supported worker policy`);
+        if (useEveryCpu) await everyCpu.check(); else await everyCpu.uncheck();
+        const expectedWorkers = useEveryCpu ? logicalProcessors : logicalProcessors - 1;
+        await page.waitForFunction(expected =>
+          document.querySelector('.worker-authority')?.getAttribute('data-workers-effective') === String(expected),
+        expectedWorkers);
+        assert.equal(await workerAuthority.getAttribute('data-workers-requested'), String(expectedWorkers));
+      }
+      await resultMode.selectOption('off');
+      assert.equal(await solutionProbabilities.isEnabled(), true);
+      assert.equal(await solutionProbabilities.isChecked(), true,
+        'returning to all solutions must restore the retained supported choice');
+      await solutionProbabilities.uncheck();
+      await everyCpu.uncheck();
       await everyCpu.check();
       for (let repeat = 0; repeat < 2; repeat++) {
         await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(),

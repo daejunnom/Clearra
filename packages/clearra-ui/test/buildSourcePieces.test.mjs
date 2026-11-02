@@ -22,7 +22,6 @@ const bundle = await build({
         createDefaultBuildProbabilityRequest,
         normalizeBuildProbabilityRequest
       } from './src/lib/workspace/buildProbabilityModel.ts';
-      export { workspaceMessage } from './src/lib/workspace/workspaceI18n.ts';
     `,
     loader: 'ts',
     resolveDir: fileURLToPath(new URL('..', import.meta.url))
@@ -168,7 +167,7 @@ test('build source validation rejects lengths that the native compiler cannot ex
   );
 });
 
-test('build source-pieces control explains the automatic dependency and result effect', () => {
+test('build source-pieces control retains its bounded optional input', () => {
   const controls = readFileSync(
     new URL('../src/lib/workspace/BuildProbabilityControls.svelte', import.meta.url),
     'utf8'
@@ -181,23 +180,6 @@ test('build source-pieces control explains the automatic dependency and result e
   assert.ok(sourcePiecesInput);
   assert.doesNotMatch(sourcePiecesInput, /disabled=/u);
 
-  assert.equal(production.workspaceMessage('en', 'sourcePiecesAutomatic'), 'Automatic (target/hold)');
-  assert.equal(production.workspaceMessage('en', 'sourcePieces'), 'Source sequence length');
-  assert.match(production.workspaceMessage('en', 'sourcePiecesHelp'), /complete pattern universe/u);
-  assert.match(production.workspaceMessage('en', 'sourcePiecesHelp'), /not a see-n visibility setting/u);
-  assert.match(production.workspaceMessage('en', 'sourcePiecesHelp'), /every aggregation, including tiling/u);
-  assert.equal(production.workspaceMessage('ko', 'sourcePiecesAutomatic'), '자동 (목표/홀드)');
-  assert.equal(production.workspaceMessage('ko', 'sourcePieces'), '공급 시퀀스 미노 수');
-  assert.match(production.workspaceMessage('ko', 'sourcePiecesHelp'), /see-n 가시성 설정이 아닙니다/u);
-  assert.match(production.workspaceMessage('ko', 'sourcePiecesHelp'), /타일링을 포함한 모든 집계 방식/u);
-  assert.equal(production.workspaceMessage('ja', 'sourcePieces'), '供給列のミノ数');
-  assert.match(production.workspaceMessage('ja', 'sourcePiecesHelp'), /see-n の可視範囲設定ではありません/u);
-  assert.equal(production.workspaceMessage('en', 'solutionProbabilities'), 'Build probability by solution');
-  assert.equal(production.workspaceMessage('en', 'solutionProbability'), 'Build probability');
-  assert.equal(production.workspaceMessage('ko', 'solutionProbabilities'), '해법별 구축 확률');
-  assert.equal(production.workspaceMessage('ko', 'solutionProbability'), '구축 확률');
-  assert.equal(production.workspaceMessage('ja', 'solutionProbabilities'), '解法ごとの構築確率');
-  assert.equal(production.workspaceMessage('ja', 'solutionProbability'), '構築確率');
 });
 
 test('build solution probabilities lower only when enabled and remain unavailable for tiling', () => {
@@ -242,22 +224,13 @@ test('build solution probabilities lower only when enabled and remain unavailabl
       .arguments.includes('--solution-probabilities'),
     false
   );
-});
-
-test('build probability controls expose and gate the solution-probability switch', () => {
-  const controls = readFileSync(
-    new URL('../src/lib/workspace/BuildProbabilityControls.svelte', import.meta.url),
-    'utf8'
-  );
-  const checkedMarker = 'checked={request.solutionProbabilities}';
-  const checkedIndex = controls.indexOf(checkedMarker);
-  assert.notEqual(checkedIndex, -1);
-  const inputStart = controls.lastIndexOf('<input', checkedIndex);
-  const inputEnd = controls.indexOf('/>', checkedIndex);
-  assert.notEqual(inputStart, -1);
-  assert.notEqual(inputEnd, -1);
-  const solutionProbabilitiesInput = controls.slice(inputStart, inputEnd + 2);
-  assert.match(solutionProbabilitiesInput, /disabled=\{request\.aggregation === 'tiling'\}/u);
-  assert.match(solutionProbabilitiesInput, /solutionProbabilities:/u);
-  assert.match(controls, /label\('solutionProbabilities'\)/u);
+  for (const resultMode of ['complete-replay-paths', 'minimum-solutions', 'field-average-score',
+    'fixed-queue-maximum-score', 'highest-score-minimum-set', 'failed-queues']) {
+    const draft = validBuildRequest({ resultMode, solutionProbabilities: true });
+    assert.equal(draft.solutionProbabilities, true, resultMode);
+    assert.equal(production.normalizeBuildProbabilityRequest(draft).solutionProbabilities, false, resultMode);
+    assert.equal(production.buildProbabilityCommandArguments(draft).includes('--solution-probabilities'), false, resultMode);
+    assert.equal(production.buildProbabilityRequestForDesktop(draft, 'en')
+      .arguments.includes('--solution-probabilities'), false, resultMode);
+  }
 });

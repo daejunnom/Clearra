@@ -154,6 +154,11 @@ test('extended workspace guards result and option capabilities separately from t
   for (const scoreMode of ['minimum-cover', 'score-minimals']) {
     assert.ok(workspaceValidationCodes({ ...visible, scoreMode }, 'web')
       .includes('visible-seven-minimum-cover-unsupported'), 'typed minimum policies remain oracle-only');
+    const corrected = { ...visible, scoreMode, queueKnowledge: 'oracle' };
+    assert.ok(!workspaceValidationCodes(corrected, 'web')
+      .includes('visible-seven-minimum-cover-unsupported'));
+    assert.ok(!workspaceValidationCodes(corrected, 'desktop')
+      .includes('visible-seven-minimum-cover-unsupported'));
   }
   for (const change of [
     { tablebaseEnabled: true }, { precomputeBuildDependencies: true }]) {
@@ -178,6 +183,28 @@ test('extended workspace guards result and option capabilities separately from t
   for (const lines of [1, 3, 5, 6]) {
     assert.ok(!workspaceValidationCodes({ ...base, lines, workers: 11, scoreMode: 'minimum-cover' }, 'web')
       .some(code => code.startsWith('pc_extended_')), 'compact product semantics stay unchanged');
+  }
+});
+
+test('24L PC score products preserve the chosen CPU worker policy on both surfaces', () => {
+  const fixture = readFileSync(
+    new URL('../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv', import.meta.url), 'utf8'
+  ).split(/\r?\n/u).find(line => line.startsWith('forced-24L\t')).split('\t');
+  const [, height, hex, , queue] = fixture;
+  for (const scoreMode of ['summary', 'score-finder', 'score-minimals']) {
+    for (const useAllLogicalProcessors of [false, true]) {
+      const request = { ...createDefaultWorkspaceRequest(), lines: Number(height),
+        boardMask: BigInt(`0x${hex}`), queue, holdEnabled: false, scoreMode,
+        workers: useAllLogicalProcessors ? 12 : 11, useAllLogicalProcessors,
+        solutionProbabilities: true };
+      assert.deepEqual(workspaceValidationCodes(request, 'web'), [], scoreMode);
+      assert.deepEqual(workspaceValidationCodes(request, 'desktop'), [], scoreMode);
+      const args = buildWorkspaceCommandArguments(request);
+      assert.equal(args[args.indexOf('--workers') + 1], String(request.workers), scoreMode);
+      assert.equal(args.includes('--use-all-cpu-threads'), useAllLogicalProcessors, scoreMode);
+      assert.equal(args.includes('--solution-probabilities'), false, scoreMode);
+      assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args, scoreMode);
+    }
   }
 });
 

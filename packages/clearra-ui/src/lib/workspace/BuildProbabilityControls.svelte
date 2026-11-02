@@ -188,7 +188,8 @@
         <label class="workspace-switch-label">
         <input
           type="checkbox"
-          checked={request.solutionProbabilities}
+          data-build-control="solution-probabilities"
+          checked={request.resultMode === 'all-solutions' && request.aggregation !== 'tiling' && request.solutionProbabilities}
           disabled={request.aggregation === 'tiling'}
           on:change={(event) => patch({
             solutionProbabilities: (event.currentTarget as HTMLInputElement).checked
