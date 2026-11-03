@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.8.4 - 2026-11-03
+
+- Align native C SRS+ I-piece half-turn kicks and Rust-to-C descriptors with
+  the existing Rust search profile and the TETR.IO kick-table reference.
+- Let PC score products select the supported full-CPU worker policy and make
+  the minimum-score queue-visibility conflict editable instead of trapping it.
+- Display inactive per-solution Build probability choices as inactive in PC
+  and Build searches while preserving the draft for supported result modes.
+
 ## 0.8.3 - 2026-10-21
 
 - Keep CTK3-to-Fumen document and solution comments page-local: pages without
