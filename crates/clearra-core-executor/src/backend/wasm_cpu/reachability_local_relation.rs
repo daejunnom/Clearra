@@ -123,7 +123,10 @@ pub(crate) fn exact_local_relation(
 /// whole reachable set. Unreached poses cannot become reached without first
 /// changing an edge from that set. This can be much smaller than unioning all
 /// statically valid but currently unreachable poses in the window.
-fn reached_source_dependency_mask(template: &ReachabilityTemplate, source: usize) -> u64 {
+pub(super) fn reached_source_dependency_mask(
+    template: &ReachabilityTemplate,
+    source: usize,
+) -> u64 {
     let mut mask = 0_u64;
     mask |= template.state_masks[source];
     for &target in &template.translation_targets[source] {

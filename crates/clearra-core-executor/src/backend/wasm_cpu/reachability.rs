@@ -13,6 +13,16 @@ use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
 mod local_relation;
 pub(crate) use local_relation::exact_local_relation;
 
+#[cfg(any(test, feature = "local-search-ab"))]
+#[path = "reachability_dependency_cache.rs"]
+mod dependency_cache;
+#[cfg(any(test, feature = "local-search-ab"))]
+#[path = "reachability_independence.rs"]
+mod independence;
+#[cfg(any(test, feature = "local-search-ab"))]
+#[path = "reachability_reverse_dependency.rs"]
+mod reverse_dependency;
+
 #[cfg(test)]
 #[path = "reachability_peer_tests.rs"]
 mod peer_tests;
@@ -126,6 +136,11 @@ pub(super) fn checked_reachability_retained_upper_bound(
     ];
     let profile = builtin_kick_profile(profile_id)?;
     let mut bytes = 0_u128;
+    #[cfg(any(test, feature = "local-search-ab"))]
+    if super::placement_dependency::enabled() {
+        bytes = (dependency_cache::PlacementDependencyCache::retained_upper_bound()
+            + independence::static_dependency_peak_upper_bound()) as u128;
+    }
     let mut maximum_scratch_states = 0_u128;
     for piece in STANDARD_PIECES {
         let ceiling = source_ceiling(height, piece, profile.supports_180(), profile);
@@ -469,6 +484,8 @@ pub(super) struct ReachabilityMetrics {
 /// stage. Templates are immutable after first use; mutable scratch and cache
 /// never escape the query session.
 pub(super) struct ReachabilityWorkspace {
+    #[cfg(any(test, feature = "local-search-ab"))]
+    placement_dependencies: dependency_cache::PlacementDependencyCache,
     cache: ReachabilityCache,
     scratch: ReachabilityScratch,
     templates: [Option<Arc<ReachabilityTemplate>>; 7],
@@ -500,6 +517,8 @@ fn conditioned_context_frame_capacity(height: u8) -> Option<u128> {
 impl Default for ReachabilityWorkspace {
     fn default() -> Self {
         Self {
+            #[cfg(any(test, feature = "local-search-ab"))]
+            placement_dependencies: dependency_cache::PlacementDependencyCache::default(),
             cache: ReachabilityCache::default(),
             scratch: ReachabilityScratch::default(),
             templates: std::array::from_fn(|_| None),
@@ -670,6 +689,39 @@ impl ReachabilityWorkspace {
                     key_present,
                 } => (exhaustive, admit, key_present),
             };
+        #[cfg(any(test, feature = "local-search-ab"))]
+        if let Some(reachable) = self.placement_dependencies.lookup(
+            catalog,
+            board,
+            piece,
+            self.kick_profile_id,
+            rotation,
+            x,
+            y,
+            frame,
+        ) {
+            // Preserve the existing exact-board cache as the cheapest first
+            // tier. A target certificate proves no other lock on this board.
+            let mut desired = ReachableLocks::default();
+            desired.insert(catalog.width(), rotation, x, y);
+            self.cache.insert(
+                board,
+                piece,
+                if reachable {
+                    desired
+                } else {
+                    ReachableLocks::default()
+                },
+                if reachable {
+                    ReachableLocks::default()
+                } else {
+                    desired
+                },
+                false,
+                admit,
+            );
+            return reachable;
+        }
         if self.conditioned.is_some()
             && (frame.is_none() || self.templates[piece_index(piece)].is_none())
         {
@@ -910,6 +962,20 @@ impl ReachabilityWorkspace {
         let (reachable, locks, unreachable_locks, all_locks_exhaustive, visited_state_count) =
             if exhaustive {
                 let result = search_reachable_locks(template, board, &mut self.scratch, None);
+                #[cfg(any(test, feature = "local-search-ab"))]
+                self.placement_dependencies.observe_full(
+                    catalog,
+                    template,
+                    board,
+                    piece,
+                    self.kick_profile_id,
+                    rotation,
+                    x,
+                    y,
+                    frame,
+                    &self.scratch,
+                    &result,
+                );
                 (
                     result.locks.contains(catalog.width(), rotation, x, y),
                     result.locks,
@@ -920,6 +986,20 @@ impl ReachabilityWorkspace {
             } else {
                 let result =
                     reverse_lock_reachable(template, board, rotation, x, y, &mut self.scratch);
+                #[cfg(any(test, feature = "local-search-ab"))]
+                self.placement_dependencies.observe_reverse(
+                    catalog,
+                    template,
+                    board,
+                    piece,
+                    self.kick_profile_id,
+                    rotation,
+                    x,
+                    y,
+                    frame,
+                    &self.scratch,
+                    &result,
+                );
                 (
                     result.reachable,
                     if result.reachable {
@@ -1009,7 +1089,12 @@ impl ReachabilityWorkspace {
     }
 
     fn retained_bytes_with_shared(&self, include_shared: bool) -> usize {
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let prototype_bytes = self.placement_dependencies.retained_bytes();
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let prototype_bytes = 0;
         self.cache.retained_bytes()
+            + prototype_bytes
             + self
                 .templates
                 .iter()

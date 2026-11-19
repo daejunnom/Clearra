@@ -964,6 +964,8 @@ impl BuildUpWorkspace {
 }
 
 pub(super) struct CandidateProjection {
+    #[cfg(any(test, feature = "local-search-ab"))]
+    shared_row_conditions: Option<super::placement_conditions::RowConditions>,
     operation_cells: [u64; super::MAX_BOARD64_PIECES],
     operation_count: u8,
     row_contributors: [u16; 16],
@@ -1037,6 +1039,16 @@ pub(super) fn checked_candidate_verification_peak_upper_bound(
     )?;
     let standard_bag_cursor_bytes =
         StandardBagCoverage::checked_cursor_transition_retained_bytes(universe)?;
+    #[cfg(any(test, feature = "local-search-ab"))]
+    let row_condition_bytes = if super::placement_dependency::enabled() {
+        core::mem::size_of::<super::placement_conditions::RowConditions>()
+            + core::mem::size_of_val(candidate.row_ids())
+            + usize::from(catalog.height()) * 2 * core::mem::size_of::<u16>()
+    } else {
+        0
+    };
+    #[cfg(not(any(test, feature = "local-search-ab")))]
+    let row_condition_bytes = 0;
 
     subset_count
         .checked_mul(projection_and_feasibility_per_subset)?
@@ -1048,6 +1060,7 @@ pub(super) fn checked_candidate_verification_peak_upper_bound(
         .checked_add(trace_bytes)?
         .checked_add(reachability_bytes)?
         .checked_add(standard_bag_cursor_bytes)?
+        .checked_add(row_condition_bytes as u128)?
         .checked_add(crate::legal_board::NEGATIVE_QUERY_CACHE_BYTES as u128)?
         .checked_add(core::mem::size_of::<CandidateBuildResult>() as u128)?
         .checked_mul(2)
@@ -1117,7 +1130,33 @@ impl CandidateProjection {
             state_generations.fill(0);
             workspace.projection_generation = 1;
         }
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let shared_row_conditions = super::placement_dependency::enabled()
+            .then(|| {
+                catalog
+                    .placement_conditions()
+                    .and_then(|conditions| conditions.specialize(candidate.row_ids()))
+            })
+            .flatten()
+            .filter(|conditions| {
+                conditions.operation_count() == operation_count
+                    && conditions.selected_rows() == candidate.row_ids()
+            });
+        #[cfg(any(test, feature = "local-search-ab"))]
+        if let Some(conditions) = &shared_row_conditions {
+            super::placement_dependency::record(|m| {
+                m.row_conditions_specialized += 1;
+                m.row_condition_groups += conditions.group_count() as u64;
+                m.completed_row_events += u64::from(conditions.completed_row_count());
+                m.atomic_row_groups += conditions.atomic_group_count() as u64;
+                m.row_condition_peak_bytes = m
+                    .row_condition_peak_bytes
+                    .max(conditions.retained_bytes() as u64);
+            });
+        }
         Ok(Self {
+            #[cfg(any(test, feature = "local-search-ab"))]
+            shared_row_conditions,
             operation_cells,
             operation_count: operation_count as u8,
             row_contributors,
@@ -1161,6 +1200,10 @@ impl CandidateProjection {
     }
 
     pub fn expected_deleted_rows(&self, subset: usize) -> u16 {
+        #[cfg(any(test, feature = "local-search-ab"))]
+        if let Some(conditions) = &self.shared_row_conditions {
+            return conditions.deleted_rows(subset as u16);
+        }
         let subset_bits = subset as u16;
         let mut deleted = 0_u16;
         for row in 0..usize::from(self.height) {

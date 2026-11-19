@@ -44,6 +44,12 @@ mod parallel_search;
 mod parallel_worker;
 mod pc4_graph_materializer;
 mod piece_order_language;
+#[cfg(any(test, feature = "local-search-ab"))]
+mod placement_conditions;
+#[cfg(any(test, feature = "local-search-ab"))]
+mod placement_dependency;
+#[cfg(test)]
+mod placement_dependency_integration_tests;
 mod queue_observation_policy;
 mod reachability;
 mod realization_feasibility;

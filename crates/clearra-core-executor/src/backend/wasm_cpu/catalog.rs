@@ -40,6 +40,9 @@ pub(super) struct InstantiatedRealization {
 
 #[derive(Clone, Debug)]
 pub(super) struct GeometryCatalog {
+    #[cfg(any(test, feature = "local-search-ab"))]
+    placement_conditions:
+        Option<std::sync::Arc<super::placement_conditions::PlacementConditionCatalog>>,
     width: u8,
     height: u8,
     initial_board: u64,
@@ -104,6 +107,14 @@ impl GeometryCatalog {
         let realization_count = checked_realization_count_upper_bound(width, height)?;
         let row_count = realization_count;
         let row_count_usize = usize::try_from(row_count).ok()?;
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let prototype_peak = if super::placement_dependency::enabled() {
+            super::placement_conditions::PlacementConditionCatalog::checked_compile_peak_upper_bound(row_count_usize)?
+        } else {
+            0
+        };
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let prototype_peak = 0;
         let clear_state_count = 1_u128.checked_shl(u32::from(height))?;
 
         let raw_and_ordered_realizations = realization_count
@@ -147,6 +158,7 @@ impl GeometryCatalog {
             };
 
         raw_and_ordered_realizations
+            .checked_add(prototype_peak)?
             .checked_add(skeleton_bytes)?
             .checked_add(temporal_bytes)?
             .checked_add(support_bytes)?
@@ -503,7 +515,9 @@ impl GeometryCatalog {
         identity_digest = mix_digest(identity_digest, projection_catalog.identity_digest());
         identity_digest = mix_digest(identity_digest, separator_catalog.identity_digest());
 
-        Ok(Self {
+        let catalog = Self {
+            #[cfg(any(test, feature = "local-search-ab"))]
+            placement_conditions: None,
             width,
             height,
             initial_board,
@@ -521,7 +535,37 @@ impl GeometryCatalog {
             instantiation_offsets,
             instantiated_realizations,
             identity_digest,
-        })
+        };
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let catalog = {
+            let mut catalog = catalog;
+            if super::placement_dependency::enabled() {
+                catalog.placement_conditions =
+                    super::placement_conditions::PlacementConditionCatalog::compile(&catalog)
+                        .filter(|conditions| conditions.matches_catalog(&catalog))
+                        .map(|conditions| {
+                            super::placement_dependency::record(|m| {
+                                m.catalogs_compiled += 1;
+                                m.catalog_placements += conditions.row_count() as u64;
+                                m.unique_clear_domains += conditions.domain_count() as u64;
+                                m.shared_clear_domains += conditions
+                                    .row_count()
+                                    .saturating_sub(conditions.domain_count())
+                                    as u64;
+                            });
+                            std::sync::Arc::new(conditions)
+                        });
+            }
+            catalog
+        };
+        Ok(catalog)
+    }
+
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub fn placement_conditions(
+        &self,
+    ) -> Option<&std::sync::Arc<super::placement_conditions::PlacementConditionCatalog>> {
+        self.placement_conditions.as_ref()
     }
 
     pub const fn width(&self) -> u8 {
@@ -610,6 +654,23 @@ impl GeometryCatalog {
         row_id: u32,
         deleted_rows: u16,
     ) -> InstantiatedRealizationIter<'_> {
+        #[cfg(any(test, feature = "local-search-ab"))]
+        if super::placement_dependency::enabled()
+            && self
+                .placement_conditions
+                .as_ref()
+                .is_some_and(|conditions| {
+                    conditions.supports_deleted_rows(row_id, deleted_rows) == Some(false)
+                })
+        {
+            return InstantiatedRealizationIter {
+                catalog: self,
+                target_cells: self.skeleton(row_id).cells,
+                deleted_rows,
+                precomputed: None,
+                raw: None,
+            };
+        }
         if let Some(precomputed) = self.instantiated_realizations(row_id, deleted_rows) {
             InstantiatedRealizationIter {
                 catalog: self,
@@ -686,7 +747,16 @@ impl GeometryCatalog {
     }
 
     pub fn retained_bytes(&self) -> usize {
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let prototype_bytes = self.placement_conditions.as_ref().map_or(0, |conditions| {
+            conditions.retained_bytes()
+                + core::mem::size_of::<super::placement_conditions::PlacementConditionCatalog>()
+                + 2 * core::mem::size_of::<usize>()
+        });
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let prototype_bytes = 0;
         self.skeletons.capacity() * core::mem::size_of::<SkeletonRow>()
+            + prototype_bytes
             + self.realizations.capacity() * core::mem::size_of::<Realization>()
             + self.skeleton_occupied_rows.capacity() * core::mem::size_of::<u16>()
             + self
