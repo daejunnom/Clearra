@@ -183,19 +183,7 @@ impl PieceOrderLanguageCache {
     }
 
     pub fn canonicalize(&mut self, graph: &BuildOrderGraph) -> Result<u32, WasmExactSearchError> {
-        self.ensure_buckets();
-        if self.graph_classes.len() < graph.nodes.len() {
-            self.graph_classes
-                .try_reserve_exact(graph.nodes.len() - self.graph_classes.len())
-                .map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "wasm_piece_language_class_storage_unavailable",
-                    )
-                })?;
-            self.graph_classes
-                .resize(graph.nodes.len(), EMPTY_REFERENCE);
-        }
-        self.graph_classes[..graph.nodes.len()].fill(EMPTY_REFERENCE);
+        self.prepare_graph_classes(graph.nodes.len())?;
 
         for node_index in (0..graph.nodes.len()).rev() {
             let source = &graph.nodes[node_index];
@@ -241,6 +229,85 @@ impl PieceOrderLanguageCache {
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_piece_language_root_not_live",
             ))
+    }
+
+    /// Solve Boolean completion and the exact piece suffix language in one
+    /// backward pass. Graph edges already contain qualified physical moves;
+    /// this step performs no field or reachability query. Multiple same-kind
+    /// operation edges remain a union of suffixes, not a path count.
+    ///
+    /// The returned ID belongs to this worker's language arena and is consumed
+    /// before that arena can be recycled. CountAll continues to use operation
+    /// edges and its separate weighted product instead of this quotient.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub fn canonicalize_and_mark_live(
+        &mut self,
+        graph: &mut BuildOrderGraph,
+    ) -> Result<Option<u32>, WasmExactSearchError> {
+        if graph.nodes.is_empty() || graph.root as usize >= graph.nodes.len() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_piece_language_root_out_of_range",
+            ));
+        }
+        self.prepare_graph_classes(graph.nodes.len())?;
+        for node_index in (0..graph.nodes.len()).rev() {
+            let accepting = graph.nodes[node_index].accepting();
+            self.edge_scratch.clear();
+            for edge in graph.piece_edges(node_index) {
+                let child_index = edge.to as usize;
+                if child_index <= node_index || child_index >= graph.nodes.len() {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_piece_language_not_topological",
+                    ));
+                }
+                let child = self.graph_classes[child_index];
+                if child == EMPTY_REFERENCE {
+                    // A dead child contributes the empty suffix language.
+                    continue;
+                }
+                self.edge_scratch.try_reserve(1).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_piece_language_edge_scratch_unavailable",
+                    )
+                })?;
+                self.edge_scratch.push(
+                    CanonicalPieceEdge::new(child, piece_code(edge.piece)).ok_or(
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_piece_language_child_index_overflow",
+                        ),
+                    )?,
+                );
+            }
+            let live = accepting || !self.edge_scratch.is_empty();
+            graph.nodes[node_index].live = live;
+            if live {
+                self.edge_scratch.sort_unstable();
+                self.edge_scratch.dedup();
+                let remaining_depth = self.remaining_depth(accepting)?;
+                self.graph_classes[node_index] = self.intern_node(accepting, remaining_depth)?;
+            }
+        }
+        Ok(self
+            .graph_classes
+            .get(graph.root as usize)
+            .copied()
+            .filter(|reference| *reference != EMPTY_REFERENCE))
+    }
+
+    fn prepare_graph_classes(&mut self, node_count: usize) -> Result<(), WasmExactSearchError> {
+        self.ensure_buckets();
+        if self.graph_classes.len() < node_count {
+            self.graph_classes
+                .try_reserve_exact(node_count - self.graph_classes.len())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_piece_language_class_storage_unavailable",
+                    )
+                })?;
+            self.graph_classes.resize(node_count, EMPTY_REFERENCE);
+        }
+        self.graph_classes[..node_count].fill(EMPTY_REFERENCE);
+        Ok(())
     }
 
     pub fn coverage(
@@ -573,10 +640,149 @@ const fn piece_code(piece: clearra_core_domain::piece::piece_kind::PieceKind) ->
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
+
     use super::{CanonicalPieceEdge, PieceOrderLanguageCache};
+    use crate::backend::wasm_cpu::buildup::{BuildOrderGraph, BuildOrderNodeSpec};
     use crate::backend::wasm_cpu::queue_observation_policy::{
         ObservationPieceLanguage, RootedPieceLanguageUnion,
     };
+
+    fn branching_operation_graph(accepting: bool) -> BuildOrderGraph {
+        let specs = [
+            (0, 4, 0, false),
+            (4, 2, 1, false),
+            (6, 1, 1, false),
+            (7, 1, 1, false),
+            (8, 0, 2, accepting),
+            (8, 0, 2, accepting),
+            (8, 0, 2, false),
+        ]
+        .into_iter()
+        .map(
+            |(edge_start, edge_count, depth, accepting)| BuildOrderNodeSpec {
+                edge_start,
+                edge_count,
+                depth,
+                accepting,
+            },
+        )
+        .collect();
+        let edges = [
+            (1, 0, PieceKind::I),
+            (2, 1, PieceKind::I),
+            (2, 6, PieceKind::I),
+            (3, 2, PieceKind::T),
+            (4, 3, PieceKind::O),
+            (5, 4, PieceKind::T),
+            (4, 3, PieceKind::O),
+            (6, 5, PieceKind::Z),
+        ]
+        .into_iter()
+        .map(|(to, operation, piece)| {
+            BuildOrderGraph::edge(to, operation, piece, RotationState::Zero, 0, 0, 0)
+        })
+        .collect();
+        BuildOrderGraph::from_topological_parts(specs, edges, 0, 0, false).unwrap()
+    }
+
+    fn words(cache: &PieceOrderLanguageCache, root: u32) -> BTreeSet<Vec<u8>> {
+        fn visit(
+            cache: &PieceOrderLanguageCache,
+            node: u32,
+            prefix: &mut Vec<u8>,
+            output: &mut BTreeSet<Vec<u8>>,
+        ) {
+            if cache.node(node).unwrap().accepting {
+                output.insert(prefix.clone());
+            }
+            for kind in 1..=7 {
+                for edge in cache.edges_for_piece(node, kind).unwrap() {
+                    prefix.push(kind);
+                    visit(cache, edge.child(), prefix, output);
+                    prefix.pop();
+                }
+            }
+        }
+        let mut output = BTreeSet::new();
+        visit(cache, root, &mut Vec::new(), &mut output);
+        output
+    }
+
+    #[test]
+    fn fused_language_preserves_same_kind_branches_dead_edges_and_exact_queue_union() {
+        let mut graph = branching_operation_graph(true);
+        let expected_live = graph.nodes.iter().map(|node| node.live).collect::<Vec<_>>();
+        let operation_edges = (0..graph.nodes.len())
+            .map(|node| {
+                graph
+                    .edges(node)
+                    .iter()
+                    .map(|edge| edge.canonical_key())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut cache = PieceOrderLanguageCache::default();
+        let baseline_root = cache.canonicalize(&graph).unwrap();
+        assert_eq!(operation_edges.iter().map(Vec::len).sum::<usize>(), 8);
+        let expected_words = BTreeSet::from([vec![1, 2], vec![1, 3]]);
+        assert_eq!(words(&cache, baseline_root), expected_words);
+
+        // Fused completion derives liveness; it must not trust stale flags.
+        for node in &mut graph.nodes {
+            node.live = !node.live;
+        }
+        let fused_root = cache
+            .canonicalize_and_mark_live(&mut graph)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fused_root, baseline_root, "same exact suffix identities");
+        assert_eq!(words(&cache, fused_root), expected_words);
+        assert_eq!(
+            graph.nodes.iter().map(|node| node.live).collect::<Vec<_>>(),
+            expected_live
+        );
+        assert_eq!(
+            (0..graph.nodes.len())
+                .map(|node| graph
+                    .edges(node)
+                    .iter()
+                    .map(|edge| edge.canonical_key())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            operation_edges,
+            "Boolean language construction must not remove CountAll operation edges",
+        );
+    }
+
+    #[test]
+    fn fused_language_dead_root_cannot_reuse_previous_graph_classes() {
+        let mut cache = PieceOrderLanguageCache::default();
+        let mut live = branching_operation_graph(true);
+        let expected = cache.canonicalize_and_mark_live(&mut live).unwrap();
+        assert!(expected.is_some());
+        let mut dead = branching_operation_graph(false);
+        for node in &mut dead.nodes {
+            node.live = true;
+        }
+        assert_eq!(cache.canonicalize_and_mark_live(&mut dead).unwrap(), None);
+        assert!(dead.nodes.iter().all(|node| !node.live));
+        assert_eq!(
+            cache.canonicalize_and_mark_live(&mut live).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn fused_language_rejects_invalid_root_instead_of_publishing_a_language() {
+        let mut graph = branching_operation_graph(true);
+        graph.root = graph.nodes.len() as u32;
+        assert!(PieceOrderLanguageCache::default()
+            .canonicalize_and_mark_live(&mut graph)
+            .is_err());
+    }
 
     #[test]
     fn determinized_union_preserves_all_distinct_piece_branches_once() {

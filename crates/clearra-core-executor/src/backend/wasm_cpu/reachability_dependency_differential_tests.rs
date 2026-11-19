@@ -169,6 +169,7 @@ fn a_full_relation_cache_computes_exact_positive_and_negative_misses() {
                 locks: source.locks,
                 target_condition: source.target_condition,
                 influencing_placements: source.influencing_placements.clone(),
+                next_in_bucket: source.next_in_bucket,
             };
             cache.influence_ids += copy.influencing_placements.capacity();
             cache.relations.push(copy);
@@ -207,7 +208,10 @@ fn a_full_relation_cache_computes_exact_positive_and_negative_misses() {
             assert_eq!(cache.relations.len(), MAX_RELATIONS);
         }
     });
-    assert_eq!(metrics.generated_relations, 3);
+    assert_eq!(
+        metrics.generated_relations, 1,
+        "a saturated cache must not compile unused proofs"
+    );
     assert_eq!(metrics.reused_relations, 0);
 }
 

@@ -12,6 +12,8 @@ use super::*;
 const MAX_RELATIONS: usize = 128;
 const MAX_STATIC_MASKS: usize = 2048;
 const MAX_INFLUENCE_IDS: usize = 128 * 1024;
+const BUCKET_COUNT: usize = 256;
+const NO_RELATION: u16 = u16::MAX;
 const OWNER_ALLOCATION_BYTES: usize =
     core::mem::size_of::<PlacementConditionCatalog>() + 2 * core::mem::size_of::<usize>();
 
@@ -32,6 +34,7 @@ struct Relation {
     target_condition: Option<StaticMask>,
     // These are concrete catalog row IDs, never kind bits or supply labels.
     influencing_placements: Vec<u32>,
+    next_in_bucket: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -58,7 +61,6 @@ struct StaticMask {
     mask: u64,
 }
 
-#[derive(Default)]
 pub(super) struct PlacementDependencyCache {
     // Pin allocation identity without retaining an obsolete catalog's buffers
     // when a reused workspace sees only hard-drop/exact-board cache hits.
@@ -67,10 +69,37 @@ pub(super) struct PlacementDependencyCache {
     relations: Vec<Relation>,
     static_masks: Vec<StaticMask>,
     influence_ids: usize,
+    bucket_heads: [u16; BUCKET_COUNT],
+}
+
+impl Default for PlacementDependencyCache {
+    fn default() -> Self {
+        Self {
+            catalog: None,
+            profile: None,
+            relations: Vec::new(),
+            static_masks: Vec::new(),
+            influence_ids: 0,
+            bucket_heads: [NO_RELATION; BUCKET_COUNT],
+        }
+    }
+}
+
+fn relation_bucket(piece: PieceKind, scope: RelationScope) -> usize {
+    let pose = match scope {
+        RelationScope::WholeFamily => 0x8000,
+        RelationScope::Target(rotation, x, y) => {
+            u32::from(rotation.quarter_turns()) * 64 + y as u32 * 10 + x as u32
+        }
+    };
+    let key = (piece_index(piece) as u32) * 256 + pose;
+    (key.wrapping_mul(0x9e37_79b9) >> 24) as usize
 }
 
 impl PlacementDependencyCache {
     pub(super) fn retained_bytes(&self) -> usize {
+        // Like the surrounding workspace accounting, count retained heap
+        // allocations only. The fixed bucket array is inline in the workspace.
         self.relations.capacity() * core::mem::size_of::<Relation>()
             + usize::from(self.catalog.is_some()) * OWNER_ALLOCATION_BYTES
             + self.static_masks.capacity() * core::mem::size_of::<StaticMask>()
@@ -105,28 +134,40 @@ impl PlacementDependencyCache {
         let frame = self.prepare_scope(catalog, board, profile, x, y, frame)?;
         placement_dependency::record(|m| m.queries += 1);
         let mut different_frame = false;
-        for relation in &self.relations {
-            if relation.piece != piece || !relation.scope.contains(rotation, x, y) {
+        let buckets = [
+            relation_bucket(piece, RelationScope::WholeFamily),
+            relation_bucket(piece, RelationScope::Target(rotation, x, y)),
+        ];
+        for (position, bucket) in buckets.into_iter().enumerate() {
+            if position == 1 && bucket == buckets[0] {
                 continue;
             }
-            if relation.frame != frame {
-                different_frame = true;
-                continue;
-            }
-            let family_matches = board & relation.mask == relation.occupancy;
-            let target_matches = relation.target_condition.is_some_and(|target| {
-                target.rotation == rotation
-                    && target.x == x
-                    && target.y == y
-                    && (board ^ relation.source_board) & target.mask == 0
-            });
-            if family_matches || target_matches {
-                placement_dependency::record(|m| {
-                    m.reused_relations += 1;
-                    m.cross_board_reuses += u64::from(board != relation.source_board);
-                    m.static_reuses += u64::from(!family_matches && target_matches);
+            let mut index = self.bucket_heads[bucket];
+            while index != NO_RELATION {
+                let relation = &self.relations[usize::from(index)];
+                index = relation.next_in_bucket;
+                if relation.piece != piece || !relation.scope.contains(rotation, x, y) {
+                    continue;
+                }
+                if relation.frame != frame {
+                    different_frame = true;
+                    continue;
+                }
+                let family_matches = board & relation.mask == relation.occupancy;
+                let target_matches = relation.target_condition.is_some_and(|target| {
+                    target.rotation == rotation
+                        && target.x == x
+                        && target.y == y
+                        && (board ^ relation.source_board) & target.mask == 0
                 });
-                return Some(relation.locks.contains(catalog.width(), rotation, x, y));
+                if family_matches || target_matches {
+                    placement_dependency::record(|m| {
+                        m.reused_relations += 1;
+                        m.cross_board_reuses += u64::from(board != relation.source_board);
+                        m.static_reuses += u64::from(!family_matches && target_matches);
+                    });
+                    return Some(relation.locks.contains(catalog.width(), rotation, x, y));
+                }
             }
         }
         if different_frame {
@@ -163,11 +204,12 @@ impl PlacementDependencyCache {
             || !self
                 .catalog
                 .as_ref()
-                .is_some_and(|previous| std::sync::Weak::ptr_eq(previous, &Arc::downgrade(owner)))
+                .is_some_and(|previous| previous.as_ptr() == Arc::as_ptr(owner))
         {
             self.relations.clear();
             self.static_masks.clear();
             self.influence_ids = 0;
+            self.bucket_heads.fill(NO_RELATION);
             self.catalog = Some(Arc::downgrade(owner));
             self.profile = Some(profile);
         }
@@ -195,6 +237,9 @@ impl PlacementDependencyCache {
         let Some(frame) = self.prepare_scope(catalog, board, profile, x, y, frame) else {
             return;
         };
+        if self.relations.len() == MAX_RELATIONS || self.influence_ids == MAX_INFLUENCE_IDS {
+            return;
+        }
         let Some(mask) = reverse_dependency::reverse_lock_dependency_mask(
             template, rotation, x, y, scratch, result,
         ) else {
@@ -220,6 +265,7 @@ impl PlacementDependencyCache {
                 locks,
                 target_condition: None,
                 influencing_placements: Vec::new(),
+                next_in_bucket: NO_RELATION,
             },
         );
     }
@@ -243,6 +289,9 @@ impl PlacementDependencyCache {
             return;
         };
         if !result.exhaustive {
+            return;
+        }
+        if self.relations.len() == MAX_RELATIONS || self.influence_ids == MAX_INFLUENCE_IDS {
             return;
         }
 
@@ -300,6 +349,7 @@ impl PlacementDependencyCache {
                 occupancy: board & mask,
                 locks: result.locks,
                 influencing_placements: Vec::new(),
+                next_in_bucket: NO_RELATION,
                 target_condition: static_mask.map(|mask| StaticMask {
                     piece,
                     rotation,
@@ -335,6 +385,9 @@ impl PlacementDependencyCache {
             {
                 self.influence_ids += influencing_placements.capacity();
                 relation.influencing_placements = influencing_placements;
+                let bucket = relation_bucket(relation.piece, relation.scope);
+                relation.next_in_bucket = self.bucket_heads[bucket];
+                self.bucket_heads[bucket] = self.relations.len() as u16;
                 self.relations.push(relation);
             }
         }

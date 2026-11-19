@@ -34,6 +34,8 @@ mod geometry_family;
 mod geometry_parallel_tests;
 mod geometry_projection;
 mod geometry_separator;
+#[cfg(test)]
+mod graph_probability_integration_tests;
 mod inverse_projection;
 mod kick_profiles;
 #[cfg(feature = "parallel")]

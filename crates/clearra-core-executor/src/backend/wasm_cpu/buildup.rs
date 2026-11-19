@@ -132,6 +132,10 @@ pub(super) struct BuildOrderGraph {
     piece_edges_share_operation_edges: bool,
     pub root: u32,
     reachability_states: usize,
+    // Worker-local suffix-language identity, consumed before the owning
+    // BuildUpWorkspace may recycle its language arena. Never exported as an ID.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    canonical_language_root: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1681,16 +1685,23 @@ fn verify_candidate_with_projection(
             coverage_product_states = product.active_states;
             coverage_product_edge_checks = product.edge_checks;
         } else {
+            #[cfg(any(test, feature = "local-search-ab"))]
+            let mut canonical_language_id = graph.canonical_language_root;
+            #[cfg(not(any(test, feature = "local-search-ab")))]
             let mut canonical_language_id = None;
             if problem
                 .queue_observation_policy()
                 .requires_observation_policy()
             {
-                let language_id = match workspace.piece_order_languages.canonicalize(&graph) {
-                    Ok(language_id) => language_id,
-                    Err(error) => {
-                        workspace.recycle_graph(graph);
-                        return Err(error);
+                let language_id = if let Some(language_id) = canonical_language_id {
+                    language_id
+                } else {
+                    match workspace.piece_order_languages.canonicalize(&graph) {
+                        Ok(language_id) => language_id,
+                        Err(error) => {
+                            workspace.recycle_graph(graph);
+                            return Err(error);
+                        }
                     }
                 };
                 canonical_language_id = Some(language_id);
@@ -2957,6 +2968,8 @@ impl BuildOrderGraph {
             piece_edges_share_operation_edges: piece_transitions_are_unique,
             root,
             reachability_states,
+            #[cfg(any(test, feature = "local-search-ab"))]
+            canonical_language_root: None,
         })
     }
 
@@ -3354,21 +3367,30 @@ impl BuildOrderGraph {
                 piece_edges.len() as u32 - nodes[node_index].piece_edge_start
             };
         }
-        for index in (0..nodes.len()).rev() {
-            if nodes[index].live {
-                continue;
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let fuse_language = super::placement_dependency::enabled()
+            && piece_language_projection_only
+            && problem.count_policy() == PcCountPolicy::CountUnique
+            && reachability_mode == BuildReachabilityMode::Existing;
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let fuse_language = false;
+        if !fuse_language {
+            for index in (0..nodes.len()).rev() {
+                if nodes[index].live {
+                    continue;
+                }
+                let start = nodes[index].edge_start as usize;
+                let end = start + nodes[index].edge_count as usize;
+                nodes[index].live = edges[start..end]
+                    .iter()
+                    .any(|edge| nodes[edge.to as usize].live);
             }
-            let start = nodes[index].edge_start as usize;
-            let end = start + nodes[index].edge_count as usize;
-            nodes[index].live = edges[start..end]
-                .iter()
-                .any(|edge| nodes[edge.to as usize].live);
         }
         edge_scratch.clear();
         workspace.graph_edge_scratch = edge_scratch;
         subset_queue.clear();
         workspace.graph_subset_queue = subset_queue;
-        Ok(Self {
+        let graph = Self {
             nodes,
             edges,
             piece_edges,
@@ -3378,7 +3400,36 @@ impl BuildOrderGraph {
                 .reachability
                 .generated_state_count()
                 .saturating_sub(reachability_states_before),
-        })
+            #[cfg(any(test, feature = "local-search-ab"))]
+            canonical_language_root: None,
+        };
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let graph = if fuse_language {
+            let mut graph = graph;
+            graph.canonical_language_root = match workspace
+                .piece_order_languages
+                .canonicalize_and_mark_live(&mut graph)
+            {
+                Ok(root) => root,
+                Err(error) => {
+                    workspace.recycle_graph(graph);
+                    return Err(error);
+                }
+            };
+            super::placement_dependency::record(|metrics| {
+                metrics.fused_language_graphs += 1;
+                metrics.fused_language_nodes += graph.nodes.len() as u64;
+                metrics.fused_language_edges += if graph.piece_edges_share_operation_edges {
+                    graph.edges.len()
+                } else {
+                    graph.piece_edges.len()
+                } as u64;
+            });
+            graph
+        } else {
+            graph
+        };
+        Ok(graph)
     }
 
     pub fn max_depth(&self) -> usize {
@@ -3450,6 +3501,11 @@ fn annotate_and_prune_finesse_graph_with_query_count(
     control: &ExecutionControl,
     query_count: Option<&mut usize>,
 ) -> Result<PreparedFinesseLanguage, WasmExactSearchError> {
+    #[cfg(any(test, feature = "local-search-ab"))]
+    {
+        // Finesse may replace the edge set, invalidating any earlier suffix ID.
+        graph.canonical_language_root = None;
+    }
     let target_grouping_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseTargetGrouping);
     let mut subsets = vec![usize::MAX; graph.nodes.len()];
     subsets[graph.root as usize] = 0;

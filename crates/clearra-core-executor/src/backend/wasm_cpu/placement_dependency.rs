@@ -29,6 +29,9 @@ pub(super) struct PlacementDependencyMetrics {
     pub atomic_row_groups: u64,
     pub row_condition_peak_bytes: u64,
     pub primitive_states: u64,
+    pub fused_language_graphs: u64,
+    pub fused_language_nodes: u64,
+    pub fused_language_edges: u64,
 }
 
 thread_local! {
@@ -42,7 +45,13 @@ pub(super) fn enabled() -> bool {
     }
     #[cfg(feature = "local-search-ab")]
     {
-        std::env::var("CLEARRA_PLACEMENT_DEPENDENCY").is_ok_and(|value| value == "1")
+        // The experiment is selected at process start. A/B runs use separate
+        // processes; do not allocate/read the environment in every ILC/lock
+        // query. Scoped unit-test overrides above remain independent.
+        static PROCESS_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *PROCESS_MODE.get_or_init(|| {
+            std::env::var("CLEARRA_PLACEMENT_DEPENDENCY").is_ok_and(|value| value == "1")
+        })
     }
     #[cfg(not(feature = "local-search-ab"))]
     {
