@@ -3101,6 +3101,8 @@ impl BuildOrderGraph {
                 .realization_feasibility
                 .has_current_partial_dependency_graph(proof)
         });
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let mut accepting_reached = false;
         let mut subset_cursor = 0usize;
         while subset_cursor < subset_queue.len() {
             let subset = usize::from(subset_queue[subset_cursor]);
@@ -3115,6 +3117,10 @@ impl BuildOrderGraph {
             if subset == all_placed {
                 nodes[node_index].accepting = completion.accepts(projection, subset);
                 nodes[node_index].live = nodes[node_index].accepting;
+                #[cfg(any(test, feature = "local-search-ab"))]
+                {
+                    accepting_reached |= nodes[node_index].accepting;
+                }
                 continue;
             }
             edge_scratch.clear();
@@ -3404,8 +3410,17 @@ impl BuildOrderGraph {
             canonical_language_root: None,
         };
         #[cfg(any(test, feature = "local-search-ab"))]
-        let graph = if fuse_language {
+        let graph = if fuse_language && accepting_reached {
             let mut graph = graph;
+            super::placement_dependency::record(|metrics| {
+                metrics.fused_language_graphs += 1;
+                metrics.fused_language_nodes += graph.nodes.len() as u64;
+                metrics.fused_language_edges += if graph.piece_edges_share_operation_edges {
+                    graph.edges.len()
+                } else {
+                    graph.piece_edges.len()
+                } as u64;
+            });
             graph.canonical_language_root = match workspace
                 .piece_order_languages
                 .canonicalize_and_mark_live(&mut graph)
@@ -3416,17 +3431,18 @@ impl BuildOrderGraph {
                     return Err(error);
                 }
             };
-            super::placement_dependency::record(|metrics| {
-                metrics.fused_language_graphs += 1;
-                metrics.fused_language_nodes += graph.nodes.len() as u64;
-                metrics.fused_language_edges += if graph.piece_edges_share_operation_edges {
-                    graph.edges.len()
-                } else {
-                    graph.piece_edges.len()
-                } as u64;
-            });
             graph
         } else {
+            if fuse_language {
+                // Every node starts nonlive, and only accepting terminals can
+                // seed a live suffix. With no such terminal, the graph already
+                // denotes the empty language; leave its root ID unset without
+                // initializing classes or visiting edges again.
+                super::placement_dependency::record(|metrics| {
+                    metrics.skipped_dead_language_graphs += 1;
+                    metrics.skipped_dead_language_nodes += graph.nodes.len() as u64;
+                });
+            }
             graph
         };
         Ok(graph)

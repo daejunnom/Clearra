@@ -182,6 +182,43 @@ fn fused_graph_probability_matches_every_explicit_two_piece_queue_with_hold() {
 }
 
 #[test]
+fn fused_graph_skips_dead_languages_without_changing_live_solution_queues() {
+    let _guard = product_guard();
+    // This catalog contains both physically dead and successful candidates.
+    // One workspace is reused across both kinds of candidate.
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0xfc3f_0fc3_f0),
+        PcQueueInput::standard_7_bag(),
+        PieceWindow::new(4),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(4))
+    .with_supply_window_size(SupplyWindowSize::new(4))
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+    .with_execution_policy(execution_policy());
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("mixed candidate fixture");
+    let (baseline, _) = run(&problem, false);
+    let (treatment, metrics) = run(&problem, true);
+    assert_same_solution_queues(&baseline, &treatment);
+    assert_eq!(
+        treatment.usize_field("normalized_unique_solution_count"),
+        Some(135)
+    );
+    assert_eq!(treatment.usize_field("covered_pattern_count"), Some(173));
+    assert_eq!(treatment.usize_field("coverage_pattern_count"), Some(840));
+    assert!(metrics.fused_language_graphs > 0);
+    assert!(metrics.skipped_dead_language_graphs > 0);
+    assert!(metrics.skipped_dead_language_nodes > 0);
+    eprintln!(
+        "mixed graph language: fused={}, skipped_dead_graphs={}, skipped_dead_nodes={}",
+        metrics.fused_language_graphs,
+        metrics.skipped_dead_language_graphs,
+        metrics.skipped_dead_language_nodes,
+    );
+}
+
+#[test]
 fn fused_graph_keeps_same_kind_supply_actions_distinct_for_count_all() {
     let _guard = product_guard();
     let query = PcScenarioQuery::new(

@@ -69,6 +69,9 @@ pub(super) struct PlacementDependencyCache {
     relations: Vec<Relation>,
     static_masks: Vec<StaticMask>,
     influence_ids: usize,
+    // A rejected allocation can leave a nonzero remainder below the budget.
+    // Stop compiling new proofs in that scope, while retaining all lookups.
+    observation_admission_closed: bool,
     bucket_heads: [u16; BUCKET_COUNT],
 }
 
@@ -80,6 +83,7 @@ impl Default for PlacementDependencyCache {
             relations: Vec::new(),
             static_masks: Vec::new(),
             influence_ids: 0,
+            observation_admission_closed: false,
             bucket_heads: [NO_RELATION; BUCKET_COUNT],
         }
     }
@@ -209,6 +213,7 @@ impl PlacementDependencyCache {
             self.relations.clear();
             self.static_masks.clear();
             self.influence_ids = 0;
+            self.observation_admission_closed = false;
             self.bucket_heads.fill(NO_RELATION);
             self.catalog = Some(Arc::downgrade(owner));
             self.profile = Some(profile);
@@ -237,7 +242,10 @@ impl PlacementDependencyCache {
         let Some(frame) = self.prepare_scope(catalog, board, profile, x, y, frame) else {
             return;
         };
-        if self.relations.len() == MAX_RELATIONS || self.influence_ids == MAX_INFLUENCE_IDS {
+        if self.observation_admission_closed
+            || self.relations.len() == MAX_RELATIONS
+            || self.influence_ids == MAX_INFLUENCE_IDS
+        {
             return;
         }
         let Some(mask) = reverse_dependency::reverse_lock_dependency_mask(
@@ -291,7 +299,10 @@ impl PlacementDependencyCache {
         if !result.exhaustive {
             return;
         }
-        if self.relations.len() == MAX_RELATIONS || self.influence_ids == MAX_INFLUENCE_IDS {
+        if self.observation_admission_closed
+            || self.relations.len() == MAX_RELATIONS
+            || self.influence_ids == MAX_INFLUENCE_IDS
+        {
             return;
         }
 
@@ -376,13 +387,18 @@ impl PlacementDependencyCache {
                     .saturating_sub(influencing_placements.len())
                     as u64;
             });
-            if self.relations.len() < MAX_RELATIONS
-                && self
-                    .influence_ids
-                    .saturating_add(influencing_placements.capacity())
-                    <= MAX_INFLUENCE_IDS
-                && self.relations.try_reserve_exact(1).is_ok()
+            if self
+                .influence_ids
+                .saturating_add(influencing_placements.capacity())
+                > MAX_INFLUENCE_IDS
             {
+                // Deliberately forgo even smaller later proofs until scope
+                // reset. Repeated misses must not rebuild footprints and sort
+                // incidence vectors that this bounded cache cannot retain.
+                self.observation_admission_closed = true;
+                return;
+            }
+            if self.relations.len() < MAX_RELATIONS && self.relations.try_reserve_exact(1).is_ok() {
                 self.influence_ids += influencing_placements.capacity();
                 relation.influencing_placements = influencing_placements;
                 let bucket = relation_bucket(relation.piece, relation.scope);

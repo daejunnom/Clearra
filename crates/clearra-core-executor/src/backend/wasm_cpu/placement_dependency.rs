@@ -28,10 +28,16 @@ pub(super) struct PlacementDependencyMetrics {
     pub completed_row_events: u64,
     pub atomic_row_groups: u64,
     pub row_condition_peak_bytes: u64,
+    // States counted by dependency observers, not all production reachability
+    // work: observers that return before recording a result are excluded.
     pub primitive_states: u64,
+    // Actual fused canonicalization calls and their input graph sizes.
     pub fused_language_graphs: u64,
     pub fused_language_nodes: u64,
     pub fused_language_edges: u64,
+    // Fused-path graphs with no accepting terminal need no language pass.
+    pub skipped_dead_language_graphs: u64,
+    pub skipped_dead_language_nodes: u64,
 }
 
 thread_local! {
