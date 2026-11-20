@@ -956,6 +956,28 @@ impl StandardBagCoverage {
         })
     }
 
+    /// Native workers publish this finalized coverage before dropping their
+    /// workspace. Borrowing retains only the existing epoch-merge allocation.
+    /// None denotes an exact empty set, not an unexecuted or failed flush.
+    #[cfg(feature = "parallel")]
+    pub(super) fn flushed_global_words(
+        &mut self,
+    ) -> Result<(usize, Option<&[u64]>), WasmExactSearchError> {
+        self.flush_epoch_global()?;
+        let pattern_count = self.materialized_pattern_count;
+        let words = self.global_words.as_slice();
+        if words.is_empty() {
+            if self.global_covered_pattern_count == 0 {
+                return Ok((pattern_count, None));
+            }
+        } else if words.len() == pattern_count.div_ceil(u64::BITS as usize) {
+            return Ok((pattern_count, Some(words)));
+        }
+        Err(WasmExactSearchError::InvalidProblem(
+            "wasm_standard_bag_coverage_shape_mismatch",
+        ))
+    }
+
     pub fn materialize_root(&self, root: u32) -> Result<PatternBitSet, WasmExactSearchError> {
         let word_count = self.materialized_pattern_count.div_ceil(u64::BITS as usize);
         let mut words = Vec::new();
@@ -2220,6 +2242,77 @@ mod supply_automaton_tests {
             SupplyProvenanceId(0x77),
         );
         (universe, initial)
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn terminal_bag_coverage_borrow_matches_materialized_union() {
+        use super::super::parallel_coverage::SharedCoverage;
+
+        let (_, initial) = request_fixture(4);
+        let universe = PatternUniverseMaterializer::standard_7_bag(4, 0, 0x77)
+            .expect("full four-draw standard bag");
+        assert_eq!(universe.pattern_count(), 840);
+        let mut coverage = StandardBagCoverage::for_universe(&universe, initial, false, false)
+            .expect("bag coverage")
+            .expect("supported universe");
+        let shared = SharedCoverage::new(840);
+        let (count, words) = coverage.flushed_global_words().expect("exact empty union");
+        assert!(words.is_none());
+        shared
+            .union_original_words(count, words)
+            .expect("empty union");
+        assert!(shared.to_bitset().expect("valid shape").is_empty());
+
+        let first_piece_root = |coverage: &mut StandardBagCoverage, piece| {
+            let mut children = [REJECT; 7];
+            children[usize::from(piece_code(piece) - 1)] = ACCEPT;
+            coverage
+                .intern_node(0, FULL_STANDARD_BAG, children)
+                .expect("first-piece language")
+        };
+        let first = first_piece_root(&mut coverage, PieceKind::I);
+        coverage.merge_global(first).expect("first symbolic epoch");
+        // Old caller owns a bitset copy; the second epoch remains pending
+        // until the new terminal borrow explicitly flushes it.
+        let mut reference = coverage
+            .materialize_global()
+            .expect("old materialized copy");
+        let second = first_piece_root(&mut coverage, PieceKind::T);
+        reference
+            .union_with(
+                &coverage
+                    .materialize_root(second)
+                    .expect("materialized second root"),
+            )
+            .expect("same universe");
+        coverage
+            .merge_global(second)
+            .expect("second symbolic epoch");
+        let (count, words) = coverage.flushed_global_words().expect("terminal borrow");
+        shared
+            .union_original_words(count, words)
+            .expect("borrowed union");
+        let actual = shared.to_bitset().expect("valid shape");
+        assert_eq!(actual, reference);
+        for ordinal in 0..840 {
+            let present = matches!(
+                universe.sequence_at(ordinal)[0],
+                PieceKind::I | PieceKind::T
+            );
+            assert_eq!(
+                actual.word_at(ordinal / 64) & (1u64 << (ordinal % 64)) != 0,
+                present
+            );
+        }
+
+        coverage.global_words.truncate(1);
+        assert!(matches!(
+            coverage.flushed_global_words(),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_standard_bag_coverage_shape_mismatch"
+            ))
+        ));
     }
 
     #[test]

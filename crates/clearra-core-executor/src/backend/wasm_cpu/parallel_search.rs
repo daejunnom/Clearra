@@ -18,7 +18,7 @@ use super::{
     buildup::{verify_candidate, BuildUpWorkspace, CandidateWitnessMode},
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
-    geometry::{GeometrySearch, ParallelGeometryPlan, TargetGroup},
+    geometry::{GeometrySearch, ParallelGeometryPlan, ParallelGeometryPreparation, TargetGroup},
     parallel_coverage::SharedCoverage,
     parallel_worker::{
         run_branch_worker, BranchSearchOutcome, ParallelBranchQueue, ParallelBranchTask,
@@ -102,26 +102,18 @@ pub(super) fn execute_if_worthwhile(
         return Ok(ParallelSearchDecision::Serial { geometry, reason });
     }
 
-    let mut geometry = geometry;
-    geometry.compile_for_parallel(&catalog, &control)?;
-    let balanced_workers = geometry
-        .candidate_family_count()
-        .map_or(requested_workers, |count| {
-            parallel_worker_count_for_candidates(count, requested_workers)
-        });
-    if balanced_workers < 2 {
-        return Ok(ParallelSearchDecision::Serial {
-            geometry,
-            reason: "small-compiled-candidate-family",
-        });
-    }
-    let plan = match geometry.into_parallel_plan(balanced_workers) {
-        Ok(plan) => plan,
-        Err(geometry) => {
-            return Ok(ParallelSearchDecision::Serial {
-                geometry,
-                reason: "exact-family-not-splittable",
-            });
+    let (plan, balanced_workers) = match geometry.prepare_parallel(
+        &catalog,
+        &control,
+        requested_workers,
+        parallel_worker_count_for_candidates,
+    )? {
+        ParallelGeometryPreparation::Ready {
+            plan,
+            balanced_workers,
+        } => (plan, balanced_workers),
+        ParallelGeometryPreparation::Serial { geometry, reason } => {
+            return Ok(ParallelSearchDecision::Serial { geometry, reason });
         }
     };
     execute_plan(

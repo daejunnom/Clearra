@@ -1546,12 +1546,16 @@ impl FamilyCompiler {
         self.retained_bytes() as u128 <= limit
     }
 
-    fn into_enumerator(self) -> (FamilyEnumerator, Option<u128>) {
+    fn into_enumerator(
+        self,
+        parallel_counts: Option<&mut Option<Vec<u128>>>,
+    ) -> (FamilyEnumerator, Option<u128>) {
         FamilyEnumerator::from_completed_family(
             self.targets,
             self.family,
             self.root_family,
             self.target_depth,
+            parallel_counts,
         )
     }
 
@@ -1825,7 +1829,7 @@ mod precomputed_geometry_tests {
                 }
             }
             let metrics = compiler.domain_metrics;
-            let (mut enumerator, _) = compiler.into_enumerator();
+            let (mut enumerator, _) = compiler.into_enumerator(None);
             let mut identities = BTreeSet::new();
             while let Some(candidate) = enumerator.next_candidate(&catalog).expect("enumeration") {
                 identities.insert(candidate.identity);
@@ -2208,14 +2212,24 @@ impl FamilyEnumerator {
     /// The unbounded handoff queries the root once. Its value is returned to
     /// the search for reporting/admission, including an already-observed
     /// None (overflow/allocation failure). The bounded constructor does not
-    /// query at all, and partition weights have a later, transient lifetime.
+    /// query at all. The native parallel dispatcher may retain the same table
+    /// briefly for partition weights, but the enumerator never owns it.
     fn from_completed_family(
         targets: Arc<[TargetGroup]>,
         family: GeometrySolutionFamily,
         root_family: u32,
         target_depth: u8,
+        parallel_counts: Option<&mut Option<Vec<u128>>>,
     ) -> (Self, Option<u128>) {
-        let candidate_count = family.path_count(root_family);
+        let candidate_count = if let Some(counts) = parallel_counts {
+            *counts = family.path_count_table();
+            counts
+                .as_ref()
+                .and_then(|table| table.get(root_family as usize))
+                .copied()
+        } else {
+            family.path_count(root_family)
+        };
         let mut tasks = Vec::new();
         if root_family != FAMILY_INVALID {
             tasks.push(TraversalTask {
@@ -2286,13 +2300,11 @@ impl FamilyEnumerator {
     fn into_parallel_enumerators(
         self,
         desired_partition_count: usize,
+        path_counts: Vec<u128>,
     ) -> Result<(Vec<Self>, usize), Self> {
         if self.tasks.len() != 1 {
             return Err(self);
         }
-        let Some(path_counts) = self.family.path_count_table() else {
-            return Err(self);
-        };
         let task = self.tasks[0];
         let mut seeds = vec![TraversalSeed {
             task,
@@ -2321,6 +2333,9 @@ impl FamilyEnumerator {
                 None => seeds[index].splittable = false,
             }
         }
+        // The table is only dispatch scratch; do not carry it into the
+        // enumerators, the shared family, or worker memory accounting.
+        drop(path_counts);
         let shared_family_bytes = self.family.retained_bytes();
         let mut enumerators = Vec::new();
         if enumerators.try_reserve_exact(seeds.len()).is_err() {
@@ -2453,6 +2468,7 @@ mod family_enumerator_stack_tests {
             GeometrySolutionFamily::new(),
             FAMILY_EMPTY,
             0,
+            None,
         )
         .0
     }
@@ -2464,7 +2480,7 @@ mod family_enumerator_stack_tests {
         let b = family.append(5, FAMILY_EMPTY).unwrap();
         let root = family.union(a, b).unwrap();
         let (enumerator, count) =
-            FamilyEnumerator::from_completed_family(Arc::from([]), family, root, 1);
+            FamilyEnumerator::from_completed_family(Arc::from([]), family, root, 1, None);
 
         assert_eq!(count, Some(2));
         assert_eq!(enumerator.tasks[0].family, root);
@@ -2486,17 +2502,147 @@ mod family_enumerator_stack_tests {
         // immutable family. Even here the existing whole-table count is
         // unavailable, not a successful count of the root alone.
         let (enumerator, count) =
-            FamilyEnumerator::from_completed_family(Arc::from([]), family, a, 1);
+            FamilyEnumerator::from_completed_family(Arc::from([]), family, a, 1, None);
         assert_eq!(count, None);
         assert_eq!(enumerator.tasks[0].family, a);
-        #[cfg(feature = "parallel")]
-        {
-            let fallback = enumerator
-                .into_parallel_enumerators(2)
-                .expect_err("overflowing partition weights are unavailable");
-            assert_eq!(fallback.candidate_count, None);
-            assert_eq!(fallback.tasks[0].family, a);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn prepared_parallel_family_uses_same_partition_seeds_and_order() {
+        let mut family = GeometrySolutionFamily::new();
+        let a = family.append(21, FAMILY_EMPTY).unwrap();
+        let b = family.append(22, FAMILY_EMPTY).unwrap();
+        let c = family.append(23, FAMILY_EMPTY).unwrap();
+        let d = family.append(24, FAMILY_EMPTY).unwrap();
+        let left = family.union(a, b).unwrap();
+        let right = family.union(c, d).unwrap();
+        let product = family.product(left, right).unwrap();
+        let root = family.append(7, product).unwrap();
+        let mut path_counts = None;
+        let (enumerator, count) = FamilyEnumerator::from_completed_family(
+            Arc::from([]),
+            family,
+            root,
+            3,
+            Some(&mut path_counts),
+        );
+        assert_eq!(count, Some(4));
+        let (partitions, _) = enumerator
+            .into_parallel_enumerators(4, path_counts.expect("ready weights"))
+            .expect("all four cartesian paths can split");
+        let shapes = partitions
+            .iter()
+            .map(|branch| {
+                let seed = branch.tasks[0];
+                assert_eq!(seed.continuation_count, 0);
+                (
+                    branch.rows[..usize::from(seed.depth)].to_vec(),
+                    seed.family,
+                    branch.candidate_count,
+                )
+            })
+            .collect::<Vec<_>>();
+        // The highest-weight seed is split first; on a tie the last seed
+        // is split first. This is not lexical emission order.
+        assert_eq!(
+            shapes,
+            vec![
+                (vec![7, 21], c, Some(1)),
+                (vec![7, 22], c, Some(1)),
+                (vec![7, 22], d, Some(1)),
+                (vec![7, 21], d, Some(1)),
+            ]
+        );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn prepared_parallel_family_preserves_small_and_missing_count_fallback() {
+        fn search_with(enumerator: FamilyEnumerator, count: Option<u128>) -> GeometrySearch {
+            let mut geometry = GeometrySearch::placeholder();
+            geometry.enumerator = Some(enumerator);
+            geometry.candidate_family_count = count;
+            geometry
         }
+
+        for root_present in [false, true] {
+            let mut family = GeometrySolutionFamily::new();
+            let root = if root_present {
+                family.append(4, FAMILY_EMPTY).unwrap()
+            } else {
+                FAMILY_INVALID
+            };
+            let mut scratch = None;
+            let (enumerator, count) = FamilyEnumerator::from_completed_family(
+                Arc::from([]),
+                family,
+                root,
+                1,
+                Some(&mut scratch),
+            );
+            assert_eq!(count, Some(u128::from(root_present)));
+            let fallback = search_with(enumerator, count)
+                .prepare_compiled_parallel(usize::from(root_present), scratch);
+            let ParallelGeometryPreparation::Serial { geometry, reason } = fallback else {
+                panic!("small family must not dispatch");
+            };
+            assert_eq!(reason, "small-compiled-candidate-family");
+            assert_eq!(geometry.candidate_family_count, count);
+            assert_eq!(
+                geometry.enumerator.unwrap().tasks.len(),
+                usize::from(root_present)
+            );
+        }
+
+        let mut family = GeometrySolutionFamily::new();
+        let a = family.append(4, FAMILY_EMPTY).unwrap();
+        let b = family.append(5, FAMILY_EMPTY).unwrap();
+        let mut overflow = family.union(a, b).unwrap();
+        for _ in 0..7 {
+            overflow = family.product(overflow, overflow).unwrap();
+        }
+        assert!(family.node(overflow).is_some());
+        let mut scratch = None;
+        let (enumerator, count) = FamilyEnumerator::from_completed_family(
+            Arc::from([]),
+            family,
+            a,
+            1,
+            Some(&mut scratch),
+        );
+        assert_eq!(count, None);
+        assert!(scratch.is_none());
+        let fallback = search_with(enumerator, count).prepare_compiled_parallel(2, scratch);
+        let ParallelGeometryPreparation::Serial { geometry, reason } = fallback else {
+            panic!("overflowing or unavailable table cannot dispatch");
+        };
+        assert_eq!(reason, "exact-family-not-splittable");
+        assert_eq!(geometry.candidate_family_count, None);
+        assert_eq!(geometry.enumerator.unwrap().tasks[0].family, a);
+
+        // A valid count does not turn a refused partition allocation into
+        // a failure of the existing serial enumerator or its root count.
+        let mut family = GeometrySolutionFamily::new();
+        let a = family.append(4, FAMILY_EMPTY).unwrap();
+        let b = family.append(5, FAMILY_EMPTY).unwrap();
+        let root = family.union(a, b).unwrap();
+        let (enumerator, count) = FamilyEnumerator::from_completed_family(
+            Arc::from([]),
+            family,
+            root,
+            1,
+            Some(&mut scratch),
+        );
+        assert!(scratch.is_some());
+        let fallback =
+            search_with(enumerator, count).prepare_compiled_parallel(usize::MAX, scratch);
+        let ParallelGeometryPreparation::Serial { geometry, reason } = fallback else {
+            panic!("impossible partition reservation cannot dispatch");
+        };
+        assert_eq!(reason, "exact-family-not-splittable");
+        assert_eq!(geometry.candidate_family_count, Some(2));
+        assert_eq!(geometry.enumerator.unwrap().tasks[0].family, root);
     }
 
     #[test]
@@ -2978,6 +3124,20 @@ pub(super) struct ParallelGeometryPlan {
     pub searches: Vec<GeometrySearch>,
     pub group_pattern_index_bytes: usize,
     pub shared_family_bytes: usize,
+}
+
+#[cfg(feature = "parallel")]
+// A serial fallback returns the original geometry state without reallocating it.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum ParallelGeometryPreparation {
+    Serial {
+        geometry: GeometrySearch,
+        reason: &'static str,
+    },
+    Ready {
+        plan: ParallelGeometryPlan,
+        balanced_workers: usize,
+    },
 }
 
 pub(super) fn compile_target_groups(
@@ -3647,7 +3807,7 @@ impl GeometrySearch {
     }
 
     pub fn advance(&mut self, catalog: &GeometryCatalog) -> GeometryAdvance {
-        self.advance_internal(catalog, None)
+        self.advance_internal(catalog, None, None)
     }
 
     pub fn advance_with_retained_limit(
@@ -3658,13 +3818,14 @@ impl GeometrySearch {
         if !self.resource_authoritative {
             return GeometryAdvance::ResourceIncomplete("geometry_memory_authority_not_connected");
         }
-        self.advance_internal(catalog, Some(retained_limit_bytes))
+        self.advance_internal(catalog, Some(retained_limit_bytes), None)
     }
 
     fn advance_internal(
         &mut self,
         catalog: &GeometryCatalog,
         retained_limit_bytes: Option<u128>,
+        parallel_counts: Option<&mut Option<Vec<u128>>>,
     ) -> GeometryAdvance {
         if let Some(mut preparation) = self.target_preparation.take() {
             if retained_limit_bytes
@@ -3785,7 +3946,7 @@ impl GeometrySearch {
                         };
                         self.enumerator = Some(enumerator);
                     } else {
-                        let (enumerator, root_count) = compiler.into_enumerator();
+                        let (enumerator, root_count) = compiler.into_enumerator(parallel_counts);
                         self.candidate_family_count = root_count;
                         self.enumerator = Some(enumerator);
                     }
@@ -3830,16 +3991,20 @@ impl GeometrySearch {
     }
 
     #[cfg(feature = "parallel")]
-    pub fn compile_for_parallel(
-        &mut self,
+    pub fn prepare_parallel(
+        mut self,
         catalog: &GeometryCatalog,
         control: &clearra_core_domain::execution_cancellation::ExecutionControl,
-    ) -> Result<(), WasmExactSearchError> {
+        requested_workers: usize,
+        balance_workers: impl FnOnce(u128, usize) -> usize,
+    ) -> Result<ParallelGeometryPreparation, WasmExactSearchError> {
+        let needed_compile = self.target_preparation.is_some() || self.compiler.is_some();
+        let mut path_counts = None;
         while self.target_preparation.is_some() || self.compiler.is_some() {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }
-            match self.advance(catalog) {
+            match self.advance_internal(catalog, None, Some(&mut path_counts)) {
                 GeometryAdvance::Pending => {}
                 GeometryAdvance::ResourceIncomplete(reason) => {
                     return Err(WasmExactSearchError::InvalidProblem(reason));
@@ -3851,15 +4016,61 @@ impl GeometrySearch {
                 }
             }
         }
-        Ok(())
+        let balanced_workers = self
+            .candidate_family_count
+            .map_or(requested_workers, |count| {
+                balance_workers(count, requested_workers)
+            });
+        if balanced_workers >= 2 && !needed_compile {
+            // A caller may hand us a family compiled by the ordinary serial
+            // path, which only retained a scalar. This is a new handoff, so
+            // build its one transient table only when there is a split seed.
+            path_counts = self
+                .enumerator
+                .as_ref()
+                .filter(|enumerator| enumerator.tasks.len() == 1)
+                .and_then(|enumerator| enumerator.family.path_count_table());
+        }
+        Ok(self.prepare_compiled_parallel(balanced_workers, path_counts))
+    }
+
+    #[cfg(feature = "parallel")]
+    fn prepare_compiled_parallel(
+        self,
+        balanced_workers: usize,
+        path_counts: Option<Vec<u128>>,
+    ) -> ParallelGeometryPreparation {
+        if balanced_workers < 2 {
+            return ParallelGeometryPreparation::Serial {
+                geometry: self,
+                reason: "small-compiled-candidate-family",
+            };
+        }
+        let Some(path_counts) = path_counts else {
+            return ParallelGeometryPreparation::Serial {
+                geometry: self,
+                reason: "exact-family-not-splittable",
+            };
+        };
+        match self.into_parallel_plan(balanced_workers, path_counts) {
+            Ok(plan) => ParallelGeometryPreparation::Ready {
+                plan,
+                balanced_workers,
+            },
+            Err(geometry) => ParallelGeometryPreparation::Serial {
+                geometry,
+                reason: "exact-family-not-splittable",
+            },
+        }
     }
 
     #[cfg(feature = "parallel")]
     // Failure returns ownership of the prepared search so serial fallback loses no state.
     #[allow(clippy::result_large_err)]
-    pub fn into_parallel_plan(
+    fn into_parallel_plan(
         mut self,
         requested_workers: usize,
+        path_counts: Vec<u128>,
     ) -> Result<ParallelGeometryPlan, Self> {
         if self.target_preparation.is_some() || self.compiler.is_some() {
             return Err(self);
@@ -3873,7 +4084,7 @@ impl GeometrySearch {
             return Err(self);
         };
         let (enumerators, shared_family_bytes) =
-            match enumerator.into_parallel_enumerators(desired_partition_count) {
+            match enumerator.into_parallel_enumerators(desired_partition_count, path_counts) {
                 Ok(partitions) if partitions.0.len() >= 2 => partitions,
                 Ok((mut partitions, _)) => {
                     self.enumerator = partitions.pop();

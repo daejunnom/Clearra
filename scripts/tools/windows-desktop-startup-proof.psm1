@@ -123,6 +123,10 @@ function Get-ClearraDesktopStartupObservation {
     }
 }
 
+function Test-ClearraNativeX64DesktopHost([bool]$Windows, [string]$ProcessArchitecture, [string]$OsArchitecture) {
+    return $Windows -and $ProcessArchitecture -ceq 'X64' -and $OsArchitecture -ceq 'X64'
+}
+
 function Get-ClearraDesktopStartupReadinessReason([hashtable]$Observation) {
     if (-not $Observation.gui_process_owned) { return 'gui-process-not-job-owned' }
     if (-not $Observation.visible_clearra_window) { return 'gui-window-not-observed' }
@@ -131,4 +135,4 @@ function Get-ClearraDesktopStartupReadinessReason([hashtable]$Observation) {
 }
 
 Export-ModuleMember -Function Test-ClearraDesktopOwnedDescendant, Get-ClearraDesktopWebViewArgumentEvidence,
-    Get-ClearraDesktopStartupObservation, Get-ClearraDesktopStartupReadinessReason
+    Get-ClearraDesktopStartupObservation, Get-ClearraDesktopStartupReadinessReason, Test-ClearraNativeX64DesktopHost

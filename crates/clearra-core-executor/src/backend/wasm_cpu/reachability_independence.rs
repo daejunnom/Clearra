@@ -38,6 +38,39 @@ pub(super) fn bounded_no_entry_on_minimum_board(
     minimum_board: u64,
     target: usize,
 ) -> bool {
+    bounded_no_entry::<false>(template, minimum_board, 0, target)
+}
+
+/// Experimental fixed-frame refinement: an earlier kick that is free on
+/// the maximum board is also free on every board in the interval. This
+/// suppresses the later candidate on all those boards. No inference of
+/// monotonicity for the actual ordered-kick graph is needed.
+///
+/// This proof is valid only inside [minimum_board, maximum_board]. It must
+/// not become the all-supersets `MovementProof::Closed` used by BuildUp.
+#[cfg(test)]
+fn bounded_no_entry_on_ordered_interval(
+    template: &ReachabilityTemplate,
+    minimum_board: u64,
+    maximum_board: u64,
+    target: usize,
+) -> bool {
+    let bits = u32::from(template.width) * u32::from(template.height);
+    if !(1..=64).contains(&bits)
+        || minimum_board & !maximum_board != 0
+        || (bits < 64 && maximum_board >> bits != 0)
+    {
+        return false;
+    }
+    bounded_no_entry::<true>(template, minimum_board, maximum_board, target)
+}
+
+fn bounded_no_entry<const USE_ORDERED_INTERVAL: bool>(
+    template: &ReachabilityTemplate,
+    minimum_board: u64,
+    maximum_board: u64,
+    target: usize,
+) -> bool {
     let Some(&target_mask) = template.state_masks.get(target) else {
         return false;
     };
@@ -65,6 +98,10 @@ pub(super) fn bounded_no_entry_on_minimum_board(
         let end = template.reverse_rotation_offsets[pose + 1] as usize;
         let rotations = template.reverse_rotation_sources[begin..end]
             .iter()
+            .filter(|&&source| {
+                !USE_ORDERED_INTERVAL
+                    || reverse_rotation_is_first_success(template, maximum_board, source)
+            })
             .map(|source| source.source);
         let translations = template.reverse_translation_sources[pose].into_iter();
         for source in translations.chain(rotations) {
@@ -399,6 +436,130 @@ mod tests {
                 1
             ));
         }
+    }
+
+    #[test]
+    fn ordered_negative_eliminates_a_later_kick_only_inside_its_interval() {
+        const MINIMUM: u64 = 0x4002;
+        const WITH_IRRELEVANT_BLOCKER: u64 = MINIMUM | (1 << 20);
+        const WITH_EARLIER_KICK_BLOCKED: u64 = MINIMUM | (1 << 11);
+        let profile = KickTableProfileId::Srs90;
+        let piece = PieceKind::T;
+        let rotation = RotationState::Zero;
+        let template = ReachabilityTemplate::compile(10, 3, piece, profile);
+        let target = state_index(
+            10,
+            template.ceiling,
+            State {
+                rotation,
+                x: 2,
+                y: 0,
+            },
+        )
+        .unwrap();
+
+        // The target's left, right and upper predecessors collide at min.
+        // Its only clear rotation predecessor is Right(2,0), aimed at the
+        // target by kick #2. Kick #0 (Zero(1,1)) wins throughout the narrower
+        // interval. Occupying (1,1) removes that earlier winner instead.
+        assert!(!bounded_no_entry_on_minimum_board(
+            &template, MINIMUM, target
+        ));
+        assert!(bounded_no_entry_on_ordered_interval(
+            &template, MINIMUM, MINIMUM, target
+        ));
+        assert!(bounded_no_entry_on_ordered_interval(
+            &template,
+            MINIMUM,
+            WITH_IRRELEVANT_BLOCKER,
+            target
+        ));
+        assert!(!bounded_no_entry_on_ordered_interval(
+            &template,
+            MINIMUM,
+            WITH_EARLIER_KICK_BLOCKED,
+            target
+        ));
+        assert!(!bounded_no_entry_on_ordered_interval(
+            &template,
+            WITH_IRRELEVANT_BLOCKER,
+            MINIMUM,
+            target
+        ));
+        assert!(!bounded_no_entry_on_ordered_interval(
+            &template,
+            MINIMUM,
+            MINIMUM | (1 << 30),
+            target
+        ));
+        for (board, reachable) in [
+            (MINIMUM, false),
+            (WITH_IRRELEVANT_BLOCKER, false),
+            (WITH_EARLIER_KICK_BLOCKED, true),
+        ] {
+            assert_eq!(
+                oracle_lock(10, 3, board, piece, profile, rotation, 2, 0),
+                reachable
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_negative_matches_independent_locks_across_small_intervals() {
+        const OPTIONAL: [u64; 4] = [1 << 6, 1 << 11, 1 << 18, 1 << 20];
+        let piece = PieceKind::T;
+        let rotation = RotationState::Zero;
+        let mut new_interval_proofs = 0;
+        let mut completions = 0;
+        for profile in PROFILES {
+            let template = ReachabilityTemplate::compile(10, 3, piece, profile);
+            let target = state_index(
+                10,
+                template.ceiling,
+                State {
+                    rotation,
+                    x: 2,
+                    y: 0,
+                },
+            )
+            .unwrap();
+            for base in [0x4002, 0x10_5800, 0x03c4_0840] {
+                let base_only = bounded_no_entry_on_minimum_board(&template, base, target);
+                for choices in 0..1 << OPTIONAL.len() {
+                    let extra = OPTIONAL.iter().enumerate().fold(0, |mask, (index, &bit)| {
+                        if choices & (1 << index) == 0 {
+                            mask
+                        } else {
+                            mask | bit
+                        }
+                    }) & !base;
+                    if !bounded_no_entry_on_ordered_interval(&template, base, base | extra, target)
+                    {
+                        continue;
+                    }
+                    new_interval_proofs += usize::from(!base_only && extra != 0);
+                    let mut completion = extra;
+                    loop {
+                        let board = base | completion;
+                        assert!(
+                            !oracle_lock(10, 3, board, piece, profile, rotation, 2, 0),
+                            "{profile:?}: target reached on {board:#x} in [{base:#x}, {:#x}]",
+                            base | extra,
+                        );
+                        completions += 1;
+                        if completion == 0 {
+                            break;
+                        }
+                        completion = (completion - 1) & extra;
+                    }
+                }
+            }
+        }
+        assert!(
+            new_interval_proofs > 0,
+            "must exercise nondegenerate new certificates"
+        );
+        assert!(completions > new_interval_proofs);
     }
 
     #[test]

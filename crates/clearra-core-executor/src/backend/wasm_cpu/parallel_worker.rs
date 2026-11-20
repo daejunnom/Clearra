@@ -603,9 +603,7 @@ pub(super) fn run_branch_worker(
     }
 
     if problem.objective().kind() != ObjectiveKind::Tiling {
-        if let Some(coverage) = workspace.materialize_standard_bag_coverage()? {
-            shared_coverage.union(&coverage)?;
-        }
+        workspace.publish_worker_standard_bag_coverage(shared_coverage)?;
     }
     aggregate.candidate_digest_retained_bytes = outcomes
         .iter()

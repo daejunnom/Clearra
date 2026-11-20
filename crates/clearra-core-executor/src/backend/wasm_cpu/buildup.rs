@@ -855,6 +855,18 @@ impl BuildUpWorkspace {
             .transpose()
     }
 
+    #[cfg(feature = "parallel")]
+    pub(super) fn publish_worker_standard_bag_coverage(
+        &mut self,
+        destination: &super::parallel_coverage::SharedCoverage,
+    ) -> Result<(), WasmExactSearchError> {
+        if let Some(coverage) = self.standard_bag_coverage.as_mut() {
+            let (pattern_count, words) = coverage.flushed_global_words()?;
+            destination.union_original_words(pattern_count, words)?;
+        }
+        Ok(())
+    }
+
     pub fn materialize_standard_bag_root(
         &self,
         root: u32,

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
 use clearra_core_executor::CoreExecutionResult;
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+use clearra_pc_graph::request::{PcContinuationTokenCodec, PcCountPolicy, PcScenarioQuery};
 use clearra_validation::diagnostic::diagnostic_report::DiagnosticReport;
 
 use crate::{
@@ -18,7 +20,12 @@ pub struct ScenarioAppRenderContract {
     fixture_path: Option<String>,
     input_fields: Vec<(String, String)>,
     expected: Option<ScenarioAppExpected>,
+    compact_input_replay_token: Option<String>,
 }
+
+// Compact scenario compatibility need not retain an unbounded suffix. This
+// covers the legacy compact queue-view width without depending on its C ABI.
+const MAX_COMPACT_SCENARIO_REPLAY_QUEUE: usize = 64;
 
 impl ScenarioAppRenderContract {
     pub fn new(verify_expected: bool, input_fields: Vec<(String, String)>) -> Self {
@@ -27,6 +34,7 @@ impl ScenarioAppRenderContract {
             fixture_path: None,
             input_fields,
             expected: None,
+            compact_input_replay_token: None,
         }
     }
 }
@@ -41,6 +49,46 @@ impl ScenarioAppRenderContract {
         self.expected = expected;
         self
     }
+
+    /// Carries only an immutable input replay for the legacy scenario product;
+    /// unlike pc2 it does not assert that an output game state is reachable.
+    pub(crate) fn prepare_compact_input_replay(mut self, query: &PcScenarioQuery) -> Self {
+        let board = query.initial_board();
+        let policy = query.execution_policy();
+        let objective_from_count = match query.count_policy() {
+            PcCountPolicy::CountAll => ObjectivePolicy::all(),
+            PcCountPolicy::CountUnique => ObjectivePolicy::unique(),
+            PcCountPolicy::FirstSolution => return self,
+        };
+        if board.width() != 10
+            || !(2..=6).contains(&board.visible_height())
+            || board.has_extended_occupancy()
+            || query.exact_pieces().is_none()
+            || query.objective() != objective_from_count
+            || query.supply_window_size().is_some()
+            || query.allowed_colored_solution_identities().is_some()
+            || query
+                .queue_observation_policy()
+                .requires_observation_policy()
+            || query.verified_kick_profile().is_some()
+            || policy.tablebase_requested()
+            || policy.precompute_build_dependencies()
+        {
+            return self;
+        }
+        let Some(fixed) = query.remaining_queue().as_fixed_sequence() else {
+            return self;
+        };
+        if fixed.is_empty() || fixed.len() > MAX_COMPACT_SCENARIO_REPLAY_QUEUE {
+            return self;
+        }
+        let canonical = query
+            .clone()
+            .with_initial_board(board.after_initial_line_clear());
+        self.compact_input_replay_token =
+            PcContinuationTokenCodec::encode_scenario_replay(&canonical).ok();
+        self
+    }
 }
 impl ScenarioAppRenderContract {
     pub fn success_response(self, result: CoreExecutionResult) -> AppResponse {
@@ -53,16 +101,37 @@ impl ScenarioAppRenderContract {
                 )
             }
         };
-        let contract_fields =
-            match canonical_contract_fields(self.input_fields.into_iter().chain(expected_fields)) {
-                Ok(fields) => fields,
-                Err(message) => {
-                    return AppResponse::failed(
-                        AppStatus::ExecutionFailed,
-                        AppError::new(AppErrorCode::ExecutionFailed, message),
-                    )
-                }
-            };
+        let replay_fields = self
+            .compact_input_replay_token
+            .filter(|_| {
+                result.field("scenario_replay_token").is_none()
+                    && result.bool_field("count_complete") == Some(true)
+                    && result.bool_field("resource_truncated") == Some(false)
+            })
+            .map(|token| {
+                [
+                    ("scenario_replay_token_version".to_owned(), "sr2".to_owned()),
+                    (
+                        "replay_hint".to_owned(),
+                        format!("clearra continue {token}"),
+                    ),
+                    ("scenario_replay_token".to_owned(), token),
+                ]
+            });
+        let contract_fields = match canonical_contract_fields(
+            self.input_fields
+                .into_iter()
+                .chain(expected_fields)
+                .chain(replay_fields.into_iter().flatten()),
+        ) {
+            Ok(fields) => fields,
+            Err(message) => {
+                return AppResponse::failed(
+                    AppStatus::ExecutionFailed,
+                    AppError::new(AppErrorCode::ExecutionFailed, message),
+                )
+            }
+        };
 
         // Keep successful scenario results typed until the host renderer. This preserves
         // solution-set authority and lets every host apply the shared public field contract.

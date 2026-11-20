@@ -8,6 +8,8 @@ mod build_probability_distributed;
 mod buildup;
 mod catalog;
 mod compact_exact_u64_map;
+#[cfg(test)]
+mod compact_pc2_completion_ledger;
 mod coverage_product;
 mod distributed;
 #[cfg(test)]

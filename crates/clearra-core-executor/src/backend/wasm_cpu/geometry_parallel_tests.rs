@@ -11,7 +11,7 @@ use clearra_problem::{ProblemCompiler, SearchProblem};
 
 use super::{
     catalog::GeometryCatalog,
-    geometry::{GeometryAdvance, GeometrySearch},
+    geometry::{GeometryAdvance, GeometrySearch, ParallelGeometryPreparation},
 };
 
 #[test]
@@ -38,22 +38,28 @@ fn assert_serial_and_partitioned_geometry_match(problem: SearchProblem, workers:
     let control = ExecutionControl::new(ExecutionCancellationToken::new());
 
     let mut serial = geometry_for(&problem, &catalog);
-    serial
-        .compile_for_parallel(&catalog, &control)
-        .expect("serial family compile");
+    let mut remaining_serial_identities = collect_identities(&mut serial, &catalog);
     let serial_count = serial
         .candidate_family_count()
         .expect("P7P3 family path count");
-    let mut remaining_serial_identities = collect_identities(&mut serial, &catalog);
 
-    let mut partition_source = geometry_for(&problem, &catalog);
-    partition_source
-        .compile_for_parallel(&catalog, &control)
+    let prepared = geometry_for(&problem, &catalog)
+        .prepare_parallel(&catalog, &control, workers, |count, requested| {
+            assert_eq!(count, serial_count);
+            requested.min(count.min(usize::MAX as u128) as usize)
+        })
         .expect("partitioned family compile");
-    let plan = match partition_source.into_parallel_plan(workers) {
-        Ok(plan) => plan,
-        Err(_) => panic!("family has independent traversal partitions"),
+    let ParallelGeometryPreparation::Ready {
+        plan,
+        balanced_workers,
+    } = prepared
+    else {
+        panic!("family has independent traversal partitions");
     };
+    assert_eq!(
+        balanced_workers,
+        workers.min(serial_count.min(usize::MAX as u128) as usize)
+    );
     let partition_count = plan
         .searches
         .iter()

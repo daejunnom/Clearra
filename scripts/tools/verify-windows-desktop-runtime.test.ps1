@@ -9,6 +9,11 @@ function Assert-Equal($Actual, $Expected, [string]$Label) {
     $script:passed++
 }
 
+Assert-Equal (Test-ClearraNativeX64DesktopHost $true 'X64' 'X64') $true 'native x64 Windows'
+Assert-Equal (Test-ClearraNativeX64DesktopHost $true 'X64' 'Arm64') $false 'emulated x64 is not a native host'
+Assert-Equal (Test-ClearraNativeX64DesktopHost $true 'X86' 'X64') $false '32-bit process is not the required host'
+Assert-Equal (Test-ClearraNativeX64DesktopHost $false 'X64' 'X64') $false 'non-Windows x64 cannot provide this evidence'
+
 $caseRoot = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'clearra startup proof fixture')
 $profile = [IO.Path]::Combine($caseRoot, 'webview2')
 $otherProfile = [IO.Path]::Combine($caseRoot, 'another-webview2')

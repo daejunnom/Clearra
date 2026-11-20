@@ -184,7 +184,10 @@ impl ScenarioAppCommand {
         &'static str,
     > {
         let result_projection = self.validated_result_projection()?;
-        Ok((self.query, self.render_contract, result_projection))
+        let render_contract = self
+            .render_contract
+            .map(|contract| contract.prepare_compact_input_replay(&self.query));
+        Ok((self.query, render_contract, result_projection))
     }
 }
 
@@ -493,6 +496,15 @@ impl RunnableAppCommand for ScenarioAppCommand {
                     result
                 };
                 if let Some(contract) = self.render_contract {
+                    let contract = if context
+                        .services()
+                        .core_executor()
+                        .supports_cooperative_wasm_search()
+                    {
+                        contract.prepare_compact_input_replay(&self.query)
+                    } else {
+                        contract
+                    };
                     return contract.success_response(result);
                 }
                 let mut response = AppResponse::success(AppRenderModel::Scenario(result));

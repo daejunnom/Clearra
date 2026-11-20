@@ -119,8 +119,9 @@ $gui = $null
 $jobProven = $false
 $phase = 'preflight'
 try {
-    if (-not $IsWindows -or [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne
-        [Runtime.InteropServices.Architecture]::X64) {
+    if (-not (Test-ClearraNativeX64DesktopHost $IsWindows `
+        ([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture) `
+        ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture))) {
         Stop-Readback 'unavailable' 'windows-x64-host-required'
     }
     $runId = [string]$report.runtime_run_id
