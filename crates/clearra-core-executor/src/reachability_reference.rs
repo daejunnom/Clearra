@@ -251,6 +251,17 @@ pub fn reference_spawn_lock_anchors(
     reference_locks(width, height, board, piece, profile, None)
 }
 
+#[cfg(test)]
+pub(crate) fn reference_spawn_locks_for_ordered_profile(
+    width: u8,
+    height: u8,
+    board: u64,
+    piece: PieceKind,
+    profile: &KickTableProfile,
+) -> Option<[u64; 4]> {
+    reference_locks(width, height, board, piece, profile, None)
+}
+
 /// Independent bounded oracle for a caller-supplied set of *actual* entry
 /// poses. This does not claim that a cropped local window is closed: the BFS
 /// still sees the complete physical board and can leave and re-enter a region.

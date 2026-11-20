@@ -56,6 +56,7 @@ jobs:
             ordered_kick_interval_requires ordered_kick_witness_guard_ ordered_negative_ candidate_kick_guard_
             reachability::reference_tests incremental_domain_ minimum_domain_cutoff_
             exact_clear_domain_tests placement_conditions::tests geometric_edge_reuse_
+            compact_kick_authority::
             candidate_projection_clear_fact_reuse_ distributed_pc2_replay_ compact_pc2_
             family_root_count_ family_handoff_ prepared_parallel_family_
             split_family_traversal_matches_serial_geometry_on_small_search

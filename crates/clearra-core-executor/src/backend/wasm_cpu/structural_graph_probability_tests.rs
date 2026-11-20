@@ -1375,21 +1375,23 @@ fn conditional_ordered_negative_bypasses_graph_and_reduces_total_pose_work() {
         )
         .unwrap()
         .with_output_policy(SearchOutputPolicy::CoverageSummary);
-        let run = |enabled| {
-            structural_order::with_conditional_ordered_negative(enabled, || {
-                structural_order::with_conditional_order_mode(true, || {
-                    structural_order::with_first_kick_interval_mode(false, || {
-                        structural_order::with_ordered_kick_interval_mode(false, || {
-                            structural_order::with_movement_clear_mode(false, || {
-                                structural_order::with_mode(false, || {
-                                    placement_dependency::with_mode(false, || {
-                                        WasmCpuSearchBackend::execute_with_control(
-                                            &problem,
-                                            &ExecutionControl::default(),
-                                        )
-                                        .unwrap()
+        let run = |enabled, reuse| {
+            structural_order::with_conditional_ordered_negative_reuse(reuse, || {
+                structural_order::with_conditional_ordered_negative(enabled, || {
+                    structural_order::with_conditional_order_mode(true, || {
+                        structural_order::with_first_kick_interval_mode(false, || {
+                            structural_order::with_ordered_kick_interval_mode(false, || {
+                                structural_order::with_movement_clear_mode(false, || {
+                                    structural_order::with_mode(false, || {
+                                        placement_dependency::with_mode(false, || {
+                                            WasmCpuSearchBackend::execute_with_control(
+                                                &problem,
+                                                &ExecutionControl::default(),
+                                            )
+                                            .unwrap()
+                                        })
+                                        .0
                                     })
-                                    .0
                                 })
                             })
                         })
@@ -1397,9 +1399,11 @@ fn conditional_ordered_negative_bypasses_graph_and_reduces_total_pose_work() {
                 })
             })
         };
-        let (baseline, before) = run(false);
-        let (treatment, after) = run(true);
+        let (baseline, before) = run(false, false);
+        let (treatment, after) = run(true, false);
+        let (reused, with_reuse) = run(true, true);
         assert_parity(&baseline, &treatment);
+        assert_parity(&treatment, &reused);
         assert_eq!(before.conditional_ordered_negative, Default::default());
         assert_eq!(before.conditional_order.unknown_candidates, 1);
         assert_eq!(before.conditional_order.graph_bypasses, 0);
@@ -1411,6 +1415,15 @@ fn conditional_ordered_negative_bypasses_graph_and_reduces_total_pose_work() {
         );
         assert!(baseline.usize_field("total_build_order_nodes").unwrap() > 0);
         assert_eq!(treatment.usize_field("total_build_order_nodes"), Some(0));
+        assert_eq!(reused.usize_field("total_build_order_nodes"), Some(0));
+        assert_eq!(with_reuse.conditional_order.graph_bypasses, 1);
+        assert_eq!(with_reuse.conditional_ordered_negative.attempts, 1);
+        assert_eq!(with_reuse.conditional_ordered_negative.proofs, 1);
+        assert_eq!(with_reuse.conditional_ordered_negative.checked_poses, 1);
+        assert_eq!(
+            with_reuse.conditional_ordered_negative.reused,
+            new_proof_poses - 1
+        );
         let primitive_before = baseline.usize_field("total_reachability_states").unwrap();
         let primitive_after = treatment.usize_field("total_reachability_states").unwrap();
         let checked_poses =
@@ -1442,13 +1455,24 @@ fn conditional_ordered_negative_bypasses_graph_and_reduces_total_pose_work() {
             coverage.covered_patterns().count_ones() as usize,
             words.len()
         );
+        let [reused_coverage] = reused.solution_coverages() else {
+            panic!("reusing a bounded negative must preserve the admitted solution");
+        };
         for ordinal in 0..universe.pattern_count() {
+            let covered = words.contains::<[PieceKind]>(universe.sequence_at(ordinal).as_ref());
             assert_eq!(
                 coverage
                     .covered_patterns()
                     .contains(PatternId::new(ordinal)),
-                words.contains::<[PieceKind]>(universe.sequence_at(ordinal).as_ref()),
+                covered,
                 "ordered-negative candidate queue ordinal {ordinal}"
+            );
+            assert_eq!(
+                reused_coverage
+                    .covered_patterns()
+                    .contains(PatternId::new(ordinal)),
+                covered,
+                "reused ordered-negative candidate queue ordinal {ordinal}"
             );
         }
     }

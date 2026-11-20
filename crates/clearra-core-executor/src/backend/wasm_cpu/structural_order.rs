@@ -43,6 +43,7 @@ pub struct ConditionalOrderedNegativeMetrics {
     pub proofs: u64,
     /// Poses checked even when the ordered closure returns Unknown.
     pub checked_poses: u64,
+    pub reused: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -125,11 +126,17 @@ thread_local! {
 #[cfg(test)]
 thread_local! {
     static CONDITIONAL_ORDERED_NEGATIVE: Cell<bool> = const { Cell::new(false) };
+    static CONDITIONAL_ORDERED_NEGATIVE_REUSE: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
 pub(super) fn conditional_ordered_negative_enabled() -> bool {
     CONDITIONAL_ORDERED_NEGATIVE.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(super) fn conditional_ordered_negative_reuse_enabled() -> bool {
+    conditional_ordered_negative_enabled() && CONDITIONAL_ORDERED_NEGATIVE_REUSE.with(Cell::get)
 }
 
 #[cfg(test)]
@@ -141,6 +148,15 @@ pub(super) fn record_conditional_ordered_negative(proven: bool, checked_poses: u
         ordered.proofs += u64::from(proven);
         ordered.checked_poses += checked_poses as u64;
         slot.set(value);
+    });
+}
+
+#[cfg(test)]
+pub(super) fn record_conditional_ordered_negative_reuse() {
+    METRICS.with(|slot| {
+        let mut metrics = slot.get();
+        metrics.conditional_ordered_negative.reused += 1;
+        slot.set(metrics);
     });
 }
 
@@ -668,5 +684,20 @@ pub(super) fn with_conditional_ordered_negative<T>(enabled: bool, action: impl F
         }
     }
     let _restore = Restore(CONDITIONAL_ORDERED_NEGATIVE.with(|slot| slot.replace(enabled)));
+    action()
+}
+
+#[cfg(test)]
+pub(super) fn with_conditional_ordered_negative_reuse<T>(
+    enabled: bool,
+    action: impl FnOnce() -> T,
+) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CONDITIONAL_ORDERED_NEGATIVE_REUSE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(CONDITIONAL_ORDERED_NEGATIVE_REUSE.with(|slot| slot.replace(enabled)));
     action()
 }

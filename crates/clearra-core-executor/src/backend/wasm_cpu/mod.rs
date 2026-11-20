@@ -9,6 +9,8 @@ mod buildup;
 mod catalog;
 mod compact_exact_u64_map;
 #[cfg(test)]
+mod compact_kick_authority;
+#[cfg(test)]
 mod compact_pc2_completion_ledger;
 mod coverage_product;
 mod distributed;

@@ -38,7 +38,7 @@ pub(super) fn bounded_no_entry_on_minimum_board(
     minimum_board: u64,
     target: usize,
 ) -> bool {
-    bounded_no_entry::<false>(template, minimum_board, 0, target).0
+    bounded_no_entry(template, minimum_board, target, |_| true).0
 }
 
 /// Experimental fixed-frame refinement: an earlier kick that is free on
@@ -62,14 +62,50 @@ pub(super) fn bounded_no_entry_on_ordered_interval(
     {
         return (false, 0);
     }
-    bounded_no_entry::<true>(template, minimum_board, maximum_board, target)
+    bounded_no_entry(template, minimum_board, target, |source| {
+        reverse_rotation_is_first_success(template, maximum_board, source)
+    })
 }
 
-fn bounded_no_entry<const USE_ORDERED_INTERVAL: bool>(
+/// From a successful point proof, retain only the earlier kick footprints
+/// whose absence excluded an otherwise placeable predecessor. All minimum
+/// occupancy is kept, so every blocked predecessor stays blocked. Every
+/// retained earlier footprint must stay vacant, so each suppressed later
+/// kick stays unavailable. The exact same closure then excludes every sky
+/// entry throughout the resulting interval.
+#[cfg(test)]
+pub(super) fn bounded_ordered_no_entry_clear_mask(
+    template: &ReachabilityTemplate,
+    board: u64,
+    target: usize,
+) -> (Option<u64>, usize) {
+    let mut must_remain_clear = 0;
+    let (proven, checked_poses) = bounded_no_entry(template, board, target, |source| {
+        // A collision at minimum already excludes the predecessor without
+        // requiring any of its earlier kick targets to remain clear.
+        let source_mask = template.state_masks[usize::from(source.source)];
+        if source_mask == INVALID_STATE_MASK || board & source_mask != 0 {
+            return false;
+        }
+        let earlier = reverse_rotation_prior_targets(template, source)
+            .iter()
+            .map(|&earlier| template.state_masks[usize::from(earlier)])
+            .find(|&mask| board & mask == 0);
+        if let Some(mask) = earlier {
+            must_remain_clear |= mask;
+            false
+        } else {
+            true
+        }
+    });
+    (proven.then_some(must_remain_clear), checked_poses)
+}
+
+fn bounded_no_entry(
     template: &ReachabilityTemplate,
     minimum_board: u64,
-    maximum_board: u64,
     target: usize,
+    mut rotation_can_enter: impl FnMut(ReverseRotationSource) -> bool,
 ) -> (bool, usize) {
     let Some(&target_mask) = template.state_masks.get(target) else {
         return (false, 0);
@@ -98,10 +134,7 @@ fn bounded_no_entry<const USE_ORDERED_INTERVAL: bool>(
         let end = template.reverse_rotation_offsets[pose + 1] as usize;
         let rotations = template.reverse_rotation_sources[begin..end]
             .iter()
-            .filter(|&&source| {
-                !USE_ORDERED_INTERVAL
-                    || reverse_rotation_is_first_success(template, maximum_board, source)
-            })
+            .filter(|&&source| rotation_can_enter(source))
             .map(|source| source.source);
         let translations = template.reverse_translation_sources[pose].into_iter();
         for source in translations.chain(rotations) {
@@ -473,6 +506,14 @@ mod tests {
         assert!(!attempt(MINIMUM, WITH_EARLIER_KICK_BLOCKED).0);
         assert_eq!(attempt(WITH_IRRELEVANT_BLOCKER, MINIMUM), (false, 0));
         assert_eq!(attempt(MINIMUM, MINIMUM | (1 << 30)), (false, 0));
+        let (required_clear, visited) =
+            bounded_ordered_no_entry_clear_mask(&template, MINIMUM, target);
+        assert_eq!(visited, 1);
+        let maximum =
+            ((1_u64 << 30) - 1) & !(required_clear.unwrap() | template.state_masks[target]);
+        assert_eq!(attempt(MINIMUM, maximum), (true, 1));
+        assert_ne!(maximum & (1 << 20), 0, "irrelevant blocker can vary");
+        assert_eq!(maximum & (1 << 11), 0, "earlier kick must stay clear");
         for (board, reachable) in [
             (MINIMUM, false),
             (WITH_IRRELEVANT_BLOCKER, false),

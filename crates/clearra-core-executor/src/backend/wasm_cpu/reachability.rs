@@ -560,6 +560,22 @@ struct PreparedRelationWindows {
     count: usize,
 }
 
+/// An ordered no-entry proof with a finite occupancy upper bound. The
+/// conditional-language owner separately pins its candidate and pose.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(super) struct OrderedNoEntryBounds {
+    minimum: u64,
+    maximum: u64,
+}
+
+#[cfg(test)]
+impl OrderedNoEntryBounds {
+    pub(super) fn excludes(self, board: u64) -> bool {
+        self.minimum & !board == 0 && board & !self.maximum == 0
+    }
+}
+
 fn conditioned_context_frame_capacity(height: u8) -> Option<u128> {
     // Vec's first allocation has capacity at least four for this element
     // size, even when a 1L target needs only two original-row masks.
@@ -947,6 +963,41 @@ impl ReachabilityWorkspace {
             return (false, 0);
         };
         independence::bounded_no_entry_on_ordered_interval(template, board, board, target)
+    }
+
+    /// Retain a bounded no-entry interval from the very same exact point
+    /// proof. A different original-row frame must never reuse it.
+    #[cfg(test)]
+    pub(super) fn try_prove_ordered_lock_pose_closed_within(
+        &mut self,
+        catalog: &GeometryCatalog,
+        board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: LocalRelationRowFrame,
+    ) -> (Option<OrderedNoEntryBounds>, usize) {
+        let cells = u32::from(catalog.width()) * u32::from(frame.surviving_rows());
+        let Some(frame_mask) = u64::BITS
+            .checked_sub(cells)
+            .and_then(|empty_bits| u64::MAX.checked_shr(empty_bits))
+        else {
+            return (None, 0);
+        };
+        let Some((template, target)) =
+            self.no_entry_pose(catalog, board, piece, profile, realization, Some(frame))
+        else {
+            return (None, 0);
+        };
+        let (required_clear, checked_poses) =
+            independence::bounded_ordered_no_entry_clear_mask(template, board, target);
+        let guard = required_clear
+            .map(|clear| OrderedNoEntryBounds {
+                minimum: board,
+                maximum: frame_mask & !(clear | realization.lock_mask),
+            })
+            .filter(|bounds| bounds.excludes(board));
+        (guard, checked_poses)
     }
 
     #[cfg(any(test, feature = "local-search-ab"))]
@@ -1832,6 +1883,59 @@ impl ReachabilityTemplate {
             .expect("WASM reachability only compiles connected exact kick profiles");
         let allow_180 = profile.supports_180();
         let ceiling = source_ceiling(height, piece, allow_180, profile);
+        let mut kick_deltas: [Vec<(i8, i8)>; 12] = std::array::from_fn(|_| Vec::new());
+        for from in RotationState::ALL {
+            let targets = [
+                from.clockwise(),
+                from.counter_clockwise(),
+                from.rotated_180(),
+            ];
+            for (slot, to) in targets.into_iter().enumerate() {
+                if slot == 2 && !allow_180 {
+                    continue;
+                }
+                let index = rotation_transition_index(from, slot);
+                if let Some(sequence) = profile.sequence_for(KickTransition::new(piece, from, to)) {
+                    kick_deltas[index].extend(sequence.offsets().iter().map(|offset| {
+                        normalized_kick_delta(piece, from, to, offset.dx(), offset.dy())
+                    }));
+                }
+            }
+        }
+        Self::compile_normalized(
+            width,
+            height,
+            piece,
+            allow_180,
+            ceiling,
+            kick_deltas.each_ref().map(Vec::as_slice),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn compile_authority(
+        authority: &super::compact_kick_authority::CompactKickAuthority,
+        piece: PieceKind,
+    ) -> Self {
+        let validated = authority.piece(piece);
+        Self::compile_normalized(
+            validated.width,
+            validated.height,
+            piece,
+            validated.allow_180,
+            validated.ceiling,
+            validated.ordered,
+        )
+    }
+
+    fn compile_normalized(
+        width: u8,
+        height: u8,
+        piece: PieceKind,
+        allow_180: bool,
+        ceiling: i8,
+        kick_deltas: [&[(i8, i8)]; 12],
+    ) -> Self {
         let state_count = 4 * (ceiling as usize + 1) * width as usize;
         let definition = standard_tetromino_registry()
             .get(piece)
@@ -1860,25 +1964,6 @@ impl ReachabilityTemplate {
                     if valid {
                         state_masks[index] = mask;
                     }
-                }
-            }
-        }
-        let mut kick_deltas: [Vec<(i8, i8)>; 12] = std::array::from_fn(|_| Vec::new());
-        for from in RotationState::ALL {
-            let targets = [
-                from.clockwise(),
-                from.counter_clockwise(),
-                from.rotated_180(),
-            ];
-            for (slot, to) in targets.into_iter().enumerate() {
-                if slot == 2 && !allow_180 {
-                    continue;
-                }
-                let index = rotation_transition_index(from, slot);
-                if let Some(sequence) = profile.sequence_for(KickTransition::new(piece, from, to)) {
-                    kick_deltas[index].extend(sequence.offsets().iter().map(|offset| {
-                        normalized_kick_delta(piece, from, to, offset.dx(), offset.dy())
-                    }));
                 }
             }
         }
@@ -2572,12 +2657,19 @@ fn reverse_rotation_is_first_success(
     board: u64,
     source: ReverseRotationSource,
 ) -> bool {
+    reverse_rotation_prior_targets(template, source)
+        .iter()
+        .all(|target| board & template.state_masks[usize::from(*target)] != 0)
+}
+
+fn reverse_rotation_prior_targets(
+    template: &ReachabilityTemplate,
+    source: ReverseRotationSource,
+) -> &[u16] {
     let transition = usize::from(source.source) * 3 + usize::from(source.slot);
     let prior_start = template.rotation_target_offsets[transition] as usize;
     let prior_end = prior_start + usize::from(source.prior_target_count);
-    template.rotation_targets[prior_start..prior_end]
-        .iter()
-        .all(|target| board & template.state_masks[usize::from(*target)] != 0)
+    &template.rotation_targets[prior_start..prior_end]
 }
 
 const INVALID_STATE_INDEX: u16 = u16::MAX;
@@ -2711,7 +2803,7 @@ fn compile_rotation_targets(
     width: u8,
     ceiling: i8,
     state_masks: &[u64],
-    kick_deltas: &[Vec<(i8, i8)>; 12],
+    kick_deltas: &[&[(i8, i8)]; 12],
 ) -> (Vec<u32>, Vec<u16>, Vec<u8>) {
     let mut offsets = Vec::with_capacity(state_masks.len() * 3 + 1);
     let mut targets = Vec::new();

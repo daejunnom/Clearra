@@ -2124,6 +2124,8 @@ fn verify_conditional_order(
         ..ConditionalOrderMetrics::default()
     };
     let mut current_state = None;
+    #[cfg(test)]
+    let mut closed_within = ConditionalClosedWithinLedger::default();
     let compiled = workspace
         .piece_order_languages
         .compile_conditional_language(geometry.pieces(), 64, 256, |executed, operation| {
@@ -2148,6 +2150,8 @@ fn verify_conditional_order(
                 profile,
                 &mut workspace.reachability,
                 movement_proofs,
+                #[cfg(test)]
+                &mut closed_within,
             )
         })?;
     if control.is_cancelled() {
@@ -2189,6 +2193,48 @@ fn verify_conditional_order(
     Ok(Some(certified_language_result(coverage)))
 }
 
+/// Unlike a `MovementProof::Closed`, these negatives have a finite
+/// occupancy upper bound and are owned by one conditional compilation.
+#[cfg(test)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct ConditionalClosedWithinKey {
+    row_id: u32,
+    profile: clearra_rules::kicks::KickTableProfileId,
+    frame: LocalRelationRowFrame,
+    realization: super::catalog::InstantiatedRealization,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct ConditionalClosedWithin {
+    key: ConditionalClosedWithinKey,
+    bounds: super::reachability::OrderedNoEntryBounds,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ConditionalClosedWithinLedger {
+    entries: [Option<ConditionalClosedWithin>; 16],
+    len: usize,
+}
+
+#[cfg(test)]
+impl ConditionalClosedWithinLedger {
+    fn excludes(&self, key: ConditionalClosedWithinKey, board: u64) -> bool {
+        self.entries[..self.len]
+            .iter()
+            .flatten()
+            .any(|proof| proof.key == key && proof.bounds.excludes(board))
+    }
+
+    fn remember(&mut self, proof: ConditionalClosedWithin) {
+        if let Some(slot) = self.entries.get_mut(self.len) {
+            *slot = Some(proof);
+            self.len += 1;
+        }
+    }
+}
+
 #[cfg(any(test, feature = "local-search-ab"))]
 #[allow(clippy::too_many_arguments)]
 fn prove_conditional_transition(
@@ -2201,6 +2247,7 @@ fn prove_conditional_transition(
     profile: clearra_rules::kicks::KickTableProfileId,
     reachability: &mut ReachabilityWorkspace,
     movement_proofs: &mut CandidateMovementProofs,
+    #[cfg(test)] closed_within: &mut ConditionalClosedWithinLedger,
 ) -> super::piece_order_language::ConditionalTransitionProof {
     use super::{
         piece_order_language::ConditionalTransitionProof::{Allowed, Forbidden, Unknown},
@@ -2249,6 +2296,20 @@ fn prove_conditional_transition(
             if reachable {
                 return Allowed;
             }
+            continue;
+        }
+        #[cfg(test)]
+        let closed_key = frame
+            .filter(|_| super::structural_order::conditional_ordered_negative_reuse_enabled())
+            .map(|frame| ConditionalClosedWithinKey {
+                row_id,
+                profile,
+                frame,
+                realization,
+            });
+        #[cfg(test)]
+        if closed_key.is_some_and(|key| closed_within.excludes(key, board)) {
+            super::structural_order::record_conditional_ordered_negative_reuse();
             continue;
         }
         let exact_positive = reachability.try_prove_first_kick_lock_interval(
@@ -2303,6 +2364,27 @@ fn prove_conditional_transition(
         }
         #[cfg(test)]
         if super::structural_order::conditional_ordered_negative_enabled() {
+            if let Some(key) = closed_key {
+                let (bounds, checked_poses) = reachability
+                    .try_prove_ordered_lock_pose_closed_within(
+                        catalog,
+                        board,
+                        piece,
+                        profile,
+                        realization,
+                        key.frame,
+                    );
+                super::structural_order::record_conditional_ordered_negative(
+                    bounds.is_some(),
+                    checked_poses,
+                );
+                if let Some(bounds) = bounds {
+                    closed_within.remember(ConditionalClosedWithin { key, bounds });
+                    continue;
+                }
+                unknown = true;
+                continue;
+            }
             let (proven, checked_poses) = reachability
                 .try_prove_ordered_lock_pose_unreachable_at_point(
                     catalog,
