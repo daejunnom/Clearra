@@ -1366,10 +1366,31 @@ fn conditional_support_or_created_by_one_clear_preserves_four_line_coverage() {
         placement_poset::compile(&catalog, &candidate).is_none(),
         "an unconditional predecessor graph cannot express the missing JI prefix"
     );
-    assert!(
-        placement_poset::CandidateGeometry::for_conditional_order(&catalog, &candidate).is_some(),
-        "the earlier D=0-only admission missed this one-operation clear"
-    );
+    let geometry = placement_poset::CandidateGeometry::for_conditional_order(&catalog, &candidate)
+        .expect("the earlier D=0-only admission missed this one-operation clear");
+    let mut reused_frame = false;
+    let mut projected_new_frame = false;
+    for executed in 0..(1_usize << pieces.len()) {
+        let state = geometry.conditional_state(executed as u16);
+        assert_eq!(
+            (state.board, state.deleted),
+            subset_state(&catalog, &candidate, executed)
+        );
+        for operation in 0..pieces.len() {
+            let bit = 1_usize << operation;
+            if executed & bit != 0 {
+                continue;
+            }
+            let expected = subset_state(&catalog, &candidate, executed | bit);
+            assert_eq!(
+                geometry.conditional_after_operation(&state, executed as u16, operation),
+                expected,
+            );
+            reused_frame |= expected.1 == state.deleted;
+            projected_new_frame |= expected.1 != state.deleted;
+        }
+    }
+    assert!(reused_frame && projected_new_frame);
 
     let identity = StandardBoard64TilingIdentity::from_placements(
         initial,

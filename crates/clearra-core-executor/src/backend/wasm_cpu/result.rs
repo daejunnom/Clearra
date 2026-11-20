@@ -904,6 +904,8 @@ pub(crate) struct WasmExactSearchSession {
     parallel_worker_retained_bytes: usize,
     #[cfg(feature = "parallel")]
     parallel_worker_memory_components: Option<super::parallel_worker::WorkerMemoryComponents>,
+    #[cfg(all(feature = "parallel", any(test, feature = "local-search-ab")))]
+    parallel_handoff_payload: Option<ParallelHandoffPayload>,
     #[cfg(feature = "parallel")]
     parallel_standard_bag_memo_storage: &'static str,
     #[cfg(feature = "parallel")]
@@ -954,6 +956,16 @@ pub(crate) struct WasmExactSearchSession {
     finished: bool,
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     profile_geometry_advance_calls: usize,
+}
+
+/// Snapshot of the merged outcome before it enters the session. This is not
+/// concurrent with the worker scratch snapshots or a complete allocator peak.
+#[cfg(all(feature = "parallel", any(test, feature = "local-search-ab")))]
+#[derive(Clone, Copy)]
+struct ParallelHandoffPayload {
+    catalog_payload_bytes: usize,
+    result_slots_bytes: usize,
+    global_coverage_storage_bytes: usize,
 }
 
 impl WasmExactSearchSession {
@@ -1667,6 +1679,8 @@ impl WasmExactSearchSession {
             parallel_worker_retained_bytes: 0,
             #[cfg(feature = "parallel")]
             parallel_worker_memory_components: None,
+            #[cfg(all(feature = "parallel", any(test, feature = "local-search-ab")))]
+            parallel_handoff_payload: None,
             #[cfg(feature = "parallel")]
             parallel_standard_bag_memo_storage: "not-measured",
             #[cfg(feature = "parallel")]
@@ -1897,6 +1911,19 @@ impl WasmExactSearchSession {
             terminal_identity_move && self.can_move_terminal_parallel_identities(&outcome);
         let canonical_minimum_source_complete =
             self.validate_parallel_minimum_cover_source(&mut outcome)?;
+        let catalog_payload_bytes = self.catalog.retained_bytes();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        {
+            self.parallel_handoff_payload = (self.problem.objective().kind()
+                != ObjectiveKind::Tiling)
+                .then(|| ParallelHandoffPayload {
+                    catalog_payload_bytes,
+                    result_slots_bytes: reserved_slots_bytes(&outcome.buildable_identities)
+                        .saturating_add(reserved_slots_bytes(&outcome.solution_coverage))
+                        .saturating_add(reserved_slots_bytes(&outcome.representative_path)),
+                    global_coverage_storage_bytes: outcome.covered_patterns.retained_bytes(),
+                });
+        }
         self.geometry = outcome.geometry;
         self.covered_patterns
             .union_with(&outcome.covered_patterns)
@@ -1972,8 +1999,7 @@ impl WasmExactSearchSession {
         self.parallel_minimum_worker_candidates = outcome.minimum_worker_candidates;
         self.parallel_maximum_worker_candidates = outcome.maximum_worker_candidates;
         self.peak_cpu_bytes = self.peak_cpu_bytes.max(
-            self.catalog
-                .retained_bytes()
+            catalog_payload_bytes
                 .saturating_add(self.geometry.retained_bytes())
                 .saturating_add(self.tablebase_retained_bytes)
                 .saturating_add(self.parallel_worker_retained_bytes)
@@ -5820,6 +5846,67 @@ impl WasmExactSearchSession {
                 )
             })?;
         representative_path.extend_from_slice(&self.representative_path);
+        #[cfg(all(feature = "parallel", any(test, feature = "local-search-ab")))]
+        if let (Some(memory), Some(handoff)) = (
+            self.parallel_worker_memory_components,
+            self.parallel_handoff_payload,
+        ) {
+            // Count selected terminal buffers, not nested strings, coverage
+            // backing, a typed proof, or an encoding on the host. An identity
+            // vector may have moved here from handoff: never add stages.
+            let assembly_slots_bytes = reserved_slots_bytes(&identities)
+                .saturating_add(reserved_slots_bytes(&normalized_keys))
+                .saturating_add(reserved_slots_bytes(&solution_coverages))
+                .saturating_add(reserved_slots_bytes(&normalized_solution_coverages))
+                .saturating_add(reserved_slots_bytes(&solution_probabilities))
+                .saturating_add(reserved_slots_bytes(&coverage_pattern_words))
+                .saturating_add(reserved_slots_bytes(&representative_path));
+            let ownership_fields = [
+                field(
+                    "parallel_memory_lifetime_scope",
+                    "native-nonadditive-logical-payload-checkpoints.v1",
+                ),
+                field(
+                    "parallel_worker_exit_snapshot_count",
+                    memory.exit_snapshot_count,
+                ),
+                field(
+                    "parallel_worker_exit_scratch_bytes_sum",
+                    memory.private_scratch_bytes(),
+                ),
+                field(
+                    "parallel_worker_exit_scratch_bytes_max",
+                    memory.max_exit_scratch_bytes,
+                ),
+                field(
+                    "parallel_worker_exit_outbound_payload_bytes_sum",
+                    memory.returned_payload_bytes(),
+                ),
+                field(
+                    "parallel_worker_exit_branch_slots_bytes_sum",
+                    memory.returned_branch_slots_bytes,
+                ),
+                field(
+                    "parallel_handoff_catalog_payload_bytes",
+                    handoff.catalog_payload_bytes,
+                ),
+                field(
+                    "parallel_handoff_result_slots_bytes",
+                    handoff.result_slots_bytes,
+                ),
+                field(
+                    "parallel_handoff_global_coverage_storage_bytes",
+                    handoff.global_coverage_storage_bytes,
+                ),
+                field("parallel_assembly_result_slots_bytes", assembly_slots_bytes),
+            ];
+            fields
+                .try_reserve_exact(ownership_fields.len())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
+                })?;
+            fields.extend(ownership_fields);
+        }
         let mut result = CoreExecutionResult::new(fields, representative_path)
             .with_normalized_solution_keys(normalized_keys)
             .with_normalized_solution_identities(identities)
@@ -5848,6 +5935,11 @@ impl WasmExactSearchSession {
         }
         Ok(result)
     }
+}
+
+#[cfg(all(feature = "parallel", any(test, feature = "local-search-ab")))]
+fn reserved_slots_bytes<T>(values: &Vec<T>) -> usize {
+    values.capacity().saturating_mul(core::mem::size_of::<T>())
 }
 
 fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
@@ -6051,6 +6143,37 @@ mod tests {
             Some(false)
         );
         assert!(!result_with_rows.solution_coverages().is_empty());
+        for result in [&reference, &moved, &result_with_rows] {
+            assert_eq!(
+                result.field("parallel_memory_lifetime_scope"),
+                Some("native-nonadditive-logical-payload-checkpoints.v1")
+            );
+            let metric = |key| result.usize_field(key).expect("parallel memory checkpoint");
+            let workers = metric("workers_used");
+            let sum_scratch = metric("parallel_worker_exit_scratch_bytes_sum");
+            let max_scratch = metric("parallel_worker_exit_scratch_bytes_max");
+            let outbound = metric("parallel_worker_exit_outbound_payload_bytes_sum");
+            assert_eq!(metric("parallel_worker_exit_snapshot_count"), workers);
+            assert!(max_scratch <= sum_scratch);
+            assert!(sum_scratch <= max_scratch.saturating_mul(workers));
+            // Branch slot storage is a separate sample; neither it nor the
+            // shared owners or later checkpoints enter this legacy total.
+            assert_eq!(
+                sum_scratch.saturating_add(outbound),
+                metric("worker_retained_bytes")
+            );
+            assert!(metric("parallel_worker_exit_branch_slots_bytes_sum") > 0);
+            assert!(metric("parallel_handoff_catalog_payload_bytes") > 0);
+            assert!(metric("parallel_handoff_global_coverage_storage_bytes") > 0);
+            let identity_bytes = core::mem::size_of::<
+                clearra_core_domain::solution::StandardBoard64TilingIdentity,
+            >() * result.normalized_solution_identities().len();
+            assert!(metric("parallel_handoff_result_slots_bytes") >= identity_bytes);
+            assert!(
+                metric("parallel_assembly_result_slots_bytes")
+                    >= identity_bytes + core::mem::size_of_val(result.coverage_pattern_words())
+            );
+        }
     }
 
     #[test]

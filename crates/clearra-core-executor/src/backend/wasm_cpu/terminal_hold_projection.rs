@@ -27,6 +27,11 @@ pub(super) fn terminal_release_pattern_word(
     if queue_position != pattern_index.sequence_len() {
         return 0;
     }
+    // At the end of an explicit finite source the ordinary position index has
+    // no current piece. Only the standard-bag lookahead can shadow a release.
+    if !projects_standard_bag_lookahead {
+        return active_patterns;
+    }
     active_patterns
         & !projected_current_word(
             pattern_index,
@@ -35,6 +40,10 @@ pub(super) fn terminal_release_pattern_word(
             projects_standard_bag_lookahead,
         )
 }
+
+#[cfg(test)]
+#[path = "component_shuffle_contract_tests.rs"]
+mod component_shuffle_contract_tests;
 
 pub(super) fn projected_current_word(
     pattern_index: &PatternPiecePositionIndex,

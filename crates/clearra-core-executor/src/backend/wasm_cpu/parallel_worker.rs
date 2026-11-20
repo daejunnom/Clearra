@@ -183,10 +183,24 @@ pub(super) struct WorkerMemoryComponents {
     pub shared_standard_bag_request_bytes: usize,
     /// Request-owned immutable transitions and lazy sky entries, never summed.
     pub shared_reachability_template_bytes: usize,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub exit_snapshot_count: usize,
+    /// Largest sampled per-worker scratch at return, not a time-series peak.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub max_exit_scratch_bytes: usize,
+    /// Reserved inline branch outcome slots sent to the coordinator; excludes
+    /// nested geometry and digest allocations.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub returned_branch_slots_bytes: usize,
 }
 
 impl WorkerMemoryComponents {
     pub fn total_bytes(self) -> usize {
+        self.private_scratch_bytes()
+            .saturating_add(self.returned_payload_bytes())
+    }
+
+    pub fn private_scratch_bytes(self) -> usize {
         self.buildup
             .piece_language_bytes
             .saturating_add(self.buildup.standard_bag_bytes)
@@ -194,7 +208,10 @@ impl WorkerMemoryComponents {
             .saturating_add(self.buildup.graph_projection_bytes)
             .saturating_add(self.buildup.other_bytes)
             .saturating_add(self.evaluator_bytes)
-            .saturating_add(self.solution_identity_bytes)
+    }
+
+    pub fn returned_payload_bytes(self) -> usize {
+        self.solution_identity_bytes
             .saturating_add(self.solution_coverage_bytes)
             .saturating_add(self.candidate_digest_bytes)
     }
@@ -240,6 +257,18 @@ impl WorkerMemoryComponents {
         self.shared_reachability_template_bytes = self
             .shared_reachability_template_bytes
             .max(other.shared_reachability_template_bytes);
+        #[cfg(any(test, feature = "local-search-ab"))]
+        {
+            self.exit_snapshot_count = self
+                .exit_snapshot_count
+                .saturating_add(other.exit_snapshot_count);
+            self.max_exit_scratch_bytes = self
+                .max_exit_scratch_bytes
+                .max(other.max_exit_scratch_bytes);
+            self.returned_branch_slots_bytes = self
+                .returned_branch_slots_bytes
+                .saturating_add(other.returned_branch_slots_bytes);
+        }
     }
 }
 
@@ -602,7 +631,20 @@ pub(super) fn run_branch_worker(
         standard_bag_memo: workspace.standard_bag_memo_accounting(),
         shared_standard_bag_request_bytes,
         shared_reachability_template_bytes: shared_request.reachability.retained_bytes(),
+        #[cfg(any(test, feature = "local-search-ab"))]
+        exit_snapshot_count: 1,
+        #[cfg(any(test, feature = "local-search-ab"))]
+        max_exit_scratch_bytes: 0,
+        #[cfg(any(test, feature = "local-search-ab"))]
+        returned_branch_slots_bytes: outcomes
+            .capacity()
+            .saturating_mul(core::mem::size_of::<BranchSearchOutcome>()),
     };
+    #[cfg(any(test, feature = "local-search-ab"))]
+    {
+        aggregate.worker_memory_components.max_exit_scratch_bytes =
+            aggregate.worker_memory_components.private_scratch_bytes();
+    }
     aggregate.worker_retained_bytes = aggregate.worker_memory_components.total_bytes();
     aggregate.standard_bag_memo_storage = workspace.standard_bag_memo_storage_label();
     aggregate.piece_language_cache_hits = workspace.piece_language_coverage_hits();
@@ -951,6 +993,9 @@ mod tests {
             // Eleven workers share this exact request owner once.
             shared_standard_bag_request_bytes: 64,
             shared_reachability_template_bytes: 128,
+            exit_snapshot_count: 1,
+            max_exit_scratch_bytes: 2_100,
+            returned_branch_slots_bytes: 512,
         };
         assert_eq!(component.total_bytes(), 4500);
         let mut total = WorkerAggregate::default();
@@ -965,7 +1010,13 @@ mod tests {
                 .expect("worker components");
         }
         assert_eq!(total.worker_retained_bytes, 49_500);
-        assert_eq!(total.worker_memory_components.total_bytes(), 49_500);
+        let memory = total.worker_memory_components;
+        assert_eq!(memory.total_bytes(), 49_500);
+        assert_eq!(memory.private_scratch_bytes(), 23_100);
+        assert_eq!(memory.returned_payload_bytes(), 26_400);
+        assert_eq!(memory.exit_snapshot_count, 11);
+        assert_eq!(memory.max_exit_scratch_bytes, 2_100);
+        assert_eq!(memory.returned_branch_slots_bytes, 11 * 512);
         assert_eq!(
             total
                 .worker_memory_components

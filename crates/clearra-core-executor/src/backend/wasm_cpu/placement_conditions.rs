@@ -7,6 +7,79 @@ pub(super) const MAX_CONDITION_HEIGHT: u8 = 6;
 // This is a bounded prototype. The board64, six-row tetromino catalogs are much
 // smaller, but a future catalog extension must explicitly revisit this bound.
 const MAX_CONDITION_ROWS: usize = 128 * 1024;
+const MAX_SURVIVING_RUNS: usize = (MAX_CONDITION_HEIGHT as usize).div_ceil(2);
+
+#[derive(Clone, Copy, Debug)]
+struct SurvivingRun {
+    original_cells: u64,
+    shift: u8,
+}
+
+/// Position map of the surviving row runs after a set of atomic clears.
+///
+/// Each run maps a contiguous original interval by one downward shift.
+/// Compile it once for the frame and reuse it to project initial, executed
+/// and pending operation cells. Projection only moves surviving cells; it
+/// does not establish whether the deletion set, an ILC lock, or a physical
+/// move is reachable.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AtomicRowProjection {
+    runs: [SurvivingRun; MAX_SURVIVING_RUNS],
+    run_count: usize,
+}
+
+impl AtomicRowProjection {
+    pub(super) fn new(width: u8, height: u8, deleted_original_rows: u16) -> Option<Self> {
+        let frame = CompactedRowFrame::new(height, deleted_original_rows)?;
+        if width == 0 || u32::from(width) * u32::from(height) > u64::BITS {
+            return None;
+        }
+        let mut result = Self {
+            runs: [SurvivingRun {
+                original_cells: 0,
+                shift: 0,
+            }; MAX_SURVIVING_RUNS],
+            run_count: 0,
+        };
+        let deleted = frame.deleted_original_rows();
+        let mut original = 0;
+        let mut deleted_below = 0;
+        while original < height {
+            if deleted & (1 << original) != 0 {
+                deleted_below += 1;
+                original += 1;
+                continue;
+            }
+            let start = original;
+            while original < height && deleted & (1 << original) == 0 {
+                original += 1;
+            }
+            // start and deleted_below are strictly below height for
+            // each nonempty run, so neither shift can reach 64.
+            let cells = low_bits(u32::from(original - start) * u32::from(width));
+            result.runs[result.run_count] = SurvivingRun {
+                original_cells: cells << (u32::from(start) * u32::from(width)),
+                shift: deleted_below * width,
+            };
+            result.run_count += 1;
+        }
+        Some(result)
+    }
+
+    pub(super) fn physical_board(&self, original_cells: u64) -> u64 {
+        self.runs[..self.run_count].iter().fold(0, |board, run| {
+            board | ((original_cells & run.original_cells) >> run.shift)
+        })
+    }
+
+    /// Restore original indices for the surviving footprint. Bits in the
+    /// physical headroom above the last surviving row have no contributor.
+    fn surviving_original_cells(&self, physical_cells: u64) -> u64 {
+        self.runs[..self.run_count].iter().fold(0, |board, run| {
+            board | ((physical_cells << run.shift) & run.original_cells)
+        })
+    }
+}
 
 /// Grounding of one pending lock footprint in a fixed, compacted frame.
 /// A satisfied premise does not prove ILC instantiation or move reachability.
@@ -239,19 +312,12 @@ impl PlacementConditionCatalog {
         if physical_mask & !all_cells != 0 {
             return None;
         }
-        let frame = CompactedRowFrame::new(self.height, deleted_rows)?;
-        let mut source_mask = physical_mask;
-        if deleted_rows != 0 {
-            source_mask = 0;
-            let width = u32::from(self.width);
-            let row_bits = low_bits(width);
-            for original_y in 0..self.height {
-                if let Some(physical_y) = frame.physical_row_for_original(original_y) {
-                    let cells = (physical_mask >> (u32::from(physical_y) * width)) & row_bits;
-                    source_mask |= cells << (u32::from(original_y) * width);
-                }
-            }
-        }
+        let mut source_mask = if deleted_rows == 0 {
+            physical_mask
+        } else {
+            AtomicRowProjection::new(self.width, self.height, deleted_rows)?
+                .surviving_original_cells(physical_mask)
+        };
 
         let mut support_count = 0_usize;
         let mut cells = source_mask;
@@ -778,6 +844,36 @@ mod tests {
     }
 
     #[test]
+    fn atomic_projection_preserves_surviving_cells_for_each_compact_frame() {
+        for (width, height) in [(4, 4), (10, 6), (64, 1), (32, 2), (16, 4)] {
+            let area = u32::from(width) * u32::from(height);
+            for deleted in 0..(1_u16 << height) {
+                let map = AtomicRowProjection::new(width, height, deleted).unwrap();
+                let surviving = (0..height).fold(0, |mask, original| {
+                    if deleted & (1_u16 << original) == 0 {
+                        mask | (low_bits(u32::from(width))
+                            << (u32::from(original) * u32::from(width)))
+                    } else {
+                        mask
+                    }
+                });
+                for cell in (0..area).map(|bit| 1_u64 << bit).chain([u64::MAX]) {
+                    let physical =
+                        scalar_project(usize::from(width), usize::from(height), deleted, cell);
+                    assert_eq!(map.physical_board(cell), physical);
+                    assert_eq!(map.surviving_original_cells(physical), cell & surviving);
+                }
+                // Influence in the above-board headroom has no contributor.
+                assert_eq!(map.surviving_original_cells(u64::MAX), surviving);
+            }
+        }
+        assert!(AtomicRowProjection::new(0, 4, 0).is_none());
+        assert!(AtomicRowProjection::new(16, 5, 0).is_none());
+        assert!(AtomicRowProjection::new(4, 7, 0).is_none());
+        assert!(AtomicRowProjection::new(4, 4, 1 << 4).is_none());
+    }
+
+    #[test]
     fn concrete_support_or_and_grouped_clears_match_the_scalar_grid() {
         let (width, height) = (10, 3);
         let initial = 0x3f0f_83f4;
@@ -812,8 +908,9 @@ mod tests {
             let mut required_in_frame = 0b111;
             let mut possible_in_frame = 0;
             let mut observed_frame = false;
-            let projected_initial = scalar_project(width, height, deleted, initial);
-            let projected = placements.map(|cells| scalar_project(width, height, deleted, cells));
+            let projection = AtomicRowProjection::new(width as u8, height as u8, deleted).unwrap();
+            let projected_initial = projection.physical_board(initial);
+            let projected = placements.map(|cells| projection.physical_board(cells));
             for executed in 0..8_u16 {
                 let logical = placements
                     .iter()
@@ -834,6 +931,28 @@ mod tests {
                 required_in_frame &= executed;
                 possible_in_frame |= executed;
                 let physical = scalar_project(width, height, deleted, logical);
+                let surviving = projection.surviving_original_cells(physical);
+                let combined = (0..projected.len())
+                    .filter(|op| executed & (1_u16 << op) != 0)
+                    .fold(projected_initial, |board, op| board | projected[op]);
+                assert_eq!(physical, combined);
+                for (op, &cells) in placements.iter().enumerate() {
+                    let bit = 1_u16 << op;
+                    if executed & bit != 0 {
+                        continue;
+                    }
+                    let next_deleted = scalar_row_mask(width, height, logical | cells);
+                    assert_eq!(candidate.deleted_rows(executed | bit), next_deleted);
+                    let next_map =
+                        AtomicRowProjection::new(width as u8, height as u8, next_deleted).unwrap();
+                    // The former frame has already dropped its cleared cells.
+                    // They cannot reappear across the next (possibly atomic)
+                    // clear. Surviving executed cells still participate.
+                    assert_eq!(
+                        next_map.physical_board(surviving | cells),
+                        scalar_project(width, height, next_deleted, logical | cells)
+                    );
+                }
                 for (op, &lock_mask) in projected.iter().enumerate() {
                     let pending = 1_u16 << op;
                     if executed & pending != 0 {

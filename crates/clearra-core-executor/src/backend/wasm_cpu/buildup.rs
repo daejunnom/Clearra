@@ -1716,22 +1716,20 @@ fn verify_conditional_order(
             if control.is_cancelled() {
                 return ConditionalTransitionProof::Unknown;
             }
-            let (board, deleted) = match current_state {
-                Some((mask, state)) if mask == executed => state,
-                _ => {
-                    let state = geometry.conditional_state(executed);
-                    current_state = Some((executed, state));
-                    state
-                }
-            };
+            if current_state
+                .as_ref()
+                .is_none_or(|(mask, _)| *mask != executed)
+            {
+                current_state = Some((executed, geometry.conditional_state(executed)));
+            }
+            let state = &current_state.as_ref().expect("current frame initialized").1;
             prove_conditional_transition(
                 catalog,
                 &geometry,
                 candidate.row_ids()[operation],
                 operation,
                 executed,
-                board,
-                deleted,
+                state,
                 profile,
                 &mut workspace.reachability,
                 movement_proofs,
@@ -1784,8 +1782,7 @@ fn prove_conditional_transition(
     row_id: u32,
     operation: usize,
     executed: u16,
-    board: u64,
-    deleted: u16,
+    state: &super::placement_poset::ConditionalState,
     profile: clearra_rules::kicks::KickTableProfileId,
     reachability: &mut ReachabilityWorkspace,
     movement_proofs: &mut CandidateMovementProofs,
@@ -1795,7 +1792,9 @@ fn prove_conditional_transition(
         placement_poset::{MovementProof, MovementProofQuery},
     };
 
-    let lock_mask = geometry.conditional_lock_mask(operation, deleted);
+    let board = state.board;
+    let deleted = state.deleted;
+    let lock_mask = geometry.conditional_lock_mask(operation, state);
     let mut realizations = catalog.instantiations(row_id, deleted).peekable();
     if realizations.peek().is_none() {
         return Forbidden;
@@ -1814,7 +1813,7 @@ fn prove_conditional_transition(
     }
     let (next_board, current_clears, _) =
         place_and_clear(catalog.width(), catalog.height(), board | lock_mask);
-    let expected = geometry.conditional_state(executed | (1_u16 << operation));
+    let expected = geometry.conditional_after_operation(state, executed, operation);
     if next_board != expected.0
         || merge_deleted_rows(catalog.height(), deleted, current_clears) != Some(expected.1)
     {

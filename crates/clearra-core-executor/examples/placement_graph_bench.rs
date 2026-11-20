@@ -456,6 +456,31 @@ mod run {
                 "apdp_pivot_tightenings": geometry_domains.apdp_pivot_tightenings
             },
         });
+        let memory_lifetimes = json!({
+            "core_memory_lifetimes": {
+                "scope": result.field("parallel_memory_lifetime_scope"),
+                "interpretation": "selected logical byte estimates at named checkpoints; checkpoints overlap, do not sum or interpret as allocator or RSS peaks; null means not exposed",
+                "worker_exit": {
+                    "samples": result.usize_field("parallel_worker_exit_snapshot_count"),
+                    "scratch_bytes_sum": result.usize_field("parallel_worker_exit_scratch_bytes_sum"),
+                    "scratch_bytes_max": result.usize_field("parallel_worker_exit_scratch_bytes_max"),
+                    "outbound_payload_bytes_sum": result.usize_field("parallel_worker_exit_outbound_payload_bytes_sum"),
+                    "branch_slots_bytes_sum": result.usize_field("parallel_worker_exit_branch_slots_bytes_sum")
+                },
+                "coordinator_handoff": {
+                    "catalog_payload_bytes": result.usize_field("parallel_handoff_catalog_payload_bytes"),
+                    "result_slots_bytes": result.usize_field("parallel_handoff_result_slots_bytes"),
+                    "global_coverage_storage_bytes": result.usize_field("parallel_handoff_global_coverage_storage_bytes")
+                },
+                "terminal_assembly": {
+                    "result_slots_bytes": result.usize_field("parallel_assembly_result_slots_bytes")
+                },
+                "shared_request": {
+                    "standard_bag_retained_bytes": result.usize_field("shared_standard_bag_request_retained_bytes"),
+                    "reachability_template_retained_bytes": result.usize_field("shared_reachability_template_retained_bytes")
+                }
+            }
+        });
         let evidence = json!({
             "other_process_configuration": {
                 "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),
@@ -483,7 +508,13 @@ mod run {
             "summary": summary, "summary_field_entries": fields,
             "valid": errors.is_empty(), "validation_errors": errors,
         });
-        let output = join_report_sections([metadata, structural_metrics, domains, evidence])?;
+        let output = join_report_sections([
+            metadata,
+            structural_metrics,
+            domains,
+            memory_lifetimes,
+            evidence,
+        ])?;
         println!(
             "{}",
             serde_json::to_string_pretty(&output).map_err(|e| e.to_string())?

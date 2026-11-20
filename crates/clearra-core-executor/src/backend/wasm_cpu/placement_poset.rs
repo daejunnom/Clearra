@@ -20,7 +20,9 @@ use super::{
     buildup::{compact_target_board, placement_is_grounded},
     catalog::{GeometryCatalog, InstantiatedRealization},
     geometry::GeometryCandidate,
-    placement_conditions::{grounding_sources, GroundingSources, GroupedClearConditions},
+    placement_conditions::{
+        grounding_sources, AtomicRowProjection, GroundingSources, GroupedClearConditions,
+    },
     MAX_BOARD64_PIECES,
 };
 
@@ -62,6 +64,14 @@ pub(super) struct CandidateGeometry {
     pieces: [PieceKind; MAX_BOARD64_PIECES],
     cells: [u64; MAX_BOARD64_PIECES],
     clear_conditions: GroupedClearConditions,
+}
+
+/// One exact executed-board snapshot and its immutable original-row frame.
+/// Kept only while the conditional proof walks this state's outgoing edges.
+pub(super) struct ConditionalState {
+    pub(super) board: u64,
+    pub(super) deleted: u16,
+    projection: AtomicRowProjection,
 }
 
 /// Try to certify an entire clear-to-empty candidate using only bounded
@@ -373,18 +383,52 @@ impl CandidateGeometry {
     /// The state is only the executed set: completed rows are derived from
     /// their concrete contributor conjunctions, and all such rows are
     /// removed together in the original-row frame.
-    pub(super) fn conditional_state(&self, executed: u16) -> (u64, u16) {
+    pub(super) fn conditional_state(&self, executed: u16) -> ConditionalState {
         debug_assert_eq!(executed & !self.all_operations, 0);
         let deleted = self.clear_conditions.deleted_rows(executed);
+        let projection = self.row_projection(deleted);
         let board = board_for_operations(self.initial_board, &self.cells, executed);
-        (
-            compact_target_board(self.width, self.height, board, deleted),
+        ConditionalState {
+            board: projection.physical_board(board),
             deleted,
-        )
+            projection,
+        }
     }
 
-    pub(super) fn conditional_lock_mask(&self, operation: usize, deleted: u16) -> u64 {
-        compact_target_board(self.width, self.height, self.cells[operation], deleted)
+    pub(super) fn conditional_lock_mask(&self, operation: usize, state: &ConditionalState) -> u64 {
+        state.projection.physical_board(self.cells[operation])
+    }
+
+    pub(super) fn conditional_after_operation(
+        &self,
+        state: &ConditionalState,
+        executed: u16,
+        operation: usize,
+    ) -> (u64, u16) {
+        let bit = 1_u16 << operation;
+        debug_assert_eq!(executed & bit, 0);
+        debug_assert_eq!((executed | bit) & !self.all_operations, 0);
+        let next = executed | bit;
+        let deleted = self.clear_conditions.deleted_rows(next);
+        if deleted == state.deleted {
+            // Projection is a fixed permutation/truncation of disjoint cells.
+            // On this frame ORing the new lock does not move existing cells.
+            return (
+                state.board | self.conditional_lock_mask(operation, state),
+                deleted,
+            );
+        }
+        // When rows clear, reproject the exact original executed union;
+        // neither the stale compacted board nor individually possible pieces
+        // identify the survivors in the new frame.
+        let projection = self.row_projection(deleted);
+        let original = board_for_operations(self.initial_board, &self.cells, next);
+        (projection.physical_board(original), deleted)
+    }
+
+    fn row_projection(&self, deleted: u16) -> AtomicRowProjection {
+        AtomicRowProjection::new(self.width, self.height, deleted)
+            .expect("candidate geometry owns a validated compact row frame")
     }
 
     fn compile(catalog: &GeometryCatalog, candidate: &GeometryCandidate) -> Option<Self> {
@@ -569,14 +613,14 @@ impl CandidateGeometry {
     }
 
     fn project_frame(&self, deleted: u16) -> (u64, [u64; MAX_BOARD64_PIECES]) {
-        let initial = compact_target_board(self.width, self.height, self.initial_board, deleted);
+        let projection = self.row_projection(deleted);
+        let initial = projection.physical_board(self.initial_board);
         let mut physical_cells = [0_u64; MAX_BOARD64_PIECES];
         for (operation, physical) in physical_cells[..self.operation_count]
             .iter_mut()
             .enumerate()
         {
-            *physical =
-                compact_target_board(self.width, self.height, self.cells[operation], deleted);
+            *physical = projection.physical_board(self.cells[operation]);
         }
         (initial, physical_cells)
     }

@@ -1,9 +1,9 @@
 //! Bounded Legacy Cover candidate provider, not a product routing decision.
 //!
 //! The Legacy reducer's denominator is the requested materialized prefix, not
-//! the queue language of a new scenario. This slice certifies a single
-//! positive row for prefix [0, 1) only when the original expansion is also
-//! complete. A hit on a truncated 10×4 source is not admitted here.
+//! the queue language of a new scenario. The complete-authority entry point
+//! requires complete expansion. The separate 10×4 probe can certify a row
+//! for prefix [0, 1) from a truncated source without completing that source.
 
 use clearra_build_coverage::{
     coverage::{
@@ -35,12 +35,22 @@ use clearra_pc_graph::request::{
 };
 use clearra_problem::{ProblemCompiler, SearchProblem};
 use clearra_profiles::search::search_defaults::SearchDefaults;
-use clearra_supply::queue::fixed_sequence::FixedSequence;
+use clearra_supply::{
+    piece_source::{PieceSourceKind, SupplyTruncationReason},
+    queue::fixed_sequence::FixedSequence,
+};
 use sha2::{Digest, Sha256};
 
 const ORIGINAL_ORDINAL: usize = 0;
 const REQUESTED_PATTERN_COUNT: usize = 1;
-const MAX_SLOTS: usize = 5;
+const COMPLETE_AUTHORITY_MAX_SLOTS: usize = 5;
+const FOUR_LINE_PREFIX_SLOTS: usize = 10;
+
+#[derive(Clone, Copy)]
+enum OriginalSupplyAuthority {
+    CompleteAuthority,
+    TruncatedSourceExactPrefix,
+}
 
 #[derive(Debug, PartialEq)]
 pub(super) enum RustLegacyCoverCandidateError {
@@ -56,6 +66,26 @@ pub(super) enum RustLegacyCoverCandidateError {
     Reduction(BuildCoverageExecutionError),
 }
 
+/// Positive coverage of the one original ordinal only. Deliberately carries
+/// no Cover result, execution count, or probability of the full source.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct TruncatedLegacyCoverPrefixEvidence {
+    original_source_id: u64,
+    original_ordinal: usize,
+    materialized_pattern_count: usize,
+    total_possible_pattern_count: u128,
+    truncation_reason: SupplyTruncationReason,
+    exact_assignment: StandardBoard64TilingIdentity,
+    prefix_coverage: PatternBitSet,
+}
+
+struct VerifiedOrdinalCandidate {
+    exact_assignment: StandardBoard64TilingIdentity,
+    materialized_pattern_count: usize,
+    total_possible_pattern_count: u128,
+    reduction: BuildCoverageExecution,
+}
+
 /// Runs the already-supported Rust physical PC path on the original Legacy
 /// ordinal and submits a typed, exact positive row to the Legacy reducer.
 /// An inapplicable request or unproven absence is not a zero coverage result.
@@ -64,21 +94,73 @@ pub(super) fn execute_single_ordinal_candidate(
     query: &BuildCoverageQuery,
     control: &ExecutionControl,
 ) -> Result<BuildCoverageExecution, RustLegacyCoverCandidateError> {
+    execute_scoped_ordinal(
+        legacy,
+        query,
+        OriginalSupplyAuthority::CompleteAuthority,
+        control,
+    )
+    .map(|verified| verified.reduction)
+}
+
+/// Qualify a bounded positive Legacy 10×4 row on the materialized ordinal
+/// zero even though the source budget truncates the wider observed expansion.
+/// Never use this evidence to replace the existing Cover completeness result.
+pub(super) fn execute_truncated_source_exact_prefix(
+    legacy: &SearchProblem,
+    query: &BuildCoverageQuery,
+    control: &ExecutionControl,
+) -> Result<TruncatedLegacyCoverPrefixEvidence, RustLegacyCoverCandidateError> {
+    let verified = execute_scoped_ordinal(
+        legacy,
+        query,
+        OriginalSupplyAuthority::TruncatedSourceExactPrefix,
+        control,
+    )?;
+    Ok(TruncatedLegacyCoverPrefixEvidence {
+        original_source_id: legacy.piece_source().id().get(),
+        original_ordinal: ORIGINAL_ORDINAL,
+        materialized_pattern_count: verified.materialized_pattern_count,
+        total_possible_pattern_count: verified.total_possible_pattern_count,
+        truncation_reason: SupplyTruncationReason::ObservedWindowBudgetExceeded,
+        exact_assignment: verified.exact_assignment,
+        prefix_coverage: verified.reduction.union().covered_patterns().clone(),
+    })
+}
+
+fn execute_scoped_ordinal(
+    legacy: &SearchProblem,
+    query: &BuildCoverageQuery,
+    authority: OriginalSupplyAuthority,
+    control: &ExecutionControl,
+) -> Result<VerifiedOrdinalCandidate, RustLegacyCoverCandidateError> {
     use RustLegacyCoverCandidateError as Error;
 
     if control.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    validate_canonical_authority(legacy, query)?;
+    validate_canonical_authority(legacy, query, authority)?;
     let expected = concrete_assignment_identity(query)?;
     let source = legacy.piece_source();
     let materialized = source
         .materialized_universe()
-        .filter(|universe| {
-            source.complete()
-                && universe.complete()
-                && universe.total_possible_pattern_count() == universe.pattern_count() as u128
-                && universe.truncation_reason().is_none()
+        .filter(|universe| match authority {
+            OriginalSupplyAuthority::CompleteAuthority => {
+                source.complete()
+                    && universe.complete()
+                    && universe.total_possible_pattern_count() == universe.pattern_count() as u128
+                    && universe.truncation_reason().is_none()
+            }
+            OriginalSupplyAuthority::TruncatedSourceExactPrefix => {
+                source.kind() == PieceSourceKind::ObservedWindow
+                    && !source.complete()
+                    && !universe.complete()
+                    && universe.pattern_count() == query.limits().max_patterns()
+                    && universe.pattern_count() >= REQUESTED_PATTERN_COUNT
+                    && universe.total_possible_pattern_count() > universe.pattern_count() as u128
+                    && universe.truncation_reason()
+                        == Some(SupplyTruncationReason::ObservedWindowBudgetExceeded)
+            }
         })
         .ok_or(Error::IncompleteOriginalSupply)?;
     let ordinal = materialized
@@ -89,9 +171,9 @@ pub(super) fn execute_single_ordinal_candidate(
     let scope = ConcreteCoverageScope::new_uniform(
         board,
         source.id().get(),
-        PatternUniverseId::new(scope_id(legacy, b"ordinal-universe")),
-        PatternWeightModelId::new(scope_id(legacy, b"uniform-weights")),
-        scope_id(legacy, b"physical-execution"),
+        PatternUniverseId::new(scope_id(legacy, authority, b"ordinal-universe")),
+        PatternWeightModelId::new(scope_id(legacy, authority, b"uniform-weights")),
+        scope_id(legacy, authority, b"physical-execution"),
     );
 
     let problem = ProblemCompiler::compile_scenario_pc(
@@ -127,24 +209,40 @@ pub(super) fn execute_single_ordinal_candidate(
         covered,
         ConcreteCoverageCompleteness::Complete,
     );
+    // A Complete row here covers the scope's one ordinal, even when the
+    // wider source is truncated. That case returns row evidence only.
     let reduction =
         BuildCoverageExecution::from_verified_concrete_assignment_rows(query, scope, vec![row]);
     if control.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    reduction.map_err(Error::Reduction)
+    Ok(VerifiedOrdinalCandidate {
+        exact_assignment: expected,
+        materialized_pattern_count: materialized.pattern_count(),
+        total_possible_pattern_count: materialized.total_possible_pattern_count(),
+        reduction: reduction.map_err(Error::Reduction)?,
+    })
 }
 
 fn validate_canonical_authority(
     legacy: &SearchProblem,
     query: &BuildCoverageQuery,
+    authority: OriginalSupplyAuthority,
 ) -> Result<(), RustLegacyCoverCandidateError> {
     use RustLegacyCoverCandidateError::UnsupportedAuthority;
 
     let bridge = legacy.build_query().ok_or(UnsupportedAuthority)?;
     let template = query.template();
+    let board = template.board_size();
+    let slot_count = template.slots().len();
     let limits = query.limits();
     let defaults = SearchDefaults::MVP1;
+    let admitted_shape = match authority {
+        OriginalSupplyAuthority::CompleteAuthority => slot_count <= COMPLETE_AUTHORITY_MAX_SLOTS,
+        OriginalSupplyAuthority::TruncatedSourceExactPrefix => {
+            board.width() == 10 && board.height() == 4 && slot_count == FOUR_LINE_PREFIX_SLOTS
+        }
+    };
     if query.pattern_count() != REQUESTED_PATTERN_COUNT
         || bridge.pattern_count() != query.pattern_count()
         || bridge.selected_pattern_id().is_some()
@@ -156,7 +254,7 @@ fn validate_canonical_authority(
         || bridge.limits().max_patterns() != limits.max_patterns()
         || !(1..=defaults.build_max_patterns()).contains(&limits.max_patterns())
         || !(1..=defaults.build_max_assignments()).contains(&limits.max_assignments())
-        || template.slots().len() > MAX_SLOTS
+        || !admitted_shape
         || legacy.initial_board().occupied_mask() != 0
         || legacy.supply().hold_enabled()
     {
@@ -178,7 +276,7 @@ fn concrete_assignment_identity(
     let board = template.board_size();
     let slots = template.slots();
     let domains = query.domains();
-    if !(1..=MAX_SLOTS).contains(&slots.len())
+    if !(1..=FOUR_LINE_PREFIX_SLOTS).contains(&slots.len())
         || !(4..=10).contains(&board.width())
         || board.area() as usize != slots.len() * 4
         || domains.len() != slots.len()
@@ -267,11 +365,15 @@ fn exact_positive_bits(
     Ok(covered.clone())
 }
 
-fn scope_id(legacy: &SearchProblem, purpose: &[u8]) -> u64 {
+fn scope_id(legacy: &SearchProblem, authority: OriginalSupplyAuthority, purpose: &[u8]) -> u64 {
     // Bind the original source and physical rules, never a producer candidate
     // ID or display key. This labels in-process evidence; it is not a proof.
     let mut hash = Sha256::new();
     hash.update(b"clearra-legacy-cover-rust-single-ordinal-v1\0");
+    hash.update([match authority {
+        OriginalSupplyAuthority::CompleteAuthority => 0,
+        OriginalSupplyAuthority::TruncatedSourceExactPrefix => 1,
+    }]);
     hash.update(purpose);
     hash.update([0]);
     hash.update(legacy.piece_source().id().get().to_le_bytes());
