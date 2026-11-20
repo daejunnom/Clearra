@@ -4,6 +4,9 @@ const EXPLICIT_GPU_SCENARIO: &[&str] = &[
     "pc-scenario",
     "--field",
     "0x00000000000003f0",
+    // Six occupied cells and one I complete one row, not the default two.
+    "--visible-height",
+    "1",
     "--queue",
     "I",
     "--max-pieces",
@@ -42,6 +45,9 @@ fn process_e2e_m19_backend_policy_reports_fallback_and_backend_split() {
     assert_eq!(summary["gpu_trust_state"], "fallback-used");
     assert_eq!(summary["solution_found"], true);
     assert_eq!(summary["count_complete"], true);
+    assert_eq!(summary["normalized_unique_solution_count"], 1);
+    assert_eq!(summary["probability_complete"], true);
+    assert_eq!(summary["coverage_probability"].as_f64(), Some(1.0));
 
     let denied = clearra()
         .args(EXPLICIT_GPU_SCENARIO)
