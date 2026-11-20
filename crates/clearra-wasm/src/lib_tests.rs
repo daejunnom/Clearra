@@ -3971,6 +3971,111 @@ fn fixed_no_hold_opening_worker_observes_only_applied_candidate_packets() {
 }
 
 #[test]
+fn fixed_no_hold_opening_scoped_worker_finals_require_the_issued_and_merged_family() {
+    use crate::distributed_runtime::scoped_compact_pc2::{
+        ScopeError, ScopedCoordinator, WorkTicket, WorkerFinal,
+    };
+
+    const JOB_ID: u32 = 67;
+    const COMMAND: &str =
+        "clearra pc --lines 2 --queue IIOOOIIOOO --no-hold --count all --backend cpu --workers 3";
+
+    fn issue(runtime: &WasmCommandRuntime) -> (ScopedCoordinator, [Vec<WorkTicket>; 2]) {
+        let mut source = ScopedCoordinator::prepare(runtime, JOB_ID, COMMAND)
+            .expect("real compact CPU coordinator with two verifier slots");
+        let mut issued = [Vec::new(), Vec::new()];
+        let mut next = 0;
+        while let Some(ticket) = source.issue(next).expect("real compact producer packet") {
+            issued[next].push(ticket);
+            next ^= 1;
+        }
+        assert!(issued.iter().all(|work| !work.is_empty()));
+        (source, issued)
+    }
+
+    fn finalize(
+        source: &mut ScopedCoordinator,
+        branch: usize,
+        work: Vec<WorkTicket>,
+    ) -> WorkerFinal {
+        let mut worker = source
+            .install_worker(branch)
+            .expect("scoped compact verifier");
+        assert!(matches!(
+            source.install_worker(branch),
+            Err(ScopeError::Duplicate)
+        ));
+        for ticket in work {
+            worker
+                .consume(ticket)
+                .expect("exact original producer input applied");
+        }
+        worker
+            .finish()
+            .expect("actual verifier final bound to exact work")
+    }
+
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+
+    let (mut source, [first, second]) = issue(&runtime);
+    let first = finalize(&mut source, 0, first);
+    let second = finalize(&mut source, 1, second);
+    source
+        .apply_final(second)
+        .expect("later branch result can merge first");
+    source
+        .apply_final(first)
+        .expect("earlier branch result can merge last");
+    let result = source.finish().expect("all exact scoped finals applied");
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    let report = result.search_report().expect("complete report");
+    assert!(report.count_complete && report.solution_keys_complete && report.probability_complete);
+    assert_eq!(report.workers_used, 3);
+    assert_eq!(report.unique_solution_count, 4);
+    assert_eq!(report.covered_pattern_count, 1);
+    assert_eq!(report.total_possible_pattern_count, "1");
+    assert!(!report
+        .summary_fields
+        .iter()
+        .any(|(key, _)| key == "continuation_token"));
+
+    let (mut missing, [first, second]) = issue(&runtime);
+    let lost_final = finalize(&mut missing, 0, first);
+    let delivered = finalize(&mut missing, 1, second);
+    missing
+        .apply_final(delivered)
+        .expect("one actual aggregate");
+    assert!(matches!(missing.finish(), Err(ScopeError::Incomplete)));
+    drop(lost_final);
+
+    let (mut foreign, [first, _unused]) = issue(&runtime);
+    let foreign_final = finalize(&mut foreign, 0, first);
+    drop(foreign);
+    // Same job number, command, candidate bytes, and branch, but a different
+    // actual source owner. The foreign aggregate must not reach the reducer.
+    let (mut replacement, [_first, _second]) = issue(&runtime);
+    assert_eq!(
+        replacement.apply_final(foreign_final),
+        Err(ScopeError::ForeignScope)
+    );
+    assert!(matches!(
+        replacement.finish(),
+        Err(ScopeError::InvalidPhase)
+    ));
+
+    let (mut cancelled, [first, _second]) = issue(&runtime);
+    let final_before_cancel = finalize(&mut cancelled, 0, first);
+    cancelled.cancel();
+    assert_eq!(
+        cancelled.apply_final(final_before_cancel),
+        Err(ScopeError::Cancelled)
+    );
+    assert!(matches!(cancelled.finish(), Err(ScopeError::Cancelled)));
+}
+
+#[test]
 fn typed_pc_minimals_distributed_geometry_completes_with_the_same_exact_family() {
     let _resource_guard = typed_pc_distributed_test_guard();
     let runtime = WasmCommandRuntime::default()

@@ -4587,6 +4587,385 @@ fn score_product_worker_count(request: &AppRequest) -> Option<usize> {
 }
 
 #[cfg(test)]
+pub(crate) mod scoped_compact_pc2 {
+    //! In-process authority model. An Arc identifies a single owner here; it
+    //! cannot be carried by a real Web Worker or substitute for its protocol.
+
+    use std::sync::Arc;
+
+    use clearra_core_domain::{
+        execution_cancellation::ExecutionCancellationToken,
+        objective::objective_kind::ObjectiveKind,
+    };
+    use clearra_pc_graph::request::{PcCountPolicy, PcHoldPolicy};
+
+    use super::*;
+    use crate::WasmHostCapabilities;
+
+    const VERIFIERS: usize = 2;
+    const WORKERS_WITH_SOURCE: usize = VERIFIERS + 1;
+    const MAX_WORK: u32 = u64::BITS;
+    const MAX_COMMAND_BYTES: usize = 1024;
+    const MAX_WORK_BYTES: usize = 128;
+    const MAX_FINAL_BYTES: usize = 64 * 1024;
+
+    #[derive(Debug, Eq, PartialEq)]
+    pub(crate) enum ScopeError {
+        Unsupported,
+        InvalidPhase,
+        Capacity,
+        Cancelled,
+        ForeignScope,
+        Duplicate,
+        Incomplete,
+        Runtime,
+    }
+
+    struct SourceScope {
+        source_job_id: u32,
+        command_text: Box<str>,
+        cancellation: ExecutionCancellationToken,
+    }
+
+    /// The existing encoded buffer moves into the only issued ticket. It is
+    /// never reconstructed from a candidate ID, added to a second candidate
+    /// collection, or editable at the receiver.
+    pub(crate) struct WorkTicket {
+        scope: Arc<SourceScope>,
+        branch: usize,
+        ordinal: u32,
+        producer_bytes: Vec<u8>,
+    }
+
+    pub(crate) struct WorkerFinal {
+        scope: Arc<SourceScope>,
+        branch: usize,
+        applied_work: u64,
+        worker_bytes: Vec<u8>,
+    }
+
+    pub(crate) struct ScopedCoordinator {
+        scope: Arc<SourceScope>,
+        runtime: WasmCommandRuntime,
+        source: WasmDistributedCoordinator,
+        issued: [u64; VERIFIERS],
+        installed: [bool; VERIFIERS],
+        merged: [bool; VERIFIERS],
+        next_ordinal: u32,
+        closed: bool,
+        failed: bool,
+    }
+
+    impl ScopedCoordinator {
+        pub(crate) fn prepare(
+            runtime: &WasmCommandRuntime,
+            source_job_id: u32,
+            command_text: &str,
+        ) -> Result<Self, ScopeError> {
+            if command_text.len() > MAX_COMMAND_BYTES {
+                return Err(ScopeError::Capacity);
+            }
+            let (request, _) = runtime
+                .prepare_command_text(command_text)
+                .map_err(|_| ScopeError::Runtime)?
+                .into_parts();
+            let AppCommand::Pc(command) = request.command() else {
+                return Err(ScopeError::Unsupported);
+            };
+            let query = command.query();
+            if source_job_id == 0
+                || request.product_capability_contract().is_some()
+                || query.target().lines() != 2
+                || query.hold_policy() != PcHoldPolicy::Disabled
+                || query.count_policy() != PcCountPolicy::CountAll
+                || query.objective().kind() != ObjectiveKind::All
+                || query.objective().score().requested()
+                || query.execution_policy().requested_backend() != RequestedSearchBackend::Cpu
+                || !query
+                    .queue()
+                    .as_fixed_sequence()
+                    .is_some_and(|queue| (10..=14).contains(&queue.pieces().len()))
+            {
+                return Err(ScopeError::Unsupported);
+            }
+            let WasmDistributedPreparation::Coordinator(source) =
+                WasmDistributedCoordinator::prepare(runtime, command_text)
+                    .map_err(|_| ScopeError::Runtime)?
+            else {
+                return Err(ScopeError::Unsupported);
+            };
+            if source.mode() != WasmDistributedMode::CpuMulti
+                || source.worker_count() != WORKERS_WITH_SOURCE
+                || !matches!(&source.producer, Some(DistributedCandidateProducer::Cpu(_)))
+            {
+                return Err(ScopeError::Unsupported);
+            }
+            Ok(Self {
+                scope: Arc::new(SourceScope {
+                    source_job_id,
+                    command_text: command_text.into(),
+                    cancellation: source.control.cancellation.clone(),
+                }),
+                runtime: runtime.clone(),
+                source,
+                issued: [0; VERIFIERS],
+                installed: [false; VERIFIERS],
+                merged: [false; VERIFIERS],
+                next_ordinal: 0,
+                closed: false,
+                failed: false,
+            })
+        }
+
+        pub(crate) fn issue(&mut self, branch: usize) -> Result<Option<WorkTicket>, ScopeError> {
+            self.check_active()?;
+            if branch >= VERIFIERS || self.closed {
+                return Err(ScopeError::InvalidPhase);
+            }
+            self.failed = true;
+            for _ in 0..4_096 {
+                match self
+                    .source
+                    .advance_producer(64, 1)
+                    .map_err(|_| ScopeError::Runtime)?
+                {
+                    WasmDistributedProducerAdvance::Pending => {}
+                    WasmDistributedProducerAdvance::Batch(producer_bytes) => {
+                        let ordinal = self.next_ordinal;
+                        if ordinal >= MAX_WORK || producer_bytes.capacity() > MAX_WORK_BYTES {
+                            return Err(ScopeError::Capacity);
+                        }
+                        self.issued[branch] |= 1 << ordinal;
+                        self.next_ordinal += 1;
+                        self.failed = false;
+                        return Ok(Some(WorkTicket {
+                            scope: Arc::clone(&self.scope),
+                            branch,
+                            ordinal,
+                            producer_bytes,
+                        }));
+                    }
+                    WasmDistributedProducerAdvance::Completed => {
+                        if !self.source.summary.as_ref().is_some_and(|summary| {
+                            summary.truncated_reason.is_none()
+                                && summary.candidate_count == self.next_ordinal as usize
+                                && matches!(
+                                    summary.backend_execution,
+                                    WasmDistributedBackendExecution::Cpu
+                                )
+                        }) {
+                            return Err(ScopeError::Incomplete);
+                        }
+                        self.closed = true;
+                        self.failed = false;
+                        return Ok(None);
+                    }
+                    WasmDistributedProducerAdvance::Cancelled => return Err(ScopeError::Cancelled),
+                    WasmDistributedProducerAdvance::Initialization(_) => {
+                        return Err(ScopeError::Unsupported)
+                    }
+                }
+            }
+            Err(ScopeError::Capacity)
+        }
+
+        pub(crate) fn install_worker(&mut self, branch: usize) -> Result<ScopedWorker, ScopeError> {
+            self.check_active()?;
+            if branch >= VERIFIERS || !self.closed || self.issued[branch] == 0 {
+                return Err(ScopeError::InvalidPhase);
+            }
+            if self.installed[branch] {
+                return Err(ScopeError::Duplicate);
+            }
+            // Independent WASM worker realms reserve one local slot. The
+            // unit host shares one native admission pool, so model that same
+            // physical cap here without altering the canonical command text.
+            let runtime = self
+                .runtime
+                .clone()
+                .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
+            let mut worker =
+                WasmDistributedVerifierRuntime::prepare(&runtime, &self.scope.command_text)
+                    .map_err(|_| ScopeError::Runtime)?;
+            if !matches!(&worker.verifier, DistributedVerifier::Pc(_)) {
+                return Err(ScopeError::Unsupported);
+            }
+            worker.control.cancellation = self.scope.cancellation.clone();
+            self.installed[branch] = true;
+            Ok(ScopedWorker {
+                scope: Arc::clone(&self.scope),
+                branch,
+                worker,
+                applied_work: 0,
+                failed: false,
+            })
+        }
+
+        pub(crate) fn apply_final(&mut self, terminal: WorkerFinal) -> Result<(), ScopeError> {
+            self.check_active()?;
+            self.failed = true;
+            let branch = terminal.branch;
+            if !Arc::ptr_eq(&terminal.scope, &self.scope)
+                || terminal.scope.source_job_id != self.scope.source_job_id
+                || branch >= VERIFIERS
+            {
+                return Err(ScopeError::ForeignScope);
+            }
+            if self.merged[branch] {
+                return Err(ScopeError::Duplicate);
+            }
+            if !self.closed
+                || !self.installed[branch]
+                || self.issued[branch] == 0
+                || terminal.applied_work != self.issued[branch]
+            {
+                return Err(ScopeError::Incomplete);
+            }
+            self.source
+                .absorb_partial_with_external_retained(
+                    &terminal.worker_bytes,
+                    terminal.worker_bytes.capacity() as u128,
+                )
+                .map_err(|_| ScopeError::Runtime)?;
+            if self.scope.cancellation.is_cancelled() {
+                return Err(ScopeError::Cancelled);
+            }
+            self.merged[branch] = true;
+            self.failed = false;
+            Ok(())
+        }
+
+        pub(crate) fn finish(self) -> Result<WasmExecutionResult, ScopeError> {
+            self.check_active()?;
+            if !self.closed
+                || self.next_ordinal == 0
+                || self
+                    .issued
+                    .iter()
+                    .zip(self.merged)
+                    .any(|(work, merged)| *work != 0 && !merged)
+            {
+                return Err(ScopeError::Incomplete);
+            }
+            let result = self
+                .source
+                .finish(WORKERS_WITH_SOURCE)
+                .map_err(|_| ScopeError::Runtime)?;
+            if self.scope.cancellation.is_cancelled() {
+                return Err(ScopeError::Cancelled);
+            }
+            let report = result.search_report().ok_or(ScopeError::Incomplete)?;
+            if !report.count_complete || !report.probability_complete || report.resource_truncated {
+                return Err(ScopeError::Incomplete);
+            }
+            Ok(result)
+        }
+
+        pub(crate) fn cancel(&self) {
+            self.source.cancel();
+        }
+
+        fn check_active(&self) -> Result<(), ScopeError> {
+            if self.scope.cancellation.is_cancelled() {
+                Err(ScopeError::Cancelled)
+            } else if self.failed {
+                Err(ScopeError::InvalidPhase)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) struct ScopedWorker {
+        scope: Arc<SourceScope>,
+        branch: usize,
+        worker: WasmDistributedVerifierRuntime,
+        applied_work: u64,
+        failed: bool,
+    }
+
+    impl ScopedWorker {
+        pub(crate) fn consume(&mut self, ticket: WorkTicket) -> Result<(), ScopeError> {
+            if self.scope.cancellation.is_cancelled() {
+                return Err(ScopeError::Cancelled);
+            }
+            if self.failed {
+                return Err(ScopeError::InvalidPhase);
+            }
+            self.failed = true;
+            if !Arc::ptr_eq(&self.scope, &ticket.scope) || self.branch != ticket.branch {
+                return Err(ScopeError::ForeignScope);
+            }
+            let key = 1_u64 << ticket.ordinal;
+            if self.applied_work & key != 0 {
+                return Err(ScopeError::Duplicate);
+            }
+
+            // `consume_with_compact_commit_probe` sees only the actual decoded
+            // packet borrowed from the verifier's cursor. The exact immutable
+            // producer bytes above are its sole input. The callback fires for
+            // fully reduced negative candidates too, but not skipped work.
+            let mut observed = None;
+            let mut duplicate = false;
+            let mut on_committed = |packet: &WasmCandidatePacket| {
+                duplicate |= observed.replace(packet.ordinal()).is_some();
+            };
+            let mut step = self
+                .worker
+                .consume_with_candidate_observer::<true>(
+                    &ticket.producer_bytes,
+                    ticket.producer_bytes.capacity() as u128,
+                    &mut on_committed,
+                )
+                .map_err(|_| ScopeError::Runtime)?;
+            for _ in 0..4_096 {
+                if step.partial.is_some() {
+                    return Err(ScopeError::Unsupported);
+                }
+                if !step.has_pending_work {
+                    if duplicate || observed != Some(u64::from(ticket.ordinal)) {
+                        return Err(ScopeError::Incomplete);
+                    }
+                    if self.scope.cancellation.is_cancelled() {
+                        return Err(ScopeError::Cancelled);
+                    }
+                    self.applied_work |= key;
+                    self.failed = false;
+                    return Ok(());
+                }
+                step = self
+                    .worker
+                    .continue_with_compact_commit_probe(&mut on_committed)
+                    .map_err(|_| ScopeError::Runtime)?;
+            }
+            Err(ScopeError::Capacity)
+        }
+
+        pub(crate) fn finish(mut self) -> Result<WorkerFinal, ScopeError> {
+            if self.scope.cancellation.is_cancelled() {
+                return Err(ScopeError::Cancelled);
+            }
+            if self.failed || self.applied_work == 0 {
+                return Err(ScopeError::Incomplete);
+            }
+            let worker_bytes = self.worker.finish().map_err(|_| ScopeError::Runtime)?;
+            if self.scope.cancellation.is_cancelled() {
+                return Err(ScopeError::Cancelled);
+            }
+            if worker_bytes.is_empty() || worker_bytes.capacity() > MAX_FINAL_BYTES {
+                return Err(ScopeError::Capacity);
+            }
+            Ok(WorkerFinal {
+                scope: self.scope,
+                branch: self.branch,
+                applied_work: self.applied_work,
+                worker_bytes,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
 mod build_probability_partial_ingress_tests {
     use std::{
         cell::{Cell, RefCell},
