@@ -11,7 +11,7 @@ use crate::{
     app_error::{AppError, AppErrorCode},
     app_request::{AppExecutionParts, AppExecutionPartsRejection, AppOutputPolicy, AppRequest},
     app_response::{AppResponse, AppStatus},
-    app_services::AppServices,
+    app_services::{AppCoreExecutorService, AppServices},
     io::{AppFilePolicy, AppFileResolver},
     pc_score_minimum_cover_result::ValidatedPcScorePortfolioExecutionEvidence,
     pc_score_postprocess::PcScoreDerivation,
@@ -49,6 +49,12 @@ impl AppContext {
             language: LanguageId::default(),
             file_policy: AppFilePolicy::default(),
         }
+    }
+
+    /// Select the shared Rust CPU product service without changing the
+    /// default context or the host's decision to use it.
+    pub fn rust_cpu_product() -> Self {
+        Self::new(AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()))
     }
 }
 impl AppContext {
@@ -479,3 +485,24 @@ fn checked_direct_score_context_base_bytes(
 #[cfg(test)]
 #[path = "app_context_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn explicit_rust_cpu_product_context_preserves_default_service_selection() {
+    let product = AppContext::rust_cpu_product();
+    let default = AppContext::default();
+    assert_eq!(
+        product.services().core_executor(),
+        &AppCoreExecutorService::wasm_cpu()
+    );
+    assert_eq!(
+        default.services().core_executor(),
+        &AppCoreExecutorService::default()
+    );
+    assert_ne!(
+        product.services().core_executor(),
+        default.services().core_executor()
+    );
+    assert_eq!(product.language(), default.language());
+    assert_eq!(product.file_policy, default.file_policy);
+}

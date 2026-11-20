@@ -1,7 +1,5 @@
 mod bridge {
     use clearra_app::{AppContext, ProductPageStore};
-    #[cfg(feature = "wasm-cpu-runtime")]
-    use clearra_app::{AppCoreExecutorService, AppServices};
 
     use crate::{GuiJobHandle, GuiJobId, GuiJobQueue};
 
@@ -35,9 +33,7 @@ mod bridge {
     fn product_app_context() -> AppContext {
         #[cfg(feature = "wasm-cpu-runtime")]
         {
-            AppContext::new(
-                AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
-            )
+            AppContext::rust_cpu_product()
         }
 
         #[cfg(not(feature = "wasm-cpu-runtime"))]

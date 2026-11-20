@@ -1855,7 +1855,9 @@ fn spin_structure_family_fields(
 }
 
 fn pc_path_fields(payload: &PcPathFamilyPayload) -> Result<Vec<RenderField>, &'static str> {
-    if !valid_pc_path_canonical_witness(payload) {
+    if payload.canonical_selection() != PC_PATH_CANONICAL_SELECTION
+        || !valid_canonical_path_witness(payload.canonical_witness(), payload.witnesses())
+    {
         return Err("PC path canonical witness was missing or mismatched");
     }
     Ok(vec![
@@ -1881,28 +1883,6 @@ fn pc_path_fields(payload: &PcPathFamilyPayload) -> Result<Vec<RenderField>, &'s
             RenderFieldValue::array(payload.witnesses().iter().map(pc_path_witness_value)),
         ),
     ])
-}
-
-fn valid_pc_path_canonical_witness(payload: &PcPathFamilyPayload) -> bool {
-    if payload.canonical_selection() != PC_PATH_CANONICAL_SELECTION {
-        return false;
-    }
-    match (payload.canonical_witness(), payload.witnesses().first()) {
-        (None, None) => true,
-        (Some(canonical), Some(first)) if canonical == first => {
-            let Some(canonical_id) = canonical_decimal_u64(canonical.candidate_id()) else {
-                return false;
-            };
-            if canonical_id == 0 {
-                return false;
-            }
-            payload.witnesses().iter().all(|witness| {
-                canonical_decimal_u64(witness.candidate_id())
-                    .is_some_and(|candidate_id| candidate_id >= canonical_id)
-            })
-        }
-        _ => false,
-    }
 }
 
 fn build_path_fields(payload: &BuildPathFamilyPayload) -> Result<Vec<RenderField>, &'static str> {

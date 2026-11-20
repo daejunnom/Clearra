@@ -13,8 +13,6 @@ use crate::{
     typed_document_utility_cli::prepare_native_typed_utility,
 };
 use clearra_app::{io::AppFilePolicy, AppContext, AppStatus};
-#[cfg(feature = "wasm-cpu-runtime")]
-use clearra_app::{AppCoreExecutorService, AppServices};
 use clearra_i18n::LanguageId;
 
 const TILING_ONLY_WARNING: &str = "WARNING: Tiling-only search skips BuildUp and probability calculation. Results may include solutions that cannot be built.";
@@ -382,9 +380,7 @@ fn command_requests_tablebase(command: &ParsedCliCommand) -> bool {
 fn product_app_context() -> AppContext {
     #[cfg(feature = "wasm-cpu-runtime")]
     {
-        AppContext::new(
-            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
-        )
+        AppContext::rust_cpu_product()
     }
 
     #[cfg(not(feature = "wasm-cpu-runtime"))]

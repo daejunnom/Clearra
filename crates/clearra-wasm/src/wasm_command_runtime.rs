@@ -7,14 +7,14 @@ use std::{
 };
 
 use clearra_app::{
-    app_response::GovernedAppResponse, AppCommand, AppContext, AppCoreExecutorService,
-    AppErrorCode, AppRequest, AppServices, CooperativeAppAdvance, CooperativeAppExecution,
-    ExecutionControl, PcBestSaveWinnerV2, PcPathFamilyV2Result, PcPathWitnessV2,
-    PcSaveCompletenessEvidence, PcSaveGroupV2, PcSavePieceMultiset, PcSaveWitness,
-    PcScoreSolutionIdentity, ProductCapabilityContract, ProductCapabilityResultKind,
-    ProductPageSourceOwner, PC_BEST_SAVE_SCHEMA, PC_PATH_CANONICAL_SELECTION,
-    PC_SCORE_INFORMATIONAL_ATTACK_BASIS, PC_SCORE_PATTERN_WINNER_CONTRACT,
-    PC_SCORE_SOLUTION_FIELD_CONTRACT, PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
+    app_response::GovernedAppResponse, AppCommand, AppContext, AppErrorCode, AppRequest,
+    CooperativeAppAdvance, CooperativeAppExecution, ExecutionControl, PcBestSaveWinnerV2,
+    PcPathFamilyV2Result, PcPathWitnessV2, PcSaveCompletenessEvidence, PcSaveGroupV2,
+    PcSavePieceMultiset, PcSaveWitness, PcScoreSolutionIdentity, ProductCapabilityContract,
+    ProductCapabilityResultKind, ProductPageSourceOwner, PC_BEST_SAVE_SCHEMA,
+    PC_PATH_CANONICAL_SELECTION, PC_SCORE_INFORMATIONAL_ATTACK_BASIS,
+    PC_SCORE_PATTERN_WINNER_CONTRACT, PC_SCORE_SOLUTION_FIELD_CONTRACT,
+    PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
 };
 #[cfg(test)]
 use clearra_app::{FiniteCooperativeCallerMemory, FiniteCooperativeCallerMemoryRejection};
@@ -4407,9 +4407,7 @@ fn finite_core_execution_error(
 
 impl Default for WasmCommandRuntime {
     fn default() -> Self {
-        Self::new(AppContext::new(
-            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
-        ))
+        Self::new(AppContext::rust_cpu_product())
     }
 }
 
