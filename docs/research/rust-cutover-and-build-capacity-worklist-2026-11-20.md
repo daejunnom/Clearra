@@ -233,6 +233,20 @@ length-prefixed hashes matched. Restricted single-key probes are a
 separate diagnostic: passing a row sink or an explicitly supplied Rust
 verification universe does not prove full C Geometry DAG membership.
 
+The same full P7P4 capture resolved the set relationship: 456,842
+shared keys, zero C-exclusive, and 81 Rust-exclusive. Every exclusive
+key contains the same vertical I spanning original column 9; C also
+retains 76,845 other keys with that placement. Rightmost I occupancy
+alone is not a rejection condition. Because that I owns column 9 of
+all four original rows, no row can clear before it locks; the entire
+column is free for vertical hard drop until then. For four diverse
+exclusive keys, the exact C catalog contained all ten rows and both
+the production row sink and an owned C BuildUp admitted the key when
+supplied directly. Rust independently returned the sampled keys and
+complete lock/hold/clear witnesses in a restricted verifier. This
+rules out per-key C kick/BuildUp rejection for those four and leaves
+the entire-family C Geometry generation/task path to diagnose.
+
 Check the build recipe as well as the binary name when interpreting
 future results. The Windows release CLI uses `wasm-cpu-runtime`, as do
 the Rust product tests above. The current canonical ProductE2E producer
