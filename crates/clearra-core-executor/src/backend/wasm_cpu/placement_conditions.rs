@@ -597,6 +597,10 @@ impl RowConditions {
     pub(super) fn clear_delta(&self, before: u16, after: u16) -> u16 {
         self.deleted_rows(after) & !self.deleted_rows(before)
     }
+
+    fn retained_bytes(&self) -> usize {
+        self.selected_rows.capacity() * core::mem::size_of::<u32>()
+    }
 }
 
 fn low_bits(count: u32) -> u64 {
