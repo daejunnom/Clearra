@@ -483,6 +483,16 @@ export function assertDiscordCanonicalOnlyResult(result) {
   } catch {
     return result;
   }
+  const projection = projectDiscordCanonicalResultPayload(payload);
+  if (projection === null) return result;
+  return Object.freeze({
+    ...result,
+    stdout: JSON.stringify(projection),
+  });
+}
+
+/** Apply the same canonical-only policy to an already parsed result document. */
+export function projectDiscordCanonicalResultPayload(payload) {
   const buildProjection = projectDiscordBuildV2Result(payload);
   if (buildProjection !== null) payload = buildProjection;
   const typedProjection = buildProjection === null
@@ -499,12 +509,7 @@ export function assertDiscordCanonicalOnlyResult(result) {
   ) {
     throw new Error("Clearra returned alternative-result metadata that Discord cannot expose.");
   }
-  const projection = buildProjection ?? typedProjection ?? scoreMinimalsProjection;
-  if (projection === null) return result;
-  return Object.freeze({
-    ...result,
-    stdout: JSON.stringify(projection),
-  });
+  return buildProjection ?? typedProjection ?? scoreMinimalsProjection;
 }
 
 export function parseClearraMessage(content, prefix = "!", execution = {}) {

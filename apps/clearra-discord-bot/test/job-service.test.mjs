@@ -636,6 +636,7 @@ test("job runner transports one exact bounded render artifact and cleans its pri
   ]);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   let outputPath;
+  let includeForbiddenMetadata = false;
   const runner = new ClearraCommandRunner(
     {
       executable: "clearra",
@@ -676,6 +677,7 @@ test("job runner transports one exact bounded render artifact and cleans its pri
                 skin_id: "clearra-exact-v1",
                 product_max_bytes: 4096,
                 transport_max_bytes: 4096,
+                ...(includeForbiddenMetadata ? { tie_cursor: "not-for-discord" } : {}),
               },
               generated_files: [{
                 target: outputPath,
@@ -693,7 +695,7 @@ test("job runner transports one exact bounded render artifact and cleans its pri
     },
   );
 
-  const result = await runner.execute({
+  const job = {
     arguments: [
       "utility",
       "render",
@@ -710,13 +712,22 @@ test("job runner transports one exact bounded render artifact and cleans its pri
     deadlineUnixMs: Date.now() + 5_000,
     maxOutputBytes: 1024 * 1024,
     maxArtifactBytes: 4096,
-  });
+  };
+  const result = await runner.execute(job);
 
   assert.equal(result.artifact.mediaType, "image/png");
   assert.equal(result.artifact.sha256, sha256);
   assert.equal(Buffer.from(result.artifact.bytesBase64, "base64").equals(bytes), true);
   assert.equal(JSON.parse(result.stdout).generated_files, undefined);
   assert.equal(result.stdout.includes(outputPath), false);
+  assert.equal(existsSync(outputPath), false);
+  assert.equal(existsSync(dirname(outputPath)), false);
+
+  includeForbiddenMetadata = true;
+  await assert.rejects(
+    runner.execute({ ...job, deadlineUnixMs: Date.now() + 5_000 }),
+    /alternative-result metadata/u,
+  );
   assert.equal(existsSync(outputPath), false);
   assert.equal(existsSync(dirname(outputPath)), false);
 });

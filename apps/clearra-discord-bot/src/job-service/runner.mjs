@@ -17,6 +17,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
   assertDiscordCanonicalOnlyResult,
   prepareClearraArguments,
+  projectDiscordCanonicalResultPayload,
   searchTimeoutMsForArguments,
 } from "../clearra/command.mjs";
 import { productBuildIdentityMatchesRuntime } from "./runtime-identity.mjs";
@@ -194,8 +195,8 @@ export class ClearraCommandRunner {
           finish(() => rejectJob(pendingFailure));
           return;
         }
-        const stdoutText = Buffer.concat(stdout).toString("utf8").trim();
-        const stderrText = Buffer.concat(stderr).toString("utf8").trim();
+        const stdoutText = takeOutputText(stdout);
+        const stderrText = takeOutputText(stderr);
         void (async () => {
           const oomKillCountAfter = signal === "SIGKILL"
             ? await readOomEvidence()
@@ -204,13 +205,13 @@ export class ClearraCommandRunner {
             Number.isSafeInteger(oomKillCountBefore) &&
             Number.isSafeInteger(oomKillCountAfter) &&
             oomKillCountAfter > oomKillCountBefore;
-          const artifact = code === 0 && artifactPlan
-            ? await readRenderArtifact(artifactPlan, stdoutText)
+          const renderDocument = code === 0 && artifactPlan
+            ? parseRenderStdout(stdoutText)
             : null;
-          const sanitizedStdout = artifact
-            ? sanitizeRenderStdout(stdoutText)
-            : stdoutText;
-          finish(() => resolveJob(assertDiscordCanonicalOnlyResult({
+          const artifact = renderDocument
+            ? await readRenderArtifact(artifactPlan, renderDocument.payload)
+            : null;
+          const result = {
             exitCode: code ?? -1,
             signal: signal ?? null,
             terminationReason: confirmedOom
@@ -218,10 +219,14 @@ export class ClearraCommandRunner {
               : signal === "SIGKILL" ? "forced-signal" : "exit",
             oomKillCountBefore,
             oomKillCountAfter,
-            stdout: sanitizedStdout,
+            stdout: renderDocument ? encodeRenderStdout(renderDocument) : stdoutText,
             stderr: stderrText,
             ...(artifact ? { artifact } : {}),
-          })));
+          };
+          // Render stdout is already parsed, sanitized and checked. Other
+          // commands keep their existing string-in/string-out policy path.
+          const projected = renderDocument ? result : assertDiscordCanonicalOnlyResult(result);
+          finish(() => resolveJob(projected));
         })().catch((error) => {
           finish(() => rejectJob(error));
         });
@@ -232,6 +237,13 @@ export class ClearraCommandRunner {
       await cleanupRenderArtifactPlan(artifactPlan);
     }
   }
+}
+
+function takeOutputText(chunks) {
+  if (chunks.length === 0) return "";
+  const bytes = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
+  chunks.length = 0;
+  return bytes.toString("utf8").trim();
 }
 
 async function readCgroupOomKillCount() {
@@ -278,7 +290,7 @@ async function createRenderArtifactPlan(arguments_, maximumBytes) {
   });
 }
 
-async function readRenderArtifact(plan, stdout) {
+async function readRenderArtifact(plan, payload) {
   const metadata = await lstat(plan.outputPath).catch(() => null);
   if (
     !metadata ||
@@ -295,8 +307,6 @@ async function readRenderArtifact(plan, stdout) {
     throw new Error("Clearra produced a render artifact with an invalid binary signature.");
   }
   const digest = createHash("sha256").update(bytes).digest("hex");
-  const document = parseRenderStdout(stdout);
-  const payload = document.payload;
   if (
     payload.artifact_format !== plan.format ||
     payload.media_type !== plan.mediaType ||
@@ -350,11 +360,10 @@ function parseRenderStdout(stdout) {
   return document;
 }
 
-function sanitizeRenderStdout(stdout) {
-  const document = parseRenderStdout(stdout);
-  const sanitized = { ...document };
-  delete sanitized.generated_files;
-  return JSON.stringify(sanitized);
+function encodeRenderStdout(document) {
+  const { generated_files: _ownedFiles, ...sanitized } = document;
+  const projection = projectDiscordCanonicalResultPayload(sanitized);
+  return JSON.stringify(projection ?? sanitized);
 }
 
 function validRenderSignature(bytes, format) {
