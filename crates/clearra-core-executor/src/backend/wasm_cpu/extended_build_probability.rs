@@ -7,6 +7,9 @@ use std::{
 #[path = "extended_pc_family_parallel.rs"]
 mod pc_parallel;
 
+#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+pub(super) use pc_parallel::cooperative::{DryRunOwner, ParallelTerminalRetention, SerialHandoff};
+
 use clearra_core_domain::{
     execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind,
     solution::ExtendedTilingSolutionKey,

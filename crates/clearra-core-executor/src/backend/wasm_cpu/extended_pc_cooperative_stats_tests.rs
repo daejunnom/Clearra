@@ -2,7 +2,7 @@ use std::{env, process::Command};
 
 use clearra_core_domain::{
     board::standard_pc_board::Board256Mask, execution_cancellation::ExecutionCancellationToken,
-    piece::piece_kind::PieceKind, runtime_cpu_capacity::CpuCapacity,
+    piece::piece_kind::PieceKind, resource::ResourceLeaseToken, runtime_cpu_capacity::CpuCapacity,
 };
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
@@ -77,6 +77,23 @@ fn direct_parallel(
         .expect("a nonempty Geometry plan")
 }
 
+fn handoff_existing(
+    problem: &SearchProblem,
+    field: BuildProbabilityField,
+) -> (DryRunOwner, ResourceLeaseToken) {
+    assert!(DryRunOwner::is_eligible(problem, field));
+    let admission = admit_budget_bound_search_execution(problem, WORKERS).unwrap();
+    let original = admission.lease_token();
+    let engine =
+        ExtendedBuildProbabilitySession::new_pc_family(problem, field, admission.memory_bound(), 0)
+            .unwrap();
+    assert!(admit_budget_bound_search_execution(problem, WORKERS).is_err());
+    (
+        DryRunOwner::from_admitted(engine, admission, original).unwrap(),
+        original,
+    )
+}
+
 fn assert_parallel_terminal_matches_direct(
     owner: DryRunOwner,
     problem: &SearchProblem,
@@ -89,14 +106,12 @@ fn assert_parallel_terminal_matches_direct(
     let keys = owner.completed().unwrap().keys;
     let backing = keys.as_ptr();
     let first_text = keys.first().map(|key| key.as_ptr());
-    let terminal = owner.into_parallel_result(control).unwrap();
-    assert_eq!(
-        terminal.admission.lease_token(),
-        lease,
-        "same original lease"
-    );
+    let (actual, retention) = owner
+        .into_parallel_result(control)
+        .unwrap()
+        .into_result_and_retention();
+    assert_eq!(retention.lease_token(), lease, "same original lease");
     assert!(admit_budget_bound_search_execution(problem, WORKERS).is_err());
-    let actual = &terminal.result;
     assert_eq!(actual.normalized_solution_keys().as_ptr(), backing);
     assert_eq!(
         actual
@@ -135,7 +150,9 @@ fn assert_parallel_terminal_matches_direct(
     ] {
         assert_eq!(actual.field(key), expected.field(key), "{key}");
     }
-    drop(terminal);
+    drop(actual);
+    assert!(admit_budget_bound_search_execution(problem, WORKERS).is_err());
+    drop(retention);
     assert!(admit_budget_bound_search_execution(problem, WORKERS).is_ok());
 }
 
@@ -182,9 +199,35 @@ fn cooperative_fixed_ordinal_verification_stats_and_serial_handoff() {
     let expected = direct_parallel(&problem, field, &control);
     assert_eq!(expected.bool_field("build_variant_count_exact"), Some(true));
     assert!(!expected.path_steps().is_empty());
-    let mut owner = DryRunOwner::new(&problem, field).unwrap();
+    // Capture an older lease with identical requested width and memory.
+    // Matching limits do not authorize replacing the engine's lease epoch.
+    let stale = admit_budget_bound_search_execution(&problem, WORKERS)
+        .unwrap()
+        .lease_token();
+    let current = admit_budget_bound_search_execution(&problem, WORKERS).unwrap();
+    assert_ne!(stale, current.lease_token());
+    let engine =
+        ExtendedBuildProbabilitySession::new_pc_family(&problem, field, current.memory_bound(), 0)
+            .unwrap();
+    assert!(matches!(
+        DryRunOwner::from_admitted(engine, current, stale),
+        Err(WasmExactSearchError::InvalidProblem(_))
+    ));
+
+    let (mut owner, original) = handoff_existing(&problem, field);
     drive(&mut owner, &control);
+    assert_eq!(owner.parallel_result_pending(), Some(original));
     let facts = owner.completed().unwrap();
+    assert!(facts
+        .workers
+        .iter()
+        .any(|worker| worker.engine.peak_build_scratch_bytes != 0));
+    assert!(facts.workers.iter().all(|worker| {
+        worker.engine.build_order_workspace.retained_bytes() == 0
+            && worker.engine.coverage_evaluator.retained_bytes() == 0
+            && worker.engine.buildable_tilings.capacity() == 0
+            && worker.digests.capacity() == 0
+    }));
     assert!(owner.serial_handoff_pending().is_none());
     assert_eq!(facts.keys, expected.normalized_solution_keys());
     assert_eq!(
@@ -270,13 +313,14 @@ fn cooperative_fixed_ordinal_verification_stats_and_serial_handoff() {
         holes((0_u16..7).map(|row| 11 * row).chain([69])),
         vec![PieceKind::I; 2],
     );
-    let mut owner = DryRunOwner::new(&problem, field).unwrap();
+    let (mut owner, original) = handoff_existing(&problem, field);
     drive(&mut owner, &control);
     assert!(owner.completed().is_none(), "no parallel terminal report");
     assert!(owner.parallel_result_pending().is_none());
     let lease = owner
         .serial_handoff_pending()
         .expect("serial owner handoff");
+    assert_eq!(lease, original);
     let mut serial = owner.into_serial_handoff(&control).unwrap();
     assert_eq!(serial.admission.lease_token(), lease);
     assert!(admit_budget_bound_search_execution(&problem, WORKERS).is_err());

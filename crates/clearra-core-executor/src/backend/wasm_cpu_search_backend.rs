@@ -11,6 +11,8 @@ use clearra_problem::{SearchOutputPolicy, SearchProblem};
 
 use crate::{resource::WasmCpuTerminalResourceAuthority, CoreExecutionError, CoreExecutionResult};
 
+#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+use super::wasm_cpu::NativePcCooperativeAdvance;
 #[cfg(feature = "webgpu-search")]
 use super::wasm_cpu::WasmWebGpuSearchSession;
 #[cfg(any(test, feature = "local-search-ab"))]
@@ -165,14 +167,7 @@ enum WasmSearchSessionInner {
 impl WasmCpuSearchSession {
     pub fn new(problem: &SearchProblem) -> Result<Self, WasmCpuSearchError> {
         if problem.visible_height() > 6 {
-            if !matches!(
-                problem.backend_policy().requested_backend().as_str(),
-                "cpu" | "auto"
-            ) {
-                return Err(WasmCpuSearchError::Unsupported {
-                    reason: "extended_pc_family_requires_cpu_backend",
-                });
-            }
+            validate_extended_pc_backend(problem)?;
             return Ok(Self {
                 inner: WasmSearchSessionInner::ExtendedPc(
                     ExtendedPcSearchSession::new(problem).map_err(map_error)?,
@@ -210,6 +205,41 @@ impl WasmCpuSearchSession {
                 WasmExactSearchSession::new(problem).map_err(map_error)?,
             ),
         })
+    }
+
+    /// Select the experimental bounded native route only in conformance
+    /// tests. Product callers keep the existing selection and session path.
+    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+    fn new_native_cooperative_for_test(
+        problem: &SearchProblem,
+        checked_external_retained_bytes: u128,
+    ) -> Result<Self, WasmCpuSearchError> {
+        validate_extended_pc_backend(problem)?;
+        Ok(Self {
+            inner: WasmSearchSessionInner::ExtendedPc(
+                ExtendedPcSearchSession::new_native_cooperative_for_test(
+                    problem,
+                    checked_external_retained_bytes,
+                )
+                .map_err(map_error)?,
+            ),
+        })
+    }
+
+    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+    fn advance_native_cooperative_for_test(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<NativePcCooperativeAdvance, WasmCpuSearchError> {
+        let WasmSearchSessionInner::ExtendedPc(session) = &mut self.inner else {
+            return Err(WasmCpuSearchError::Unsupported {
+                reason: "extended_pc_native_cooperative_explicit_opt_in_required",
+            });
+        };
+        session
+            .advance_native_cooperative_for_test(work_budget, control)
+            .map_err(map_error)
     }
 
     /// Compatibility shared-input constructor that avoids a SearchProblem
@@ -427,6 +457,23 @@ impl WasmCpuSearchSession {
         }
     }
 }
+
+fn validate_extended_pc_backend(problem: &SearchProblem) -> Result<(), WasmCpuSearchError> {
+    if matches!(
+        problem.backend_policy().requested_backend().as_str(),
+        "cpu" | "auto"
+    ) {
+        Ok(())
+    } else {
+        Err(WasmCpuSearchError::Unsupported {
+            reason: "extended_pc_family_requires_cpu_backend",
+        })
+    }
+}
+
+#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+#[path = "wasm_cpu_search_backend_native_cooperative_tests.rs"]
+mod native_cooperative_tests;
 
 impl WasmCpuSearchBackend {
     /// Whether a host may load assets qualified for the named built-in

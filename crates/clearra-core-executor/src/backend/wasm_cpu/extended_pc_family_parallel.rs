@@ -946,13 +946,15 @@ fn pool_error() -> WasmExactSearchError {
 // A private foundation: only a conformance owner drives these waves for now.
 // The full native path remains the only product entry.
 #[cfg(test)]
-mod cooperative {
+pub(in crate::backend::wasm_cpu) mod cooperative {
     use super::*;
     use crate::backend::wasm_cpu::extended_geometry::{
         ExtendedGeometrySearch, ExtendedParallelGeometryPlan, ExtendedParallelPreparation,
         ExtendedPreparationStatus,
     };
-    use crate::backend::wasm_cpu::extended_pc_search::checked_pc_family_problem_nested_retained_bytes;
+    use crate::backend::wasm_cpu::extended_pc_search::{
+        checked_pc_family_problem_nested_retained_bytes, validate_pc_family_problem,
+    };
     use crate::resource::{admit_budget_bound_search_execution, ExecutionAdmission};
     use clearra_core_domain::{
         board::standard_pc_board::Board256Mask, objective::objective_kind::ObjectiveKind,
@@ -1433,22 +1435,45 @@ mod cooperative {
         pub(super) verification: VerifiedStats<'a>,
     }
 
-    pub(super) struct SerialHandoff {
-        pub(super) engine: ExtendedBuildProbabilitySession,
-        pub(super) admission: ExecutionAdmission,
+    pub(in crate::backend::wasm_cpu) struct SerialHandoff {
+        pub(in crate::backend::wasm_cpu) engine: ExtendedBuildProbabilitySession,
+        pub(in crate::backend::wasm_cpu) admission: ExecutionAdmission,
     }
 
-    pub(super) struct ParallelTerminal {
+    pub(in crate::backend::wasm_cpu) struct ParallelTerminal {
         // The published result and its allocation account drop before the
         // exact original admission. It is not a new execution or new lease.
-        pub(super) result: CoreExecutionResult,
+        result: CoreExecutionResult,
         _backing: ExecutionMemoryOwner,
-        pub(super) admission: ExecutionAdmission,
+        admission: ExecutionAdmission,
+    }
+
+    pub(in crate::backend::wasm_cpu) struct ParallelTerminalRetention {
+        _backing: ExecutionMemoryOwner,
+        admission: ExecutionAdmission,
+    }
+
+    impl ParallelTerminalRetention {
+        pub(in crate::backend::wasm_cpu) fn lease_token(&self) -> ResourceLeaseToken {
+            self.admission.lease_token()
+        }
+    }
+
+    impl ParallelTerminal {
+        pub(in crate::backend::wasm_cpu) fn into_result_and_retention(
+            self,
+        ) -> (CoreExecutionResult, ParallelTerminalRetention) {
+            let retention = ParallelTerminalRetention {
+                _backing: self._backing,
+                admission: self.admission,
+            };
+            (self.result, retention)
+        }
     }
 
     /// Test-private exact owner. Proof facts remain borrowed; publication is
     /// an explicit consuming operation under the same admission.
-    pub(super) struct DryRunOwner {
+    pub(in crate::backend::wasm_cpu) struct DryRunOwner {
         // Move-out owners precede the admission in destruction order.
         preparation: Option<ExtendedParallelPreparation>,
         plan: Option<ExtendedParallelGeometryPlan>,
@@ -1477,12 +1502,14 @@ mod cooperative {
     }
 
     impl DryRunOwner {
-        pub(super) fn new(
+        pub(in crate::backend::wasm_cpu) fn is_eligible(
             problem: &SearchProblem,
             field: BuildProbabilityField,
-        ) -> Result<Self, WasmExactSearchError> {
+        ) -> bool {
             let width = problem.backend_policy().workers();
-            if width < 2
+            if problem.visible_height() != 7
+                || field.height() != 7
+                || width < 2
                 || problem.objective().kind() != ObjectiveKind::All
                 || problem.count_policy() != PcCountPolicy::CountAll
                 || !matches!(
@@ -1506,23 +1533,77 @@ mod cooperative {
                     .remaining_queue()
                     .as_fixed_sequence()
                     .is_none()
+                || validate_pc_family_problem(problem).is_err()
             {
+                return false;
+            }
+            let initial = Board256Mask::from_words(problem.initial_board().occupied_words());
+            let Ok(full) = Board256Mask::all_cells(70) else {
+                return false;
+            };
+            let required = full.without(initial);
+            let cells = required.count_ones() as usize;
+            initial.fits_cell_count(70).unwrap_or(false)
+                && field.base_words() == initial.words()
+                && field.target_words() == required.words()
+                && cells != 0
+                && cells.is_multiple_of(4)
+                && problem.exact_pieces() == Some(cells / 4)
+        }
+
+        pub(super) fn new(
+            problem: &SearchProblem,
+            field: BuildProbabilityField,
+        ) -> Result<Self, WasmExactSearchError> {
+            if !Self::is_eligible(problem, field) {
                 return Err(contract_error());
             }
+            let width = problem.backend_policy().workers();
             let admission = admit_budget_bound_search_execution(problem, width)
                 .map_err(WasmExactSearchError::resource_admission)?;
-            if admission.lease_token().grant().compute_units as usize != width {
-                return Err(contract_error());
-            }
             let external = checked_pc_family_problem_nested_retained_bytes(problem)
                 .and_then(|bytes| bytes.checked_add(size_of::<SearchProblem>() as u128))
                 .ok_or_else(projection_error)?;
-            let mut root = ExtendedBuildProbabilitySession::new_pc_family(
+            let root = ExtendedBuildProbabilitySession::new_pc_family(
                 problem,
                 field,
                 admission.memory_bound(),
                 external,
             )?;
+            let expected_lease = admission.lease_token();
+            Self::from_admitted(root, admission, expected_lease)
+        }
+
+        /// The caller must retain the original token at engine construction,
+        /// not derive an expected token from a later, interchangeable grant.
+        /// Reject unsupported type/state before replacing its Geometry owner.
+        pub(in crate::backend::wasm_cpu) fn from_admitted(
+            mut root: ExtendedBuildProbabilitySession,
+            admission: ExecutionAdmission,
+            expected_lease: ResourceLeaseToken,
+        ) -> Result<Self, WasmExactSearchError> {
+            let width = root.problem.backend_policy().workers();
+            let lease = admission.lease_token();
+            if !Self::is_eligible(&root.problem, root.field)
+                || lease != expected_lease
+                || lease.grant().compute_units as usize != width
+                || root.memory_bound != admission.memory_bound()
+                || root.purpose != ExtendedFamilyPurpose::Pc
+                || root.shared_immutable_owners
+                || root.external_geometry
+                || root.trivial_target
+                || root.finished
+                || root.truncated_reason.is_some()
+                || root.processed_candidate_count != 0
+                || root.geometry.candidate_count() != 0
+                || root.geometry.expanded_nodes() != 0
+                || !root.geometry.is_compiling()
+                || !root.supply_projection_complete
+                || root.solution_coverage.is_some()
+                || root.pc_observation.is_some()
+            {
+                return Err(contract_error());
+            }
             let preparation = ExtendedParallelPreparation::new(
                 core::mem::replace(
                     &mut root.geometry,
@@ -1559,7 +1640,7 @@ mod cooperative {
             })
         }
 
-        pub(super) fn advance(
+        pub(in crate::backend::wasm_cpu) fn advance(
             &mut self,
             budget: usize,
             control: &ExecutionControl,
@@ -1966,6 +2047,30 @@ mod cooperative {
                 return Ok(());
             };
             let rows = worker.bounded_rows.as_ref().ok_or_else(contract_error)?;
+            if !worker.digests.is_empty()
+                || !worker.engine.buildable_tilings.is_empty()
+                || worker.engine.pc_observation.is_some()
+                || worker.engine.solution_coverage.is_some()
+                || !worker.engine.spin_execution_graphs.is_empty()
+                || !worker.engine.finesse_languages.is_empty()
+            {
+                return Err(contract_error());
+            }
+            // All pool jobs and range bindings are finished. No later phase
+            // calls this worker's solver; retain only proof/witness data. The
+            // replacement constructors allocate nothing.
+            let empty_workspace = super::super::ExtendedBuildOrderWorkspace::new(
+                worker.engine.field.width(),
+                worker.engine.field.height(),
+                worker.engine.problem.kick_profile().profile_id(),
+            );
+            drop(core::mem::replace(
+                &mut worker.engine.build_order_workspace,
+                empty_workspace,
+            ));
+            drop(core::mem::take(&mut worker.engine.coverage_evaluator));
+            drop(core::mem::take(&mut worker.engine.buildable_tilings));
+            drop(core::mem::take(&mut worker.digests));
             // One source inventory phase per worker after all digest ranges
             // are gone. Bind validated shared immutable ownership, so there
             // is no need to rewalk the common problem here. The fixed-queue
@@ -1974,6 +2079,10 @@ mod cooperative {
             let retained = worker
                 .engine
                 .checked_non_problem_retained_bytes()
+                // This historical peak includes prior local graphs/projection
+                // scratch. Those are already dropped; the original active
+                // charges and aggregate high-water mark remain intact.
+                .and_then(|bytes| bytes.checked_sub(worker.engine.peak_build_scratch_bytes as u128))
                 .and_then(|bytes| bytes.checked_add(worker.checked_auxiliary_retained_bytes()?))
                 .ok_or_else(projection_error)?;
             let base = retained
@@ -2106,15 +2215,19 @@ mod cooperative {
             })
         }
 
-        pub(super) fn serial_handoff_pending(&self) -> Option<ResourceLeaseToken> {
+        pub(in crate::backend::wasm_cpu) fn serial_handoff_pending(
+            &self,
+        ) -> Option<ResourceLeaseToken> {
             (self.phase == DryPhase::SerialHandoff).then(|| self.admission.lease_token())
         }
 
-        pub(super) fn parallel_result_pending(&self) -> Option<ResourceLeaseToken> {
+        pub(in crate::backend::wasm_cpu) fn parallel_result_pending(
+            &self,
+        ) -> Option<ResourceLeaseToken> {
             (self.phase == DryPhase::Complete).then(|| self.admission.lease_token())
         }
 
-        pub(super) fn into_parallel_result(
+        pub(in crate::backend::wasm_cpu) fn into_parallel_result(
             mut self,
             control: &ExecutionControl,
         ) -> Result<ParallelTerminal, WasmExactSearchError> {
@@ -2172,7 +2285,7 @@ mod cooperative {
             })
         }
 
-        pub(super) fn into_serial_handoff(
+        pub(in crate::backend::wasm_cpu) fn into_serial_handoff(
             self,
             control: &ExecutionControl,
         ) -> Result<SerialHandoff, WasmExactSearchError> {

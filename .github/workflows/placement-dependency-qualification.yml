@@ -75,12 +75,14 @@ jobs:
             extended_parallel_cooperative_preparation_
             extended_pc_native_cooperative_worker_waves_preserve_exact_family_and_drain
             cooperative_canonical_reduction
+            ordinary_native_pc_cooperative_session_preserves_admission_and_exact_family
             cooperative_fixed_ordinal_verification_stats_and_serial_handoff
             extended_pc_sealed_terminal_preserves_direct_result_and_admission
             extended_pc_terminal_projection_moves_private_solution_owners
             extended_result_materialization_projection_has_an_exact_one_byte_boundary
             typed_score_publication_releases_transient_backing_slots
             unguarded_result_annotations_reuse_the_physical_path_allocation
+            guarded_fail_closed_surface
             unique_field_distinguishes_absent_unique_and_duplicate_fields_without_allocation
             split_family_traversal_matches_serial_geometry_on_small_search
             capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_
@@ -259,6 +261,7 @@ jobs:
             for filter in legacy_cover_tests legacy_cover_rust::tests:: \
               pc_tiling_candidate_budget_preserves_failure_without_publishing setup_score_ordinals \
               setup_score_evaluation_identity_binds \
+              explicit_rust_cpu_product_context_preserves_default_service_selection \
               full_height_replay_shares_exact_graph_owner_across_staged_promotion; do
               "${app_lib[@]}" "$filter" || status=1
             done

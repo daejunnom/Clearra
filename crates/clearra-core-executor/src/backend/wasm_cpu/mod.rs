@@ -119,6 +119,8 @@ pub use extended_build_probability::pc_distributed::{
 };
 pub use extended_pc_failed_queue::{WasmPcFailedQueueAdvance, WasmPcFailedQueueSession};
 pub(crate) use extended_pc_search::ExtendedPcSearchSession;
+#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+pub(crate) use extended_pc_search::NativePcCooperativeAdvance;
 pub use extended_pc_tiling::distributed::{
     WasmFullHeightTilingProducer, WasmFullHeightTilingResultMerger, WasmFullHeightTilingWorker,
 };

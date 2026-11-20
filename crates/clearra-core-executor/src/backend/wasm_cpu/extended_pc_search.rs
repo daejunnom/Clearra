@@ -26,10 +26,26 @@ use crate::{
 };
 
 pub(crate) struct ExtendedPcSearchSession {
-    engine: ExtendedBuildProbabilitySession,
-    _admission: ExecutionAdmission,
+    owner: ExtendedPcSearchOwner,
     terminal_authority_supplied: bool,
 }
+
+struct ExtendedPcDirectOwner {
+    engine: ExtendedBuildProbabilitySession,
+    admission: ExecutionAdmission,
+    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+    original_lease: clearra_core_domain::resource::ResourceLeaseToken,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum ExtendedPcSearchOwner {
+    Direct(ExtendedPcDirectOwner),
+    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+    NativeCooperative(native_cooperative::Driver),
+}
+
+#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+pub(crate) use native_cooperative::NativePcCooperativeAdvance;
 
 pub(super) fn validate_pc_family_problem(
     problem: &SearchProblem,
@@ -147,11 +163,16 @@ pub(super) fn checked_pc_family_problem_nested_retained_bytes(
 
 impl ExtendedPcSearchSession {
     pub(super) fn failed_queue_memory_bound(&self) -> crate::resource::ExecutionMemoryBound {
-        self._admission.memory_bound()
+        self.direct_owner()
+            .expect("typed failed queues are not in the ordinary cooperative cohort")
+            .admission
+            .memory_bound()
     }
 
     pub(super) fn checked_failed_queue_retained_bytes(&self) -> Option<u128> {
-        self.engine.checked_retained_bytes_with_coexisting_owners()
+        self.direct_owner()?
+            .engine
+            .checked_retained_bytes_with_coexisting_owners()
     }
 
     pub fn new(problem: &SearchProblem) -> Result<Self, WasmExactSearchError> {
@@ -187,6 +208,22 @@ impl ExtendedPcSearchSession {
         additional_coexisting_retained_bytes: u128,
         authority: Option<&WasmCpuTerminalResourceAuthority>,
     ) -> Result<Self, WasmExactSearchError> {
+        let field = Self::validated_family_field(problem)?;
+        let direct = Self::admit_direct_owner(
+            problem,
+            field,
+            additional_coexisting_retained_bytes,
+            authority,
+        )?;
+        Ok(Self {
+            owner: ExtendedPcSearchOwner::Direct(direct),
+            terminal_authority_supplied: authority.is_some(),
+        })
+    }
+
+    fn validated_family_field(
+        problem: &SearchProblem,
+    ) -> Result<BuildProbabilityField, WasmExactSearchError> {
         validate_pc_family_problem(problem)?;
         // Do not silently turn a multiworker product into a serial search.
         if problem.backend_policy().workers() != 1
@@ -211,12 +248,20 @@ impl ExtendedPcSearchSession {
                 "extended_pc_area_invalid",
             ));
         }
-        let field = BuildProbabilityField::from_words_preserving_height(
+        BuildProbabilityField::from_words_preserving_height(
             height,
             initial.words(),
             required.words(),
         )
-        .map_err(|_| WasmExactSearchError::InvalidProblem("extended_pc_field_invalid"))?;
+        .map_err(|_| WasmExactSearchError::InvalidProblem("extended_pc_field_invalid"))
+    }
+
+    fn admit_direct_owner(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        additional_coexisting_retained_bytes: u128,
+        authority: Option<&WasmCpuTerminalResourceAuthority>,
+    ) -> Result<ExtendedPcDirectOwner, WasmExactSearchError> {
         let admission = if let Some(authority) = authority {
             admit_budget_bound_search_execution_under_terminal_authority(
                 problem,
@@ -228,6 +273,8 @@ impl ExtendedPcSearchSession {
             admit_budget_bound_search_execution(problem, problem.backend_policy().workers())
         }
         .map_err(WasmExactSearchError::resource_admission)?;
+        #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+        let original_lease = admission.lease_token();
         // The legacy ordinary execution API borrows a caller-owned problem;
         // both that input and the engine's owned snapshot coexist.
         let external = checked_pc_family_problem_nested_retained_bytes(problem)
@@ -247,11 +294,68 @@ impl ExtendedPcSearchSession {
             admission.memory_bound(),
             external,
         )?;
-        Ok(Self {
+        Ok(ExtendedPcDirectOwner {
             engine,
-            _admission: admission,
-            terminal_authority_supplied: authority.is_some(),
+            admission,
+            #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+            original_lease,
         })
+    }
+
+    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+    pub(crate) fn new_native_cooperative_for_test(
+        problem: &SearchProblem,
+        checked_external_retained_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
+        let field = Self::validated_family_field(problem)?;
+        if !native_cooperative::Driver::is_eligible(problem, field) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_native_cooperative_ineligible",
+            ));
+        }
+        let direct =
+            Self::admit_direct_owner(problem, field, checked_external_retained_bytes, None)?;
+        Ok(Self {
+            owner: ExtendedPcSearchOwner::NativeCooperative(native_cooperative::Driver::new(
+                direct,
+            )?),
+            terminal_authority_supplied: false,
+        })
+    }
+
+    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+    pub(crate) fn native_cooperative_leases_for_test(
+        &self,
+    ) -> Option<(
+        clearra_core_domain::resource::ResourceLeaseToken,
+        Option<clearra_core_domain::resource::ResourceLeaseToken>,
+    )> {
+        let ExtendedPcSearchOwner::NativeCooperative(owner) = &self.owner else {
+            return None;
+        };
+        Some((owner.original_lease(), owner.publication_lease()))
+    }
+
+    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+    pub(crate) fn advance_native_cooperative_for_test(
+        &mut self,
+        budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<NativePcCooperativeAdvance, WasmExactSearchError> {
+        match &mut self.owner {
+            ExtendedPcSearchOwner::NativeCooperative(owner) => owner.advance(budget, control),
+            ExtendedPcSearchOwner::Direct(_) => Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_native_cooperative_explicit_opt_in_required",
+            )),
+        }
+    }
+
+    fn direct_owner(&self) -> Option<&ExtendedPcDirectOwner> {
+        match &self.owner {
+            ExtendedPcSearchOwner::Direct(owner) => Some(owner),
+            #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+            ExtendedPcSearchOwner::NativeCooperative(_) => None,
+        }
     }
 
     pub fn advance(
@@ -259,28 +363,15 @@ impl ExtendedPcSearchSession {
         budget: usize,
         control: &ExecutionControl,
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
-        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
-        if self.requested_workers() > 1 {
-            let parallel_result =
-                self.execute_parallel_if_worthwhile(self.requested_workers(), control)?;
-            if let Some(result) = parallel_result {
-                return Ok(ExactSearchAdvance::Completed(result));
+        match &mut self.owner {
+            ExtendedPcSearchOwner::Direct(owner) => owner.advance(budget, control),
+            #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+            ExtendedPcSearchOwner::NativeCooperative(_) => {
+                Err(WasmExactSearchError::InvalidProblem(
+                    "extended_pc_native_cooperative_requires_leased_result_advance",
+                ))
             }
         }
-        let advance = self.engine.advance(budget, control)?;
-        let progress = self.engine.distributed_progress();
-        control.report_progress("geometry", progress.geometry_nodes as u64, None);
-        control.report_progress("buildup", progress.build_nodes as u64, None);
-        Ok(match advance {
-            BuildProbabilityAdvance::Pending => ExactSearchAdvance::Pending,
-            BuildProbabilityAdvance::Completed(result) => ExactSearchAdvance::Completed(result),
-            BuildProbabilityAdvance::Cancelled => ExactSearchAdvance::Cancelled,
-        })
-    }
-
-    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
-    fn requested_workers(&self) -> usize {
-        self.engine.requested_pc_workers()
     }
 
     #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
@@ -289,8 +380,17 @@ impl ExtendedPcSearchSession {
         requested_workers: usize,
         control: &ExecutionControl,
     ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
-        self.engine
-            .execute_pc_family_parallel(requested_workers, control)
+        match &mut self.owner {
+            ExtendedPcSearchOwner::Direct(owner) => owner
+                .engine
+                .execute_pc_family_parallel(requested_workers, control),
+            #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+            ExtendedPcSearchOwner::NativeCooperative(_) => {
+                Err(WasmExactSearchError::InvalidProblem(
+                    "extended_pc_native_cooperative_requires_bounded_advance",
+                ))
+            }
+        }
     }
 
     pub fn validate_public_result_memory_with_future(
@@ -300,20 +400,259 @@ impl ExtendedPcSearchSession {
     ) -> Result<(), WasmExactSearchError> {
         // This ordinary borrowed-input path never manufactures the parent
         // authority required by typed score/Tiling terminal callbacks.
-        if !self.terminal_authority_supplied {
-            return Err(WasmExactSearchError::InvalidProblem(
+        let owner = self
+            .direct_owner()
+            .filter(|_| self.terminal_authority_supplied)
+            .ok_or(WasmExactSearchError::InvalidProblem(
                 "extended_pc_family_parent_authority_not_supplied",
-            ));
-        }
-        let retained = self
+            ))?;
+        let retained = owner
             .engine
             .checked_retained_bytes_with_coexisting_owners()
             .and_then(|bytes| bytes.checked_add(result.checked_resource_retained_bytes()?))
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "extended_pc_memory_projection_unavailable",
             ))?;
-        self._admission
+        owner
+            .admission
             .ensure_memory_bound(retained, future)
             .map_err(WasmExactSearchError::resource_admission)
+    }
+}
+
+impl ExtendedPcDirectOwner {
+    fn advance(
+        &mut self,
+        budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        {
+            let requested_workers = self.engine.requested_pc_workers();
+            if requested_workers > 1 {
+                if let Some(result) = self
+                    .engine
+                    .execute_pc_family_parallel(requested_workers, control)?
+                {
+                    return Ok(ExactSearchAdvance::Completed(result));
+                }
+            }
+        }
+        advance_serial(&mut self.engine, budget, control)
+    }
+}
+
+fn advance_serial(
+    engine: &mut ExtendedBuildProbabilitySession,
+    budget: usize,
+    control: &ExecutionControl,
+) -> Result<ExactSearchAdvance, WasmExactSearchError> {
+    let advance = engine.advance(budget, control)?;
+    let progress = engine.distributed_progress();
+    control.report_progress("geometry", progress.geometry_nodes as u64, None);
+    control.report_progress("buildup", progress.build_nodes as u64, None);
+    Ok(match advance {
+        BuildProbabilityAdvance::Pending => ExactSearchAdvance::Pending,
+        BuildProbabilityAdvance::Completed(result) => ExactSearchAdvance::Completed(result),
+        BuildProbabilityAdvance::Cancelled => ExactSearchAdvance::Cancelled,
+    })
+}
+
+#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+mod native_cooperative {
+    use clearra_core_domain::resource::ResourceLeaseToken;
+
+    use super::*;
+    use crate::backend::wasm_cpu::extended_build_probability::{
+        DryRunOwner, ParallelTerminalRetention, SerialHandoff,
+    };
+
+    #[allow(clippy::large_enum_variant)]
+    enum State {
+        Parallel(DryRunOwner),
+        Serial(SerialHandoff),
+        Published(ResourceLeaseToken),
+        Stopped,
+    }
+
+    #[allow(clippy::large_enum_variant)]
+    pub(crate) enum NativePcCooperativeAdvance {
+        Pending,
+        Completed(NativePcCooperativeResult),
+        Cancelled,
+    }
+
+    enum PublicationRetention {
+        Parallel(ParallelTerminalRetention),
+        Serial(ExecutionAdmission),
+    }
+
+    /// Both the artifact and the original admission cross together. The
+    /// caller cannot extract the backing allocation and leave its authority
+    /// behind; only borrowed observation is exposed by the test seam.
+    pub(crate) struct NativePcCooperativeResult {
+        result: CoreExecutionResult,
+        retention: PublicationRetention,
+    }
+
+    impl NativePcCooperativeResult {
+        pub(crate) fn result(&self) -> &CoreExecutionResult {
+            &self.result
+        }
+
+        pub(crate) fn lease_token(&self) -> ResourceLeaseToken {
+            match &self.retention {
+                PublicationRetention::Parallel(retention) => retention.lease_token(),
+                PublicationRetention::Serial(admission) => admission.lease_token(),
+            }
+        }
+    }
+
+    pub(super) struct Driver {
+        state: State,
+        original_lease: ResourceLeaseToken,
+    }
+
+    impl Driver {
+        pub(super) fn is_eligible(problem: &SearchProblem, field: BuildProbabilityField) -> bool {
+            DryRunOwner::is_eligible(problem, field)
+        }
+
+        pub(super) fn new(direct: ExtendedPcDirectOwner) -> Result<Self, WasmExactSearchError> {
+            let original_lease = direct.original_lease;
+            Ok(Self {
+                state: State::Parallel(DryRunOwner::from_admitted(
+                    direct.engine,
+                    direct.admission,
+                    original_lease,
+                )?),
+                original_lease,
+            })
+        }
+
+        pub(super) fn publication_lease(&self) -> Option<ResourceLeaseToken> {
+            match &self.state {
+                State::Published(lease) => Some(*lease),
+                _ => None,
+            }
+        }
+
+        pub(super) fn original_lease(&self) -> ResourceLeaseToken {
+            self.original_lease
+        }
+
+        pub(super) fn advance(
+            &mut self,
+            budget: usize,
+            control: &ExecutionControl,
+        ) -> Result<NativePcCooperativeAdvance, WasmExactSearchError> {
+            if self.publication_lease().is_some() || matches!(&self.state, State::Stopped) {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "extended_pc_native_cooperative_session_already_finished",
+                ));
+            }
+            if control.is_cancelled() {
+                self.state = State::Stopped;
+                return Ok(NativePcCooperativeAdvance::Cancelled);
+            }
+            if budget == 0 {
+                return Ok(NativePcCooperativeAdvance::Pending);
+            }
+            let result = self.advance_admitted(budget, control);
+            match result {
+                Err(WasmExactSearchError::Cancelled) => Ok(NativePcCooperativeAdvance::Cancelled),
+                other => other,
+            }
+        }
+
+        fn advance_admitted(
+            &mut self,
+            budget: usize,
+            control: &ExecutionControl,
+        ) -> Result<NativePcCooperativeAdvance, WasmExactSearchError> {
+            // Taking the current owner ensures a failed or canceled step
+            // cannot reuse a partially consumed admission or retry another
+            // route after it has performed work.
+            match core::mem::replace(&mut self.state, State::Stopped) {
+                State::Parallel(mut owner) => {
+                    let (ready, used) = owner.advance(budget, control)?;
+                    if control.is_cancelled() {
+                        return Err(WasmExactSearchError::Cancelled);
+                    }
+                    let fits_publication = budget
+                        .checked_sub(used)
+                        .ok_or_else(lease_or_transfer_error)?
+                        >= 1;
+                    if !ready || !fits_publication {
+                        self.state = State::Parallel(owner);
+                        return Ok(NativePcCooperativeAdvance::Pending);
+                    }
+                    // The final move-out or the no-Geometry handoff consumes
+                    // one unit. The handoff advances its existing serial
+                    // engine only on a subsequent poll, never recursively.
+                    if let Some(actual) = owner.serial_handoff_pending() {
+                        if actual != self.original_lease {
+                            return Err(lease_or_transfer_error());
+                        }
+                        let handoff = owner.into_serial_handoff(control)?;
+                        if handoff.admission.lease_token() != self.original_lease {
+                            return Err(lease_or_transfer_error());
+                        }
+                        self.state = State::Serial(handoff);
+                        return Ok(NativePcCooperativeAdvance::Pending);
+                    }
+                    if owner.parallel_result_pending() != Some(self.original_lease) {
+                        return Err(lease_or_transfer_error());
+                    }
+                    let (result, retention) = owner
+                        .into_parallel_result(control)?
+                        .into_result_and_retention();
+                    self.publish(result, PublicationRetention::Parallel(retention), control)
+                }
+                State::Serial(mut handoff) => {
+                    let advance = advance_serial(&mut handoff.engine, budget, control)?;
+                    if control.is_cancelled() {
+                        return Err(WasmExactSearchError::Cancelled);
+                    }
+                    match advance {
+                        ExactSearchAdvance::Pending => {
+                            self.state = State::Serial(handoff);
+                            Ok(NativePcCooperativeAdvance::Pending)
+                        }
+                        ExactSearchAdvance::Cancelled => Ok(NativePcCooperativeAdvance::Cancelled),
+                        ExactSearchAdvance::Completed(result) => self.publish(
+                            result,
+                            PublicationRetention::Serial(handoff.admission),
+                            control,
+                        ),
+                    }
+                }
+                State::Published(_) | State::Stopped => Err(lease_or_transfer_error()),
+            }
+        }
+
+        fn publish(
+            &mut self,
+            result: CoreExecutionResult,
+            retention: PublicationRetention,
+            control: &ExecutionControl,
+        ) -> Result<NativePcCooperativeAdvance, WasmExactSearchError> {
+            // Keep the result and its admission in one value before any
+            // checks which can reject publication and drop the value.
+            let publication = NativePcCooperativeResult { result, retention };
+            let lease = publication.lease_token();
+            if lease != self.original_lease {
+                return Err(lease_or_transfer_error());
+            }
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            self.state = State::Published(lease);
+            Ok(NativePcCooperativeAdvance::Completed(publication))
+        }
+    }
+
+    fn lease_or_transfer_error() -> WasmExactSearchError {
+        WasmExactSearchError::InvalidProblem("extended_pc_native_cooperative_transfer_invalid")
     }
 }
