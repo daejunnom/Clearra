@@ -1,6 +1,9 @@
 use clearra_replay::ScoringExecutionEdge;
 
-use crate::{event::SpinDetector, profile::SpinProfile};
+use crate::{
+    event::{clear_event::ClearEvent, SpinDetector},
+    profile::SpinProfile,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackToBackPreservationPolicy {
@@ -13,7 +16,8 @@ impl BackToBackPreservationPolicy {
     }
 
     pub const fn requires_recognized_spin(edge: ScoringExecutionEdge) -> bool {
-        edge.cleared_lines() > 0 && edge.cleared_lines() != 4 && !edge.perfect_clear()
+        let clear = ClearEvent::from_execution_edge(edge);
+        clear.clears_lines() && !clear.is_four_line_clear() && !clear.is_perfect_clear()
     }
 
     pub fn allows(self, edge: ScoringExecutionEdge) -> bool {

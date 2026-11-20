@@ -20,6 +20,7 @@ use super::{
     buildup::{compact_target_board, placement_is_grounded},
     catalog::{GeometryCatalog, InstantiatedRealization},
     geometry::GeometryCandidate,
+    placement_conditions::{grounding_sources, GroundingSources, GroupedClearConditions},
     MAX_BOARD64_PIECES,
 };
 
@@ -60,8 +61,7 @@ pub(super) struct CandidateGeometry {
     all_operations: u16,
     pieces: [PieceKind; MAX_BOARD64_PIECES],
     cells: [u64; MAX_BOARD64_PIECES],
-    row_contributors: [u16; MAX_HEIGHT],
-    completed_rows: u16,
+    clear_conditions: GroupedClearConditions,
 }
 
 /// Try to certify an entire clear-to-empty candidate using only bounded
@@ -137,7 +137,7 @@ pub(super) fn compile_with_movement_guard(
     let mut possibly_before = [0_u16; MAX_BOARD64_PIECES];
 
     for deleted in 0..1_u16 << geometry.height {
-        let Some(required) = geometry.required_for_frame(deleted) else {
+        let Some(required) = geometry.clear_conditions.required_for_frame(deleted) else {
             continue;
         };
         required_by_frame[usize::from(deleted)] = required;
@@ -148,8 +148,21 @@ pub(super) fn compile_with_movement_guard(
         } else {
             initial
         };
+        // A completed row's contributors are required. For an undeleted
+        // row with one missing contributor, adding that contributor would
+        // change the frame. Compute candidate eligibility once per frame.
+        let mut eligible = None;
+        let mut operations_in_frame = || {
+            *eligible.get_or_insert_with(|| {
+                geometry.clear_conditions.possible_operations_in_frame(
+                    deleted,
+                    required,
+                    geometry.all_operations,
+                )
+            })
+        };
         let may_be_placed = if infer_closed_frames {
-            geometry.possible_operations_in_frame(deleted, required)
+            operations_in_frame()
         } else {
             0
         };
@@ -192,22 +205,24 @@ pub(super) fn compile_with_movement_guard(
                 possibly_before[operation] |= may_be_placed;
                 continue;
             }
-            let support_cells = lock_mask >> geometry.width;
-            for supporter in 0..geometry.operation_count {
-                if supporter == operation || physical_cells[supporter] & support_cells == 0 {
-                    continue;
+            if let GroundingSources::AnyOf(mut supporters) = grounding_sources(
+                geometry.width,
+                initial,
+                lock_mask,
+                &physical_cells[..geometry.operation_count],
+                operations_in_frame() & !operation_bit,
+            )? {
+                while supporters != 0 {
+                    let supporter_bit = 1_u16 << supporters.trailing_zeros();
+                    supporters &= supporters - 1;
+                    // Every actual lock has some ground witness. Intersecting
+                    // requirements over all possible witnesses keeps only facts
+                    // necessary for every physical order; unexecutable witnesses
+                    // can weaken this intersection but cannot make it unsound.
+                    predecessors[operation] &= required | supporter_bit;
+                    saw_grounding_witness |= operation_bit;
+                    possibly_before[operation] |= may_be_placed;
                 }
-                let branch_required = required | (1_u16 << supporter);
-                if geometry.deleted_rows(branch_required) != deleted {
-                    continue;
-                }
-                // Every actual lock has some ground witness. Intersecting
-                // requirements over all possible witnesses keeps only facts
-                // necessary for every physical order; unexecutable witnesses
-                // can weaken this intersection but cannot make it unsound.
-                predecessors[operation] &= branch_required;
-                saw_grounding_witness |= operation_bit;
-                possibly_before[operation] |= may_be_placed;
             }
         }
     }
@@ -261,17 +276,13 @@ pub(super) fn compile_with_movement_guard(
         for operation in 0..geometry.operation_count {
             let minimum = predecessor_closure(predecessors[operation] | required, &predecessors);
             let mut maximum = maximum_without[operation];
-            if minimum & !maximum != 0 || geometry.deleted_rows(minimum) != deleted {
+            if minimum & !maximum != 0 || geometry.clear_conditions.deleted_rows(minimum) != deleted
+            {
                 // No ideal with this D can make the operation available.
                 continue;
             }
-            for original_row in 0..usize::from(geometry.height) {
-                let row_bit = 1_u16 << original_row;
-                let contributors = geometry.row_contributors[original_row];
-                if geometry.completed_rows & row_bit == 0
-                    || deleted & row_bit != 0
-                    || contributors & !maximum != 0
-                {
+            for (contributors, atomic_rows) in geometry.clear_conditions.groups() {
+                if deleted & atomic_rows != 0 || contributors & !maximum != 0 {
                     continue;
                 }
                 let missing = contributors & !minimum;
@@ -364,7 +375,7 @@ impl CandidateGeometry {
     /// removed together in the original-row frame.
     pub(super) fn conditional_state(&self, executed: u16) -> (u64, u16) {
         debug_assert_eq!(executed & !self.all_operations, 0);
-        let deleted = self.deleted_rows(executed);
+        let deleted = self.clear_conditions.deleted_rows(executed);
         let board = board_for_operations(self.initial_board, &self.cells, executed);
         (
             compact_target_board(self.width, self.height, board, deleted),
@@ -445,8 +456,10 @@ impl CandidateGeometry {
             all_operations,
             pieces,
             cells,
-            row_contributors,
-            completed_rows,
+            clear_conditions: GroupedClearConditions::from_completed_rows(
+                &row_contributors[..usize::from(height)],
+                completed_rows,
+            )?,
         })
     }
 
@@ -455,78 +468,32 @@ impl CandidateGeometry {
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
     ) -> bool {
+        let eligible =
+            self.clear_conditions
+                .possible_operations_in_frame(0, 0, self.all_operations);
         for operation in 0..self.operation_count {
             let lock_mask = self.cells[operation];
-            if placement_is_grounded(self.width, self.initial_board, lock_mask)
-                || catalog
-                    .instantiations(candidate.row_ids()[operation], 0)
-                    .next()
-                    .is_none()
-            {
-                continue;
-            }
-            let support_cells = lock_mask >> self.width;
-            let mut supporters = 0;
-            for supporter in 0..self.operation_count {
-                if supporter != operation
-                    && self.cells[supporter] & support_cells != 0
-                    && self.deleted_rows(1_u16 << supporter) == 0
+            if let Some(GroundingSources::AnyOf(supporters)) = grounding_sources(
+                self.width,
+                self.initial_board,
+                lock_mask,
+                &self.cells[..self.operation_count],
+                eligible & !(1_u16 << operation),
+            ) {
+                if supporters.count_ones() >= 2
+                    && catalog
+                        .instantiations(candidate.row_ids()[operation], 0)
+                        .next()
+                        .is_some()
                 {
-                    supporters += 1;
-                    if supporters == 2 {
-                        // At D=0 the two singleton witness requirements have
-                        // empty intersection. Further frames cannot strengthen
-                        // that result, so pred[p]=0 and the later min=empty
-                        // grounding proof must fail. Reject this certificate
-                        // before doing the full D-indexed work.
-                        return true;
-                    }
+                    // At D=0 singleton support alternatives have no common
+                    // prerequisite, so an AND certificate cannot prove all
+                    // ideal transitions. The conditional compiler can.
+                    return true;
                 }
             }
         }
         false
-    }
-
-    fn deleted_rows(&self, operations: u16) -> u16 {
-        let mut deleted = 0_u16;
-        for original_row in 0..usize::from(self.height) {
-            let row_bit = 1_u16 << original_row;
-            if self.completed_rows & row_bit != 0
-                && self.row_contributors[original_row] & !operations == 0
-            {
-                deleted |= row_bit;
-            }
-        }
-        deleted
-    }
-
-    fn required_for_frame(&self, deleted: u16) -> Option<u16> {
-        if deleted & !self.completed_rows != 0 {
-            return None;
-        }
-        let mut required = 0_u16;
-        let mut rows = deleted;
-        while rows != 0 {
-            let original_row = rows.trailing_zeros() as usize;
-            rows &= rows - 1;
-            required |= self.row_contributors[original_row];
-        }
-        (self.deleted_rows(required) == deleted).then_some(required)
-    }
-
-    fn possible_operations_in_frame(&self, deleted: u16, required: u16) -> u16 {
-        let mut possible = required;
-        let mut pending = self.all_operations & !required;
-        while pending != 0 {
-            let bit = 1_u16 << pending.trailing_zeros();
-            pending &= pending - 1;
-            // If even this smallest prefix clears another original row,
-            // no superset can still have the given deleted-row mask.
-            if self.deleted_rows(required | bit) == deleted {
-                possible |= bit;
-            }
-        }
-        possible
     }
 
     fn project_frame(&self, deleted: u16) -> (u64, [u64; MAX_BOARD64_PIECES]) {

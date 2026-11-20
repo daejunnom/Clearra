@@ -1059,7 +1059,6 @@ pub(super) fn checked_candidate_verification_peak_upper_bound(
     let row_condition_bytes = if super::placement_dependency::enabled() {
         core::mem::size_of::<super::placement_conditions::RowConditions>()
             + core::mem::size_of_val(candidate.row_ids())
-            + usize::from(catalog.height()) * 2 * core::mem::size_of::<u16>()
     } else {
         0
     };

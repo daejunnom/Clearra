@@ -8,6 +8,64 @@ pub(super) const MAX_CONDITION_HEIGHT: u8 = 6;
 // smaller, but a future catalog extension must explicitly revisit this bound.
 const MAX_CONDITION_ROWS: usize = 128 * 1024;
 
+/// Grounding of one pending lock footprint in a fixed, compacted frame.
+/// A satisfied premise does not prove ILC instantiation or move reachability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum GroundingSources {
+    /// The lock touches the floor or a surviving initial-board cell.
+    AlreadyGrounded,
+    /// A nonempty disjunction of concrete operations in selected-row order.
+    AnyOf(u16),
+    /// Even all eligible support cells cannot ground this lock in this frame.
+    Ungrounded,
+}
+
+/// The supplied cells have already been projected to the same row frame.
+/// Cleared cells are absent, but the surviving cells of an executed operation
+/// still count, independently of whether that operation could instantiate
+/// again. Eligibility restricts the possible supporters, not actual execution.
+/// A malformed query is unknown (`None`), not an ungrounded lock.
+pub(super) fn grounding_sources(
+    width: u8,
+    initial: u64,
+    lock_mask: u64,
+    projected_cells: &[u64],
+    eligible_mask: u16,
+) -> Option<GroundingSources> {
+    if !(1..=10).contains(&width)
+        || lock_mask.count_ones() != 4
+        || initial & lock_mask != 0
+        || projected_cells.len() > u16::BITS as usize
+        || u64::from(eligible_mask) & !low_bits(projected_cells.len() as u32) != 0
+    {
+        return None;
+    }
+
+    let grounded_at_initial = super::buildup::placement_is_grounded(width, initial, lock_mask);
+    let below = lock_mask >> width;
+    let mut pending = eligible_mask;
+    let mut supporters = 0;
+    while pending != 0 {
+        let index = pending.trailing_zeros() as usize;
+        let bit = 1_u16 << index;
+        pending ^= bit;
+        let cells = projected_cells[index];
+        if cells & lock_mask != 0 {
+            return None;
+        }
+        if below & cells != 0 {
+            supporters |= bit;
+        }
+    }
+    Some(if grounded_at_initial {
+        GroundingSources::AlreadyGrounded
+    } else if supporters != 0 {
+        GroundingSources::AnyOf(supporters)
+    } else {
+        GroundingSources::Ungrounded
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CanonicalPlacement {
     cells: u64,
@@ -245,40 +303,23 @@ impl PlacementConditionCatalog {
         let mut selected_rows = Vec::new();
         selected_rows.try_reserve_exact(row_ids.len()).ok()?;
         selected_rows.extend_from_slice(row_ids);
-        let mut groups: Vec<RowConditionGroup> = Vec::new();
-        groups.try_reserve_exact(usize::from(self.height)).ok()?;
+        let mut completed_rows = 0;
         let row_bits = low_bits(u32::from(self.width));
-        for (row, &contributors) in row_contributors
-            .iter()
-            .enumerate()
-            .take(usize::from(self.height))
-        {
+        let height = usize::from(self.height);
+        for row in 0..height {
             let shift = row * usize::from(self.width);
             if (final_board >> shift) & row_bits != row_bits {
                 // Even executing all selected operations cannot clear this row.
                 continue;
             }
-            if contributors == 0 {
-                // Match CandidateProjection's preclear-normalization contract.
-                return None;
-            }
-            if let Some(group) = groups
-                .iter_mut()
-                .find(|group| group.contributors == contributors)
-            {
-                // With unique selected row IDs, equal execution masks mean
-                // equal canonical-ID sets, not merely equal piece-kind sets.
-                group.rows |= 1_u16 << row;
-            } else {
-                groups.push(RowConditionGroup {
-                    contributors,
-                    rows: 1_u16 << row,
-                });
-            }
+            completed_rows |= 1_u16 << row;
         }
         Some(RowConditions {
             selected_rows,
-            groups,
+            grouped: GroupedClearConditions::from_completed_rows(
+                &row_contributors[..height],
+                completed_rows,
+            )?,
         })
     }
 
@@ -290,18 +331,150 @@ impl PlacementConditionCatalog {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct RowConditionGroup {
     contributors: u16,
     rows: u16,
 }
 
-/// A small conjunction per completable target row, shared only where the
-/// canonical contributor sets are identical. No subset table is allocated.
+/// Geometry-only row events in original coordinates. A group is a
+/// conjunction over concrete execution bits, never piece-kind membership.
+/// Rows with identical contributors complete in the same event; no
+/// per-frame or per-subset table is allocated.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct GroupedClearConditions {
+    groups: [RowConditionGroup; MAX_CONDITION_HEIGHT as usize],
+    group_count: u8,
+    completed_rows: u16,
+}
+
+impl GroupedClearConditions {
+    /// `completed_rows` are exactly those full in the initial board plus all
+    /// selected placements. Other rows cannot clear and need no condition.
+    /// A row full without any operation must be precleared by the caller.
+    pub(super) fn from_completed_rows(
+        row_contributors: &[u16],
+        completed_rows: u16,
+    ) -> Option<Self> {
+        if row_contributors.is_empty()
+            || row_contributors.len() > MAX_CONDITION_HEIGHT as usize
+            || completed_rows >> row_contributors.len() != 0
+        {
+            return None;
+        }
+        let mut result = Self {
+            groups: [RowConditionGroup::default(); MAX_CONDITION_HEIGHT as usize],
+            group_count: 0,
+            completed_rows,
+        };
+        let mut pending = completed_rows;
+        while pending != 0 {
+            let row = pending.trailing_zeros() as usize;
+            let bit = 1_u16 << row;
+            pending ^= bit;
+            let contributors = row_contributors[row];
+            if contributors == 0 {
+                return None;
+            }
+            let count = result.group_count as usize;
+            if let Some(group) = result.groups[..count]
+                .iter_mut()
+                .find(|group| group.contributors == contributors)
+            {
+                group.rows |= bit;
+            } else {
+                result.groups[count] = RowConditionGroup {
+                    contributors,
+                    rows: bit,
+                };
+                result.group_count += 1;
+            }
+        }
+        Some(result)
+    }
+
+    fn active_groups(&self) -> &[RowConditionGroup] {
+        &self.groups[..self.group_count as usize]
+    }
+
+    /// Yields `(concrete contributor mask, atomic original-row mask)`.
+    pub(super) fn groups(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.active_groups()
+            .iter()
+            .map(|group| (group.contributors, group.rows))
+    }
+
+    #[cfg(test)]
+    pub(super) fn contributors_for_row(&self, original_row: usize) -> Option<u16> {
+        let bit = 1_u16.checked_shl(u32::try_from(original_row).ok()?)?;
+        self.active_groups()
+            .iter()
+            .find(|group| group.rows & bit != 0)
+            .map(|group| group.contributors)
+    }
+
+    pub(super) const fn completed_rows(&self) -> u16 {
+        self.completed_rows
+    }
+
+    /// Which original rows complete for these execution bits. This says
+    /// nothing about whether a legal order can reach the execution set.
+    pub(super) fn deleted_rows(&self, executed: u16) -> u16 {
+        self.active_groups().iter().fold(0, |deleted, group| {
+            if group.contributors & !executed == 0 {
+                deleted | group.rows
+            } else {
+                deleted
+            }
+        })
+    }
+
+    /// Minimal executed set in this geometric frame, or no consistent set.
+    /// The minimum may include contributors to several atomic row groups.
+    pub(super) fn required_for_frame(&self, deleted: u16) -> Option<u16> {
+        if deleted & !self.completed_rows() != 0 {
+            return None;
+        }
+        let required = self
+            .active_groups()
+            .iter()
+            .filter(|group| group.rows & deleted != 0)
+            .fold(0, |mask, group| mask | group.contributors);
+        (self.deleted_rows(required) == deleted).then_some(required)
+    }
+
+    /// Operations individually possible in this geometric frame. `required`
+    /// must be the minimum returned by `required_for_frame(deleted)` for this
+    /// same object. The union is not itself a possible executed set: two
+    /// optional operations might jointly clear an undeleted row.
+    pub(super) fn possible_operations_in_frame(
+        &self,
+        deleted: u16,
+        required: u16,
+        all_operations: u16,
+    ) -> u16 {
+        debug_assert_eq!(self.required_for_frame(deleted), Some(required));
+        debug_assert_eq!(required & !all_operations, 0);
+        let mut impossible = 0;
+        for group in self.active_groups() {
+            if group.rows & deleted == 0 {
+                let missing = group.contributors & !required;
+                if missing.is_power_of_two() {
+                    // Adding this one remaining contributor would clear a
+                    // different row even on the minimum execution set.
+                    impossible |= missing;
+                }
+            }
+        }
+        all_operations & !impossible
+    }
+}
+
+/// Binds the grouped conjunctions to the selected canonical row identities.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct RowConditions {
     selected_rows: Vec<u32>,
-    groups: Vec<RowConditionGroup>,
+    grouped: GroupedClearConditions,
 }
 
 impl RowConditions {
@@ -314,21 +487,19 @@ impl RowConditions {
     }
 
     pub(super) fn group_count(&self) -> usize {
-        self.groups.len()
+        self.grouped.active_groups().len()
     }
 
     pub(super) fn atomic_group_count(&self) -> usize {
-        self.groups
+        self.grouped
+            .active_groups()
             .iter()
             .filter(|group| group.rows.count_ones() > 1)
             .count()
     }
 
     pub(super) fn completed_row_count(&self) -> u32 {
-        self.groups
-            .iter()
-            .map(|group| group.rows.count_ones())
-            .sum()
+        self.grouped.completed_rows().count_ones()
     }
 
     /// Evaluate row-completion predicates on executed selected operations.
@@ -336,13 +507,7 @@ impl RowConditions {
     /// This says which target rows are full, not whether a legal execution order
     /// exists for that set of operations.
     pub(super) fn deleted_rows(&self, placed_mask: u16) -> u16 {
-        self.groups.iter().fold(0, |deleted, group| {
-            if group.contributors & !placed_mask == 0 {
-                deleted | group.rows
-            } else {
-                deleted
-            }
-        })
+        self.grouped.deleted_rows(placed_mask)
     }
 
     /// Rows newly completed by an execution-set change. Equal contributor sets
@@ -352,9 +517,9 @@ impl RowConditions {
         self.deleted_rows(after) & !self.deleted_rows(before)
     }
 
+    /// Additional heap payload only. The grouped rows are inline in `Self`.
     pub(super) fn retained_bytes(&self) -> usize {
         self.selected_rows.capacity() * core::mem::size_of::<u32>()
-            + self.groups.capacity() * core::mem::size_of::<RowConditionGroup>()
     }
 }
 
@@ -574,6 +739,186 @@ mod tests {
         assert_eq!(rows.atomic_group_count(), 1);
         assert_eq!(rows.deleted_rows(0), 0);
         assert_eq!(rows.clear_delta(0, 1), 0b0011);
+    }
+
+    fn scalar_row_mask(width: usize, height: usize, board: u64) -> u16 {
+        let mut cleared = 0;
+        for y in 0..height {
+            if (0..width).all(|x| board & (1_u64 << (y * width + x)) != 0) {
+                cleared |= 1_u16 << y;
+            }
+        }
+        cleared
+    }
+
+    fn scalar_project(width: usize, height: usize, deleted: u16, cells: u64) -> u64 {
+        let mut next = 0;
+        let mut physical_row = 0;
+        for original_row in 0..height {
+            if deleted & (1_u16 << original_row) != 0 {
+                continue;
+            }
+            for x in 0..width {
+                if cells & (1_u64 << (original_row * width + x)) != 0 {
+                    next |= 1_u64 << (physical_row * width + x);
+                }
+            }
+            physical_row += 1;
+        }
+        next
+    }
+
+    fn scalar_grounding(width: usize, height: usize, board: u64, placement: u64) -> bool {
+        (0..height).any(|y| {
+            (0..width).any(|x| {
+                placement & (1_u64 << (y * width + x)) != 0
+                    && (y == 0 || board & (1_u64 << ((y - 1) * width + x)) != 0)
+            })
+        })
+    }
+
+    #[test]
+    fn concrete_support_or_and_grouped_clears_match_the_scalar_grid() {
+        let (width, height) = (10, 3);
+        let initial = 0x3f0f_83f4;
+        let placements = [0x00f0_0000, 0x0c03, 0x7008];
+        let required = placements.iter().fold(0, |mask, &cells| mask | cells);
+        let catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+            width as u8,
+            height as u8,
+            initial,
+            required,
+        )
+        .unwrap();
+        let selected = [PieceKind::I, PieceKind::O, PieceKind::T]
+            .into_iter()
+            .zip(placements)
+            .map(|(piece, cells)| catalog.skeleton_id(piece, cells).unwrap())
+            .collect::<Vec<_>>();
+        let owner = PlacementConditionCatalog::compile(&catalog).unwrap();
+        let candidate = owner.specialize(&selected).unwrap();
+        let groups = &candidate.grouped;
+        assert_eq!(candidate.selected_rows(), selected.as_slice());
+        assert_eq!(groups.completed_rows(), 0b111);
+        assert_eq!(candidate.atomic_group_count(), 1);
+        assert_eq!(groups.contributors_for_row(0), Some(0b110));
+        assert_eq!(groups.contributors_for_row(1), Some(0b110));
+        assert_eq!(groups.contributors_for_row(2), Some(0b001));
+        assert_eq!(groups.contributors_for_row(3), None);
+        assert_eq!(candidate.clear_delta(0b010, 0b110), 0b011);
+        assert_eq!(candidate.clear_delta(0b110, 0b111), 0b100);
+
+        for deleted in 0..8_u16 {
+            let mut required_in_frame = 0b111;
+            let mut possible_in_frame = 0;
+            let mut observed_frame = false;
+            let projected_initial = scalar_project(width, height, deleted, initial);
+            let projected = placements.map(|cells| scalar_project(width, height, deleted, cells));
+            for executed in 0..8_u16 {
+                let logical = placements
+                    .iter()
+                    .enumerate()
+                    .fold(initial, |board, (op, &cells)| {
+                        if executed & (1_u16 << op) != 0 {
+                            board | cells
+                        } else {
+                            board
+                        }
+                    });
+                let observed_deleted = scalar_row_mask(width, height, logical);
+                assert_eq!(candidate.deleted_rows(executed), observed_deleted);
+                if observed_deleted != deleted {
+                    continue;
+                }
+                observed_frame = true;
+                required_in_frame &= executed;
+                possible_in_frame |= executed;
+                let physical = scalar_project(width, height, deleted, logical);
+                for (op, &lock_mask) in projected.iter().enumerate() {
+                    let pending = 1_u16 << op;
+                    if executed & pending != 0 {
+                        continue;
+                    }
+                    let source = grounding_sources(
+                        width as u8,
+                        projected_initial,
+                        lock_mask,
+                        &projected,
+                        0b111 ^ pending,
+                    );
+                    if lock_mask.count_ones() != 4 {
+                        assert_eq!(source, None);
+                        continue;
+                    }
+                    let grounded = match source.unwrap() {
+                        GroundingSources::AlreadyGrounded => true,
+                        GroundingSources::AnyOf(choices) => {
+                            assert_ne!(choices, 0);
+                            (choices & executed) != 0
+                        }
+                        GroundingSources::Ungrounded => false,
+                    };
+                    assert_eq!(
+                        grounded,
+                        scalar_grounding(width, height, physical, lock_mask)
+                    );
+                }
+            }
+            assert_eq!(
+                groups.required_for_frame(deleted),
+                observed_frame.then_some(required_in_frame)
+            );
+            if observed_frame {
+                assert_eq!(
+                    groups.possible_operations_in_frame(deleted, required_in_frame, 0b111),
+                    possible_in_frame
+                );
+            }
+        }
+        assert_eq!(
+            grounding_sources(10, initial, placements[0], &placements, 0b110),
+            Some(GroundingSources::AnyOf(0b110))
+        );
+    }
+
+    #[test]
+    fn same_kind_support_bits_remain_distinct_and_deleted_cells_are_not_supporters() {
+        let placements = [0x0033, 0x00cc, 0x0f00, 0xf000];
+        let width = 4;
+        assert_eq!(
+            grounding_sources(width, 0, placements[2], &placements, 0b1011),
+            Some(GroundingSources::AnyOf(0b0011))
+        );
+        assert_eq!(
+            grounding_sources(width, 0, placements[2], &placements, 0b1001),
+            Some(GroundingSources::AnyOf(0b0001))
+        );
+        assert_eq!(
+            grounding_sources(width, 0, placements[2], &placements, 0b1000),
+            Some(GroundingSources::Ungrounded)
+        );
+        assert_eq!(
+            grounding_sources(width, 0x0010, placements[2], &placements, 0b1000),
+            Some(GroundingSources::AlreadyGrounded)
+        );
+        let after_two_clears = placements.map(|cells| scalar_project(4, 4, 0b0011, cells));
+        assert_eq!(after_two_clears, [0, 0, 0x000f, 0x00f0]);
+        assert_eq!(
+            grounding_sources(width, 0, after_two_clears[2], &after_two_clears, 0b1011),
+            Some(GroundingSources::AlreadyGrounded)
+        );
+        assert_eq!(
+            grounding_sources(width, 0, placements[2], &placements, 0b0100),
+            None
+        );
+        assert_eq!(
+            grounding_sources(width, 0, placements[2], &placements, 0b1_0000),
+            None
+        );
+        assert_eq!(
+            grounding_sources(0, 0, placements[2], &placements, 0b1011),
+            None
+        );
     }
 
     #[test]
