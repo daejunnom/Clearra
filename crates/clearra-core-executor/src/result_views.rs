@@ -536,6 +536,10 @@ mod replay_trace {
         pub fn steps(&self) -> &[CorePathStep] {
             &self.steps
         }
+
+        pub(super) fn into_steps(self) -> Vec<CorePathStep> {
+            self.steps
+        }
     }
     impl ReplayTrace {
         pub fn retained_trace_count(&self) -> usize {
@@ -803,6 +807,10 @@ mod search_execution_report {
     impl SearchExecutionReport {
         pub fn replay_trace(&self) -> &ReplayTrace {
             &self.replay_trace
+        }
+
+        pub(crate) fn into_replay_steps(self) -> Vec<CorePathStep> {
+            self.replay_trace.into_steps()
         }
     }
     impl SearchExecutionReport {

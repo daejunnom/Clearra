@@ -909,17 +909,19 @@ impl CoreExecutionResult {
         self.pc_score_problem_evidence = None;
         self.pc_full_height_replay_evidence = None;
         self.postprocess_replay_trace = None;
-        self.postprocess_executions.clear();
+        // These producers are never reused once a typed shape is published.
+        // Release their backing slots, not just the initialized entries.
+        self.postprocess_executions = Vec::new();
         self.postprocess_execution_complete = false;
-        self.postprocess_pattern_weights.clear();
-        self.exact_scoring_execution_batches.clear();
-        self.spin_coverage_execution_batches.clear();
+        self.postprocess_pattern_weights = Vec::new();
+        self.exact_scoring_execution_batches = Vec::new();
+        self.spin_coverage_execution_batches = Vec::new();
         self.full_height_scoring_execution_batch = None;
-        self.postprocess_score_cells.clear();
+        self.postprocess_score_cells = Vec::new();
         self.postprocess_score_cells_complete = false;
         self.postprocess_score_profile_id = None;
         self.pc_score_distributed_merge_evidence = None;
-        self.postprocess_spin_coverages.clear();
+        self.postprocess_spin_coverages = Vec::new();
         self
     }
 
@@ -955,10 +957,8 @@ impl CoreExecutionResult {
 }
 impl CoreExecutionResult {
     pub fn with_additional_fields(mut self, fields: Vec<(String, String)>) -> Self {
-        let path_steps = self.path_steps().to_vec();
         self.fields.extend(fields);
-        self.execution_report =
-            SearchExecutionReport::from_summary_fields(&self.fields, path_steps);
+        self.rebuild_unguarded_execution_report();
         self
     }
 }
@@ -967,18 +967,20 @@ impl CoreExecutionResult {
         self.fields
             .retain(|(key, _)| !fields.iter().any(|(replacement, _)| replacement == key));
         self.fields.extend(fields);
-        let path_steps = self.path_steps().to_vec();
+        self.rebuild_unguarded_execution_report();
+        self
+    }
+
+    fn rebuild_unguarded_execution_report(&mut self) {
+        let path_steps = core::mem::take(&mut self.execution_report).into_replay_steps();
         self.execution_report =
             SearchExecutionReport::from_summary_fields(&self.fields, path_steps);
-        self
     }
 
     #[cfg(test)]
     pub(crate) fn without_field_for_test(mut self, field: &str) -> Self {
         self.fields.retain(|(key, _)| key != field);
-        let path_steps = self.path_steps().to_vec();
-        self.execution_report =
-            SearchExecutionReport::from_summary_fields(&self.fields, path_steps);
+        self.rebuild_unguarded_execution_report();
         self
     }
 
@@ -2892,6 +2894,80 @@ mod tests {
         assert_eq!(
             (fields[2].0.as_str(), fields[2].1.as_str()),
             ("duplicate", "second")
+        );
+    }
+
+    #[test]
+    fn typed_score_publication_releases_transient_backing_slots() {
+        let public_result = || {
+            CoreExecutionResult::new(
+                vec![("score_complete".to_owned(), "true".to_owned())],
+                Vec::new(),
+            )
+            .with_solution_average_scores(vec![SolutionAverageScoreReport::new(
+                "solution", "800", 1, 1, true,
+            )])
+        };
+        let expected = public_result();
+        let mut pending = public_result();
+        pending.postprocess_executions = Vec::with_capacity(7);
+        pending.postprocess_pattern_weights = Vec::with_capacity(31);
+        pending.exact_scoring_execution_batches = Vec::with_capacity(5);
+        pending.spin_coverage_execution_batches = Vec::with_capacity(3);
+        pending.postprocess_score_cells = Vec::with_capacity(19);
+        pending.postprocess_spin_coverages = Vec::with_capacity(2);
+        pending.postprocess_execution_complete = true;
+        pending.postprocess_score_cells_complete = true;
+        pending.postprocess_score_profile_id = Some("internal-profile".to_owned());
+        let baseline = expected.checked_resource_retained_bytes().unwrap();
+        assert!(pending.checked_resource_retained_bytes().unwrap() > baseline);
+
+        let published = pending.without_pc_score_transient_evidence();
+        assert_eq!(published, expected);
+        assert_eq!(published.checked_resource_retained_bytes(), Some(baseline));
+        for capacity in [
+            published.postprocess_executions.capacity(),
+            published.postprocess_pattern_weights.capacity(),
+            published.exact_scoring_execution_batches.capacity(),
+            published.spin_coverage_execution_batches.capacity(),
+            published.postprocess_score_cells.capacity(),
+            published.postprocess_spin_coverages.capacity(),
+        ] {
+            assert_eq!(capacity, 0);
+        }
+    }
+
+    #[test]
+    fn unguarded_result_annotations_reuse_the_physical_path_allocation() {
+        let step = CorePathStep::new(PieceKind::I, 0, 0, 0, "none", 0);
+        let result = CoreExecutionResult::new(
+            vec![("trace_retention_reason".to_owned(), "before".to_owned())],
+            vec![step.clone()],
+        );
+        let owner = result.path_steps().as_ptr();
+        let result = result
+            .with_additional_fields(vec![("retained_trace_count".to_owned(), "1".to_owned())]);
+        assert_eq!(result.path_steps().as_ptr(), owner);
+        assert_eq!(
+            result
+                .execution_report()
+                .replay_trace()
+                .retained_trace_count(),
+            1
+        );
+
+        let result = result.with_replaced_fields(vec![(
+            "trace_retention_reason".to_owned(),
+            "bounded".to_owned(),
+        )]);
+        assert_eq!(result.path_steps().as_ptr(), owner);
+        assert_eq!(result.path_steps(), &[step]);
+        assert_eq!(
+            result
+                .execution_report()
+                .replay_trace()
+                .trace_retention_reason(),
+            "bounded"
         );
     }
 
