@@ -5,6 +5,7 @@
 use std::{path::Path, process::Command};
 
 use clearra_app::ProductBuildIdentity;
+use clearra_pc_graph::request::WorkerPolicy;
 use serde_json::Value;
 
 fn run_json(args: &[&str]) -> Value {
@@ -88,6 +89,88 @@ fn fixed_queue_continuation_matches_the_exact_direct_suffix() {
         continued["summary"]["normalized_solution_set_hash"],
         expected_hash
     );
+}
+
+#[test]
+fn patterned_pc_uses_two_workers_without_changing_the_exact_result() {
+    let hardware_limit = WorkerPolicy::hardware_worker_limit();
+    let search = |workers| {
+        let mut args = vec![
+            "pc",
+            "--lines",
+            "4",
+            "--height",
+            "4",
+            "--board-mask",
+            "0x3c0f03c0f",
+            "--pieces",
+            "6",
+            "--patterns",
+            "P7",
+            "--hold",
+            "empty",
+            "--rule",
+            "srs-plus",
+            "--objective",
+            "unique",
+            "--count",
+            "unique",
+            "--backend",
+            "cpu",
+            "--workers",
+            workers,
+            "--no-tablebase",
+            "--no-legal-board",
+            "--no-conditioned-reachability",
+            "--no-build-dependency-dag",
+        ];
+        if workers == "2" && WorkerPolicy::default_worker_limit_for_hardware(hardware_limit) < 2 {
+            args.push("--use-all-cpu-threads");
+        }
+        let result = run_json(&args);
+        assert_eq!(result["kind"], "pc");
+        let summary = &result["summary"];
+        assert_eq!(summary["actual_backend"], "wasm-cpu", "{summary}");
+        assert_eq!(summary["solution_found"], true);
+        assert_eq!(summary["count_complete"], true);
+        assert_eq!(summary["probability_complete"], true);
+        assert_eq!(summary["normalized_unique_solution_count"], 246);
+        assert_eq!(
+            summary["normalized_solution_set_hash"],
+            "cts1:cb0b19c391d5003e"
+        );
+        result
+    };
+
+    let serial = search("1");
+    let serial = &serial["summary"];
+    assert_eq!(serial["workers_used"], 1);
+    assert_eq!(serial["materialized_pattern_count"], 5040);
+    assert_eq!(serial["covered_pattern_count"], 5040);
+    assert_eq!(serial["coverage_probability"].as_f64(), Some(1.0));
+
+    // Keep the fixture assertions on single-processor hosts without treating
+    // a serial run as successful parallel coverage.
+    if hardware_limit < 2 {
+        eprintln!("two-worker PC comparison unavailable on this host");
+        return;
+    }
+
+    let parallel = search("2");
+    let parallel = &parallel["summary"];
+    assert_eq!(parallel["workers_requested"], "2");
+    assert_eq!(parallel["workers_used"], 2, "{parallel}");
+    // Active counts only workers that processed at least one candidate;
+    // the pool width alone would accept a serial execution.
+    assert_eq!(parallel["parallel_active_workers"], "2", "{parallel}");
+    for key in [
+        "normalized_solution_set_hash",
+        "materialized_pattern_count",
+        "covered_pattern_count",
+        "coverage_probability",
+    ] {
+        assert_eq!(parallel[key], serial[key], "{key}");
+    }
 }
 
 #[test]
