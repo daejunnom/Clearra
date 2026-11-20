@@ -453,15 +453,18 @@ fn main() -> Result<(), String> {
         );
     }
     let args: Vec<_> = env::args().skip(1).collect();
-    let (arm, case, workers, family_output) = match args.as_slice() {
-        [arm, case, workers] => (arm, case, workers, None),
+    let (arm, case, workers, family_output, memory_diagnostic) = match args.as_slice() {
+        [arm, case, workers] => (arm, case, workers, None, false),
         [arm, case, workers, option, path] if option == "--family-output" => {
             let output = FamilyOutput::prepare(Path::new(path))?;
-            (arm, case, workers, Some(output))
+            (arm, case, workers, Some(output), false)
+        }
+        [arm, case, workers, option] if option == "--memory-diagnostic" => {
+            (arm, case, workers, None, true)
         }
         _ => {
             return Err(
-                "expected <arm> <case> <workers> [--family-output <absolute .ndjson path>]".into(),
+                "expected <arm> <case> <workers> [--family-output <absolute .ndjson path> | --memory-diagnostic]".into(),
             )
         }
     };
@@ -478,9 +481,47 @@ fn main() -> Result<(), String> {
     let problem = compile_case(case, workers)?;
     let control = ExecutionControl::default();
     let started = Instant::now();
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+    let (result, memory_observation) = if memory_diagnostic {
+        if !matches!(arm, Arm::RustCpu) || workers < 2 || case != "full-p7p4" {
+            return Err("memory diagnostic requires parallel rust-cpu full-p7p4".into());
+        }
+        let (outcome, observation) =
+            clearra_core_executor::backend::observe_native_pc_memory(|| {
+                arm.execute(&problem, &control)
+            })
+            .map_err(|error| format!("native memory observer: {error}"))?;
+        let result = outcome?;
+        if result.bool_field("cpu_parallel_execution") != Some(true)
+            || result.usize_field("parallel_active_workers") != Some(workers)
+        {
+            return Err(
+                "memory diagnostic did not exercise the requested native parallel width".into(),
+            );
+        }
+        (result, Some(observation))
+    } else {
+        (arm.execute(&problem, &control)?, None)
+    };
+    #[cfg(not(all(feature = "local-search-ab", target_os = "linux")))]
+    if memory_diagnostic {
+        return Err("memory diagnostic requires Linux and the local-search-ab feature".into());
+    }
+    #[cfg(not(all(feature = "local-search-ab", target_os = "linux")))]
     let result = arm.execute(&problem, &control)?;
     let solve_ns = started.elapsed().as_nanos();
     let sample = report(case, arm, workers, available_workers, solve_ns, &result);
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+    let sample = if let Some(observation) = memory_observation {
+        let mut sample = sample;
+        sample["memory_diagnostic"] = observation;
+        sample["memory_diagnostic"]["timing_comparable_to_abba"] = json!(false);
+        sample["memory_diagnostic"]["result_retained_bytes_after_solver"] =
+            json!(result.checked_resource_retained_bytes());
+        sample
+    } else {
+        sample
+    };
     if let Some(output) = family_output {
         output.write(case, arm, workers, available_workers, &result)?;
     }

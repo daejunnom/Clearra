@@ -30,13 +30,15 @@ pub mod search_backend_executor;
 pub mod search_backend_warmup;
 pub mod wasm_build_probability_backend;
 mod wasm_cpu;
-pub use wasm_cpu::generic_board64_search;
-pub use wasm_cpu::generic_geometry;
 pub(crate) use wasm_cpu::exact_entry_lock_anchors;
 pub(crate) use wasm_cpu::exact_local_relation;
 #[cfg(any(test, feature = "qualification-reference"))]
 pub(crate) use wasm_cpu::exact_solver_local_relation_spawn_entries;
 pub(crate) use wasm_cpu::exact_spawn_lock_anchors;
+pub use wasm_cpu::generic_board64_search;
+pub use wasm_cpu::generic_geometry;
+#[cfg(all(feature = "local-search-ab", feature = "parallel", target_os = "linux"))]
+pub use wasm_cpu::observe_native_pc_memory;
 #[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{count_distinct_no_hold_one_bag_poset, DistinctNoHoldOneBagCount};
 #[cfg(feature = "local-search-ab")]

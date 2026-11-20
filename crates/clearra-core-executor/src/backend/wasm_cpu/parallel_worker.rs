@@ -606,6 +606,10 @@ pub(super) fn run_branch_worker(
     queue: &ParallelBranchQueue,
     shared_coverage: &SharedCoverage,
     shared_request: SharedWorkerRequest,
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))] memory_probe: Option<(
+        &super::parallel_memory_peak::MemoryProbe,
+        usize,
+    )>,
 ) -> Result<ParallelWorkerResult, WasmExactSearchError> {
     let mut workspace = BuildUpWorkspace::default();
     #[cfg(feature = "local-search-ab")]
@@ -624,6 +628,10 @@ pub(super) fn run_branch_worker(
     let mut outcomes = Vec::new();
     let mut worker_candidate_count = 0usize;
 
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+    if let Some((probe, worker)) = memory_probe {
+        probe.worker(worker, Default::default(), false);
+    }
     while let Some(task) = queue.pop()? {
         if control.is_cancelled() {
             queue.abort();
@@ -642,12 +650,27 @@ pub(super) fn run_branch_worker(
             &mut aggregate,
             #[cfg(any(test, feature = "local-search-ab"))]
             shared_request.solution_coverage_capture.as_ref(),
+            #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+            memory_probe.map(|(probe, worker)| (probe, worker, branch_storage_bytes(&outcomes))),
         )?;
         worker_candidate_count = worker_candidate_count.saturating_add(candidate_count);
         outcomes.try_reserve(1).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_parallel_branch_result_unavailable")
         })?;
         outcomes.push(outcome);
+        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+        if let Some((probe, worker)) = memory_probe {
+            probe.worker(
+                worker,
+                worker_storage(
+                    &workspace,
+                    &evaluator,
+                    &aggregate,
+                    branch_storage_bytes(&outcomes),
+                ),
+                false,
+            );
+        }
     }
 
     if problem.objective().kind() != ObjectiveKind::Tiling {
@@ -714,11 +737,62 @@ pub(super) fn run_branch_worker(
     aggregate.reachability_metrics = workspace.reachability_metrics();
     aggregate.legal_board_verified_negative_prunes =
         workspace.legal_board_verified_negative_prunes();
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+    if let Some((probe, worker)) = memory_probe {
+        drop(workspace);
+        drop(evaluator);
+        probe.worker(
+            worker,
+            super::parallel_memory_peak::WorkerStorage {
+                solution_identity_bytes: aggregate.worker_memory_components.solution_identity_bytes,
+                branch_and_digest_bytes: branch_storage_bytes(&outcomes),
+                ..Default::default()
+            },
+            true,
+        );
+    }
     Ok(ParallelWorkerResult {
         branches: outcomes,
         aggregate,
         candidate_count: worker_candidate_count,
     })
+}
+
+#[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+fn branch_storage_bytes(branches: &Vec<BranchSearchOutcome>) -> usize {
+    branches.capacity() * core::mem::size_of::<BranchSearchOutcome>()
+        + branches
+            .iter()
+            .map(|branch| branch.candidate_digest.retained_bytes())
+            .sum::<usize>()
+}
+
+#[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+fn worker_storage(
+    workspace: &BuildUpWorkspace,
+    evaluator: &CoverageProductEvaluator,
+    aggregate: &WorkerAggregate,
+    branch_and_digest_bytes: usize,
+) -> super::parallel_memory_peak::WorkerStorage {
+    let buildup = workspace.memory_components();
+    let memo = workspace.standard_bag_memo_accounting();
+    // Read after memory_components(): shared bag initialization is one-way,
+    // so an initialization race can undercount the private estimate by at
+    // most one shared-payload amount and cannot charge the common table per worker.
+    let shared_bag = workspace.shared_standard_bag_request_retained_bytes();
+    super::parallel_memory_peak::WorkerStorage {
+        standard_bag_bytes: buildup.standard_bag_bytes.saturating_sub(shared_bag),
+        bag_product_memo_bytes: memo.product_payload_bytes,
+        bag_union_memo_bytes: memo.union_payload_bytes,
+        piece_language_bytes: buildup.piece_language_bytes,
+        reachability_bytes: buildup.reachability_bytes,
+        graph_projection_bytes: buildup.graph_projection_bytes,
+        other_buildup_bytes: buildup.other_bytes,
+        evaluator_bytes: evaluator.retained_bytes(),
+        solution_identity_bytes: aggregate.buildable_identities.capacity()
+            * core::mem::size_of::<StandardBoard64TilingIdentity>(),
+        branch_and_digest_bytes,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -736,6 +810,11 @@ fn run_branch(
     #[cfg(any(test, feature = "local-search-ab"))] solution_coverage_capture: Option<
         &SolutionCoverageCapture,
     >,
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))] memory_probe: Option<(
+        &super::parallel_memory_peak::MemoryProbe,
+        usize,
+        usize,
+    )>,
 ) -> Result<(BranchSearchOutcome, usize), WasmExactSearchError> {
     let mut search = task.search;
     let mut candidate_digest = CandidateDigestEvidence::new(
@@ -898,6 +977,21 @@ fn run_branch(
                     problem.output_policy().retains_representative_trace(),
                 )?;
                 local_ordinal = local_ordinal.saturating_add(1);
+                #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+                if let Some((probe, worker, branch_bytes)) = memory_probe {
+                    if local_ordinal & super::parallel_memory_peak::WORKER_SAMPLE_MASK == 0 {
+                        probe.worker(
+                            worker,
+                            worker_storage(
+                                workspace,
+                                evaluator,
+                                aggregate,
+                                branch_bytes.saturating_add(candidate_digest.retained_bytes()),
+                            ),
+                            false,
+                        );
+                    }
+                }
             }
         }
     }

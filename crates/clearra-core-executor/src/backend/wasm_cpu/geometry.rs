@@ -4001,9 +4001,20 @@ impl GeometrySearch {
     ) -> Result<ParallelGeometryPreparation, WasmExactSearchError> {
         let needed_compile = self.target_preparation.is_some() || self.compiler.is_some();
         let mut path_counts = None;
+        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+        let memory_probe = super::parallel_memory_peak::current();
+        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+        let mut diagnostic_ticks = 0usize;
         while self.target_preparation.is_some() || self.compiler.is_some() {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
+            }
+            #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+            if let Some(probe) = &memory_probe {
+                if diagnostic_ticks & 0x7ff == 0 {
+                    self.publish_parallel_preparation_memory(probe);
+                }
+                diagnostic_ticks = diagnostic_ticks.wrapping_add(1);
             }
             match self.advance_internal(catalog, None, Some(&mut path_counts)) {
                 GeometryAdvance::Pending => {}
@@ -4032,7 +4043,36 @@ impl GeometrySearch {
                 .filter(|enumerator| enumerator.tasks.len() == 1)
                 .and_then(|enumerator| enumerator.family.path_count_table());
         }
+        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+        if let Some(probe) = &memory_probe {
+            self.publish_parallel_preparation_memory(probe);
+        }
         Ok(self.prepare_compiled_parallel(balanced_workers, path_counts))
+    }
+
+    #[cfg(all(feature = "parallel", feature = "local-search-ab", target_os = "linux"))]
+    fn publish_parallel_preparation_memory(
+        &self,
+        probe: &super::parallel_memory_peak::MemoryProbe,
+    ) {
+        let residual_memo_bytes = self
+            .compiler
+            .as_ref()
+            .map_or(0, |compiler| compiler.residual_memo.retained_bytes());
+        let solution_family_bytes = self.compiler.as_ref().map_or_else(
+            || {
+                self.enumerator
+                    .as_ref()
+                    .map_or(0, |enumerator| enumerator.family.retained_bytes())
+            },
+            |compiler| compiler.family.retained_bytes(),
+        );
+        probe.coordinator(super::parallel_memory_peak::CoordinatorStorage::Geometry {
+            accounted_bytes: self.retained_bytes(),
+            target_preparation_upper_bound: self.target_preparation.is_some(),
+            residual_memo_bytes,
+            solution_family_bytes,
+        });
     }
 
     #[cfg(feature = "parallel")]

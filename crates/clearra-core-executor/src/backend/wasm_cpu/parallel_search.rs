@@ -16,6 +16,8 @@ use crate::{
     CorePathStep,
 };
 
+#[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+use super::parallel_memory_peak::{self, CoordinatorStorage};
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::result::SolutionCoverageCapture;
 use super::{
@@ -296,7 +298,23 @@ fn execute_plan(
     let queue = Arc::new(ParallelBranchQueue::new(branch_tasks(plan.searches)));
     let (sender, receiver) = mpsc::channel();
 
-    for _ in 0..workers_used.saturating_sub(1) {
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+    let memory_probe = parallel_memory_peak::current();
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+    if let Some(probe) = &memory_probe {
+        probe.begin_verify(
+            workers_used,
+            catalog.retained_bytes(),
+            CoordinatorStorage::Verifying {
+                target_index_bytes: plan.group_pattern_index_bytes,
+                solution_family_bytes: plan.shared_family_bytes,
+                global_coverage_words_bytes: pattern_count.div_ceil(64)
+                    * core::mem::size_of::<u64>(),
+            },
+        );
+    }
+
+    for _worker_index in 1..workers_used {
         let worker_problem = Arc::clone(&problem);
         let worker_catalog = Arc::clone(&catalog);
         let worker_targets = Arc::clone(&plan.targets);
@@ -305,6 +323,8 @@ fn execute_plan(
         let worker_coverage = Arc::clone(&shared_coverage);
         let worker_request = shared_request.clone();
         let worker_sender = sender.clone();
+        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+        let worker_memory = memory_probe.clone();
         let profile = WorkerSearchProfile::capture();
         cpu_worker_pool::submit_cpu_job(move || {
             let result = catch_unwind(AssertUnwindSafe(|| {
@@ -317,6 +337,8 @@ fn execute_plan(
                         &worker_queue,
                         &worker_coverage,
                         worker_request,
+                        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+                        worker_memory.as_deref().map(|probe| (probe, _worker_index)),
                     )
                 })
             }))
@@ -339,6 +361,8 @@ fn execute_plan(
         &queue,
         &shared_coverage,
         shared_request.clone(),
+        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+        memory_probe.as_deref().map(|probe| (probe, 0)),
     );
     if caller_result.is_err() {
         queue.abort();
@@ -355,6 +379,10 @@ fn execute_plan(
     let worker_results = results
         .into_iter()
         .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+    if let Some(probe) = &memory_probe {
+        probe.coordinator(CoordinatorStorage::Merging);
+    }
     let mut outcome = merge_results(
         &problem,
         &catalog,
@@ -378,6 +406,10 @@ fn execute_plan(
     outcome
         .worker_memory_components
         .shared_reachability_template_bytes = shared_request.reachability.retained_bytes();
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+    if let Some(probe) = &memory_probe {
+        probe.coordinator(CoordinatorStorage::Finalizing);
+    }
     Ok(outcome)
 }
 

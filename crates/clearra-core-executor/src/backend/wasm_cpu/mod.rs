@@ -52,6 +52,10 @@ mod inverse_projection;
 mod kick_profiles;
 #[cfg(feature = "parallel")]
 mod parallel_coverage;
+#[cfg(all(feature = "local-search-ab", feature = "parallel", target_os = "linux"))]
+mod parallel_memory_peak;
+#[cfg(all(feature = "local-search-ab", feature = "parallel", target_os = "linux"))]
+pub use parallel_memory_peak::observe_native_pc_memory;
 #[cfg(feature = "parallel")]
 mod parallel_search;
 #[cfg(feature = "parallel")]
