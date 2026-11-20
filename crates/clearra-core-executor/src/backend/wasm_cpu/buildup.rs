@@ -6011,7 +6011,8 @@ mod kick_guard_reuse_tests {
                 .0
             })
         };
-        let (expected, _) = run(&CandidateMovementProofs::default());
+        let baseline = CandidateMovementProofs::default();
+        let (expected, _) = run(&baseline);
         let (actual, observed) = run(&disputed);
         assert_eq!(actual, expected);
         let metrics = observed.ordered_kick_guard_reuse;

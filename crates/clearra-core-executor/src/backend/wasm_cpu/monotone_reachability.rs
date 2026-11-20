@@ -808,7 +808,7 @@ mod tests {
             None,
             witness(OBSERVED, OBSERVED, KickWitnessOrder::RawFirst),
         );
-        let guard_accepts = |board| guard.minimum & !board == 0 && board & !guard.maximum == 0;
+        let guard_accepts = |board: u64| guard.minimum & !board == 0 && board & !guard.maximum == 0;
         assert_ne!(OBSERVED & !SIBLING, 0);
         assert_ne!(SIBLING & !OBSERVED, 0);
         for board in [OBSERVED, SIBLING, BLOCKERS, BASE] {
