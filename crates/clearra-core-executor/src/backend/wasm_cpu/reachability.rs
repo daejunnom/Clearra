@@ -123,8 +123,16 @@ pub(super) struct ReachabilitySearchResult {
 
 const REACHABILITY_CACHE_CAPACITY: usize = 1 << 16;
 const REACHABILITY_CACHE_WAYS: usize = 4;
+const REACHABILITY_PAYLOADS_PER_CHUNK: usize = 1 << 8;
+const REACHABILITY_PAYLOAD_CHUNKS: usize =
+    REACHABILITY_CACHE_CAPACITY / REACHABILITY_PAYLOADS_PER_CHUNK;
 const SMALL_SEARCH_EXHAUSTIVE_OBSERVATIONS: u8 = 32;
 const LARGE_SEARCH_EXHAUSTIVE_OBSERVATIONS: u8 = 16;
+
+const _: () = assert!(
+    REACHABILITY_CACHE_CAPACITY <= u16::MAX as usize + 1
+        && REACHABILITY_CACHE_CAPACITY % REACHABILITY_PAYLOADS_PER_CHUNK == 0
+);
 
 /// Conservative retained-storage ceiling for every reachability allocation
 /// that exact scoring can make for one connected Board64 catalog.  The bound
@@ -224,10 +232,14 @@ pub(super) fn checked_reachability_retained_upper_bound(
     }
 
     let cache_entry_bytes = (core::mem::size_of::<ReachabilityCacheKey>()
-        + core::mem::size_of::<ReachableLocks>() * 2
+        + core::mem::size_of::<ReachabilityCachePayload>()
         + core::mem::size_of::<ReachabilityObservation>()) as u128;
     bytes =
         bytes.checked_add((REACHABILITY_CACHE_CAPACITY as u128).checked_mul(cache_entry_bytes)?)?;
+    bytes = bytes.checked_add(
+        (REACHABILITY_PAYLOAD_CHUNKS as u128)
+            .checked_mul(core::mem::size_of::<Vec<ReachabilityCachePayload>>() as u128)?,
+    )?;
     bytes = bytes.checked_add(
         7_u128
             .checked_mul(conditioned_context_frame_capacity(height)?)?
@@ -248,10 +260,16 @@ struct ReachabilityCacheKey {
     observation: u8,
     exhaustive: bool,
     valid: bool,
-    reserved: [u8; 4],
+    payload_index: u16,
 }
 
 const _: () = assert!(core::mem::size_of::<ReachabilityCacheKey>() == 16);
+
+#[derive(Clone, Copy)]
+struct ReachabilityCachePayload {
+    locks: ReachableLocks,
+    unreachable_locks: ReachableLocks,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReachabilityCacheLookup {
@@ -276,15 +294,19 @@ const _: () = assert!(core::mem::size_of::<ReachabilityObservation>() == 4);
 
 /// Query-local, bounded exact reachability cache.
 ///
-/// Hot keys and cold lock bitsets are split so a direct-map miss touches only
-/// sixteen bytes. Partial searches may cache proven-reachable locks, but a
-/// missing lock is authoritative only when `exhaustive` is set. Replacement
-/// and allocation failure therefore degrade to a cache miss, never pruning.
+/// A cold miss needs only the admission observations. Allocate the four-way
+/// key table on first admission and the larger lock payloads in fixed chunks
+/// as slots are populated. Chunking keeps payload indices stable and avoids
+/// an old-plus-new buffer peak when the cache grows. Misses still read only
+/// hot keys when the table exists; no payload is accessed before a key match.
+/// Partial searches store only concrete evidence. A missing lock is
+/// authoritative only when `exhaustive` is set.
 #[derive(Default)]
 struct ReachabilityCache {
     keys: Vec<ReachabilityCacheKey>,
-    locks: Vec<ReachableLocks>,
-    unreachable_locks: Vec<ReachableLocks>,
+    payloads: Vec<Vec<ReachabilityCachePayload>>,
+    payload_count: usize,
+    payload_retained_bytes: usize,
     observations: Vec<ReachabilityObservation>,
     exhaustive_observations: u8,
     allocation_disabled: bool,
@@ -301,37 +323,38 @@ impl ReachabilityCache {
         x: i8,
         y: i8,
     ) -> ReachabilityCacheLookup {
-        if self.keys.is_empty() && !self.initialize() {
-            return ReachabilityCacheLookup::Search {
-                exhaustive: false,
-                admit: false,
-                key_present: false,
-            };
-        }
         let piece_code = piece_index(piece) as u8 + 1;
         let hash = reachability_cache_hash(board, piece_code);
-        let set_start = reachability_cache_set_start(hash, self.keys.len());
-        for index in set_start..set_start + REACHABILITY_CACHE_WAYS {
-            let key = &mut self.keys[index];
-            if !key.valid || key.board != board || key.piece_code != piece_code {
-                continue;
+        if self.keys.is_empty() {
+            if !self.initialize_observations() {
+                return ReachabilityCacheLookup::Search {
+                    exhaustive: false,
+                    admit: false,
+                    key_present: false,
+                };
             }
-            if self.locks[index].contains(width, rotation, x, y) {
-                return ReachabilityCacheLookup::Reachable;
+        } else {
+            let set_start = reachability_cache_set_start(hash, self.keys.len());
+            for index in set_start..set_start + REACHABILITY_CACHE_WAYS {
+                let key = &self.keys[index];
+                if !key.valid || key.board != board || key.piece_code != piece_code {
+                    continue;
+                }
+                let payload = self.payload(key.payload_index);
+                if payload.locks.contains(width, rotation, x, y) {
+                    return ReachabilityCacheLookup::Reachable;
+                }
+                if key.exhaustive || payload.unreachable_locks.contains(width, rotation, x, y) {
+                    return ReachabilityCacheLookup::ExhaustivelyUnreachable;
+                }
+                let exhaustive = key.observation >= self.exhaustive_observations;
+                self.keys[index].observation = key.observation.saturating_add(1);
+                return ReachabilityCacheLookup::Search {
+                    exhaustive,
+                    admit: true,
+                    key_present: true,
+                };
             }
-            if self.unreachable_locks[index].contains(width, rotation, x, y) {
-                return ReachabilityCacheLookup::ExhaustivelyUnreachable;
-            }
-            if key.exhaustive {
-                return ReachabilityCacheLookup::ExhaustivelyUnreachable;
-            }
-            let exhaustive = key.observation >= self.exhaustive_observations;
-            key.observation = key.observation.saturating_add(1);
-            return ReachabilityCacheLookup::Search {
-                exhaustive,
-                admit: true,
-                key_present: true,
-            };
         }
         let prior_observations = self.observe(hash);
         ReachabilityCacheLookup::Search {
@@ -353,7 +376,7 @@ impl ReachabilityCache {
         if !exhaustive && !admit {
             return;
         }
-        if self.keys.is_empty() && !self.initialize() {
+        if self.keys.is_empty() && !self.initialize_keys() {
             return;
         }
         let piece_code = piece_index(piece) as u8 + 1;
@@ -362,10 +385,11 @@ impl ReachabilityCache {
         let mut victim = set_start;
         let mut victim_observation = u8::MAX;
         for index in set_start..set_start + REACHABILITY_CACHE_WAYS {
-            let key = &self.keys[index];
+            let key = self.keys[index];
             if key.valid && key.board == board && key.piece_code == piece_code {
-                self.locks[index].union_with(locks);
-                self.unreachable_locks[index].union_with(unreachable_locks);
+                let payload = self.payload_mut(key.payload_index);
+                payload.locks.union_with(locks);
+                payload.unreachable_locks.union_with(unreachable_locks);
                 self.keys[index].exhaustive |= exhaustive;
                 self.keys[index].observation = self.keys[index].observation.max(1);
                 return;
@@ -383,16 +407,30 @@ impl ReachabilityCache {
         if !exhaustive && victim_observation > 1 {
             return;
         }
+        let payload = ReachabilityCachePayload {
+            locks,
+            unreachable_locks,
+        };
+        let key = self.keys[victim];
+        let payload_index = if key.valid {
+            *self.payload_mut(key.payload_index) = payload;
+            key.payload_index
+        } else {
+            let Some(index) = self.allocate_payload(payload) else {
+                // Existing entries are still exact, and replacement can
+                // reuse their slots even when growing the cache failed.
+                return;
+            };
+            index
+        };
         self.keys[victim] = ReachabilityCacheKey {
             board,
             piece_code,
             observation: 1,
             exhaustive,
             valid: true,
-            reserved: [0; 4],
+            payload_index,
         };
-        self.locks[victim] = locks;
-        self.unreachable_locks[victim] = unreachable_locks;
     }
 
     fn configure(&mut self, operation_count: usize) {
@@ -420,40 +458,21 @@ impl ReachabilityCache {
         prior
     }
 
-    fn initialize(&mut self) -> bool {
+    fn initialize_observations(&mut self) -> bool {
+        if !self.observations.is_empty() {
+            return true;
+        }
         if self.allocation_disabled {
             return false;
         }
         if self
-            .keys
+            .observations
             .try_reserve_exact(REACHABILITY_CACHE_CAPACITY)
             .is_err()
-            || self
-                .locks
-                .try_reserve_exact(REACHABILITY_CACHE_CAPACITY)
-                .is_err()
-            || self
-                .unreachable_locks
-                .try_reserve_exact(REACHABILITY_CACHE_CAPACITY)
-                .is_err()
-            || self
-                .observations
-                .try_reserve_exact(REACHABILITY_CACHE_CAPACITY)
-                .is_err()
         {
-            self.keys = Vec::new();
-            self.locks = Vec::new();
-            self.unreachable_locks = Vec::new();
-            self.observations = Vec::new();
             self.allocation_disabled = true;
             return false;
         }
-        self.keys
-            .resize(REACHABILITY_CACHE_CAPACITY, ReachabilityCacheKey::default());
-        self.locks
-            .resize(REACHABILITY_CACHE_CAPACITY, ReachableLocks::default());
-        self.unreachable_locks
-            .resize(REACHABILITY_CACHE_CAPACITY, ReachableLocks::default());
         self.observations.resize(
             REACHABILITY_CACHE_CAPACITY,
             ReachabilityObservation::default(),
@@ -464,10 +483,72 @@ impl ReachabilityCache {
         true
     }
 
+    fn initialize_keys(&mut self) -> bool {
+        if self.allocation_disabled || !self.initialize_observations() {
+            return false;
+        }
+        if self
+            .keys
+            .try_reserve_exact(REACHABILITY_CACHE_CAPACITY)
+            .is_err()
+        {
+            self.allocation_disabled = true;
+            return false;
+        }
+        self.keys
+            .resize(REACHABILITY_CACHE_CAPACITY, ReachabilityCacheKey::default());
+        true
+    }
+
+    fn allocate_payload(&mut self, payload: ReachabilityCachePayload) -> Option<u16> {
+        if self.allocation_disabled {
+            return None;
+        }
+        let index = u16::try_from(self.payload_count).ok()?;
+        let chunk_index = usize::from(index) / REACHABILITY_PAYLOADS_PER_CHUNK;
+        if chunk_index == self.payloads.len() {
+            if self.payloads.is_empty()
+                && self
+                    .payloads
+                    .try_reserve_exact(REACHABILITY_PAYLOAD_CHUNKS)
+                    .is_err()
+            {
+                self.allocation_disabled = true;
+                return None;
+            }
+            let mut chunk = Vec::new();
+            if chunk
+                .try_reserve_exact(REACHABILITY_PAYLOADS_PER_CHUNK)
+                .is_err()
+            {
+                self.allocation_disabled = true;
+                return None;
+            }
+            self.payload_retained_bytes +=
+                chunk.capacity() * core::mem::size_of::<ReachabilityCachePayload>();
+            self.payloads.push(chunk);
+        }
+        self.payloads[chunk_index].push(payload);
+        self.payload_count += 1;
+        Some(index)
+    }
+
+    fn payload(&self, index: u16) -> &ReachabilityCachePayload {
+        let index = usize::from(index);
+        &self.payloads[index / REACHABILITY_PAYLOADS_PER_CHUNK]
+            [index % REACHABILITY_PAYLOADS_PER_CHUNK]
+    }
+
+    fn payload_mut(&mut self, index: u16) -> &mut ReachabilityCachePayload {
+        let index = usize::from(index);
+        &mut self.payloads[index / REACHABILITY_PAYLOADS_PER_CHUNK]
+            [index % REACHABILITY_PAYLOADS_PER_CHUNK]
+    }
+
     fn retained_bytes(&self) -> usize {
         self.keys.capacity() * core::mem::size_of::<ReachabilityCacheKey>()
-            + self.locks.capacity() * core::mem::size_of::<ReachableLocks>()
-            + self.unreachable_locks.capacity() * core::mem::size_of::<ReachableLocks>()
+            + self.payloads.capacity() * core::mem::size_of::<Vec<ReachabilityCachePayload>>()
+            + self.payload_retained_bytes
             + self.observations.capacity() * core::mem::size_of::<ReachabilityObservation>()
     }
 }
@@ -3070,9 +3151,12 @@ fn source_ceiling(height: u8, piece: PieceKind, allow_180: bool, profile: &KickT
 mod tests {
     use super::{
         best_scoring_lock_evidence, builtin_kick_profile, normalized_kick_delta,
-        reverse_lock_reachable, state_from_index, state_index, ReachabilityCacheLookup,
-        ReachabilityScratch, ReachabilityTemplate, ReachabilityWorkspace, ReachableLocks, State,
-        LARGE_SEARCH_EXHAUSTIVE_OBSERVATIONS,
+        reachability_cache_hash, reachability_cache_set_start, reverse_lock_reachable,
+        state_from_index, state_index, ReachabilityCache, ReachabilityCacheLookup,
+        ReachabilityCachePayload, ReachabilityObservation, ReachabilityScratch,
+        ReachabilityTemplate, ReachabilityWorkspace, ReachableLocks, State,
+        LARGE_SEARCH_EXHAUSTIVE_OBSERVATIONS, REACHABILITY_CACHE_CAPACITY, REACHABILITY_CACHE_WAYS,
+        REACHABILITY_PAYLOADS_PER_CHUNK,
     };
     use crate::conditioned_local_index::LocalRelationCandidateLookup;
     use crate::conditioned_local_pack::{
@@ -3203,11 +3287,189 @@ mod tests {
             0,
             None,
         );
-        assert_ne!(first.cache.keys.as_ptr(), second.cache.keys.as_ptr());
+        assert_ne!(
+            first.cache.observations.as_ptr(),
+            second.cache.observations.as_ptr()
+        );
         assert_ne!(
             first.scratch.visited_generations.as_ptr(),
             second.scratch.visited_generations.as_ptr()
         );
+    }
+
+    #[test]
+    fn reachability_cache_allocates_lock_evidence_only_when_admitted() {
+        let mut cache = ReachabilityCache::default();
+        let lookup = |cache: &mut ReachabilityCache, x| {
+            cache.query(0, PieceKind::T, 10, RotationState::Zero, x, 0)
+        };
+        let miss = |admit| ReachabilityCacheLookup::Search {
+            exhaustive: false,
+            admit,
+            key_present: false,
+        };
+        assert_eq!(cache.retained_bytes(), 0);
+        assert_eq!(lookup(&mut cache, 4), miss(false));
+        assert!(cache.keys.is_empty());
+        assert!(cache.payloads.is_empty());
+        assert_eq!(
+            cache.retained_bytes(),
+            REACHABILITY_CACHE_CAPACITY * core::mem::size_of::<ReachabilityObservation>(),
+        );
+
+        let mut positive = ReachableLocks::default();
+        positive.insert(10, RotationState::Zero, 4, 0);
+        let mut negative = ReachableLocks::default();
+        negative.insert(10, RotationState::Zero, 5, 0);
+        cache.insert(0, PieceKind::T, positive, negative, false, false);
+        assert!(cache.keys.is_empty());
+        assert_eq!(lookup(&mut cache, 4), miss(true));
+        cache.insert(0, PieceKind::T, positive, negative, false, true);
+        assert_eq!(cache.payload_count, 1);
+        assert_eq!(cache.payloads.len(), 1);
+        assert_eq!(
+            cache.payload_retained_bytes,
+            REACHABILITY_PAYLOADS_PER_CHUNK * core::mem::size_of::<ReachabilityCachePayload>(),
+        );
+        assert_eq!(lookup(&mut cache, 4), ReachabilityCacheLookup::Reachable);
+        assert_eq!(
+            lookup(&mut cache, 5),
+            ReachabilityCacheLookup::ExhaustivelyUnreachable,
+        );
+        assert_eq!(
+            lookup(&mut cache, 6),
+            ReachabilityCacheLookup::Search {
+                exhaustive: false,
+                admit: true,
+                key_present: true,
+            },
+        );
+
+        let mut second = ReachableLocks::default();
+        second.insert(10, RotationState::Zero, 7, 0);
+        cache.insert(
+            0,
+            PieceKind::T,
+            second,
+            ReachableLocks::default(),
+            true,
+            true,
+        );
+        assert_eq!(cache.payload_count, 1);
+        assert_eq!(lookup(&mut cache, 4), ReachabilityCacheLookup::Reachable);
+        assert_eq!(lookup(&mut cache, 7), ReachabilityCacheLookup::Reachable);
+        assert_eq!(
+            lookup(&mut cache, 6),
+            ReachabilityCacheLookup::ExhaustivelyUnreachable,
+        );
+    }
+
+    #[test]
+    fn reachability_cache_payload_chunks_keep_earlier_slots_live() {
+        let mut cache = ReachabilityCache::default();
+        let piece = PieceKind::T;
+        let piece_code = super::piece_index(piece) as u8 + 1;
+        let mut sets = std::collections::HashSet::new();
+        let boards: Vec<_> = (0..4096)
+            .filter(|&board| {
+                sets.insert(reachability_cache_set_start(
+                    reachability_cache_hash(board, piece_code),
+                    REACHABILITY_CACHE_CAPACITY,
+                ))
+            })
+            .take(REACHABILITY_PAYLOADS_PER_CHUNK + 1)
+            .collect();
+        assert_eq!(boards.len(), REACHABILITY_PAYLOADS_PER_CHUNK + 1);
+        let mut positive = ReachableLocks::default();
+        positive.insert(10, RotationState::Zero, 4, 0);
+        for &board in &boards[..REACHABILITY_PAYLOADS_PER_CHUNK] {
+            cache.insert(
+                board,
+                piece,
+                positive,
+                ReachableLocks::default(),
+                true,
+                true,
+            );
+        }
+        let first_payload = cache.payloads[0].as_ptr();
+        assert_eq!(cache.payloads.len(), 1);
+        let new_board = boards[REACHABILITY_PAYLOADS_PER_CHUNK];
+        cache.insert(
+            new_board,
+            piece,
+            positive,
+            ReachableLocks::default(),
+            true,
+            true,
+        );
+        assert_eq!(cache.payloads.len(), 2);
+        assert_eq!(cache.payloads[0].as_ptr(), first_payload);
+        assert_eq!(cache.payload_count, boards.len());
+        for board in boards {
+            assert_eq!(
+                cache.query(board, piece, 10, RotationState::Zero, 4, 0),
+                ReachabilityCacheLookup::Reachable,
+            );
+        }
+    }
+
+    #[test]
+    fn reachability_cache_replacement_reuses_slot_without_stale_evidence() {
+        let mut cache = ReachabilityCache::default();
+        let piece = PieceKind::T;
+        let piece_code = super::piece_index(piece) as u8 + 1;
+        let set_for = |board| {
+            reachability_cache_set_start(
+                reachability_cache_hash(board, piece_code),
+                REACHABILITY_CACHE_CAPACITY,
+            )
+        };
+        let set_start = set_for(0);
+        let boards: Vec<_> = (0..(1 << 20))
+            .filter(|&board| set_for(board) == set_start)
+            .take(REACHABILITY_CACHE_WAYS + 1)
+            .collect();
+        assert_eq!(boards.len(), REACHABILITY_CACHE_WAYS + 1);
+        let mut positive = ReachableLocks::default();
+        positive.insert(10, RotationState::Zero, 4, 0);
+        let mut negative = ReachableLocks::default();
+        negative.insert(10, RotationState::Zero, 5, 0);
+        for &board in &boards[..REACHABILITY_CACHE_WAYS] {
+            cache.insert(board, piece, positive, negative, false, true);
+        }
+        let payload_index = cache.keys[set_start].payload_index;
+        let bytes = cache.retained_bytes();
+        cache.allocation_disabled = true;
+        let new_board = boards[REACHABILITY_CACHE_WAYS];
+        let mut replacement = ReachableLocks::default();
+        replacement.insert(10, RotationState::Zero, 6, 0);
+        cache.insert(
+            new_board,
+            piece,
+            replacement,
+            ReachableLocks::default(),
+            false,
+            true,
+        );
+        assert_eq!(cache.keys[set_start].board, new_board);
+        assert_eq!(cache.keys[set_start].payload_index, payload_index);
+        assert_eq!(cache.payload_count, REACHABILITY_CACHE_WAYS);
+        assert_eq!(cache.retained_bytes(), bytes);
+        assert_eq!(
+            cache.query(new_board, piece, 10, RotationState::Zero, 6, 0),
+            ReachabilityCacheLookup::Reachable,
+        );
+        for x in [4, 5] {
+            assert_eq!(
+                cache.query(new_board, piece, 10, RotationState::Zero, x, 0),
+                ReachabilityCacheLookup::Search {
+                    exhaustive: false,
+                    admit: true,
+                    key_present: true,
+                },
+            );
+        }
     }
 
     #[test]
@@ -3400,7 +3662,11 @@ mod tests {
             .position(|key| key.valid && key.board == 0)
             .unwrap();
         assert!(!workspace.cache.keys[key_index].exhaustive);
-        let returned = workspace.cache.locks[key_index].anchors;
+        let returned = workspace
+            .cache
+            .payload(workspace.cache.keys[key_index].payload_index)
+            .locks
+            .anchors;
         let (slot, missing) = reference
             .iter()
             .zip(returned)
@@ -3578,10 +3844,12 @@ mod tests {
                 .position(|key| key.valid && key.board == 0)
                 .unwrap();
             assert!(!workspace.cache.keys[slot].exhaustive);
+            let payload_index = workspace.cache.keys[slot].payload_index;
+            let partial_locks = workspace.cache.payload(payload_index).locks.anchors;
             if shortcut_enabled {
                 let mut desired = ReachableLocks::default();
                 desired.insert(10, RotationState::Zero, 4, 0);
-                assert_eq!(workspace.cache.locks[slot].anchors, desired.anchors);
+                assert_eq!(partial_locks, desired.anchors);
             }
             // An exhaustive-cache request still runs the full composer,
             // irrespective of the Boolean shortcut switch.
@@ -3591,7 +3859,7 @@ mod tests {
             .unwrap();
             let (missing_slot, missing_anchor) = reference
                 .iter()
-                .zip(workspace.cache.locks[slot].anchors)
+                .zip(partial_locks)
                 .enumerate()
                 .find_map(|(rotation, (expected, returned))| {
                     let missing = *expected & !returned;
@@ -3609,7 +3877,10 @@ mod tests {
                 Some(LocalRelationRowFrame::new(4, 0).unwrap()),
             ));
             assert!(workspace.cache.keys[slot].exhaustive);
-            assert_eq!(workspace.cache.locks[slot].anchors, reference,);
+            assert_eq!(
+                workspace.cache.payload(payload_index).locks.anchors,
+                reference,
+            );
         }
     }
 
