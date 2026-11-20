@@ -214,8 +214,15 @@ ClearraGeometryApdpStatus clearra_geometry_apdp_propagate(
         }
         if (!clearra_geometry_apdp_row_supports_required_cells(
                 search->catalog, row_id, required_same_tile_cells)) {
-            result.filtered_parent_row_count++;
-            continue;
+            /*
+             * SameTile already enumerates the complete feasible parent
+             * domain. An inverse-clear parent can contain this exact
+             * three-cell group without another recognizable partial in the
+             * original row frame. Lack of a static pair is not evidence
+             * against the exact parent: keep the ordinary SameTile domain.
+             */
+            *out_result = (ClearraGeometryApdpResult){0};
+            return CLEARRA_GEOMETRY_APDP_SKIPPED;
         }
         result.exact_parent_row_count++;
         result.parent_piece_mask |= UINT64_C(1)
