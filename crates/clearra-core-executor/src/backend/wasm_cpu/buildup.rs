@@ -7061,7 +7061,7 @@ mod kick_guard_reuse_tests {
             },
             MovementProofSource::ConditionalOrder,
         );
-        let run = |proofs| {
+        let run = |proofs: &CandidateMovementProofs| {
             structural_order::with_mode(false, || {
                 placement_dependency::with_mode(false, || {
                     let mut workspace = BuildUpWorkspace::default();
