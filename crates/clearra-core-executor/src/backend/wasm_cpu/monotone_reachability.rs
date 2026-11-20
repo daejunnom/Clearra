@@ -28,8 +28,9 @@ use clearra_rules::kicks::{KickTableProfile, KickTableProfileId};
 use crate::conditioned_local_relation::LocalRelationRowFrame;
 
 use super::{
-    builtin_kick_profile, grounded_index, normalized_kick_delta, piece_index, state_from_index,
-    state_index, ReachabilityTemplate, State, INVALID_STATE_INDEX, INVALID_STATE_MASK,
+    builtin_kick_profile, grounded_index, normalized_kick_delta, piece_index,
+    reverse_rotation_is_first_success, state_from_index, state_index, ReachabilityTemplate, State,
+    INVALID_STATE_INDEX, INVALID_STATE_MASK,
 };
 
 /// A positive-only proof attempt using no rotations. Failure means Unknown for
@@ -228,18 +229,19 @@ pub(super) fn proves_translation_lock_interval(
     })
 }
 
-/// A single last rotation is safe on every board in the interval only when
-/// the chosen edge is actually raw kick index zero. Geometry compilation
-/// filters invalid addresses; merely being the first retained edge is not
-/// enough to admit this intentionally narrow certificate.
+/// The original narrow mode admits only raw kick index zero, even if the
+/// first geometrically retained edge has a later raw index. The ordered mode
+/// allows later kicks when every earlier geometrically valid candidate is
+/// blocked on minimum. All other earlier kicks were already removed by the
+/// exact template compiler's occupancy-independent geometry checks.
 ///
 /// The exact template provides the sky seeds and every movement edge. Follow
 /// only straight downward translations to the source, checking occupancy on
-/// maximum. Raw kick zero stays first-success because its destination is
-/// placeable on maximum and there is no earlier kick. The final lock is
+/// maximum. The chosen destination is also clear on maximum, so that kick
+/// remains first-success on every intermediate board. The final lock is
 /// grounded on minimum, and the precursor need not itself be grounded. No
 /// board, pose graph, or visited set is allocated or retained by this check.
-pub(super) fn proves_first_kick_lock_interval(
+pub(super) fn proves_last_kick_lock_interval<const ALLOW_BLOCKED_PRIORS: bool>(
     template: &ReachabilityTemplate,
     minimum: u64,
     maximum: u64,
@@ -256,17 +258,24 @@ pub(super) fn proves_first_kick_lock_interval(
     }
     let begin = template.reverse_rotation_offsets[target] as usize;
     let end = template.reverse_rotation_offsets[target + 1] as usize;
-    for edge in &template.reverse_rotation_sources[begin..end] {
-        if edge.prior_target_count != 0 {
-            continue;
-        }
+    for &edge in &template.reverse_rotation_sources[begin..end] {
         let source = usize::from(edge.source);
         let transition = source * 3 + usize::from(edge.slot);
         let first = template.rotation_target_offsets[transition] as usize;
-        if template.rotation_kick_indices[first] == 0
-            && usize::from(template.rotation_targets[first]) == target
-            && has_straight_descent_from_sky(template, maximum, source)
+        if ALLOW_BLOCKED_PRIORS {
+            let chosen = first + usize::from(edge.prior_target_count);
+            if usize::from(template.rotation_targets[chosen]) != target
+                || !reverse_rotation_is_first_success(template, minimum, edge)
+            {
+                continue;
+            }
+        } else if edge.prior_target_count != 0
+            || template.rotation_kick_indices[first] != 0
+            || usize::from(template.rotation_targets[first]) != target
         {
+            continue;
+        }
+        if has_straight_descent_from_sky(template, maximum, source) {
             return true;
         }
     }
@@ -590,6 +599,108 @@ mod tests {
         KickTableProfileId::Jstris180,
         KickTableProfileId::NoKick,
     ];
+
+    #[test]
+    fn ordered_kick_interval_requires_both_prior_blockers_on_minimum() {
+        use crate::reachability_reference::reference_spawn_lock_anchors;
+
+        const TARGET: u64 = 0x201c;
+        const LEFT_PRIOR_BLOCKER: u64 = 1 << 11;
+        const RIGHT_PRIOR_BLOCKER: u64 = 1 << 14;
+        const MINIMUM: u64 = 0x4802;
+        const MAXIMUM: u64 = MINIMUM | (1 << 29);
+        let profile = KickTableProfileId::Srs90;
+        let catalog = super::super::GeometryCatalog::compile_for_required_cells_on_dimensions(
+            10, 3, MINIMUM, TARGET,
+        )
+        .unwrap();
+        let row = catalog.skeleton_id(PieceKind::T, TARGET).unwrap();
+        let lock = catalog
+            .instantiations(row, 0)
+            .find(|lock| lock.rotation == RotationState::Zero && lock.x == 2 && lock.lock_y == 0)
+            .unwrap();
+        assert_eq!(lock.lock_mask, TARGET);
+        let frame = LocalRelationRowFrame::new(3, 0);
+        let mut workspace = super::super::ReachabilityWorkspace::default();
+        workspace.configure_kick_profile(profile, false);
+        assert!(!workspace.try_prove_first_kick_lock_interval(
+            &catalog,
+            MINIMUM,
+            MAXIMUM,
+            PieceKind::T,
+            profile,
+            lock,
+            frame,
+        ));
+        assert!(workspace.try_prove_ordered_kick_lock_interval(
+            &catalog,
+            MINIMUM,
+            MAXIMUM,
+            PieceKind::T,
+            profile,
+            lock,
+            frame,
+        ));
+        for board in [MINIMUM, MAXIMUM] {
+            let exact = reference_spawn_lock_anchors(10, 3, board, PieceKind::T, profile).unwrap();
+            assert_ne!(exact[0] & (1 << 2), 0, "board {board:#x}");
+        }
+
+        // The two preceding kicks are permanently blocked only if both
+        // roof cells belong to minimum. A blocker present only on maximum
+        // cannot be used to prove the third kick throughout the interval.
+        let without_left = MINIMUM & !LEFT_PRIOR_BLOCKER;
+        let exact =
+            reference_spawn_lock_anchors(10, 3, without_left, PieceKind::T, profile).unwrap();
+        assert_eq!(exact[0] & (1 << 2), 0);
+        for blocker in [LEFT_PRIOR_BLOCKER, RIGHT_PRIOR_BLOCKER] {
+            assert!(!workspace.try_prove_ordered_kick_lock_interval(
+                &catalog,
+                MINIMUM & !blocker,
+                MAXIMUM,
+                PieceKind::T,
+                profile,
+                lock,
+                frame,
+            ));
+        }
+
+        let template = workspace.template(&catalog, PieceKind::T);
+        let source = state_index(
+            10,
+            template.ceiling,
+            State {
+                rotation: RotationState::Right,
+                x: 2,
+                y: 0,
+            },
+        )
+        .unwrap();
+        let target = state_index(
+            10,
+            template.ceiling,
+            State {
+                rotation: lock.rotation,
+                x: lock.x,
+                y: lock.lock_y,
+            },
+        )
+        .unwrap() as u16;
+        let start = template.rotation_target_offsets[source * 3 + 1] as usize;
+        assert!(has_straight_descent_from_sky(template, MAXIMUM, source));
+        assert_eq!(template.rotation_kick_indices[start..start + 3], [0, 1, 2]);
+        assert_eq!(template.rotation_targets[start + 2], target);
+        assert_eq!(
+            super::super::first_successful_kick(template, MINIMUM, source, 1),
+            Some(target)
+        );
+        for blocker in [LEFT_PRIOR_BLOCKER, RIGHT_PRIOR_BLOCKER] {
+            assert_ne!(
+                super::super::first_successful_kick(template, MINIMUM & !blocker, source, 1),
+                Some(target)
+            );
+        }
+    }
 
     #[test]
     fn first_kick_interval_preserves_the_discovered_t_lock_on_both_boards() {

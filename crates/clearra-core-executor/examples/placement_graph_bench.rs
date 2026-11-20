@@ -127,6 +127,7 @@ mod run {
         let incremental_domain_mode = experiment_mode("CLEARRA_INCREMENTAL_DOMAIN")?;
         let first_kick_interval_mode = experiment_mode("CLEARRA_FIRST_KICK_INTERVAL")?;
         let conditional_order_mode = experiment_mode("CLEARRA_CONDITIONAL_ORDER")?;
+        let terminal_identity_move_mode = experiment_mode("CLEARRA_TERMINAL_IDENTITY_MOVE")?;
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
         let capacity = CpuCapacity::current();
         let policy = PcExecutionPolicy::mvp_default()
@@ -207,7 +208,10 @@ mod run {
             )
             .map_err(|e| {
                 let cause = failure.lock().ok().and_then(|mut first| first.take());
-                format!("exact capture execution failed: {e:?}; spool diagnostic: {cause:?}")
+                let stats = spool.lock().ok().map(|owner| owner.stats());
+                format!(
+                    "exact capture execution failed: {e:?}; spool diagnostic: {cause:?}; {stats:?}"
+                )
             })?;
             let spool = Arc::try_unwrap(spool)
                 .map_err(|_| "coverage workers still hold the spool")?
@@ -280,7 +284,8 @@ mod run {
             "incremental_domain_mode": incremental_domain_mode,
             "first_kick_interval_mode": first_kick_interval_mode,
             "conditional_order_mode": conditional_order_mode,
-            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},conditional_order={conditional_order_mode}",
+            "terminal_identity_move_mode": terminal_identity_move_mode,
+            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode}",
                 variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode)),
             "static_influence": {
                 "scope": "completed search, workspace counters aggregated after worker joins; null means metric not exposed",
@@ -447,18 +452,17 @@ mod run {
             .collect();
         result_keys.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
         let mut expected = result_keys.iter();
-        let summary = spool
-            .finish_checked(output, |key| {
-                if expected.next().is_some_and(|next| next.as_str() == key) {
-                    Ok(())
-                } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "captured solution identity differs from exact product result",
-                    ))
-                }
-            })
-            .map_err(|e| format!("coverage evidence: {e}"))?;
+        let (summary, spool_stats) = spool.finish_checked(output, |key| {
+            if expected.next().is_some_and(|next| next.as_str() == key) {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "captured solution identity differs from exact product result",
+                ))
+            }
+        });
+        let summary = summary.map_err(|e| format!("coverage evidence: {e}; {spool_stats:?}"))?;
         if expected.next().is_some() {
             return Err("captured solution family did not cover the exact product result".into());
         }
@@ -467,6 +471,13 @@ mod run {
             "sha256": file_sha(&path)?, "solution_count": summary.solutions,
             "total_weight": universe.queue_count(), "covered_weight": summary.covered_queues,
             "covered_pairs": summary.covered_pairs, "complete": true,
+            "output_bytes": fs::metadata(&path).map_err(|e| e.to_string())?.len(),
+            "spool": {
+                "fragments_fed": spool_stats.fragments_fed,
+                "spill_bytes_written": spool_stats.spill_bytes_written,
+                "peak_live_spill_bytes": spool_stats.peak_live_spill_bytes,
+                "peak_live_run_count": spool_stats.peak_live_run_count
+            }
         }))
     }
 
@@ -872,13 +883,19 @@ mod run {
             let incremental = extra_mode("incremental_domain_mode")?;
             let first_kick = extra_mode("first_kick_interval_mode")?;
             let conditional = extra_mode("conditional_order_mode")?;
+            let terminal_move = extra_mode("terminal_identity_move_mode")?;
             all_axes_times
                 .entry(format!(
-                    "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},conditional_order={conditional}"
+                    "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},conditional_order={conditional},terminal_identity_move={terminal_move}"
                 ))
                 .or_default()
                 .push(ms);
-            if movement == "0" && incremental == "0" && first_kick == "0" && conditional == "0" {
+            if movement == "0"
+                && incremental == "0"
+                && first_kick == "0"
+                && conditional == "0"
+                && terminal_move == "0"
+            {
                 times.entry(mode).or_default().push(ms);
             }
         }

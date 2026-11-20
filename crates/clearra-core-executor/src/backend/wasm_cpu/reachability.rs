@@ -754,6 +754,55 @@ impl ReachabilityWorkspace {
         realization: InstantiatedRealization,
         frame: Option<LocalRelationRowFrame>,
     ) -> bool {
+        self.try_prove_last_kick_lock_interval::<false>(
+            catalog,
+            minimum_board,
+            maximum_board,
+            piece,
+            profile,
+            realization,
+            frame,
+        )
+    }
+
+    /// Research-only until a separately selected mode consumes the proof.
+    /// Earlier kicks must be geometrically inadmissible or blocked on the
+    /// minimum occupancy. The admitted conclusions remain Boolean only.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_prove_ordered_kick_lock_interval(
+        &mut self,
+        catalog: &GeometryCatalog,
+        minimum_board: u64,
+        maximum_board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> bool {
+        self.try_prove_last_kick_lock_interval::<true>(
+            catalog,
+            minimum_board,
+            maximum_board,
+            piece,
+            profile,
+            realization,
+            frame,
+        )
+    }
+
+    #[cfg(any(test, feature = "local-search-ab"))]
+    #[allow(clippy::too_many_arguments)]
+    fn try_prove_last_kick_lock_interval<const ALLOW_BLOCKED_PRIORS: bool>(
+        &mut self,
+        catalog: &GeometryCatalog,
+        minimum_board: u64,
+        maximum_board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> bool {
         if self.kick_profile_id != profile
             || builtin_kick_profile(profile).is_none()
             || minimum_board & !maximum_board != 0
@@ -780,7 +829,7 @@ impl ReachabilityWorkspace {
         if template.state_masks[target] != realization.lock_mask {
             return false;
         }
-        monotone_reachability::proves_first_kick_lock_interval(
+        monotone_reachability::proves_last_kick_lock_interval::<ALLOW_BLOCKED_PRIORS>(
             template,
             minimum_board,
             maximum_board,

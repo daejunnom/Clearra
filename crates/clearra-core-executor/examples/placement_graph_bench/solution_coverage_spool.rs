@@ -249,7 +249,20 @@ pub(super) struct CoverageSpool {
     runs: Vec<Run>,
     next_run: usize,
     disk_bytes: u64,
+    live_runs: usize,
+    stats: CoverageSpoolStats,
     failed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct CoverageSpoolStats {
+    /// Push invocations, including a fragment rejected on capture failure.
+    pub(super) fragments_fed: u64,
+    /// Bytes accepted by file writes, including temporary merge replacements.
+    pub(super) spill_bytes_written: u64,
+    pub(super) peak_live_spill_bytes: u64,
+    /// Counts replacement/partial files that coexist with their input runs.
+    pub(super) peak_live_run_count: usize,
 }
 
 impl CoverageSpool {
@@ -286,8 +299,14 @@ impl CoverageSpool {
             runs: Vec::new(),
             next_run: 0,
             disk_bytes: 0,
+            live_runs: 0,
+            stats: CoverageSpoolStats::default(),
             failed: false,
         })
+    }
+
+    pub(super) fn stats(&self) -> CoverageSpoolStats {
+        self.stats
     }
 
     pub(super) fn push_fragment(
@@ -295,6 +314,7 @@ impl CoverageSpool {
         key: &str,
         fragment: CoverageFragment,
     ) -> io::Result<()> {
+        self.stats.fragments_fed = self.stats.fragments_fed.saturating_add(1);
         if self.failed {
             return Err(invalid(
                 "spool failed earlier; no coverage receipt is valid",
@@ -362,6 +382,8 @@ impl CoverageSpool {
             .ok_or_else(|| quota("run sequence overflow"))?;
         let before = self.disk_bytes;
         let file = File::create_new(&path)?;
+        self.live_runs += 1;
+        self.stats.peak_live_run_count = self.stats.peak_live_run_count.max(self.live_runs);
         let mut out = RunWriter {
             inner: BufWriter::with_capacity(
                 IO_BUFFER,
@@ -369,6 +391,7 @@ impl CoverageSpool {
                     file,
                     used: &mut self.disk_bytes,
                     limit: self.limits.disk_bytes,
+                    stats: &mut self.stats,
                 },
             ),
             universe: self.universe,
@@ -388,11 +411,20 @@ impl CoverageSpool {
 
     #[cfg(test)]
     pub(super) fn finish<W: Write>(self, output: CoverageWriter<W>) -> io::Result<CoverageSummary> {
-        self.finish_checked(output, |_| Ok(()))
+        self.finish_checked(output, |_| Ok(())).0
     }
 
     pub(super) fn finish_checked<W: Write>(
         mut self,
+        output: CoverageWriter<W>,
+        validate_key: impl FnMut(&str) -> io::Result<()>,
+    ) -> (io::Result<CoverageSummary>, CoverageSpoolStats) {
+        let result = self.finish_inner(output, validate_key);
+        (result, self.stats())
+    }
+
+    fn finish_inner<W: Write>(
+        &mut self,
         mut output: CoverageWriter<W>,
         mut validate_key: impl FnMut(&str) -> io::Result<()>,
     ) -> io::Result<CoverageSummary> {
@@ -402,7 +434,7 @@ impl CoverageSpool {
             ));
         }
         if self.runs.is_empty() {
-            for (key, bits) in self.pending {
+            for (key, bits) in std::mem::take(&mut self.pending) {
                 validate_key(&key)?;
                 bits.write_final(&mut output, &key)?;
             }
@@ -444,6 +476,7 @@ impl CoverageSpool {
             // this run's exclusive directory; do not remove a directory tree.
             fs::remove_file(run.path)?;
             self.disk_bytes -= run.bytes;
+            self.live_runs -= 1;
         }
         Ok(())
     }
@@ -482,6 +515,7 @@ struct BudgetedFile<'a> {
     file: File,
     used: &'a mut u64,
     limit: u64,
+    stats: &'a mut CoverageSpoolStats,
 }
 
 impl Write for BudgetedFile<'_> {
@@ -491,6 +525,11 @@ impl Write for BudgetedFile<'_> {
         }
         let written = self.file.write(bytes)?;
         *self.used += written as u64;
+        self.stats.spill_bytes_written = self
+            .stats
+            .spill_bytes_written
+            .saturating_add(written as u64);
+        self.stats.peak_live_spill_bytes = self.stats.peak_live_spill_bytes.max(*self.used);
         Ok(written)
     }
 

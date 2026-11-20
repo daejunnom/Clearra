@@ -27,6 +27,7 @@ const MODES = Object.freeze({
   CLEARRA_INCREMENTAL_DOMAIN: "0",
   CLEARRA_FIRST_KICK_INTERVAL: "0",
   CLEARRA_CONDITIONAL_ORDER: "0",
+  CLEARRA_TERMINAL_IDENTITY_MOVE: "0",
 });
 const CASES = Object.freeze({
   small: Object.freeze({
@@ -126,7 +127,7 @@ export function validatedProofArm(report, receipt, step, options, binarySha) {
     report.mode === "1" && report.structural_mode === "1" &&
     report.static_influence_mode === "0" && report.translation_interval_mode === "0" &&
     report.incremental_domain_mode === "0" && report.first_kick_interval_mode === "0" &&
-    report.conditional_order_mode === "0",
+    report.conditional_order_mode === "0" && report.terminal_identity_move_mode === "0",
   step.name + ": unexpected source, mode, or coverage output");
   const input = report.input;
   requireThat(input?.board === fixture.board && input.height === fixture.height &&

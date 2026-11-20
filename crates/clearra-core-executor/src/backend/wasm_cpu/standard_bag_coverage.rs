@@ -2225,7 +2225,7 @@ mod supply_automaton_tests {
         let universe = PatternUniverseMaterializer::standard_7_bag(11, 0, 0x77)
             .expect("full standard P7P4 universe");
         assert_eq!(universe.pattern_count(), P7P4_PREFIXES * P7P4_TAIL_BITS);
-        let coverage = StandardBagCoverage::for_universe(&universe, initial, hold_enabled, true)
+        let coverage = StandardBagCoverage::for_universe(&universe, initial, hold_enabled, false)
             .expect("supported standard bag")
             .expect("standard decision source");
         (universe, coverage)
@@ -2360,15 +2360,77 @@ mod supply_automaton_tests {
 
     #[test]
     fn direct_p7p4_capture_observes_hold_product_and_arena_epoch() {
+        use clearra_core_domain::pc::pc_target::PcTarget;
+        use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+        use clearra_pc_graph::request::{OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput};
+        use clearra_problem::ProblemCompiler;
+        use clearra_rules::profile::builtin_rules::jstris_180;
         use PieceKind::{I, J, L, O, S, T, Z};
-        let (_, mut coverage) = full_p7p4_capture_fixture(true);
+
+        let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
+            .with_rule(jstris_180())
+            .with_queue(PcQueueInput::standard_7_bag())
+            .with_hold_policy(PcHoldPolicy::EnabledEmpty)
+            .with_objective(ObjectivePolicy::unique());
+        let problem = ProblemCompiler::compile_opening_pc(&query).expect("product P7P4");
+        let universe = problem
+            .piece_source()
+            .materialized_universe()
+            .expect("native queue universe");
+        assert!(problem.supply().hold_enabled());
+        // 11 actual draws are available for ten locks. Projection of an
+        // extra terminal lookahead only applies if the source ends at ten.
+        assert!(!problem.supply().projects_unplaced_lookahead());
+        let mut coverage = StandardBagCoverage::for_universe(
+            universe,
+            problem.initial_hold(),
+            problem.supply().hold_enabled(),
+            problem.supply().projects_unplaced_lookahead(),
+        )
+        .expect("standard decision source")
+        .expect("eligible P7P4");
+
+        // Prove ordinal zero is accepted independently of the symbolic
+        // coverage solver: stash the first I, run the queue normally, then
+        // release the held I on the fourth second-bag draw (S).
+        let queue = universe.sequence_at(0);
+        assert_eq!(queue.as_ref(), &[I, O, T, S, Z, J, L, I, O, T, S]);
+        let placements = [O, T, S, Z, J, L, I, O, T, I];
+        let automaton = canonical_automaton();
+        let mut state = automaton
+            .project_bag_initial_state(problem.initial_hold(), true, placements.len())
+            .expect("empty hold on fresh canonical bag");
+        for (index, &piece) in placements.iter().enumerate() {
+            let branch = match index {
+                0 => SupplyBranchKind::StoreCurrent,
+                9 => SupplyBranchKind::SwapHeld,
+                _ => SupplyBranchKind::Current,
+            };
+            let cursor = usize::from(state.cursor());
+            let next_piece = (branch == SupplyBranchKind::StoreCurrent).then(|| queue[cursor + 1]);
+            let mut witnessed = None;
+            automaton
+                .for_each_matching_bag_step(state, piece, |step| {
+                    if step.evidence.branch_kind == branch
+                        && step.evidence.queue_current_piece == queue[cursor]
+                        && step.evidence.queue_next_piece == next_piece
+                    {
+                        witnessed = Some(step.next_state);
+                    }
+                })
+                .expect("canonical bag branches");
+            state = witnessed.expect("concrete store/current/swap witness");
+        }
+        assert_eq!(usize::from(state.cursor()), queue.len());
+        assert_eq!(state.hold_piece(), Some(S));
+
         let mut languages = PieceOrderLanguageCache::default();
         let mut predecessors = [0_u16; 10];
         for (index, predecessor) in predecessors.iter_mut().enumerate().skip(1) {
             *predecessor = 1 << (index - 1);
         }
         let lang = languages
-            .compile_poset_language(&[I, O, T, S, Z, J, L, I, O, T], &predecessors, 128)
+            .compile_poset_language(&placements, &predecessors, 128)
             .expect("valid matching language")
             .expect("bounded language");
         let result = coverage

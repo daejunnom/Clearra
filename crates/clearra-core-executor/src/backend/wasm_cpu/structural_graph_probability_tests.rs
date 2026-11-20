@@ -1178,3 +1178,149 @@ fn first_kick_certificate_saves_primitive_search_without_collapsing_support_or()
         );
     }
 }
+
+#[test]
+fn conditional_support_or_preserves_every_empty_hold_queue_ordinal() {
+    use clearra_core_domain::solution::normalized_tiling_solution::{
+        PiecePlacementMask, StandardBoard64TilingIdentity,
+    };
+    use clearra_coverage::pattern::pattern_id::PatternId;
+    use clearra_rules::profile::builtin_rules::srs;
+    use PieceKind::{I, O, T};
+
+    // For a chosen physical word, independently try the current piece, a
+    // swap with held, or storing into empty hold and using the next draw.
+    // A finished word needs no additional draw, even with a piece held.
+    fn plays_word(queue: &[PieceKind], held: Option<PieceKind>, word: &[PieceKind]) -> bool {
+        let Some((&required, suffix)) = word.split_first() else {
+            return true;
+        };
+        let Some((&current, remaining)) = queue.split_first() else {
+            return false;
+        };
+        if current == required && plays_word(remaining, held, suffix) {
+            return true;
+        }
+        match held {
+            Some(piece) => piece == required && plays_word(remaining, Some(current), suffix),
+            None => remaining.split_first().is_some_and(|(&next, after_next)| {
+                next == required && plays_word(after_next, Some(current), suffix)
+            }),
+        }
+    }
+
+    fn four_draw_queues() -> Vec<[PieceKind; 4]> {
+        fn visit(
+            out: &mut Vec<[PieceKind; 4]>,
+            queue: &mut [PieceKind; 4],
+            depth: usize,
+            used: u8,
+        ) {
+            if depth == queue.len() {
+                out.push(*queue);
+                return;
+            }
+            for (index, piece) in PieceKind::STANDARD_TETROMINOES.into_iter().enumerate() {
+                let bit = 1_u8 << index;
+                if used & bit == 0 {
+                    queue[depth] = piece;
+                    visit(out, queue, depth + 1, used | bit);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        visit(&mut out, &mut [PieceKind::I; 4], 0, 0);
+        out
+    }
+
+    let _guard = product_guard();
+    let placements = [(I, 0x00f0_0000), (O, 0x0c03), (T, 0x7008)];
+    let (catalog, candidate) = fixture(3, &placements);
+    let board = catalog.initial_board();
+    let pieces: Vec<_> = candidate
+        .row_ids()
+        .iter()
+        .map(|&id| catalog.skeleton(id).piece)
+        .collect();
+    let transitions = physical_transitions(&catalog, &candidate, KickTableProfileId::Srs90);
+    let words = operation_words(&pieces, &transitions);
+    assert_eq!(
+        words,
+        BTreeSet::from([vec![O, I, T], vec![O, T, I], vec![T, I, O], vec![T, O, I]])
+    );
+
+    let problem = ProblemCompiler::compile_scenario_pc(
+        &PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(3, board),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(3),
+        )
+        .with_rule(srs())
+        .with_allow_hold(true)
+        .with_exact_pieces(Some(3))
+        .with_supply_window_size(SupplyWindowSize::new(4))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+        .with_retained_trace_limit(0)
+        .with_execution_policy(policy()),
+    )
+    .unwrap()
+    .with_output_policy(SearchOutputPolicy::CoverageSummary);
+    assert!(problem.supply().hold_enabled());
+    assert!(problem.initial_hold().hold_empty());
+    assert!(!problem.supply().projects_unplaced_lookahead());
+    assert!(!problem
+        .queue_observation_policy()
+        .requires_observation_policy());
+
+    let run = |conditional| {
+        structural_order::with_conditional_order_mode(conditional, || {
+            structural_order::with_first_kick_interval_mode(false, || {
+                structural_order::with_movement_clear_mode(false, || {
+                    structural_order::with_mode(false, || {
+                        placement_dependency::with_mode(false, || {
+                            WasmCpuSearchBackend::execute_with_control(
+                                &problem,
+                                &ExecutionControl::default(),
+                            )
+                            .unwrap()
+                        })
+                        .0
+                    })
+                })
+            })
+        })
+    };
+    let (baseline, _) = run(false);
+    let (conditional, metrics) = run(true);
+    assert_parity(&baseline, &conditional);
+    assert!(metrics.conditional_order.attempted_candidates > 0);
+
+    let identity = StandardBoard64TilingIdentity::from_placements(
+        board,
+        placements.map(|(piece, cells)| PiecePlacementMask::new(piece, cells)),
+    )
+    .unwrap();
+    let coverage = conditional
+        .solution_coverages()
+        .iter()
+        .find(|coverage| coverage.identity() == identity)
+        .expect("the O/T support-OR tiling is present")
+        .covered_patterns();
+    let queues = four_draw_queues();
+    let universe = problem.piece_source().materialized_universe().unwrap();
+    assert_eq!(queues.len(), 840);
+    assert_eq!(universe.pattern_count(), queues.len());
+    let mut successes = 0;
+    for (ordinal, queue) in queues.iter().enumerate() {
+        assert_eq!(universe.sequence_at(ordinal).as_ref(), queue.as_slice());
+        let expected = words.iter().any(|word| plays_word(queue, None, word));
+        assert_eq!(
+            coverage.contains(PatternId::new(ordinal)),
+            expected,
+            "original supply ordinal {ordinal} ({queue:?})"
+        );
+        successes += usize::from(expected);
+    }
+    assert_eq!(successes, 80);
+}

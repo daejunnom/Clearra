@@ -1826,6 +1826,21 @@ impl WasmExactSearchSession {
         worker_count: usize,
         control: &ExecutionControl,
     ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let terminal_identity_move =
+            std::env::var_os("CLEARRA_TERMINAL_IDENTITY_MOVE").is_some_and(|mode| mode == "1");
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let terminal_identity_move = false;
+        self.execute_parallel_with_identity_storage(worker_count, control, terminal_identity_move)
+    }
+
+    #[cfg(feature = "parallel")]
+    fn execute_parallel_with_identity_storage(
+        &mut self,
+        worker_count: usize,
+        control: &ExecutionControl,
+        terminal_identity_move: bool,
+    ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
         self.execution_control = control.clone();
         if worker_count <= 1 {
             return Ok(None);
@@ -1858,8 +1873,9 @@ impl WasmExactSearchSession {
             ParallelSearchDecision::Completed(outcome) => {
                 self.parallel_decision_reason = "parallel-immutable-family-queue";
                 self.cpu_warmup_performed = self.cpu_warmup_requested;
-                self.absorb_parallel_outcome(outcome)?;
-                match self.complete()? {
+                let terminal_identities =
+                    self.absorb_parallel_outcome(outcome, terminal_identity_move)?;
+                match self.complete_internal(true, terminal_identities)? {
                     ExactSearchAdvance::Completed(result) => Ok(Some(result)),
                     ExactSearchAdvance::Pending | ExactSearchAdvance::Cancelled => {
                         Err(WasmExactSearchError::InvalidProblem(
@@ -1875,7 +1891,10 @@ impl WasmExactSearchSession {
     fn absorb_parallel_outcome(
         &mut self,
         mut outcome: ParallelSearchOutcome,
-    ) -> Result<(), WasmExactSearchError> {
+        terminal_identity_move: bool,
+    ) -> Result<Option<Vec<StandardBoard64TilingIdentity>>, WasmExactSearchError> {
+        let move_terminal_identities =
+            terminal_identity_move && self.can_move_terminal_parallel_identities(&outcome);
         let canonical_minimum_source_complete =
             self.validate_parallel_minimum_cover_source(&mut outcome)?;
         self.geometry = outcome.geometry;
@@ -1891,20 +1910,31 @@ impl WasmExactSearchSession {
         // serial verifier's raw candidate row log. Reuse the same validated
         // canonical row reconstruction as the distributed minimum source.
         self.distributed_minimum_cover_source_complete |= canonical_minimum_source_complete;
-        for identity in outcome.buildable_identities {
-            if self.problem.objective().kind() == ObjectiveKind::Tiling {
-                self.insert_tiling_result_identity(identity)?;
-                continue;
+        let terminal_identities = if move_terminal_identities {
+            // No later stage needs the mutable hash set. Canonicalize the
+            // incoming allocation in place, using the result's normal Ord
+            // and Eq, and transfer it directly to the terminal projection.
+            let mut identities = core::mem::take(&mut outcome.buildable_identities);
+            identities.sort_unstable();
+            identities.dedup();
+            Some(identities)
+        } else {
+            for identity in outcome.buildable_identities {
+                if self.problem.objective().kind() == ObjectiveKind::Tiling {
+                    self.insert_tiling_result_identity(identity)?;
+                    continue;
+                }
+                let identity = TilingIdentityEntry::new(identity);
+                if !self.buildable_identities.contains(&identity)
+                    && self.buildable_identities.try_reserve(1).is_err()
+                {
+                    self.mark_truncated("solution_identity_storage_unavailable");
+                    break;
+                }
+                self.buildable_identities.insert(identity);
             }
-            let identity = TilingIdentityEntry::new(identity);
-            if !self.buildable_identities.contains(&identity)
-                && self.buildable_identities.try_reserve(1).is_err()
-            {
-                self.mark_truncated("solution_identity_storage_unavailable");
-                break;
-            }
-            self.buildable_identities.insert(identity);
-        }
+            None
+        };
         for coverage in outcome.solution_coverage {
             self.merge_solution_coverage(coverage.identity(), coverage.covered_patterns())?;
         }
@@ -1957,7 +1987,12 @@ impl WasmExactSearchSession {
                         .worker_memory_components
                         .shared_reachability_template_bytes,
                 )
-                .saturating_add(self.solution_identity_retained_bytes()),
+                .saturating_add(self.solution_identity_retained_bytes())
+                .saturating_add(terminal_identities.as_ref().map_or(0, |identities| {
+                    identities
+                        .capacity()
+                        .saturating_mul(core::mem::size_of::<StandardBoard64TilingIdentity>())
+                })),
         );
         if let Some(reason) = outcome.truncated_reason {
             self.mark_truncated(reason);
@@ -1965,7 +2000,51 @@ impl WasmExactSearchSession {
         if self.memory_budget_exceeded() {
             self.mark_truncated("memory_budget_exceeded");
         }
-        Ok(())
+        Ok(terminal_identities)
+    }
+
+    #[cfg(feature = "parallel")]
+    fn can_move_terminal_parallel_identities(&self, outcome: &ParallelSearchOutcome) -> bool {
+        // This preserves all existing serial, partial, minimum, typed
+        // execution-evidence and parent-authorized memory paths. The
+        // ordinary Summary/Trace representative is already owned by outcome.
+        !self.finished
+            && self.packing_candidate_count == 0
+            && self.execution_control.partition().count() == 1
+            && self.count_complete
+            && outcome.count_complete
+            && self.truncated_reason.is_none()
+            && outcome.truncated_reason.is_none()
+            && !matches!(
+                self.problem_retention,
+                SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+            )
+            && self.problem.backend_request().max_memory_mib().is_none()
+            && self.problem.objective().kind() == ObjectiveKind::Unique
+            && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountUnique
+            && matches!(
+                self.problem.output_policy(),
+                SearchOutputPolicy::Summary | SearchOutputPolicy::Trace
+            )
+            && self.problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::Disabled
+            && !self.problem.objective().score().requested()
+            && !self.problem.objective().execution_constraints().requested()
+            && !self.problem.solution_probability_policy().requested()
+            && !self
+                .problem
+                .queue_observation_policy()
+                .requires_observation_policy()
+            && self
+                .problem
+                .piece_source()
+                .materialized_universe()
+                .is_some_and(|universe| universe.complete())
+            && self.buildable_identities.is_empty()
+            && self.compact_tiling_identities.is_none()
+            && self.distributed_tiling_root_runs.is_none()
+            && self.coverage_rows.is_empty()
+            && self.solution_coverage.is_none()
+            && outcome.solution_coverage.is_empty()
     }
 
     #[cfg(feature = "parallel")]
@@ -3982,16 +4061,17 @@ impl WasmExactSearchSession {
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
         self.geometry
             .finish_external(self.packing_candidate_count, 0, 0);
-        self.complete_internal(false)
+        self.complete_internal(false, None)
     }
 
     fn complete(&mut self) -> Result<ExactSearchAdvance, WasmExactSearchError> {
-        self.complete_internal(true)
+        self.complete_internal(true, None)
     }
 
     fn complete_internal(
         &mut self,
         include_normalized_keys: bool,
+        terminal_identities: Option<Vec<StandardBoard64TilingIdentity>>,
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
         let coverage_span = SearchStageSpan::begin(ExecutorSearchStage::WasmFinalCoverage);
         if self.problem.objective().kind() != ObjectiveKind::Tiling {
@@ -4094,8 +4174,11 @@ impl WasmExactSearchSession {
         } else {
             None
         };
-        let solution_identity_count = self.solution_identity_count();
-        let result = self.build_result(include_normalized_keys, scoring_batch)?;
+        let solution_identity_count = terminal_identities
+            .as_ref()
+            .map_or_else(|| self.solution_identity_count(), Vec::len);
+        let result =
+            self.build_result(include_normalized_keys, scoring_batch, terminal_identities)?;
         if (scoring_requested || self.canonical_tiling_terminal_authorized())
             && matches!(
                 self.problem_retention,
@@ -4442,6 +4525,7 @@ impl WasmExactSearchSession {
         &mut self,
         include_normalized_keys: bool,
         scoring_batch: Option<ExactScoringExecutionBatch>,
+        terminal_identities: Option<Vec<StandardBoard64TilingIdentity>>,
     ) -> Result<CoreExecutionResult, WasmExactSearchError> {
         if matches!(
             self.problem_retention,
@@ -4464,12 +4548,16 @@ impl WasmExactSearchSession {
         } else {
             None
         };
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let terminal_identities_moved = terminal_identities.is_some();
         let mut identities = if !solution_set_materialized {
             Vec::new()
         } else if let Some(store) = &tiling_solution_store {
             store
                 .page_identities(0, TILING_SOLUTION_INITIAL_PAGE_SIZE)
                 .map_err(WasmExactSearchError::InvalidProblem)?
+        } else if let Some(identities) = terminal_identities {
+            identities
         } else {
             self.take_sorted_solution_identities()?
         };
@@ -4796,6 +4884,8 @@ impl WasmExactSearchSession {
         let kick_profile = self.problem.kick_profile();
         let rule_capability = RuleCapability::from_rule(rule);
         let field_values = [
+            #[cfg(any(test, feature = "local-search-ab"))]
+            field("parallel_terminal_identity_move", terminal_identities_moved),
             field(
                 "backend_requested",
                 self.problem.backend_policy().requested_backend().as_str(),
@@ -5867,6 +5957,95 @@ mod tests {
         queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
         QueueObservationPolicy,
     };
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn native_parallel_terminal_identity_move_preserves_exact_trace_result() {
+        use clearra_pc_graph::request::{PcSolutionProbabilityPolicy, SupplyWindowSize};
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0xfc3f_0fc3_f0),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(4),
+        )
+        .with_rule(clearra_rules::profile::builtin_rules::jstris_180())
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(4))
+        .with_supply_window_size(SupplyWindowSize::new(4))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_execution_policy(PcExecutionPolicy::default().with_workers(1));
+        let problem = ProblemCompiler::compile_scenario_pc(
+            &query
+                .clone()
+                .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit),
+        )
+        .expect("trace fixture");
+        assert_eq!(
+            problem.output_policy(),
+            clearra_problem::SearchOutputPolicy::Trace
+        );
+        let execute = |problem: &clearra_problem::SearchProblem, move_identities| {
+            WasmExactSearchSession::new(problem)
+                .expect("parallel identity session")
+                .execute_parallel_with_identity_storage(
+                    2,
+                    &ExecutionControl::default(),
+                    move_identities,
+                )
+                .expect("native search completes")
+                .expect("fixture has multiple native branches")
+        };
+        let reference = execute(&problem, false);
+        let moved = execute(&problem, true);
+        assert_eq!(
+            reference.bool_field("parallel_terminal_identity_move"),
+            Some(false)
+        );
+        assert_eq!(
+            moved.bool_field("parallel_terminal_identity_move"),
+            Some(true)
+        );
+        assert!(reference.normalized_solution_identities().len() > 1);
+        assert!(!reference.path_steps().is_empty());
+        assert_eq!(
+            moved.normalized_solution_identities(),
+            reference.normalized_solution_identities()
+        );
+        assert_eq!(
+            moved.normalized_solution_keys(),
+            reference.normalized_solution_keys()
+        );
+        assert_eq!(
+            moved.coverage_pattern_words(),
+            reference.coverage_pattern_words()
+        );
+        assert_eq!(moved.path_steps(), reference.path_steps());
+        for key in [
+            "normalized_unique_solution_count",
+            "normalized_solution_set_hash",
+            "packing_candidate_set_digest",
+            "coverage_probability",
+            "count_complete",
+            "probability_complete",
+            "resource_truncated",
+        ] {
+            assert_eq!(moved.field(key), reference.field(key), "{key}");
+        }
+        assert_eq!(moved.bool_field("count_complete"), Some(true));
+        assert_eq!(moved.bool_field("probability_complete"), Some(true));
+        assert_eq!(moved.bool_field("resource_truncated"), Some(false));
+
+        let retain_rows = ProblemCompiler::compile_scenario_pc(
+            &query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Include),
+        )
+        .expect("per-solution coverage fixture");
+        let result_with_rows = execute(&retain_rows, true);
+        assert_eq!(
+            result_with_rows.bool_field("parallel_terminal_identity_move"),
+            Some(false)
+        );
+        assert!(!result_with_rows.solution_coverages().is_empty());
+    }
 
     #[test]
     fn candidate_witness_only_reads_known_coverage_when_eligible() {

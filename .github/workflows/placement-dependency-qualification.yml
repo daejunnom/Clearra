@@ -33,7 +33,7 @@ jobs:
           set -eu
           cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib --no-run
           status=0
-          for filter in structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_ candidate_witness_only_reads conditional_language_; do
+          for filter in structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves ordered_kick_interval_requires reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_ candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move; do
             cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib "$filter" || status=1
           done
           exit "$status"
