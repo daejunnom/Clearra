@@ -9,6 +9,7 @@ import {
 import { listenForWasmOwnerTermination } from '@clearra/ui/wasm-lifecycle';
 import type { ClearraWorkerExecutionKind } from './ClearraVerifierPool';
 import { createWorkerHostYield } from './workerHostYield';
+import { takeVerifierBatch } from './verifierBatchOwnership';
 import {
   WORKER_HEARTBEAT_INTERVAL_MS,
   sha256Hex,
@@ -45,7 +46,9 @@ type VerifierRequest =
   | {
       type: 'consume';
       requestId: number;
-      batch: ArrayBuffer;
+      // The wire supplies an ArrayBuffer. Only this worker clears the slot,
+      // after the matching run grant and before starting the WASM operation.
+      batch: ArrayBuffer | null;
       delegation: ExecutableDelegationPermit;
     }
   | { type: 'finish'; requestId: number; delegation: ExecutableDelegationPermit }
@@ -271,6 +274,7 @@ async function stageExecutable(request: ExecutableVerifierRequest): Promise<void
       : request.type === 'consume'
         ? request.batch
         : 'clearra-verifier-finish-v1';
+  if (payload === null) throw new Error('verifier batch is missing');
   await authorizeExecutable(request.delegation, payload);
   if (stagedExecutables.has(request.delegation.taskId)) {
     throw new Error('executable delegation is already staged');
@@ -307,7 +311,7 @@ async function executeAuthorized(request: ExecutableVerifierRequest): Promise<vo
   if (!wasm || !initialized) throw new Error('distributed verifier is not initialized');
   if (executionKind === 'exact-at-most') {
     if (request.type !== 'consume') throw new Error('exact task receipts have no verifier finish');
-    wasm.distributed_finish_parallel_worker_start!(request.batch);
+    wasm.distributed_finish_parallel_worker_start!(takeVerifierBatch(request));
     let lastHeartbeatAt = performance.now();
     let lastHostYieldAt = lastHeartbeatAt;
     let receipt: ArrayBuffer | null = null;
@@ -341,7 +345,7 @@ async function executeAuthorized(request: ExecutableVerifierRequest): Promise<vo
       let lastHeartbeatAt = performance.now();
       let lastHostYieldAt = lastHeartbeatAt;
       let consumed: ClearraDistributedVerifierConsume =
-        wasm.distributed_verifier_consume(request.batch);
+        wasm.distributed_verifier_consume(takeVerifierBatch(request));
       let candidateCount = consumed.candidateCount;
       let candidateCountAvailable = consumed.candidateCountAvailable;
       let candidateCountExact =

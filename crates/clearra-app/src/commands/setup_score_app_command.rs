@@ -267,8 +267,9 @@ impl SetupScoreAppCommand {
             (self.candidates.capacity() as u128)
                 .checked_mul(core::mem::size_of::<SetupScoreCandidateRequest>() as u128)?,
         )?;
-        let mut transient = (self.candidates.len() as u128)
-            .checked_mul(core::mem::size_of::<ReducedCandidate>() as u128)?;
+        let mut transient = (self.candidates.len() as u128).checked_mul(
+            (core::mem::size_of::<ReducedCandidate>() + 2 * core::mem::size_of::<usize>()) as u128,
+        )?;
         for candidate in &self.candidates {
             bytes = bytes
                 .checked_add(candidate.candidate_id.capacity() as u128)?
@@ -299,7 +300,12 @@ struct ReducedCandidate {
     setup_covered_pattern_count: usize,
     setup_covered_probability: String,
     setup_row: clearra_coverage::pattern::pattern_bitset::PatternBitSet,
-    continuation_probability: String,
+    continuation: ValidatedContinuationScore,
+}
+
+#[derive(Clone, Debug)]
+struct ValidatedContinuationScore {
+    probability: String,
     expected_score_bits: u64,
     expected_score: String,
 }
@@ -327,13 +333,15 @@ enum SetupScoreRunError {
 }
 
 fn execute(
-    command: SetupScoreAppCommand,
+    mut command: SetupScoreAppCommand,
     context: &AppExecutionContext<'_>,
 ) -> Result<ProductResultPayload, SetupScoreRunError> {
-    let mut reduced = Vec::with_capacity(command.candidates.len());
+    let candidates = std::mem::take(&mut command.candidates);
+    let mut reduced: Vec<ReducedCandidate> = Vec::with_capacity(candidates.len());
+    let continuation_producers = continuation_producer_indices(&candidates);
     let mut canonical_weights = None;
     let mut pattern_universe_identity = None;
-    for candidate in command.candidates.iter().cloned() {
+    for (index, candidate) in candidates.into_iter().enumerate() {
         let coverage = candidate
             .coverage
             .execute_setup_score_coverage(
@@ -364,50 +372,27 @@ fn execute(
             pattern_universe_identity = Some(coverage.pattern_universe_identity().to_owned());
         }
 
-        let authority = match PcScoreCompiledAuthority::compile_scenario(
-            candidate.continuation,
-            PcScoreIngressOrigin::CanonicalPcScore,
-        ) {
-            Ok(authority) => authority,
-            Err(PcScoreCompiledAuthorityError::ResourceAdmission(report)) => {
-                return Err(SetupScoreRunError::Core(
-                    clearra_core_executor::CoreExecutionError::resource_incomplete(
-                        "execution-admission",
-                        0,
-                        *report,
-                    ),
-                ));
-            }
-            Err(PcScoreCompiledAuthorityError::ProblemCompile(error)) => {
-                return Err(SetupScoreRunError::Rejected(format!(
-                    "setup score continuation compile failed: {error:?}"
-                )));
-            }
-            Err(PcScoreCompiledAuthorityError::Contract(error)) => {
-                return Err(SetupScoreRunError::Rejected(format!(
-                    "setup score continuation contract rejected: {error}"
-                )));
-            }
+        if context.execution_control().is_cancelled() {
+            return Err(SetupScoreRunError::Core(
+                clearra_core_executor::CoreExecutionError::Cancelled,
+            ));
+        }
+        let producer = continuation_producers[index];
+        let continuation = if producer == index {
+            evaluate_continuation(candidate.continuation, context)?
+        } else {
+            // The producer completed earlier in canonical candidate order,
+            // with the identical full query. Only its validated score may be
+            // reused; each colored Setup candidate still has its own coverage.
+            reduced[producer].continuation.clone()
         };
-        let (_, score_evidence) = context
-            .services()
-            .core_executor()
-            .execute_pc_score_with_control(
-                &authority,
-                context.pc_score_external_retained_context_bytes(),
-                context.execution_control(),
-            )
-            .map_err(SetupScoreRunError::Core)?;
-        let score = score_evidence.report();
         reduced.push(ReducedCandidate {
             candidate_id: candidate.candidate_id,
             completed_board_mask: candidate.completed_board_mask,
             setup_covered_pattern_count: coverage.row().count_ones() as usize,
             setup_covered_probability: coverage.covered_probability().to_owned(),
             setup_row: coverage.row().clone(),
-            continuation_probability: score.covered_probability().to_owned(),
-            expected_score_bits: score.unconditional_expected_score_bits(),
-            expected_score: score.unconditional_expected_score().to_owned(),
+            continuation,
         });
     }
     let weights = canonical_weights.ok_or_else(|| {
@@ -418,7 +403,7 @@ fn execute(
         let best = reduced
             .iter()
             .filter(|candidate| candidate.setup_row.contains(pattern))
-            .map(|candidate| f64::from_bits(candidate.expected_score_bits))
+            .map(|candidate| f64::from_bits(candidate.continuation.expected_score_bits))
             .reduce(f64::max)
             .unwrap_or(0.0);
         let weight = weights.weight(pattern).ok_or_else(|| {
@@ -432,8 +417,8 @@ fn execute(
         ));
     }
     reduced.sort_by(|left, right| {
-        f64::from_bits(right.expected_score_bits)
-            .total_cmp(&f64::from_bits(left.expected_score_bits))
+        f64::from_bits(right.continuation.expected_score_bits)
+            .total_cmp(&f64::from_bits(left.continuation.expected_score_bits))
             .then_with(|| left.candidate_id.cmp(&right.candidate_id))
     });
     let evaluation_identity_sha256 = evaluation_identity(
@@ -455,8 +440,8 @@ fn execute(
                 format!("0x{:016x}", candidate.completed_board_mask),
                 candidate.setup_covered_pattern_count.to_string(),
                 candidate.setup_covered_probability.as_str(),
-                candidate.continuation_probability.as_str(),
-                candidate.expected_score.as_str(),
+                candidate.continuation.probability.as_str(),
+                candidate.continuation.expected_score.as_str(),
             )
         })
         .collect::<Result<Vec<_>, _>>()
@@ -487,6 +472,75 @@ fn execute(
         SETUP_SCORE_RESULT_CONTRACT,
         ProductResultPayloadContent::SetupScoreRanking(payload),
     ))
+}
+
+fn continuation_producer_indices(candidates: &[SetupScoreCandidateRequest]) -> Vec<usize> {
+    let mut producers = (0..candidates.len()).collect::<Vec<_>>();
+    let mut by_field = producers.clone();
+    by_field.sort_unstable_by_key(|&index| {
+        let field = candidates[index].continuation.initial_board();
+        (
+            field.width(),
+            field.visible_height(),
+            field.occupied_words(),
+            index,
+        )
+    });
+    for pair in by_field.windows(2) {
+        let (left, right) = (pair[0], pair[1]);
+        // Board grouping only locates possible duplicates. Full equality
+        // binds queue/window, observation, rule, objective and resource policy.
+        if candidates[left].continuation == candidates[right].continuation {
+            producers[right] = producers[left];
+        }
+    }
+    producers
+}
+
+fn evaluate_continuation(
+    query: PcScenarioQuery,
+    context: &AppExecutionContext<'_>,
+) -> Result<ValidatedContinuationScore, SetupScoreRunError> {
+    let authority = match PcScoreCompiledAuthority::compile_scenario(
+        query,
+        PcScoreIngressOrigin::CanonicalPcScore,
+    ) {
+        Ok(authority) => authority,
+        Err(PcScoreCompiledAuthorityError::ResourceAdmission(report)) => {
+            return Err(SetupScoreRunError::Core(
+                clearra_core_executor::CoreExecutionError::resource_incomplete(
+                    "execution-admission",
+                    0,
+                    *report,
+                ),
+            ));
+        }
+        Err(PcScoreCompiledAuthorityError::ProblemCompile(error)) => {
+            return Err(SetupScoreRunError::Rejected(format!(
+                "setup score continuation compile failed: {error:?}"
+            )));
+        }
+        Err(PcScoreCompiledAuthorityError::Contract(error)) => {
+            return Err(SetupScoreRunError::Rejected(format!(
+                "setup score continuation contract rejected: {error}"
+            )));
+        }
+    };
+    let (_, evidence) = context
+        .services()
+        .core_executor()
+        .execute_pc_score_with_control(
+            &authority,
+            context.pc_score_external_retained_context_bytes(),
+            context.execution_control(),
+        )
+        .map_err(SetupScoreRunError::Core)?;
+    let score = evidence.report();
+    Ok(ValidatedContinuationScore {
+        probability: score.covered_probability().to_owned(),
+        expected_score_bits: score.unconditional_expected_score_bits(),
+        expected_score: score.unconditional_expected_score().to_owned(),
+    })
 }
 
 fn score_execution_policy(coverage_policy: &PcExecutionPolicy) -> PcExecutionPolicy {
@@ -555,7 +609,7 @@ fn evaluation_identity(
     for candidate in candidates {
         hash_text(&mut hasher, candidate.candidate_id.as_str());
         hasher.update(candidate.completed_board_mask.to_be_bytes());
-        hasher.update(candidate.expected_score_bits.to_be_bytes());
+        hasher.update(candidate.continuation.expected_score_bits.to_be_bytes());
         hasher.update((candidate.setup_covered_pattern_count as u128).to_be_bytes());
     }
     format!("{:x}", hasher.finalize())
@@ -604,6 +658,38 @@ mod tests {
             policy,
         )
         .expect("valid Setup-score command")
+    }
+
+    #[test]
+    fn setup_score_reuse_requires_full_continuation_query_not_candidate_identity() {
+        let policy = PcExecutionPolicy::mvp_default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_allow_backend_fallback(false);
+        let mut first = setup_score_command(policy).candidates.remove(0);
+        first.continuation = first.continuation.with_initial_board(
+            PcScenarioBoard::standard_10_from_words(7, [0xf, 1, 0, 0]).unwrap(),
+        );
+        let mut same_board_different_candidate = first.clone();
+        same_board_different_candidate
+            .candidate_id
+            .push_str("-colored");
+        let mut high_word_differs = same_board_different_candidate.clone();
+        high_word_differs.continuation = high_word_differs.continuation.with_initial_board(
+            PcScenarioBoard::standard_10_from_words(7, [0xf, 2, 0, 0]).unwrap(),
+        );
+        let mut observation_differs = first.clone();
+        observation_differs.continuation = observation_differs
+            .continuation
+            .with_queue_observation_policy(clearra_supply::QueueObservationPolicy::VisibleSeven);
+        assert_eq!(
+            continuation_producer_indices(&[
+                first,
+                high_word_differs,
+                same_board_different_candidate,
+                observation_differs,
+            ]),
+            [0, 1, 0, 3]
+        );
     }
 
     #[test]

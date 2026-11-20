@@ -658,6 +658,73 @@ fn compare_products(installed: bool) {
 }
 
 #[test]
+fn setup_score_reuses_equal_pc_input_without_reusing_colored_build_coverage() {
+    use clearra_ctk3::{encode_ctk3, Ctk3Color, Ctk3Document, Ctk3Page, Ctk3Piece};
+    use clearra_host_contract::ProductResultPayloadContent;
+
+    #[cfg(feature = "parallel")]
+    register_setup_system_host();
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    // Two horizontal Is and two Os occupy the same 4x2 region. Both
+    // continue with the same three-Os PC, but only the I drawing matches the
+    // supplied Setup queue.
+    let page = |piece| {
+        let mut cells = vec![Ctk3Color::Empty; 20];
+        cells[0..4].fill(Ctk3Color::Piece(piece));
+        cells[10..14].fill(Ctk3Color::Piece(piece));
+        Ctk3Page::new(2, cells)
+    };
+    let source = encode_ctk3(&Ctk3Document::new(
+        10,
+        vec![page(Ctk3Piece::I), page(Ctk3Piece::O)],
+    ))
+    .unwrap();
+    let document = SetupScoreDocumentV1::decode(FieldDocumentFormat::Ctk3, &source).unwrap();
+    let command = SetupScoreAppCommand::new(
+        document,
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 2])),
+        None,
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O; 3])),
+        None,
+        2,
+        false,
+        ScoreProfileSelection::Tetrio,
+        0,
+        RuleProfile::new(RuleProfileId::SrsPlus),
+        policy(false, false, 1),
+    )
+    .unwrap();
+    let response = success(&context, AppRequest::new(AppCommand::SetupScore(command)));
+    let ProductResultPayloadContent::SetupScoreRanking(ranking) =
+        response.public_result_payload().unwrap().content()
+    else {
+        panic!("actual Setup-score ranked payload required");
+    };
+    assert!(ranking.complete());
+    let [first, second] = ranking.candidates() else {
+        panic!("two distinct canonical color drawings");
+    };
+    assert_ne!(first.candidate_id(), second.candidate_id());
+    assert_eq!(first.continuation_probability().parse(), Ok(1.0_f64));
+    assert_eq!(
+        first.continuation_probability(),
+        second.continuation_probability()
+    );
+    assert_eq!(
+        first.unconditional_expected_score(),
+        second.unconditional_expected_score()
+    );
+    let mut coverage = [
+        first.setup_covered_pattern_count(),
+        second.setup_covered_pattern_count(),
+    ];
+    coverage.sort_unstable();
+    assert_eq!(coverage, ["0", "1"]);
+}
+
+#[test]
 fn unavailable_optional_assets_preserve_real_pc_score_and_build_reducers() {
     compare_products(false);
 }
