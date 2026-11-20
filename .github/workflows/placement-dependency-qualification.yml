@@ -222,6 +222,7 @@ jobs:
             status=1
           fi
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
+          cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_sr3_local_continue_is_cooperative_on_one_worker || status=1
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint || status=1
           cargo test --locked -p clearra-app --features native-c-core --test opening_continuation_parity || status=1
           cargo test --locked -p clearra-app --features native-c-core \

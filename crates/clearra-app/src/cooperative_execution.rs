@@ -20,7 +20,7 @@ use clearra_forward_search::{
     ForwardSearchAdvance, ForwardSearchError, ForwardSearchReport, ForwardSearchSession,
 };
 use clearra_host_contract::{AppCommandKind, BackendReport, ResourceBudget};
-use clearra_pc_graph::request::OpeningPcSearchQuery;
+use clearra_pc_graph::request::{OpeningPcSearchQuery, PcExecutionPolicy};
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFinesseRequest,
     BuildSolutionProbabilityPolicy, FiniteScenarioPcCompileBudget, FiniteScenarioPcCompileError,
@@ -41,6 +41,7 @@ use crate::{
     commands::{
         build_probability_app_command::{BuildProbabilityAppCommand, BuildProbabilityResultMode},
         build_v2_app_command::BuildV2AppRequest,
+        continue_app_command::ContinueAppCommand,
         core_execution_error_response,
         path_app_command::path_response,
         scenario_app_command::{FullHeightScenarioInputReplay, ScenarioAppCommand},
@@ -261,7 +262,8 @@ impl CooperativePostprocessExecution {
                     ..
                 } => projection.projection().is_standard(),
                 CooperativeSearchResponseKind::PcOpeningContinuation(_)
-                | CooperativeSearchResponseKind::ScenarioFullHeightInputReplay { .. } => true,
+                | CooperativeSearchResponseKind::ScenarioFullHeightInputReplay { .. }
+                | CooperativeSearchResponseKind::LocalContinueSr3(_) => true,
                 _ => false,
             }
     }
@@ -759,6 +761,7 @@ pub(crate) enum CooperativeSearchResponseKind {
         render_contract: Option<crate::commands::ScenarioAppRenderContract>,
         replay: FullHeightScenarioInputReplay,
     },
+    LocalContinueSr3(ContinueAppCommand),
     ScenarioChance {
         authority: PcChanceCompiledAuthority,
         expected_problem: Arc<clearra_problem::SearchProblem>,
@@ -1236,22 +1239,35 @@ impl AppContext {
             &execution_parts.0,
             AppCommand::Damage(_) | AppCommand::SpinFinder(_) | AppCommand::Ren(_)
         );
-        let core_search = matches!(
-            &execution_parts.0,
-            AppCommand::Pc(_)
-                | AppCommand::Path(_)
-                | AppCommand::Scenario(_)
-                | AppCommand::Setup(_)
-                | AppCommand::BuildProbability(_)
-        ) || matches!(&execution_parts.0, AppCommand::BuildV2(command)
+        let cooperative_backend = self
+            .services()
+            .core_executor()
+            .supports_cooperative_wasm_search();
+        // sr3 carries no execution-policy override. On a multiworker host
+        // ExtendedPc may enter a blocking native pool from advance(), hence
+        // the unchanged synchronous Continue path remains its owner.
+        let prepared_continue_sr3 = match &execution_parts.0 {
+            AppCommand::Continue(command)
+                if cooperative_backend
+                    && execution_parts.5.is_none()
+                    && PcExecutionPolicy::mvp_default().workers() == 1 =>
+            {
+                command.compile_cooperative_sr3()
+            }
+            _ => None,
+        };
+        let core_search = prepared_continue_sr3.is_some()
+            || matches!(
+                &execution_parts.0,
+                AppCommand::Pc(_)
+                    | AppCommand::Path(_)
+                    | AppCommand::Scenario(_)
+                    | AppCommand::Setup(_)
+                    | AppCommand::BuildProbability(_)
+            )
+            || matches!(&execution_parts.0, AppCommand::BuildV2(command)
             if matches!(command.request(), BuildV2AppRequest::BuildCover(_)));
-        if (!forward && !core_search)
-            || (core_search
-                && !self
-                    .services()
-                    .core_executor()
-                    .supports_cooperative_wasm_search())
-        {
+        if (!forward && !core_search) || (core_search && !cooperative_backend) {
             return CooperativeAppExecution {
                 context: Some(self.clone()),
                 state: CooperativeExecutionState::Immediate(Some(execution_parts)),
@@ -1447,7 +1463,13 @@ impl AppContext {
             }
             _ => None,
         };
-        let compiled = compile_search_command(command);
+        let compiled = match (command, prepared_continue_sr3) {
+            (AppCommand::Continue(command), Some(problem)) => Ok((
+                Arc::new(problem),
+                CooperativeSearchResponseKind::LocalContinueSr3(command),
+            )),
+            (command, _) => compile_search_command(command),
+        };
         let (problem, response_kind) = match compiled {
             Ok(compiled) => compiled,
             Err(response) => {
@@ -1625,8 +1647,8 @@ impl AppContext {
             Ok(session) => session,
             Err(error) => {
                 drop(problem);
-                drop(response_kind);
-                let response = wasm_search_error_response(
+                let response = cooperative_core_search_error_response(
+                    response_kind,
                     error,
                     &backend_requested,
                     gpu_device_requested.clone(),
@@ -2792,6 +2814,7 @@ impl CooperativeAppExecution {
         if matches!(
             &postprocess.response_kind,
             CooperativeSearchResponseKind::PcOpeningContinuation(_)
+                | CooperativeSearchResponseKind::LocalContinueSr3(_)
         ) && control.is_cancelled()
         {
             return CooperativeAppAdvance::Cancelled;
@@ -3107,8 +3130,8 @@ impl CooperativeAppExecution {
                                 product_capability_contract,
                             } = search;
                             drop(session);
-                            drop(response_kind);
-                            let response = wasm_search_error_response(
+                            let response = cooperative_core_search_error_response(
+                                response_kind,
                                 error,
                                 &backend_requested,
                                 gpu_device_requested,
@@ -4370,6 +4393,9 @@ pub(crate) fn response_from_search_with_build_score_derivation(
                 None => AppResponse::success(AppRenderModel::Scenario(result)),
             }
         }
+        CooperativeSearchResponseKind::LocalContinueSr3(command) => {
+            command.cooperative_sr3_response(result)
+        }
         CooperativeSearchResponseKind::ScenarioChance {
             authority,
             expected_problem,
@@ -4607,6 +4633,24 @@ fn forward_search_error_response(error: ForwardSearchError) -> AppResponse {
 
 fn core_error_from_wasm(error: WasmCpuSearchError) -> CoreExecutionError {
     error.into_core_execution_error()
+}
+
+fn cooperative_core_search_error_response(
+    response_kind: CooperativeSearchResponseKind,
+    error: WasmCpuSearchError,
+    backend_requested: &str,
+    gpu_device_requested: Option<String>,
+) -> AppResponse {
+    let local_continue = matches!(
+        &response_kind,
+        CooperativeSearchResponseKind::LocalContinueSr3(_)
+    );
+    drop(response_kind);
+    if local_continue {
+        core_execution_error_response(core_error_from_wasm(error))
+    } else {
+        wasm_search_error_response(error, backend_requested, gpu_device_requested)
+    }
 }
 
 fn wasm_search_error_response(

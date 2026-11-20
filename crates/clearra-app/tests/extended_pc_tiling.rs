@@ -491,6 +491,166 @@ fn full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family() {
 }
 
 #[test]
+#[cfg(not(target_family = "wasm"))]
+fn full_height_sr3_local_continue_is_cooperative_on_one_worker() {
+    use clearra_app::{AppRenderModel, ContinueAppCommand};
+    use clearra_core_domain::execution_cancellation::{
+        ExecutionCancellationHandle, ExecutionCancellationToken, ExecutionProgress, ProgressSink,
+    };
+    use clearra_pc_graph::request::PcContinuationTokenCodec;
+    use clearra_supply::QueueObservationPolicy;
+    use std::{env, process::Command, sync::Arc};
+
+    // Runtime CPU capacity reads an existing outer process setting. Set it
+    // only in this isolated test subprocess, never in the parallel test runner.
+    const TEST: &str = "full_height_sr3_local_continue_is_cooperative_on_one_worker";
+    const CHILD: &str = "CLEARRA_TEST_SR3_COOPERATIVE_CHILD";
+    if env::var_os(CHILD).is_none() {
+        let output = Command::new(env::current_exe().expect("current test executable"))
+            .args(["--exact", TEST])
+            .env(CHILD, "1")
+            .env("CLEARRA_EXPECTED_VCPUS", "1")
+            .output()
+            .expect("run isolated one-worker sr3 regression");
+        assert!(
+            output.status.success(),
+            "isolated sr3 regression failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    assert_eq!(PcExecutionPolicy::mvp_default().workers(), 1);
+
+    struct CancelAtPublication(ExecutionCancellationHandle);
+    impl ProgressSink for CancelAtPublication {
+        fn report(&self, progress: ExecutionProgress) {
+            if progress.stage == "postprocess" && progress.completed == 1 {
+                self.0.cancel();
+            }
+        }
+    }
+
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for (height, observation) in [
+        (7, QueueObservationPolicy::VisibleSeven),
+        (24, QueueObservationPolicy::FullQueueOracle),
+    ] {
+        let (fixture, _, _) = ordinary_request(height, false);
+        let AppCommand::Scenario(scenario) = fixture.command() else {
+            panic!("scenario fixture");
+        };
+        let query = scenario
+            .query()
+            .clone()
+            .with_queue_observation_policy(observation);
+        let token = PcContinuationTokenCodec::encode_scenario_replay(&query).unwrap();
+        assert!(token.starts_with("sr3:"));
+        let request = AppRequest::new(AppCommand::Continue(ContinueAppCommand::new(Some(token))));
+        let direct = context.run(request.clone());
+        assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
+
+        let control = ExecutionControl::default();
+        let mut execution = context.start_cooperative_execution(request.clone());
+        assert!(matches!(
+            execution.advance(1, &control),
+            CooperativeAppAdvance::Pending
+        ));
+        let response = (0..4096)
+            .find_map(|_| match execution.advance(1, &control) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => None,
+                CooperativeAppAdvance::Completed(response) => Some(response),
+                other => panic!("unexpected cooperative sr3 response: {other:?}"),
+            })
+            .expect("bounded sr3 replay completed");
+        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+        let (Some(AppRenderModel::Continue(expected)), Some(AppRenderModel::Continue(actual))) =
+            (direct.render_model(), response.render_model())
+        else {
+            panic!("both local drivers must use Continue's existing result");
+        };
+        for key in [
+            "status",
+            "continuation_kind",
+            "input_continuation_token",
+            "interactive_prompt",
+            "actual_backend",
+            "normalized_solution_set_hash",
+            "queue_knowledge",
+            "observation_policy_evaluated",
+            "coverage_pattern_count",
+            "covered_pattern_count",
+            "count_complete",
+        ] {
+            let value = |fields: &[clearra_output::model::RenderField]| {
+                fields
+                    .iter()
+                    .find(|field| field.key() == key)
+                    .expect("expected Continue result field")
+                    .value()
+                    .as_text()
+            };
+            assert_eq!(
+                value(expected.fields()),
+                value(actual.fields()),
+                "{height}L: {key}"
+            );
+        }
+
+        let mut early = context.start_cooperative_execution(request.clone());
+        let cancellation = ExecutionCancellationToken::new();
+        let early_control = ExecutionControl::new(cancellation.clone());
+        assert!(matches!(
+            early.advance(1, &early_control),
+            CooperativeAppAdvance::Pending
+        ));
+        cancellation.handle().cancel();
+        assert!(matches!(
+            early.advance(1, &early_control),
+            CooperativeAppAdvance::Cancelled
+        ));
+
+        let mut late = context.start_cooperative_execution(request);
+        let cancellation = ExecutionCancellationToken::new();
+        let publication_handle = cancellation.handle();
+        let late_control = ExecutionControl::new(cancellation)
+            .with_progress_sink(Arc::new(CancelAtPublication(publication_handle.clone())));
+        let cancelled = (0..4096).any(|_| match late.advance(1, &late_control) {
+            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => false,
+            CooperativeAppAdvance::Cancelled => true,
+            other => panic!("cancelled sr3 replay must not publish: {other:?}"),
+        });
+        assert!(cancelled && publication_handle.is_cancelled());
+    }
+
+    let malformed = AppRequest::new(AppCommand::Continue(ContinueAppCommand::new(Some(
+        "sr3:invalid".to_owned(),
+    ))));
+    let direct = context.run(malformed.clone());
+    let mut execution = context.start_cooperative_execution(malformed.clone());
+    let CooperativeAppAdvance::Completed(response) =
+        execution.advance(1, &ExecutionControl::default())
+    else {
+        panic!("invalid sr3 must retain the original immediate diagnostic");
+    };
+    assert_eq!(direct.status(), response.status());
+    assert_eq!(
+        direct.error().unwrap().code(),
+        response.error().unwrap().code()
+    );
+
+    let mut cancelled = context.start_cooperative_execution(malformed);
+    let token = ExecutionCancellationToken::new();
+    token.handle().cancel();
+    assert!(matches!(
+        cancelled.advance(1, &ExecutionControl::new(token)),
+        CooperativeAppAdvance::Cancelled
+    ));
+}
+
+#[test]
 fn full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint() {
     use clearra_app::{AppRenderModel, ContinueAppCommand, PcPathIngressOrigin};
     use clearra_pc_graph::request::{PcContinuationToken, PcContinuationTokenCodec};
