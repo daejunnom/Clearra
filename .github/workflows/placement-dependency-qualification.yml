@@ -2,7 +2,7 @@ name: Placement Dependency Qualification
 
 on:
   push:
-    branches: [codex/v090-relation-rust-integration]
+    branches: [codex/v090-relation-rust-integration, codex/v090-relation-rust-p7p4]
   workflow_dispatch:
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
           set -eu
           cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib --no-run
           status=0
-          for filter in structural_graph_probability_tests bounded_no_entry reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows; do
+          for filter in structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_ candidate_witness_only_reads conditional_language_; do
             cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib "$filter" || status=1
           done
           exit "$status"
@@ -43,16 +43,11 @@ jobs:
       - name: Verify supervised capture and comparison on the one-I fixture
         run: |
           set -eu
+          df --output=avail -B1 "$GITHUB_WORKSPACE"
           CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked -p clearra-manage
           CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
-          manager=build/cargo/default/debug/clearra-manage
-          bench=build/cargo/default/debug/examples/placement_graph_bench
-          prefix="small-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          out=_local/artifacts/benchmarks/placement-graph-coverage
-          "$manager" storage verify --path "$out"
-          "$manager" runtime run --producer benchmark --profile benchmark-search --timeout 60 -- "$bench" --small --coverage-slot "$prefix-a"
-          CLEARRA_MOVEMENT_CLEAR_CERTIFICATES=1 "$manager" runtime run --producer benchmark --profile benchmark-search --timeout 60 -- "$bench" --small --coverage-slot "$prefix-b"
-          "$bench" --compare-coverage "$out/$prefix-a/solution-coverage.clrcov" "$out/$prefix-b/solution-coverage.clrcov"
+          node scripts/benchmark/run-placement-coverage-proof.mjs --case small --build-profile debug \
+            --id "small-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source-sha "$GITHUB_SHA"
   receipts-and-adoption:
     if: github.ref == 'refs/heads/codex/v090-relation-rust-integration'
     runs-on: ubuntu-latest
@@ -67,7 +62,7 @@ jobs:
         run: cargo test --locked -p clearra-manage --bin clearra-manage runtime::tests
       - name: Test the local adoption evaluator
         if: ${{ !cancelled() }}
-        run: node --test scripts/tools/placement-graph-adoption.test.mjs
+        run: node --test scripts/tools/placement-graph-adoption.test.mjs scripts/benchmark/run-placement-coverage-proof.test.mjs
   operation-reuse:
     if: github.ref == 'refs/heads/codex/v090-relation-rust-integration'
     runs-on: ubuntu-latest
@@ -90,3 +85,33 @@ jobs:
           cmake --build "$out" --target clearra_core --parallel 2
           RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-L native=$out" cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_tests
           SH
+  p7p4-exact-handoff:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/v090-relation-rust-p7p4'
+    runs-on: ubuntu-latest
+    timeout-minutes: 125
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require the exact source and enough managed workspace storage
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          available="$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -1 | tr -d ' ')"
+          printf 'workspace_available_bytes=%s\n' "$available"
+          test "$available" -ge 35433480192 || { echo 'P7P4 capture requires 33 GiB free in its artifact volume'; exit 2; }
+      - name: Build native proof tools once
+        run: |
+          cargo build --locked --release -p clearra-manage
+          cargo build --locked --release -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
+      - name: Compare all per-solution queues under separate supervised leases
+        run: |
+          node scripts/benchmark/run-placement-coverage-proof.mjs --case p7p4 \
+            --id "large-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source-sha "$GITHUB_SHA"
+      - name: Retain bounded proof evidence without publishing raw queue files
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: p7p4-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _local/artifacts/benchmarks/placement-graph-coverage/large-${{ github.run_id }}-${{ github.run_attempt }}-proof/*.json
+          if-no-files-found: ignore
+          retention-days: 14

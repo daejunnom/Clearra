@@ -78,8 +78,19 @@ use crate::solution_probability::{
 };
 
 #[cfg(any(test, feature = "local-search-ab"))]
+pub enum CapturedSolutionCoverage<'a> {
+    Bitmap(&'a PatternBitSet),
+    P7P4(Arc<super::standard_bag_coverage::P7P4CoverageBlocks>),
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
 pub(crate) type SolutionCoverageCapture = Arc<
-    dyn Fn(StandardBoard64TilingIdentity, &PatternBitSet) -> Result<(), &'static str> + Send + Sync,
+    dyn for<'a> Fn(
+            StandardBoard64TilingIdentity,
+            CapturedSolutionCoverage<'a>,
+        ) -> Result<(), &'static str>
+        + Send
+        + Sync,
 >;
 
 /// Emit one exact per-candidate fragment while its worker's symbolic root is
@@ -90,10 +101,25 @@ pub(super) fn capture_candidate_solution_coverage(
     capture: &SolutionCoverageCapture,
     identity: StandardBoard64TilingIdentity,
     result: &super::buildup::CandidateBuildResult,
-    workspace: &BuildUpWorkspace,
+    workspace: &mut BuildUpWorkspace,
 ) -> Result<(), WasmExactSearchError> {
     if !result.buildable {
         return Ok(());
+    }
+    if result.covered_patterns.is_none() {
+        if let Some(root) = result.symbolic_coverage_root {
+            if let Some(blocks) = workspace.capture_p7p4_root(root)? {
+                if blocks.covered_count() == 0
+                    || blocks.covered_count() as usize != result.symbolic_covered_pattern_count
+                {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "solution_coverage_capture_cardinality_mismatch",
+                    ));
+                }
+                return capture(identity, CapturedSolutionCoverage::P7P4(blocks))
+                    .map_err(WasmExactSearchError::InvalidProblem);
+            }
+        }
     }
     let mut symbolic = result
         .symbolic_coverage_root
@@ -122,7 +148,8 @@ pub(super) fn capture_candidate_solution_coverage(
             "solution_coverage_capture_cardinality_mismatch",
         ));
     }
-    capture(identity, bits).map_err(WasmExactSearchError::InvalidProblem)
+    capture(identity, CapturedSolutionCoverage::Bitmap(bits))
+        .map_err(WasmExactSearchError::InvalidProblem)
 }
 
 // Keep browser-worker cancellation responsive without paying an ABI/event-loop
@@ -3017,15 +3044,16 @@ impl WasmExactSearchSession {
             solution_coverage_required || self.solution_coverage_capture.is_some();
         #[cfg(not(any(test, feature = "local-search-ab")))]
         let exact_candidate_coverage = solution_coverage_required;
-        let coverage_already_known = self.buildup_workspace.standard_bag_coverage_complete()
-            || self
-                .covered_patterns
-                .is_superset(target.possible_patterns.as_ref())
-                .expect("candidate pattern group belongs to the session universe");
         let witness_mode = CandidateWitnessMode::for_candidate(
             &self.problem,
             target,
-            coverage_already_known,
+            || {
+                self.buildup_workspace.standard_bag_coverage_complete()
+                    || self
+                        .covered_patterns
+                        .is_superset(target.possible_patterns.as_ref())
+                        .expect("candidate pattern group belongs to the session universe")
+            },
             exact_candidate_coverage,
         );
         if matches!(
@@ -3186,7 +3214,7 @@ impl WasmExactSearchSession {
                 capture,
                 candidate.identity,
                 &result,
-                &self.buildup_workspace,
+                &mut self.buildup_workspace,
             )?;
         }
         if let Some(candidate_coverage) = result.covered_patterns.as_ref() {
@@ -5841,6 +5869,74 @@ mod tests {
     };
 
     #[test]
+    fn candidate_witness_only_reads_known_coverage_when_eligible() {
+        use crate::backend::wasm_cpu::{buildup::CandidateWitnessMode, geometry::TargetGroup};
+        use clearra_supply::pattern_universe::{PatternPiecePositionIndex, PieceMultisetKey};
+        use std::sync::Arc;
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(1, 0x3f0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::unique());
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("witness problem");
+        let universe = problem
+            .piece_source()
+            .materialized_universe()
+            .expect("fixed queue universe");
+        assert_eq!(universe.pattern_count(), 1);
+        let bits = Arc::new(PatternBitSet::all(1));
+        let mut target = TargetGroup {
+            key: PieceMultisetKey::from_pieces([PieceKind::I]),
+            pattern_index_id: 0,
+            possible_patterns: Arc::clone(&bits),
+            pattern_index: None,
+        };
+        let forbidden = || panic!("an ineligible witness mode must not scan queue coverage");
+        assert_eq!(
+            CandidateWitnessMode::for_candidate(&problem, &target, forbidden, false),
+            CandidateWitnessMode::Disabled
+        );
+        target.pattern_index = Some(Arc::new(
+            PatternPiecePositionIndex::compile_subset_before(universe, &bits, 1)
+                .expect("one concrete queue index"),
+        ));
+        assert_eq!(
+            CandidateWitnessMode::for_candidate(&problem, &target, forbidden, true),
+            CandidateWitnessMode::Disabled
+        );
+        let count_all =
+            ProblemCompiler::compile_scenario_pc(&query.with_count_policy(PcCountPolicy::CountAll))
+                .expect("count-all problem");
+        assert_eq!(
+            CandidateWitnessMode::for_candidate(&count_all, &target, forbidden, false),
+            CandidateWitnessMode::Disabled
+        );
+        let mut checked = false;
+        assert_eq!(
+            CandidateWitnessMode::for_candidate(
+                &problem,
+                &target,
+                || {
+                    checked = true;
+                    true
+                },
+                false,
+            ),
+            CandidateWitnessMode::MembershipOnly
+        );
+        assert!(checked);
+        assert_eq!(
+            CandidateWitnessMode::for_candidate(&problem, &target, || false, false),
+            CandidateWitnessMode::ExactSinglePatternCoverage
+        );
+    }
+
+    #[test]
     fn capture_candidate_solution_coverage_matches_explicit_product_rows() {
         use std::{
             collections::BTreeMap,
@@ -5886,7 +5982,10 @@ mod tests {
                 PatternBitSet,
             >::new()));
             let capture_rows = Arc::clone(&rows);
-            let capture = move |identity, bits: &PatternBitSet| {
+            let capture = move |identity, fragment: CapturedSolutionCoverage<'_>| {
+                let CapturedSolutionCoverage::Bitmap(bits) = fragment else {
+                    return Err("small fixture must export the explicit bitmap");
+                };
                 let mut rows = capture_rows.lock().expect("fixture capture");
                 let row = rows
                     .entry(identity)

@@ -28,6 +28,44 @@ pub struct StructuralOrderMetrics {
     pub translation_interval_guards: u64,
     pub translation_interval_row_steps: u64,
     pub movement_clear: MovementClearMetrics,
+    pub first_kick_interval: FirstKickIntervalMetrics,
+    pub conditional_order: ConditionalOrderMetrics,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ConditionalOrderMetrics {
+    pub attempted_candidates: u64,
+    pub certified_candidates: u64,
+    pub empty_certificates: u64,
+    pub unknown_candidates: u64,
+    pub budget_candidates: u64,
+    pub checked_transitions: u64,
+    pub residual_states: u64,
+    pub graph_bypasses: u64,
+    pub reused_pose_proofs: u64,
+}
+
+impl ConditionalOrderMetrics {
+    fn add(&mut self, delta: Self) {
+        self.attempted_candidates += delta.attempted_candidates;
+        self.certified_candidates += delta.certified_candidates;
+        self.empty_certificates += delta.empty_certificates;
+        self.unknown_candidates += delta.unknown_candidates;
+        self.budget_candidates += delta.budget_candidates;
+        self.checked_transitions += delta.checked_transitions;
+        self.residual_states += delta.residual_states;
+        self.graph_bypasses += delta.graph_bypasses;
+        self.reused_pose_proofs += delta.reused_pose_proofs;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FirstKickIntervalMetrics {
+    pub attempts: u64,
+    pub proofs: u64,
+    /// Edges selected without any ordinary lock query, excluding interval
+    /// successes superseded by a later exact hard-drop alternative.
+    pub selected_locks: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -55,7 +93,43 @@ thread_local! {
     static MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static TRANSLATION_MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static MOVEMENT_CLEAR_MODE: Cell<Option<bool>> = const { Cell::new(None) };
+    static FIRST_KICK_INTERVAL_MODE: Cell<Option<bool>> = const { Cell::new(None) };
+    static CONDITIONAL_ORDER_MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static METRICS: Cell<StructuralOrderMetrics> = Cell::new(StructuralOrderMetrics::default());
+}
+
+pub(super) fn conditional_order_enabled() -> bool {
+    if let Some(mode) = CONDITIONAL_ORDER_MODE.with(Cell::get) {
+        return mode;
+    }
+    #[cfg(feature = "local-search-ab")]
+    {
+        static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            std::env::var("CLEARRA_CONDITIONAL_ORDER").is_ok_and(|value| value == "1")
+        })
+    }
+    #[cfg(not(feature = "local-search-ab"))]
+    {
+        false
+    }
+}
+
+pub(super) fn first_kick_intervals_enabled() -> bool {
+    if let Some(mode) = FIRST_KICK_INTERVAL_MODE.with(Cell::get) {
+        return mode;
+    }
+    #[cfg(feature = "local-search-ab")]
+    {
+        static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            std::env::var("CLEARRA_FIRST_KICK_INTERVAL").is_ok_and(|value| value == "1")
+        })
+    }
+    #[cfg(not(feature = "local-search-ab"))]
+    {
+        false
+    }
 }
 
 pub(super) fn movement_clear_certificates_enabled() -> bool {
@@ -113,7 +187,10 @@ pub(super) fn enabled() -> bool {
 mod process_totals {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{MovementClearMetrics, StructuralOrderMetrics};
+    use super::{
+        ConditionalOrderMetrics, FirstKickIntervalMetrics, MovementClearMetrics,
+        StructuralOrderMetrics,
+    };
 
     // Bypass totals count successful certificates. Analytic totals also count
     // failed candidates, once per candidate rather than per row or primitive
@@ -134,6 +211,18 @@ mod process_totals {
     static REUSED_CLOSED: AtomicU64 = AtomicU64::new(0);
     static POINT_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
     static POINT_PROOFS: AtomicU64 = AtomicU64::new(0);
+    static FIRST_KICK_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    static FIRST_KICK_PROOFS: AtomicU64 = AtomicU64::new(0);
+    static FIRST_KICK_SELECTED: AtomicU64 = AtomicU64::new(0);
+    static CONDITIONAL_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    static CONDITIONAL_CERTIFIED: AtomicU64 = AtomicU64::new(0);
+    static CONDITIONAL_EMPTY: AtomicU64 = AtomicU64::new(0);
+    static CONDITIONAL_UNKNOWN: AtomicU64 = AtomicU64::new(0);
+    static CONDITIONAL_BUDGET: AtomicU64 = AtomicU64::new(0);
+    static CONDITIONAL_TRANSITIONS: AtomicU64 = AtomicU64::new(0);
+    static CONDITIONAL_STATES: AtomicU64 = AtomicU64::new(0);
+    static CONDITIONAL_BYPASSES: AtomicU64 = AtomicU64::new(0);
+    static CONDITIONAL_REUSED: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn record(delta: StructuralOrderMetrics) {
         BYPASSES.fetch_add(delta.skipped_build_graphs, Ordering::Relaxed);
@@ -162,6 +251,22 @@ mod process_totals {
                 point_pose_attempts: POINT_ATTEMPTS.load(Ordering::Relaxed),
                 point_pose_proofs: POINT_PROOFS.load(Ordering::Relaxed),
             },
+            first_kick_interval: FirstKickIntervalMetrics {
+                attempts: FIRST_KICK_ATTEMPTS.load(Ordering::Relaxed),
+                proofs: FIRST_KICK_PROOFS.load(Ordering::Relaxed),
+                selected_locks: FIRST_KICK_SELECTED.load(Ordering::Relaxed),
+            },
+            conditional_order: ConditionalOrderMetrics {
+                attempted_candidates: CONDITIONAL_ATTEMPTS.load(Ordering::Relaxed),
+                certified_candidates: CONDITIONAL_CERTIFIED.load(Ordering::Relaxed),
+                empty_certificates: CONDITIONAL_EMPTY.load(Ordering::Relaxed),
+                unknown_candidates: CONDITIONAL_UNKNOWN.load(Ordering::Relaxed),
+                budget_candidates: CONDITIONAL_BUDGET.load(Ordering::Relaxed),
+                checked_transitions: CONDITIONAL_TRANSITIONS.load(Ordering::Relaxed),
+                residual_states: CONDITIONAL_STATES.load(Ordering::Relaxed),
+                graph_bypasses: CONDITIONAL_BYPASSES.load(Ordering::Relaxed),
+                reused_pose_proofs: CONDITIONAL_REUSED.load(Ordering::Relaxed),
+            },
         }
     }
 
@@ -184,6 +289,24 @@ mod process_totals {
         REUSED_CLOSED.fetch_add(delta.reused_closed_locks, Ordering::Relaxed);
         POINT_ATTEMPTS.fetch_add(delta.point_pose_attempts, Ordering::Relaxed);
         POINT_PROOFS.fetch_add(delta.point_pose_proofs, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_first_kick_interval(delta: FirstKickIntervalMetrics) {
+        FIRST_KICK_ATTEMPTS.fetch_add(delta.attempts, Ordering::Relaxed);
+        FIRST_KICK_PROOFS.fetch_add(delta.proofs, Ordering::Relaxed);
+        FIRST_KICK_SELECTED.fetch_add(delta.selected_locks, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_conditional_order(delta: ConditionalOrderMetrics) {
+        CONDITIONAL_ATTEMPTS.fetch_add(delta.attempted_candidates, Ordering::Relaxed);
+        CONDITIONAL_CERTIFIED.fetch_add(delta.certified_candidates, Ordering::Relaxed);
+        CONDITIONAL_EMPTY.fetch_add(delta.empty_certificates, Ordering::Relaxed);
+        CONDITIONAL_UNKNOWN.fetch_add(delta.unknown_candidates, Ordering::Relaxed);
+        CONDITIONAL_BUDGET.fetch_add(delta.budget_candidates, Ordering::Relaxed);
+        CONDITIONAL_TRANSITIONS.fetch_add(delta.checked_transitions, Ordering::Relaxed);
+        CONDITIONAL_STATES.fetch_add(delta.residual_states, Ordering::Relaxed);
+        CONDITIONAL_BYPASSES.fetch_add(delta.graph_bypasses, Ordering::Relaxed);
+        CONDITIONAL_REUSED.fetch_add(delta.reused_pose_proofs, Ordering::Relaxed);
     }
 }
 
@@ -254,6 +377,34 @@ pub(super) fn record_movement_clear(delta: MovementClearMetrics) {
     process_totals::record_movement_clear(delta);
 }
 
+pub(super) fn record_first_kick_interval(delta: FirstKickIntervalMetrics) {
+    if delta.attempts == 0 {
+        return;
+    }
+    METRICS.with(|slot| {
+        let mut value = slot.get();
+        value.first_kick_interval.attempts += delta.attempts;
+        value.first_kick_interval.proofs += delta.proofs;
+        value.first_kick_interval.selected_locks += delta.selected_locks;
+        slot.set(value);
+    });
+    #[cfg(feature = "local-search-ab")]
+    process_totals::record_first_kick_interval(delta);
+}
+
+pub(super) fn record_conditional_order(delta: ConditionalOrderMetrics) {
+    if delta == ConditionalOrderMetrics::default() {
+        return;
+    }
+    METRICS.with(|slot| {
+        let mut value = slot.get();
+        value.conditional_order.add(delta);
+        slot.set(value);
+    });
+    #[cfg(feature = "local-search-ab")]
+    process_totals::record_conditional_order(delta);
+}
+
 /// Diagnostic totals since process start. Read after all experiment workers
 /// have joined; this is not a multi-search session statistics interface.
 #[cfg(feature = "local-search-ab")]
@@ -305,5 +456,29 @@ pub(super) fn with_movement_clear_mode<T>(enabled: bool, action: impl FnOnce() -
         }
     }
     let _restore = Restore(MOVEMENT_CLEAR_MODE.with(|slot| slot.replace(Some(enabled))));
+    action()
+}
+
+#[cfg(test)]
+pub(super) fn with_first_kick_interval_mode<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FIRST_KICK_INTERVAL_MODE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(FIRST_KICK_INTERVAL_MODE.with(|slot| slot.replace(Some(enabled))));
+    action()
+}
+
+#[cfg(test)]
+pub(super) fn with_conditional_order_mode<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CONDITIONAL_ORDER_MODE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(CONDITIONAL_ORDER_MODE.with(|slot| slot.replace(Some(enabled))));
     action()
 }

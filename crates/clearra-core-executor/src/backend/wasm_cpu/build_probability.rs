@@ -2589,15 +2589,16 @@ impl CompactBuildProbabilitySession {
             WasmExactSearchError::InvalidProblem("wasm_build_probability_target_index_invalid"),
         )?;
         let solution_coverage_required = self.solution_coverage.is_some();
-        let coverage_already_known = self.buildup.standard_bag_coverage_complete()
-            || self
-                .covered_patterns
-                .is_superset(target.possible_patterns.as_ref())
-                .expect("candidate pattern group belongs to the build probability universe");
         let witness_mode = CandidateWitnessMode::for_candidate(
             &self.problem,
             target,
-            coverage_already_known,
+            || {
+                self.buildup.standard_bag_coverage_complete()
+                    || self
+                        .covered_patterns
+                        .is_superset(target.possible_patterns.as_ref())
+                        .expect("candidate pattern group belongs to the build probability universe")
+            },
             solution_coverage_required,
         );
         let result = if self.finesse_requested {
@@ -3613,15 +3614,18 @@ impl CompactBuildProbabilitySession {
                         "wasm_finesse_distributed_identity_reconstruction_failed",
                     ))?;
             let solution_coverage_required = self.solution_coverage.is_some();
-            let coverage_already_known = self.buildup.standard_bag_coverage_complete()
-                || self
-                    .covered_patterns
-                    .is_superset(target.possible_patterns.as_ref())
-                    .expect("candidate pattern group belongs to the build probability universe");
             let witness_mode = CandidateWitnessMode::for_candidate(
                 &self.problem,
                 &target,
-                coverage_already_known,
+                || {
+                    self.buildup.standard_bag_coverage_complete()
+                        || self
+                            .covered_patterns
+                            .is_superset(target.possible_patterns.as_ref())
+                            .expect(
+                                "candidate pattern group belongs to the build probability universe",
+                            )
+                },
                 solution_coverage_required,
             );
             let result = verify_candidate_for_completion_with_finesse(

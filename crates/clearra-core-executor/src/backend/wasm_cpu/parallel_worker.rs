@@ -682,12 +682,13 @@ fn run_branch(
                     solution_coverage_required || solution_coverage_capture.is_some();
                 #[cfg(not(any(test, feature = "local-search-ab")))]
                 let exact_candidate_coverage = solution_coverage_required;
-                let coverage_already_known = workspace.standard_bag_coverage_complete()
-                    || shared_coverage.is_superset(target.possible_patterns.as_ref());
                 let witness_mode = CandidateWitnessMode::for_candidate(
                     problem,
                     target,
-                    coverage_already_known,
+                    || {
+                        workspace.standard_bag_coverage_complete()
+                            || shared_coverage.is_superset(target.possible_patterns.as_ref())
+                    },
                     exact_candidate_coverage,
                 );
                 let result = verify_candidate(

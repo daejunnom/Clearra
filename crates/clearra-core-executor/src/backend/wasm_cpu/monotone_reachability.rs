@@ -27,7 +27,10 @@ use clearra_rules::kicks::{KickTableProfile, KickTableProfileId};
 
 use crate::conditioned_local_relation::LocalRelationRowFrame;
 
-use super::{builtin_kick_profile, normalized_kick_delta, piece_index};
+use super::{
+    builtin_kick_profile, grounded_index, normalized_kick_delta, piece_index, state_from_index,
+    state_index, ReachabilityTemplate, State, INVALID_STATE_INDEX, INVALID_STATE_MASK,
+};
 
 /// A positive-only proof attempt using no rotations. Failure means Unknown for
 /// the full movement system, including NoKick, which still permits rotations.
@@ -223,6 +226,84 @@ pub(super) fn proves_translation_lock_interval(
         proven: path.exists,
         row_steps: path.row_steps,
     })
+}
+
+/// A single last rotation is safe on every board in the interval only when
+/// the chosen edge is actually raw kick index zero. Geometry compilation
+/// filters invalid addresses; merely being the first retained edge is not
+/// enough to admit this intentionally narrow certificate.
+///
+/// The exact template provides the sky seeds and every movement edge. Follow
+/// only straight downward translations to the source, checking occupancy on
+/// maximum. Raw kick zero stays first-success because its destination is
+/// placeable on maximum and there is no earlier kick. The final lock is
+/// grounded on minimum, and the precursor need not itself be grounded. No
+/// board, pose graph, or visited set is allocated or retained by this check.
+pub(super) fn proves_first_kick_lock_interval(
+    template: &ReachabilityTemplate,
+    minimum: u64,
+    maximum: u64,
+    target: usize,
+) -> bool {
+    let Some(&target_mask) = template.state_masks.get(target) else {
+        return false;
+    };
+    if target_mask == INVALID_STATE_MASK
+        || maximum & target_mask != 0
+        || !grounded_index(template, minimum, target)
+    {
+        return false;
+    }
+    let begin = template.reverse_rotation_offsets[target] as usize;
+    let end = template.reverse_rotation_offsets[target + 1] as usize;
+    for edge in &template.reverse_rotation_sources[begin..end] {
+        if edge.prior_target_count != 0 {
+            continue;
+        }
+        let source = usize::from(edge.source);
+        let transition = source * 3 + usize::from(edge.slot);
+        let first = template.rotation_target_offsets[transition] as usize;
+        if template.rotation_kick_indices[first] == 0
+            && usize::from(template.rotation_targets[first]) == target
+            && has_straight_descent_from_sky(template, maximum, source)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_straight_descent_from_sky(
+    template: &ReachabilityTemplate,
+    maximum: u64,
+    source: usize,
+) -> bool {
+    let source_pose = state_from_index(template.width, template.ceiling, source);
+    let seed_pose = State {
+        y: source_pose.y.max(template.height as i8),
+        ..source_pose
+    };
+    let Some(mut pose) = state_index(template.width, template.ceiling, seed_pose) else {
+        return false;
+    };
+    if !template.is_sky_seed(pose) {
+        return false;
+    }
+    for _ in source_pose.y..=seed_pose.y {
+        let mask = template.state_masks[pose];
+        if mask == INVALID_STATE_MASK || maximum & mask != 0 {
+            return false;
+        }
+        if pose == source {
+            return true;
+        }
+        let down = template.translation_targets[pose][0];
+        if down == INVALID_STATE_INDEX {
+            return false;
+        }
+        pose = usize::from(down);
+    }
+    false
 }
 
 /// Constructible only after the registry/profile monotonicity proof succeeds.
@@ -509,6 +590,98 @@ mod tests {
         KickTableProfileId::Jstris180,
         KickTableProfileId::NoKick,
     ];
+
+    #[test]
+    fn first_kick_interval_preserves_the_discovered_t_lock_on_both_boards() {
+        use crate::reachability_reference::reference_spawn_lock_anchors;
+
+        const INITIAL: u64 = 0x3f0f_83f4;
+        const I: u64 = 0x00f0_0000;
+        const O: u64 = 0x0c03;
+        const T: u64 = 0x7008;
+        let catalog = super::super::GeometryCatalog::compile_for_required_cells_on_dimensions(
+            10,
+            3,
+            INITIAL,
+            I | O | T,
+        )
+        .unwrap();
+        let row = catalog.skeleton_id(PieceKind::T, T).unwrap();
+        let lock = catalog
+            .instantiations(row, 0)
+            .find(|lock| lock.rotation == RotationState::Two && lock.x == 2 && lock.lock_y == 0)
+            .unwrap();
+        assert_eq!(lock.lock_mask, T);
+        let frame = LocalRelationRowFrame::new(3, 0);
+        for profile in PROFILES {
+            let mut workspace = super::super::ReachabilityWorkspace::default();
+            workspace.configure_kick_profile(profile, false);
+            let translation = proves_translation_lock_interval(
+                PieceKind::T,
+                10,
+                3,
+                INITIAL,
+                INITIAL | O,
+                lock.rotation,
+                lock.x,
+                lock.lock_y,
+                T,
+                frame.unwrap(),
+            )
+            .unwrap();
+            assert!(!translation.proven);
+            assert!(workspace.try_prove_first_kick_lock_interval(
+                &catalog,
+                INITIAL,
+                INITIAL | O,
+                PieceKind::T,
+                profile,
+                lock,
+                frame,
+            ));
+            for board in [INITIAL, INITIAL | O] {
+                let exact = reference_spawn_lock_anchors(10, 3, board, PieceKind::T, profile)
+                    .expect("supported independent oracle");
+                assert_ne!(
+                    exact[RotationState::Two.quarter_turns() as usize] & (1 << 2),
+                    0
+                );
+            }
+
+            // The target stays free, but an extra cell above it blocks the
+            // same-column descent. Do not reuse the old positive result.
+            let path_blocker = 1_u64 << 23;
+            assert_eq!((INITIAL | O | T) & path_blocker, 0);
+            assert!(!workspace.try_prove_first_kick_lock_interval(
+                &catalog,
+                INITIAL,
+                INITIAL | O | path_blocker,
+                PieceKind::T,
+                profile,
+                lock,
+                frame,
+            ));
+            assert!(!workspace.try_prove_first_kick_lock_interval(
+                &catalog,
+                INITIAL | O,
+                INITIAL,
+                PieceKind::T,
+                profile,
+                lock,
+                frame,
+            ));
+            assert!(!workspace.try_prove_first_kick_lock_interval(
+                &catalog,
+                INITIAL,
+                INITIAL | O,
+                PieceKind::T,
+                profile,
+                lock,
+                LocalRelationRowFrame::new(3, 1),
+            ));
+            assert_eq!(workspace.generated_state_count(), 0);
+        }
+    }
 
     #[test]
     fn capability_checks_actual_profile_offsets_not_the_profile_name() {

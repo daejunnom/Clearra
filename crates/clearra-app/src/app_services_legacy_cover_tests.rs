@@ -62,6 +62,7 @@ fn compile(query: &BuildCoverageQuery) -> SearchProblem {
 }
 
 fn run_app(backend: AppCoreExecutorService, query: BuildCoverageQuery) -> CoreExecutionResult {
+    let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
     let app = AppContext::new(AppServices::new().with_core_executor(backend));
     let response = app.run(AppRequest::new(AppCommand::Cover(CoverAppCommand::new(
         query,
@@ -108,6 +109,7 @@ fn horizontal_i_import() -> BuildCoverageQuery {
 
 #[test]
 fn positive_legacy_cover_ordinal_zero_matches_the_explicit_i_rust_kernel() {
+    let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
     let coverage_query = horizontal_i_import();
     assert!(
         !clearra_validation::validators::build_query_validator::validate_build_coverage_query(

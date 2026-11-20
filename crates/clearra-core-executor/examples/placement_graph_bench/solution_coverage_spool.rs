@@ -1,8 +1,9 @@
 //! Bounded, exact per-identity coverage reduction for the local search benchmark.
 
 use super::solution_coverage_compare::{
-    read_queue_set, write_queue_set, CoverageSummary, CoverageUniverse, CoverageWriter,
+    read_queue_set, write_queue_set, BagBlocks, CoverageSummary, CoverageUniverse, CoverageWriter,
 };
+use clearra_core_executor::backend::P7P4CoverageBlocks;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use std::{
     cmp::Reverse,
@@ -11,6 +12,7 @@ use std::{
     io::{self, BufReader, BufWriter, Read, Write},
     mem::size_of,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 const MAGIC: &[u8; 8] = b"CLRSP01\0";
@@ -49,6 +51,13 @@ pub(super) struct CoverageFragment {
 }
 
 impl CoverageFragment {
+    pub(super) fn from_p7p4_blocks(blocks: Arc<P7P4CoverageBlocks>) -> Self {
+        Self {
+            universe: CoverageUniverse::P7P4,
+            bits: Bits::Blocks(BagBlocks::from_capture(blocks)),
+        }
+    }
+
     pub(super) fn from_bitset(universe: CoverageUniverse, set: &PatternBitSet) -> io::Result<Self> {
         let size = universe.queue_count() as usize;
         if set.pattern_count() != size {
@@ -71,6 +80,7 @@ impl CoverageFragment {
 enum Bits {
     Sparse(Box<[u32]>),
     Dense(Box<[u64]>),
+    Blocks(BagBlocks),
 }
 
 impl Bits {
@@ -78,12 +88,15 @@ impl Bits {
         match self {
             Self::Sparse(ids) => std::mem::size_of_val(ids.as_ref()),
             Self::Dense(words) => std::mem::size_of_val(words.as_ref()),
+            Self::Blocks(blocks) => blocks.retained_bytes(),
         }
     }
 
     fn union_bytes_bound(&self, other: &Self, universe: CoverageUniverse) -> usize {
         let dense_bytes = word_count(universe) * size_of::<u64>();
         match (self, other) {
+            (Self::Blocks(a), Self::Blocks(b)) => a.retained_union_bound(b),
+            (Self::Blocks(_), _) | (_, Self::Blocks(_)) => BagBlocks::max_retained_bytes(),
             (Self::Sparse(a), Self::Sparse(b)) => {
                 ((a.len() + b.len()) * size_of::<u32>()).min(dense_bytes)
             }
@@ -92,6 +105,12 @@ impl Bits {
     }
 
     fn union(&mut self, other: Self, universe: CoverageUniverse) {
+        if matches!(self, Self::Blocks(_)) || matches!(other, Self::Blocks(_)) {
+            debug_assert_eq!(universe, CoverageUniverse::P7P4);
+            let left = std::mem::replace(self, Self::Sparse(Box::default())).into_bag_blocks();
+            *self = Self::Blocks(left.union(other.into_bag_blocks()));
+            return;
+        }
         match (&mut *self, other) {
             (Self::Dense(left), Self::Dense(right)) => {
                 for (left, right) in left.iter_mut().zip(right.iter()) {
@@ -135,6 +154,15 @@ impl Bits {
                     *self = Self::Dense(words.into_boxed_slice());
                 }
             }
+            _ => unreachable!("fixed-universe block union handled first"),
+        }
+    }
+
+    fn into_bag_blocks(self) -> BagBlocks {
+        match self {
+            Self::Sparse(ids) => BagBlocks::from_sparse(&ids),
+            Self::Dense(words) => BagBlocks::from_words(&words),
+            Self::Blocks(blocks) => blocks,
         }
     }
 
@@ -156,6 +184,10 @@ impl Bits {
             Self::Dense(words) => {
                 out.write_all(&[1])?;
                 write_queue_set(out, universe, words).map(|_| ())
+            }
+            Self::Blocks(blocks) => {
+                out.write_all(&[2])?;
+                blocks.write(out)
             }
         }
     }
@@ -182,6 +214,7 @@ impl Bits {
             1 => Ok(Self::Dense(
                 read_queue_set(input, universe)?.into_boxed_slice(),
             )),
+            2 if universe == CoverageUniverse::P7P4 => Ok(Self::Blocks(BagBlocks::read(input)?)),
             _ => Err(invalid("unknown spool coverage record")),
         }
     }
@@ -202,6 +235,7 @@ impl Bits {
                 out.write_ranges(key, &ranges).map(|_| ())
             }
             Self::Dense(words) => out.write_solution(key, words).map(|_| ()),
+            Self::Blocks(blocks) => out.write_blocks(key, blocks),
         }
     }
 }
@@ -227,7 +261,12 @@ impl CoverageSpool {
         universe: CoverageUniverse,
         limits: CoverageSpoolLimits,
     ) -> io::Result<Self> {
-        let row_ceiling = word_count(universe) * size_of::<u64>() + MAX_KEY + MAP_ENTRY_ALLOWANCE;
+        let payload_ceiling = if universe == CoverageUniverse::P7P4 {
+            BagBlocks::max_retained_bytes()
+        } else {
+            word_count(universe) * size_of::<u64>()
+        };
+        let row_ceiling = payload_ceiling + MAX_KEY + MAP_ENTRY_ALLOWANCE;
         if limits.memory_bytes < row_ceiling
             || limits.disk_bytes == 0
             || limits.max_runs == 0
@@ -732,6 +771,46 @@ mod tests {
                 ("ctk1|b".to_owned(), vec![1, 8, 9]),
             ]
         );
+    }
+
+    #[test]
+    fn compact_disk_rows_union_with_compact_and_legacy_fragments() {
+        let dir = TestDir::new();
+        let universe = CoverageUniverse::P7P4;
+        let mut spool = dir.spool(universe, CoverageSpoolLimits::default());
+        let key = "ctk1|a";
+        let last = universe.queue_count() - 1;
+        for ids in [[2, 840], [840, last]] {
+            spool
+                .push_fragment(
+                    key,
+                    CoverageFragment {
+                        universe,
+                        bits: Bits::Blocks(BagBlocks::from_sparse(&ids)),
+                    },
+                )
+                .unwrap();
+            spool.flush().unwrap();
+        }
+        spool
+            .push_fragment(key, sparse(universe, &[1, 840]))
+            .unwrap();
+        spool.flush().unwrap();
+        let mut rows = 0;
+        merge_sorted(&spool.runs, universe, |actual_key, bits| {
+            assert_eq!(actual_key, key);
+            let Bits::Blocks(actual) = bits else {
+                panic!("union of compact plus legacy input must stay compact");
+            };
+            assert_eq!(
+                actual.differences(&BagBlocks::from_sparse(&[1, 2, 840, last])),
+                (None, None),
+            );
+            rows += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(rows, 1);
     }
 
     #[test]

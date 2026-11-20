@@ -52,7 +52,7 @@ impl CertifiedPlacementPoset {
     }
 }
 
-struct CandidateGeometry {
+pub(super) struct CandidateGeometry {
     width: u8,
     height: u8,
     initial_board: u64,
@@ -339,6 +339,43 @@ pub(super) fn compile_with_movement_guard(
 }
 
 impl CandidateGeometry {
+    /// Start only with the small Boolean candidates intentionally rejected by
+    /// the poset because support needs a disjunction. This admission does not
+    /// prove a single physical move.
+    pub(super) fn for_conditional_order(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+    ) -> Option<Self> {
+        if !(3..=8).contains(&candidate.row_ids().len()) {
+            return None;
+        }
+        let geometry = Self::compile(catalog, candidate)?;
+        geometry
+            .has_unprovable_initial_support_disjunction(catalog, candidate)
+            .then_some(geometry)
+    }
+
+    pub(super) fn pieces(&self) -> &[PieceKind] {
+        &self.pieces[..self.operation_count]
+    }
+
+    /// The state is only the executed set: completed rows are derived from
+    /// their concrete contributor conjunctions, and all such rows are
+    /// removed together in the original-row frame.
+    pub(super) fn conditional_state(&self, executed: u16) -> (u64, u16) {
+        debug_assert_eq!(executed & !self.all_operations, 0);
+        let deleted = self.deleted_rows(executed);
+        let board = board_for_operations(self.initial_board, &self.cells, executed);
+        (
+            compact_target_board(self.width, self.height, board, deleted),
+            deleted,
+        )
+    }
+
+    pub(super) fn conditional_lock_mask(&self, operation: usize, deleted: u16) -> u64 {
+        compact_target_board(self.width, self.height, self.cells[operation], deleted)
+    }
+
     fn compile(catalog: &GeometryCatalog, candidate: &GeometryCandidate) -> Option<Self> {
         let width = catalog.width();
         let height = catalog.height();

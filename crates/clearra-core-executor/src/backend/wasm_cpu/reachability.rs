@@ -738,6 +738,56 @@ impl ReachabilityWorkspace {
         Some((attempt.proven, usize::from(attempt.row_steps)))
     }
 
+    /// Prove one Boolean lock over a fixed-frame occupancy interval by
+    /// descending from a canonical sky seed and then using raw kick zero.
+    /// Neither a failed attempt nor a different ILC realization inherits
+    /// any conclusion. This does not supply witness or rotation evidence.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_prove_first_kick_lock_interval(
+        &mut self,
+        catalog: &GeometryCatalog,
+        minimum_board: u64,
+        maximum_board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> bool {
+        if self.kick_profile_id != profile
+            || builtin_kick_profile(profile).is_none()
+            || minimum_board & !maximum_board != 0
+        {
+            return false;
+        }
+        let Some(frame) = frame.filter(|frame| frame.target_height() == catalog.height()) else {
+            return false;
+        };
+        if !frame.accepts_physical_board(catalog.width(), maximum_board | realization.lock_mask)
+            || realization.lock_mask.count_ones() != 4
+        {
+            return false;
+        }
+        let template = self.template(catalog, piece);
+        let state = State {
+            rotation: realization.rotation,
+            x: realization.x,
+            y: realization.lock_y,
+        };
+        let Some(target) = state_index(template.width, template.ceiling, state) else {
+            return false;
+        };
+        if template.state_masks[target] != realization.lock_mask {
+            return false;
+        }
+        monotone_reachability::proves_first_kick_lock_interval(
+            template,
+            minimum_board,
+            maximum_board,
+            target,
+        )
+    }
+
     /// Prove that this exact ILC pose has no entry on any board containing the
     /// minimum occupancy in the same original-row frame. A miss is Unknown.
     /// Only canonical sky entry is covered; callers requiring a full operation

@@ -94,6 +94,47 @@ pub(super) struct PosetLanguageResult {
     pub operation_classes: usize,
 }
 
+/// Proof of the existence of an exact Boolean transition, not its
+/// multiplicity, score, replay witness, or placement identity.
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ConditionalTransitionProof {
+    Allowed,
+    Forbidden,
+    Unknown,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ConditionalLanguageCompilation {
+    Certified(ConditionalLanguageResult),
+    Unknown,
+    BudgetExceeded,
+    Unsupported,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ConditionalLanguageResult {
+    /// A certified empty language has no root. A nonempty root belongs to
+    /// this cache and cannot outlive arena recycling.
+    pub root: Option<u32>,
+    pub residual_states: usize,
+    pub checked_transitions: usize,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+const MAX_CONDITIONAL_STATES: usize = 64;
+#[cfg(any(test, feature = "local-search-ab"))]
+const MAX_CONDITIONAL_TRANSITIONS: usize = 256;
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy)]
+struct ConditionalResidual {
+    executed: u16,
+    allowed: u16,
+}
+
 #[cfg(any(test, feature = "local-search-ab"))]
 const MAX_POSET_OPERATIONS: usize = 15;
 
@@ -348,6 +389,146 @@ impl PieceOrderLanguageCache {
             residual_states: states.len(),
             operation_classes: classes.len(),
         }))
+    }
+
+    /// Compile exact kind words for a small Boolean relation over concrete
+    /// executed-operation masks. The caller must establish that the mask is
+    /// a sufficient physical state: row events, occupancy and all relevant
+    /// board semantics must be derived exactly, with no hidden prefix state.
+    /// The callback is for proofs only, not for rerunning physical search.
+    ///
+    /// Finish admission and check every outgoing transition of every
+    /// reachable nonterminal mask before touching the language arena. A
+    /// refused budget or Unknown delegates the whole language to the existing
+    /// exact producer. Kind equality is not operation exchangeability:
+    /// concrete residuals remain distinct until exact suffix interning.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub fn compile_conditional_language(
+        &mut self,
+        pieces: &[PieceKind],
+        state_budget: usize,
+        transition_budget: usize,
+        mut prove: impl FnMut(u16, usize) -> ConditionalTransitionProof,
+    ) -> Result<ConditionalLanguageCompilation, WasmExactSearchError> {
+        use ConditionalLanguageCompilation::{BudgetExceeded, Certified, Unknown, Unsupported};
+
+        if pieces.is_empty() || pieces.len() > MAX_POSET_OPERATIONS {
+            return Ok(Unsupported);
+        }
+        let state_limit = state_budget.min(MAX_CONDITIONAL_STATES);
+        let transition_limit = transition_budget.min(MAX_CONDITIONAL_TRANSITIONS);
+        if state_limit == 0 || transition_limit == 0 {
+            return Ok(BudgetExceeded);
+        }
+        let full = (1_u16 << pieces.len()) - 1;
+        let mut residuals = [ConditionalResidual {
+            executed: 0,
+            allowed: 0,
+        }; MAX_CONDITIONAL_STATES];
+        let mut residual_count = 1;
+        let mut checked_transitions = 0;
+        let mut index = 0;
+        while index < residual_count {
+            let executed = residuals[index].executed;
+            let mut pending = full ^ executed;
+            let mut allowed = 0;
+            while pending != 0 {
+                if checked_transitions == transition_limit {
+                    return Ok(BudgetExceeded);
+                }
+                let operation = pending.trailing_zeros() as usize;
+                let bit = 1_u16 << operation;
+                pending ^= bit;
+                checked_transitions += 1;
+                match prove(executed, operation) {
+                    ConditionalTransitionProof::Unknown => return Ok(Unknown),
+                    ConditionalTransitionProof::Forbidden => continue,
+                    ConditionalTransitionProof::Allowed => allowed |= bit,
+                }
+
+                // Adding a concrete operation strictly increases its mask.
+                // Keep the pending suffix sorted to merge duplicates while
+                // obtaining topological order without a mask-sized table.
+                let child = executed | bit;
+                let next = index + 1;
+                if let Err(offset) = residuals[next..residual_count]
+                    .binary_search_by_key(&child, |state| state.executed)
+                {
+                    if residual_count == state_limit {
+                        return Ok(BudgetExceeded);
+                    }
+                    let insert = next + offset;
+                    residuals.copy_within(insert..residual_count, insert + 1);
+                    residuals[insert] = ConditionalResidual {
+                        executed: child,
+                        allowed: 0,
+                    };
+                    residual_count += 1;
+                }
+            }
+            residuals[index].allowed = allowed;
+            index += 1;
+        }
+
+        let result = |root| ConditionalLanguageResult {
+            root,
+            residual_states: residual_count,
+            checked_transitions,
+        };
+        if residuals[residual_count - 1].executed != full {
+            return Ok(Certified(result(None)));
+        }
+
+        self.ensure_buckets();
+        let mut references = [EMPTY_REFERENCE; MAX_CONDITIONAL_STATES];
+        for index in (0..residual_count).rev() {
+            let ConditionalResidual { executed, allowed } = residuals[index];
+            let mut edges = allowed;
+            self.edge_scratch.clear();
+            self.edge_scratch
+                .try_reserve(allowed.count_ones() as usize)
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_conditional_language_edge_scratch_unavailable",
+                    )
+                })?;
+            while edges != 0 {
+                let operation = edges.trailing_zeros() as usize;
+                let bit = 1_u16 << operation;
+                edges ^= bit;
+                let next = index + 1;
+                let offset = residuals[next..residual_count]
+                    .binary_search_by_key(&(executed | bit), |state| state.executed)
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_conditional_language_child_missing",
+                        )
+                    })?;
+                let child = references[next + offset];
+                if child != EMPTY_REFERENCE {
+                    self.edge_scratch.push(
+                        CanonicalPieceEdge::new(child, piece_code(pieces[operation])).ok_or(
+                            WasmExactSearchError::InvalidProblem(
+                                "wasm_piece_language_child_index_overflow",
+                            ),
+                        )?,
+                    );
+                }
+            }
+            let accepting = executed == full;
+            if accepting || !self.edge_scratch.is_empty() {
+                self.edge_scratch.sort_unstable();
+                self.edge_scratch.dedup();
+                let depth = self.remaining_depth(accepting)?;
+                references[index] = self.intern_node(accepting, depth)?;
+            }
+        }
+        if references[0] == EMPTY_REFERENCE {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_conditional_language_certified_terminal_not_live",
+            ));
+        }
+        Ok(Certified(result(Some(references[0]))))
     }
 
     /// Solve Boolean completion and the exact piece suffix language in one
@@ -1079,7 +1260,8 @@ mod tests {
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 
     use super::{
-        count_distinct_no_hold_one_bag_poset, CanonicalPieceEdge, PieceOrderLanguageCache,
+        count_distinct_no_hold_one_bag_poset, CanonicalPieceEdge, ConditionalLanguageCompilation,
+        ConditionalTransitionProof, PieceOrderLanguageCache,
     };
     use crate::backend::wasm_cpu::buildup::{BuildOrderGraph, BuildOrderNodeSpec};
     use crate::backend::wasm_cpu::queue_observation_policy::{
@@ -1171,6 +1353,249 @@ mod tests {
         let mut output = BTreeSet::new();
         visit(pieces, predecessors, 0, &mut Vec::new(), &mut output);
         output
+    }
+
+    #[test]
+    fn conditional_language_preserves_or_support_and_visits_each_residual_once() {
+        use ConditionalLanguageCompilation::Certified;
+        use ConditionalTransitionProof::{Allowed, Forbidden};
+        use PieceKind::{I, O, T};
+
+        let mut cache = PieceOrderLanguageCache::default();
+        let mut checked = BTreeSet::new();
+        let compiled = cache
+            .compile_conditional_language(&[I, O, T], 64, 256, |executed, operation| {
+                assert!(checked.insert((executed, operation)));
+                if operation == 0 && executed & 0b110 == 0 {
+                    Forbidden
+                } else {
+                    Allowed
+                }
+            })
+            .unwrap();
+        let Certified(result) = compiled else {
+            panic!("complete Boolean proof was refused: {compiled:?}");
+        };
+        assert_eq!(result.residual_states, 7);
+        assert_eq!(result.checked_transitions, 10);
+        assert_eq!(result.checked_transitions, checked.len());
+        let expected: BTreeSet<Vec<u8>> = [[O, I, T], [O, T, I], [T, I, O], [T, O, I]]
+            .into_iter()
+            .map(|word| word.into_iter().map(super::piece_code).collect())
+            .collect();
+        assert_eq!(words(&cache, result.root.unwrap()), expected);
+    }
+
+    #[test]
+    fn conditional_language_reuses_suffixes_without_merging_distinct_same_kind_operations() {
+        use ConditionalLanguageCompilation::Certified;
+        use ConditionalTransitionProof::{Allowed, Forbidden};
+        use PieceKind::{I, O, T};
+
+        let mut cache = PieceOrderLanguageCache::default();
+        let pieces = [I, I, T, O];
+        let predecessors = [0, 0, 0b0001, 0b0010];
+        let expected = explicit_poset_words(&pieces, &predecessors);
+        let Certified(result) = cache
+            .compile_conditional_language(&pieces, 64, 256, |executed, operation| {
+                if predecessors[operation] & !executed == 0 {
+                    Allowed
+                } else {
+                    Forbidden
+                }
+            })
+            .unwrap()
+        else {
+            panic!("complete Boolean proof was refused");
+        };
+        let root = result.root.unwrap();
+        assert_eq!(words(&cache, root), expected);
+        assert_eq!(
+            cache
+                .edges_for_piece(root, super::piece_code(I))
+                .unwrap()
+                .len(),
+            2
+        );
+        let poset = cache
+            .compile_poset_language(&pieces, &predecessors, 64)
+            .unwrap()
+            .unwrap();
+        assert_eq!(poset.root, root);
+    }
+
+    #[test]
+    fn conditional_language_unknown_or_budget_refusal_does_not_intern() {
+        use ConditionalLanguageCompilation::{BudgetExceeded, Unknown};
+        use ConditionalTransitionProof::Allowed;
+        use PieceKind::{I, O, T};
+
+        let mut cache = PieceOrderLanguageCache::default();
+        let prior = cache
+            .compile_poset_language(&[I], &[0], 2)
+            .unwrap()
+            .unwrap();
+        let before = (
+            cache.node_count(),
+            cache.edge_count(),
+            words(&cache, prior.root),
+        );
+        let pieces = [I, O, T];
+        let mut checked = 0;
+        assert_eq!(
+            cache
+                .compile_conditional_language(&pieces, 64, 256, |executed, operation| {
+                    checked += 1;
+                    if executed == 0b110 && operation == 0 {
+                        ConditionalTransitionProof::Unknown
+                    } else {
+                        Allowed
+                    }
+                })
+                .unwrap(),
+            Unknown
+        );
+        assert!(checked > 3);
+        assert_eq!(
+            cache
+                .compile_conditional_language(&pieces, 1, 256, |_, _| Allowed)
+                .unwrap(),
+            BudgetExceeded
+        );
+        let mut checked = 0;
+        assert_eq!(
+            cache
+                .compile_conditional_language(&pieces, 64, 2, |_, _| {
+                    checked += 1;
+                    Allowed
+                })
+                .unwrap(),
+            BudgetExceeded
+        );
+        assert_eq!(checked, 2);
+        assert_eq!(
+            cache
+                .compile_conditional_language(&[I; 15], usize::MAX, usize::MAX, |_, _| Allowed)
+                .unwrap(),
+            BudgetExceeded
+        );
+        assert_eq!(
+            (
+                cache.node_count(),
+                cache.edge_count(),
+                words(&cache, prior.root)
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn conditional_language_exact_empty_and_dead_branches_are_not_unknown() {
+        use ConditionalLanguageCompilation::Certified;
+        use ConditionalTransitionProof::{Allowed, Forbidden};
+        use PieceKind::{I, O};
+
+        let mut cache = PieceOrderLanguageCache::default();
+        let Certified(dead) = cache
+            .compile_conditional_language(&[I, O], 64, 256, |executed, _| {
+                if executed == 0 {
+                    Allowed
+                } else {
+                    Forbidden
+                }
+            })
+            .unwrap()
+        else {
+            panic!("exact dead relation was refused");
+        };
+        assert_eq!(dead.root, None);
+        assert_eq!(dead.residual_states, 3);
+        assert_eq!(cache.node_count(), 0);
+        let Certified(one) = cache
+            .compile_conditional_language(&[I, O], 64, 256, |executed, _| {
+                if executed == 0b01 {
+                    Forbidden
+                } else {
+                    Allowed
+                }
+            })
+            .unwrap()
+        else {
+            panic!("exact partly dead relation was refused");
+        };
+        assert_eq!(
+            words(&cache, one.root.unwrap()),
+            BTreeSet::from([vec![super::piece_code(O), super::piece_code(I)]])
+        );
+    }
+
+    #[test]
+    fn conditional_language_matches_explicit_words_for_every_three_operation_relation() {
+        use ConditionalLanguageCompilation::Certified;
+        use ConditionalTransitionProof::{Allowed, Forbidden};
+        use PieceKind::{I, O, T};
+
+        const PERMUTATIONS: [[usize; 3]; 6] = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        let mut transition = [[0; 3]; 8];
+        let mut bits = 0;
+        for (executed, row) in transition.iter_mut().enumerate() {
+            for (operation, value) in row.iter_mut().enumerate() {
+                if executed & (1 << operation) == 0 {
+                    *value = 1_u16 << bits;
+                    bits += 1;
+                }
+            }
+        }
+        assert_eq!(bits, 12);
+        let mut cache = PieceOrderLanguageCache::default();
+        for pieces in [[I, O, T], [I, I, O]] {
+            for relation in 0..(1_u16 << bits) {
+                let expected: BTreeSet<_> = PERMUTATIONS
+                    .iter()
+                    .filter(|order| {
+                        let mut executed = 0;
+                        order.iter().all(|&operation| {
+                            let allowed = relation & transition[executed][operation] != 0;
+                            executed |= 1 << operation;
+                            allowed
+                        })
+                    })
+                    .map(|order| {
+                        order
+                            .iter()
+                            .map(|&operation| super::piece_code(pieces[operation]))
+                            .collect()
+                    })
+                    .collect();
+                let Certified(result) = cache
+                    .compile_conditional_language(&pieces, 8, 12, |executed, operation| {
+                        if relation & transition[usize::from(executed)][operation] != 0 {
+                            Allowed
+                        } else {
+                            Forbidden
+                        }
+                    })
+                    .unwrap()
+                else {
+                    panic!("three-operation mask relation exceeded its full bound");
+                };
+                let actual = result
+                    .root
+                    .map(|root| words(&cache, root))
+                    .unwrap_or_default();
+                assert_eq!(
+                    actual, expected,
+                    "relation={relation:012b}, pieces={pieces:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "local-search-ab"))]
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use super::{
@@ -30,6 +32,157 @@ const CANCELLATION_POLL_MASK: u32 = 0xff;
 const STANDARD_PIECE_COUNT: usize = PieceKind::STANDARD_TETROMINOES.len();
 const STANDARD_BAG_MASK_COUNT: usize = 1 << STANDARD_PIECE_COUNT;
 const CURSOR_TRANSITION_UNAVAILABLE: u8 = u8::MAX;
+
+#[cfg(any(test, feature = "local-search-ab"))]
+const P7P4_PREFIXES: usize = 5_040;
+#[cfg(any(test, feature = "local-search-ab"))]
+const P7P4_TAIL_BITS: usize = 840;
+#[cfg(any(test, feature = "local-search-ab"))]
+const P7P4_TAIL_BYTES: usize = P7P4_TAIL_BITS / 8;
+#[cfg(any(test, feature = "local-search-ab"))]
+const P7P4_TAIL_MEMO_MAX: usize = 4_096;
+
+/// An owned projection of a live, full P7P4 decision root. Data only: no
+/// worker- or epoch-local arena reference can escape through this type.
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct P7P4CoverageBlocks {
+    tails: Box<[[u8; P7P4_TAIL_BYTES]]>,
+    runs: Box<[(u16, u16)]>,
+    covered_count: u32,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+impl P7P4CoverageBlocks {
+    /// Each mask is over the 840 lexicographic four-draw tails, LSB first.
+    pub fn tails(&self) -> &[[u8; P7P4_TAIL_BYTES]] {
+        &self.tails
+    }
+
+    /// (Tail dictionary index, consecutive first-bag prefix count).
+    pub fn runs(&self) -> &[(u16, u16)] {
+        &self.runs
+    }
+
+    pub const fn covered_count(&self) -> u32 {
+        self.covered_count
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Default)]
+struct P7P4CaptureCache {
+    tail_masks: HashMap<u32, [u8; P7P4_TAIL_BYTES]>,
+    last_root: Option<(u32, Arc<P7P4CoverageBlocks>)>,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+impl P7P4CaptureCache {
+    fn retained_bytes(&self) -> usize {
+        let last = self.last_root.as_ref().map_or(0, |(_, blocks)| {
+            core::mem::size_of::<P7P4CoverageBlocks>()
+                + core::mem::size_of_val(blocks.tails())
+                + core::mem::size_of_val(blocks.runs())
+        });
+        last + self.tail_masks.capacity()
+            * (core::mem::size_of::<(u32, [u8; P7P4_TAIL_BYTES])>() + 1)
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Default)]
+struct P7P4CaptureBuilder {
+    tails: Vec<[u8; P7P4_TAIL_BYTES]>,
+    tail_indices: HashMap<[u8; P7P4_TAIL_BYTES], u16>,
+    tail_counts: Vec<u16>,
+    // Local references are never serialized. This map prevents re-hashing a
+    // mask when several first-bag permutations point at the same tail root.
+    tail_refs: HashMap<u32, u16>,
+    runs: Vec<(u16, u16)>,
+    prefix_count: usize,
+    covered_count: u32,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+impl P7P4CaptureBuilder {
+    fn append(
+        &mut self,
+        root: u32,
+        repeat: usize,
+        render_tail: impl FnOnce() -> Result<[u8; P7P4_TAIL_BYTES], WasmExactSearchError>,
+    ) -> Result<(), WasmExactSearchError> {
+        if repeat == 0 || self.prefix_count + repeat > P7P4_PREFIXES {
+            return Err(p7p4_bad_frame());
+        }
+        let index = if let Some(&index) = self.tail_refs.get(&root) {
+            index
+        } else {
+            let mask = render_tail()?;
+            let index = if let Some(&index) = self.tail_indices.get(&mask) {
+                index
+            } else {
+                let index = u16::try_from(self.tails.len()).map_err(|_| p7p4_bad_frame())?;
+                self.tail_indices
+                    .try_reserve(1)
+                    .map_err(|_| p7p4_storage_error())?;
+                self.tails
+                    .try_reserve(1)
+                    .map_err(|_| p7p4_storage_error())?;
+                self.tail_counts
+                    .try_reserve(1)
+                    .map_err(|_| p7p4_storage_error())?;
+                self.tail_indices.insert(mask, index);
+                self.tails.push(mask);
+                self.tail_counts
+                    .push(mask.iter().map(|byte| byte.count_ones() as u16).sum());
+                index
+            };
+            self.tail_refs
+                .try_reserve(1)
+                .map_err(|_| p7p4_storage_error())?;
+            self.tail_refs.insert(root, index);
+            index
+        };
+        let repeat_u16 = u16::try_from(repeat).map_err(|_| p7p4_bad_frame())?;
+        match self.runs.last_mut() {
+            Some((last_index, length)) if *last_index == index => *length += repeat_u16,
+            _ => {
+                self.runs.try_reserve(1).map_err(|_| p7p4_storage_error())?;
+                self.runs.push((index, repeat_u16));
+            }
+        }
+        self.prefix_count += repeat;
+        self.covered_count +=
+            u32::from(self.tail_counts[usize::from(index)]) * u32::from(repeat_u16);
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        expected_covered_count: u64,
+    ) -> Result<P7P4CoverageBlocks, WasmExactSearchError> {
+        if self.prefix_count != P7P4_PREFIXES
+            || u64::from(self.covered_count) != expected_covered_count
+        {
+            return Err(p7p4_bad_frame());
+        }
+        Ok(P7P4CoverageBlocks {
+            tails: self.tails.into_boxed_slice(),
+            runs: self.runs.into_boxed_slice(),
+            covered_count: self.covered_count,
+        })
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn p7p4_bad_frame() -> WasmExactSearchError {
+    WasmExactSearchError::InvalidProblem("wasm_p7p4_capture_root_shape_mismatch")
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn p7p4_storage_error() -> WasmExactSearchError {
+    WasmExactSearchError::InvalidProblem("wasm_p7p4_capture_storage_unavailable")
+}
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C, align(32))]
@@ -601,6 +754,8 @@ pub(super) struct StandardBagCoverage {
     edge_check_count: usize,
     root_cache_hits: usize,
     root_cache_misses: usize,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    p7p4_capture: P7P4CaptureCache,
 }
 
 impl StandardBagCoverage {
@@ -702,6 +857,8 @@ impl StandardBagCoverage {
             edge_check_count: 0,
             root_cache_hits: 0,
             root_cache_misses: 0,
+            #[cfg(any(test, feature = "local-search-ab"))]
+            p7p4_capture: P7P4CaptureCache::default(),
         })
     }
 
@@ -821,8 +978,162 @@ impl StandardBagCoverage {
         })
     }
 
+    /// Call while the candidate's root is live, before the worker accumulates
+    /// it into its global union (that step may recycle the decision arena).
+    /// None is unsupported, never a proof of an empty accepted queue language.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub(super) fn capture_p7p4_root(
+        &mut self,
+        root: u32,
+    ) -> Result<Option<Arc<P7P4CoverageBlocks>>, WasmExactSearchError> {
+        if self.sequence_len != 11
+            || self.materialized_pattern_count != P7P4_PREFIXES * P7P4_TAIL_BITS
+            || !self.hold_enabled
+            || self.initial_hold_code != 0
+        {
+            return Ok(None);
+        }
+        if let Some((cached_root, blocks)) = &self.p7p4_capture.last_root {
+            if *cached_root == root {
+                return Ok(Some(Arc::clone(blocks)));
+            }
+        }
+        let source = SourceState {
+            depth: 0,
+            bag_remainder: FULL_STANDARD_BAG,
+        };
+        let expected = self.summary(root, source)?.covered_pattern_count;
+        let mut capture = core::mem::take(&mut self.p7p4_capture);
+        let mut builder = P7P4CaptureBuilder::default();
+        let blocks = self
+            .append_p7p4_prefix(root, source, &mut capture.tail_masks, &mut builder)
+            .and_then(|()| builder.finish(expected))
+            .map(Arc::new);
+        if let Ok(blocks) = &blocks {
+            capture.last_root = Some((root, Arc::clone(blocks)));
+        }
+        self.p7p4_capture = capture;
+        blocks.map(Some)
+    }
+
+    #[cfg(any(test, feature = "local-search-ab"))]
+    fn append_p7p4_prefix(
+        &self,
+        root: u32,
+        source: SourceState,
+        tail_masks: &mut HashMap<u32, [u8; P7P4_TAIL_BYTES]>,
+        builder: &mut P7P4CaptureBuilder,
+    ) -> Result<(), WasmExactSearchError> {
+        let source = source.normalized();
+        if root <= ACCEPT {
+            let remaining =
+                usize::try_from(self.suffix_count(source)).map_err(|_| p7p4_bad_frame())?;
+            if remaining % P7P4_TAIL_BITS != 0 {
+                return Err(p7p4_bad_frame());
+            }
+            let fill = if root == ACCEPT { u8::MAX } else { 0 };
+            return builder.append(root, remaining / P7P4_TAIL_BITS, || {
+                Ok([fill; P7P4_TAIL_BYTES])
+            });
+        }
+        if source.depth == 7 {
+            if source.bag_remainder != FULL_STANDARD_BAG {
+                return Err(p7p4_bad_frame());
+            }
+            return builder.append(root, 1, || {
+                if let Some(&cached) = tail_masks.get(&root) {
+                    return Ok(cached);
+                }
+                let mut mask = [0; P7P4_TAIL_BYTES];
+                self.append_p7p4_tail(root, source, 0, &mut mask)?;
+                // A refused memo insertion is not a failed exact projection.
+                if tail_masks.len() < P7P4_TAIL_MEMO_MAX && tail_masks.try_reserve(1).is_ok() {
+                    tail_masks.insert(root, mask);
+                }
+                Ok(mask)
+            });
+        }
+        if source.depth > 7 {
+            return Err(p7p4_bad_frame());
+        }
+        for (piece_index, child) in self
+            .p7p4_checked_children(root, source)?
+            .into_iter()
+            .enumerate()
+        {
+            if source.bag_remainder & (1_u8 << piece_index) != 0 {
+                let next = self.advance_source(source, piece_index)?;
+                self.append_p7p4_prefix(child, next, tail_masks, builder)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "local-search-ab"))]
+    fn append_p7p4_tail(
+        &self,
+        root: u32,
+        source: SourceState,
+        base: usize,
+        mask: &mut [u8; P7P4_TAIL_BYTES],
+    ) -> Result<(), WasmExactSearchError> {
+        if root == REJECT {
+            return Ok(());
+        }
+        let source = source.normalized();
+        let extent = usize::try_from(self.suffix_count(source)).map_err(|_| p7p4_bad_frame())?;
+        let end = base
+            .checked_add(extent)
+            .filter(|end| *end <= P7P4_TAIL_BITS)
+            .ok_or_else(p7p4_bad_frame)?;
+        if root == ACCEPT {
+            for ordinal in base..end {
+                mask[ordinal / 8] |= 1_u8 << (ordinal % 8);
+            }
+            return Ok(());
+        }
+        if source.depth >= self.sequence_len {
+            return Err(p7p4_bad_frame());
+        }
+        let mut child_base = base;
+        for (index, child) in self
+            .p7p4_checked_children(root, source)?
+            .into_iter()
+            .enumerate()
+        {
+            if source.bag_remainder & (1_u8 << index) != 0 {
+                let next = self.advance_source(source, index)?;
+                self.append_p7p4_tail(child, next, child_base, mask)?;
+                child_base +=
+                    usize::try_from(self.suffix_count(next)).map_err(|_| p7p4_bad_frame())?;
+            }
+        }
+        if child_base != end {
+            return Err(p7p4_bad_frame());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "local-search-ab"))]
+    fn p7p4_checked_children(
+        &self,
+        root: u32,
+        source: SourceState,
+    ) -> Result<[u32; 7], WasmExactSearchError> {
+        let index = reference_index(root);
+        if self.node_levels.get(index).copied() != Some(source.depth)
+            || self.node_valid_masks.get(index).copied() != Some(source.bag_remainder)
+        {
+            return Err(p7p4_bad_frame());
+        }
+        self.nodes
+            .get(index)
+            .map(|node| node.children)
+            .ok_or_else(p7p4_bad_frame)
+    }
+
     pub fn retained_bytes(&self) -> usize {
-        self.shared_request_retained_bytes()
+        let retained = self.shared_request_retained_bytes()
             + self.nodes.capacity() * core::mem::size_of::<DecisionNode>()
             + self.node_summaries.capacity() * core::mem::size_of::<DecisionSummary>()
             + self.node_levels.capacity() * core::mem::size_of::<u8>()
@@ -830,7 +1141,10 @@ impl StandardBagCoverage {
             + self.bucket_heads.capacity() * core::mem::size_of::<u32>()
             + self.memo_retained_payload_bytes()
             + self.product_memo.directory_retained_bytes()
-            + self.global_words.capacity() * core::mem::size_of::<u64>()
+            + self.global_words.capacity() * core::mem::size_of::<u64>();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let retained = retained + self.p7p4_capture.retained_bytes();
+        retained
     }
 
     pub fn shared_request_retained_bytes(&self) -> usize {
@@ -897,6 +1211,10 @@ impl StandardBagCoverage {
 
     pub fn flush_and_recycle_local_cache(&mut self) -> Result<(), WasmExactSearchError> {
         self.flush_epoch_global()?;
+        #[cfg(any(test, feature = "local-search-ab"))]
+        {
+            self.p7p4_capture = P7P4CaptureCache::default();
+        }
         self.nodes.clear();
         self.node_summaries.clear();
         self.node_levels.clear();
@@ -1898,6 +2216,216 @@ mod supply_automaton_tests {
             SupplyProvenanceId(0x77),
         );
         (universe, initial)
+    }
+
+    fn full_p7p4_capture_fixture(
+        hold_enabled: bool,
+    ) -> (MaterializedPatternUniverse, StandardBagCoverage) {
+        let (_, initial) = request_fixture(11);
+        let universe = PatternUniverseMaterializer::standard_7_bag(11, 0, 0x77)
+            .expect("full standard P7P4 universe");
+        assert_eq!(universe.pattern_count(), P7P4_PREFIXES * P7P4_TAIL_BITS);
+        let coverage = StandardBagCoverage::for_universe(&universe, initial, hold_enabled, true)
+            .expect("supported standard bag")
+            .expect("standard decision source");
+        (universe, coverage)
+    }
+
+    fn p7p4_capture_path(
+        coverage: &mut StandardBagCoverage,
+        start_depth: u8,
+        pieces: &[PieceKind],
+        end: u32,
+    ) -> u32 {
+        let mut source = SourceState {
+            depth: start_depth,
+            bag_remainder: FULL_STANDARD_BAG,
+        };
+        let mut path = Vec::new();
+        for &piece in pieces {
+            let source_now = source.normalized();
+            let index = usize::from(piece_code(piece) - 1);
+            path.push((source_now, index));
+            source = coverage
+                .advance_source(source_now, index)
+                .expect("valid draw");
+        }
+        path.into_iter().rev().fold(end, |child, (source, index)| {
+            let mut children = [REJECT; 7];
+            children[index] = child;
+            coverage
+                .intern_node(source.depth, source.bag_remainder, children)
+                .expect("valid decision node")
+        })
+    }
+
+    fn unpack_p7p4_capture(blocks: &P7P4CoverageBlocks) -> Vec<u64> {
+        // Independent conversion through ordinal offsets, intentionally
+        // (unlike the exporter) crossing the 840/64-bit row alignment.
+        let mut words = vec![0; (P7P4_PREFIXES * P7P4_TAIL_BITS) / 64];
+        let mut ordinal = 0;
+        for &(index, repeat) in blocks.runs() {
+            let mask = &blocks.tails()[usize::from(index)];
+            for _ in 0..repeat {
+                for suffix in 0..P7P4_TAIL_BITS {
+                    if mask[suffix / 8] & (1_u8 << (suffix % 8)) != 0 {
+                        let offset = ordinal + suffix;
+                        words[offset / 64] |= 1_u64 << (offset % 64);
+                    }
+                }
+                ordinal += P7P4_TAIL_BITS;
+            }
+        }
+        assert_eq!(ordinal, P7P4_PREFIXES * P7P4_TAIL_BITS);
+        words
+    }
+
+    fn permutations_in_literal_piece_order(len: usize) -> Vec<Vec<PieceKind>> {
+        use PieceKind::{I, J, L, O, S, T, Z};
+        fn visit(len: usize, prefix: &mut Vec<PieceKind>, out: &mut Vec<Vec<PieceKind>>) {
+            if prefix.len() == len {
+                out.push(prefix.clone());
+                return;
+            }
+            for next in [I, O, T, S, Z, J, L] {
+                if !prefix.contains(&next) {
+                    prefix.push(next);
+                    visit(len, prefix, out);
+                    prefix.pop();
+                }
+            }
+        }
+        let mut out = Vec::new();
+        visit(len, &mut Vec::new(), &mut out);
+        out
+    }
+
+    #[test]
+    fn direct_p7p4_capture_matches_dense_and_original_queue_ordinals() {
+        use PieceKind::I;
+        let (universe, mut coverage) = full_p7p4_capture_fixture(true);
+        let prefixes = permutations_in_literal_piece_order(7);
+        let tails = permutations_in_literal_piece_order(4);
+        assert_eq!(prefixes.len(), P7P4_PREFIXES);
+        assert_eq!(tails.len(), P7P4_TAIL_BITS);
+        let selected_prefix = [719, 720, 839, 5_039];
+        let selected_suffix = [0, 63, 64, 839];
+        let mut tail = REJECT;
+        for index in selected_suffix {
+            let path = p7p4_capture_path(&mut coverage, 7, &tails[index], ACCEPT);
+            tail = coverage.union(tail, path).expect("exact tail union");
+        }
+        let mut root = p7p4_capture_path(&mut coverage, 0, &[I], ACCEPT);
+        for index in selected_prefix {
+            let path = p7p4_capture_path(&mut coverage, 0, &prefixes[index], tail);
+            root = coverage.union(root, path).expect("exact prefix union");
+        }
+        let blocks = coverage
+            .capture_p7p4_root(root)
+            .expect("direct projection")
+            .expect("eligible full fresh standard bag");
+        assert!(Arc::ptr_eq(
+            &blocks,
+            &coverage
+                .capture_p7p4_root(root)
+                .expect("same arena")
+                .expect("eligible")
+        ));
+        let words = unpack_p7p4_capture(&blocks);
+        assert_eq!(
+            words,
+            coverage
+                .materialize_root(root)
+                .expect("dense reference")
+                .to_owned_words()
+        );
+        assert_eq!(blocks.covered_count(), 720 * 840 + 3 * 4);
+        assert_eq!(coverage.p7p4_capture.tail_masks.len(), 1);
+        for prefix in [0, 719, 720, 839, 840, 5039] {
+            for suffix in 0..P7P4_TAIL_BITS {
+                let mut queue = prefixes[prefix].clone();
+                queue.extend_from_slice(&tails[suffix]);
+                let ordinal = prefix * P7P4_TAIL_BITS + suffix;
+                assert_eq!(universe.sequence_at(ordinal).as_ref(), queue);
+                let expected = queue[0] == I
+                    || (selected_prefix.contains(&prefix) && selected_suffix.contains(&suffix));
+                assert_eq!(
+                    words[ordinal / 64] >> (ordinal % 64) & 1 != 0,
+                    expected,
+                    "{ordinal}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direct_p7p4_capture_observes_hold_product_and_arena_epoch() {
+        use PieceKind::{I, J, L, O, S, T, Z};
+        let (_, mut coverage) = full_p7p4_capture_fixture(true);
+        let mut languages = PieceOrderLanguageCache::default();
+        let mut predecessors = [0_u16; 10];
+        for (index, predecessor) in predecessors.iter_mut().enumerate().skip(1) {
+            *predecessor = 1 << (index - 1);
+        }
+        let lang = languages
+            .compile_poset_language(&[I, O, T, S, Z, J, L, I, O, T], &predecessors, 128)
+            .expect("valid matching language")
+            .expect("bounded language");
+        let result = coverage
+            .cover_language(&languages, lang.root, &ExecutionControl::default())
+            .expect("actual hold-enabled bag decision product");
+        assert!(result.covers_any_pattern);
+        let blocks = coverage
+            .capture_p7p4_root(result.root)
+            .expect("compact actual product")
+            .expect("eligible");
+        assert_eq!(
+            blocks.covered_count() as usize,
+            result.covered_pattern_count
+        );
+        let words = unpack_p7p4_capture(&blocks);
+        assert_eq!(words[0] & 1, 1);
+        assert_eq!(
+            words,
+            coverage
+                .materialize_root(result.root)
+                .expect("dense product")
+                .to_owned_words()
+        );
+
+        let (_, mut coverage) = full_p7p4_capture_fixture(true);
+        let old_root = p7p4_capture_path(&mut coverage, 0, &[I], ACCEPT);
+        let old = coverage
+            .capture_p7p4_root(old_root)
+            .expect("old projection")
+            .expect("eligible");
+        coverage
+            .flush_and_recycle_local_cache()
+            .expect("clear decision arena");
+        let new_root = p7p4_capture_path(&mut coverage, 0, &[O], ACCEPT);
+        assert_eq!(old_root, new_root, "arena can reuse the numeric reference");
+        let new = coverage
+            .capture_p7p4_root(new_root)
+            .expect("new projection")
+            .expect("eligible");
+        assert!(!Arc::ptr_eq(&old, &new));
+        assert_ne!(old, new);
+        assert_eq!(unpack_p7p4_capture(&old)[0], u64::MAX);
+        assert_eq!(unpack_p7p4_capture(&new)[0], 0);
+    }
+
+    #[test]
+    fn direct_p7p4_capture_rejects_nonmatching_scope_without_an_empty_proof() {
+        let mut truncated = coverage_for_len(11, true);
+        assert!(truncated
+            .capture_p7p4_root(ACCEPT)
+            .expect("clean fallback")
+            .is_none());
+        let (_, mut no_hold) = full_p7p4_capture_fixture(false);
+        assert!(no_hold
+            .capture_p7p4_root(ACCEPT)
+            .expect("clean fallback")
+            .is_none());
     }
 
     fn branching_piece_language(

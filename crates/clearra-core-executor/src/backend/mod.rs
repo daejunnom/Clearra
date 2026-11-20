@@ -39,6 +39,8 @@ pub(crate) use wasm_cpu::exact_spawn_lock_anchors;
 pub use wasm_cpu::{count_distinct_no_hold_one_bag_poset, DistinctNoHoldOneBagCount};
 #[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{structural_order_experiment_totals, StructuralOrderMetrics};
+#[cfg(feature = "local-search-ab")]
+pub use wasm_cpu::{CapturedSolutionCoverage, P7P4CoverageBlocks};
 pub use wasm_cpu::{
     WasmFullHeightPcProducer, WasmFullHeightPcResultMerger, WasmFullHeightPcVerifier,
     WasmFullHeightTilingProducer, WasmFullHeightTilingResultMerger, WasmFullHeightTilingWorker,

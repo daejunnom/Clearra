@@ -16,7 +16,7 @@ const RUNTIME_SCHEMA = "clearra.runtime-receipt.v2";
 const ORDER = "ABBABAAB";
 const AXES = [
   "mode", "structural_mode", "static_influence_mode", "translation_interval_mode",
-  "movement_clear_certificates_mode",
+  "movement_clear_certificates_mode", "first_kick_interval_mode", "conditional_order_mode",
 ];
 const FIXED_P7P4_AXES = ["incremental_domain_mode"];
 const SOLUTIONS = 456_459;

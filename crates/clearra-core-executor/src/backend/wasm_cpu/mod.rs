@@ -121,6 +121,8 @@ pub(crate) use reachability::{
     DocumentLockReachability, DocumentReachabilityEngine,
 };
 #[cfg(any(test, feature = "local-search-ab"))]
+pub use result::CapturedSolutionCoverage;
+#[cfg(any(test, feature = "local-search-ab"))]
 pub(crate) use result::SolutionCoverageCapture;
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
 pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
@@ -132,6 +134,8 @@ pub(crate) use setup_parallel::{
     WasmSetupParallelCoordinator, WasmSetupParallelProduce, WasmSetupParallelWorker,
     WasmSetupParallelWorkerAdvance,
 };
+#[cfg(feature = "local-search-ab")]
+pub use standard_bag_coverage::P7P4CoverageBlocks;
 pub use tiling_parallel::{
     WasmPackedTilingIdentity, WasmPcRootProducer, WasmPcRootResultMerger, WasmTilingRootAdvance,
     WasmTilingRootChunk, WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,

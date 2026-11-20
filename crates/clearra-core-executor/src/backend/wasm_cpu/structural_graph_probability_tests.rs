@@ -732,11 +732,18 @@ fn count_all_same_current_and_held_piece_keeps_the_operation_graph() {
         WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default()).unwrap()
     };
     let (baseline, _) = structural_order::with_mode(false, run);
-    let (treatment, metrics) =
-        structural_order::with_movement_clear_mode(true, || structural_order::with_mode(true, run));
+    let (treatment, metrics) = structural_order::with_conditional_order_mode(true, || {
+        structural_order::with_first_kick_interval_mode(true, || {
+            structural_order::with_movement_clear_mode(true, || {
+                structural_order::with_mode(true, run)
+            })
+        })
+    });
     assert_parity(&baseline, &treatment);
     assert_eq!(metrics.skipped_build_graphs, 0);
     assert_eq!(metrics.movement_clear, Default::default());
+    assert_eq!(metrics.first_kick_interval, Default::default());
+    assert_eq!(metrics.conditional_order, Default::default());
     assert_eq!(treatment.coverage_pattern_words(), &[1]);
     assert!(
         treatment
@@ -999,5 +1006,175 @@ fn movement_clear_certificate_matches_the_t_l_oracle_and_saves_primitive_search(
             |result: &CoreExecutionResult| result.usize_field("total_reachability_states").unwrap();
         assert!(states(&partial) < states(&baseline), "{profile:?}");
         assert!(states(&completed) < states(&baseline), "{profile:?}");
+    }
+}
+
+#[test]
+fn first_kick_certificate_saves_primitive_search_without_collapsing_support_or() {
+    use clearra_core_domain::{
+        piece::rotation::RotationState,
+        solution::normalized_tiling_solution::{PiecePlacementMask, StandardBoard64TilingIdentity},
+    };
+    use clearra_coverage::pattern::pattern_id::PatternId;
+    use clearra_rules::profile::builtin_rules::srs;
+
+    let _guard = product_guard();
+    use PieceKind::{I, O, T};
+    let placements = [(I, 0x00f0_0000), (O, 0x0c03), (T, 0x7008)];
+    let (catalog, candidate) = fixture(3, &placements);
+    let board = catalog.initial_board();
+    assert_eq!(board, 0x3f0f_83f4);
+    let profile = KickTableProfileId::Srs90;
+    let pieces: Vec<_> = candidate
+        .row_ids()
+        .iter()
+        .map(|&id| catalog.skeleton(id).piece)
+        .collect();
+    let bit = |piece| 1_usize << pieces.iter().position(|&kind| kind == piece).unwrap();
+    let transitions = physical_transitions(&catalog, &candidate, profile);
+    assert_eq!(usize::from(transitions[0]) & bit(I), 0);
+    for supporter in [O, T] {
+        assert_ne!(usize::from(transitions[bit(supporter)]) & bit(I), 0);
+    }
+    let words = operation_words(&pieces, &transitions);
+    assert_eq!(
+        words,
+        BTreeSet::from([vec![O, I, T], vec![O, T, I], vec![T, I, O], vec![T, O, I]])
+    );
+    assert!(
+        placement_poset::compile(&catalog, &candidate).is_none(),
+        "I requires O or T; do not force either as its mandatory predecessor"
+    );
+
+    let (maximum, deleted) = subset_state(&catalog, &candidate, bit(O));
+    assert_eq!((maximum, deleted), (board | 0x0c03, 0));
+    let target = catalog
+        .instantiations(catalog.skeleton_id(T, 0x7008).unwrap(), deleted)
+        .find(|lock| lock.rotation == RotationState::Two && lock.lock_mask == 0x7008)
+        .unwrap();
+    let mut workspace = ReachabilityWorkspace::default();
+    workspace.configure_kick_profile(profile, false);
+    for occupancy in [board, maximum] {
+        assert!(!workspace.lock_harddrop_reachable_instantiated(10, occupancy, target));
+    }
+    assert!(workspace.try_prove_first_kick_lock_interval(
+        &catalog,
+        board,
+        maximum,
+        T,
+        profile,
+        target,
+        LocalRelationRowFrame::new(3, 0),
+    ));
+    assert_eq!(workspace.generated_state_count(), 0);
+
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(3, board),
+        PcQueueInput::standard_7_bag(),
+        PieceWindow::new(3),
+    )
+    .with_rule(srs())
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(3))
+    .with_supply_window_size(SupplyWindowSize::new(3))
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+    .with_retained_trace_limit(0)
+    .with_execution_policy(policy());
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    let run = |problem: &clearra_problem::SearchProblem, first_kick, conditional| {
+        structural_order::with_conditional_order_mode(conditional, || {
+            structural_order::with_first_kick_interval_mode(first_kick, || {
+                structural_order::with_movement_clear_mode(false, || {
+                    structural_order::with_mode(false, || {
+                        placement_dependency::with_mode(false, || {
+                            WasmCpuSearchBackend::execute_with_control(
+                                problem,
+                                &ExecutionControl::default(),
+                            )
+                            .unwrap()
+                        })
+                        .0
+                    })
+                })
+            })
+        })
+    };
+    let (ordinary, _) = run(&problem, false, false);
+    let intended = StandardBoard64TilingIdentity::from_placements(
+        board,
+        placements.map(|(piece, cells)| PiecePlacementMask::new(piece, cells)),
+    )
+    .unwrap();
+    assert!(ordinary
+        .normalized_solution_identities()
+        .contains(&intended));
+    let summary = problem
+        .clone()
+        .with_output_policy(SearchOutputPolicy::CoverageSummary);
+    let (baseline, disabled) = run(&summary, false, false);
+    let (candidate, enabled) = run(&summary, true, false);
+    let (conditional, conditional_metrics) = run(&summary, false, true);
+    assert_parity(&baseline, &candidate);
+    assert_parity(&baseline, &conditional);
+    assert_eq!(
+        candidate.normalized_solution_coverages(),
+        ordinary.normalized_solution_coverages()
+    );
+    let universe = problem.piece_source().materialized_universe().unwrap();
+    assert_eq!(universe.pattern_count(), 210);
+    let solution = candidate
+        .solution_coverages()
+        .iter()
+        .find(|coverage| coverage.identity() == intended)
+        .unwrap();
+    for index in 0..universe.pattern_count() {
+        assert_eq!(
+            solution.covered_patterns().contains(PatternId::new(index)),
+            words.contains::<[PieceKind]>(universe.sequence_at(index).as_ref()),
+            "OR-support candidate queue {index}"
+        );
+    }
+    let reports = crate::solution_probability::probability_reports(
+        ordinary.normalized_solution_identities(),
+        candidate.solution_coverages(),
+        universe.weights(),
+        true,
+    );
+    assert!(!reports.is_empty());
+    assert_eq!(reports, ordinary.solution_probabilities());
+    assert_eq!(disabled.first_kick_interval, Default::default());
+    assert_eq!(disabled.conditional_order, Default::default());
+    assert_eq!(enabled.conditional_order, Default::default());
+    assert_eq!(conditional_metrics.first_kick_interval, Default::default());
+    assert_eq!(enabled.skipped_build_graphs, 0);
+    assert!(enabled.first_kick_interval.selected_locks > 0);
+    assert!(enabled.first_kick_interval.attempts >= enabled.first_kick_interval.proofs);
+    assert!(enabled.first_kick_interval.proofs >= enabled.first_kick_interval.selected_locks);
+    assert!(
+        candidate.usize_field("total_reachability_states").unwrap()
+            < baseline.usize_field("total_reachability_states").unwrap(),
+        "proof selection must reduce primitive traversal, not just report a hit",
+    );
+    let order = conditional_metrics.conditional_order;
+    assert!(order.attempted_candidates > 0);
+    assert!(order.checked_transitions > 0);
+    assert!(order.checked_transitions <= order.attempted_candidates * 256);
+    assert!(order.residual_states <= order.certified_candidates * 64);
+    if order.certified_candidates != 0 {
+        assert!(order.graph_bypasses > 0);
+        assert!(
+            conditional
+                .usize_field("total_reachability_states")
+                .unwrap()
+                < baseline.usize_field("total_reachability_states").unwrap(),
+            "completed conditional language must replace physical graph traversal",
+        );
+    } else {
+        assert_eq!(order.graph_bypasses, 0);
+        assert_eq!(
+            order.unknown_candidates + order.budget_candidates,
+            order.attempted_candidates
+        );
     }
 }

@@ -7,16 +7,14 @@ use clearra_core_domain::{
     resource::{ExecutionAvailabilityReason, ExecutionAvailabilityState, ResourceReport},
     solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
 };
-#[cfg(any(test, feature = "local-search-ab"))]
-use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::{SearchOutputPolicy, SearchProblem};
 
 use crate::{resource::WasmCpuTerminalResourceAuthority, CoreExecutionError, CoreExecutionResult};
 
-#[cfg(any(test, feature = "local-search-ab"))]
-use super::wasm_cpu::SolutionCoverageCapture;
 #[cfg(feature = "webgpu-search")]
 use super::wasm_cpu::WasmWebGpuSearchSession;
+#[cfg(any(test, feature = "local-search-ab"))]
+use super::wasm_cpu::{CapturedSolutionCoverage, SolutionCoverageCapture};
 use super::wasm_cpu::{
     ExactSearchAdvance, ExtendedPcSearchSession, ExtendedPcTilingSession, WasmExactSearchError,
     WasmExactSearchSession,
@@ -630,7 +628,10 @@ impl WasmCpuSearchBackend {
     pub fn execute_with_solution_coverage_capture(
         problem: &SearchProblem,
         control: &ExecutionControl,
-        capture: impl Fn(StandardBoard64TilingIdentity, &PatternBitSet) -> Result<(), &'static str>
+        capture: impl for<'a> Fn(
+                StandardBoard64TilingIdentity,
+                CapturedSolutionCoverage<'a>,
+            ) -> Result<(), &'static str>
             + Send
             + Sync
             + 'static,

@@ -4,14 +4,17 @@
 use std::{
     collections::HashMap,
     io::{self, Read, Write},
+    sync::Arc,
 };
 
 use clearra_core_domain::solution::normalized_tiling_solution::NormalizedTilingSolutionKey;
+use clearra_core_executor::backend::P7P4CoverageBlocks;
 
 const MAGIC: &[u8; 8] = b"CLRCOV1\0";
 const MAX_KEY_BYTES: usize = 512;
 const SUFFIX_BYTES: usize = 105; // 840 possible four-draw tails following each first bag.
 const SUFFIX_BITS: usize = SUFFIX_BYTES * 8;
+const P7P4_PREFIX_COUNT: usize = 5_040;
 
 /// Tags freeze the fixture's rule, board, hold, CountUnique, output mode,
 /// supply order, queue length and unit weight. P7P4 uses the original
@@ -155,6 +158,21 @@ impl<W: Write> CoverageWriter<W> {
             return self.write_solution(key, &payload.words(universe));
         }
         self.write_row(key, &QueueSet { numerator, payload })
+    }
+
+    pub(super) fn write_blocks(&mut self, key: &str, blocks: &BagBlocks) -> io::Result<()> {
+        if self.evidence.summary.universe != CoverageUniverse::P7P4 {
+            return Err(invalid(
+                "bag block evidence requires the fixed P7P4 universe",
+            ));
+        }
+        self.write_row(
+            key,
+            &QueueSet {
+                numerator: blocks.covered_count,
+                payload: QueuePayload::BagBlocks(blocks.clone()),
+            },
+        )
     }
 
     fn write_row(&mut self, key: &str, set: &QueueSet) -> io::Result<()> {
@@ -316,11 +334,22 @@ pub(super) fn compare(
                 if left == right {
                     continue;
                 }
-                // Encoding may differ without any semantic change.
-                let left_words = left.payload.words(universe);
-                let right_words = right.payload.words(universe);
-                let first_missing_queue = first_difference(&left_words, &right_words);
-                let first_added_queue = first_difference(&right_words, &left_words);
+                let (first_missing_queue, first_added_queue) = match (&left.payload, &right.payload)
+                {
+                    (QueuePayload::BagBlocks(left), QueuePayload::BagBlocks(right)) => {
+                        left.differences(right)
+                    }
+                    // Legacy and small-fixture records may use different
+                    // representations, so fall back to exact words only here.
+                    _ => {
+                        let left_words = left.payload.words(universe);
+                        let right_words = right.payload.words(universe);
+                        (
+                            first_difference(&left_words, &right_words),
+                            first_difference(&right_words, &left_words),
+                        )
+                    }
+                };
                 if first_missing_queue.is_some() || first_added_queue.is_some() {
                     return Ok(CoverageComparison::Different(CoverageDifference {
                         reference_identity: Some(left_key),
@@ -377,10 +406,7 @@ struct QueueSet {
 #[derive(Debug, Eq, PartialEq)]
 enum QueuePayload {
     Ranges(Vec<(u32, u32)>),
-    BagBlocks {
-        blocks: Vec<[u8; SUFFIX_BYTES]>,
-        runs: Vec<(u16, u16)>, // (dictionary index, number of prefixes)
-    },
+    BagBlocks(BagBlocks),
 }
 
 impl QueueSet {
@@ -408,11 +434,9 @@ impl QueueSet {
         }
         // In a fixed P7P4 universe, each complete first bag occupies exactly
         // one 840-bit block. Equivalent tail sets need storing only once.
-        let payload = QueuePayload::from_bag_words(words, universe);
-        let QueuePayload::BagBlocks { blocks, runs } = &payload else {
-            unreachable!("bag dictionary returns blocks");
-        };
-        let limit = 4 + blocks.len() * SUFFIX_BYTES + runs.len() * 4;
+        let blocks = BagBlocks::from_words(words);
+        let limit = 4 + blocks.payload_bytes();
+        let payload = QueuePayload::BagBlocks(blocks);
         let payload = collect_ranges(words, limit).map_or(payload, QueuePayload::Ranges);
         Ok(Self { numerator, payload })
     }
@@ -445,48 +469,13 @@ impl QueueSet {
                 })
             }
             1 => {
-                let total_blocks = universe.block_count();
-                let block_count = usize::from(get_u16(input)?);
-                let run_count = usize::from(get_u16(input)?);
-                if block_count == 0
-                    || block_count > total_blocks
-                    || run_count == 0
-                    || run_count > total_blocks
-                {
-                    return Err(invalid("invalid bag block or run count"));
+                if universe != CoverageUniverse::P7P4 {
+                    return Err(invalid("bag blocks outside the fixed P7P4 universe"));
                 }
-                let mut blocks = reserve(block_count)?;
-                let mut counts = reserve(block_count)?;
-                for _ in 0..block_count {
-                    let block = read_array::<SUFFIX_BYTES>(input)?;
-                    counts.push(block.iter().map(|byte| byte.count_ones()).sum::<u32>());
-                    blocks.push(block);
-                }
-                let mut runs = reserve(run_count)?;
-                let mut seen = 0;
-                let mut numerator = 0;
-                for _ in 0..run_count {
-                    let index = get_u16(input)?;
-                    let repeat = get_u16(input)?;
-                    let Some(&count) = counts.get(usize::from(index)) else {
-                        return Err(invalid("invalid bag block dictionary index"));
-                    };
-                    seen += usize::from(repeat);
-                    if repeat == 0
-                        || seen > total_blocks
-                        || runs.last().is_some_and(|&(last, _)| index == last)
-                    {
-                        return Err(invalid("invalid bag block run"));
-                    }
-                    numerator += u32::from(repeat) * count;
-                    runs.push((index, repeat));
-                }
-                if seen != total_blocks {
-                    return Err(invalid("incomplete bag block prefix coverage"));
-                }
+                let blocks = BagBlocks::read(input)?;
                 Ok(Self {
-                    numerator,
-                    payload: QueuePayload::BagBlocks { blocks, runs },
+                    numerator: blocks.covered_count,
+                    payload: QueuePayload::BagBlocks(blocks),
                 })
             }
             _ => Err(invalid("invalid queue-set encoding")),
@@ -494,30 +483,339 @@ impl QueueSet {
     }
 }
 
-impl QueuePayload {
-    fn from_bag_words(words: &[u64], universe: CoverageUniverse) -> Self {
-        let mut bytes = Vec::with_capacity(universe.byte_count());
+/// Exact fixed-universe data. Native capture borrows the worker's owned Arc;
+/// restored and ORed rows share one compact owned dictionary instead.
+#[derive(Clone, Debug)]
+pub(super) struct BagBlocks {
+    storage: BagBlockStorage,
+    covered_count: u32,
+}
+
+#[derive(Clone, Debug)]
+enum BagBlockStorage {
+    Native(Arc<P7P4CoverageBlocks>),
+    Owned(Arc<OwnedBagBlocks>),
+}
+
+#[derive(Debug)]
+struct OwnedBagBlocks {
+    tails: Box<[[u8; SUFFIX_BYTES]]>,
+    runs: Box<[(u16, u16)]>,
+}
+
+impl PartialEq for BagBlocks {
+    fn eq(&self, other: &Self) -> bool {
+        if self.covered_count != other.covered_count {
+            return false;
+        }
+        if match (&self.storage, &other.storage) {
+            (BagBlockStorage::Native(left), BagBlockStorage::Native(right)) => {
+                Arc::ptr_eq(left, right)
+            }
+            (BagBlockStorage::Owned(left), BagBlockStorage::Owned(right)) => {
+                Arc::ptr_eq(left, right)
+            }
+            _ => false,
+        } {
+            return true;
+        }
+        self.runs() == other.runs() && self.tails() == other.tails()
+    }
+}
+
+impl Eq for BagBlocks {}
+
+impl BagBlocks {
+    pub(super) fn from_capture(capture: Arc<P7P4CoverageBlocks>) -> Self {
+        // This type is only constructed by the core's exact fixed-P7P4
+        // projection; independently validate external bytes in read().
+        Self {
+            covered_count: capture.covered_count(),
+            storage: BagBlockStorage::Native(capture),
+        }
+    }
+
+    fn from_owned(
+        tails: Vec<[u8; SUFFIX_BYTES]>,
+        runs: Vec<(u16, u16)>,
+        covered_count: u32,
+    ) -> Self {
+        Self {
+            storage: BagBlockStorage::Owned(Arc::new(OwnedBagBlocks {
+                tails: tails.into_boxed_slice(),
+                runs: runs.into_boxed_slice(),
+            })),
+            covered_count,
+        }
+    }
+
+    pub(super) fn from_words(words: &[u64]) -> Self {
+        let mut bytes = Vec::with_capacity(words.len() * 8);
         for word in words {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
-        assert_eq!(bytes.len(), universe.block_count() * SUFFIX_BYTES);
-        let mut indexed = HashMap::new();
-        let mut blocks = Vec::new();
-        let mut runs: Vec<(u16, u16)> = Vec::new();
-        for block in bytes.chunks_exact(SUFFIX_BYTES) {
-            let index = *indexed.entry(block).or_insert_with(|| {
-                let index = blocks.len() as u16;
-                blocks.push(block.try_into().expect("exactly one 7P4 block"));
-                index
-            });
-            match runs.last_mut() {
-                Some((previous, count)) if *previous == index => *count += 1,
-                _ => runs.push((index, 1)),
-            }
+        assert_eq!(bytes.len(), P7P4_PREFIX_COUNT * SUFFIX_BYTES);
+        let mut builder = BagBlockBuilder::default();
+        for tail in bytes.chunks_exact(SUFFIX_BYTES) {
+            builder.add(tail.try_into().expect("one P7P4 tail"), 1);
         }
-        Self::BagBlocks { blocks, runs }
+        builder.finish()
     }
 
+    pub(super) fn from_sparse(ids: &[u32]) -> Self {
+        let mut builder = BagBlockBuilder::default();
+        let mut prefix = 0;
+        for group in ids.chunk_by(|a, b| *a / SUFFIX_BITS as u32 == *b / SUFFIX_BITS as u32) {
+            let current = group[0] as usize / SUFFIX_BITS;
+            if current > prefix {
+                builder.add([0; SUFFIX_BYTES], (current - prefix) as u16);
+            }
+            let mut tail = [0; SUFFIX_BYTES];
+            for &queue in group {
+                let bit = queue as usize % SUFFIX_BITS;
+                tail[bit / 8] |= 1 << (bit % 8);
+            }
+            builder.add(tail, 1);
+            prefix = current + 1;
+        }
+        if prefix < P7P4_PREFIX_COUNT {
+            builder.add([0; SUFFIX_BYTES], (P7P4_PREFIX_COUNT - prefix) as u16);
+        }
+        builder.finish()
+    }
+
+    fn tails(&self) -> &[[u8; SUFFIX_BYTES]] {
+        match &self.storage {
+            BagBlockStorage::Native(blocks) => blocks.tails(),
+            BagBlockStorage::Owned(blocks) => &blocks.tails,
+        }
+    }
+
+    fn runs(&self) -> &[(u16, u16)] {
+        match &self.storage {
+            BagBlockStorage::Native(blocks) => blocks.runs(),
+            BagBlockStorage::Owned(blocks) => &blocks.runs,
+        }
+    }
+
+    pub(super) fn payload_bytes(&self) -> usize {
+        std::mem::size_of_val(self.tails()) + std::mem::size_of_val(self.runs())
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.payload_bytes() + 128 // bound fixed Arc/owner/box allocation overhead per row
+    }
+
+    pub(super) const fn max_retained_bytes() -> usize {
+        P7P4_PREFIX_COUNT * (SUFFIX_BYTES + 4) + 128
+    }
+
+    pub(super) fn retained_union_bound(&self, other: &Self) -> usize {
+        if self == other {
+            return self.retained_bytes();
+        }
+        // Any stored dictionary entry is used by at least one output run;
+        // cuts can occur only at a run boundary of one input.
+        let cuts = (self.runs().len() + other.runs().len() - 1).min(P7P4_PREFIX_COUNT);
+        self.retained_bytes()
+            .max(other.retained_bytes())
+            .max(cuts * (SUFFIX_BYTES + 4) + 128)
+    }
+
+    fn zip_runs(&self, other: &Self, mut visit: impl FnMut(u16, u16, u16) -> bool) {
+        // Split only at boundaries. A long repeat performs one tail operation.
+        let mut left = self.runs().iter().copied();
+        let mut right = other.runs().iter().copied();
+        let mut a = left.next();
+        let mut b = right.next();
+        while let (Some((a_id, a_count)), Some((b_id, b_count))) = (a, b) {
+            let width = a_count.min(b_count);
+            if !visit(a_id, b_id, width) {
+                break;
+            }
+            a = if width == a_count {
+                left.next()
+            } else {
+                Some((a_id, a_count - width))
+            };
+            b = if width == b_count {
+                right.next()
+            } else {
+                Some((b_id, b_count - width))
+            };
+        }
+    }
+
+    pub(super) fn union(self, other: Self) -> Self {
+        let full = (P7P4_PREFIX_COUNT * SUFFIX_BITS) as u32;
+        if self.covered_count == 0 || other.covered_count == full {
+            return other;
+        }
+        if other.covered_count == 0 || self.covered_count == full || self == other {
+            return self;
+        }
+        let mut pairs = HashMap::new();
+        let mut builder = BagBlockBuilder::default();
+        self.zip_runs(&other, |li, ri, width| {
+            let combined = *pairs.entry((li, ri)).or_insert_with(|| {
+                let left = &self.tails()[usize::from(li)];
+                let right = &other.tails()[usize::from(ri)];
+                let block = std::array::from_fn(|i| left[i] | right[i]);
+                builder.intern(block)
+            });
+            builder.append(combined, width);
+            true
+        });
+        builder.finish()
+    }
+
+    pub(super) fn differences(&self, other: &Self) -> (Option<u32>, Option<u32>) {
+        let mut position = 0;
+        let (mut missing, mut added) = (None, None);
+        self.zip_runs(other, |li, ri, width| {
+            let left = &self.tails()[usize::from(li)];
+            let right = &other.tails()[usize::from(ri)];
+            if missing.is_none() {
+                missing = first_tail_difference(left, right).map(|delta| position + delta);
+            }
+            if added.is_none() {
+                added = first_tail_difference(right, left).map(|delta| position + delta);
+            }
+            position += u32::from(width) * SUFFIX_BITS as u32;
+            missing.is_none() || added.is_none()
+        });
+        (missing, added)
+    }
+
+    pub(super) fn read(input: &mut impl Read) -> io::Result<Self> {
+        let block_count = usize::from(get_u16(input)?);
+        let run_count = usize::from(get_u16(input)?);
+        if !(1..=P7P4_PREFIX_COUNT).contains(&block_count)
+            || !(1..=P7P4_PREFIX_COUNT).contains(&run_count)
+        {
+            return Err(invalid("invalid bag block or run count"));
+        }
+        let mut tails = reserve(block_count)?;
+        let mut counts = reserve(block_count)?;
+        for _ in 0..block_count {
+            let block = read_array::<SUFFIX_BYTES>(input)?;
+            counts.push(count_tail(&block));
+            tails.push(block);
+        }
+        let mut runs = reserve(run_count)?;
+        let (mut seen, mut numerator) = (0, 0);
+        for _ in 0..run_count {
+            let index = get_u16(input)?;
+            let repeat = get_u16(input)?;
+            let Some(&count) = counts.get(usize::from(index)) else {
+                return Err(invalid("invalid bag block dictionary index"));
+            };
+            seen += usize::from(repeat);
+            if repeat == 0
+                || seen > P7P4_PREFIX_COUNT
+                || runs.last().is_some_and(|&(last, _)| index == last)
+            {
+                return Err(invalid("invalid bag block run"));
+            }
+            numerator += u32::from(repeat) * count;
+            runs.push((index, repeat));
+        }
+        if seen != P7P4_PREFIX_COUNT {
+            return Err(invalid("incomplete bag block prefix coverage"));
+        }
+        Ok(Self::from_owned(tails, runs, numerator))
+    }
+
+    pub(super) fn write(&self, out: &mut impl Write) -> io::Result<()> {
+        let tails = self.tails();
+        let runs = self.runs();
+        out.write_all(&(tails.len() as u16).to_le_bytes())?;
+        out.write_all(&(runs.len() as u16).to_le_bytes())?;
+        for tail in tails {
+            out.write_all(tail)?;
+        }
+        for &(index, repeat) in runs {
+            out.write_all(&index.to_le_bytes())?;
+            out.write_all(&repeat.to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn or_into(&self, output: &mut [u8]) -> u32 {
+        let (mut added, mut offset) = (0, 0);
+        for &(index, repeat) in self.runs() {
+            let tail = &self.tails()[usize::from(index)];
+            let next = offset + SUFFIX_BYTES * usize::from(repeat);
+            if tail.iter().any(|&byte| byte != 0) {
+                for block in output[offset..next].chunks_exact_mut(SUFFIX_BYTES) {
+                    for (old, bits) in block.iter_mut().zip(tail) {
+                        added += (bits & !*old).count_ones();
+                        *old |= bits;
+                    }
+                }
+            }
+            offset = next;
+        }
+        added
+    }
+}
+
+#[derive(Default)]
+struct BagBlockBuilder {
+    tails: Vec<[u8; SUFFIX_BYTES]>,
+    dictionary: HashMap<[u8; SUFFIX_BYTES], u16>,
+    counts: Vec<u32>,
+    runs: Vec<(u16, u16)>,
+    prefix_count: usize,
+    covered_count: u32,
+}
+
+impl BagBlockBuilder {
+    fn intern(&mut self, tail: [u8; SUFFIX_BYTES]) -> u16 {
+        *self.dictionary.entry(tail).or_insert_with(|| {
+            let index = self.tails.len() as u16;
+            self.counts.push(count_tail(&tail));
+            self.tails.push(tail);
+            index
+        })
+    }
+
+    fn append(&mut self, index: u16, repeat: u16) {
+        debug_assert!(repeat > 0);
+        match self.runs.last_mut() {
+            Some((previous, count)) if *previous == index => *count += repeat,
+            _ => self.runs.push((index, repeat)),
+        }
+        self.prefix_count += usize::from(repeat);
+        self.covered_count += u32::from(repeat) * self.counts[usize::from(index)];
+    }
+
+    fn add(&mut self, tail: [u8; SUFFIX_BYTES], repeat: u16) {
+        let index = self.intern(tail);
+        self.append(index, repeat);
+    }
+
+    fn finish(self) -> BagBlocks {
+        debug_assert_eq!(self.prefix_count, P7P4_PREFIX_COUNT);
+        BagBlocks::from_owned(self.tails, self.runs, self.covered_count)
+    }
+}
+
+fn count_tail(tail: &[u8; SUFFIX_BYTES]) -> u32 {
+    tail.iter().map(|byte| byte.count_ones()).sum()
+}
+
+fn first_tail_difference(left: &[u8; SUFFIX_BYTES], right: &[u8; SUFFIX_BYTES]) -> Option<u32> {
+    left.iter()
+        .zip(right)
+        .enumerate()
+        .find_map(|(i, (&left, &right))| {
+            let diff = left & !right;
+            (diff != 0).then(|| i as u32 * 8 + diff.trailing_zeros())
+        })
+}
+
+impl QueuePayload {
     fn write(&self, out: &mut impl Write) -> io::Result<()> {
         match self {
             Self::Ranges(ranges) => {
@@ -530,17 +828,9 @@ impl QueuePayload {
                     previous_end = end;
                 }
             }
-            Self::BagBlocks { blocks, runs } => {
+            Self::BagBlocks(blocks) => {
                 out.write_all(&[1])?;
-                out.write_all(&(blocks.len() as u16).to_le_bytes())?;
-                out.write_all(&(runs.len() as u16).to_le_bytes())?;
-                for block in blocks {
-                    out.write_all(block)?;
-                }
-                for &(index, repeat) in runs {
-                    out.write_all(&index.to_le_bytes())?;
-                    out.write_all(&repeat.to_le_bytes())?;
-                }
+                blocks.write(out)?;
             }
         }
         Ok(())
@@ -552,22 +842,7 @@ impl QueuePayload {
                 .iter()
                 .map(|&(start, end)| mark_range(output, start as usize, end as usize))
                 .sum(),
-            Self::BagBlocks { blocks, runs } => {
-                let mut added = 0;
-                let mut offset = 0;
-                for &(index, repeat) in runs {
-                    let block = &blocks[usize::from(index)];
-                    for _ in 0..repeat {
-                        let next = offset + SUFFIX_BYTES;
-                        for (old, bits) in output[offset..next].iter_mut().zip(block) {
-                            added += (bits & !*old).count_ones();
-                            *old |= bits;
-                        }
-                        offset = next;
-                    }
-                }
-                added
-            }
+            Self::BagBlocks(blocks) => blocks.or_into(output),
         }
     }
 
@@ -865,6 +1140,37 @@ mod tests {
         assert_eq!(read_queue_set(packed.as_slice(), universe).unwrap(), words);
         packed.pop();
         assert!(read_queue_set(packed.as_slice(), universe).is_err());
+    }
+
+    #[test]
+    fn bag_block_union_and_bidirectional_difference_cross_prefix_boundaries() {
+        let top = CoverageUniverse::P7P4.queue_count() - 1;
+        let left_ids = [0, 838, 840, top];
+        let right_ids = [0, 839, 840, 1680];
+        let left = BagBlocks::from_sparse(&left_ids);
+        let right = BagBlocks::from_sparse(&right_ids);
+        assert_eq!(left.covered_count, right.covered_count);
+        assert_eq!(left.differences(&right), (Some(838), Some(839)));
+        let merged = left.union(right);
+        let expected = BagBlocks::from_sparse(&[0, 838, 839, 840, 1680, top]);
+        assert_eq!(merged.differences(&expected), (None, None));
+        assert_eq!(merged.covered_count, 6);
+        let mut compact = Vec::new();
+        merged.write(&mut compact).unwrap();
+        assert!(compact.len() < 1_024);
+        assert_eq!(BagBlocks::read(&mut compact.as_slice()).unwrap(), merged);
+    }
+
+    #[test]
+    fn remapped_or_split_bag_dictionaries_compare_as_exact_sets() {
+        let mut bit = [0; SUFFIX_BYTES];
+        bit[0] = 2;
+        let zeros = [0; SUFFIX_BYTES];
+        let repeated = BagBlocks::from_owned(vec![bit, zeros], vec![(0, 3), (1, 5037)], 3);
+        let remapped =
+            BagBlocks::from_owned(vec![zeros, bit, bit], vec![(2, 1), (1, 2), (0, 5037)], 3);
+        assert_ne!(repeated, remapped);
+        assert_eq!(repeated.differences(&remapped), (None, None));
     }
 
     #[test]

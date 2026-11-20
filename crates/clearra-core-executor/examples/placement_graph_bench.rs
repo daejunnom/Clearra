@@ -53,7 +53,9 @@ mod run {
         piece::piece_kind::PieceKind, runtime_cpu_capacity::CpuCapacity,
         solution::normalized_tiling_solution::NormalizedTilingSolutionKey,
     };
-    use clearra_core_executor::{CoreExecutionResult, WasmCpuSearchBackend};
+    use clearra_core_executor::{
+        backend::CapturedSolutionCoverage, CoreExecutionResult, WasmCpuSearchBackend,
+    };
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
     use clearra_pc_graph::request::{
         OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
@@ -123,6 +125,8 @@ mod run {
         let movement_clear_certificates_mode =
             experiment_mode("CLEARRA_MOVEMENT_CLEAR_CERTIFICATES")?;
         let incremental_domain_mode = experiment_mode("CLEARRA_INCREMENTAL_DOMAIN")?;
+        let first_kick_interval_mode = experiment_mode("CLEARRA_FIRST_KICK_INTERVAL")?;
+        let conditional_order_mode = experiment_mode("CLEARRA_CONDITIONAL_ORDER")?;
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
         let capacity = CpuCapacity::current();
         let policy = PcExecutionPolicy::mvp_default()
@@ -172,10 +176,17 @@ mod run {
             let result = WasmCpuSearchBackend::execute_with_solution_coverage_capture(
                 &problem,
                 &control,
-                move |identity, bits| {
+                move |identity, evidence| {
                     let save = || -> Result<(), String> {
-                        let fragment = CoverageFragment::from_bitset(universe, bits)
-                            .map_err(|e| e.to_string())?;
+                        let fragment = match evidence {
+                            CapturedSolutionCoverage::Bitmap(bits) => {
+                                CoverageFragment::from_bitset(universe, bits)
+                                    .map_err(|e| e.to_string())?
+                            }
+                            CapturedSolutionCoverage::P7P4(blocks) => {
+                                CoverageFragment::from_p7p4_blocks(blocks)
+                            }
+                        };
                         let key =
                             NormalizedTilingSolutionKey::from_standard_board64_identity(identity);
                         owner
@@ -267,7 +278,10 @@ mod run {
             "translation_interval_mode": translation_interval_mode,
             "movement_clear_certificates_mode": movement_clear_certificates_mode,
             "incremental_domain_mode": incremental_domain_mode,
-            "variant": variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode),
+            "first_kick_interval_mode": first_kick_interval_mode,
+            "conditional_order_mode": conditional_order_mode,
+            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},conditional_order={conditional_order_mode}",
+                variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode)),
             "static_influence": {
                 "scope": "completed search, workspace counters aggregated after worker joins; null means metric not exposed",
                 "queries": result.usize_field("reachability_static_influence_queries"),
@@ -299,6 +313,22 @@ mod run {
                 "reused_closed_locks": structural_totals.movement_clear.reused_closed_locks,
                 "point_pose_attempts": structural_totals.movement_clear.point_pose_attempts,
                 "point_pose_proofs": structural_totals.movement_clear.point_pose_proofs
+            },
+            "first_kick_interval": {
+                "attempts": structural_totals.first_kick_interval.attempts,
+                "proofs": structural_totals.first_kick_interval.proofs,
+                "selected_locks": structural_totals.first_kick_interval.selected_locks
+            },
+            "conditional_order": {
+                "attempted_candidates": structural_totals.conditional_order.attempted_candidates,
+                "certified_candidates": structural_totals.conditional_order.certified_candidates,
+                "empty_certificates": structural_totals.conditional_order.empty_certificates,
+                "unknown_candidates": structural_totals.conditional_order.unknown_candidates,
+                "budget_candidates": structural_totals.conditional_order.budget_candidates,
+                "checked_transitions": structural_totals.conditional_order.checked_transitions,
+                "residual_states": structural_totals.conditional_order.residual_states,
+                "graph_bypasses": structural_totals.conditional_order.graph_bypasses,
+                "reused_pose_proofs": structural_totals.conditional_order.reused_pose_proofs
             },
             "other_process_configuration": {
                 "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),
@@ -840,13 +870,15 @@ mod run {
             };
             let movement = extra_mode("movement_clear_certificates_mode")?;
             let incremental = extra_mode("incremental_domain_mode")?;
+            let first_kick = extra_mode("first_kick_interval_mode")?;
+            let conditional = extra_mode("conditional_order_mode")?;
             all_axes_times
                 .entry(format!(
-                    "{mode},movement_clear={movement},incremental_domain={incremental}"
+                    "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},conditional_order={conditional}"
                 ))
                 .or_default()
                 .push(ms);
-            if movement == "0" && incremental == "0" {
+            if movement == "0" && incremental == "0" && first_kick == "0" && conditional == "0" {
                 times.entry(mode).or_default().push(ms);
             }
         }
