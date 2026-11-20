@@ -955,6 +955,14 @@ pub fn encode_partial_results(
 
 pub fn encode_partial_results_with_memory_guard<E>(
     results: &[CoreExecutionResult],
+    memory_guard: impl FnMut(u128) -> Result<(), E>,
+) -> Result<Vec<u8>, GuardedDistributedWireError<E>> {
+    encode_partial_results_with_prefix(results, |_| Ok([]), memory_guard)
+}
+
+fn encode_partial_results_with_prefix<E, const PREFIX_LEN: usize>(
+    results: &[CoreExecutionResult],
+    prefix: impl FnOnce(usize) -> Result<[u8; PREFIX_LEN], DistributedWireError>,
     mut memory_guard: impl FnMut(u128) -> Result<(), E>,
 ) -> Result<Vec<u8>, GuardedDistributedWireError<E>> {
     if results.len() > MAX_WIRE_ITEMS {
@@ -986,6 +994,10 @@ pub fn encode_partial_results_with_memory_guard<E>(
             })?;
     }
 
+    let prefix = prefix(required_len).map_err(GuardedDistributedWireError::Wire)?;
+    let required_len = required_len.checked_add(PREFIX_LEN).ok_or_else(|| {
+        GuardedDistributedWireError::Wire(DistributedWireError("partial_batch_length_overflow"))
+    })?;
     memory_guard(required_len as u128).map_err(GuardedDistributedWireError::MemoryGuard)?;
     let mut output = Vec::new();
     output.try_reserve_exact(required_len).map_err(|_| {
@@ -995,6 +1007,8 @@ pub fn encode_partial_results_with_memory_guard<E>(
 
     {
         let mut sink = CheckedWireOutput::new(&mut output);
+        sink.extend_checked(&prefix)
+            .map_err(GuardedDistributedWireError::Wire)?;
         checked_put_u32(&mut sink, PARTIAL_BATCH_MAGIC)
             .map_err(GuardedDistributedWireError::Wire)?;
         checked_put_u32(&mut sink, WIRE_VERSION).map_err(GuardedDistributedWireError::Wire)?;
@@ -1016,6 +1030,138 @@ pub fn encode_partial_results_with_memory_guard<E>(
         )));
     }
     Ok(output)
+}
+
+#[cfg(test)]
+pub(crate) mod scoped_compact_terminal {
+    //! Framing for the in-process compact worker ownership tests. Matching
+    //! bytes describe scope; they do not authenticate a worker or replace the
+    //! private control owner that owns the issued work and terminal carrier.
+    use super::*;
+
+    const MAGIC: [u8; 4] = *b"CP2F";
+    const VERSION: u32 = 1;
+    const PREFIX_LEN: usize = 72;
+    pub(crate) const MAX_FRAME_BYTES: usize = 64 * 1024;
+    pub(crate) const BRANCHES: usize = 2;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) struct TerminalScope {
+        pub(crate) source_job_id: u32,
+        pub(crate) epoch: u64,
+        pub(crate) request_sha256: [u8; 32],
+        pub(crate) branch: u32,
+        pub(crate) applied_work: u64,
+    }
+
+    impl TerminalScope {
+        fn valid(self) -> bool {
+            self.source_job_id != 0
+                && self.epoch != 0
+                && self.branch < BRANCHES as u32
+                && self.applied_work != 0
+        }
+
+        fn prefix(self, inner_len: usize) -> Result<[u8; PREFIX_LEN], DistributedWireError> {
+            if !self.valid() || inner_len > MAX_FRAME_BYTES - PREFIX_LEN {
+                return Err(DistributedWireError(
+                    "compact_terminal_scope_or_length_invalid",
+                ));
+            }
+            let mut prefix = [0; PREFIX_LEN];
+            let mut cursor = 0;
+            for part in [
+                MAGIC.as_slice(),
+                &VERSION.to_le_bytes(),
+                &self.source_job_id.to_le_bytes(),
+                &self.epoch.to_le_bytes(),
+                &self.request_sha256,
+                &self.branch.to_le_bytes(),
+                &self.applied_work.to_le_bytes(),
+                &self.applied_work.count_ones().to_le_bytes(),
+                &(inner_len as u32).to_le_bytes(),
+            ] {
+                prefix[cursor..cursor + part.len()].copy_from_slice(part);
+                cursor += part.len();
+            }
+            debug_assert_eq!(cursor, PREFIX_LEN);
+            Ok(prefix)
+        }
+    }
+
+    pub(crate) fn encode(
+        results: &[CoreExecutionResult],
+        scope: TerminalScope,
+    ) -> Result<Vec<u8>, DistributedWireError> {
+        if results.len() != 1 {
+            return Err(DistributedWireError(
+                "compact_terminal_requires_one_worker_result",
+            ));
+        }
+        encode_partial_results_with_prefix(
+            results,
+            |inner_len| scope.prefix(inner_len),
+            |bytes| {
+                if bytes > MAX_FRAME_BYTES as u128 {
+                    Err(DistributedWireError(
+                        "compact_terminal_frame_capacity_exceeded",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .map_err(|error| match error {
+            GuardedDistributedWireError::Wire(error)
+            | GuardedDistributedWireError::MemoryGuard(error) => error,
+        })
+    }
+
+    /// Verify fixed framing and the single PRB1/v8 carrier before handing a
+    /// borrowed body to the existing guarded parser, which checks all rows.
+    pub(crate) fn decode(input: &[u8]) -> Result<(TerminalScope, &[u8]), DistributedWireError> {
+        if !(PREFIX_LEN..=MAX_FRAME_BYTES).contains(&input.len()) {
+            return Err(DistributedWireError(
+                "compact_terminal_frame_length_invalid",
+            ));
+        }
+        let mut reader = Reader::new(input);
+        if reader.take(MAGIC.len())? != MAGIC || reader.u32()? != VERSION {
+            return Err(DistributedWireError("compact_terminal_header_invalid"));
+        }
+        let scope = TerminalScope {
+            source_job_id: reader.u32()?,
+            epoch: reader.u64()?,
+            request_sha256: reader
+                .take(32)?
+                .try_into()
+                .map_err(|_| DistributedWireError("compact_terminal_request_hash_invalid"))?,
+            branch: reader.u32()?,
+            applied_work: reader.u64()?,
+        };
+        if !scope.valid() || reader.u32()? != scope.applied_work.count_ones() {
+            return Err(DistributedWireError("compact_terminal_work_count_invalid"));
+        }
+        let len = reader.byte_length()?;
+        if len != input.len() - PREFIX_LEN {
+            return Err(DistributedWireError("compact_terminal_body_length_invalid"));
+        }
+        let body = reader.take(len)?;
+        let mut inner = Reader::new(body);
+        inner.require_header(PARTIAL_BATCH_MAGIC)?;
+        if inner.u32()? != 1 {
+            return Err(DistributedWireError(
+                "compact_terminal_requires_one_worker_result",
+            ));
+        }
+        let result_len = inner.byte_length()?;
+        let mut result = Reader::new(inner.take(result_len)?);
+        result.require_header(PARTIAL_MAGIC)?;
+        if inner.cursor != body.len() {
+            return Err(DistributedWireError("compact_terminal_body_length_invalid"));
+        }
+        Ok((scope, body))
+    }
 }
 
 #[cfg(test)]

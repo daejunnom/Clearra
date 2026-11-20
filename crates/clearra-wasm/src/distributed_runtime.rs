@@ -4247,11 +4247,17 @@ impl WasmDistributedVerifierRuntime {
                 .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY_FINISH", reason))?;
             return finish_build_probability_worker_results(verifier, results);
         }
-        let results = self
-            .verifier
+        let results = self.finish_generic_worker_results()?;
+        encode_partial_results(&results)
+            .map_err(|error| distributed_error("E_WASM_DISTRIBUTED_PARTIAL_ENCODE", error.reason()))
+    }
+
+    fn finish_generic_worker_results(
+        &mut self,
+    ) -> Result<Vec<clearra_core_executor::CoreExecutionResult>, WasmCommandRuntimeError> {
+        self.verifier
             .finish()
-            .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY_FINISH", reason))?;
-        let results = results
+            .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY_FINISH", reason))?
             .into_iter()
             .map(|result| {
                 self.postprocessor
@@ -4263,9 +4269,7 @@ impl WasmDistributedVerifierRuntime {
                         )
                     })
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        encode_partial_results(&results)
-            .map_err(|error| distributed_error("E_WASM_DISTRIBUTED_PARTIAL_ENCODE", error.reason()))
+            .collect()
     }
 }
 
@@ -4591,23 +4595,31 @@ pub(crate) mod scoped_compact_pc2 {
     //! In-process authority model. An Arc identifies a single owner here; it
     //! cannot be carried by a real Web Worker or substitute for its protocol.
 
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
 
     use clearra_core_domain::{
         execution_cancellation::ExecutionCancellationToken,
         objective::objective_kind::ObjectiveKind,
     };
     use clearra_pc_graph::request::{PcCountPolicy, PcHoldPolicy};
+    use sha2::{Digest, Sha256};
 
     use super::*;
-    use crate::WasmHostCapabilities;
+    use crate::{
+        distributed_wire::scoped_compact_terminal::{
+            self, TerminalScope, BRANCHES, MAX_FRAME_BYTES,
+        },
+        WasmHostCapabilities,
+    };
 
-    const VERIFIERS: usize = 2;
-    const WORKERS_WITH_SOURCE: usize = VERIFIERS + 1;
+    const WORKERS_WITH_SOURCE: usize = BRANCHES + 1;
     const MAX_WORK: u32 = u64::BITS;
     const MAX_COMMAND_BYTES: usize = 1024;
     const MAX_WORK_BYTES: usize = 128;
-    const MAX_FINAL_BYTES: usize = 64 * 1024;
+    static NEXT_SCOPE_EPOCH: AtomicU64 = AtomicU64::new(1);
 
     #[derive(Debug, Eq, PartialEq)]
     pub(crate) enum ScopeError {
@@ -4618,11 +4630,14 @@ pub(crate) mod scoped_compact_pc2 {
         ForeignScope,
         Duplicate,
         Incomplete,
+        MalformedTerminal,
         Runtime,
     }
 
     struct SourceScope {
         source_job_id: u32,
+        epoch: u64,
+        request_sha256: [u8; 32],
         command_text: Box<str>,
         cancellation: ExecutionCancellationToken,
     }
@@ -4640,17 +4655,22 @@ pub(crate) mod scoped_compact_pc2 {
     pub(crate) struct WorkerFinal {
         scope: Arc<SourceScope>,
         branch: usize,
-        applied_work: u64,
         worker_bytes: Vec<u8>,
+    }
+
+    impl WorkerFinal {
+        pub(crate) fn corrupt_frame(&mut self, edit: impl FnOnce(&mut Vec<u8>)) {
+            edit(&mut self.worker_bytes);
+        }
     }
 
     pub(crate) struct ScopedCoordinator {
         scope: Arc<SourceScope>,
         runtime: WasmCommandRuntime,
         source: WasmDistributedCoordinator,
-        issued: [u64; VERIFIERS],
-        installed: [bool; VERIFIERS],
-        merged: [bool; VERIFIERS],
+        issued: [u64; BRANCHES],
+        installed: [bool; BRANCHES],
+        merged: [bool; BRANCHES],
         next_ordinal: u32,
         closed: bool,
         failed: bool,
@@ -4703,14 +4723,20 @@ pub(crate) mod scoped_compact_pc2 {
             Ok(Self {
                 scope: Arc::new(SourceScope {
                     source_job_id,
+                    epoch: NEXT_SCOPE_EPOCH
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |epoch| {
+                            epoch.checked_add(1)
+                        })
+                        .map_err(|_| ScopeError::Capacity)?,
+                    request_sha256: Sha256::digest(command_text.as_bytes()).into(),
                     command_text: command_text.into(),
                     cancellation: source.control.cancellation.clone(),
                 }),
                 runtime: runtime.clone(),
                 source,
-                issued: [0; VERIFIERS],
-                installed: [false; VERIFIERS],
-                merged: [false; VERIFIERS],
+                issued: [0; BRANCHES],
+                installed: [false; BRANCHES],
+                merged: [false; BRANCHES],
                 next_ordinal: 0,
                 closed: false,
                 failed: false,
@@ -4719,7 +4745,7 @@ pub(crate) mod scoped_compact_pc2 {
 
         pub(crate) fn issue(&mut self, branch: usize) -> Result<Option<WorkTicket>, ScopeError> {
             self.check_active()?;
-            if branch >= VERIFIERS || self.closed {
+            if branch >= BRANCHES || self.closed {
                 return Err(ScopeError::InvalidPhase);
             }
             self.failed = true;
@@ -4771,11 +4797,15 @@ pub(crate) mod scoped_compact_pc2 {
 
         pub(crate) fn install_worker(&mut self, branch: usize) -> Result<ScopedWorker, ScopeError> {
             self.check_active()?;
-            if branch >= VERIFIERS || !self.closed || self.issued[branch] == 0 {
+            if branch >= BRANCHES || !self.closed || self.issued[branch] == 0 {
                 return Err(ScopeError::InvalidPhase);
             }
             if self.installed[branch] {
                 return Err(ScopeError::Duplicate);
+            }
+            let verified_hash: [u8; 32] = Sha256::digest(self.scope.command_text.as_bytes()).into();
+            if verified_hash != self.scope.request_sha256 {
+                return Err(ScopeError::ForeignScope);
             }
             // Independent WASM worker realms reserve one local slot. The
             // unit host shares one native admission pool, so model that same
@@ -4805,9 +4835,18 @@ pub(crate) mod scoped_compact_pc2 {
             self.check_active()?;
             self.failed = true;
             let branch = terminal.branch;
-            if !Arc::ptr_eq(&terminal.scope, &self.scope)
-                || terminal.scope.source_job_id != self.scope.source_job_id
-                || branch >= VERIFIERS
+            if !Arc::ptr_eq(&terminal.scope, &self.scope) || branch >= BRANCHES {
+                return Err(ScopeError::ForeignScope);
+            }
+            if terminal.worker_bytes.capacity() > MAX_FRAME_BYTES {
+                return Err(ScopeError::Capacity);
+            }
+            let (scope, body) = scoped_compact_terminal::decode(&terminal.worker_bytes)
+                .map_err(|_| ScopeError::MalformedTerminal)?;
+            if scope.source_job_id != self.scope.source_job_id
+                || scope.epoch != self.scope.epoch
+                || scope.request_sha256 != self.scope.request_sha256
+                || scope.branch != branch as u32
             {
                 return Err(ScopeError::ForeignScope);
             }
@@ -4817,13 +4856,13 @@ pub(crate) mod scoped_compact_pc2 {
             if !self.closed
                 || !self.installed[branch]
                 || self.issued[branch] == 0
-                || terminal.applied_work != self.issued[branch]
+                || scope.applied_work != self.issued[branch]
             {
                 return Err(ScopeError::Incomplete);
             }
             self.source
                 .absorb_partial_with_external_retained(
-                    &terminal.worker_bytes,
+                    body,
                     terminal.worker_bytes.capacity() as u128,
                 )
                 .map_err(|_| ScopeError::Runtime)?;
@@ -4948,17 +4987,32 @@ pub(crate) mod scoped_compact_pc2 {
             if self.failed || self.applied_work == 0 {
                 return Err(ScopeError::Incomplete);
             }
-            let worker_bytes = self.worker.finish().map_err(|_| ScopeError::Runtime)?;
+            if self.worker.has_pending_candidates()
+                || !matches!(&self.worker.verifier, DistributedVerifier::Pc(_))
+            {
+                return Err(ScopeError::InvalidPhase);
+            }
+            let results = self
+                .worker
+                .finish_generic_worker_results()
+                .map_err(|_| ScopeError::Runtime)?;
+            let worker_bytes = scoped_compact_terminal::encode(
+                &results,
+                TerminalScope {
+                    source_job_id: self.scope.source_job_id,
+                    epoch: self.scope.epoch,
+                    request_sha256: self.scope.request_sha256,
+                    branch: self.branch as u32,
+                    applied_work: self.applied_work,
+                },
+            )
+            .map_err(|_| ScopeError::Runtime)?;
             if self.scope.cancellation.is_cancelled() {
                 return Err(ScopeError::Cancelled);
-            }
-            if worker_bytes.is_empty() || worker_bytes.capacity() > MAX_FINAL_BYTES {
-                return Err(ScopeError::Capacity);
             }
             Ok(WorkerFinal {
                 scope: self.scope,
                 branch: self.branch,
-                applied_work: self.applied_work,
                 worker_bytes,
             })
         }

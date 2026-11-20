@@ -3975,6 +3975,7 @@ fn fixed_no_hold_opening_scoped_worker_finals_require_the_issued_and_merged_fami
     use crate::distributed_runtime::scoped_compact_pc2::{
         ScopeError, ScopedCoordinator, WorkTicket, WorkerFinal,
     };
+    use crate::distributed_wire::scoped_compact_terminal;
 
     const JOB_ID: u32 = 67;
     const COMMAND: &str =
@@ -4049,6 +4050,90 @@ fn fixed_no_hold_opening_scoped_worker_finals_require_the_issued_and_merged_fami
         .expect("one actual aggregate");
     assert!(matches!(missing.finish(), Err(ScopeError::Incomplete)));
     drop(lost_final);
+
+    let (mut malformed, [first, _second]) = issue(&runtime);
+    let mut corrupt_final = finalize(&mut malformed, 0, first);
+    corrupt_final.corrupt_frame(|wire| {
+        let (_, body) = scoped_compact_terminal::decode(wire).expect("actual framed PRB");
+        assert!(std::ptr::eq(body.as_ptr(), wire[72..].as_ptr()));
+        for (offset, description) in [
+            (0, "outer magic"),
+            (4, "outer version"),
+            (64, "declared work count"),
+            (68, "declared body length"),
+            (76, "inner PRB version"),
+            (80, "exactly one inner result"),
+        ] {
+            wire[offset] ^= 1;
+            assert!(
+                scoped_compact_terminal::decode(wire).is_err(),
+                "{description}"
+            );
+            wire[offset] ^= 1;
+        }
+        let _ = wire.pop();
+    });
+    assert_eq!(
+        malformed.apply_final(corrupt_final),
+        Err(ScopeError::MalformedTerminal)
+    );
+    assert!(matches!(malformed.finish(), Err(ScopeError::InvalidPhase)));
+
+    // Frames from the right local owner must still carry its exact wire
+    // binding. These are well-formed but belong to a different scope.
+    for (offset, description) in [
+        (8, "job ID"),
+        (12, "epoch"),
+        (20, "request hash"),
+        (52, "branch"),
+    ] {
+        let (mut source, [first, _second]) = issue(&runtime);
+        let mut final_frame = finalize(&mut source, 0, first);
+        final_frame.corrupt_frame(|wire| {
+            wire[offset] ^= 1;
+            assert!(
+                scoped_compact_terminal::decode(wire).is_ok(),
+                "{description}"
+            );
+        });
+        assert_eq!(
+            source.apply_final(final_frame),
+            Err(ScopeError::ForeignScope),
+            "{description}"
+        );
+        assert!(matches!(source.finish(), Err(ScopeError::InvalidPhase)));
+    }
+
+    let (mut wrong_work, [first, _second]) = issue(&runtime);
+    let mut final_frame = finalize(&mut wrong_work, 0, first);
+    final_frame.corrupt_frame(|wire| {
+        // Swap ordinals 0 and 1 between the alternating branches without
+        // changing the reported count or the otherwise valid scope.
+        wire[56] ^= 0b11;
+        assert!(scoped_compact_terminal::decode(wire).is_ok());
+    });
+    assert_eq!(
+        wrong_work.apply_final(final_frame),
+        Err(ScopeError::Incomplete)
+    );
+    assert!(matches!(wrong_work.finish(), Err(ScopeError::InvalidPhase)));
+
+    let (mut invalid_body, [first, _second]) = issue(&runtime);
+    let mut final_frame = finalize(&mut invalid_body, 0, first);
+    final_frame.corrupt_frame(|wire| {
+        // The fixed frame deliberately leaves validation of all inner fields
+        // to the existing guarded reducer ingress.
+        wire[96..100].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(scoped_compact_terminal::decode(wire).is_ok());
+    });
+    assert_eq!(
+        invalid_body.apply_final(final_frame),
+        Err(ScopeError::Runtime)
+    );
+    assert!(matches!(
+        invalid_body.finish(),
+        Err(ScopeError::InvalidPhase)
+    ));
 
     let (mut foreign, [first, _unused]) = issue(&runtime);
     let foreign_final = finalize(&mut foreign, 0, first);
