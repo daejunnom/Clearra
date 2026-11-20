@@ -1,3 +1,10 @@
+import {
+  clonePlain,
+  deepFreeze,
+  plainObject,
+  stripAttackFields,
+} from "./plain-result-snapshot.mjs";
+
 const DISPLAY_FAMILY_LIMIT = 24;
 
 const BUILD_V2_RESULT_CONTRACTS = new Map([
@@ -217,14 +224,6 @@ function withoutAttackFields(value) {
   ));
 }
 
-function stripAttackFields(value) {
-  if (Array.isArray(value)) return value.map(stripAttackFields);
-  if (!plainObject(value)) return value;
-  return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => !key.toLowerCase().includes("attack"))
-    .map(([key, nested]) => [key, stripAttackFields(nested)]));
-}
-
 function containsForbiddenAlternativeMetadata(value, path = []) {
   if (Array.isArray(value)) {
     return value.some((entry, index) =>
@@ -269,24 +268,4 @@ function validRuntimeIdentity(identity) {
 function canonicalBuildCandidateKey(value) {
   return typeof value === "string" &&
     /^ctk1\|initial=[0-9a-f]{16}\|placements=[A-Z][A-Za-z0-9@:_+\-]*:[0-9a-f]{16}(?:,[A-Z][A-Za-z0-9@:_+\-]*:[0-9a-f]{16})*$/u.test(value);
-}
-
-function clonePlain(value) {
-  if (Array.isArray(value)) return value.map(clonePlain);
-  if (plainObject(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, nested]) => [key, clonePlain(nested)]),
-    );
-  }
-  return value;
-}
-
-function deepFreeze(value) {
-  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
-  for (const nested of Object.values(value)) deepFreeze(nested);
-  return Object.freeze(value);
-}
-
-function plainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

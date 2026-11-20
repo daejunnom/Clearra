@@ -1,6 +1,13 @@
 // SRP rationale: the single change reason is the closed Discord projection of
 // App-owned typed results, including repeat validation at runner/client hops.
 // Keeping raw and narrowed forms together prevents divergent privacy contracts.
+import {
+  clonePlain,
+  deepFreeze,
+  plainObject,
+  stripAttackFields,
+} from "./plain-result-snapshot.mjs";
+
 const DISPLAY_FAMILY_LIMIT = 24;
 const SCORE_ONLY_EQUALITY = "score-only-attack-informational";
 const SCORE_ONLY_SUMMARY_EQUALITY = "score-only";
@@ -834,14 +841,6 @@ function rejectLegacyPrivateMetadata(value) {
   visit(value);
 }
 
-function stripAttackFields(value) {
-  if (Array.isArray(value)) return value.map(stripAttackFields);
-  if (!plainObject(value)) return value;
-  return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => !key.toLowerCase().includes("attack"))
-    .map(([key, nested]) => [key, stripAttackFields(nested)]));
-}
-
 function comparePathKey(left, right) {
   if (left[0] !== right[0]) return left[0] < right[0] ? -1 : 1;
   if (left[1] !== right[1]) return left[1] < right[1] ? -1 : 1;
@@ -938,24 +937,4 @@ function sha256(value) {
 
 function invalid(capabilityId, subject) {
   return new Error(`Discord received invalid ${subject} for ${capabilityId}.`);
-}
-
-function clonePlain(value) {
-  if (Array.isArray(value)) return value.map(clonePlain);
-  if (plainObject(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, nested]) => [key, clonePlain(nested)]),
-    );
-  }
-  return value;
-}
-
-function deepFreeze(value) {
-  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
-  for (const nested of Object.values(value)) deepFreeze(nested);
-  return Object.freeze(value);
-}
-
-function plainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

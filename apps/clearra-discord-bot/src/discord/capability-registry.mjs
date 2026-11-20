@@ -3,6 +3,7 @@
 // command authority below; Discord-owned meta and settings handlers remain
 // explicit. Keep this independent from the JSON contract fixture: contract
 // tests compare both projections field by field so either side detects drift.
+import { clonePlain, deepFreeze } from "./plain-result-snapshot.mjs";
 
 export const PRODUCT_CAPABILITY_REGISTRY_VERSION =
   "clearra.product-capability-registry.v1";
@@ -706,22 +707,6 @@ function sameStrings(left, right) {
   return Array.isArray(left) &&
     left.length === right.length &&
     left.every((value, index) => value === right[index]);
-}
-
-function clonePlain(value) {
-  if (Array.isArray(value)) return value.map(clonePlain);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, clonePlain(entry)]),
-    );
-  }
-  return value;
-}
-
-function deepFreeze(value) {
-  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
-  for (const entry of Object.values(value)) deepFreeze(entry);
-  return Object.freeze(value);
 }
 
 assertProductCapabilityRegistry();

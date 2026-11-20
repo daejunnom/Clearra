@@ -1,3 +1,9 @@
+import {
+  clonePlain,
+  deepFreeze,
+  plainObject as isPlainObject,
+} from "./plain-result-snapshot.mjs";
+
 const SCORE_MINIMALS_RESULT_CONTRACT = "pc-score-portfolio.v2";
 const SCORE_ONLY_EQUALITY = "score-only";
 const INFORMATIONAL_ATTACK = "informational-only";
@@ -292,24 +298,4 @@ function safeCanonicalSolutionKey(value) {
     value.trim() === value &&
     !/[\u0000-\u001f\u007f]/u.test(value) &&
     !/@(?:everyone|here)/iu.test(value);
-}
-
-function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function clonePlain(value) {
-  if (Array.isArray(value)) return value.map(clonePlain);
-  if (isPlainObject(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, nested]) => [key, clonePlain(nested)]),
-    );
-  }
-  return value;
-}
-
-function deepFreeze(value) {
-  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
-  for (const nested of Object.values(value)) deepFreeze(nested);
-  return Object.freeze(value);
 }
