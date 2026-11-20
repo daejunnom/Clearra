@@ -546,6 +546,11 @@ impl CoreExecutionResult {
     /// authoritative solution set. Finesse score is independent of a searched solution set and
     /// therefore remains valid.
     pub fn without_finesse_search_report(mut self) -> Self {
+        self.drop_finesse_search_report();
+        self
+    }
+
+    fn drop_finesse_search_report(&mut self) {
         if self
             .finesse_report
             .as_ref()
@@ -553,7 +558,6 @@ impl CoreExecutionResult {
         {
             self.finesse_report = None;
         }
-        self
     }
 
     /// Rebinds a finesse-search report to the final canonical solution set.
@@ -576,36 +580,7 @@ impl CoreExecutionResult {
     /// solution authority before a result crosses a public application boundary.
     pub fn into_fail_closed_public_solution_surface(mut self) -> Self {
         self.fields = self.fail_closed_solution_summary_fields();
-        self.postprocess_replay_trace = None;
-        self.postprocess_executions.clear();
-        self.postprocess_execution_complete = false;
-        self.postprocess_pattern_weights.clear();
-        self.packing_candidate_keys.clear();
-        self.normalized_solution_keys.clear();
-        self.normalized_solution_identities.clear();
-        self.representative_solution_identity = None;
-        self.pc_chance_coverage_evidence = None;
-        self.distributed_pc_chance_coverage_rows = None;
-        self.pc_score_problem_evidence = None;
-        self.pc_full_height_replay_evidence = None;
-        self.solution_coverages.clear();
-        self.normalized_solution_coverages.clear();
-        self.solution_probabilities.clear();
-        self.solution_average_scores.clear();
-        self.exact_scoring_execution_batches.clear();
-        self.spin_coverage_execution_batches.clear();
-        self.full_height_scoring_execution_batch = None;
-        self.postprocess_score_cells.clear();
-        self.postprocess_score_cells_complete = false;
-        self.postprocess_score_profile_id = None;
-        self.pc_score_distributed_merge_evidence = None;
-        self.postprocess_spin_coverages.clear();
-        self.tiling_solution_page_store = None;
-        self.pc_tiling_memory_admission_evidence = None;
-        self.pre_b2b_produced_solution_audit_checkpoint = None;
-        self.pre_b2b_solution_audit_checkpoint = None;
-        self.solution_set_audit_report = None;
-        self = self.without_finesse_search_report();
+        self.drop_private_solution_authority();
         self.execution_report =
             SearchExecutionReport::from_summary_fields(&self.fields, Vec::new());
         self
@@ -669,11 +644,15 @@ impl CoreExecutionResult {
         memory_guard(&self, actual_future_bytes)
             .map_err(CoreResultFieldReplacementError::MemoryGuard)?;
 
-        // Drop, rather than merely clear, every private/transient backing store
-        // while the terminal authority is still live. This makes the returned
-        // result's checked retained-byte report describe its physical owners.
         self.fields = fields;
         self.execution_report = execution_report;
+        self.drop_private_solution_authority();
+        Ok(self)
+    }
+
+    fn drop_private_solution_authority(&mut self) {
+        // Release private backing slots as well as their initialized contents.
+        // The guarded caller only reaches this after both admission checks.
         self.postprocess_replay_trace = None;
         self.postprocess_executions = Vec::new();
         self.postprocess_execution_complete = false;
@@ -703,8 +682,7 @@ impl CoreExecutionResult {
         self.pre_b2b_produced_solution_audit_checkpoint = None;
         self.pre_b2b_solution_audit_checkpoint = None;
         self.solution_set_audit_report = None;
-        self = self.without_finesse_search_report();
-        Ok(self)
+        self.drop_finesse_search_report();
     }
 
     fn checked_fail_closed_public_surface_projection(&self) -> Option<(usize, u128)> {
@@ -749,10 +727,7 @@ impl CoreExecutionResult {
         ))
     }
 
-    fn visit_fail_closed_solution_summary_fields<E>(
-        &self,
-        mut visit: impl FnMut(&str, &str) -> Result<(), E>,
-    ) -> Result<(), E> {
+    fn should_canonicalize_solution_summary(&self) -> bool {
         let availability = self.execution_report.solution_set_availability();
         let has_declared_policy = self
             .fields
@@ -762,18 +737,30 @@ impl CoreExecutionResult {
             .fields
             .iter()
             .any(|(key, value)| key == "search_output_policy" && value == "coverage-summary");
-        if !coverage_summary
-            && ((!availability.uses_explicit_contract() && !has_declared_policy)
-                || (availability.contract_valid()
+        coverage_summary
+            || ((availability.uses_explicit_contract() || has_declared_policy)
+                && !(availability.contract_valid()
                     && availability
                         .materialized_key_count_matches(self.normalized_solution_keys.len())))
-        {
-            for (key, value) in &self.fields {
+    }
+
+    fn visit_fail_closed_solution_summary_fields<E>(
+        &self,
+        mut visit: impl FnMut(&str, &str) -> Result<(), E>,
+    ) -> Result<(), E> {
+        if !self.should_canonicalize_solution_summary() {
+            for (key, value) in self.summary_field_entries() {
                 visit(key, value)?;
             }
             return Ok(());
         }
+        self.visit_canonicalized_solution_summary_fields(visit)
+    }
 
+    fn visit_canonicalized_solution_summary_fields<E>(
+        &self,
+        mut visit: impl FnMut(&str, &str) -> Result<(), E>,
+    ) -> Result<(), E> {
         const SOLUTION_AVAILABILITY_KEYS: &[&str] = &[
             "search_output_policy",
             "unique_solution_count",
@@ -1483,156 +1470,18 @@ impl CoreExecutionResult {
     }
 
     pub fn fail_closed_solution_summary_fields(&self) -> Vec<(String, String)> {
-        let availability = self.execution_report.solution_set_availability();
-        let has_declared_policy = self
-            .fields
-            .iter()
-            .any(|(key, _)| key == "search_output_policy");
-        let coverage_summary = self
-            .fields
-            .iter()
-            .any(|(key, value)| key == "search_output_policy" && value == "coverage-summary");
-        let had_b2b_witness_contract = self
-            .fields
-            .iter()
-            .any(|(key, _)| key == "b2b_preservation_witness_available");
-        if !coverage_summary
-            && ((!availability.uses_explicit_contract() && !has_declared_policy)
-                || (availability.contract_valid()
-                    && availability
-                        .materialized_key_count_matches(self.normalized_solution_keys.len())))
-        {
+        if !self.should_canonicalize_solution_summary() {
             return self.summary_fields();
         }
 
-        const SOLUTION_AVAILABILITY_KEYS: &[&str] = &[
-            "search_output_policy",
-            "unique_solution_count",
-            "normalized_unique_solution_count",
-            "actual_normalized_unique_solution_count",
-            "total_solution_count",
-            "solution_count_calculated",
-            "solution_set_materialized",
-            "solution_keys_materialized_count",
-            "solution_keys_complete",
-            "solution_page_available",
-            "normalized_solution_set_hash",
-            "actual_normalized_solution_set_hash",
-            "mirror_unique_solution_count",
-            "mirror_normalized_solution_set_hash",
-            "original_unique_solution_count",
-            "coverage_row_count",
-            "b2b_preserving_candidate_pattern_count",
-            "pattern_verified_execution_count",
-            "minimum_cover_source_solution_count",
-            "minimum_cover_selected_solution_count",
-            "solution_trace_count",
-            "unique_solution_trace_count",
-            "solution_path_count",
-            "solution_probability_count",
-            "objective_solution_traces",
-            "objective_unique_solution_traces",
-            "post_pc_solution_count",
-            "b2b_preserving_solution_count",
-            "b2b_preservation_witness_available",
-            "b2b_preservation_witness_kind",
-            "b2b_preservation_witness_candidate_key",
-            "b2b_preservation_witness_pattern_index",
-        ];
-        let search_output_policy = self
-            .fields
-            .iter()
-            .filter(|(key, _)| key == "search_output_policy")
-            .map(|(_, value)| value.as_str())
-            .find(|value| *value == "coverage-summary")
-            .or_else(|| {
-                self.field("search_output_policy").filter(|value| {
-                    matches!(
-                        *value,
-                        "summary" | "trace" | "tiling-only" | "coverage-rows"
-                    )
-                })
-            })
-            .map(ToOwned::to_owned);
-        let mut fields = self
-            .fields
-            .iter()
-            .filter(|(key, _)| !SOLUTION_AVAILABILITY_KEYS.contains(&key.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        if let Some(search_output_policy) = search_output_policy {
-            fields.push(("search_output_policy".to_owned(), search_output_policy));
-        }
-        fields.extend([
-            (
-                "unique_solution_count".to_owned(),
-                "not-calculated".to_owned(),
-            ),
-            (
-                "normalized_unique_solution_count".to_owned(),
-                "not-calculated".to_owned(),
-            ),
-            ("solution_count_calculated".to_owned(), "false".to_owned()),
-            ("solution_set_materialized".to_owned(), "false".to_owned()),
-            (
-                "solution_keys_materialized_count".to_owned(),
-                "0".to_owned(),
-            ),
-            ("solution_keys_complete".to_owned(), "false".to_owned()),
-            ("solution_page_available".to_owned(), "false".to_owned()),
-            (
-                "normalized_solution_set_hash".to_owned(),
-                "not-calculated".to_owned(),
-            ),
-            (
-                "actual_normalized_solution_set_hash".to_owned(),
-                "not-calculated".to_owned(),
-            ),
-        ]);
-        if had_b2b_witness_contract {
-            fields.extend([
-                (
-                    "b2b_preservation_witness_available".to_owned(),
-                    "false".to_owned(),
-                ),
-                (
-                    "b2b_preservation_witness_kind".to_owned(),
-                    "not-materialized".to_owned(),
-                ),
-                (
-                    "b2b_preservation_witness_candidate_key".to_owned(),
-                    "not-materialized".to_owned(),
-                ),
-                (
-                    "b2b_preservation_witness_pattern_index".to_owned(),
-                    "not-materialized".to_owned(),
-                ),
-            ]);
-        }
-        for key in [
-            "total_solution_count",
-            "actual_normalized_unique_solution_count",
-            "mirror_unique_solution_count",
-            "original_unique_solution_count",
-            "mirror_normalized_solution_set_hash",
-            "coverage_row_count",
-            "b2b_preserving_candidate_pattern_count",
-            "pattern_verified_execution_count",
-            "minimum_cover_source_solution_count",
-            "minimum_cover_selected_solution_count",
-            "solution_trace_count",
-            "unique_solution_trace_count",
-            "solution_path_count",
-            "solution_probability_count",
-            "objective_solution_traces",
-            "objective_unique_solution_traces",
-            "post_pc_solution_count",
-            "b2b_preserving_solution_count",
-        ] {
-            if self.field(key).is_some() {
-                fields.push((key.to_owned(), "not-calculated".to_owned()));
-            }
-        }
+        let mut fields = Vec::new();
+        self.visit_canonicalized_solution_summary_fields::<core::convert::Infallible>(
+            |key, value| {
+                fields.push((key.to_owned(), value.to_owned()));
+                Ok(())
+            },
+        )
+        .unwrap_or_else(|never| match never {});
         if let Some(report) = &self.solution_set_audit_report {
             let redacted = report.redacted_summary_fields();
             let redacted_keys = redacted
@@ -3017,13 +2866,18 @@ mod tests {
     #[test]
     fn guarded_fail_closed_surface_matches_legacy_fields_and_drops_private_backing() {
         let source = synthetic_coverage_summary_with_private_solution_storage();
-        let expected = source.clone().into_fail_closed_public_solution_surface();
+        let expected = synthetic_coverage_summary_with_private_solution_storage()
+            .into_fail_closed_public_solution_surface();
         let mut projected_future = 0_u128;
         let mut guard_calls = 0_usize;
         let guarded = source
             .try_into_fail_closed_public_solution_surface_with_memory_guard(|live, future| {
                 guard_calls += 1;
                 projected_future = future;
+                // The caller must still be able to charge the private owner
+                // during both admissions, including the actual-capacity check.
+                assert_eq!(live.normalized_solution_keys(), &["private-solution"]);
+                assert!(live.normalized_solution_keys.capacity() > 1);
                 let required = live
                     .checked_resource_retained_bytes()
                     .and_then(|bytes| bytes.checked_add(future))
@@ -3035,7 +2889,9 @@ mod tests {
 
         assert!(projected_future > 0);
         assert_eq!(guard_calls, 2);
-        assert_eq!(guarded.summary_fields(), expected.summary_fields());
+        assert_eq!(guarded, expected);
+        assert_eq!(expected.packing_candidate_keys.capacity(), 0);
+        assert_eq!(expected.normalized_solution_keys.capacity(), 0);
         assert_eq!(guarded.packing_candidate_keys.capacity(), 0);
         assert_eq!(guarded.normalized_solution_keys.capacity(), 0);
         assert_eq!(guarded.normalized_solution_identities.capacity(), 0);
@@ -3048,6 +2904,55 @@ mod tests {
                 .backend_selected(),
             "wasm-cpu"
         );
+    }
+
+    #[test]
+    fn guarded_fail_closed_surface_preserves_unprotected_duplicates_in_producer_order() {
+        let source = CoreExecutionResult::new(
+            [
+                ("progress_phase", "started"),
+                ("search_output_policy", "summary"),
+                ("total_solution_count", "12"),
+                ("progress_phase", "finished"),
+                ("search_output_policy", "coverage-summary"),
+                ("normalized_unique_solution_count", "1"),
+                ("b2b_preservation_witness_available", "true"),
+                ("b2b_preservation_witness_candidate_key", "private-key"),
+                ("tail", "preserved"),
+                ("normalized_unique_solution_count", "2"),
+            ]
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .into(),
+            Vec::new(),
+        );
+
+        let expected = [
+            ("progress_phase", "started"),
+            ("progress_phase", "finished"),
+            ("tail", "preserved"),
+            ("search_output_policy", "coverage-summary"),
+            ("unique_solution_count", "not-calculated"),
+            ("normalized_unique_solution_count", "not-calculated"),
+            ("solution_count_calculated", "false"),
+            ("solution_set_materialized", "false"),
+            ("solution_keys_materialized_count", "0"),
+            ("solution_keys_complete", "false"),
+            ("solution_page_available", "false"),
+            ("normalized_solution_set_hash", "not-calculated"),
+            ("actual_normalized_solution_set_hash", "not-calculated"),
+            ("b2b_preservation_witness_available", "false"),
+            ("b2b_preservation_witness_kind", "not-materialized"),
+            ("b2b_preservation_witness_candidate_key", "not-materialized"),
+            ("b2b_preservation_witness_pattern_index", "not-materialized"),
+            ("total_solution_count", "not-calculated"),
+        ];
+        let unguarded = source.clone().into_fail_closed_public_solution_surface();
+        let guarded = source
+            .try_into_fail_closed_public_solution_surface_with_memory_guard(|_, _| Ok::<_, ()>(()))
+            .expect("guarded terminal projection");
+        for projected in [unguarded, guarded] {
+            assert!(projected.summary_field_entries().eq(expected));
+        }
     }
 
     #[test]
@@ -3084,12 +2989,31 @@ mod tests {
     #[test]
     fn guarded_fail_closed_surface_rejects_unconsumed_private_audit() {
         let source = synthetic_coverage_summary_with_private_solution_storage()
+            .with_additional_fields(vec![
+                (
+                    "solution_set_audit_private_authority".to_owned(),
+                    "attached".to_owned(),
+                ),
+                (
+                    "solution_set_audit_private_authority".to_owned(),
+                    "duplicate".to_owned(),
+                ),
+            ])
             .with_solution_set_audit_report(SolutionSetAuditReport::unavailable(
                 SolutionProductFamily::Pc,
                 "private-audit-must-be-consumed",
             ));
+        let unguarded = source.clone().into_fail_closed_public_solution_surface();
+        assert!(unguarded
+            .summary_field_entries()
+            .filter(|(key, _)| *key == "solution_set_audit_private_authority")
+            .eq([("solution_set_audit_private_authority", "not-materialized")]));
+        assert!(unguarded.solution_set_audit_report().is_none());
+
         let error = source
-            .try_into_fail_closed_public_solution_surface_with_memory_guard(|_, _| Ok::<_, ()>(()))
+            .try_into_fail_closed_public_solution_surface_with_memory_guard(
+                |_, _| -> Result<(), ()> { panic!("private audit must fail before admission") },
+            )
             .expect_err("private audit is outside guarded public projection");
         assert!(matches!(
             error,
