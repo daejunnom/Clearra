@@ -157,7 +157,11 @@ export class ClearraCommandRunner {
         if (timeout) this.clearTimeout(timeout);
         if (forceKillTimer) this.clearTimeout(forceKillTimer);
         options.signal?.removeEventListener("abort", abort);
-        callback();
+        // The process can close before async diagnostics or artifact checks
+        // finish. A cancellation or deadline accepted in that window still
+        // owns the terminal outcome and must not publish the late result.
+        if (pendingFailure) rejectJob(pendingFailure);
+        else callback();
       };
       const fail = (error) => {
         if (settled || pendingFailure) return;

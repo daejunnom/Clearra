@@ -629,6 +629,58 @@ test("SIGKILL is classified as OOM only when the container counter advances", as
   }
 });
 
+test("job cancellation wins while post-close OOM classification is pending", async () => {
+  const lookupStarted = Promise.withResolvers();
+  const lookupResult = Promise.withResolvers();
+  const abort = new AbortController();
+  let calls = 0;
+  let killCalls = 0;
+  const runner = new ClearraCommandRunner(
+    {
+      executable: "clearra",
+      processLogicalProcessors: 1,
+      searchWorkersPerSession: 1,
+      useAllLogicalProcessors: false,
+      searchTimeoutMs: 5_000,
+      maxOutputBytes: 4096,
+      terminationGraceMs: 100,
+    },
+    {
+      readOomKillCount: async () => {
+        if (calls++ === 0) return 7;
+        lookupStarted.resolve();
+        return lookupResult.promise;
+      },
+      spawn: () => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.exitCode = null;
+        child.signalCode = null;
+        child.kill = () => { killCalls++; };
+        queueMicrotask(() => {
+          child.signalCode = "SIGKILL";
+          child.emit("close", null, child.signalCode);
+        });
+        return child;
+      },
+    },
+  );
+
+  const outcome = runner.execute({
+    arguments: ["sfinder", "chance", "v115@vhAAgH", "P7P3", "4"],
+    deadlineUnixMs: Date.now() + 5_000,
+    maxOutputBytes: 4096,
+  }, { signal: abort.signal });
+  await lookupStarted.promise;
+  const cancelled = assert.rejects(outcome, { name: "AbortError" });
+  abort.abort();
+  lookupResult.resolve(8);
+  await cancelled;
+  assert.equal(calls, 2);
+  assert.equal(killCalls, 0, "the child has already closed");
+});
+
 test("job runner transports one exact bounded render artifact and cleans its private path", async () => {
   const bytes = Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
