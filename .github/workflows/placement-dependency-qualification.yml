@@ -61,6 +61,7 @@ jobs:
             candidate_projection_clear_fact_reuse_ distributed_pc2_replay_ compact_pc2_
             family_root_count_ family_handoff_ prepared_parallel_family_
             extended_parallel_cooperative_preparation_
+            extended_pc_native_cooperative_worker_waves_preserve_exact_family_and_drain
             extended_pc_terminal_projection_moves_private_solution_owners
             extended_result_materialization_projection_has_an_exact_one_byte_boundary
             split_family_traversal_matches_serial_geometry_on_small_search

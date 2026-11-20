@@ -52,6 +52,118 @@ impl WorkerResult {
             .and_then(|bytes| bytes.checked_sub(self.engine.checked_retained_bytes()?))
             .ok_or_else(projection_error)
     }
+
+    fn memory_owner(&self) -> Result<&ExecutionMemoryOwner, WasmExactSearchError> {
+        self.engine
+            .private_memory_owner
+            .as_ref()
+            .ok_or_else(contract_error)
+    }
+
+    fn reserve_branch(
+        &mut self,
+        branch: &ExtendedParallelGeometryBranch,
+    ) -> Result<usize, WasmExactSearchError> {
+        let count = usize::try_from(branch.candidate_count).map_err(|_| projection_error())?;
+        let growth = (count as u128)
+            .checked_mul(size_of::<u64>() as u128)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (self.digests.len() + 1) as u128 * 2 * size_of::<DigestSegment>() as u128,
+                )
+            })
+            .ok_or_else(projection_error)?;
+        let private = self
+            .checked_retained_bytes()
+            .and_then(|bytes| bytes.checked_add(branch.private_retained_bytes() as u128))
+            .and_then(|bytes| bytes.checked_add(growth))
+            .ok_or_else(projection_error)?;
+        self.memory_owner()?
+            .ensure(private)
+            .map_err(WasmExactSearchError::resource_admission)?;
+        self.digests.try_reserve(1).map_err(|_| storage_error())?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .map_err(|_| storage_error())?;
+        self.digests.push(DigestSegment {
+            first_ordinal: branch.first_ordinal,
+            values,
+        });
+        Ok(self.digests.len() - 1)
+    }
+
+    /// Consume one existing candidate unit with the same row identity,
+    /// exact BuildUp/supply reducer and private memory accounting in both
+    /// the full native loop and a paused cooperative wave.
+    fn reduce_next_candidate(
+        &mut self,
+        branch: &mut ExtendedParallelGeometryBranch,
+        digest_index: usize,
+        progress: &AtomicUsize,
+        control: &ExecutionControl,
+    ) -> Result<bool, WasmExactSearchError> {
+        let owned = self.checked_retained_bytes().ok_or_else(projection_error)?;
+        let Some(candidate) =
+            branch.next_candidate_with_owner(&self.engine.catalog, self.memory_owner()?, owned)?
+        else {
+            return Ok(false);
+        };
+        let ordinal = branch
+            .first_ordinal
+            .checked_add(self.digests[digest_index].values.len() as u128)
+            .and_then(|ordinal| u64::try_from(ordinal).ok())
+            .ok_or_else(projection_error)?;
+        let digest_future = (candidate.row_ids().len() as u128)
+            .checked_mul(64)
+            .and_then(|bytes| bytes.checked_add(128))
+            .ok_or_else(projection_error)?;
+        self.memory_owner()?
+            .ensure(
+                owned
+                    .checked_add(branch.private_retained_bytes() as u128)
+                    .and_then(|bytes| bytes.checked_add(digest_future))
+                    .ok_or_else(projection_error)?,
+            )
+            .map_err(WasmExactSearchError::resource_admission)?;
+        let digest =
+            super::ExtendedTilingKey::from_candidate(&self.engine.catalog, &candidate).digest();
+        let before_nodes = self.engine.searched_build_nodes;
+        self.engine.coexisting_retained_bytes = self
+            .digest_retained_bytes()?
+            .checked_add(branch.private_retained_bytes() as u128)
+            .ok_or_else(projection_error)?;
+        self.engine.ensure_memory_bound(0)?;
+        self.engine
+            .process_candidate(candidate, Some(ordinal), control)?;
+        if let Some(reason) = self.engine.truncated_reason {
+            return Err(self.engine.pc_resource_stop_error(reason));
+        }
+        self.digests[digest_index].values.push(digest);
+        self.engine.ensure_memory_bound(0)?;
+        let retained = self
+            .checked_retained_bytes()
+            .ok_or_else(projection_error)?
+            .checked_add(branch.private_retained_bytes() as u128)
+            .ok_or_else(projection_error)?;
+        self.private_peak_bytes = self.private_peak_bytes.max(retained);
+        let added = self
+            .engine
+            .searched_build_nodes
+            .saturating_sub(before_nodes);
+        let nodes = progress
+            .fetch_add(added, Ordering::Relaxed)
+            .saturating_add(added);
+        control.report_progress("buildup", nodes as u64, None);
+        Ok(true)
+    }
+
+    fn settle_without_branch(&mut self) -> Result<(), WasmExactSearchError> {
+        self.engine.coexisting_retained_bytes = 0;
+        self.memory_owner()?
+            .ensure(self.checked_retained_bytes().ok_or_else(projection_error)?)
+            .map_err(WasmExactSearchError::resource_admission)
+    }
 }
 
 impl ExtendedBuildProbabilitySession {
@@ -595,163 +707,48 @@ fn run_worker(
         }
         let next = match assigned.take() {
             Some(branch) => Some(branch),
-            None => {
-                let branch = queue.lock().map_err(|_| pool_error())?.pop();
-                if let Some(branch) = branch.as_ref() {
-                    queued_memory
-                        .transfer_retained_to(
-                            result
-                                .engine
-                                .private_memory_owner
-                                .as_ref()
-                                .ok_or_else(contract_error)?,
-                            branch.private_retained_bytes() as u128,
-                        )
-                        .map_err(WasmExactSearchError::resource_admission)?;
-                }
-                branch
-            }
+            None => take_worker_branch(queue, queued_memory, &result)?,
         };
         let Some(mut branch) = next else {
             break;
         };
-        let count = usize::try_from(branch.candidate_count).map_err(|_| projection_error())?;
-        let growth = (count as u128)
-            .checked_mul(size_of::<u64>() as u128)
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    (result.digests.len() + 1) as u128 * 2 * size_of::<DigestSegment>() as u128,
-                )
-            })
-            .ok_or_else(projection_error)?;
-        let owned = result
-            .checked_retained_bytes()
-            .ok_or_else(projection_error)?;
-        let branch_bytes = branch.private_retained_bytes() as u128;
-        let private = owned
-            .checked_add(branch_bytes)
-            .and_then(|bytes| bytes.checked_add(growth))
-            .ok_or_else(projection_error)?;
-        result
-            .engine
-            .private_memory_owner
-            .as_ref()
-            .ok_or_else(contract_error)?
-            .ensure(private)
-            .map_err(WasmExactSearchError::resource_admission)?;
-        result.digests.try_reserve(1).map_err(|_| storage_error())?;
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(count)
-            .map_err(|_| storage_error())?;
-        result.digests.push(DigestSegment {
-            first_ordinal: branch.first_ordinal,
-            values,
-        });
-        let index = result.digests.len() - 1;
+        let index = result.reserve_branch(&branch)?;
         let before_count = result.engine.processed_candidate_count;
         loop {
             if control.is_cancelled() || abort.load(Ordering::Acquire) {
                 return Err(WasmExactSearchError::Cancelled);
             }
-            let owned = result
-                .checked_retained_bytes()
-                .ok_or_else(projection_error)?;
-            let Some(candidate) = branch.next_candidate_with_owner(
-                &result.engine.catalog,
-                result
-                    .engine
-                    .private_memory_owner
-                    .as_ref()
-                    .ok_or_else(contract_error)?,
-                owned,
-            )?
-            else {
+            if !result.reduce_next_candidate(&mut branch, index, progress, control)? {
                 break;
-            };
-            let ordinal = branch
-                .first_ordinal
-                .checked_add(result.digests[index].values.len() as u128)
-                .and_then(|ordinal| u64::try_from(ordinal).ok())
-                .ok_or_else(projection_error)?;
-            let digest_future = (candidate.row_ids().len() as u128)
-                .checked_mul(64)
-                .and_then(|bytes| bytes.checked_add(128))
-                .ok_or_else(projection_error)?;
-            result
-                .engine
-                .private_memory_owner
-                .as_ref()
-                .ok_or_else(contract_error)?
-                .ensure(
-                    owned
-                        .checked_add(branch.private_retained_bytes() as u128)
-                        .and_then(|bytes| bytes.checked_add(digest_future))
-                        .ok_or_else(projection_error)?,
-                )
-                .map_err(WasmExactSearchError::resource_admission)?;
-            let digest =
-                super::ExtendedTilingKey::from_candidate(&result.engine.catalog, &candidate)
-                    .digest();
-            let before_nodes = result.engine.searched_build_nodes;
-            result.engine.coexisting_retained_bytes = result
-                .digest_retained_bytes()?
-                .checked_add(branch.private_retained_bytes() as u128)
-                .ok_or_else(projection_error)?;
-            result.engine.ensure_memory_bound(0)?;
-            result
-                .engine
-                .process_candidate(candidate, Some(ordinal), control)?;
-            if let Some(reason) = result.engine.truncated_reason {
-                return Err(result.engine.pc_resource_stop_error(reason));
             }
-            result.digests[index].values.push(digest);
-            result.engine.ensure_memory_bound(0)?;
-            let retained = result
-                .checked_retained_bytes()
-                .ok_or_else(projection_error)?
-                .checked_add(branch.private_retained_bytes() as u128)
-                .ok_or_else(projection_error)?;
-            result.private_peak_bytes = result.private_peak_bytes.max(retained);
-            let added = result
-                .engine
-                .searched_build_nodes
-                .saturating_sub(before_nodes);
-            let nodes = progress
-                .fetch_add(added, Ordering::Relaxed)
-                .saturating_add(added);
-            control.report_progress("buildup", nodes as u64, None);
         }
-        if result.engine.processed_candidate_count - before_count != count {
+        if (result.engine.processed_candidate_count - before_count) as u128
+            != branch.candidate_count
+        {
             return Err(contract_error());
         }
         drop(branch);
-        result.engine.coexisting_retained_bytes = 0;
-        result
-            .engine
-            .private_memory_owner
-            .as_ref()
-            .ok_or_else(contract_error)?
-            .ensure(
-                result
-                    .checked_retained_bytes()
-                    .ok_or_else(projection_error)?,
+        result.settle_without_branch()?;
+    }
+    result.settle_without_branch()?;
+    Ok(result)
+}
+
+fn take_worker_branch(
+    queue: &Mutex<Vec<ExtendedParallelGeometryBranch>>,
+    queued_memory: &ExecutionMemoryOwner,
+    worker: &WorkerResult,
+) -> Result<Option<ExtendedParallelGeometryBranch>, WasmExactSearchError> {
+    let branch = queue.lock().map_err(|_| pool_error())?.pop();
+    if let Some(branch) = branch.as_ref() {
+        queued_memory
+            .transfer_retained_to(
+                worker.memory_owner()?,
+                branch.private_retained_bytes() as u128,
             )
             .map_err(WasmExactSearchError::resource_admission)?;
     }
-    result.engine.coexisting_retained_bytes = 0;
-    result
-        .engine
-        .private_memory_owner
-        .as_ref()
-        .ok_or_else(contract_error)?
-        .ensure(
-            result
-                .checked_retained_bytes()
-                .ok_or_else(projection_error)?,
-        )
-        .map_err(WasmExactSearchError::resource_admission)?;
-    Ok(result)
+    Ok(branch)
 }
 
 fn checked_worker_bytes(workers: &[WorkerResult]) -> Result<u128, WasmExactSearchError> {
@@ -778,3 +775,350 @@ fn storage_error() -> WasmExactSearchError {
 fn pool_error() -> WasmExactSearchError {
     WasmExactSearchError::InvalidProblem("extended_pc_family_worker_pool_unavailable")
 }
+
+// A private foundation: only a conformance owner drives these waves for now.
+// The full native path remains the only product entry.
+#[cfg(test)]
+mod cooperative {
+    use super::*;
+    use crate::resource::ExecutionAdmission;
+    use clearra_core_domain::resource::ResourceLeaseToken;
+
+    pub(super) struct WorkerCursor {
+        result: WorkerResult,
+        branch: Option<ExtendedParallelGeometryBranch>,
+        digest: Option<(usize, usize)>,
+        done: bool,
+    }
+
+    impl WorkerCursor {
+        pub(super) fn new(
+            engine: ExtendedBuildProbabilitySession,
+            first: Option<ExtendedParallelGeometryBranch>,
+        ) -> Self {
+            Self {
+                result: WorkerResult {
+                    engine,
+                    digests: Vec::new(),
+                    private_peak_bytes: 0,
+                },
+                branch: first,
+                digest: None,
+                done: false,
+            }
+        }
+
+        fn advance(
+            &mut self,
+            credit: usize,
+            shared: &WaveShared,
+            control: &ExecutionControl,
+        ) -> Result<usize, WasmExactSearchError> {
+            let mut used = 0;
+            while used < credit && !self.done {
+                if control.is_cancelled() || shared.abort.load(Ordering::Acquire) {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                used += 1;
+                if self.branch.is_none() {
+                    self.branch =
+                        take_worker_branch(&shared.queue, &shared.queued_memory, &self.result)?;
+                }
+                let Some(branch) = self.branch.as_mut() else {
+                    self.result.settle_without_branch()?;
+                    self.done = true;
+                    break;
+                };
+                let Some((index, before_count)) = self.digest else {
+                    self.digest = Some((
+                        self.result.reserve_branch(branch)?,
+                        self.result.engine.processed_candidate_count,
+                    ));
+                    continue;
+                };
+                if !self
+                    .result
+                    .reduce_next_candidate(branch, index, &shared.progress, control)?
+                {
+                    let count = self
+                        .result
+                        .engine
+                        .processed_candidate_count
+                        .checked_sub(before_count)
+                        .ok_or_else(contract_error)?;
+                    if count as u128 != branch.candidate_count {
+                        return Err(contract_error());
+                    }
+                    self.branch = None;
+                    self.digest = None;
+                    self.result.settle_without_branch()?;
+                }
+            }
+            if control.is_cancelled() || shared.abort.load(Ordering::Acquire) {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            Ok(used)
+        }
+    }
+
+    #[derive(Clone)]
+    struct WaveShared {
+        queue: Arc<Mutex<Vec<ExtendedParallelGeometryBranch>>>,
+        queued_memory: ExecutionMemoryOwner,
+        progress: Arc<AtomicUsize>,
+        abort: Arc<AtomicBool>,
+    }
+
+    impl WaveShared {
+        fn run(
+            self,
+            mut cursor: WorkerCursor,
+            credit: usize,
+            control: ExecutionControl,
+        ) -> WorkerCompletion {
+            let work = catch_unwind(AssertUnwindSafe(|| cursor.advance(credit, &self, &control)))
+                .unwrap_or(Err(WasmExactSearchError::InvalidProblem(
+                    "extended_pc_family_worker_panicked",
+                )));
+            if work.is_err() {
+                self.abort.store(true, Ordering::Release);
+            }
+            // Drop queue/control clones before handing the sole live cursor
+            // (or an error with no cursor) back to the coordinator.
+            drop(self);
+            drop(control);
+            work.map(|used| (cursor, used))
+        }
+    }
+
+    type WorkerCompletion = Result<(WorkerCursor, usize), WasmExactSearchError>;
+    type TaggedCompletion = (usize, WorkerCompletion);
+
+    struct DrainWave<'a> {
+        _admission: &'a ExecutionAdmission,
+        abort: Arc<AtomicBool>,
+        sender: Option<mpsc::Sender<TaggedCompletion>>,
+        receiver: mpsc::Receiver<TaggedCompletion>,
+        submitted: usize,
+    }
+
+    impl<'a> DrainWave<'a> {
+        fn new(admission: &'a ExecutionAdmission, abort: Arc<AtomicBool>) -> Self {
+            let (sender, receiver) = mpsc::channel();
+            Self {
+                _admission: admission,
+                abort,
+                sender: Some(sender),
+                receiver,
+                submitted: 0,
+            }
+        }
+
+        fn receive(&mut self) -> Option<Result<TaggedCompletion, WasmExactSearchError>> {
+            if self.submitted == 0 {
+                return None;
+            }
+            self.submitted -= 1;
+            Some(self.receiver.recv().map_err(|_| pool_error()))
+        }
+    }
+
+    impl Drop for DrainWave<'_> {
+        fn drop(&mut self) {
+            // Every successfully enqueued closure must end before the wave
+            // returns, including an early error or coordinator unwind.
+            if self.submitted != 0 {
+                self.abort.store(true, Ordering::Release);
+                self.sender = None;
+                while self.receive().is_some() {}
+            }
+        }
+    }
+
+    pub(super) struct WorkerWaves {
+        slots: Vec<Option<WorkerCursor>>,
+        queue: Arc<Mutex<Vec<ExtendedParallelGeometryBranch>>>,
+        queued_memory: ExecutionMemoryOwner,
+        progress: Arc<AtomicUsize>,
+        lease: ResourceLeaseToken,
+        next_slot: usize,
+        failed: bool,
+    }
+
+    impl WorkerWaves {
+        pub(super) fn checked_fixed_backing_bytes(width: usize) -> Option<u128> {
+            // Slot backing remains allocated after move-out. Also charge the
+            // pool job, the completion channel, and per-wave control owners.
+            (width as u128)
+                .checked_mul(
+                    (size_of::<Option<WorkerCursor>>() + 3 * size_of::<TaggedCompletion>() + 2048)
+                        as u128,
+                )?
+                .checked_add(size_of::<Self>() as u128 + 512)
+        }
+
+        /// The coordinator has already admitted all slots and any initially
+        /// assigned branch, using the same credits as the direct native run.
+        pub(super) fn new(
+            admission: &ExecutionAdmission,
+            slots: Vec<Option<WorkerCursor>>,
+            queue: Vec<ExtendedParallelGeometryBranch>,
+            queued_memory: ExecutionMemoryOwner,
+        ) -> Result<Self, WasmExactSearchError> {
+            let lease = admission.lease_token();
+            let width = slots.len();
+            if width < 2
+                || lease.grant().compute_units as usize != width
+                || slots.iter().any(Option::is_none)
+            {
+                return Err(contract_error());
+            }
+            let pool = cpu_worker_pool::ensure_cpu_workers(width).map_err(|_| pool_error())?;
+            if pool.total_workers() != width {
+                return Err(pool_error());
+            }
+            Ok(Self {
+                slots,
+                queue: Arc::new(Mutex::new(queue)),
+                queued_memory,
+                progress: Arc::new(AtomicUsize::new(0)),
+                lease,
+                next_slot: 0,
+                failed: false,
+            })
+        }
+
+        pub(super) fn advance(
+            &mut self,
+            admission: &ExecutionAdmission,
+            budget: usize,
+            control: &ExecutionControl,
+        ) -> Result<(bool, usize), WasmExactSearchError> {
+            if self.failed
+                || admission.lease_token() != self.lease
+                || control.partition().count() != 1
+            {
+                return Err(contract_error());
+            }
+            if control.is_cancelled() {
+                self.failed = true;
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            let live = self
+                .slots
+                .iter()
+                .filter(|slot| slot.as_ref().is_some_and(|cursor| !cursor.done))
+                .count();
+            let active = live.min(budget);
+            if active == 0 {
+                return Ok((live == 0, 0));
+            }
+            // Retain all admitted slots. Low per-call credit gives one
+            // unit to a rotating subset; later calls can use the full width.
+            let width = self.slots.len();
+            let start = self.next_slot;
+            self.failed = true;
+            let abort = Arc::new(AtomicBool::new(false));
+            let mut wave = DrainWave::new(admission, Arc::clone(&abort));
+            let shared = WaveShared {
+                queue: Arc::clone(&self.queue),
+                queued_memory: self.queued_memory.clone(),
+                progress: Arc::clone(&self.progress),
+                abort: Arc::clone(&abort),
+            };
+            let mut caller = None;
+            let mut assigned = 0;
+            for offset in 0..width {
+                let index = (start + offset) % width;
+                if self.slots[index].as_ref().is_none_or(|cursor| cursor.done) {
+                    continue;
+                }
+                let credit = budget / active + usize::from(assigned < budget % active);
+                let cursor = self.slots[index].take().ok_or_else(contract_error)?;
+                if caller.is_none() {
+                    caller = Some((index, cursor, credit));
+                } else {
+                    let work = shared.clone();
+                    let worker_control = control.clone();
+                    let sender = wave.sender.as_ref().ok_or_else(contract_error)?.clone();
+                    cpu_worker_pool::submit_cpu_job(move || {
+                        let result = work.run(cursor, credit, worker_control);
+                        let _ = sender.send((index, result));
+                    })
+                    .map_err(|_| pool_error())?;
+                    wave.submitted += 1;
+                }
+                assigned += 1;
+                self.next_slot = (index + 1) % width;
+                if assigned == active {
+                    break;
+                }
+            }
+            wave.sender = None;
+            let (index, cursor, credit) = caller.ok_or_else(contract_error)?;
+            let caller = shared.run(cursor, credit, control.clone());
+            let mut used = 0;
+            let mut error = None;
+            self.accept_completion(Ok((index, caller)), &mut used, &mut error);
+            while let Some(result) = wave.receive() {
+                self.accept_completion(result, &mut used, &mut error);
+            }
+            if let Some(error) = error {
+                return Err(error);
+            }
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            if used > budget {
+                return Err(contract_error());
+            }
+            self.failed = false;
+            let done = self
+                .slots
+                .iter()
+                .all(|slot| slot.as_ref().is_some_and(|cursor| cursor.done));
+            Ok((done, used))
+        }
+
+        fn accept_completion(
+            &mut self,
+            result: Result<TaggedCompletion, WasmExactSearchError>,
+            used: &mut usize,
+            error: &mut Option<WasmExactSearchError>,
+        ) {
+            let result = result.and_then(|(index, completion)| {
+                let (cursor, steps) = completion?;
+                let slot = self.slots.get_mut(index).ok_or_else(contract_error)?;
+                if slot.is_some() {
+                    return Err(contract_error());
+                }
+                *used = used.checked_add(steps).ok_or_else(projection_error)?;
+                *slot = Some(cursor);
+                Ok(())
+            });
+            if let Err(next) = result {
+                if error.is_none() || matches!(error, Some(WasmExactSearchError::Cancelled)) {
+                    *error = Some(next);
+                }
+            }
+        }
+
+        pub(super) fn into_completed_slots(
+            self,
+        ) -> Result<impl Iterator<Item = WorkerResult>, WasmExactSearchError> {
+            if self.failed
+                || self
+                    .slots
+                    .iter()
+                    .any(|slot| slot.as_ref().is_none_or(|cursor| !cursor.done))
+            {
+                return Err(contract_error());
+            }
+            Ok(self.slots.into_iter().flatten().map(|cursor| cursor.result))
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "extended_pc_family_parallel_worker_tests.rs"]
+mod worker_tests;
