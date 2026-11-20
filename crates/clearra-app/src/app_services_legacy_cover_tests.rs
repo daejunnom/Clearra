@@ -1,13 +1,21 @@
 use clearra_build_coverage::{
     domain::slot_domain::SlotDomain,
     query::build_coverage_limits::BuildCoverageLimits,
-    template::{BuildSlot, BuildSlotId, BuildTemplate},
+    template::{BuildSlot, BuildSlotId, BuildTemplate, TemplateImport},
 };
 use clearra_core_domain::{
-    board::cell::CellCoord, execution_cancellation::ExecutionCancellationToken,
+    board::cell::CellCoord,
+    execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     piece::piece_kind::PieceKind,
+    solution::{PiecePlacementMask, StandardBoard64TilingIdentity},
+};
+use clearra_core_executor::WasmCpuSearchBackend;
+use clearra_pc_graph::request::{
+    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+    PcSolutionProbabilityPolicy, PieceWindow,
 };
 use clearra_problem::{BuildProblemLimits, BuildQuery, BuildTemplateBridge, ProblemCompiler};
+use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 use super::{
     AppCoreExecutorService, AppServices, BuildCoverageQuery, CoreExecutionError,
@@ -63,6 +71,121 @@ fn run_app(backend: AppCoreExecutorService, query: BuildCoverageQuery) -> CoreEx
         panic!("expected Cover result");
     };
     result.clone()
+}
+
+fn horizontal_i_import() -> BuildCoverageQuery {
+    let template = TemplateImport::from_json(
+        "positive legacy cover seam fixture",
+        r#"{
+            "schema_version": 2,
+            "id": "legacy-one-I",
+            "board": { "width": 4, "height": 1 },
+            "slots": [{
+                "id": 0,
+                "cells": [{ "x": 0, "y": 0 }, { "x": 1, "y": 0 },
+                          { "x": 2, "y": 0 }, { "x": 3, "y": 0 }],
+                "allowed_pieces": ["I"],
+                "required_piece": "I"
+            }]
+        }"#,
+    )
+    .expect("native cover template must accept a horizontal I in a 4×1 board")
+    .into_template();
+    let slot = &template.slots()[0];
+    let domain = SlotDomain::new(slot.id(), slot.allowed_pieces().to_vec());
+    let required = clearra_build_coverage::domain::slot_constraint::SlotConstraint::required(
+        slot.id(),
+        PieceKind::I,
+    );
+    BuildCoverageQuery::new(
+        template,
+        vec![domain],
+        vec![required],
+        1,
+        BuildCoverageLimits::default(),
+    )
+}
+
+#[test]
+fn positive_legacy_cover_ordinal_zero_matches_the_explicit_i_rust_kernel() {
+    let coverage_query = horizontal_i_import();
+    assert!(
+        !clearra_validation::validators::build_query_validator::validate_build_coverage_query(
+            &coverage_query,
+        )
+        .has_errors()
+    );
+    let legacy_problem = compile(&coverage_query);
+    let original_universe = legacy_problem
+        .piece_source()
+        .materialized_universe()
+        .expect("legacy observed universe");
+    assert_eq!(coverage_query.pattern_count(), 1);
+    assert_eq!(original_universe.sequence_at(0).as_ref(), &[PieceKind::I]);
+
+    // Rebuild the one admitted ordinal as an explicit source. Executing all
+    // legacy observed ordinals through the Rust PC API instead would silently
+    // change the request's denominator.
+    let rust_problem = ProblemCompiler::compile_scenario_pc(
+        &PcScenarioQuery::new(
+            PcScenarioBoard::new(4, 1, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_rule(legacy_problem.rule_profile_value())
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1)),
+    )
+    .expect("explicit I queue on a 4×1 board");
+    let rust =
+        WasmCpuSearchBackend::execute_with_control(&rust_problem, &ExecutionControl::default())
+            .expect("Rust compact PC kernel, without the product cover adapter");
+    let exact_identity = StandardBoard64TilingIdentity::from_placements(
+        0,
+        [PiecePlacementMask::new(PieceKind::I, 0xf)],
+    )
+    .expect("the single colored placement must tile the row");
+    assert_eq!(rust.normalized_solution_identities(), &[exact_identity]);
+    assert_eq!(rust.usize_field("coverage_pattern_count"), Some(1));
+    assert_eq!(rust.coverage_pattern_words(), &[1]);
+    assert_eq!(rust.bool_field("probability_complete"), Some(true));
+    assert_eq!(rust.bool_field("build_variant_count_exact"), Some(true));
+
+    #[cfg(feature = "native-c-core")]
+    {
+        use clearra_build_coverage::coverage::BuildCoverageExecution;
+        use clearra_core_domain::probability::probability_value::ProbabilityValue;
+        use clearra_core_executor::{packing::PackingRunner, BuildUpRunner};
+
+        let packing = PackingRunner::run(&legacy_problem).expect("native legacy packing");
+        assert_eq!(packing.candidate_count(), 1);
+        let buildup = BuildUpRunner::run(&legacy_problem, &packing).expect("native legacy BuildUp");
+        assert!(buildup.coverage_complete());
+        let [row] = buildup.coverage_rows() else {
+            panic!(
+                "expected one positive native coverage row, got {}",
+                buildup.coverage_rows().len()
+            );
+        };
+        assert_eq!(row.pattern_count(), 1);
+        assert_eq!(row.coverage_bits().words(), rust.coverage_pattern_words());
+        let native_identity = packing
+            .candidate_view_at(0)
+            .expect("native packing identity")
+            .standard_board64_tiling_identity(0)
+            .expect("normalized native packing identity");
+        assert_eq!(native_identity, exact_identity);
+
+        let cover =
+            BuildCoverageExecution::from_c_buildup_rows(&coverage_query, buildup.coverage_rows())
+                .expect("legacy coverage reducer");
+        assert_eq!(cover.assignments().len(), 1);
+        assert!(cover.exact_cover_complete());
+        assert_eq!(cover.result().probability(), ProbabilityValue::ONE);
+    }
 }
 
 #[test]

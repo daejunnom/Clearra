@@ -40,6 +40,19 @@ jobs:
       - name: Test the bounded solution stream and exact comparison
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
+      - name: Verify supervised capture and comparison on the one-I fixture
+        run: |
+          set -eu
+          CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked -p clearra-manage
+          CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
+          manager=build/cargo/default/debug/clearra-manage
+          bench=build/cargo/default/debug/examples/placement_graph_bench
+          prefix="small-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          out=_local/artifacts/benchmarks/placement-graph-coverage
+          "$manager" storage verify --path "$out"
+          "$manager" runtime run --producer benchmark --profile benchmark-search --timeout 60 -- "$bench" --small --coverage-slot "$prefix-a"
+          CLEARRA_MOVEMENT_CLEAR_CERTIFICATES=1 "$manager" runtime run --producer benchmark --profile benchmark-search --timeout 60 -- "$bench" --small --coverage-slot "$prefix-b"
+          "$bench" --compare-coverage "$out/$prefix-a/solution-coverage.clrcov" "$out/$prefix-b/solution-coverage.clrcov"
   receipts-and-adoption:
     if: github.ref == 'refs/heads/codex/v090-relation-rust-integration'
     runs-on: ubuntu-latest
@@ -69,4 +82,11 @@ jobs:
         run: cargo test --locked -p clearra-rules -p clearra-finesse -p clearra-core-ffi --lib --no-fail-fast
       - name: Test the legacy Cover Rust service boundary
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_tests
+        shell: bash
+        run: |
+          node scripts/tools/invoke-clearra-build.mjs --purpose experiment -- bash -e -u <<'SH'
+          out="$CLEARRA_BUILD_TRANSACTION_ROOT/legacy-cover-core-c"
+          cmake -S core-c -B "$out" -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$out" --target clearra_core --parallel 2
+          RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-L native=$out" cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_tests
+          SH
