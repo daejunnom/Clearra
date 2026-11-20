@@ -953,6 +953,7 @@ mod cooperative {
         board::standard_pc_board::Board256Mask, objective::objective_kind::ObjectiveKind,
         resource::ResourceLeaseToken,
     };
+    use clearra_pc_graph::request::PcCountPolicy;
     use clearra_problem::{BuildProbabilityField, SearchProblem};
 
     use super::cooperative_canonical::{CanonicalReduction, SourceKey};
@@ -1322,6 +1323,8 @@ mod cooperative {
         AdmitCanonical,
         ImportCanonical,
         FoldCanonical,
+        SealVerification,
+        SerialHandoff,
         Complete,
         Failed,
     }
@@ -1332,12 +1335,102 @@ mod cooperative {
         returned: Option<DigestSegment>,
     }
 
+    struct WorkerBinding {
+        worker: WorkerResult,
+        count: u128,
+        representative_bound: bool,
+    }
+
+    #[derive(Clone, Copy)]
+    struct RepresentativeRank {
+        worker_index: usize,
+        ordinal: u64,
+    }
+
+    #[derive(Default)]
+    struct VerificationFold {
+        count_all: u128,
+        coverage_word: u64,
+        representative: Option<RepresentativeRank>,
+    }
+
+    impl VerificationFold {
+        fn merge_worker(
+            &mut self,
+            slot: usize,
+            binding: &WorkerBinding,
+            depth: usize,
+        ) -> Result<(), WasmExactSearchError> {
+            let worker = &binding.worker;
+            let engine = &worker.engine;
+            if engine.covered_patterns.pattern_count() != 1
+                || !engine.pc_build_variant_count_complete
+            {
+                return Err(contract_error());
+            }
+            // Do not populate PatternBitSet's lazy dense cache. This retains
+            // the original supplied ordinal, not a successful-queue subset.
+            let word = engine.covered_patterns.word_at(0);
+            let rows = worker.bounded_rows.as_ref().ok_or_else(contract_error)?;
+            let count = engine.pc_build_variant_count;
+            let rank = match (
+                word,
+                engine.representative_rank,
+                engine.representative_pattern_id,
+            ) {
+                (0, None, None)
+                    if count == 0 && rows.len == 0 && engine.representative_path.is_empty() =>
+                {
+                    None
+                }
+                (1, Some(ordinal), Some(0))
+                    if binding.representative_bound
+                        && count != 0
+                        && rows.len != 0
+                        && engine.representative_path.len() == depth =>
+                {
+                    Some(RepresentativeRank {
+                        worker_index: slot,
+                        ordinal,
+                    })
+                }
+                _ => return Err(contract_error()),
+            };
+            self.count_all = self
+                .count_all
+                .checked_add(count)
+                .ok_or_else(contract_error)?;
+            self.coverage_word |= word;
+            if let Some(rank) = rank {
+                if self
+                    .representative
+                    .is_none_or(|current| rank.ordinal < current.ordinal)
+                {
+                    self.representative = Some(rank);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) struct VerifiedStats<'a> {
+        pub(super) count_all: u128,
+        pub(super) coverage_word: u64,
+        pub(super) representative: Option<(u64, u32, &'a [crate::CorePathStep])>,
+    }
+
     pub(super) struct CompletedFacts<'a> {
         pub(super) digest: u64,
         pub(super) candidate_count: u128,
         pub(super) workers: &'a [WorkerResult],
         pub(super) keys: &'a [String],
         pub(super) hash: &'a str,
+        pub(super) verification: VerifiedStats<'a>,
+    }
+
+    pub(super) struct SerialHandoff {
+        pub(super) engine: ExtendedBuildProbabilitySession,
+        pub(super) admission: ExecutionAdmission,
     }
 
     /// Silent exact conformance only. Workers and the complete ordinal proof
@@ -1350,10 +1443,11 @@ mod cooperative {
         slots: Vec<Option<WorkerCursor>>,
         waves: Option<WorkerWaves>,
         completed_slots: Option<CompletedSlots>,
-        active_worker: Option<(WorkerResult, u128)>,
+        active_worker: Option<WorkerBinding>,
         workers: Vec<WorkerResult>,
         ranges: Vec<Range>,
         canonical: Option<CanonicalReduction>,
+        verification: VerificationFold,
         source_rows: usize,
         row_worker: usize,
         phase: DryPhase,
@@ -1377,6 +1471,11 @@ mod cooperative {
             let width = problem.backend_policy().workers();
             if width < 2
                 || problem.objective().kind() != ObjectiveKind::All
+                || problem.count_policy() != PcCountPolicy::CountAll
+                || problem
+                    .piece_source()
+                    .materialized_universe()
+                    .is_none_or(|universe| !universe.complete() || universe.pattern_count() != 1)
                 || problem
                     .queue_observation_policy()
                     .requires_observation_policy()
@@ -1426,6 +1525,7 @@ mod cooperative {
                 workers: Vec::new(),
                 ranges: Vec::new(),
                 canonical: None,
+                verification: VerificationFold::default(),
                 source_rows: 0,
                 row_worker: 0,
                 phase: DryPhase::Prepare,
@@ -1467,8 +1567,9 @@ mod cooperative {
                 if control.is_cancelled() {
                     return Err(WasmExactSearchError::Cancelled);
                 }
-                if self.phase == DryPhase::Complete || remaining == 0 {
-                    return Ok((self.phase == DryPhase::Complete, budget - remaining));
+                let terminal = matches!(self.phase, DryPhase::Complete | DryPhase::SerialHandoff);
+                if terminal || remaining == 0 {
+                    return Ok((terminal, budget - remaining));
                 }
                 match self.phase {
                     DryPhase::Prepare => {
@@ -1522,7 +1623,7 @@ mod cooperative {
                             .ok_or_else(contract_error)?
                             .advance_output(&mut remaining, control)?
                         {
-                            self.phase = DryPhase::Complete;
+                            self.phase = DryPhase::SealVerification;
                         }
                     }
                     _ => {
@@ -1633,6 +1734,7 @@ mod cooperative {
                 DryPhase::Fold => self.fold_step(),
                 DryPhase::SettleCanonicalSources => self.settle_canonical_source(),
                 DryPhase::AdmitCanonical => self.admit_canonical_cursor(),
+                DryPhase::SealVerification => self.seal_verification(),
                 _ => Err(contract_error()),
             }
         }
@@ -1645,9 +1747,11 @@ mod cooperative {
             let (geometry, plan) = preparation.into_result()?;
             self.root.geometry = geometry;
             let Some(plan) = plan else {
-                // Not part of this positive-family conformance scope. The
-                // unchanged product owner handles exact empty results.
-                return Err(contract_error());
+                // Geometry never yielded a parallel owner. Preserve its
+                // exact serial state and this same request's lease instead of
+                // manufacturing a parallel family with zero solutions.
+                self.phase = DryPhase::SerialHandoff;
+                return Ok(());
             };
             let limit = self.root.problem.backend_request().max_candidates();
             if limit != 0 && plan.candidate_count > limit as u128 {
@@ -1722,8 +1826,8 @@ mod cooperative {
         }
 
         fn bind_step(&mut self) -> Result<(), WasmExactSearchError> {
-            if let Some((mut worker, mut count)) = self.active_worker.take() {
-                if let Some(segment) = worker.digests.pop() {
+            if let Some(mut binding) = self.active_worker.take() {
+                if let Some(segment) = binding.worker.digests.pop() {
                     let index = self
                         .ranges
                         .binary_search_by_key(&segment.first_ordinal, |range| range.first)
@@ -1733,15 +1837,28 @@ mod cooperative {
                     if range.returned.is_some() || range.count != n {
                         return Err(contract_error());
                     }
-                    count = count.checked_add(n).ok_or_else(projection_error)?;
+                    let end = range.first.checked_add(n).ok_or_else(projection_error)?;
+                    if binding
+                        .worker
+                        .engine
+                        .representative_rank
+                        .is_some_and(|ordinal| (range.first..end).contains(&u128::from(ordinal)))
+                    {
+                        if binding.representative_bound {
+                            return Err(contract_error());
+                        }
+                        binding.representative_bound = true;
+                    }
+                    binding.count = binding.count.checked_add(n).ok_or_else(projection_error)?;
                     range.returned = Some(segment);
-                    self.active_worker = Some((worker, count));
+                    self.active_worker = Some(binding);
                 } else {
-                    if count != worker.engine.processed_candidate_count as u128 {
+                    let worker = &binding.worker;
+                    if binding.count != worker.engine.processed_candidate_count as u128 {
                         return Err(contract_error());
                     }
                     let rows = worker.bounded_rows.as_ref().ok_or_else(contract_error)?;
-                    if rows.len as u128 > count
+                    if rows.len as u128 > binding.count
                         || !worker.engine.buildable_tilings.is_empty()
                         || !worker.engine.supply_projection_complete
                         || !worker.engine.pc_build_variant_count_complete
@@ -1754,9 +1871,17 @@ mod cooperative {
                         .ok_or_else(projection_error)?;
                     self.bound_candidates = self
                         .bound_candidates
-                        .checked_add(count)
+                        .checked_add(binding.count)
                         .ok_or_else(projection_error)?;
-                    self.workers.push(worker);
+                    self.verification.merge_worker(
+                        self.workers.len(),
+                        &binding,
+                        self.root
+                            .problem
+                            .exact_pieces()
+                            .ok_or_else(contract_error)?,
+                    )?;
+                    self.workers.push(binding.worker);
                 }
             } else if let Some(worker) = self
                 .completed_slots
@@ -1765,7 +1890,11 @@ mod cooperative {
                 .next()
             {
                 self.root.validate_pc_verifier(&worker.engine)?;
-                self.active_worker = Some((worker, 0));
+                self.active_worker = Some(WorkerBinding {
+                    worker,
+                    count: 0,
+                    representative_bound: false,
+                });
             } else {
                 if self.workers.len() != self.width || self.bound_candidates != self.candidate_count
                 {
@@ -1898,17 +2027,80 @@ mod cooperative {
                 .map_err(WasmExactSearchError::resource_admission)
         }
 
+        fn seal_verification(&mut self) -> Result<(), WasmExactSearchError> {
+            let (keys, _) = self
+                .canonical
+                .as_ref()
+                .and_then(CanonicalReduction::family)
+                .ok_or_else(contract_error)?;
+            match self.verification.representative {
+                None if keys.is_empty()
+                    && self.verification.coverage_word == 0
+                    && self.verification.count_all == 0 => {}
+                Some(winner)
+                    if !keys.is_empty()
+                        && self.verification.coverage_word == 1
+                        && self.verification.count_all != 0 =>
+                {
+                    let source = self
+                        .workers
+                        .get(winner.worker_index)
+                        .ok_or_else(contract_error)?;
+                    source.engine.validate_pc_representative_physical_chain()?;
+                }
+                _ => return Err(contract_error()),
+            }
+            self.phase = DryPhase::Complete;
+            Ok(())
+        }
+
         pub(super) fn completed(&self) -> Option<CompletedFacts<'_>> {
             if self.phase != DryPhase::Complete {
                 return None;
             }
             let (keys, hash) = self.canonical.as_ref()?.family()?;
+            let representative = match self.verification.representative {
+                Some(winner) => {
+                    let worker = self.workers.get(winner.worker_index)?;
+                    Some((
+                        winner.ordinal,
+                        worker.engine.representative_pattern_id?,
+                        worker.engine.representative_path.as_slice(),
+                    ))
+                }
+                None => None,
+            };
             Some(CompletedFacts {
                 digest: self.digest,
                 candidate_count: self.candidate_count,
                 workers: &self.workers,
                 keys,
                 hash,
+                verification: VerifiedStats {
+                    count_all: self.verification.count_all,
+                    coverage_word: self.verification.coverage_word,
+                    representative,
+                },
+            })
+        }
+
+        pub(super) fn serial_handoff_pending(&self) -> Option<ResourceLeaseToken> {
+            (self.phase == DryPhase::SerialHandoff).then(|| self.admission.lease_token())
+        }
+
+        pub(super) fn into_serial_handoff(
+            self,
+            control: &ExecutionControl,
+        ) -> Result<SerialHandoff, WasmExactSearchError> {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            if self.phase != DryPhase::SerialHandoff || control.partition().count() != 1 {
+                return Err(contract_error());
+            }
+            Ok(SerialHandoff {
+                engine: self.root,
+                admission: self.admission,
             })
         }
 
@@ -1934,3 +2126,7 @@ mod worker_tests;
 #[cfg(test)]
 #[path = "extended_pc_cooperative_canonical.rs"]
 mod cooperative_canonical;
+
+#[cfg(test)]
+#[path = "extended_pc_cooperative_stats_tests.rs"]
+mod cooperative_stats_tests;

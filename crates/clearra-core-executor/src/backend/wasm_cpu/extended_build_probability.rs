@@ -140,6 +140,16 @@ struct ExtendedDistributedPartial {
     coverage_source_row_count: usize,
 }
 
+/// Output of the exact native canonical cursor, not a decoded or
+/// user-supplied solution family. The cursor validates every row and records
+/// its retained text capacity while ordering and hashing it.
+#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+struct SealedPcFamily {
+    keys: Vec<String>,
+    hash: String,
+    key_text_bytes: u128,
+}
+
 // Browser workers call the distributed entrypoints; native builds retain the same
 // session surface so compact and extended execution stay contract-compatible.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -2844,11 +2854,14 @@ impl ExtendedBuildProbabilitySession {
             && self.problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountAll
     }
 
-    fn validate_pc_representative_physical_chain(&self) -> Result<(), WasmExactSearchError> {
+    fn validate_pc_representative_physical_chain(
+        &self,
+        has_solutions: bool,
+    ) -> Result<(), WasmExactSearchError> {
         // This is only the already-selected witness. Full replay multiplicity
         // and query-bound terminal authority remain separate contracts.
         if self.representative_path.is_empty() {
-            return if self.buildable_tilings.is_empty() {
+            return if !has_solutions {
                 Ok(())
             } else {
                 Err(WasmExactSearchError::InvalidProblem(
@@ -2892,7 +2905,10 @@ impl ExtendedBuildProbabilitySession {
         Ok(())
     }
 
-    fn build_pc_family_result(&mut self) -> Result<CoreExecutionResult, WasmExactSearchError> {
+    fn validate_pc_family_result_source(
+        &self,
+        has_solutions: bool,
+    ) -> Result<(), WasmExactSearchError> {
         if !self.external_geometry
             && self
                 .pc_observation
@@ -2903,27 +2919,11 @@ impl ExtendedBuildProbabilitySession {
                 "extended_pc_observation_not_finalized",
             ));
         }
-        self.validate_pc_representative_physical_chain()?;
-        let minimum_source = self
-            .problem
-            .pc_chance_evidence_policy()
-            .retains_pc_minimum_cover_v2_evidence();
-        let score_source = self.problem.objective().score().requested();
-        let path_source = self
-            .problem
-            .pc_chance_evidence_policy()
-            .retains_pc_path_v2_evidence();
-        let failed_source = self
-            .problem
-            .pc_chance_evidence_policy()
-            .pc_failed_queue_example_limit()
-            .is_some();
-        let chance_source = self.problem.pc_chance_evidence_policy()
-            == PcChanceEvidencePolicy::PcProbabilityV2
-            || failed_source;
-        let universe = self.problem.piece_source().materialized_universe().ok_or(
-            WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
-        )?;
+        self.validate_pc_representative_physical_chain(has_solutions)
+    }
+
+    fn build_pc_family_result(&mut self) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        self.validate_pc_family_result_source(!self.buildable_tilings.is_empty())?;
         let mut keys = Vec::new();
         keys.try_reserve_exact(self.buildable_tilings.len())
             .map_err(|_| {
@@ -2959,6 +2959,196 @@ impl ExtendedBuildProbabilitySession {
             );
             coverages.sort_unstable_by(|left, right| left.solution_key().cmp(right.solution_key()));
         }
+        let result = self.assemble_pc_family_result(&keys, coverages, None)?;
+        Ok(result.with_normalized_solution_keys(keys))
+    }
+
+    /// Terminal join for the test-private native coordinator. Its existing
+    /// request ledger continues to charge the root, remaining workers, and
+    /// this cursor slot; the slot already owns the received keys and hash.
+    /// No public or distributed input can construct a sealed family.
+    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+    fn complete_pc_family_with_sealed_keys(
+        &mut self,
+        family: SealedPcFamily,
+        owner: &ExecutionMemoryOwner,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        use clearra_core_domain::objective::objective_kind::ObjectiveKind;
+        use clearra_problem::SearchOutputPolicy;
+
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let invalid =
+            || WasmExactSearchError::InvalidProblem("extended_pc_sealed_result_contract_invalid");
+        let projection_error = || {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_extended_result_materialization_projection_overflow",
+            )
+        };
+        let has_solutions = !family.keys.is_empty();
+        let candidate_count = self.geometry.candidate_count();
+        let depth = self.problem.exact_pieces().ok_or_else(invalid)?;
+        let universe = self
+            .problem
+            .piece_source()
+            .materialized_universe()
+            .ok_or_else(invalid)?;
+        if self.finished
+            || self.purpose != ExtendedFamilyPurpose::Pc
+            || self.shared_immutable_owners
+            || self.external_geometry
+            || self.trivial_target
+            || self.geometry.is_compiling()
+            || control.partition().count() != 1
+            || self.problem.objective().kind() != ObjectiveKind::All
+            || !matches!(
+                self.problem.output_policy(),
+                SearchOutputPolicy::Summary | SearchOutputPolicy::Trace
+            )
+            || self.problem.objective().score().requested()
+            || self.problem.objective().execution_constraints().requested()
+            || self.problem.solution_probability_policy().requested()
+            || self.problem.pc_chance_evidence_policy() != PcChanceEvidencePolicy::Disabled
+            || self
+                .problem
+                .queue_observation_policy()
+                .requires_observation_policy()
+            || self
+                .problem
+                .core_query()
+                .remaining_queue()
+                .as_fixed_sequence()
+                .is_none()
+            || !universe.complete()
+            || universe.pattern_count() != 1
+            || self.covered_patterns.pattern_count() != 1
+            || self.solution_coverage.is_some()
+            || self.pc_observation.is_some()
+            || !self.buildable_tilings.is_empty()
+            || !self.distributed_solution_keys.is_empty()
+            || !self.spin_execution_graphs.is_empty()
+            || !self.finesse_languages.is_empty()
+            || self.truncated_reason.is_some()
+            || !self.supply_projection_complete
+            || !self.count_pc_build_paths()
+            || !self.pc_build_variant_count_complete
+            || self.processed_candidate_count != candidate_count
+            || self.geometry.candidate_family_count() != Some(candidate_count as u128)
+            || family.keys.len() > candidate_count
+            || has_solutions == self.covered_patterns.is_empty()
+            || self.representative_path.len() > 60
+            || family.hash.strip_prefix("cts1:").is_none_or(|raw| {
+                raw.len() != 16
+                    || !raw
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        {
+            return Err(invalid());
+        }
+        self.validate_pc_family_result_source(has_solutions)?;
+        if has_solutions {
+            if self.representative_pattern_id != Some(0)
+                || self.representative_path.len() != depth
+                || self
+                    .representative_rank
+                    .is_none_or(|rank| u128::from(rank) >= candidate_count as u128)
+                || self.pc_build_variant_count < family.keys.len() as u128
+            {
+                return Err(invalid());
+            }
+        } else if !self.representative_path.is_empty()
+            || self.representative_pattern_id.is_some()
+            || self.representative_rank.is_some()
+            || self.pc_build_variant_count != 0
+        {
+            return Err(invalid());
+        }
+
+        // Each identity has equal fixed-width text in this single exact
+        // height/depth family. The bounded cursor checked length == capacity
+        // before admitting each row, so this confirms its accumulated
+        // credit without revisiting the family.
+        let key_len = ExtendedTilingKey::empty()
+            .canonical_key_len(self.field.height())
+            .checked_add(depth.checked_mul(66).ok_or_else(projection_error)?)
+            .and_then(|n| n.checked_add(depth.saturating_sub(1)))
+            .ok_or_else(projection_error)?;
+        if family.key_text_bytes != (family.keys.len() as u128) * (key_len as u128) {
+            return Err(invalid());
+        }
+        let key_storage = (family.keys.capacity() as u128)
+            .checked_mul(core::mem::size_of::<String>() as u128)
+            .and_then(|n| n.checked_add(family.key_text_bytes))
+            .ok_or_else(projection_error)?;
+        // Private variable-size solution stores above are empty. This
+        // preflight can only inspect the one coverage word and bounded path
+        // in addition to the common fixed result envelope.
+        let result_future = self
+            .checked_result_materialization_future_bytes()
+            .ok_or_else(projection_error)?;
+        let reserved = key_storage
+            .checked_add(family.hash.capacity() as u128)
+            .and_then(|n| n.checked_add(result_future))
+            .ok_or_else(projection_error)?;
+        owner
+            .ensure(reserved)
+            .map_err(WasmExactSearchError::resource_admission)?;
+        let result = self.assemble_pc_family_result(&family.keys, Vec::new(), Some(family.hash))?;
+        let retained = result
+            .checked_resource_retained_bytes()
+            .ok_or_else(projection_error)?;
+        if retained > result_future {
+            return Err(projection_error());
+        }
+        // The formatted hash scratch is gone; strings inside the result
+        // are independently retained. Move the Vec into that result after
+        // the final admission, without another key loop or reservation.
+        owner
+            .ensure(
+                key_storage
+                    .checked_add(retained)
+                    .ok_or_else(projection_error)?,
+            )
+            .map_err(WasmExactSearchError::resource_admission)?;
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        self.finished = true;
+        Ok(result.with_normalized_solution_keys(family.keys))
+    }
+
+    // The advanced native reducer owns the keys outside this helper so that
+    // the fixed result can be measured before attaching the live key owner.
+    // The direct caller still derives its cts1 hash here from its sorted keys.
+    fn assemble_pc_family_result(
+        &mut self,
+        keys: &[String],
+        coverages: Vec<NormalizedSolutionCoverage>,
+        sealed_hash: Option<String>,
+    ) -> Result<CoreExecutionResult, WasmExactSearchError> {
+        let minimum_source = self
+            .problem
+            .pc_chance_evidence_policy()
+            .retains_pc_minimum_cover_v2_evidence();
+        let score_source = self.problem.objective().score().requested();
+        let path_source = self
+            .problem
+            .pc_chance_evidence_policy()
+            .retains_pc_path_v2_evidence();
+        let failed_source = self
+            .problem
+            .pc_chance_evidence_policy()
+            .pc_failed_queue_example_limit()
+            .is_some();
+        let chance_source = self.problem.pc_chance_evidence_policy()
+            == PcChanceEvidencePolicy::PcProbabilityV2
+            || failed_source;
+        let universe = self.problem.piece_source().materialized_universe().ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
+        )?;
         let count_complete = self.supply_projection_complete
             && self.truncated_reason.is_none()
             && self.pc_build_variant_count_complete;
@@ -2975,7 +3165,7 @@ impl ExtendedBuildProbabilitySession {
             && !policy_requested
         {
             crate::solution_probability::normalized_solution_probability_reports(
-                &keys,
+                keys,
                 &coverages,
                 universe.weights(),
                 probability_complete && count_complete,
@@ -2990,15 +3180,19 @@ impl ExtendedBuildProbabilitySession {
         // not Build's private string-owner `ctks1` envelope. Use the borrowed
         // four-word codec so exporting the same family neither truncates the
         // field nor acquires compact Board64 reducer authority.
-        let mut hasher =
-            clearra_core_domain::solution::NormalizedTilingSolutionSetHasher::default();
-        for key in &keys {
-            let identity = ExtendedTilingSolutionKey::parse_canonical(key).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("extended_pc_solution_identity_invalid")
-            })?;
-            hasher.update_extended_canonical_key(identity);
-        }
-        let hash = hasher.finish();
+        let hash = if let Some(hash) = sealed_hash {
+            hash
+        } else {
+            let mut hasher =
+                clearra_core_domain::solution::NormalizedTilingSolutionSetHasher::default();
+            for key in keys {
+                let identity = ExtendedTilingSolutionKey::parse_canonical(key).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("extended_pc_solution_identity_invalid")
+                })?;
+                hasher.update_extended_canonical_key(identity);
+            }
+            hasher.finish()
+        };
         let probability = universe
             .weights()
             .covered_weight(&self.covered_patterns)
@@ -3308,7 +3502,7 @@ impl ExtendedBuildProbabilitySession {
             })?;
             Some(if minimum_source {
                 evidence
-                    .bind_extended_minimum_source_keys(&keys)
+                    .bind_extended_minimum_source_keys(keys)
                     .map_err(|_| {
                         WasmExactSearchError::InvalidProblem(
                             "extended_pc_minimum_problem_evidence_mismatch",
@@ -3457,7 +3651,7 @@ impl ExtendedBuildProbabilitySession {
             Some(
                 PcFullHeightReplayEvidence::from_executed_problem(
                     &self.problem,
-                    &keys,
+                    keys,
                     physical_batch
                         .take()
                         .ok_or(WasmExactSearchError::InvalidProblem(
@@ -3472,7 +3666,6 @@ impl ExtendedBuildProbabilitySession {
         // Minimum evidence comes from this PC producer's verified language,
         // not from Build result fields. The common exact reducer runs in App.
         let mut result = CoreExecutionResult::new(fields, self.representative_path.clone())
-            .with_normalized_solution_keys(keys)
             .with_normalized_solution_coverages(coverages)
             .with_solution_probabilities(probabilities)
             .with_coverage_pattern_words(self.covered_patterns.to_owned_words());
@@ -4346,6 +4539,181 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    fn extended_pc_sealed_terminal_preserves_direct_result_and_admission() {
+        use crate::resource::SharedExecutionMemoryBudget;
+        use clearra_core_domain::{
+            board::standard_pc_board::Board256Mask,
+            execution_cancellation::ExecutionCancellationToken,
+        };
+        use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+        use clearra_pc_graph::request::{PcCountPolicy, PcExecutionPolicy, RequestedSearchBackend};
+        use clearra_rules::profile::builtin_rules::srs_plus;
+
+        let height = 7;
+        let mut target = Board256Mask::EMPTY;
+        for (column, start_row) in [(0, 0), (1, 3)] {
+            for row in start_row..start_row + 4 {
+                target = target.union(Board256Mask::singleton(row * 10 + column).unwrap());
+            }
+        }
+        let initial = Board256Mask::all_cells(u16::from(height) * 10)
+            .unwrap()
+            .without(target);
+        let field = BuildProbabilityField::from_words_preserving_height(
+            height,
+            initial.words(),
+            target.words(),
+        )
+        .unwrap();
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10_from_words(u16::from(height), initial.words()).unwrap(),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 2])),
+            PieceWindow::new(2),
+        )
+        .with_rule(srs_plus())
+        .with_exact_pieces(Some(2))
+        .with_allow_hold(false)
+        .with_min_remaining_queue(0)
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_objective(ObjectivePolicy::all())
+        .with_retained_trace_limit(1)
+        .with_execution_policy(
+            PcExecutionPolicy::default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_workers(1)
+                .with_allow_backend_fallback(false),
+        );
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let bound = ExecutionMemoryBound::unbounded_for_problem(&problem).unwrap();
+        let control = ExecutionControl::default();
+        let make_terminal_source = || {
+            let mut session =
+                ExtendedBuildProbabilitySession::new_pc_family(&problem, field, bound, 0).unwrap();
+            for _ in 0..10_000 {
+                match session.advance_geometry_bounded().unwrap() {
+                    ExtendedGeometryAdvance::Pending => {}
+                    ExtendedGeometryAdvance::Candidate(candidate) => {
+                        let ordinal = session.geometry.candidate_count().saturating_sub(1) as u64;
+                        session
+                            .process_candidate(candidate, Some(ordinal), &control)
+                            .unwrap();
+                    }
+                    ExtendedGeometryAdvance::Complete => return session,
+                    ExtendedGeometryAdvance::ResourceIncomplete(reason) => {
+                        panic!("small fixture did not complete Geometry: {reason}")
+                    }
+                }
+            }
+            panic!("small fixture exceeded its work limit")
+        };
+        let BuildProbabilityAdvance::Completed(direct) = make_terminal_source()
+            .complete_with_control(&control)
+            .unwrap()
+        else {
+            panic!("direct terminal did not complete");
+        };
+        assert_eq!(direct.normalized_solution_keys().len(), 1);
+        assert_eq!(direct.coverage_pattern_words(), &[1]);
+        assert!(!direct.path_steps().is_empty());
+        let family = || {
+            let keys = direct.normalized_solution_keys().to_vec();
+            let key_text_bytes = keys.iter().map(|s| s.capacity() as u128).sum();
+            SealedPcFamily {
+                keys,
+                hash: direct
+                    .field("normalized_solution_set_hash")
+                    .unwrap()
+                    .to_owned(),
+                key_text_bytes,
+            }
+        };
+
+        let mut sealed = make_terminal_source();
+        // The cooperative reducer moves these away before final assembly.
+        drop(core::mem::take(&mut sealed.buildable_tilings));
+        let shared_bytes = sealed.checked_retained_bytes().unwrap();
+        let probe = SharedExecutionMemoryBudget::new(bound, shared_bytes, 1).unwrap();
+        let candidate = family();
+        let projected = (candidate.keys.capacity() as u128)
+            * (core::mem::size_of::<String>() as u128)
+            + candidate.key_text_bytes
+            + candidate.hash.capacity() as u128
+            + sealed
+                .checked_result_materialization_future_bytes()
+                .unwrap();
+        probe.owner(0).ensure(projected).unwrap();
+        let required = probe.admitted_peak_bytes();
+        drop(probe);
+        let exact =
+            SharedExecutionMemoryBudget::new(bound.with_cap(required).unwrap(), shared_bytes, 1)
+                .unwrap();
+        let too_short = SharedExecutionMemoryBudget::new(
+            bound.with_cap(required - 1).unwrap(),
+            shared_bytes,
+            1,
+        )
+        .unwrap();
+        let representative = core::mem::take(&mut sealed.representative_path);
+        assert!(matches!(
+            sealed.complete_pc_family_with_sealed_keys(family(), &exact.owner(0), &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_representative_replay_missing"
+            ))
+        ));
+        sealed.representative_path = representative;
+        let cancellation = ExecutionCancellationToken::new();
+        cancellation.handle().cancel();
+        assert!(matches!(
+            sealed.complete_pc_family_with_sealed_keys(
+                family(),
+                &exact.owner(0),
+                &ExecutionControl::new(cancellation)
+            ),
+            Err(WasmExactSearchError::Cancelled)
+        ));
+        assert!(matches!(
+            sealed.complete_pc_family_with_sealed_keys(family(), &too_short.owner(0), &control),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        let received = family();
+        let backing = received.keys.as_ptr();
+        let result = sealed
+            .complete_pc_family_with_sealed_keys(received, &exact.owner(0), &control)
+            .unwrap();
+        assert_eq!(result.normalized_solution_keys().as_ptr(), backing);
+        assert_eq!(
+            result.normalized_solution_keys(),
+            direct.normalized_solution_keys()
+        );
+        assert_eq!(result.path_steps(), direct.path_steps());
+        assert_eq!(
+            result.coverage_pattern_words(),
+            direct.coverage_pattern_words()
+        );
+        for field in [
+            "normalized_solution_set_hash",
+            "actual_normalized_solution_set_hash",
+            "build_variant_count",
+            "build_variant_count_exact",
+            "count_complete",
+            "probability_complete",
+            "coverage_probability",
+            "packing_candidate_digest",
+            "packing_candidate_count",
+            "representative_physical_replay_validated",
+        ] {
+            assert_eq!(result.field(field), direct.field(field), "{field}");
+        }
+        assert!(matches!(
+            sealed.complete_pc_family_with_sealed_keys(family(), &exact.owner(0), &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_sealed_result_contract_invalid"
+            ))
+        ));
     }
 
     #[test]
