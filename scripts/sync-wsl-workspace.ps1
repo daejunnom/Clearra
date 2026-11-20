@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Distribution = 'Clearra-Build',
+    [string]$Distribution,
     [switch]$AsJson
 )
 

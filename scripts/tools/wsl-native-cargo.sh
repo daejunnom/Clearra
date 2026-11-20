@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${CLEARRA_WSL_MARKER_DIGEST:-}" ]]; then
-    export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-fi
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 hash -r
 case "$PATH" in *"/mnt/"*) printf 'Windows PATH entry leaked into WSL native execution\n' >&2; exit 2 ;; esac
 
@@ -72,10 +70,6 @@ BUILD_ROOT="$BUILD_TRANSACTION/core-c-native-$BUILD_VARIANT"
 export CARGO_TARGET_DIR="$MANAGED_CARGO_TARGET"
 mkdir -p "$BUILD_ROOT"
 
-if [[ -f "$HOME/.cargo/env" ]]; then
-    # shellcheck disable=SC1091
-    source "$HOME/.cargo/env"
-fi
 if ! command -v cargo >/dev/null 2>&1; then
     printf 'cargo is required in the WSL distribution\n' >&2
     exit 2

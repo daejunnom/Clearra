@@ -3,21 +3,42 @@
 start_lease_watch() {
     local host_stdin
     exec {host_stdin}<&0
-    # In a noninteractive Bash, an unredirected background command reads
-    # /dev/null. Preserve the actual host lease pipe explicitly.
+    # Noninteractive Bash otherwise redirects unredirected background stdin
+    # to /dev/null. Read the host supervisor's actual lease pipe.
     lease_watch <&"$host_stdin" &
     exec {host_stdin}<&-
 }
 
-# The watcher launcher can be sourced to exercise its real pipe contract
-# without starting a distribution or invoking the guest service manager.
+owned_cgroup_drained() {
+    local path="$1" expected="$2" observed="$3" active_state="$4"
+    [[ "$active_state" =~ ^(inactive|failed)$ && ( -z "$observed" || "$observed" == "$expected" ) ]] || return 1
+    for _ in {1..50}; do
+        [[ -e "$path" ]] || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+append_wsl_build_environment() {
+    local -n arguments="$1"
+    local distribution="$2" anchor="$3"
+    [[ -n "$distribution" && "${#distribution}" -le 256 && "$distribution" != *[[:cntrl:]]* ]] || return 2
+    [[ "$anchor" =~ ^[a-zA-Z]:[\\/].+$ && "$anchor" != *[[:cntrl:]]* ]] || return 2
+    arguments+=(
+        --setenv "WSL_DISTRO_NAME=$distribution"
+        --setenv "LOCALAPPDATA=$anchor"
+        --setenv "CLEARRA_WSL_DISTRIBUTION=$distribution"
+    )
+}
+
+# Unit tests can exercise the real pipe without invoking systemd or WSL.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
     return
 fi
 
 set -euo pipefail
 
-[[ "$(id -u)" -eq 0 ]] || exit 2
+(( EUID != 0 )) || { printf 'Clearra WSL requires a non-root user\n' >&2; exit 2; }
 UNIT=
 MEMORY_MAX=
 TASKS_MAX=
@@ -25,16 +46,15 @@ RUNTIME_MAX=
 GRACE=
 GUEST=
 ENTRY=
-MARKER_DIGEST=
+HOST_BUILD_ANCHOR=
 NODE_VERSION=
 NPM_VERSION=
 PNPM_VERSION=
 RUST_VERSION=
 CARGO_VERSION=
 WASM_BINDGEN_VERSION=
-MODE=runtime
-RUN_AS=clearra
 while [[ $# -gt 0 ]]; do
+    [[ "$1" == -- || $# -ge 2 ]] || exit 2
     case "$1" in
         --unit) UNIT="$2"; shift 2 ;;
         --memory-max) MEMORY_MAX="$2"; shift 2 ;;
@@ -43,132 +63,136 @@ while [[ $# -gt 0 ]]; do
         --grace) GRACE="$2"; shift 2 ;;
         --guest) GUEST="$2"; shift 2 ;;
         --entry) ENTRY="$2"; shift 2 ;;
-        --marker-digest) MARKER_DIGEST="$2"; shift 2 ;;
+        --host-build-anchor) HOST_BUILD_ANCHOR="$2"; shift 2 ;;
         --node-version) NODE_VERSION="$2"; shift 2 ;;
         --npm-version) NPM_VERSION="$2"; shift 2 ;;
         --pnpm-version) PNPM_VERSION="$2"; shift 2 ;;
         --rust-version) RUST_VERSION="$2"; shift 2 ;;
         --cargo-version) CARGO_VERSION="$2"; shift 2 ;;
         --wasm-bindgen-version) WASM_BINDGEN_VERSION="$2"; shift 2 ;;
-        --mode) MODE="$2"; shift 2 ;;
-        --run-as) RUN_AS="$2"; shift 2 ;;
         --) shift; break ;;
         *) exit 2 ;;
     esac
 done
-[[ "$UNIT" =~ ^clearra-[A-Za-z0-9._-]+$ ]] || exit 2
+[[ "$UNIT" =~ ^clearra-rust-[0-9]+-[0-9]+$ ]] || exit 2
 [[ "$MEMORY_MAX" =~ ^[1-9][0-9]+$ ]] || exit 2
 [[ "$TASKS_MAX" =~ ^[1-9][0-9]*$ ]] || exit 2
 [[ "$RUNTIME_MAX" =~ ^[1-9][0-9]*$ ]] || exit 2
-[[ "$GRACE" =~ ^[0-9]+([.][0-9]+)?$ ]] || exit 2
-case "$MODE:$RUN_AS" in
-    runtime:clearra)
-        [[ "$ENTRY" =~ ^[a-z0-9-]+$ ]] || exit 2
-        [[ "$MARKER_DIGEST" =~ ^[0-9a-f]{64}$ ]] || exit 2
-        for version in "$NODE_VERSION" "$NPM_VERSION" "$PNPM_VERSION" "$RUST_VERSION" "$CARGO_VERSION" "$WASM_BINDGEN_VERSION"; do
-            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 2
-        done
-        ;;
-    provision:root)
-        [[ -z "$ENTRY$MARKER_DIGEST$NODE_VERSION$NPM_VERSION$PNPM_VERSION$RUST_VERSION$CARGO_VERSION$WASM_BINDGEN_VERSION" ]] || exit 2
-        ;;
-    *) exit 2 ;;
-esac
-[[ -f "$GUEST" ]] || exit 2
+[[ "$GRACE" =~ ^[1-9][0-9]{0,3}$ ]] || exit 2
+[[ "$ENTRY" =~ ^[a-z0-9-]+$ && -f "$GUEST" && ! -L "$GUEST" ]] || exit 2
+for version in "$NODE_VERSION" "$NPM_VERSION" "$PNPM_VERSION" "$RUST_VERSION" "$CARGO_VERSION" "$WASM_BINDGEN_VERSION"; do
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 2
+done
+distribution="${WSL_DISTRO_NAME:?Missing WSL distribution identity}"
+build_environment=()
+append_wsl_build_environment build_environment "$distribution" "$HOST_BUILD_ANCHOR" || exit 2
 
-parent_lost_marker="/run/${UNIT}.parent-lost"
-rm -f "$parent_lost_marker"
-trap 'rm -f "$parent_lost_marker"' EXIT
-host_signal_cleanup() {
-    trap - HUP TERM INT
+# The already-running user manager owns one transient group. Never stop
+# the distribution, a shared slice, another user's process or service.
+runtime_dir="/run/user/$EUID"
+[[ -d "$runtime_dir" && -O "$runtime_dir" && ! -L "$runtime_dir" && -S "$runtime_dir/bus" ]] || {
+    printf 'Clearra WSL requires a bounded current-user systemd service\n' >&2
+    exit 2
+}
+[[ "$(stat -f -c %T /sys/fs/cgroup)" == cgroup2fs ]] || exit 2
+export XDG_RUNTIME_DIR="$runtime_dir"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+user_cgroup="$(timeout --kill-after=2 5 systemctl --user show --property=ControlGroup --value -- -.slice)"
+[[ "$user_cgroup" == "/user.slice/user-$EUID.slice/user@$EUID.service" ]] || {
+    printf 'Clearra WSL could not verify the current user cgroup\n' >&2
+    exit 2
+}
+unit_name="$UNIT.service"
+control_group="$user_cgroup/app.slice/$unit_name"
+cgroup_path="/sys/fs/cgroup$control_group"
+[[ ! -e "$cgroup_path" ]] || exit 2
+
+# If EOF arrives before a queued service starts, the guest sees cancellation
+# or no lease directory, and declines to start any work.
+lease_dir="$(mktemp -d -- "$runtime_dir/clearra-lease.XXXXXXXX")"
+parent_lost_marker="$lease_dir/parent-lost"
+trap 'rm -f -- "$parent_lost_marker"; rmdir -- "$lease_dir"' EXIT
+stop_unit() {
+    timeout --kill-after=2 "$(( GRACE + 5 ))" systemctl --user stop -- "$unit_name" >/dev/null 2>&1
+}
+mark_parent_lost() {
     : >"$parent_lost_marker"
-    systemctl kill --kill-who=all --signal=TERM "${UNIT}.service" >/dev/null 2>&1 || true
-    sleep "$GRACE"
-    systemctl kill --kill-who=all --signal=KILL "${UNIT}.service" >/dev/null 2>&1 || true
-    # This is the dedicated distribution's own systemd instance. Powering it
-    # off cannot affect another WSL distribution and closes the parent-crash
-    # gap in which no Windows supervisor remains to issue --terminate.
-    systemctl poweroff --force --force --no-block >/dev/null 2>&1 || true
+    stop_unit || true
+}
+host_signal_cleanup() {
+    trap '' HUP TERM INT
+    mark_parent_lost
     exit 125
 }
 trap host_signal_cleanup HUP TERM INT
 lease_watch() {
-    # The host keeps stdin open for the complete lease. EOF means its
-    # supervisor disappeared. Kill the entire transient unit, then escalate.
     trap 'exit 0' HUP TERM INT
     while IFS= read -r _; do :; done
-    trap - HUP TERM INT
-    : >"$parent_lost_marker"
-    systemctl kill --kill-who=all --signal=TERM "${UNIT}.service" >/dev/null 2>&1 || true
-    sleep "$GRACE"
-    systemctl kill --kill-who=all --signal=KILL "${UNIT}.service" >/dev/null 2>&1 || true
-    systemctl poweroff --force --force --no-block >/dev/null 2>&1 || true
+    trap '' HUP TERM INT
+    mark_parent_lost
 }
 start_lease_watch
 watcher=$!
 
 status=0
 systemd_arguments=(
-    --quiet --wait --pipe
+    --user --quiet --wait --pipe --slice=app.slice --expand-environment=no
     --unit "$UNIT"
-    --uid "$RUN_AS"
-    --property "MemoryMax=${MEMORY_MAX}"
+    --property "MemoryMax=$MEMORY_MAX"
     --property "MemorySwapMax=0"
-    --property "TasksMax=${TASKS_MAX}"
-    --property "MemoryOOMGroup=yes"
+    --property "TasksMax=$TASKS_MAX"
     --property "OOMPolicy=kill"
-    --property "RuntimeMaxSec=${RUNTIME_MAX}"
+    --property "RuntimeMaxSec=${RUNTIME_MAX}s"
+    --property "TimeoutStopSec=${GRACE}s"
+    --property "KillMode=control-group"
+    --setenv "CLEARRA_WSL_LEASE_DIR=$lease_dir"
+    --setenv "CLEARRA_WSL_EXPECTED_CGROUP=$control_group"
+    --setenv "CLEARRA_WSL_MEMORY_MAX=$MEMORY_MAX"
+    --setenv "CLEARRA_WSL_TASKS_MAX=$TASKS_MAX"
+    "${build_environment[@]}"
+    --setenv "CLEARRA_WSL_NODE_VERSION=$NODE_VERSION"
+    --setenv "CLEARRA_WSL_NPM_VERSION=$NPM_VERSION"
+    --setenv "CLEARRA_WSL_PNPM_VERSION=$PNPM_VERSION"
+    --setenv "CLEARRA_WSL_RUST_VERSION=$RUST_VERSION"
+    --setenv "CLEARRA_WSL_CARGO_VERSION=$CARGO_VERSION"
+    --setenv "CLEARRA_WSL_WASM_BINDGEN_VERSION=$WASM_BINDGEN_VERSION"
 )
-command=(/bin/bash "$GUEST")
-if [[ "$MODE" == runtime ]]; then
-    systemd_arguments+=(
-        --setenv "CLEARRA_WSL_MARKER_DIGEST=${MARKER_DIGEST}"
-        --setenv "CLEARRA_WSL_NODE_VERSION=${NODE_VERSION}"
-        --setenv "CLEARRA_WSL_NPM_VERSION=${NPM_VERSION}"
-        --setenv "CLEARRA_WSL_PNPM_VERSION=${PNPM_VERSION}"
-        --setenv "CLEARRA_WSL_RUST_VERSION=${RUST_VERSION}"
-        --setenv "CLEARRA_WSL_CARGO_VERSION=${CARGO_VERSION}"
-        --setenv "CLEARRA_WSL_WASM_BINDGEN_VERSION=${WASM_BINDGEN_VERSION}"
-    )
-    command+=("$ENTRY")
+if [[ ! -e "$parent_lost_marker" ]]; then
+    systemd-run "${systemd_arguments[@]}" -- /bin/bash "$GUEST" "$ENTRY" "$@" </dev/null || status=$?
 fi
-command+=("$@")
-systemd-run "${systemd_arguments[@]}" -- "${command[@]}" </dev/null || status=$?
 
 kill "$watcher" >/dev/null 2>&1 || true
 wait "$watcher" >/dev/null 2>&1 || true
-result="$(systemctl show "${UNIT}.service" --property=Result --value 2>/dev/null || true)"
-control_group="$(systemctl show "${UNIT}.service" --property=ControlGroup --value 2>/dev/null || true)"
-memory_peak="$(systemctl show "${UNIT}.service" --property=MemoryPeak --value 2>/dev/null || true)"
-systemctl stop "${UNIT}.service" >/dev/null 2>&1 || true
-n_tasks="$(systemctl show "${UNIT}.service" --property=NTasks --value 2>/dev/null || true)"
-active_state="$(systemctl show "${UNIT}.service" --property=ActiveState --value 2>/dev/null || true)"
-[[ -n "$n_tasks" ]] || n_tasks=0
-systemctl reset-failed "${UNIT}.service" >/dev/null 2>&1 || true
+unit_property() {
+    timeout --kill-after=2 5 systemctl --user show --property="$1" --value -- "$unit_name" 2>/dev/null
+}
+result="$(unit_property Result || true)"
+memory_peak="$(unit_property MemoryPeak || true)"
+stop_unit || true
+active_state="$(unit_property ActiveState || true)"
+observed_cgroup="$(unit_property ControlGroup || true)"
 cgroup_removed=false
-if [[ "$control_group" == /system.slice/clearra-*.service ]]; then
-    cgroup_path="/sys/fs/cgroup${control_group}"
-    for _ in {1..50}; do
-        if [[ ! -e "$cgroup_path" ]]; then
-            cgroup_removed=true
-            break
-        fi
-        sleep 0.1
-    done
+if owned_cgroup_drained "$cgroup_path" "$control_group" "$observed_cgroup" "$active_state"; then
+    cgroup_removed=true
+    if [[ "$active_state" == failed ]]; then
+        timeout --kill-after=2 5 systemctl --user reset-failed -- "$unit_name" >/dev/null 2>&1 || true
+    fi
 fi
-if [[ "$cgroup_removed" != true ]]; then
+if [[ "$cgroup_removed" != true || -e "$parent_lost_marker" ]]; then
     status=125
 fi
-if [[ "$result" == "oom-kill" ]]; then
-    printf 'CLEARRA_WSL_RESULT=oom-kill\n'
-elif [[ -f "$parent_lost_marker" ]]; then
+if [[ -f "$parent_lost_marker" ]]; then
     printf 'CLEARRA_WSL_RESULT=parent-lost\n'
 else
     printf 'CLEARRA_WSL_RESULT=%s\n' "${result:-exit-code}"
 fi
 printf 'CLEARRA_WSL_CONTROL_GROUP=%s\n' "$control_group"
 printf 'CLEARRA_WSL_MEMORY_PEAK=%s\n' "${memory_peak:-unknown}"
-printf 'CLEARRA_WSL_REMAINING_TASKS=%s\n' "$n_tasks"
+if [[ "$cgroup_removed" == true ]]; then
+    printf 'CLEARRA_WSL_REMAINING_TASKS=0\n'
+else
+    printf 'CLEARRA_WSL_REMAINING_TASKS=unknown\n'
+fi
 printf 'CLEARRA_WSL_UNIT_ACTIVE_STATE=%s\n' "${active_state:-unknown}"
 printf 'CLEARRA_WSL_CGROUP_REMOVED=%s\n' "$cgroup_removed"
 exit "$status"

@@ -12,3 +12,7 @@ active manager moved to `tools/clearra-manage`.
 
 The historical tests intentionally remain next to the old modules. They may be
 read or adapted as evidence, but CI does not import or execute them.
+
+The old guest provisioning and sanitization scripts are preserved beside
+this source for audit only. The current runner neither imports guest images
+nor changes user accounts, guest configuration, or installed toolchains.

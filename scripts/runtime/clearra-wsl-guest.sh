@@ -1,85 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENTRY="${1:-}"
-shift || true
-MARKER=/etc/clearra/runtime.json
-[[ -f "$MARKER" ]] || { printf 'Clearra WSL runtime marker is missing\n' >&2; exit 2; }
-python3 - "$MARKER" \
-    "${CLEARRA_WSL_MARKER_DIGEST:?}" \
-    "${CLEARRA_WSL_NODE_VERSION:?}" \
-    "${CLEARRA_WSL_NPM_VERSION:?}" \
-    "${CLEARRA_WSL_PNPM_VERSION:?}" \
-    "${CLEARRA_WSL_RUST_VERSION:?}" \
-    "${CLEARRA_WSL_CARGO_VERSION:?}" \
-    "${CLEARRA_WSL_WASM_BINDGEN_VERSION:?}" <<'PY'
-import json
-import pathlib
-import sys
-
-path, digest, node, npm, pnpm, rust, cargo, wasm = sys.argv[1:]
-value = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-expected = {
-    "node": node,
-    "npm": npm,
-    "pnpm": pnpm,
-    "rust": rust,
-    "cargo": cargo,
-    "wasm_bindgen": wasm,
+finite_cgroup_limits_match() {
+    local actual_memory="$1" actual_swap="$2" actual_tasks="$3" expected_memory="$4" expected_tasks="$5"
+    [[ "$actual_memory" =~ ^[1-9][0-9]{1,15}$ &&
+       "$expected_memory" =~ ^[1-9][0-9]{1,15}$ &&
+       "$actual_swap" == 0 && "$actual_tasks" == "$expected_tasks" &&
+       "$actual_tasks" =~ ^[1-9][0-9]*$ ]] || return 2
+    # Linux memory.max is page-granular. Never grant more than requested,
+    # but accept its rounding down on hosts with larger page sizes.
+    (( actual_memory <= expected_memory && expected_memory - actual_memory < 1048576 ))
 }
-if (
-    value.get("schema_id") != "clearra.wsl-runtime.v1"
-    or value.get("runtime_user") != "clearra"
-    or value.get("toolchain_digest") != digest
-    or value.get("toolchains") != expected
-):
-    raise SystemExit("Clearra WSL runtime marker does not match the host policy")
-PY
-actual_digest="$(python3 - "$MARKER" <<'PY'
-import json, pathlib, sys
-print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["toolchain_digest"])
-PY
-)"
-[[ "$actual_digest" == "${CLEARRA_WSL_MARKER_DIGEST:?}" ]] || {
-    printf 'Clearra WSL toolchain marker does not match this source policy\n' >&2
+
+verify_cgroup_limits() {
+    local control_path="$1" expected_memory="$2" expected_tasks="$3"
+    local actual_memory actual_swap actual_tasks oom_group
+    read -r actual_memory <"$control_path/memory.max" || return 2
+    read -r actual_swap <"$control_path/memory.swap.max" || return 2
+    read -r actual_tasks <"$control_path/pids.max" || return 2
+    read -r oom_group <"$control_path/memory.oom.group" || return 2
+    [[ "$oom_group" == 1 ]] || return 2
+    finite_cgroup_limits_match "$actual_memory" "$actual_swap" "$actual_tasks" "$expected_memory" "$expected_tasks"
+}
+
+ENTRY="${1:?Missing Clearra WSL entry}"
+shift
+(( EUID != 0 )) || exit 2
+lease_dir="${CLEARRA_WSL_LEASE_DIR:?Missing WSL owner lease}"
+[[ "$lease_dir" == "/run/user/$EUID/clearra-lease."* &&
+   "$(realpath -e -- "$lease_dir")" == "$lease_dir" &&
+   -d "$lease_dir" && -O "$lease_dir" && ! -e "$lease_dir/parent-lost" ]] || exit 125
+
+# Merely starting a systemd unit is not proof of delegated cgroup controls.
+# Check the limits the kernel actually exposes before launching toolchains.
+control_group="${CLEARRA_WSL_EXPECTED_CGROUP:?Missing WSL cgroup identity}"
+[[ "$control_group" =~ ^/user\.slice/user-"$EUID"\.slice/user@"$EUID"\.service/app\.slice/clearra-rust-[0-9]+-[0-9]+\.service$ ]] || exit 2
+grep -Fxq -- "0::$control_group" /proc/self/cgroup || exit 2
+verify_cgroup_limits "/sys/fs/cgroup$control_group" "${CLEARRA_WSL_MEMORY_MAX:?}" "${CLEARRA_WSL_TASKS_MAX:?}" || {
+    printf 'Clearra WSL could not prove delegated memory, swap, and task limits\n' >&2
     exit 2
 }
 
-NODE_VERSION="$(python3 - "$MARKER" <<'PY'
-import json, pathlib, sys
-print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["toolchains"]["node"])
-PY
-)"
-NPM_VERSION="$(python3 - "$MARKER" <<'PY'
-import json, pathlib, sys
-print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["toolchains"]["npm"])
-PY
-)"
-RUST_VERSION="$(python3 - "$MARKER" <<'PY'
-import json, pathlib, sys
-print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["toolchains"]["rust"])
-PY
-)"
-CARGO_VERSION="$(python3 - "$MARKER" <<'PY'
-import json, pathlib, sys
-print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["toolchains"]["cargo"])
-PY
-)"
-PNPM_VERSION="$(python3 - "$MARKER" <<'PY'
-import json, pathlib, sys
-print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["toolchains"]["pnpm"])
-PY
-)"
-WASM_BINDGEN_VERSION="$(python3 - "$MARKER" <<'PY'
-import json, pathlib, sys
-print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["toolchains"]["wasm_bindgen"])
-PY
-)"
-export HOME=/home/clearra
-export CARGO_HOME=/opt/clearra/cargo
-export RUSTUP_HOME=/opt/clearra/rustup
-export COREPACK_HOME=/opt/clearra/corepack
-export PATH="/opt/clearra/node/${NODE_VERSION}/bin:/opt/clearra/cargo/bin:/opt/clearra/tools/wasm-bindgen-cli/${WASM_BINDGEN_VERSION}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+distribution="${CLEARRA_WSL_DISTRIBUTION:?Missing WSL distribution identity}"
+[[ "${#distribution}" -le 256 && "$distribution" != *[[:cntrl:]]* ]] || exit 2
+NODE_VERSION="${CLEARRA_WSL_NODE_VERSION:?}"
+NPM_VERSION="${CLEARRA_WSL_NPM_VERSION:?}"
+PNPM_VERSION="${CLEARRA_WSL_PNPM_VERSION:?}"
+RUST_VERSION="${CLEARRA_WSL_RUST_VERSION:?}"
+CARGO_VERSION="${CLEARRA_WSL_CARGO_VERSION:?}"
+WASM_BINDGEN_VERSION="${CLEARRA_WSL_WASM_BINDGEN_VERSION:?}"
+# Retain the chosen account's toolchain, never the mounted Windows PATH.
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+toolchain_digest="$(printf '%s\n' "$NODE_VERSION" "$NPM_VERSION" "$PNPM_VERSION" \
+    "$RUST_VERSION" "$CARGO_VERSION" "$WASM_BINDGEN_VERSION" | sha256sum)"
+toolchain_digest="${toolchain_digest%% *}"
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
     CARGO_BUILD_RUSTFLAGS CARGO_PROFILE_RELEASE_CODEGEN_UNITS \
     CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_OPT_LEVEL \
@@ -246,6 +220,22 @@ def retirement_target(plan, live_lease, current_after, incoming_after):
 PY
 }
 
+require_unmounted_source_tree() {
+    python3 - "$1" <<'PY'
+from pathlib import PurePosixPath
+import re
+import sys
+
+root = PurePosixPath(sys.argv[1])
+with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as mounts:
+    for line in mounts:
+        encoded = line.split(" ", 5)[4]
+        mount = re.sub(r"\\([0-7]{3})", lambda part: chr(int(part[1], 8)), encoded)
+        if PurePosixPath(mount).is_relative_to(root):
+            raise SystemExit("Managed WSL source tree has a nested or root mount")
+PY
+}
+
 sync_source() (
     # A command substitution normally clears errexit. Keep digest/copy/tar
     # failures terminal inside this private extraction transaction too.
@@ -257,25 +247,58 @@ sync_source() (
     [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || exit 2
     local base="$HOME/.local/share/Clearra/workspaces/$digest"
     local source="$base/source"
-    [[ "$(realpath -m -- "$base")" == "$base" && ! -L "$source" ]] || exit 2
+    local owner="$base/.clearra-source-owner" inner_owner=".clearra-wsl-extracted-source"
+    [[ "$HOME" == /* && "$HOME" != / && -O "$HOME" &&
+       "$(realpath -m -- "$base")" == "$base" && ! -L "$source" ]] || exit 2
+    umask 077
     mkdir -p -- "$base"
-    local scratch file_count
+    [[ -O "$base" && "$(stat -f -c %T -- "$base")" == ext2/ext3 ]] || exit 2
+    local scratch file_count old_identity old_owner new_record publish_ok=0
     scratch="$(mktemp -d -- "$base/.incoming.XXXXXXXX")"
-    trap 'rm -rf --one-file-system -- "$scratch"' EXIT
+    cleanup_source_staging() {
+        # If replacing the prepared source failed, do not erase its backup.
+        [[ ! -e "$scratch/previous" || "$publish_ok" == 1 ]] || return
+        require_unmounted_source_tree "$scratch" || return
+        rm -rf --one-file-system -- "$scratch"
+    }
+    trap cleanup_source_staging EXIT
     copy_verified_source_archive "$archive" "$scratch/source.tar.gz" "$digest"
-    if [[ "$mode" == receipt ]]; then
-        # GNU stat reports the ext filesystem family using this spelling.
-        [[ "$(stat -f -c %T -- "$base")" == ext2/ext3 ]] || exit 2
-        file_count="$(count_source_archive_files "$scratch/source.tar.gz")"
-    fi
+    file_count="$(count_source_archive_files "$scratch/source.tar.gz")"
     mkdir -- "$scratch/source"
-    tar -xzf "$scratch/source.tar.gz" -C "$scratch/source"
-    # The Rust manager holds the dedicated lease throughout extraction and
-    # this run. Replace only this same-digest source after successful tar.
-    rm -rf --one-file-system -- "$source"
-    mv -T -- "$scratch/source" "$source"
+    tar --no-same-owner -xzf "$scratch/source.tar.gz" -C "$scratch/source"
+    [[ ! -e "$scratch/source/$inner_owner" && ! -L "$scratch/source/$inner_owner" ]] || exit 2
+    new_record="clearra.wsl-source.v2:$digest:$(stat -c '%d:%i' -- "$scratch/source"):${scratch##*/}"
+    (set -o noclobber; printf '%s\n' "$new_record" >"$scratch/new-owner")
+    (set -o noclobber; printf '%s\n' "$new_record" >"$scratch/source/$inner_owner")
+    # The host lease prevents other managed readers from replacing this
+    # source. Never retire an unproven directory or a same-device bind mount.
+    if [[ -e "$source" ]]; then
+        [[ -d "$source" && -O "$source" && ! -L "$source" ]] || exit 2
+        [[ -f "$owner" && ! -L "$owner" && -O "$owner" &&
+           -f "$source/$inner_owner" && ! -L "$source/$inner_owner" && -O "$source/$inner_owner" ]] || exit 2
+        old_identity="$(stat -c '%d:%i' -- "$source")"
+        old_owner="$(<"$owner")"
+        [[ "$old_owner" == "clearra.wsl-source.v2:$digest:$old_identity:.incoming."* &&
+           "$(<"$source/$inner_owner")" == "$old_owner" ]] || exit 2
+        require_unmounted_source_tree "$source"
+        [[ "$(stat -c '%d:%i' -- "$source")" == "$old_identity" ]] || exit 2
+        mv -T -- "$source" "$scratch/previous"
+        [[ "$(stat -c '%d:%i' -- "$scratch/previous")" == "$old_identity" ]] || exit 2
+    else
+        [[ ! -e "$owner" && ! -L "$owner" ]] || exit 2
+    fi
+    if ! mv -nT -- "$scratch/source" "$source" || [[ -e "$scratch/source" ]]; then
+        if [[ ! -e "$source" && -d "$scratch/previous" ]]; then
+            mv -nT -- "$scratch/previous" "$source"
+        fi
+        exit 2
+    fi
+    # If owner publication fails, leave the previous source retained.
+    mv -T -- "$scratch/new-owner" "$owner"
+    publish_ok=1
     if [[ "$mode" == receipt ]]; then
-        printf 'clearra_wsl_source_receipt_v1=Clearra-Build\t%s\t%s\t%s\n' "$source" "$digest" "$file_count"
+        [[ "$source" != *[[:cntrl:]]* ]] || exit 2
+        printf 'clearra_wsl_source_receipt_v2=%s\t%s\t%s\t%s\n' "$distribution" "$source" "$digest" "$file_count"
     else
         printf '%s' "$source"
     fi
@@ -314,23 +337,35 @@ require_empty_benchmark_output() {
 }
 
 verify_toolchains() {
-    [[ "$(node --version)" == "v${NODE_VERSION}" ]]
-    [[ "$(npm --version)" == "$NPM_VERSION" ]]
-    [[ "$(pnpm --version)" == "$PNPM_VERSION" ]]
-    [[ "$(rustc "+${RUST_VERSION}" --version)" == "rustc ${RUST_VERSION}"* ]]
-    [[ "$(cargo "+${RUST_VERSION}" --version)" == "cargo ${CARGO_VERSION}"* ]]
-    [[ "$(wasm-bindgen --version)" == "wasm-bindgen ${WASM_BINDGEN_VERSION}" ]]
+    [[ "$(node --version)" == "v${NODE_VERSION}" ]] || return 2
+    [[ "$(npm --version)" == "$NPM_VERSION" ]] || return 2
+    [[ "$(pnpm --version)" == "$PNPM_VERSION" ]] || return 2
+    verify_rust || return 2
+    [[ "$(wasm-bindgen --version)" == "wasm-bindgen ${WASM_BINDGEN_VERSION}" ]] || return 2
     node --version
     npm --version
     pnpm --version
-    rustc "+${RUST_VERSION}" --version
-    cargo "+${RUST_VERSION}" --version
+    rustup run "$RUST_VERSION" rustc --version
+    rustup run "$RUST_VERSION" cargo --version
     wasm-bindgen --version
-    python3 - "$MARKER" <<'PY'
-import json, pathlib, sys
-value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-print(json.dumps({"schema_id": value["schema_id"], "toolchain_digest": value["toolchain_digest"], "toolchains": value["toolchains"]}, sort_keys=True))
+    python3 - "$distribution" "$toolchain_digest" "$NODE_VERSION" "$NPM_VERSION" "$PNPM_VERSION" \
+        "$RUST_VERSION" "$CARGO_VERSION" "$WASM_BINDGEN_VERSION" <<'PY'
+import json, sys
+distribution, digest, node, npm, pnpm, rust, cargo, wasm_bindgen = sys.argv[1:]
+print(json.dumps({
+    "schema_id": "clearra.wsl-toolchain.v2",
+    "distribution": distribution,
+    "toolchain_digest": digest,
+    "toolchains": dict(node=node, npm=npm, pnpm=pnpm, rust=rust, cargo=cargo, wasm_bindgen=wasm_bindgen),
+}, sort_keys=True))
 PY
+}
+
+verify_rust() {
+    # rustup run selects only an already-installed toolchain. A diagnostic
+    # lease does not bootstrap the user's account or modify toolchain setup.
+    [[ "$(rustup run "$RUST_VERSION" rustc --version)" == "rustc $RUST_VERSION "* &&
+       "$(rustup run "$RUST_VERSION" cargo --version)" == "cargo $CARGO_VERSION "* ]]
 }
 
 case "$ENTRY" in
@@ -361,34 +396,37 @@ case "$ENTRY" in
                 *) exit 2 ;;
             esac
         done
-        [[ "$STAGING" == /mnt/?/* ]] || exit 2
-        mkdir -p "$STAGING"
-        TARGET_ROOT="$HOME/.cache/Clearra/build/${CLEARRA_WSL_MARKER_DIGEST}/cargo-target"
-        mkdir -p "$TARGET_ROOT"
-        export CARGO_TARGET_DIR="$TARGET_ROOT" CARGO_INCREMENTAL=0
-        export CLEARRA_SOURCE_COMMIT="$SOURCE_COMMIT" CLEARRA_ENGINE_BUILD_ID="$ENGINE_BUILD_ID"
-        if [[ "$VERIFY" -eq 1 ]]; then
-            cargo "+${RUST_VERSION}" check --locked --manifest-path "$SOURCE_ROOT/Cargo.toml" --package clearra-cli-command --lib --tests
-            cargo "+${RUST_VERSION}" check --locked --manifest-path "$SOURCE_ROOT/Cargo.toml" --package clearra-wasm --lib --tests
-            cargo "+${RUST_VERSION}" test --locked --manifest-path "$SOURCE_ROOT/Cargo.toml" --package clearra-wasm --test wasm_host_contract
-        fi
-        cargo_args=("+${RUST_VERSION}" build --locked --manifest-path "$SOURCE_ROOT/Cargo.toml" --target wasm32-unknown-unknown --release -p clearra-wasm-abi)
-        [[ "$STAGE_PROFILING" -eq 0 ]] || cargo_args+=(--features stage-profiling)
-        cargo "${cargo_args[@]}"
-        wasm-bindgen "$TARGET_ROOT/wasm32-unknown-unknown/release/clearra_wasm.wasm" \
-            --target web --out-dir "$STAGING" --out-name clearra_wasm --no-typescript
+        [[ "$STAGING" == /mnt/?/* && "$(realpath -m -- "$STAGING")" == "$STAGING" ]] || exit 2
         verify_toolchains
-        python3 - "$STAGING/.clearra-wsl-toolchain.json" "$actual_digest" \
+        mkdir -p "$STAGING"
+        export CARGO_INCREMENTAL=0
+        export CLEARRA_SOURCE_COMMIT="$SOURCE_COMMIT" CLEARRA_ENGINE_BUILD_ID="$ENGINE_BUILD_ID"
+        node "$SOURCE_ROOT/scripts/tools/invoke-clearra-build.mjs" --source-root "$SOURCE_ROOT" --purpose experiment \
+            -- bash -euo pipefail -c '
+                rust="$1"
+                staging="$2"
+                if [[ "$3" == 1 ]]; then
+                    rustup run "$rust" cargo check --locked -p clearra-cli-command --lib --tests
+                    rustup run "$rust" cargo check --locked -p clearra-wasm --lib --tests
+                    rustup run "$rust" cargo test --locked -p clearra-wasm --test wasm_host_contract
+                fi
+                args=(build --locked --target wasm32-unknown-unknown --release -p clearra-wasm-abi)
+                [[ "$4" == 0 ]] || args+=(--features stage-profiling)
+                rustup run "$rust" cargo "${args[@]}"
+                wasm-bindgen "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/clearra_wasm.wasm" \
+                    --target web --out-dir "$staging" --out-name clearra_wasm --no-typescript
+            ' -- "$RUST_VERSION" "$STAGING" "$VERIFY" "$STAGE_PROFILING"
+        python3 - "$STAGING/.clearra-wsl-toolchain.json" "$distribution" "$toolchain_digest" \
             "$NODE_VERSION" "$NPM_VERSION" "$PNPM_VERSION" \
             "$RUST_VERSION" "$WASM_BINDGEN_VERSION" <<'PY'
 import json, pathlib, subprocess, sys
-path, digest, node, npm, pnpm, rust, wasm = sys.argv[1:]
+path, distribution, digest, node, npm, pnpm, rust, wasm = sys.argv[1:]
 value = {
     "environment": "wsl",
-    "distribution": "Clearra-Build",
+    "distribution": distribution,
     "toolchain_digest": digest,
-    "rustc": subprocess.check_output(["rustc", f"+{rust}", "-Vv"], text=True).strip(),
-    "cargo": subprocess.check_output(["cargo", f"+{rust}", "-V"], text=True).strip(),
+    "rustc": subprocess.check_output(["rustup", "run", rust, "rustc", "-Vv"], text=True).strip(),
+    "cargo": subprocess.check_output(["rustup", "run", rust, "cargo", "-V"], text=True).strip(),
     "wasm_bindgen": subprocess.check_output(["wasm-bindgen", "--version"], text=True).strip(),
     "node": subprocess.check_output(["node", "--version"], text=True).strip(),
     "npm": subprocess.check_output(["npm", "--version"], text=True).strip(),
@@ -396,7 +434,8 @@ value = {
     "expected_versions": {"node": node, "npm": npm, "pnpm": pnpm, "rust": rust, "wasm_bindgen": wasm},
     "rust_build_environment": "default",
 }
-pathlib.Path(path).write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+with pathlib.Path(path).open("x", encoding="utf-8") as receipt:
+    receipt.write(json.dumps(value, sort_keys=True) + "\n")
 PY
         ;;
     oracle-local-layers-v080)
@@ -433,6 +472,7 @@ PY
         exec bash "$SOURCE_ROOT/scripts/tools/wsl-core-c-tests.sh" "${SOURCE_ARGS[@]}"
         ;;
     native-cargo)
+        verify_rust
         parse_source "$@"
         [[ "${#SOURCE_ARGS[@]}" -gt 0 ]]
         case "${SOURCE_ARGS[0]}" in
@@ -443,6 +483,7 @@ PY
         exec bash "$SOURCE_ROOT/scripts/tools/wsl-native-cargo.sh" "${SOURCE_ARGS[@]}"
         ;;
     pc-runtime-build-batch)
+        verify_rust
         parse_source "$@"
         set -- "${SOURCE_ARGS[@]}"
         HOST_OUTPUT=
@@ -454,32 +495,36 @@ PY
             esac
         done
         require_empty_benchmark_output "$HOST_OUTPUT"
-        [[ "${#ARGUMENTS[@]}" -eq 7 ]] || exit 2
-        if [[ "${ARGUMENTS[4]}" == auto ]]; then
+        [[ "${#ARGUMENTS[@]}" -eq 6 ]] || exit 2
+        if [[ "${ARGUMENTS[3]}" == auto ]]; then
             auto_workers="$(($(nproc) - 1))"
             [[ "$auto_workers" -ge 1 ]] || auto_workers=1
-            ARGUMENTS[4]="$auto_workers"
+            ARGUMENTS[3]="$auto_workers"
         fi
-        [[ "${ARGUMENTS[4]}" =~ ^[1-9][0-9]*$ ]] || exit 2
-        [[ "${ARGUMENTS[4]}" -le "$(nproc)" ]] || {
-            printf 'Requested workers exceed the dedicated WSL logical processor count; no silent reduction is permitted\n' >&2
+        [[ "${ARGUMENTS[3]}" =~ ^[1-9][0-9]*$ ]] || exit 2
+        [[ "${ARGUMENTS[3]}" -le "$(nproc)" ]] || {
+            printf 'Requested workers exceed the WSL logical processor count; no silent reduction is permitted\n' >&2
             exit 2
         }
         export CLEARRA_WSL_WORKSPACE="$SOURCE_ROOT"
-        report="$HOME/.local/state/Clearra/reports/runtime-environments/latest"
-        bash "$SOURCE_ROOT/scripts/tools/wsl-pc-runtime-build-and-batch.sh" "${ARGUMENTS[@]}"
+        report="$(mktemp -d -- "$SOURCE_ROOT/.clearra-pc-runtime.XXXXXXXX")"
+        export CLEARRA_WSL_REPORT_ROOT="$report"
+        trap 'rm -rf --one-file-system -- "$report"' EXIT
+        bash "$SOURCE_ROOT/scripts/tools/wsl-pc-runtime-build-and-batch.sh" \
+            "${ARGUMENTS[0]}" "$report" "${ARGUMENTS[@]:1}"
         require_empty_benchmark_output "$HOST_OUTPUT"
         mkdir -p -- "$HOST_OUTPUT"
         require_empty_benchmark_output "$HOST_OUTPUT"
         cp -a --no-clobber -- "$report"/. "$HOST_OUTPUT"/
         filesystem="$(stat -f -c %T "$SOURCE_ROOT")"
         python3 - "$HOST_OUTPUT/clearra-runtime-host.json" "$SOURCE_ROOT" \
-            "$filesystem" "$(nproc)" "$CLEARRA_WSL_MARKER_DIGEST" "${ARGUMENTS[4]}" <<'PY'
+            "$filesystem" "$(nproc)" "$toolchain_digest" "${ARGUMENTS[3]}" "$distribution" <<'PY'
 import json, pathlib, sys
-path, source, filesystem, processors, digest, workers = sys.argv[1:]
+path, source, filesystem, processors, digest, workers, distribution = sys.argv[1:]
 value = {
     "runtime_root": source,
     "runtime_filesystem": filesystem,
+    "distribution": distribution,
     "logical_processors": int(processors),
     "workers": int(workers),
     "toolchain_digest": digest,

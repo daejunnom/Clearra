@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${CLEARRA_WSL_MARKER_DIGEST:-}" ]]; then
-    export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-fi
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 hash -r
 case "$PATH" in *"/mnt/"*) printf 'Windows PATH entry leaked into WSL runtime\n' >&2; exit 2 ;; esac
 
@@ -36,8 +34,11 @@ EXPECTED_BINARY="$MANAGED_CARGO_TARGET/release/clearra-pc-artifact"
 node --input-type=module -e \
     'import { pathToFileURL } from "node:url"; const p = await import(pathToFileURL(process.argv[1])); p.assertBuildPathWithin(process.argv[2], process.argv[3]); p.assertNoBuildLinks(process.argv[2]);' \
     "$AUTHORITY_ROOT/scripts/tools/clearra-build-policy.mjs" "$BINARY" "$BUILD_TRANSACTION"
-EXPECTED_REPORT_ROOT="$HOME/.local/state/Clearra/reports/runtime-environments/latest"
-[[ "$REPORT_ROOT" == "$EXPECTED_REPORT_ROOT" ]] || {
+[[ "$REPORT_ROOT" == "${CLEARRA_WSL_REPORT_ROOT:?A private guest report root is required}" &&
+   "$REPORT_ROOT" == "$SOURCE_ROOT/.clearra-pc-runtime."* &&
+   -d "$REPORT_ROOT" && -O "$REPORT_ROOT" &&
+   "$(realpath -e -- "$REPORT_ROOT")" == "$REPORT_ROOT" &&
+   -z "$(find "$REPORT_ROOT" -mindepth 1 -maxdepth 1 -exec printf x \; -quit)" ]] || {
     printf 'unsafe WSL runtime report root: %s\n' "$REPORT_ROOT" >&2
     exit 2
 }
@@ -48,8 +49,6 @@ case "$GPU_INVENTORY_MODE" in query | skip) ;; *) exit 2 ;; esac
 case "$PROFILE_MODE" in profile | no-profile) ;; *) exit 2 ;; esac
 [[ -x "$BINARY" ]] || { printf 'WSL runtime artifact is not executable: %s\n' "$BINARY" >&2; exit 2; }
 
-rm -rf -- "$REPORT_ROOT"
-mkdir -p "$REPORT_ROOT"
 REPORT_FS="$(stat -f -c %T "$REPORT_ROOT")"
 case "$REPORT_FS" in
     9p | v9fs | drvfs | fuseblk)

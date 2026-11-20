@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Archived provisioning source; not a live management entrypoint.
 set -euo pipefail
 
 [[ "$(id -u)" -eq 0 ]] || { printf 'Clearra WSL provisioning requires root\n' >&2; exit 2; }

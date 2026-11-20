@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 const paths = [
   '../build-core-c.sh',
@@ -76,12 +79,21 @@ test('WSL runtime batch consumes only the active owner exact benchmark binary', 
   assert.doesNotMatch(source, /\/home\/\*\/\.cache\/Clearra\/build|invoke-clearra-build|cargo build/u);
 });
 
-test('standalone NoPrepare batch refuses before artifact execution or report mutation', async () => {
-  const source = await readFile(new URL('./wsl-pc-runtime-batch.sh', import.meta.url), 'utf8');
-  assert.match(source, /\[\[ -n "\$\{CLEARRA_BUILD_SESSION_ID:-\}" \]\]/u);
-  assert.match(source, /Standalone\/NoPrepare execution cannot borrow a cached binary/u);
-  const ownerCheck = source.indexOf('--field transaction)');
-  assert.ok(ownerCheck > 0);
-  assert.ok(ownerCheck < source.indexOf('rm -rf -- "$REPORT_ROOT"'));
-  assert.ok(ownerCheck < source.indexOf('"$BINARY" --list-gpu-devices'));
+test('standalone NoPrepare batch refuses before artifact execution or report mutation', t => {
+  const bash = process.platform === 'win32'
+    ? join(process.env.ProgramFiles || 'C:/Program Files', 'Git/bin/bash.exe') : 'bash';
+  const result = spawnSync(bash, ['--noprofile', '--norc', '-c', `
+unset CLEARRA_BUILD_SESSION_ID
+source scripts/tools/wsl-pc-runtime-batch.sh /dev/null /dev/null cpu auto 1 skip no-profile
+`], {
+    cwd: fileURLToPath(new URL('../../', import.meta.url)), encoding: 'utf8',
+    windowsHide: true, timeout: 3000,
+  });
+  if (result.error?.code === 'ENOENT') {
+    t.skip('Requires a local Bash (Git Bash on Windows), never WSL');
+    return;
+  }
+  assert.ifError(result.error);
+  assert.equal(result.status, 2, result.stderr);
+  assert.equal(result.stdout, '');
 });

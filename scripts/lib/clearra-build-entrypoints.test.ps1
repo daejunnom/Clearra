@@ -131,6 +131,21 @@ try {
     Assert-ArtifactPathCondition `
         ($dispatch[-1] -ceq $unicodeArgument -and $dispatch -notcontains 'wsl.exe') `
         'wsl_dispatch_preserves_unicode_without_raw_wsl'
+    $selectedDistribution = "Research $unicodeUser"
+    $selectedDispatch = @(New-ClearraManagedWslEntryArguments `
+        -RepositoryRoot $entryAuthority -Entry 'core-c-tests' `
+        -Distribution $selectedDistribution -CommandArguments @('--workers', '1'))
+    $expectedSelectedDispatch = $expectedPrefix[0..4] +
+        @('--distribution', $selectedDistribution) + $expectedPrefix[5..7] + @('--workers', '1')
+    Assert-ArtifactPathCondition `
+        (($selectedDispatch -join "`n") -ceq ($expectedSelectedDispatch -join "`n")) `
+        'wsl_dispatch_forwards_explicit_distribution_as_one_argument'
+    Assert-ArtifactPathCondition `
+        (Test-ArtifactPathThrows {
+            New-ClearraManagedWslEntryArguments -RepositoryRoot $entryAuthority `
+                -Entry 'core-c-tests' -Distribution '--shutdown'
+        }) `
+        'wsl_dispatch_rejects_distribution_that_looks_like_an_option'
     Assert-ArtifactPathCondition `
         (Test-ArtifactPathThrows {
             New-ClearraManagedWslEntryArguments -RepositoryRoot $entryAuthority `

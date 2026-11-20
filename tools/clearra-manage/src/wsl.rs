@@ -1,26 +1,20 @@
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions, TryLockError};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::thread;
-use std::time::{Duration, Instant};
 
 use crate::policy::{Policy, WslEntry};
 use crate::runtime::{self, RunOptions, RunOutcome};
 use crate::storage;
 use crate::{Error, Result};
 
-// The deadline protocol stays isolated until a Windows control transport can
-// prove bounded Job ownership and complete nonblocking stdout capture.
-#[cfg(test)]
-mod dedicated_cleanup;
-
 pub fn run_entry(
     repository: &Path,
     policy: &Policy,
+    distribution: Option<&OsStr>,
     entry_name: &str,
     arguments: &[OsString],
 ) -> Result<RunOutcome> {
@@ -29,6 +23,8 @@ pub fn run_entry(
             "managed WSL is available only from a Windows host",
         ));
     }
+    let mut command = wsl_guest_command(distribution)?;
+    let build_anchor = host_build_anchor()?;
     let contract = policy
         .runtime_policy
         .wsl
@@ -37,6 +33,8 @@ pub fn run_entry(
         .ok_or_else(|| Error::usage(format!("unregistered WSL entrypoint: {entry_name}")))?
         .clone();
     reject_control_characters(arguments)?;
+    // This serializes Clearra's own launches, not other work in the selected
+    // distribution; no distribution lifecycle API is invoked.
     let _lease = WslLease::acquire(repository, policy)?;
     let run_tag = format!("{}-{}", std::process::id(), unix_nanos());
     let mut guest_arguments =
@@ -58,8 +56,6 @@ pub fn run_entry(
         );
     }
 
-    let wsl = wsl_executable();
-    let distro = &policy.runtime_policy.wsl.distribution;
     let session = windows_to_wsl(&repository.join("scripts/runtime/clearra-wsl-session.sh"))?;
     let guest = windows_to_wsl(&repository.join("scripts/runtime/clearra-wsl-guest.sh"))?;
     let profile = policy.profile(&contract.profile)?;
@@ -85,7 +81,6 @@ pub fn run_entry(
         ))
     })?;
     let unit = format!("clearra-rust-{run_tag}");
-    let digest = marker_digest(policy)?;
     let tool = |name: &str| {
         policy
             .toolchains
@@ -93,13 +88,7 @@ pub fn run_entry(
             .cloned()
             .ok_or_else(|| Error::policy(format!("missing toolchain version: {name}")))
     };
-    let mut command = vec![
-        OsString::from(wsl),
-        OsString::from("-d"),
-        OsString::from(distro),
-        OsString::from("--user"),
-        OsString::from("root"),
-        OsString::from("--exec"),
+    command.extend([
         OsString::from("/bin/bash"),
         OsString::from(session),
         OsString::from("--unit"),
@@ -114,14 +103,10 @@ pub fn run_entry(
         OsString::from(profile.termination_grace_seconds.to_string()),
         OsString::from("--guest"),
         OsString::from(guest),
-        OsString::from("--mode"),
-        OsString::from("runtime"),
-        OsString::from("--run-as"),
-        OsString::from("clearra"),
         OsString::from("--entry"),
         OsString::from(entry_name),
-        OsString::from("--marker-digest"),
-        OsString::from(digest),
+        OsString::from("--host-build-anchor"),
+        OsString::from(build_anchor),
         OsString::from("--node-version"),
         OsString::from(tool("node")?),
         OsString::from("--npm-version"),
@@ -135,10 +120,13 @@ pub fn run_entry(
         OsString::from("--wasm-bindgen-version"),
         OsString::from(tool("wasm_bindgen")?),
         OsString::from("--"),
-    ];
+    ]);
     command.extend(guest_arguments);
 
-    let result = runtime::run(
+    // Lease EOF lets the guest stop its own service on unexpected host exit;
+    // its separate RuntimeMaxSec remains bounded if transport is interrupted.
+    // The return value and receipt below describe the Windows launcher.
+    runtime::run(
         repository,
         policy,
         RunOptions {
@@ -150,11 +138,29 @@ pub fn run_entry(
             extra_env: BTreeMap::new(),
             echo: true,
         },
-    );
-    let termination = terminate_dedicated(policy);
-    drop(temporary_archive);
-    termination?;
-    result
+    )
+}
+
+fn wsl_guest_command(distribution: Option<&OsStr>) -> Result<Vec<OsString>> {
+    let mut command = vec![wsl_executable().into_os_string()];
+    if let Some(distribution) = distribution {
+        let value = distribution
+            .to_str()
+            .ok_or_else(|| Error::usage("WSL distribution selector must be valid Unicode"))?;
+        if value.is_empty()
+            || value.trim() != value
+            || value.starts_with('-')
+            || value.encode_utf16().count() > 255
+            || value
+                .chars()
+                .any(|character| character.is_control() || matches!(character, '"' | '\\' | '/'))
+        {
+            return Err(Error::usage("invalid WSL distribution selector"));
+        }
+        command.extend([OsString::from("--distribution"), distribution.to_owned()]);
+    }
+    command.push(OsString::from("--exec"));
+    Ok(command)
 }
 
 fn guest_hard_limit(
@@ -289,20 +295,10 @@ fn source_archive(repository: &Path, policy: &Policy, run_tag: &str) -> Result<W
     })
 }
 
-fn marker_digest(policy: &Policy) -> Result<String> {
-    let material = serde_json::json!({
-        "toolchains": &policy.toolchains,
-        "sources": &policy.toolchain_sources,
-    });
-    let bytes = serde_json::to_vec(&material)
-        .map_err(|error| Error::policy(format!("serialize toolchain identity: {error}")))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
-}
-
 fn sha256_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).map_err(|error| Error::io("open source archive", error))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = [0u8; 64 * 1024];
     loop {
         let count = file
             .read(&mut buffer)
@@ -313,77 +309,6 @@ fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn terminate_dedicated(policy: &Policy) -> Result<()> {
-    let wsl = &policy.runtime_policy.wsl;
-    if wsl.allow_shutdown
-        || wsl.distribution
-            != policy
-                .runtime_policy
-                .process_tree_contract
-                .wsl_terminate_distribution
-    {
-        return Err(Error::policy(
-            "WSL termination ownership contract is invalid",
-        ));
-    }
-    let executable = wsl_executable();
-    if !dedicated_is_running(&executable, &wsl.distribution)? {
-        return Ok(());
-    }
-    let status = Command::new(&executable)
-        .args(["--terminate", &wsl.distribution])
-        .status()
-        .map_err(|error| Error::io("terminate dedicated WSL distribution", error))?;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if !dedicated_is_running(&executable, &wsl.distribution)? {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    Err(Error::runtime(format!(
-        "E_CLEARRA_WSL_TERMINATION_FAILED: exit={status} distribution is still running"
-    )))
-}
-
-fn dedicated_is_running(executable: &Path, distribution: &str) -> Result<bool> {
-    let running = Command::new(executable)
-        .args(["--list", "--running", "--quiet"])
-        .output()
-        .map_err(|error| Error::io("verify WSL termination", error))?;
-    if !running.status.success() {
-        return Err(Error::runtime(
-            "E_CLEARRA_WSL_TERMINATION_FAILED: could not list running distributions",
-        ));
-    }
-    let text = decode_wsl_output(&running.stdout);
-    Ok(text
-        .lines()
-        .any(|line| line.trim().eq_ignore_ascii_case(distribution)))
-}
-
-fn decode_wsl_output(bytes: &[u8]) -> String {
-    if bytes.starts_with(&[0xff, 0xfe])
-        || bytes
-            .iter()
-            .skip(1)
-            .step_by(2)
-            .take(8)
-            .all(|value| *value == 0)
-    {
-        let values = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .filter(|value| *value != 0xfeff)
-            .collect::<Vec<_>>();
-        String::from_utf16_lossy(&values)
-    } else {
-        String::from_utf8_lossy(bytes).into_owned()
-    }
 }
 
 fn windows_to_wsl(path: &Path) -> Result<String> {
@@ -432,6 +357,52 @@ fn wsl_executable() -> PathBuf {
         .join("System32/wsl.exe")
 }
 
+fn host_build_anchor() -> Result<String> {
+    let hosted = std::env::var_os("GITHUB_ACTIONS").as_deref() == Some(OsStr::new("true"));
+    let name = if hosted {
+        "RUNNER_TEMP"
+    } else {
+        "LOCALAPPDATA"
+    };
+    let anchor = canonical_windows_env_directory(name)?;
+    if hosted {
+        let workspace = canonical_windows_env_directory("GITHUB_WORKSPACE")?;
+        if !workspace.as_bytes()[0].eq_ignore_ascii_case(&anchor.as_bytes()[0]) {
+            return Err(Error::storage(
+                "GitHub Windows RUNNER_TEMP must share the checkout volume",
+            ));
+        }
+    }
+    Ok(anchor)
+}
+
+fn canonical_windows_env_directory(name: &str) -> Result<String> {
+    let invalid = || {
+        Error::storage(format!(
+            "WSL host {name} must be a rooted Windows directory"
+        ))
+    };
+    let value = std::env::var_os(name).ok_or_else(invalid)?;
+    let valid_path = |text: &str| {
+        matches!(text.as_bytes(), [drive, b':', b'\\' | b'/', _, ..] if drive.is_ascii_alphabetic())
+            && !text.chars().any(char::is_control)
+    };
+    if !value.to_str().is_some_and(valid_path) {
+        return Err(invalid());
+    }
+    let path = fs::canonicalize(Path::new(&value))
+        .map_err(|error| Error::io("canonicalize WSL host build anchor", error))?;
+    if !path.is_dir() {
+        return Err(invalid());
+    }
+    let text = path.to_str().ok_or_else(invalid)?;
+    let text = text.strip_prefix(r"\\?\").unwrap_or(text);
+    if !valid_path(text) {
+        return Err(invalid());
+    }
+    Ok(text.to_owned())
+}
+
 fn temporary_root() -> Result<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")
         .ok_or_else(|| Error::runtime("LOCALAPPDATA is unavailable"))?;
@@ -445,8 +416,7 @@ fn unix_nanos() -> u128 {
         .as_nanos()
 }
 
-const WSL_LOCK_FILENAME: &str = "Clearra-Build.lock";
-const LEGACY_WSL_LEASE_FILENAME: &str = "Clearra-Build.lease";
+const WSL_LOCK_FILENAME: &str = "owned-guest-session.lock";
 
 struct WslLease {
     // Closing the handle releases the OS lock. The path must stay in
@@ -486,9 +456,7 @@ impl WslLease {
         let directory = runtime::state_root()?.join("wsl");
         let path = directory.join(WSL_LOCK_FILENAME);
         let path = storage::verify(repository, policy, &path, false, None)?.path;
-        let lease = Self::lock_at(&path)?;
-        terminate_dedicated(policy)?;
-        Ok(lease)
+        Self::lock_at(&path)
     }
 
     fn lock_at(path: &Path) -> Result<Self> {
@@ -522,7 +490,7 @@ impl WslLease {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
                 return Err(Error::runtime(
-                    "E_CLEARRA_WSL_SESSION_BUSY: dedicated distribution already has an owner",
+                    "E_CLEARRA_WSL_SESSION_BUSY: another Clearra guest session already holds the lease",
                 ));
             }
             Err(TryLockError::Error(error)) => {
@@ -530,19 +498,6 @@ impl WslLease {
             }
         }
 
-        // The obsolete PID-lease implementation does not observe this lock.
-        // No mixed-version execution is supported. Any legacy lease is an
-        // explicit migration blocker; we never infer staleness or terminate
-        // on its behalf, even when it is empty, unreadable, or a dangling link.
-        match fs::symlink_metadata(parent.join(LEGACY_WSL_LEASE_FILENAME)) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Error::io("verify legacy WSL lease absence", error)),
-            Ok(_) => {
-                return Err(Error::runtime(
-                    "E_CLEARRA_WSL_SESSION_BUSY: stop legacy managers and verify the old WSL lease before migration",
-                ));
-            }
-        }
         Ok(Self { _file: file })
     }
 }
@@ -584,16 +539,25 @@ mod tests {
     }
 
     #[test]
-    fn empty_legacy_wsl_lease_is_not_interpreted_as_stale() {
-        let staging = test_staging("legacy-lock");
-        let path = staging.0.join(WSL_LOCK_FILENAME);
-        let legacy = staging.0.join(LEGACY_WSL_LEASE_FILENAME);
-        fs::File::create_new(&legacy).expect("empty ownership marker");
-        let Err(error) = WslLease::lock_at(&path) else {
-            panic!("lock accepted while legacy owner may still be active");
-        };
-        assert!(error.to_string().contains("E_CLEARRA_WSL_SESSION_BUSY"));
-        assert!(legacy.is_file(), "the legacy lease was not removed");
+    fn wsl_launch_selects_a_guest_without_owning_its_lifecycle() {
+        let default = wsl_guest_command(None).expect("default WSL selection");
+        assert_eq!(&default[1..], ["--exec"]);
+        let explicit =
+            wsl_guest_command(Some(OsStr::new("Linux 작업"))).expect("explicit WSL selection");
+        assert_eq!(&explicit[1..], ["--distribution", "Linux 작업", "--exec"]);
+        for invalid in [
+            "",
+            "--shutdown",
+            " leading",
+            "trailing ",
+            "two\nlines",
+            "a/b",
+            "a\\b",
+            "a\"b",
+            &"x".repeat(256),
+        ] {
+            assert!(wsl_guest_command(Some(OsStr::new(invalid))).is_err());
+        }
     }
 
     #[test]
@@ -613,24 +577,6 @@ mod tests {
         };
         assert!(fail_after_create().is_err());
         assert!(!temporary.exists(), "partial staging was not cleaned");
-    }
-
-    #[test]
-    fn utf16_wsl_listing_is_decoded() {
-        let bytes = [
-            0xff, 0xfe, b'U', 0, b'b', 0, b'u', 0, b'n', 0, b't', 0, b'u', 0, b'\n', 0,
-        ];
-        assert!(decode_wsl_output(&bytes).contains("Ubuntu"));
-    }
-
-    #[test]
-    fn marker_digest_stays_compatible_with_the_python_v1_distribution() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let policy = Policy::load(&root).expect("load policy");
-        assert_eq!(
-            marker_digest(&policy).expect("marker digest"),
-            "ae944b9b6162e6861e9fec2613d3ee01bd785096abb4b57c815ca19d28c91fdb"
-        );
     }
 
     #[test]

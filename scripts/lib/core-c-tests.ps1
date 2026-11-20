@@ -115,9 +115,6 @@ function Invoke-CoreCTestWsl(
     }
 
     $repositoryRoot = Resolve-ClearraBuildSourceRoot
-    if ($WslDistribution -cne 'Clearra-Build') {
-        throw 'Clearra C tests use only the managed Clearra-Build distribution.'
-    }
     $workerCount = [Math]::Max(1, $Workers)
     $commandArguments = @('--workers', [string]$workerCount)
     if (Test-CoreCTestConfigureArgEnabled $ConfigureArgs 'CLEARRA_CORE_ENABLE_ASAN') {
@@ -135,6 +132,7 @@ function Invoke-CoreCTestWsl(
     $arguments = New-ClearraManagedWslEntryArguments `
         -RepositoryRoot $repositoryRoot `
         -Entry 'core-c-tests' `
+        -Distribution $WslDistribution `
         -CommandArguments $commandArguments
     $result = Invoke-CoreCNativeCapture $manager $arguments 'managed WSL aggregate C tests'
     if ($result.ExitCode -ne 0) {
@@ -150,7 +148,7 @@ function Invoke-CoreCTestWsl(
         -TestCount 1 `
         -TestLayout 'wsl-aggregate' `
         -InternalTestCount $internalTestCount `
-        -BuildDir 'Clearra-Build managed ext4 transaction' `
+        -BuildDir 'managed WSL ext4 transaction' `
         -Output $result.Output `
         -Command "clearra-manage runtime wsl run --entry core-c-tests"
 }
@@ -165,7 +163,7 @@ function Invoke-CoreCTest(
     [int]$Workers = 1,
     [ValidateSet('auto', 'windows', 'wsl')]
     [string]$RuntimeEnvironment = 'auto',
-    [string]$WslDistribution = 'Clearra-Build'
+    [string]$WslDistribution
 ) {
     $record = Assert-CoreCActiveBuildTransaction
     Assert-ClearraRequestedBuildPath -Path $BuildDir -RepositoryRoot $record.source_root | Out-Null

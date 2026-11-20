@@ -7,14 +7,15 @@ import { validateWslBuildBinding } from './clearra-build-paths.mjs';
 
 const digest = path => createHash('sha256').update(path).digest('hex').slice(0, 24);
 const checkoutId = digest('d:/projects/clearra');
-const guestSource = `/home/clearra/.local/share/Clearra/workspaces/${checkoutId}/source`;
+const guestHome = '/home/example person';
+const guestSource = `${guestHome}/.local/share/Clearra/workspaces/${checkoutId}/source`;
 const sourceId = digest(guestSource);
 const guestBuild = '/mnt/c/Users/example/AppData/Local/Clearra/build';
 const sessionId = '0123456789abcdef0123456789abcdef';
 const local = {
   hostMode: 'local', hostAnchorRoot: 'C:\\Users\\example\\AppData\\Local',
   hostCheckoutRoot: 'D:\\Projects\\Clearra', hostBuildRoot: 'C:\\Users\\example\\AppData\\Local\\Clearra\\build',
-  checkoutId, guestBuildRoot: guestBuild, guestSourceRoot: guestSource,
+  checkoutId, guestBuildRoot: guestBuild, guestHome, guestSourceRoot: guestSource,
 };
 
 test('explicit local WSL anchors use the existing LOCALAPPDATA role, not the checkout volume', () => {
@@ -52,6 +53,10 @@ test('explicit WSL root and checkout bindings cannot be relocated under a differ
     /exact checkout slot/u);
   assert.throws(() => validateWslBuildBinding({ ...local, guestSourceRoot: `${guestSource}/../source` }),
     /exact checkout slot/u);
+  assert.throws(() => validateWslBuildBinding({ ...local, guestHome: '/home/other' }), /exact checkout slot/u);
+  for (const home of ['/mnt/c/Users/example', '/home/other/../example', '/root', '/home/alias/']) {
+    assert.throws(() => validateWslBuildBinding({ ...local, guestHome: home }), /Invalid canonical current-user/u);
+  }
   assert.throws(() => validateWslBuildBinding({ ...local, checkoutId: 'e'.repeat(24) }), /checkout identity mismatch/u);
 });
 
@@ -64,7 +69,7 @@ test('explicit WSL experiment and product outputs retain their registered owner 
   assert.equal(accepted.cargoTarget, experiment.cargoTarget);
   assert.throws(() => validateWslBuildBinding({ ...local, owner: { ...experiment, sourceId: checkoutId } }),
     /owner identity mismatch/u);
-  for (const cargoTarget of [`${accepted.cargoTarget}/shadow`, '/home/clearra/.cache/Clearra/build/cargo-target']) {
+  for (const cargoTarget of [`${accepted.cargoTarget}/shadow`, `${guestHome}/.cache/Clearra/build/cargo-target`]) {
     assert.throws(() => validateWslBuildBinding({ ...local, owner: { ...experiment, cargoTarget } }),
       /exact transaction role/u);
   }
@@ -84,4 +89,14 @@ test('existing build path CLI does not accept prospective WSL bindings as option
     { encoding: 'utf8', windowsHide: true });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Unknown build path option/u);
+});
+
+test('direct build path CLI does not silently accept an incomplete option', () => {
+  const script = fileURLToPath(new URL('./clearra-build-paths.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [script, '--field'], {
+    encoding: 'utf8', windowsHide: true,
+  });
+  assert.equal(result.status, 1, result.stderr || result.error?.message);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /Build path options require values/u);
 });

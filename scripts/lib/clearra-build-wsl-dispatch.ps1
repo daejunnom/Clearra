@@ -14,7 +14,8 @@ function New-ClearraManagedWslEntryArguments(
         'posix-syntax-audit'
     )]
     [string]$Entry,
-    [string[]]$CommandArguments = @()
+    [string[]]$CommandArguments = @(),
+    [string]$Distribution
 ) {
     $root = [System.IO.Path]::GetFullPath($RepositoryRoot)
     foreach ($argument in $CommandArguments) {
@@ -23,6 +24,17 @@ function New-ClearraManagedWslEntryArguments(
         }
     }
     return [string[]]@(
-        '--root', $root, 'runtime', 'wsl', 'run', '--entry', $Entry, '--'
-    ) + [string[]]$CommandArguments
+        '--root', $root, 'runtime', 'wsl', 'run'
+    ) + @(New-ClearraWslDistributionArguments $Distribution) +
+        [string[]]@('--entry', $Entry, '--') + [string[]]$CommandArguments
+}
+
+function New-ClearraWslDistributionArguments([string]$Distribution) {
+    if ([string]::IsNullOrEmpty($Distribution)) {
+        return
+    }
+    if ($Distribution.Length -gt 255 -or $Distribution -match '^[\s-]|\s$|[\p{Cc}"\\/]') {
+        throw 'Invalid WSL distribution selector.'
+    }
+    return '--distribution', $Distribution
 }

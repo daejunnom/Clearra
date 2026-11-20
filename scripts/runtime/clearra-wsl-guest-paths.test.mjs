@@ -55,6 +55,21 @@ fi
 `);
 });
 
+test('guest executes only with bounded and matching kernel controllers', t => {
+  check(t, `
+set -euo pipefail
+${helper('finite_cgroup_limits_match')}
+finite_cgroup_limits_match 536870912 0 128 536870912 128
+finite_cgroup_limits_match 536866816 0 128 536870912 128
+if finite_cgroup_limits_match max 0 128 536870912 128; then exit 31; fi
+if finite_cgroup_limits_match 536870912 max 128 536870912 128; then exit 32; fi
+if finite_cgroup_limits_match 536870912 0 max 536870912 128; then exit 33; fi
+if finite_cgroup_limits_match 536870912 0 64 536870912 128; then exit 34; fi
+if finite_cgroup_limits_match 536875008 0 128 536870912 128; then exit 35; fi
+if finite_cgroup_limits_match 534773760 0 128 536870912 128; then exit 36; fi
+`);
+});
+
 test('guest benchmark output rejects occupied or noncanonical destinations', t => {
   check(t, `
 set -euo pipefail

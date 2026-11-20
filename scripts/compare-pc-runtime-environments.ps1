@@ -9,7 +9,7 @@ param(
     [string]$GpuInventoryMode = 'auto',
     [int]$Workers = [Math]::Max(1, [Environment]::ProcessorCount),
     [long]$WasmMaxNodes = 100000000,
-    [string]$Distribution = 'Clearra-Build',
+    [string]$Distribution,
     [string]$OutputDirectory = '',
     [string]$WindowsBinaryPath = '',
     [string]$WslBinaryPath = '',
@@ -163,6 +163,14 @@ function NativeBatchArtifactArguments([string]$BatchOutput, [int]$WorkerCount) {
     return [string[]]$arguments.ToArray()
 }
 
+function Assert-NativeReferenceArtifact([object]$Summary) {
+    if ($null -eq $Summary -or
+        -not $Summary.PSObject.Properties['execution_engine'] -or
+        $Summary.execution_engine -cne 'native-c-reference') {
+        throw 'The native comparison requires an explicit native C reference artifact; rebuild the prebuilt binary.'
+    }
+}
+
 function Invoke-WindowsEnvironment {
     Assert-ClearraRuntimeEnvironmentAvailable 'windows' | Out-Null
     $workerCount = [Math]::Max(1, $Workers)
@@ -220,6 +228,7 @@ function Invoke-WindowsEnvironment {
     $results = foreach ($case in $cases) {
         $caseOutput = Join-Path $batchOutput $case.id
         $summary = Get-Content -LiteralPath (Join-Path $caseOutput 'summary.json') -Raw | ConvertFrom-Json
+        Assert-NativeReferenceArtifact $summary
         [pscustomobject]@{
             scenario = $case.id
             expected_unique_solution_count = $case.expected
@@ -254,9 +263,7 @@ function Invoke-WslEnvironment {
     if (-not $Prepare.IsPresent) {
         throw 'The managed WSL comparison requires -Prepare; cached or caller-supplied WSL binaries are not accepted.'
     }
-    if ($Distribution -cne 'Clearra-Build') {
-        throw 'Only the managed Clearra-Build distribution is available to Clearra.'
-    }
+    [void](New-ClearraWslDistributionArguments $Distribution)
     if (-not [string]::IsNullOrWhiteSpace($WslBinaryPath)) {
         throw 'A caller-supplied WSL binary cannot bypass the managed build-and-batch entrypoint.'
     }
@@ -265,7 +272,6 @@ function Invoke-WslEnvironment {
     } else {
         'auto'
     }
-    $linuxReportRoot = '/home/clearra/.local/state/Clearra/reports/runtime-environments/latest'
     $inventoryMode = if (Get-GpuInventoryRequested) { 'query' } else { 'skip' }
     $profileMode = if ($ProfileStages.IsPresent) { 'profile' } else { 'no-profile' }
     $cargoFeatures = if ($ProfileStages.IsPresent) {
@@ -279,9 +285,10 @@ function Invoke-WslEnvironment {
     $arguments = New-ClearraManagedWslEntryArguments `
         -RepositoryRoot $Root `
         -Entry 'pc-runtime-build-batch' `
+        -Distribution $Distribution `
         -CommandArguments @(
         '--host-output', $sessionOutput,
-        $cargoFeatures, $linuxReportRoot, $Backend, $GpuDevice,
+        $cargoFeatures, $Backend, $GpuDevice,
         $workerSelection, $inventoryMode, $profileMode
     )
     $batch = Invoke-CapturedCommand $manager $arguments
@@ -291,6 +298,13 @@ function Invoke-WslEnvironment {
         throw 'Managed WSL build/runtime timing records are missing.'
     }
     $hostInfo = Get-Content -LiteralPath (Join-Path $sessionOutput 'clearra-runtime-host.json') -Raw | ConvertFrom-Json
+    [void](New-ClearraWslDistributionArguments $hostInfo.distribution)
+    if ([string]::IsNullOrEmpty($hostInfo.distribution) -or (
+        -not [string]::IsNullOrEmpty($Distribution) -and
+        -not [string]::Equals($hostInfo.distribution, $Distribution, [StringComparison]::OrdinalIgnoreCase)
+    )) {
+        throw 'Managed WSL runtime report does not identify the selected distribution.'
+    }
     $workerCount = [int]$hostInfo.workers
     if ($workerCount -gt [int]$hostInfo.logical_processors) {
         throw 'The managed WSL session accepted an invalid worker count.'
@@ -325,6 +339,7 @@ function Invoke-WslEnvironment {
         $sessionCaseOutput = Join-Path $sessionOutput $case.id
         $summaryJson = Get-Content -LiteralPath (Join-Path $sessionCaseOutput 'summary.json') -Raw
         $summary = $summaryJson | ConvertFrom-Json
+        Assert-NativeReferenceArtifact $summary
         $hostCaseOutput = Join-Path $outputRoot "wsl-$($case.id)"
         New-Item -ItemType Directory -Force -Path $hostCaseOutput | Out-Null
         foreach ($artifactName in @(
@@ -354,7 +369,7 @@ function Invoke-WslEnvironment {
     }
     return [pscustomobject]@{
         environment = 'wsl-native'
-        distribution = 'Clearra-Build'
+        distribution = $hostInfo.distribution
         runtime_root = $hostInfo.runtime_root
         runtime_artifact = 'managed:clearra-pc-artifact'
         prepared_this_run = $true

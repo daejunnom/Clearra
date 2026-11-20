@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
 
-const DEDICATED_WSL_DISTRIBUTION: &str = "Clearra-Build";
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct Policy {
     pub schema_id: String,
@@ -103,22 +101,19 @@ pub struct ParallelClass {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessTreeContract {
     pub windows_job_kill_on_close: bool,
     pub windows_aggregate_memory_limit: bool,
     pub windows_active_process_limit: bool,
     pub linux_process_group: bool,
-    pub wsl_terminate_distribution: String,
+    pub wsl_distribution_termination_allowed: bool,
     pub wsl_global_shutdown_allowed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WslPolicy {
-    pub distribution: String,
-    pub source_distribution: String,
-    pub marker: String,
-    pub allow_shutdown: bool,
-    pub terminate_only_dedicated_distribution: bool,
     pub entrypoints: BTreeMap<String, WslEntry>,
 }
 
@@ -275,18 +270,10 @@ impl Policy {
             || !tree.windows_aggregate_memory_limit
             || !tree.windows_active_process_limit
             || !tree.linux_process_group
+            || tree.wsl_distribution_termination_allowed
             || tree.wsl_global_shutdown_allowed
         {
             return Err(Error::policy("process-tree safety contract is weakened"));
-        }
-        let wsl = &self.runtime_policy.wsl;
-        // Agreement between two configurable names does not establish ownership.
-        if wsl.distribution != DEDICATED_WSL_DISTRIBUTION
-            || tree.wsl_terminate_distribution != DEDICATED_WSL_DISTRIBUTION
-            || wsl.allow_shutdown
-            || !wsl.terminate_only_dedicated_distribution
-        {
-            return Err(Error::policy("WSL ownership contract is inconsistent"));
         }
         if self.runtime_policy.memory_pressure.automatic_retry {
             return Err(Error::policy("automatic OOM retry must remain disabled"));
@@ -340,10 +327,6 @@ impl Policy {
                     "reserved local port is missing: {port}"
                 )));
             }
-        }
-        if wsl.source_distribution == wsl.distribution || wsl.marker != "/etc/clearra/runtime.json"
-        {
-            return Err(Error::policy("WSL source/marker contract is invalid"));
         }
         Ok(())
     }
@@ -464,37 +447,20 @@ mod tests {
     }
 
     #[test]
-    fn wsl_policy_accepts_only_the_literal_dedicated_launch_and_termination_target() {
-        let mut policy = checked_in_policy();
+    fn wsl_policy_selects_only_registered_entrypoints_not_a_distribution() {
+        let policy = checked_in_policy();
         assert!(policy.validate().is_ok());
-        // Test Ubuntu as a target with a distinct provenance label, so the
-        // rejection must come from the ownership check, not provenance equality.
-        policy.runtime_policy.wsl.source_distribution = "historical-source".into();
-        assert!(policy.validate().is_ok());
-        for alias in ["Ubuntu", "clearra-build", "Clearra-Build ", ""] {
-            let mut changed = policy.clone();
-            changed.runtime_policy.wsl.distribution = alias.into();
-            assert!(changed.validate().is_err(), "launch target {alias:?}");
-
-            let mut changed = policy.clone();
-            changed
-                .runtime_policy
-                .process_tree_contract
-                .wsl_terminate_distribution = alias.into();
-            assert!(changed.validate().is_err(), "termination target {alias:?}");
-
-            changed.runtime_policy.wsl.distribution = alias.into();
-            assert!(changed.validate().is_err(), "matching targets {alias:?}");
-        }
+        assert!(policy.runtime_policy.wsl.entrypoints.contains_key("verify"));
+        let mut source: serde_json::Value =
+            serde_json::from_str(include_str!("../../../config/clearra-management.v1.json"))
+                .expect("policy JSON parses");
+        source["runtime_policy"]["wsl"]["distribution"] = "example".into();
+        assert!(serde_json::from_value::<Policy>(source).is_err());
     }
 
     #[test]
     fn wsl_policy_rejects_each_weakened_shutdown_boundary() {
         let policy = checked_in_policy();
-        let mut changed = policy.clone();
-        changed.runtime_policy.wsl.allow_shutdown = true;
-        assert!(changed.validate().is_err());
-
         let mut changed = policy.clone();
         changed
             .runtime_policy
@@ -505,8 +471,8 @@ mod tests {
         let mut changed = policy;
         changed
             .runtime_policy
-            .wsl
-            .terminate_only_dedicated_distribution = false;
+            .process_tree_contract
+            .wsl_distribution_termination_allowed = true;
         assert!(changed.validate().is_err());
     }
 }

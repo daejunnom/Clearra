@@ -77,7 +77,7 @@ function Invoke-CoreCTestStartMode(
         -Scope Script `
         -ErrorAction SilentlyContinue
     $wslDistribution = if ($null -eq $distributionVariable) {
-        'Ubuntu'
+        $null
     } else {
         [string]$distributionVariable.Value
     }

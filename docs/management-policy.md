@@ -17,7 +17,7 @@ The manager validates:
 - traversal, symlink, junction, reparse-point, and credential-path escapes;
 - hard memory, process-count, output-size, timeout, and descendant-tree limits;
 - cooperative GC requests and acknowledgements under host pressure;
-- ownership and termination of the dedicated `Clearra-Build` WSL distribution.
+- scoped ownership and cleanup of each supervised WSL request.
 
 The manager does not govern filesystem reads, Git, dependency management,
 toolchain installation, package publication, or every ordinary child process.
@@ -115,24 +115,26 @@ reason, and tree-stop result. Secret values are redacted.
 All WSL work uses a fixed manifest entrypoint:
 
 ```text
-clearra-manage runtime wsl verify
-clearra-manage runtime wsl run --entry <registered-id> -- <arguments>
+clearra-manage runtime wsl verify [--distribution NAME]
+clearra-manage runtime wsl run [--distribution NAME] --entry <registered-id> -- <arguments>
 ```
 
-The Rust manager is the only production source that invokes the WSL host
-executable. A lease owns only `Clearra-Build`, verifies its compatible
-toolchain marker, runs a fixed guest entrypoint, and terminates that distribution
-on every exit path. It never calls global `wsl --shutdown`, changes
-`.wslconfig`, or stops another distribution.
+The existing default distribution is used when no distribution is specified.
+The Rust manager runs a fixed guest entrypoint as the existing non-root user
+and bounds the owned process tree in a per-run user service; it does not take
+ownership of the distribution or require a preinstalled runtime marker.
+Cancellation, timeout, and parent exit must drain only that request.
+The manager never terminates a distribution, calls global `wsl --shutdown`,
+or changes `.wslconfig`.
 
 WSL's `MemoryMax` follows the host's total-capacity emergency ceiling rather
 than free memory at session start. Native Cargo and C work has no managed heap
 to collect, so a GC request cannot be counted as completed for that guest;
 kernel reclaim and the cgroup hard boundary remain its safety mechanisms.
 
-Provisioning remains an explicit administrator/bootstrap operation rather than
-a recurring build command. The retained Python history is not a provisioning
-fallback.
+The guest still needs a working user service manager and the relevant pinned
+toolchain. An unavailable containment or toolchain capability is reported
+before running work; no privileged provisioning is attempted.
 
 ## Git and release promotion
 

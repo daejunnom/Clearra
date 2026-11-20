@@ -130,10 +130,11 @@ Do not silently reduce requested worker counts. Solver hot paths remain free of
 supervisor code; containment belongs at the outer process boundary.
 
 WSL execution is always a supervised case. `clearra-manage runtime wsl run`
-owns only `Clearra-Build`, uses a fixed registered guest entrypoint, and
-terminates only that distribution after the lease. Never call global
-`wsl --shutdown`. Other distributions and `.wslconfig` are outside Clearra's
-ownership.
+accepts the existing default distribution or an explicit
+`--distribution NAME` and a fixed guest entrypoint. It owns only the
+per-request process tree and bounded guest unit. Never terminate a
+distribution, call global `wsl --shutdown`, or change `.wslconfig` as a
+side effect of a Clearra run.
 
 ## Fixed local ports
 

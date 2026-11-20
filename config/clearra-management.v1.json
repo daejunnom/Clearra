@@ -470,7 +470,7 @@
       "windows_aggregate_memory_limit": true,
       "windows_active_process_limit": true,
       "linux_process_group": true,
-      "wsl_terminate_distribution": "Clearra-Build",
+      "wsl_distribution_termination_allowed": false,
       "wsl_global_shutdown_allowed": false
     },
     "local_ports": {
@@ -500,11 +500,6 @@
       }
     },
     "wsl": {
-      "distribution": "Clearra-Build",
-      "source_distribution": "Ubuntu",
-      "marker": "/etc/clearra/runtime.json",
-      "allow_shutdown": false,
-      "terminate_only_dedicated_distribution": true,
       "entrypoints": {
         "verify": {
           "profile": "control",

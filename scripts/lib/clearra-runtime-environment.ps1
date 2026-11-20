@@ -27,7 +27,7 @@ function Resolve-ClearraRuntimeEnvironment([AllowNull()][string]$Environment) {
 
 function Assert-ClearraRuntimeEnvironmentAvailable(
     [string]$Environment,
-    [string]$WslDistribution = 'Clearra-Build'
+    [string]$WslDistribution
 ) {
     $resolved = Resolve-ClearraRuntimeEnvironment $Environment
     switch ($resolved) {
@@ -37,11 +37,12 @@ function Assert-ClearraRuntimeEnvironmentAvailable(
             }
         }
         'wsl' {
-            if ($env:WSL_DISTRO_NAME -or $env:WSL_INTEROP) {
+            [void](New-ClearraWslDistributionArguments $WslDistribution)
+            if (($env:WSL_DISTRO_NAME -or $env:WSL_INTEROP) -and (
+                [string]::IsNullOrEmpty($WslDistribution) -or
+                [string]::Equals($env:WSL_DISTRO_NAME, $WslDistribution, [StringComparison]::OrdinalIgnoreCase)
+            )) {
                 break
-            }
-            if ($WslDistribution -cne 'Clearra-Build') {
-                throw 'Only the managed Clearra-Build distribution is available to Clearra.'
             }
             $repositoryRoot = [System.IO.Path]::GetFullPath(
                 (Join-Path $script:ClearraWslDispatchRoot '../..')
@@ -57,7 +58,10 @@ function Assert-ClearraRuntimeEnvironmentAvailable(
     return $resolved
 }
 
-function ConvertFrom-ClearraWslSourceReceipt([string]$Text) {
+function ConvertFrom-ClearraWslSourceReceipt(
+    [string]$Text,
+    [string]$ExpectedDistribution
+) {
     # Accept only one complete record on its own line. Runtime/log output
     # is not authority for any subset of these fields.
     $lines = @([regex]::Split($Text, '\r\n|\n|\r') | Where-Object {
@@ -66,16 +70,23 @@ function ConvertFrom-ClearraWslSourceReceipt([string]$Text) {
     if ($lines.Count -ne 1) {
         throw 'Managed WSL synchronization did not emit exactly one bounded source receipt.'
     }
-    $pattern = '\Aclearra_wsl_source_receipt_v1=Clearra-Build\t(?<workspace>/home/clearra/\.local/share/Clearra/workspaces/(?<key>[0-9a-f]{64})/source)\t(?<digest>[0-9a-f]{64})\t(?<count>[1-9][0-9]{0,9})\z'
+    $pattern = '\Aclearra_wsl_source_receipt_v2=(?<distribution>[^\p{Cc}]{1,255})\t(?<workspace>/[^\p{Cc}]{1,4096}/workspaces/(?<key>[0-9a-f]{64})/source)\t(?<digest>[0-9a-f]{64})\t(?<count>[1-9][0-9]{0,9})\z'
     $receipt = [regex]::Match($lines[0], $pattern)
     $count = 0
     if (-not $receipt.Success -or
         $receipt.Groups['key'].Value -cne $receipt.Groups['digest'].Value -or
+        $receipt.Groups['workspace'].Value -match '//|/(?:\.{1,2})(?:/|$)|\\' -or
         -not [int]::TryParse($receipt.Groups['count'].Value, [ref]$count)) {
         throw 'Managed WSL synchronization emitted an invalid source receipt.'
     }
+    $distribution = $receipt.Groups['distribution'].Value
+    [void](New-ClearraWslDistributionArguments $distribution)
+    if (-not [string]::IsNullOrEmpty($ExpectedDistribution) -and
+        -not [string]::Equals($distribution, $ExpectedDistribution, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Managed WSL source receipt does not identify the selected distribution.'
+    }
     return [pscustomobject]@{
-        distribution = 'Clearra-Build'
+        distribution = $distribution
         workspace = $receipt.Groups['workspace'].Value
         source_digest = $receipt.Groups['digest'].Value
         source_file_count = $count
@@ -86,18 +97,15 @@ function ConvertFrom-ClearraWslSourceReceipt([string]$Text) {
 
 function Sync-ClearraWslExt4Workspace(
     [string]$RepositoryRoot,
-    [string]$WslDistribution = 'Clearra-Build'
+    [string]$WslDistribution
 ) {
-    if ($WslDistribution -cne 'Clearra-Build') {
-        throw 'Only the managed Clearra-Build distribution is available to Clearra.'
-    }
     $root = [System.IO.Path]::GetFullPath($RepositoryRoot)
     $manager = Get-ClearraManageExecutable -RepositoryRoot $root
     $arguments = New-ClearraManagedWslEntryArguments `
-        -RepositoryRoot $root -Entry 'sync-workspace'
+        -RepositoryRoot $root -Entry 'sync-workspace' -Distribution $WslDistribution
     $output = @(& $manager @arguments 2>&1)
     $exitCode = $LASTEXITCODE
     $text = ($output | ForEach-Object { $_.ToString() }) -join "`n"
     if ($exitCode -ne 0) { throw "Managed WSL source synchronization failed ($exitCode).`n$text" }
-    return ConvertFrom-ClearraWslSourceReceipt $text
+    return ConvertFrom-ClearraWslSourceReceipt $text $WslDistribution
 }

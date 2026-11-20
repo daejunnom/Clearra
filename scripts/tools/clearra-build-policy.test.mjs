@@ -247,8 +247,10 @@ test('product rejects a fifth completed generation without deleting prior output
   const prior = await readdir(productRoot);
   assert.equal(prior.length, 4);
   if (crossHostGeneration) assert.ok((await stat(crossHostGeneration)).isDirectory());
-  await assert.rejects(acquireBuildOwner({ ...options, purpose: 'product' }), /slot limits/u);
-  await assert.rejects(acquireBuildOwner(options), /slot limits/u);
+  await assert.rejects(acquireBuildOwner({ ...options, purpose: 'product' }), {
+    code: 'E_CLEARRA_BUILD_STORAGE_LIMIT',
+  });
+  await assert.rejects(acquireBuildOwner(options), { code: 'E_CLEARRA_BUILD_STORAGE_LIMIT' });
   assert.deepEqual(await readdir(productRoot), prior);
 });
 
@@ -266,7 +268,9 @@ test('product retirement preflights and refuses to delete generations without pr
   await mkdir(nested);
   const link = join(nested, 'link');
   await symlink(foreign, link, process.platform === 'win32' ? 'junction' : 'dir');
-  await assert.rejects(retainProductBuildGenerations(oldest.root), /nested symlink or junction/u);
+  await assert.rejects(retainProductBuildGenerations(oldest.root), {
+    code: 'E_CLEARRA_BUILD_STORAGE_UNOWNED',
+  });
   assert.equal(await readFile(join(sibling.target, 'Cargo.lock'), 'utf8'), 'fixture compiler input');
   assert.equal(await readFile(join(link, 'preserve'), 'utf8'), 'outside generation');
   assert.deepEqual(await readdir(join(oldest.root, '.leases')), []);
@@ -278,7 +282,9 @@ test('product retirement preflights and refuses to delete generations without pr
   const otherOwner = { schema_version: 1, purpose: 'product', source_id: sibling.marker.source_id,
     session_id: sibling.marker.session_id, owner_pid: process.pid };
   await writeFile(lease, JSON.stringify(otherOwner));
-  await assert.rejects(retainProductBuildGenerations(oldest.root), /slot limits/u);
+  await assert.rejects(retainProductBuildGenerations(oldest.root), {
+    code: 'E_CLEARRA_BUILD_STORAGE_LIMIT',
+  });
   assert.equal(await readFile(join(oldest.target, 'Cargo.lock'), 'utf8'), 'fixture compiler input');
   assert.equal(await readFile(join(sibling.target, 'Cargo.lock'), 'utf8'), 'fixture compiler input');
   assert.deepEqual(JSON.parse(await readFile(lease, 'utf8')), otherOwner);
@@ -294,11 +300,15 @@ test('experiment cache retirement preserves every scratch sibling on foreign nes
   await mkdir(early);
   await mkdir(nested, { recursive: true });
   await writeFile(join(early, 'still-owned'), 'preserve early scratch');
-  await writeFile(join(nested, BUILD_TRANSACTION_MARKER), JSON.stringify({ status: 'active' }));
-  await assert.rejects(acquireBuildOwner(options), /foreign nested ownership/u);
+  const previousMarker = join(previous.transactionRoot, BUILD_TRANSACTION_MARKER);
+  const nestedMarker = join(nested, BUILD_TRANSACTION_MARKER);
+  const previousContents = await readFile(previousMarker);
+  const nestedContents = Buffer.from(JSON.stringify({ status: 'active' }));
+  await writeFile(nestedMarker, nestedContents);
+  await assert.rejects(acquireBuildOwner(options), { code: 'E_CLEARRA_BUILD_STORAGE_UNOWNED' });
   assert.equal(await readFile(join(early, 'still-owned'), 'utf8'), 'preserve early scratch');
-  assert.equal(JSON.parse(await readFile(join(previous.transactionRoot, BUILD_TRANSACTION_MARKER), 'utf8')).status, 'complete');
-  assert.equal(JSON.parse(await readFile(join(nested, BUILD_TRANSACTION_MARKER), 'utf8')).status, 'active');
+  assert.deepEqual(await readFile(previousMarker), previousContents);
+  assert.deepEqual(await readFile(nestedMarker), nestedContents);
   assert.equal(await readFile(join(previous.target, 'Cargo.lock'), 'utf8'), 'fixture compiler input');
   assert.deepEqual(await readdir(join(previous.root, '.leases')), []);
 });

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Archived preparation source; not a live management entrypoint.
 set -euo pipefail
 
 [[ "$(id -u)" -eq 0 ]] || {

@@ -216,8 +216,9 @@ fn wsl_command(
     let action = take_front(&mut arguments, "WSL action")?;
     let action_text = action.to_string_lossy();
     if action_text == "verify" {
+        let distribution = take_option(&mut arguments, "--distribution");
         require_empty(&arguments)?;
-        let outcome = wsl::run_entry(repository, policy, "verify", &[])?;
+        let outcome = wsl::run_entry(repository, policy, distribution.as_deref(), "verify", &[])?;
         eprintln!("clearra_runtime_receipt={}", outcome.receipt.display());
         return Ok(outcome.return_code);
     }
@@ -234,8 +235,15 @@ fn wsl_command(
     let entry = required_option(&mut arguments, "--entry")?
         .to_string_lossy()
         .into_owned();
+    let distribution = take_option(&mut arguments, "--distribution");
     require_empty(&arguments)?;
-    let outcome = wsl::run_entry(repository, policy, &entry, &guest_arguments)?;
+    let outcome = wsl::run_entry(
+        repository,
+        policy,
+        distribution.as_deref(),
+        &entry,
+        &guest_arguments,
+    )?;
     eprintln!("clearra_runtime_receipt={}", outcome.receipt.display());
     if let Some(code) = &outcome.error_code {
         eprintln!(
@@ -296,8 +304,8 @@ fn print_help() {
          clearra-manage [--root PATH] storage verify --path PATH [--force-unmanaged-output --force-reason REASON]\n\
          clearra-manage [--root PATH] runtime audit\n\
          clearra-manage [--root PATH] runtime run --producer ID --profile ID [--timeout SECONDS] -- COMMAND...\n\
-         clearra-manage [--root PATH] runtime wsl verify\n\
-         clearra-manage [--root PATH] runtime wsl run --entry ID -- ARGUMENTS..."
+         clearra-manage [--root PATH] runtime wsl verify [--distribution NAME]\n\
+         clearra-manage [--root PATH] runtime wsl run [--distribution NAME] --entry ID -- ARGUMENTS..."
     );
 }
 

@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${CLEARRA_WSL_MARKER_DIGEST:-}" ]]; then
-    export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-fi
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 hash -r
 AUTHORITY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROOT="${CLEARRA_WSL_WORKSPACE:?An ext4 source copy is required}"
@@ -16,7 +14,8 @@ WORKERS="$5"
 INVENTORY="$6"
 PROFILE="$7"
 case "$FEATURES" in gpu-backend | gpu-backend,stage-profiling) ;; *) exit 2 ;; esac
-[[ "$REPORT_ROOT" == "$HOME/.local/state/Clearra/reports/runtime-environments/latest" ]] || exit 2
+[[ "$REPORT_ROOT" == "${CLEARRA_WSL_REPORT_ROOT:?A private guest report root is required}" &&
+   "$REPORT_ROOT" == "$ROOT/.clearra-pc-runtime."* ]] || exit 2
 case "$BACKEND" in auto | cpu | gpu | hybrid) ;; *) exit 2 ;; esac
 [[ "$GPU_DEVICE" == auto || "$GPU_DEVICE" =~ ^[0-9]+$ ]] || exit 2
 [[ "$WORKERS" =~ ^[1-9][0-9]*$ ]] || exit 2
@@ -32,8 +31,10 @@ if [[ -z "${CLEARRA_BUILD_SESSION_ID:-}" ]]; then
 fi
 MANAGED_CARGO_TARGET="$(node "$AUTHORITY_ROOT/scripts/tools/clearra-build-paths.mjs" --source-root "$ROOT" --field cargo-target)"
 prepare_started_ns="$(date +%s%N)"
+# This benchmark arm is the independent native C reference. The fixed
+# transport arguments select profiling, not a different solver.
 bash "$AUTHORITY_ROOT/scripts/tools/wsl-native-cargo.sh" \
-    build --release -p clearra-pc-artifact --features "$FEATURES"
+    build --release -p clearra-pc-artifact --features "native-c-reference,$FEATURES"
 prepare_ended_ns="$(date +%s%N)"
 batch_started_ns="$(date +%s%N)"
 bash "$AUTHORITY_ROOT/scripts/tools/wsl-pc-runtime-batch.sh" \
