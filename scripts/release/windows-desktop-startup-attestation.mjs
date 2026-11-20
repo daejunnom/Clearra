@@ -93,7 +93,7 @@ function checkOrigin(origin, evidence) {
     'Windows GUI producer job differs from the trusted origin');
 }
 
-function matchExecutable(evidence, version, executableBytes) {
+function selectExecutable(evidence, version) {
   const entries = evidence.final_source_fragments.release_artifacts;
   const expected = new Map([
     ['linux-cli', `Clearra-CLI-v${version}-linux-x86_64`],
@@ -106,12 +106,26 @@ function matchExecutable(evidence, version, executableBytes) {
       `canonical acceptance must contain a unique versioned ${role} artifact`);
   }
   const entry = entries.find(({ role }) => role === 'windows-gui');
-  requireThat(executableBytes instanceof Uint8Array && executableBytes.length === entry.size_bytes &&
-    sha256(executableBytes) === entry.sha256,
-  'downloaded Windows GUI executable size or SHA-256 differs from acceptance');
   return Object.freeze({
     role: 'windows-gui', name: entry.name, size_bytes: entry.size_bytes, sha256: entry.sha256,
   });
+}
+
+// Only selects trusted metadata. Call validateAcceptedWindowsDesktopStartupInput
+// with the actual staged bytes before any startup attempt.
+export function selectAcceptedWindowsDesktopStartupArtifact({ acceptedEvidence, trustedActionsOrigin }) {
+  checkOrigin(trustedActionsOrigin, acceptedEvidence);
+  return selectExecutable(acceptedEvidence, trustedActionsOrigin.release_version);
+}
+
+export function validateAcceptedWindowsDesktopStartupInput({
+  acceptedEvidence, trustedActionsOrigin, executableBytes,
+}) {
+  const artifact = selectAcceptedWindowsDesktopStartupArtifact({ acceptedEvidence, trustedActionsOrigin });
+  requireThat(executableBytes instanceof Uint8Array && executableBytes.length === artifact.size_bytes &&
+    sha256(executableBytes) === artifact.sha256,
+  'downloaded Windows GUI executable size or SHA-256 differs from acceptance');
+  return artifact;
 }
 
 function absoluteWindowsPath(value, label) {
@@ -257,8 +271,7 @@ function checkProbe(output, receipt, origin, artifact, invocation) {
 export function sealAcceptedWindowsDesktopStartupAttestation({
   acceptedEvidence, trustedActionsOrigin, executableBytes, startupOutput, supervisorReceipt, invocation,
 }) {
-  checkOrigin(trustedActionsOrigin, acceptedEvidence);
-  const artifact = matchExecutable(acceptedEvidence, trustedActionsOrigin.release_version, executableBytes);
+  const artifact = validateAcceptedWindowsDesktopStartupInput({ acceptedEvidence, trustedActionsOrigin, executableBytes });
   const { outcome, probe, stdoutSha256, exitCode } = checkProbe(
     startupOutput, supervisorReceipt, trustedActionsOrigin, artifact, invocation,
   );

@@ -155,7 +155,7 @@ jobs:
         run: cargo test --locked -p clearra-manage --bin clearra-manage runtime::tests
       - name: Test the work, receipt, and timing evidence boundaries
         if: ${{ !cancelled() }}
-        run: node --test scripts/tools/placement-graph-adoption.test.mjs scripts/benchmark/run-placement-coverage-proof.test.mjs scripts/benchmark/run-placement-graph-adoption.test.mjs scripts/benchmark/verify-placement-work-pair.test.mjs scripts/release/windows-desktop-startup-attestation.test.mjs
+        run: node --test scripts/tools/placement-graph-adoption.test.mjs scripts/benchmark/run-placement-coverage-proof.test.mjs scripts/benchmark/run-placement-graph-adoption.test.mjs scripts/benchmark/verify-placement-work-pair.test.mjs scripts/release/windows-desktop-startup-attestation.test.mjs scripts/release/run-windows-desktop-startup-readback.test.mjs
       - uses: actions/setup-node@v4
         if: ${{ !cancelled() }}
         id: node
