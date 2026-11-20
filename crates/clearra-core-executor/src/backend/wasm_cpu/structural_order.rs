@@ -32,11 +32,9 @@ pub struct StructuralOrderMetrics {
     pub ordered_kick_interval: KickIntervalMetrics,
     pub ordered_kick_guard_reuse: KickGuardReuseMetrics,
     pub conditional_order: ConditionalOrderMetrics,
-    #[cfg(test)]
     pub conditional_ordered_negative: ConditionalOrderedNegativeMetrics,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ConditionalOrderedNegativeMetrics {
     pub attempts: u64,
@@ -44,6 +42,22 @@ pub struct ConditionalOrderedNegativeMetrics {
     /// Poses checked even when the ordered closure returns Unknown.
     pub checked_poses: u64,
     pub reused: u64,
+}
+
+impl ConditionalOrderedNegativeMetrics {
+    pub(super) fn attempted(&mut self, proven: bool, checked_poses: usize) {
+        self.attempts += 1;
+        self.proofs += u64::from(proven);
+        self.checked_poses += checked_poses as u64;
+    }
+}
+
+/// A same-thread diagnostic override, never selected by environment or product policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConditionalOrderedWorkMode {
+    Off,
+    Point,
+    ClosedWithin,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -123,41 +137,36 @@ thread_local! {
     static METRICS: Cell<StructuralOrderMetrics> = Cell::new(StructuralOrderMetrics::default());
 }
 
-#[cfg(test)]
 thread_local! {
     static CONDITIONAL_ORDERED_NEGATIVE: Cell<bool> = const { Cell::new(false) };
     static CONDITIONAL_ORDERED_NEGATIVE_REUSE: Cell<bool> = const { Cell::new(false) };
 }
 
-#[cfg(test)]
-pub(super) fn conditional_ordered_negative_enabled() -> bool {
-    CONDITIONAL_ORDERED_NEGATIVE.with(Cell::get)
+pub(super) fn conditional_ordered_work_mode() -> ConditionalOrderedWorkMode {
+    if !CONDITIONAL_ORDERED_NEGATIVE.get() {
+        ConditionalOrderedWorkMode::Off
+    } else if CONDITIONAL_ORDERED_NEGATIVE_REUSE.get() {
+        ConditionalOrderedWorkMode::ClosedWithin
+    } else {
+        ConditionalOrderedWorkMode::Point
+    }
 }
 
-#[cfg(test)]
-pub(super) fn conditional_ordered_negative_reuse_enabled() -> bool {
-    conditional_ordered_negative_enabled() && CONDITIONAL_ORDERED_NEGATIVE_REUSE.with(Cell::get)
-}
-
-#[cfg(test)]
-pub(super) fn record_conditional_ordered_negative(proven: bool, checked_poses: usize) {
-    METRICS.with(|slot| {
-        let mut value = slot.get();
-        let ordered = &mut value.conditional_ordered_negative;
-        ordered.attempts += 1;
-        ordered.proofs += u64::from(proven);
-        ordered.checked_poses += checked_poses as u64;
-        slot.set(value);
-    });
-}
-
-#[cfg(test)]
-pub(super) fn record_conditional_ordered_negative_reuse() {
+pub(super) fn record_conditional_ordered_negative(delta: ConditionalOrderedNegativeMetrics) {
+    if delta == ConditionalOrderedNegativeMetrics::default() {
+        return;
+    }
     METRICS.with(|slot| {
         let mut metrics = slot.get();
-        metrics.conditional_ordered_negative.reused += 1;
+        let ordered = &mut metrics.conditional_ordered_negative;
+        ordered.attempts += delta.attempts;
+        ordered.proofs += delta.proofs;
+        ordered.checked_poses += delta.checked_poses;
+        ordered.reused += delta.reused;
         slot.set(metrics);
     });
+    #[cfg(feature = "local-search-ab")]
+    process_totals::record_ordered_negative(delta);
 }
 
 pub(super) fn conditional_order_enabled() -> bool {
@@ -284,8 +293,8 @@ mod process_totals {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        ConditionalOrderMetrics, KickGuardReuseMetrics, KickIntervalMetrics, MovementClearMetrics,
-        StructuralOrderMetrics,
+        ConditionalOrderMetrics, ConditionalOrderedNegativeMetrics, KickGuardReuseMetrics,
+        KickIntervalMetrics, MovementClearMetrics, StructuralOrderMetrics,
     };
 
     // Bypass totals count successful certificates. Analytic totals also count
@@ -327,6 +336,10 @@ mod process_totals {
     static CONDITIONAL_STATES: AtomicU64 = AtomicU64::new(0);
     static CONDITIONAL_BYPASSES: AtomicU64 = AtomicU64::new(0);
     static CONDITIONAL_REUSED: AtomicU64 = AtomicU64::new(0);
+    static NEGATIVE_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    static NEGATIVE_PROOFS: AtomicU64 = AtomicU64::new(0);
+    static NEGATIVE_POSES: AtomicU64 = AtomicU64::new(0);
+    static NEGATIVE_REUSES: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn record(delta: StructuralOrderMetrics) {
         BYPASSES.fetch_add(delta.skipped_build_graphs, Ordering::Relaxed);
@@ -383,8 +396,12 @@ mod process_totals {
                 graph_bypasses: CONDITIONAL_BYPASSES.load(Ordering::Relaxed),
                 reused_pose_proofs: CONDITIONAL_REUSED.load(Ordering::Relaxed),
             },
-            #[cfg(test)]
-            conditional_ordered_negative: Default::default(),
+            conditional_ordered_negative: ConditionalOrderedNegativeMetrics {
+                attempts: NEGATIVE_ATTEMPTS.load(Ordering::Relaxed),
+                proofs: NEGATIVE_PROOFS.load(Ordering::Relaxed),
+                checked_poses: NEGATIVE_POSES.load(Ordering::Relaxed),
+                reused: NEGATIVE_REUSES.load(Ordering::Relaxed),
+            },
         }
     }
 
@@ -439,6 +456,13 @@ mod process_totals {
         CONDITIONAL_STATES.fetch_add(delta.residual_states, Ordering::Relaxed);
         CONDITIONAL_BYPASSES.fetch_add(delta.graph_bypasses, Ordering::Relaxed);
         CONDITIONAL_REUSED.fetch_add(delta.reused_pose_proofs, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_ordered_negative(delta: ConditionalOrderedNegativeMetrics) {
+        NEGATIVE_ATTEMPTS.fetch_add(delta.attempts, Ordering::Relaxed);
+        NEGATIVE_PROOFS.fetch_add(delta.proofs, Ordering::Relaxed);
+        NEGATIVE_POSES.fetch_add(delta.checked_poses, Ordering::Relaxed);
+        NEGATIVE_REUSES.fetch_add(delta.reused, Ordering::Relaxed);
     }
 }
 
@@ -577,7 +601,53 @@ pub fn structural_order_experiment_totals() -> StructuralOrderMetrics {
     process_totals::snapshot()
 }
 
-#[cfg(test)]
+/// Execute the existing conditional language on this thread and return its
+/// actual counters for this call, not the process totals. A fixed single
+/// worker is required; never change an existing request's worker policy.
+#[cfg(feature = "local-search-ab")]
+pub fn run_conditional_ordered_work(
+    problem: &clearra_problem::SearchProblem,
+    mode: ConditionalOrderedWorkMode,
+) -> Result<(crate::CoreExecutionResult, StructuralOrderMetrics), String> {
+    use clearra_core_domain::execution_cancellation::ExecutionControl;
+    use clearra_pc_graph::request::WorkerPolicy;
+
+    if problem.backend_policy().worker_policy() != WorkerPolicy::Fixed(1)
+        || problem.backend_policy().workers() != 1
+    {
+        return Err("conditional ordered work requires an explicitly fixed single worker".into());
+    }
+    if super::placement_dependency::enabled()
+        || translation_intervals_enabled()
+        || movement_clear_certificates_enabled()
+        || first_kick_intervals_enabled()
+        || ordered_kick_intervals_enabled()
+        || ordered_kick_guard_reuse_enabled()
+    {
+        return Err("conditional ordered work requires the other movement proofs off".into());
+    }
+    let (result, work) = with_conditional_ordered_negative_reuse(
+        mode == ConditionalOrderedWorkMode::ClosedWithin,
+        || {
+            with_conditional_ordered_negative(mode != ConditionalOrderedWorkMode::Off, || {
+                with_conditional_order_mode(true, || {
+                    with_mode(false, || {
+                        crate::WasmCpuSearchBackend::execute_with_control(
+                            problem,
+                            &ExecutionControl::default(),
+                        )
+                    })
+                })
+            })
+        },
+    );
+    let result = result.map_err(|error| format!("conditional ordered work: {error:?}"))?;
+    if result.usize_field("workers_used") != Some(1) {
+        return Err("conditional ordered work was not executed by one worker".into());
+    }
+    Ok((result, work))
+}
+
 pub(super) fn with_mode<T>(
     enabled: bool,
     action: impl FnOnce() -> T,
@@ -663,7 +733,6 @@ pub(super) fn with_ordered_kick_guard_reuse_mode<T>(
     action()
 }
 
-#[cfg(test)]
 pub(super) fn with_conditional_order_mode<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
     struct Restore(Option<bool>);
     impl Drop for Restore {
@@ -675,7 +744,6 @@ pub(super) fn with_conditional_order_mode<T>(enabled: bool, action: impl FnOnce(
     action()
 }
 
-#[cfg(test)]
 pub(super) fn with_conditional_ordered_negative<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
@@ -687,7 +755,6 @@ pub(super) fn with_conditional_ordered_negative<T>(enabled: bool, action: impl F
     action()
 }
 
-#[cfg(test)]
 pub(super) fn with_conditional_ordered_negative_reuse<T>(
     enabled: bool,
     action: impl FnOnce() -> T,

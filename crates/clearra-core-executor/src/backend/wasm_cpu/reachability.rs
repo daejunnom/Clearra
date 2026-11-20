@@ -564,14 +564,14 @@ struct PreparedRelationWindows {
 
 /// An ordered no-entry proof with a finite occupancy upper bound. The
 /// conditional-language owner separately pins its candidate and pose.
-#[cfg(test)]
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy)]
 pub(super) struct OrderedNoEntryBounds {
     minimum: u64,
     maximum: u64,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "local-search-ab"))]
 impl OrderedNoEntryBounds {
     pub(super) fn excludes(self, board: u64) -> bool {
         self.minimum & !board == 0 && board & !self.maximum == 0
@@ -984,7 +984,7 @@ impl ReachabilityWorkspace {
     /// The experimental conditional-language caller owns exactly one concrete
     /// board. The returned negative only applies to that point and is never
     /// retained as a minimum-board certificate.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn try_prove_ordered_lock_pose_unreachable_at_point(
         &mut self,
         catalog: &GeometryCatalog,
@@ -1004,7 +1004,7 @@ impl ReachabilityWorkspace {
 
     /// Retain a bounded no-entry interval from the very same exact point
     /// proof. A different original-row frame must never reuse it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn try_prove_ordered_lock_pose_closed_within(
         &mut self,
         catalog: &GeometryCatalog,

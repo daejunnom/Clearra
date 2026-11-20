@@ -92,7 +92,10 @@ pub use buildup::{with_operation_mask_experiment, OperationMaskExperimentReport}
 #[cfg(feature = "local-search-ab")]
 pub use geometry::{geometry_domain_experiment_totals, GeometryDomainExperimentTotals};
 #[cfg(feature = "local-search-ab")]
-pub use structural_order::{structural_order_experiment_totals, StructuralOrderMetrics};
+pub use structural_order::{
+    run_conditional_ordered_work, structural_order_experiment_totals, ConditionalOrderedWorkMode,
+    StructuralOrderMetrics,
+};
 mod terminal_hold_projection;
 mod tiling_parallel;
 #[cfg(feature = "webgpu-search")]

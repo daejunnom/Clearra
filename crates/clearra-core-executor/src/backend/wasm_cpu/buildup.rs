@@ -2438,8 +2438,7 @@ fn verify_conditional_order(
         ..ConditionalOrderMetrics::default()
     };
     let mut current_state = None;
-    #[cfg(test)]
-    let mut closed_within = ConditionalClosedWithinLedger::default();
+    let mut ordered = ConditionalOrderedChecks::new();
     let compiled = workspace
         .piece_order_languages
         .compile_conditional_language(geometry.pieces(), 64, 256, |executed, operation| {
@@ -2463,10 +2462,11 @@ fn verify_conditional_order(
                 profile,
                 &mut workspace.reachability,
                 movement_proofs,
-                #[cfg(test)]
-                &mut closed_within,
+                &mut ordered,
             )
-        })?;
+        });
+    super::structural_order::record_conditional_ordered_negative(ordered.work);
+    let compiled = compiled?;
     if control.is_cancelled() {
         return Err(WasmExactSearchError::Cancelled);
     }
@@ -2508,7 +2508,7 @@ fn verify_conditional_order(
 
 /// Unlike a `MovementProof::Closed`, these negatives have a finite
 /// occupancy upper bound and are owned by one conditional compilation.
-#[cfg(test)]
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct ConditionalClosedWithinKey {
     row_id: u32,
@@ -2517,21 +2517,21 @@ struct ConditionalClosedWithinKey {
     realization: super::catalog::InstantiatedRealization,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy)]
 struct ConditionalClosedWithin {
     key: ConditionalClosedWithinKey,
     bounds: super::reachability::OrderedNoEntryBounds,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Default)]
 struct ConditionalClosedWithinLedger {
     entries: [Option<ConditionalClosedWithin>; 16],
     len: usize,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "local-search-ab"))]
 impl ConditionalClosedWithinLedger {
     fn excludes(&self, key: ConditionalClosedWithinKey, board: u64) -> bool {
         self.entries[..self.len]
@@ -2549,6 +2549,26 @@ impl ConditionalClosedWithinLedger {
 }
 
 #[cfg(any(test, feature = "local-search-ab"))]
+struct ConditionalOrderedChecks {
+    mode: super::structural_order::ConditionalOrderedWorkMode,
+    ledger: Option<ConditionalClosedWithinLedger>,
+    work: super::structural_order::ConditionalOrderedNegativeMetrics,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+impl ConditionalOrderedChecks {
+    fn new() -> Self {
+        let mode = super::structural_order::conditional_ordered_work_mode();
+        Self {
+            mode,
+            ledger: (mode == super::structural_order::ConditionalOrderedWorkMode::ClosedWithin)
+                .then(ConditionalClosedWithinLedger::default),
+            work: Default::default(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
 #[allow(clippy::too_many_arguments)]
 fn prove_conditional_transition(
     catalog: &GeometryCatalog,
@@ -2559,7 +2579,7 @@ fn prove_conditional_transition(
     profile: clearra_rules::kicks::KickTableProfileId,
     reachability: &mut ReachabilityWorkspace,
     movement_proofs: &mut CandidateMovementProofs,
-    #[cfg(test)] closed_within: &mut ConditionalClosedWithinLedger,
+    ordered: &mut ConditionalOrderedChecks,
 ) -> super::piece_order_language::ConditionalTransitionProof {
     use super::{
         piece_order_language::ConditionalTransitionProof::{Allowed, Forbidden, Unknown},
@@ -2610,19 +2630,22 @@ fn prove_conditional_transition(
             }
             continue;
         }
-        #[cfg(test)]
-        let closed_key = frame
-            .filter(|_| super::structural_order::conditional_ordered_negative_reuse_enabled())
-            .map(|frame| ConditionalClosedWithinKey {
-                row_id,
-                profile,
-                frame,
-                realization,
-            });
-        #[cfg(test)]
-        if closed_key.is_some_and(|key| closed_within.excludes(key, board)) {
-            super::structural_order::record_conditional_ordered_negative_reuse();
-            continue;
+        let closed_key =
+            ordered
+                .ledger
+                .as_ref()
+                .and(frame)
+                .map(|frame| ConditionalClosedWithinKey {
+                    row_id,
+                    profile,
+                    frame,
+                    realization,
+                });
+        if let (Some(ledger), Some(key)) = (&ordered.ledger, closed_key) {
+            if ledger.excludes(key, board) {
+                ordered.work.reused += 1;
+                continue;
+            }
         }
         let exact_positive = reachability.try_prove_first_kick_lock_interval(
             catalog,
@@ -2674,9 +2697,8 @@ fn prove_conditional_transition(
             );
             continue;
         }
-        #[cfg(test)]
-        if super::structural_order::conditional_ordered_negative_enabled() {
-            if let Some(key) = closed_key {
+        if ordered.mode != super::structural_order::ConditionalOrderedWorkMode::Off {
+            if let (Some(ledger), Some(key)) = (&mut ordered.ledger, closed_key) {
                 let (bounds, checked_poses) = reachability
                     .try_prove_ordered_lock_pose_closed_within(
                         catalog,
@@ -2686,12 +2708,9 @@ fn prove_conditional_transition(
                         realization,
                         key.frame,
                     );
-                super::structural_order::record_conditional_ordered_negative(
-                    bounds.is_some(),
-                    checked_poses,
-                );
+                ordered.work.attempted(bounds.is_some(), checked_poses);
                 if let Some(bounds) = bounds {
-                    closed_within.remember(ConditionalClosedWithin { key, bounds });
+                    ledger.remember(ConditionalClosedWithin { key, bounds });
                     continue;
                 }
                 unknown = true;
@@ -2706,7 +2725,7 @@ fn prove_conditional_transition(
                     realization,
                     frame,
                 );
-            super::structural_order::record_conditional_ordered_negative(proven, checked_poses);
+            ordered.work.attempted(proven, checked_poses);
             if proven {
                 // Only this executed subset and this ILC pose were proved.
                 // Do not publish an all-supersets Closed fact to fallback.

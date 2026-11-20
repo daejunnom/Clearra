@@ -82,6 +82,12 @@ jobs:
       - name: Test the bounded solution stream and exact comparison
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
+      - name: Compare actual ClosedWithin proof work on 840 original queues
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo test --locked -p clearra-core-executor --features parallel,local-search-ab
+          --example conditional_closed_within_work canonical_840_queues_check_three_compiled_arms
+          -- --exact --nocapture
       - name: Build the focused proof tools once
         id: focused-tools
         if: ${{ !cancelled() }}

@@ -48,7 +48,6 @@ pub(super) fn bounded_no_entry_on_minimum_board(
 ///
 /// This proof is valid only inside [minimum_board, maximum_board]. It must
 /// not become the all-supersets `MovementProof::Closed` used by BuildUp.
-#[cfg(test)]
 pub(super) fn bounded_no_entry_on_ordered_interval(
     template: &ReachabilityTemplate,
     minimum_board: u64,
@@ -73,7 +72,6 @@ pub(super) fn bounded_no_entry_on_ordered_interval(
 /// retained earlier footprint must stay vacant, so each suppressed later
 /// kick stays unavailable. The exact same closure then excludes every sky
 /// entry throughout the resulting interval.
-#[cfg(test)]
 pub(super) fn bounded_ordered_no_entry_clear_mask(
     template: &ReachabilityTemplate,
     board: u64,
