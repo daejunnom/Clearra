@@ -1639,6 +1639,142 @@ fn conditional_support_or_created_by_one_clear_preserves_four_line_coverage() {
 }
 
 #[test]
+fn conditional_joint_clear_support_or_preserves_2520_original_queues() {
+    use clearra_core_domain::solution::normalized_tiling_solution::{
+        PiecePlacementMask, StandardBoard64ColoredTilingIdentity, StandardBoard64TilingIdentity,
+    };
+    use clearra_coverage::pattern::pattern_id::PatternId;
+    use clearra_rules::profile::builtin_rules::srs;
+    use PieceKind::{I, J, L, O, T};
+
+    let _guard = product_guard();
+    let placements = [
+        (I, 0x07_8000_0000),
+        (T, 0x1c02),
+        (O, 0x6018),
+        (J, 0x60_0802_0000),
+        (L, 0x08_0380_0000),
+    ];
+    let (catalog, candidate) = fixture(4, &placements);
+    let initial = catalog.initial_board();
+    assert_eq!(initial, 0x90_747d_83e5);
+    let pieces: Vec<_> = candidate
+        .row_ids()
+        .iter()
+        .map(|&row| catalog.skeleton(row).piece)
+        .collect();
+    let bit = |piece| 1_usize << pieces.iter().position(|&kind| kind == piece).unwrap();
+    let joint = bit(J) | bit(L);
+    let transitions = physical_transitions(&catalog, &candidate, KickTableProfileId::Srs90);
+    let words = operation_words(&pieces, &transitions);
+    // Every operation starts grounded; no original row has a singleton
+    // contributor. Both J and L are executable in either order. Only their
+    // combination deletes row two and removes I's floor-independent support.
+    for (first, second) in [(J, L), (L, J)] {
+        assert_ne!(usize::from(transitions[0]) & bit(first), 0);
+        assert_ne!(usize::from(transitions[bit(first)]) & bit(second), 0);
+        assert_eq!(subset_state(&catalog, &candidate, bit(first)).1, 0);
+    }
+    assert_eq!(subset_state(&catalog, &candidate, joint).1, 0b0100);
+    assert_eq!(usize::from(transitions[joint]), bit(O) | bit(T));
+    for supporter in [T, O] {
+        assert_ne!(usize::from(transitions[joint | bit(supporter)]) & bit(I), 0);
+    }
+    assert!(words.contains(&vec![J, L, T, I, O]));
+    assert!(words.contains(&vec![L, J, O, I, T]));
+    assert!(!words.contains(&vec![J, L, I, T, O]));
+    let admits = || {
+        placement_poset::CandidateGeometry::for_conditional_order(&catalog, &candidate).is_some()
+    };
+    assert!(!admits());
+    assert!(placement_poset::with_joint_clear_admission(true, admits));
+    assert!(!admits());
+
+    let identity = StandardBoard64TilingIdentity::from_placements(
+        initial,
+        placements.map(|(piece, cells)| PiecePlacementMask::new(piece, cells)),
+    )
+    .unwrap();
+    let colored = StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(identity);
+    let problem = ProblemCompiler::compile_scenario_pc(
+        &PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, initial),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(5),
+        )
+        .with_rule(srs())
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(5))
+        .with_supply_window_size(SupplyWindowSize::new(5))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+        .with_allowed_colored_solution_identities([colored])
+        .with_retained_trace_limit(0)
+        .with_execution_policy(policy()),
+    )
+    .unwrap()
+    .with_output_policy(SearchOutputPolicy::CoverageSummary);
+    let run = |joint_admission| {
+        structural_order::with_mode(false, || {
+            structural_order::with_conditional_order_mode(true, || {
+                placement_poset::with_joint_clear_admission(joint_admission, || {
+                    placement_dependency::with_mode(false, || {
+                        WasmCpuSearchBackend::execute_with_control(
+                            &problem,
+                            &ExecutionControl::default(),
+                        )
+                        .unwrap()
+                    })
+                    .0
+                })
+            })
+        })
+    };
+    let (baseline, before) = run(false);
+    let (treatment, after) = run(true);
+    assert_parity(&baseline, &treatment);
+    assert_eq!(before.conditional_order.attempted_candidates, 0);
+    let actual = after.conditional_order;
+    assert_eq!(actual.attempted_candidates, 1);
+    assert!((1..=256).contains(&actual.checked_transitions));
+    assert!(actual.residual_states <= 64);
+    assert_eq!(actual.budget_candidates, 0);
+    assert_eq!(actual.certified_candidates + actual.unknown_candidates, 1);
+    assert_eq!(actual.graph_bypasses, actual.certified_candidates);
+    let old_nodes = baseline.usize_field("total_build_order_nodes").unwrap();
+    let new_nodes = treatment.usize_field("total_build_order_nodes").unwrap();
+    assert!(old_nodes > 0);
+    assert_eq!(
+        new_nodes,
+        if actual.graph_bypasses == 1 {
+            0
+        } else {
+            old_nodes
+        }
+    );
+    eprintln!(
+        "joint-clear support OR: certified={}, unknown={}, checked={}, graph nodes={old_nodes}->{new_nodes}, primitive poses={}->{}",
+        actual.certified_candidates, actual.unknown_candidates, actual.checked_transitions,
+        baseline.usize_field("total_reachability_states").unwrap(),
+        treatment.usize_field("total_reachability_states").unwrap()
+    );
+    let universe = problem.piece_source().materialized_universe().unwrap();
+    assert_eq!(universe.pattern_count(), 2520);
+    let [entry] = treatment.solution_coverages() else {
+        panic!("the colored filter must select only the five concrete placements");
+    };
+    assert_eq!(entry.identity(), identity);
+    assert_eq!(entry.covered_patterns().count_ones() as usize, words.len());
+    for ordinal in 0..universe.pattern_count() {
+        assert_eq!(
+            entry.covered_patterns().contains(PatternId::new(ordinal)),
+            words.contains::<[PieceKind]>(universe.sequence_at(ordinal).as_ref()),
+            "joint-clear OR original queue {ordinal}"
+        );
+    }
+}
+
+#[test]
 fn conditional_support_or_preserves_every_empty_hold_queue_ordinal() {
     use clearra_core_domain::solution::normalized_tiling_solution::{
         PiecePlacementMask, StandardBoard64TilingIdentity,

@@ -29,6 +29,23 @@ use super::{
 const MAX_HEIGHT: usize = 6;
 const MAX_CLEAR_FRAMES: usize = 1 << MAX_HEIGHT;
 
+#[cfg(test)]
+thread_local! {
+    static JOINT_CLEAR_ADMISSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn with_joint_clear_admission<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            JOINT_CLEAR_ADMISSION.set(self.0);
+        }
+    }
+    let _restore = Restore(JOINT_CLEAR_ADMISSION.replace(enabled));
+    action()
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct CertifiedPlacementPoset {
     operation_count: usize,
@@ -371,9 +388,18 @@ impl CandidateGeometry {
             return None;
         }
         let geometry = Self::compile(catalog, candidate)?;
-        (geometry.has_unprovable_initial_support_disjunction(catalog, candidate)
-            || geometry.has_support_disjunction_after_one_operation_clear(catalog, candidate))
-        .then_some(geometry)
+        if geometry.has_unprovable_initial_support_disjunction(catalog, candidate)
+            || geometry.has_support_disjunction_after_group_clear::<false>(catalog, candidate)
+        {
+            return Some(geometry);
+        }
+        #[cfg(test)]
+        if JOINT_CLEAR_ADMISSION.get()
+            && geometry.has_support_disjunction_after_group_clear::<true>(catalog, candidate)
+        {
+            return Some(geometry);
+        }
+        None
     }
 
     pub(super) fn pieces(&self) -> &[PieceKind] {
@@ -540,21 +566,32 @@ impl CandidateGeometry {
         false
     }
 
-    fn has_support_disjunction_after_one_operation_clear(
+    fn has_support_disjunction_after_group_clear<const JOINT: bool>(
         &self,
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
     ) -> bool {
-        if self.operation_count < 4 {
+        if self.operation_count < if JOINT { 5 } else { 4 } {
             return false;
         }
-        for (required, deleted) in self.clear_conditions.groups() {
-            if !required.is_power_of_two() {
-                continue;
+        // The test-only joint lane inspects at most two actual contributor
+        // groups *after* the ordinary admission missed. Never enumerate pairs
+        // or subsets to find a frame. Missing a later group is only fallback.
+        let groups = self.clear_conditions.groups().filter(|(required, _)| {
+            if JOINT {
+                required.count_ones() == 2
+            } else {
+                required.is_power_of_two()
             }
-            // This singleton satisfies exactly its own atomic group. Inspect
-            // at most one frame per group; never enumerate execution subsets
-            // just to decide whether to try the bounded compiler.
+        });
+        for (required, group_rows) in groups.take(if JOINT { 2 } else { MAX_HEIGHT }) {
+            // A pair can also finish a distinct singleton group; the union of
+            // all rows actually cleared by these concrete operations is atomic.
+            let deleted = if JOINT {
+                self.clear_conditions.deleted_rows(required)
+            } else {
+                group_rows
+            };
             let optional = self.clear_conditions.possible_operations_in_frame(
                 deleted,
                 required,
@@ -564,7 +601,12 @@ impl CandidateGeometry {
                 continue;
             }
             let (initial, physical) = self.project_frame(deleted);
-            let minimum = initial | physical[required.trailing_zeros() as usize];
+            let first = initial | physical[required.trailing_zeros() as usize];
+            let minimum = if JOINT {
+                first | physical[(required & (required - 1)).trailing_zeros() as usize]
+            } else {
+                first
+            };
             for (operation, &lock_mask) in physical[..self.operation_count].iter().enumerate() {
                 let operation_bit = 1_u16 << operation;
                 if required & operation_bit != 0
