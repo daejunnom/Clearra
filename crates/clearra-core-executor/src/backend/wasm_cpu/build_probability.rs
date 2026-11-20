@@ -136,6 +136,7 @@ const fn returned_carrier_delta_bytes(returned_carrier_bytes: u128) -> u128 {
 pub(crate) struct WasmBuildProbabilitySession {
     pending: VecDeque<BuildProbabilitySessionKind>,
     completed: Vec<CoreExecutionResult>,
+    completed_progress: BuildProbabilityProgress,
     pattern_weights: WeightedPatternSet,
     aggregation: BuildProbabilityAggregation,
     finesse_metric: FinesseMetric,
@@ -211,6 +212,31 @@ impl BuildProbabilitySessionKind {
             Self::Compact(session) => session.checked_finesse_search_material_future_bytes(),
             Self::Extended(session) => session.checked_finesse_search_material_future_bytes(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BuildProbabilityProgress {
+    geometry_nodes: usize,
+    candidates: usize,
+    verification_nodes: usize,
+}
+
+impl BuildProbabilityProgress {
+    fn including_pass(self, progress: WasmDistributedProgress) -> Self {
+        Self {
+            geometry_nodes: self.geometry_nodes.saturating_add(progress.geometry_nodes),
+            candidates: self.candidates.saturating_add(progress.candidates),
+            verification_nodes: self.verification_nodes.saturating_add(progress.build_nodes),
+        }
+    }
+
+    fn report(self, control: &ExecutionControl) {
+        // Each slice may discover and verify candidates before returning.
+        // These are separate counters with no known denominators.
+        control.report_progress("build-geometry", self.geometry_nodes as u64, None);
+        control.report_progress("build-candidates", self.candidates as u64, None);
+        control.report_progress("build-verification", self.verification_nodes as u64, None);
     }
 }
 
@@ -325,6 +351,7 @@ impl WasmBuildProbabilitySession {
         let session = Self {
             pending,
             completed: Vec::with_capacity(usize::from(mirror_distinct) + 1),
+            completed_progress: BuildProbabilityProgress::default(),
             pattern_weights: problem
                 .piece_source()
                 .materialized_pattern_weights()
@@ -441,23 +468,37 @@ impl WasmBuildProbabilitySession {
                 "wasm_build_probability_aggregate_memory_projection_overflow",
             ),
         )?;
-        let advance = {
+        let report_progress = control.progress_sink.is_some();
+        let has_later_pass = self.pending.len() > 1;
+        let (advance, progress) = {
             let Some(session) = self.pending.front_mut() else {
                 return Err(WasmExactSearchError::InvalidProblem(
                     "wasm_build_probability_pass_missing",
                 ));
             };
             session.set_coexisting_retained_bytes(coexisting_retained_bytes);
-            match session {
+            let advance = match session {
                 BuildProbabilitySessionKind::Compact(session) => {
                     session.advance(work_budget, control)
                 }
                 BuildProbabilitySessionKind::Extended(session) => {
                     session.advance(work_budget, control)
                 }
-            }?
+            }?;
+            // Preserve exact pass totals before its solver is dropped. A
+            // later slice may attach an observer to the next pass.
+            let carry_progress =
+                has_later_pass && matches!(&advance, BuildProbabilityAdvance::Completed(_));
+            let progress = (carry_progress
+                || report_progress && !matches!(&advance, BuildProbabilityAdvance::Cancelled))
+            .then(|| self.completed_progress.including_pass(session.progress()));
+            (advance, progress)
         };
-        self.report_cooperative_progress(control);
+        if report_progress {
+            if let Some(progress) = progress {
+                progress.report(control);
+            }
+        }
         match advance {
             BuildProbabilityAdvance::Pending => {
                 self.ensure_memory_bound(0)?;
@@ -529,6 +570,10 @@ impl WasmBuildProbabilitySession {
                     };
                     self.finesse_search_materials.push(material);
                 }
+                if has_later_pass {
+                    self.completed_progress =
+                        progress.expect("completed pass must preserve progress for its successor");
+                }
                 self.completed.push(result);
                 self.pending.pop_front();
                 self.ensure_memory_bound(0)?;
@@ -571,40 +616,6 @@ impl WasmBuildProbabilitySession {
                 Ok(BuildProbabilityAdvance::Completed(result))
             }
         }
-    }
-
-    fn report_cooperative_progress(&self, control: &ExecutionControl) {
-        // Native and finite-memory owners may deliberately install no progress
-        // sink. Do not derive or retain any telemetry for those owners.
-        if control.progress_sink.is_none() {
-            return;
-        }
-        let mut progress = self.pending.front().map_or_else(
-            WasmDistributedProgress::default,
-            BuildProbabilitySessionKind::progress,
-        );
-        for result in &self.completed {
-            progress.geometry_nodes = progress.geometry_nodes.saturating_add(
-                result
-                    .usize_field("geometry_searched_nodes")
-                    .or_else(|| result.usize_field("searched_nodes"))
-                    .unwrap_or(0),
-            );
-            progress.candidates = progress
-                .candidates
-                .saturating_add(result.usize_field("packing_candidate_count").unwrap_or(0));
-            progress.build_nodes = progress.build_nodes.saturating_add(
-                result
-                    .usize_field("buildup_searched_nodes")
-                    .or_else(|| result.usize_field("total_build_order_nodes"))
-                    .unwrap_or(0),
-            );
-        }
-        // A cooperative slice verifies each emitted candidate before returning.
-        // Keep counts separate instead of using one count as a fabricated total.
-        control.report_progress("build-geometry", progress.geometry_nodes as u64, None);
-        control.report_progress("build-candidates", progress.candidates as u64, None);
-        control.report_progress("build-verification", progress.build_nodes as u64, None);
     }
 
     pub(crate) fn validate_public_result_memory_with_future(
@@ -6157,19 +6168,23 @@ mod finesse_integration_tests {
         .unwrap();
         let capture = Arc::new(Capture::default());
         let control = ExecutionControl::default().with_progress_sink(capture.clone());
-        let mut complete = false;
+        let mut result = None;
         for _ in 0..1_000 {
-            if matches!(
-                session.advance(1, &control).unwrap(),
-                BuildProbabilityAdvance::Completed(_)
-            ) {
-                complete = true;
+            if let BuildProbabilityAdvance::Completed(completed) = session
+                .advance(1, &control)
+                .expect("advance the small mirror fixture")
+            {
+                result = Some(completed);
                 break;
             }
         }
-        assert!(complete, "the small two-pass fixture must complete");
+        let result = result.expect("the small two-pass fixture must complete");
         let captured = capture.0.lock().unwrap();
-        for stage in ["build-geometry", "build-candidates", "build-verification"] {
+        for (stage, reported_field) in [
+            ("build-geometry", "searched_nodes"),
+            ("build-candidates", "packing_candidate_count"),
+            ("build-verification", "total_build_order_nodes"),
+        ] {
             let values: Vec<_> = captured
                 .iter()
                 .filter(|progress| progress.stage == stage)
@@ -6182,6 +6197,11 @@ mod finesse_integration_tests {
             assert!(values
                 .windows(2)
                 .all(|pair| pair[0].completed <= pair[1].completed));
+            assert_eq!(
+                Some(values.last().expect("stage progress").completed),
+                result.usize_field(reported_field).map(|count| count as u64),
+                "the terminal snapshot must account for both passes in {stage}"
+            );
         }
         let geometry: Vec<_> = captured
             .iter()
