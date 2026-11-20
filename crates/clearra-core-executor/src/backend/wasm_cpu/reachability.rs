@@ -22,6 +22,9 @@ mod dependency_cache;
 #[path = "reachability_independence.rs"]
 mod independence;
 #[cfg(any(test, feature = "local-search-ab"))]
+#[path = "reachability_no_entry_components.rs"]
+mod no_entry_components;
+#[cfg(any(test, feature = "local-search-ab"))]
 #[path = "reachability_reverse_dependency.rs"]
 mod reverse_dependency;
 
@@ -841,7 +844,8 @@ impl ReachabilityWorkspace {
     /// Prove that this exact ILC pose has no entry on any board containing the
     /// minimum occupancy in the same original-row frame. A miss is Unknown.
     /// Only canonical sky entry is covered; callers requiring a full operation
-    /// must prove every concrete realization independently.
+    /// must prove every concrete realization independently. The optional
+    /// horizontal quotient preserves this contract and uses the same template.
     #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn try_prove_lock_pose_unreachable_at_minimum(
         &mut self,
@@ -877,7 +881,11 @@ impl ReachabilityWorkspace {
         if template.state_masks[target] != realization.lock_mask {
             return false;
         }
-        independence::bounded_no_entry_on_minimum_board(template, minimum_board, target)
+        if no_entry_components::enabled() {
+            no_entry_components::proves_no_entry(template, minimum_board, target)
+        } else {
+            independence::bounded_no_entry_on_minimum_board(template, minimum_board, target)
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

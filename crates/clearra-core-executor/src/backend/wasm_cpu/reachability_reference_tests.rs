@@ -5,8 +5,9 @@ use clearra_rules::kicks::KickTableProfileId;
 
 use super::super::catalog::{GeometryCatalog, InstantiatedRealization};
 use super::{
-    search_reachable_locks, search_reachable_locks_from_entries, ReachabilityScratch,
-    ReachabilityTemplate, ReachabilityWorkspace,
+    no_entry_components::with_mode as with_no_entry_components_mode, search_reachable_locks,
+    search_reachable_locks_from_entries, ReachabilityScratch, ReachabilityTemplate,
+    ReachabilityWorkspace,
 };
 use crate::conditioned_local_relation::{
     derive_exact_conditioned_local_relation, ConditionedPoseWindow, LocalRelationRowFrame,
@@ -88,18 +89,72 @@ fn adding_a_blocker_can_enable_a_later_ordered_kick() {
             ),
             expected
         );
-        assert!(
-            !workspace.try_prove_lock_pose_unreachable_at_minimum(
-                &catalog,
-                board,
-                PieceKind::T,
-                profile,
-                ADVERSARIAL_T_LOCK,
-                LocalRelationRowFrame::new(3, 0),
-            ),
-            "absence at the minimum board is not proof on every allowed superset"
-        );
+        for components in [false, true] {
+            assert!(
+                !with_no_entry_components_mode(components, || {
+                    workspace.try_prove_lock_pose_unreachable_at_minimum(
+                        &catalog,
+                        board,
+                        PieceKind::T,
+                        profile,
+                        ADVERSARIAL_T_LOCK,
+                        LocalRelationRowFrame::new(3, 0),
+                    )
+                }),
+                "absence at minimum is not proof on every superset; components={components}"
+            );
+        }
     }
+}
+
+#[test]
+fn horizontal_no_entry_components_cover_a_wide_cavity_but_not_its_opening() {
+    const FULL_WIDTH: u8 = 10;
+    const HEIGHT: u8 = 6;
+    let sealed = 0x1ff_u64 << 40;
+    // One hole in row four cannot admit an O. Opening column eight
+    // makes a two-cell channel connected to the real sky entries.
+    let open = sealed & !(1 << 48);
+    let profile = KickTableProfileId::NoKick;
+    let pose = InstantiatedRealization {
+        lock_mask: 0xc03,
+        rotation: RotationState::Zero,
+        x: 0,
+        lock_y: 0,
+    };
+    let catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+        FULL_WIDTH,
+        HEIGHT,
+        sealed,
+        pose.lock_mask,
+    )
+    .expect("aligned physical O target");
+    let frame = LocalRelationRowFrame::new(HEIGHT, 0);
+    let mut workspace = ReachabilityWorkspace::default();
+    workspace.configure_kick_profile(profile, false);
+    for (board, reachable) in [(sealed, false), (open, true)] {
+        let exact =
+            reference_spawn_lock_anchors(FULL_WIDTH, HEIGHT, board, PieceKind::O, profile).unwrap();
+        assert_eq!(exact[0] & 1 != 0, reachable);
+        let mut prove = |components| {
+            with_no_entry_components_mode(components, || {
+                workspace.try_prove_lock_pose_unreachable_at_minimum(
+                    &catalog,
+                    board,
+                    PieceKind::O,
+                    profile,
+                    pose,
+                    frame,
+                )
+            })
+        };
+        assert!(
+            !prove(false),
+            "the 16-pose limit does not cover this cavity"
+        );
+        assert_eq!(prove(true), !reachable);
+    }
+    assert_eq!(workspace.generated_state_count(), 0);
 }
 
 #[test]

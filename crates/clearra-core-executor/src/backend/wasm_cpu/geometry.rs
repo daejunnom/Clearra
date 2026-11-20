@@ -15,7 +15,9 @@ use super::{
     catalog::GeometryCatalog,
     exact_collections::ExactHashMap,
     geometry_component::{compile_component_plan, ComponentFamilyEntry, ComponentPlanResult},
-    geometry_domain::{hall_impossible, DomainPropagation, DomainStatus, DomainSupportCache},
+    geometry_domain::{
+        hall_impossible, DomainPropagation, DomainStatus, DomainSupportCache, SameTileParentMode,
+    },
     geometry_family::{FamilyNodeKind, GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID},
     geometry_projection::ProjectionReachabilityCache,
     mix_digest, piece_index, WasmExactSearchError, MAX_BOARD64_PIECES,
@@ -51,6 +53,8 @@ pub struct GeometryDomainExperimentTotals {
     /// Counts advanced-route cell support work, not minimum-route scans.
     pub support_cells_reused: u64,
     pub support_cells_recomputed: u64,
+    pub same_tile_parent_scans: u64,
+    pub same_tile_parent_reuses: u64,
     pub apdp_static_checks: u64,
     pub apdp_static_complete: u64,
     pub apdp_pivot_tightenings: u64,
@@ -84,6 +88,8 @@ impl GeometryDomainExperimentTotals {
         self.support_cells_reused += u64::from(reused);
         self.support_cells_recomputed +=
             u64::from(observation.support_cells_examined.count_ones() - reused);
+        self.same_tile_parent_scans += u64::from(observation.same_tile_parent_scans);
+        self.same_tile_parent_reuses += u64::from(observation.same_tile_parent_reuses);
         self.apdp_static_checks += u64::from(observation.apdp_static_check);
         self.apdp_static_complete += u64::from(observation.apdp_static_complete);
         self.apdp_pivot_tightenings += u64::from(observation.apdp_pivot_tightened);
@@ -115,6 +121,14 @@ impl GeometryDomainExperimentTotals {
             (
                 &mut self.support_cells_recomputed,
                 family.support_cells_recomputed,
+            ),
+            (
+                &mut self.same_tile_parent_scans,
+                family.same_tile_parent_scans,
+            ),
+            (
+                &mut self.same_tile_parent_reuses,
+                family.same_tile_parent_reuses,
             ),
             (&mut self.apdp_static_checks, family.apdp_static_checks),
             (&mut self.apdp_static_complete, family.apdp_static_complete),
@@ -964,6 +978,7 @@ struct FamilyCompiler {
     stack: Vec<CompileFrame>,
     residual_memo: ResidualMemo,
     domain_support_cache: DomainSupportCache,
+    same_tile_parents: SameTileParentMode,
     #[cfg(any(feature = "local-search-ab", test))]
     incremental_domain: bool,
     #[cfg(any(feature = "local-search-ab", test))]
@@ -1012,6 +1027,7 @@ impl FamilyCompiler {
             stack,
             residual_memo: ResidualMemo::disabled(),
             domain_support_cache: DomainSupportCache::default(),
+            same_tile_parents: SameTileParentMode::from_experiment(),
             #[cfg(any(feature = "local-search-ab", test))]
             incremental_domain: incremental_domain_enabled(),
             #[cfg(any(feature = "local-search-ab", test))]
@@ -1046,6 +1062,7 @@ impl FamilyCompiler {
             stack: vec![CompileFrame::root(required_cells)],
             residual_memo: ResidualMemo::new(target_depth),
             domain_support_cache: DomainSupportCache::default(),
+            same_tile_parents: SameTileParentMode::from_experiment(),
             #[cfg(any(feature = "local-search-ab", test))]
             incremental_domain: incremental_domain_enabled(),
             #[cfg(any(feature = "local-search-ab", test))]
@@ -1082,6 +1099,7 @@ impl FamilyCompiler {
             stack: vec![CompileFrame::child(remaining, depth, NO_ROW, 0)],
             residual_memo: state.residual_memo,
             domain_support_cache: DomainSupportCache::default(),
+            same_tile_parents: SameTileParentMode::from_experiment(),
             #[cfg(any(feature = "local-search-ab", test))]
             incremental_domain: incremental_domain_enabled(),
             #[cfg(any(feature = "local-search-ab", test))]
@@ -1169,9 +1187,15 @@ impl FamilyCompiler {
                         depth,
                         remaining,
                         feasible_piece_mask,
+                        self.same_tile_parents,
                     )
                 } else {
-                    DomainPropagation::compile(catalog, remaining, feasible_piece_mask)
+                    DomainPropagation::compile_with_mode(
+                        catalog,
+                        remaining,
+                        feasible_piece_mask,
+                        self.same_tile_parents,
+                    )
                 };
                 #[cfg(any(feature = "local-search-ab", test))]
                 self.domain_metrics.record_advanced(
@@ -1724,7 +1748,7 @@ mod precomputed_geometry_tests {
             false,
             super::super::packing_hold_projection(&problem),
         );
-        let compile = |incremental| {
+        let compile = |incremental, same_tile_parents| {
             let mut search =
                 GeometrySearch::new(universe, &family, catalog.required_cells(), false)
                     .expect("geometry search");
@@ -1732,6 +1756,7 @@ mod precomputed_geometry_tests {
             assert_eq!(compiler.target_depth, 8);
             assert!(!compiler.resource_authoritative);
             compiler.incremental_domain = incremental;
+            compiler.same_tile_parents = same_tile_parents;
             loop {
                 match compiler.advance(&catalog) {
                     CompileAdvance::Pending => {}
@@ -1748,8 +1773,8 @@ mod precomputed_geometry_tests {
             (identities, metrics)
         };
 
-        let (full, a) = compile(false);
-        let (incremental, b) = compile(true);
+        let (full, a) = compile(false, SameTileParentMode::Scan);
+        let (incremental, b) = compile(true, SameTileParentMode::Scan);
         assert!(
             !full.is_empty(),
             "eight vertical I pieces tile this residual"
@@ -1772,6 +1797,30 @@ mod precomputed_geometry_tests {
         assert_eq!(a.apdp_static_checks, b.apdp_static_checks);
         assert_eq!(a.apdp_static_complete, b.apdp_static_complete);
         assert_eq!(a.apdp_pivot_tightenings, b.apdp_pivot_tightenings);
+
+        let (parent_reuse, c) = compile(false, SameTileParentMode::Reuse);
+        let (combined, d) = compile(true, SameTileParentMode::Reuse);
+        assert_eq!(parent_reuse, full);
+        assert_eq!(combined, full);
+        assert_eq!(a.same_tile_parent_reuses, 0);
+        assert_eq!(b.same_tile_parent_reuses, 0);
+        assert_eq!(a.same_tile_parent_scans, b.same_tile_parent_scans);
+        assert!(c.same_tile_parent_reuses > 0);
+        assert!(c.same_tile_parent_scans < a.same_tile_parent_scans);
+        assert_eq!(
+            a.same_tile_parent_scans,
+            c.same_tile_parent_scans + c.same_tile_parent_reuses
+        );
+        assert_eq!(
+            c,
+            GeometryDomainExperimentTotals {
+                advanced_full_compiles: d.advanced_incremental_compiles,
+                advanced_incremental_compiles: 0,
+                support_cells_reused: 0,
+                support_cells_recomputed: d.support_cells_recomputed + d.support_cells_reused,
+                ..d
+            }
+        );
     }
 
     #[test]

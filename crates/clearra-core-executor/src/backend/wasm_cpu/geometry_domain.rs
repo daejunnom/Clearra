@@ -29,6 +29,8 @@ pub(super) struct DomainCompilation {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct DomainCompileObservation {
     pub support_cells_examined: u64,
+    pub same_tile_parent_scans: u8,
+    pub same_tile_parent_reuses: u8,
     pub apdp_static_check: bool,
     pub apdp_static_complete: bool,
     pub apdp_pivot_tightened: bool,
@@ -38,6 +40,31 @@ pub(super) struct DomainCompileObservation {
 pub(super) enum DomainStatus {
     Supported,
     Empty,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SameTileParentMode {
+    Scan,
+    #[cfg(any(feature = "local-search-ab", test))]
+    Reuse,
+}
+
+impl SameTileParentMode {
+    pub fn from_experiment() -> Self {
+        #[cfg(any(feature = "local-search-ab", test))]
+        {
+            static MODE: std::sync::OnceLock<SameTileParentMode> = std::sync::OnceLock::new();
+            *MODE.get_or_init(|| {
+                if std::env::var("CLEARRA_SAME_TILE_PARENT_REUSE").as_deref() == Ok("1") {
+                    Self::Reuse
+                } else {
+                    Self::Scan
+                }
+            })
+        }
+        #[cfg(not(any(feature = "local-search-ab", test)))]
+        Self::Scan
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -134,6 +161,7 @@ impl DomainSupportCache {
         depth: u8,
         remaining: u64,
         piece_mask: u8,
+        same_tile_parents: SameTileParentMode,
     ) -> DomainCompilation {
         while self
             .ancestors
@@ -147,15 +175,20 @@ impl DomainSupportCache {
             parent.dirty_cells(catalog, remaining, piece_mask)
         });
         let mut cells = [CellSupport::default(); 64];
-        let result =
-            DomainPropagation::compile_with_support(catalog, remaining, piece_mask, |cell| {
+        let result = DomainPropagation::compile_with_support(
+            catalog,
+            remaining,
+            piece_mask,
+            same_tile_parents,
+            |cell| {
                 let support = match parent {
                     Some(parent) if dirty & (1_u64 << cell) == 0 => parent.cells[cell as usize],
                     _ => CellSupport::compile(catalog, cell, remaining, piece_mask),
                 };
                 cells[cell as usize] = support;
                 support
-            });
+            },
+        );
         #[cfg(any(feature = "local-search-ab", test))]
         {
             self.reused_support_cells =
@@ -199,15 +232,34 @@ impl DomainPropagation {
         remaining: u64,
         feasible_piece_mask: u8,
     ) -> DomainCompilation {
-        Self::compile_with_support(catalog, remaining, feasible_piece_mask, |cell| {
-            CellSupport::compile(catalog, cell, remaining, feasible_piece_mask)
-        })
+        Self::compile_with_mode(
+            catalog,
+            remaining,
+            feasible_piece_mask,
+            SameTileParentMode::Scan,
+        )
+    }
+
+    pub fn compile_with_mode(
+        catalog: &GeometryCatalog,
+        remaining: u64,
+        feasible_piece_mask: u8,
+        same_tile_parents: SameTileParentMode,
+    ) -> DomainCompilation {
+        Self::compile_with_support(
+            catalog,
+            remaining,
+            feasible_piece_mask,
+            same_tile_parents,
+            |cell| CellSupport::compile(catalog, cell, remaining, feasible_piece_mask),
+        )
     }
 
     fn compile_with_support(
         catalog: &GeometryCatalog,
         remaining: u64,
         feasible_piece_mask: u8,
+        same_tile_parents: SameTileParentMode,
         mut support_for: impl FnMut(u8) -> CellSupport,
     ) -> DomainCompilation {
         let mut result = Self {
@@ -223,6 +275,13 @@ impl DomainPropagation {
         let mut parents = core::array::from_fn(|index| index as u8);
         #[cfg(any(feature = "local-search-ab", test))]
         let mut observation = DomainCompileObservation::default();
+        #[cfg(any(feature = "local-search-ab", test))]
+        let mut support_counts = match same_tile_parents {
+            SameTileParentMode::Scan => None,
+            SameTileParentMode::Reuse => Some([0_u32; 64]),
+        };
+        #[cfg(not(any(feature = "local-search-ab", test)))]
+        let _ = same_tile_parents;
 
         let mut cells = remaining;
         while cells != 0 {
@@ -232,6 +291,10 @@ impl DomainPropagation {
             let support_count = support.count as usize;
             cell_piece_masks[cell as usize] = support.pieces;
             common_owner_cells[cell as usize] = support.common_owner_cells;
+            #[cfg(any(feature = "local-search-ab", test))]
+            if let Some(counts) = support_counts.as_mut() {
+                counts[cell as usize] = support.count;
+            }
             if support_count == 0 {
                 #[cfg(any(feature = "local-search-ab", test))]
                 {
@@ -296,8 +359,25 @@ impl DomainPropagation {
                     observation,
                 };
             }
-            let (count, piece_mask) =
-                exact_parent_rows(catalog, remaining, feasible_piece_mask, required, false);
+            #[cfg(any(feature = "local-search-ab", test))]
+            let from_summary = support_counts.as_ref().and_then(|counts| {
+                same_tile_parent_summary(required, &common_owner_cells, counts, &cell_piece_masks)
+            });
+            #[cfg(not(any(feature = "local-search-ab", test)))]
+            let from_summary = None;
+            let (count, piece_mask) = if let Some(summary) = from_summary {
+                #[cfg(any(feature = "local-search-ab", test))]
+                {
+                    observation.same_tile_parent_reuses += 1;
+                }
+                summary
+            } else {
+                #[cfg(any(feature = "local-search-ab", test))]
+                {
+                    observation.same_tile_parent_scans += 1;
+                }
+                exact_parent_rows(catalog, remaining, feasible_piece_mask, required, false)
+            };
             if count == 0 {
                 result.pivot_required_cells = required;
                 result.pivot_support_count = 0;
@@ -554,6 +634,27 @@ pub(super) fn row_feasible(
         && feasible_piece_mask & (1_u8 << piece_index(row.piece)) != 0
 }
 
+#[cfg(any(feature = "local-search-ab", test))]
+fn same_tile_parent_summary(
+    required: u64,
+    common_owner_cells: &[u64; 64],
+    counts: &[u32; 64],
+    cell_piece_masks: &[u8; 64],
+) -> Option<(usize, u8)> {
+    let mut members = required;
+    while members != 0 {
+        let cell = members.trailing_zeros() as usize;
+        members &= members - 1;
+        // Every group parent covers this member. Conversely, the member's
+        // exact intersection proves every one of its parents covers the
+        // whole group. A transitive DSU connection alone is not that proof.
+        if counts[cell] != 0 && common_owner_cells[cell] & required == required {
+            return Some((counts[cell] as usize, cell_piece_masks[cell]));
+        }
+    }
+    None
+}
+
 fn exact_parent_rows(
     catalog: &GeometryCatalog,
     remaining: u64,
@@ -692,6 +793,28 @@ mod tests {
     const LEFT_O: u64 = 0x03 | (0x03 << 10);
     const RIGHT_O: u64 = LEFT_O << 6;
 
+    #[test]
+    fn same_tile_parent_reuse_requires_a_single_member_to_prove_the_group() {
+        let mut common_owners = [0_u64; 64];
+        let mut counts = [0_u32; 64];
+        let mut piece_masks = [0_u8; 64];
+        let required = 0b111;
+        // The two outside cells each require the middle one, but neither
+        // requires the opposite outside cell. DSU connects all three.
+        common_owners[..3].copy_from_slice(&[0b011, 0b010, 0b110]);
+        counts[..3].copy_from_slice(&[4, 6, 2]);
+        piece_masks[..3].copy_from_slice(&[0b1110, 0b1111, 0b0100]);
+        assert_eq!(
+            same_tile_parent_summary(required, &common_owners, &counts, &piece_masks),
+            None
+        );
+        common_owners[2] = required;
+        assert_eq!(
+            same_tile_parent_summary(required, &common_owners, &counts, &piece_masks),
+            Some((2, 0b0100))
+        );
+    }
+
     fn catalog() -> GeometryCatalog {
         GeometryCatalog::compile_build_stage(4, 1 << 4, REMAINING).unwrap()
     }
@@ -730,11 +853,20 @@ mod tests {
         remaining: u64,
         piece_mask: u8,
     ) -> DomainCompilation {
-        let actual = cache.compile(catalog, depth, remaining, piece_mask);
-        let expected =
-            DomainPropagation::compile_with_support(catalog, remaining, piece_mask, |cell| {
-                exhaustive_cell_support(catalog, cell, remaining, piece_mask)
-            });
+        let actual = cache.compile(
+            catalog,
+            depth,
+            remaining,
+            piece_mask,
+            SameTileParentMode::Scan,
+        );
+        let expected = DomainPropagation::compile_with_support(
+            catalog,
+            remaining,
+            piece_mask,
+            SameTileParentMode::Scan,
+            |cell| exhaustive_cell_support(catalog, cell, remaining, piece_mask),
+        );
         assert_eq!(
             actual, expected,
             "remaining {remaining:#x}, pieces {piece_mask:#x}"
