@@ -192,6 +192,27 @@ mod error {
             assignments: usize,
             c_coverage_rows: usize,
         },
+        InvalidConcreteAssignmentTemplate,
+        InvalidConcreteCoverageScope,
+        InvalidConcreteCoverageLimits,
+        ConcreteAssignmentSearchIncomplete,
+        ConcreteCoverageStorageUnavailable,
+        AmbiguousConcreteAssignment,
+        IncompleteConcreteCoverageRow {
+            row: usize,
+        },
+        ConcreteCoverageScopeMismatch {
+            row: usize,
+        },
+        ForeignConcreteCoverageRow {
+            row: usize,
+        },
+        DuplicateConcreteCoverageRow {
+            assignment: usize,
+        },
+        MissingConcreteCoverageRow {
+            assignment: usize,
+        },
         Matrix(BuildCoverageMatrixError),
         Weights(WeightedPatternSetError),
         Probability(UnionProbabilityError),
@@ -305,10 +326,50 @@ mod execution_builder {
         coverage_identity_factory::coverage_identity_for_query_or_rows,
         coverage_row_validator::validate_c_coverage_rows,
         row_coverage_extractor::coverage_for_assignments,
-        BuildCoverageExecution, BuildCoverageExecutionError,
+        verified_assignment_coverage::{join_verified_rows, validate_verified_query},
+        BuildCoverageExecution, BuildCoverageExecutionError, ConcreteAssignmentCoverageRow,
+        ConcreteCoverageScope,
     };
 
     impl BuildCoverageExecution {
+        /// Reduces complete, independently verified queue rows by concrete
+        /// assignment identity. Every solved assignment needs an explicit
+        /// row, including an exact empty row. The provider's scope must be
+        /// resolved from the request, not inferred from the first row.
+        ///
+        /// This uses the legacy uniform denominator and does not execute or
+        /// certify physical reachability. Neither native candidate IDs nor
+        /// per-color union masks can stand in for exact assignment identity.
+        pub fn from_verified_concrete_assignment_rows(
+            query: &BuildCoverageQuery,
+            expected_scope: ConcreteCoverageScope,
+            rows: Vec<ConcreteAssignmentCoverageRow>,
+        ) -> Result<Self, BuildCoverageExecutionError> {
+            let template = validate_verified_query(query, expected_scope)?;
+            let exact = solve_exact_cover(query)?;
+            if !exact.complete {
+                return Err(BuildCoverageExecutionError::ConcreteAssignmentSearchIncomplete);
+            }
+            if exact.assignments.is_empty() {
+                return Err(BuildCoverageExecutionError::NoAssignments);
+            }
+            let matrix = join_verified_rows(
+                template,
+                &exact.assignments,
+                query.pattern_count(),
+                expected_scope,
+                rows,
+            )?;
+            finish_execution(
+                query,
+                exact.assignments,
+                true,
+                exact.searched_nodes,
+                0,
+                matrix,
+            )
+        }
+
         pub fn from_c_buildup_rows(
             query: &BuildCoverageQuery,
             rows: &[CoverageRow],
@@ -431,9 +492,14 @@ mod stable_identity {
         }
     }
 }
+#[path = "verified_assignment_coverage.rs"]
+mod verified_assignment_coverage;
 
 pub use error::BuildCoverageExecutionError;
 pub use execution::BuildCoverageExecution;
+pub use verified_assignment_coverage::{
+    ConcreteAssignmentCoverageRow, ConcreteCoverageCompleteness, ConcreteCoverageScope,
+};
 
 #[cfg(test)]
 use clearra_coverage::{
