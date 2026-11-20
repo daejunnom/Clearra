@@ -493,10 +493,12 @@ pub(super) fn checked_compiler_completion_future_bytes(
 ) -> Option<u128> {
     (u128::from(node_count) + 2)
         .checked_mul(core::mem::size_of::<u128>() as u128)?
-        .checked_add(
-            (target_count as u128)
-                .checked_mul(2 * core::mem::size_of::<GeometryTarget>() as u128)?,
-        )?
+        .checked_add(checked_enumerator_ownership_future_bytes(target_count)?)
+}
+
+fn checked_enumerator_ownership_future_bytes(target_count: usize) -> Option<u128> {
+    (target_count as u128)
+        .checked_mul(2 * core::mem::size_of::<GeometryTarget>() as u128)?
         .checked_add(4 * core::mem::size_of::<TraversalTask>() as u128 + 64)
 }
 
@@ -936,7 +938,7 @@ impl ExtendedGeometrySearch {
 
     #[cfg(test)]
     pub fn advance(&mut self, catalog: &ExtendedInverseCatalog) -> ExtendedGeometryAdvance {
-        self.advance_with_node_budget(catalog, None, None)
+        self.advance_with_node_budget(catalog, None, None, false)
             .expect("unbounded Geometry does not perform memory admission")
     }
 
@@ -949,6 +951,17 @@ impl ExtendedGeometrySearch {
         node_budget: Option<&SharedExecutionNodeBudget>,
         bound: ExecutionMemoryBound,
         coexisting_bytes: u128,
+    ) -> Result<ExtendedGeometryAdvance, WasmExactSearchError> {
+        self.advance_bounded_with_count_policy(catalog, node_budget, bound, coexisting_bytes, false)
+    }
+
+    fn advance_bounded_with_count_policy(
+        &mut self,
+        catalog: &ExtendedInverseCatalog,
+        node_budget: Option<&SharedExecutionNodeBudget>,
+        bound: ExecutionMemoryBound,
+        coexisting_bytes: u128,
+        defer_path_count: bool,
     ) -> Result<ExtendedGeometryAdvance, WasmExactSearchError> {
         let family_base = if let Some(compiler) = self.compiler.as_mut() {
             Some(
@@ -992,8 +1005,12 @@ impl ExtendedGeometrySearch {
         } else {
             None
         };
-        let result =
-            self.advance_with_node_budget(catalog, node_budget, Some((bound, coexisting_bytes)))?;
+        let result = self.advance_with_node_budget(
+            catalog,
+            node_budget,
+            Some((bound, coexisting_bytes)),
+            defer_path_count,
+        )?;
         let refused = self
             .compiler
             .as_ref()
@@ -1025,11 +1042,12 @@ impl ExtendedGeometrySearch {
         Ok(result)
     }
 
-    pub(super) fn advance_with_node_budget(
+    fn advance_with_node_budget(
         &mut self,
         catalog: &ExtendedInverseCatalog,
         node_budget: Option<&SharedExecutionNodeBudget>,
         completion_bound: Option<(ExecutionMemoryBound, u128)>,
+        defer_path_count: bool,
     ) -> Result<ExtendedGeometryAdvance, WasmExactSearchError> {
         if let Some(compiler) = self.dense_compiler.as_mut() {
             let Some(dense_catalog) = catalog.dense_geometry() else {
@@ -1060,9 +1078,12 @@ impl ExtendedGeometrySearch {
                             .checked_add(self.pattern_index_bytes as u128)
                             .and_then(|bytes| bytes.checked_add(compiler.retained_bytes() as u128))
                             .ok_or_else(memory_projection_error)?;
-                        let future = compiler
-                            .checked_completion_future_bytes()
-                            .ok_or_else(memory_projection_error)?;
+                        let future = if defer_path_count {
+                            checked_enumerator_ownership_future_bytes(compiler.targets().len())
+                        } else {
+                            compiler.checked_completion_future_bytes()
+                        }
+                        .ok_or_else(memory_projection_error)?;
                         bound
                             .ensure(observed, future)
                             .map_err(WasmExactSearchError::resource_admission)?;
@@ -1072,7 +1093,9 @@ impl ExtendedGeometrySearch {
                         .dense_compiler
                         .take()
                         .expect("dense extended compiler exists");
-                    self.candidate_family_count = compiler.candidate_family_count();
+                    if !defer_path_count {
+                        self.candidate_family_count = compiler.candidate_family_count();
+                    }
                     let (targets, family, root_family, target_depth) = compiler.into_parts();
                     self.enumerator = Some(ExtendedFamilyEnumerator::new(
                         targets,
@@ -1108,10 +1131,14 @@ impl ExtendedGeometrySearch {
                             .checked_add(self.pattern_index_bytes as u128)
                             .and_then(|bytes| bytes.checked_add(compiler.retained_bytes() as u128))
                             .ok_or_else(memory_projection_error)?;
-                        let future = checked_compiler_completion_future_bytes(
-                            compiler.family.node_count(),
-                            compiler.targets.len(),
-                        )
+                        let future = if defer_path_count {
+                            checked_enumerator_ownership_future_bytes(compiler.targets.len())
+                        } else {
+                            checked_compiler_completion_future_bytes(
+                                compiler.family.node_count(),
+                                compiler.targets.len(),
+                            )
+                        }
                         .ok_or_else(memory_projection_error)?;
                         bound
                             .ensure(observed, future)
@@ -1119,7 +1146,10 @@ impl ExtendedGeometrySearch {
                     }
                     self.observe_compiler_metrics();
                     let compiler = self.compiler.take().expect("extended compiler exists");
-                    self.candidate_family_count = compiler.family.path_count(compiler.root_family);
+                    if !defer_path_count {
+                        self.candidate_family_count =
+                            compiler.family.path_count(compiler.root_family);
+                    }
                     self.enumerator = Some(compiler.into_enumerator());
                     return Ok(ExtendedGeometryAdvance::Pending);
                 }

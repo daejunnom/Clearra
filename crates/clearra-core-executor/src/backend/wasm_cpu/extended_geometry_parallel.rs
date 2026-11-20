@@ -223,34 +223,22 @@ impl ExtendedGeometrySearch {
             .map_err(|_| storage_error())?;
         let mut ordinal = 0_u128;
         for seed in seeds {
-            let mut tasks = Vec::new();
-            tasks.try_reserve_exact(1).map_err(|_| storage_error())?;
-            tasks.push(seed.task);
-            branches.push(ExtendedParallelGeometryBranch {
-                enumerator: ExtendedFamilyEnumerator {
-                    targets: Arc::clone(&enumerator.targets),
-                    family: Arc::clone(&enumerator.family),
-                    tasks,
-                    rows: seed.rows,
-                    target_depth: enumerator.target_depth,
-                    task_memory_limit: None,
-                    refused_task_bytes: None,
-                },
-                first_ordinal: ordinal,
-                candidate_count: seed.weight,
-            });
-            ordinal =
-                ordinal
-                    .checked_add(seed.weight)
-                    .ok_or(WasmExactSearchError::InvalidProblem(
-                        "extended_parallel_geometry_count_overflow",
-                    ))?;
+            append_branch(enumerator, &mut branches, &mut ordinal, seed)?;
         }
+        self.seal_parallel_plan(branches, ordinal).map(Some)
+    }
+
+    fn seal_parallel_plan(
+        &mut self,
+        branches: Vec<ExtendedParallelGeometryBranch>,
+        ordinal: u128,
+    ) -> Result<ExtendedParallelGeometryPlan, WasmExactSearchError> {
         if Some(ordinal) != self.candidate_family_count {
             return Err(WasmExactSearchError::InvalidProblem(
                 "extended_parallel_geometry_split_count_mismatch",
             ));
         }
+        let enumerator = self.enumerator.as_ref().ok_or_else(traversal_error)?;
         let plan = ExtendedParallelGeometryPlan {
             branches,
             targets: Arc::clone(&enumerator.targets),
@@ -260,8 +248,38 @@ impl ExtendedGeometrySearch {
         };
         self.enumerator = None;
         self.pattern_index_bytes = 0;
-        Ok(Some(plan))
+        Ok(plan)
     }
+}
+
+fn append_branch(
+    enumerator: &ExtendedFamilyEnumerator,
+    branches: &mut Vec<ExtendedParallelGeometryBranch>,
+    ordinal: &mut u128,
+    seed: Seed,
+) -> Result<(), WasmExactSearchError> {
+    let mut tasks = Vec::new();
+    tasks.try_reserve_exact(1).map_err(|_| storage_error())?;
+    tasks.push(seed.task);
+    branches.push(ExtendedParallelGeometryBranch {
+        enumerator: ExtendedFamilyEnumerator {
+            targets: Arc::clone(&enumerator.targets),
+            family: Arc::clone(&enumerator.family),
+            tasks,
+            rows: seed.rows,
+            target_depth: enumerator.target_depth,
+            task_memory_limit: None,
+            refused_task_bytes: None,
+        },
+        first_ordinal: *ordinal,
+        candidate_count: seed.weight,
+    });
+    *ordinal = ordinal
+        .checked_add(seed.weight)
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "extended_parallel_geometry_count_overflow",
+        ))?;
+    Ok(())
 }
 
 fn split_seed(
@@ -270,51 +288,72 @@ fn split_seed(
     mut seed: Seed,
 ) -> Result<Option<(Seed, Seed)>, WasmExactSearchError> {
     loop {
-        match seed.task.family {
-            FAMILY_INVALID => return Ok(None),
-            FAMILY_EMPTY => {
-                if seed.task.continuation_count == 0 {
-                    return Ok(None);
-                }
-                seed.task.continuation_count -= 1;
-                seed.task.family =
-                    seed.task.continuations[usize::from(seed.task.continuation_count)];
+        match advance_split_seed(family, counts, &mut seed)? {
+            SplitSeedAdvance::Pending => {}
+            SplitSeedAdvance::Unsplittable => return Ok(None),
+            SplitSeedAdvance::Split(left, right) => return Ok(Some((left, right))),
+        }
+    }
+}
+
+// Two seed summaries are temporary, bounded stack values (each has two arrays
+// of exactly MAX_EXTENDED_PIECES entries).
+#[allow(clippy::large_enum_variant)]
+enum SplitSeedAdvance {
+    Pending,
+    Unsplittable,
+    Split(Seed, Seed),
+}
+
+fn advance_split_seed(
+    family: &GeometrySolutionFamily,
+    counts: &[u128],
+    seed: &mut Seed,
+) -> Result<SplitSeedAdvance, WasmExactSearchError> {
+    match seed.task.family {
+        FAMILY_INVALID => return Ok(SplitSeedAdvance::Unsplittable),
+        FAMILY_EMPTY => {
+            if seed.task.continuation_count == 0 {
+                return Ok(SplitSeedAdvance::Unsplittable);
             }
-            reference => {
-                let node = family.node(reference).ok_or_else(traversal_error)?;
-                match node.kind {
-                    FamilyNodeKind::Append => {
-                        let row = seed
-                            .rows
-                            .get_mut(usize::from(seed.task.depth))
-                            .ok_or_else(traversal_error)?;
-                        *row = node.row_id;
-                        seed.task.depth += 1;
-                        seed.task.family = node.left;
-                    }
-                    FamilyNodeKind::Union => {
-                        let mut left = seed;
-                        let mut right = seed;
-                        left.task.family = node.left;
-                        right.task.family = node.right;
-                        left.weight = traversal_weight(left.task, counts)?;
-                        right.weight = traversal_weight(right.task, counts)?;
-                        return Ok(Some((left, right)));
-                    }
-                    FamilyNodeKind::Product => {
-                        let continuation = seed
-                            .task
-                            .continuations
-                            .get_mut(usize::from(seed.task.continuation_count))
-                            .ok_or_else(traversal_error)?;
-                        *continuation = node.right;
-                        seed.task.continuation_count += 1;
-                        seed.task.family = node.left;
-                    }
+            seed.task.continuation_count -= 1;
+            seed.task.family = seed.task.continuations[usize::from(seed.task.continuation_count)];
+        }
+        reference => {
+            let node = family.node(reference).ok_or_else(traversal_error)?;
+            match node.kind {
+                FamilyNodeKind::Append => {
+                    let row = seed
+                        .rows
+                        .get_mut(usize::from(seed.task.depth))
+                        .ok_or_else(traversal_error)?;
+                    *row = node.row_id;
+                    seed.task.depth += 1;
+                    seed.task.family = node.left;
+                }
+                FamilyNodeKind::Union => {
+                    let mut left = *seed;
+                    let mut right = *seed;
+                    left.task.family = node.left;
+                    right.task.family = node.right;
+                    left.weight = traversal_weight(left.task, counts)?;
+                    right.weight = traversal_weight(right.task, counts)?;
+                    return Ok(SplitSeedAdvance::Split(left, right));
+                }
+                FamilyNodeKind::Product => {
+                    let continuation = seed
+                        .task
+                        .continuations
+                        .get_mut(usize::from(seed.task.continuation_count))
+                        .ok_or_else(traversal_error)?;
+                    *continuation = node.right;
+                    seed.task.continuation_count += 1;
+                    seed.task.family = node.left;
                 }
             }
         }
     }
+    Ok(SplitSeedAdvance::Pending)
 }
 
 fn traversal_weight(task: TraversalTask, counts: &[u128]) -> Result<u128, WasmExactSearchError> {
@@ -341,6 +380,374 @@ fn storage_error() -> WasmExactSearchError {
 
 fn traversal_error() -> WasmExactSearchError {
     WasmExactSearchError::InvalidProblem("extended_parallel_geometry_family_invalid")
+}
+
+// Until a request owner can drive its worker waves, keep the new preparation
+// private to Core conformance. Native direct and distributed callers continue
+// to use take_parallel_plan without entering this cursor.
+#[cfg(test)]
+mod cooperative {
+    use super::*;
+    use crate::resource::SharedExecutionNodeBudget;
+    use clearra_core_domain::execution_cancellation::ExecutionControl;
+    use core::mem::size_of;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum PreparationStatus {
+        Pending,
+        Ready,
+        Cancelled,
+        ResourceIncomplete(&'static str),
+    }
+
+    #[allow(clippy::large_enum_variant)]
+    enum Phase {
+        Compile,
+        Count,
+        Select { next: usize, best: Option<usize> },
+        Split { index: usize, seed: Seed },
+        Emit { index: usize, ordinal: u128 },
+        Done,
+        Stopped,
+    }
+
+    pub(super) struct Preparation {
+        geometry: ExtendedGeometrySearch,
+        catalog: Arc<ExtendedInverseCatalog>,
+        desired: usize,
+        phase: Phase,
+        counts: Vec<u128>,
+        seeds: Vec<Seed>,
+        branches: Vec<ExtendedParallelGeometryBranch>,
+        ready: Option<ExtendedParallelGeometryPlan>,
+        // Once an emitted branch clones the Arcs, retain the original
+        // Geometry charge rather than relying on its Arc strong-count check.
+        frozen_geometry_bytes: u128,
+        scratch_credit: u128,
+    }
+
+    impl Preparation {
+        pub(super) fn new(
+            geometry: ExtendedGeometrySearch,
+            catalog: Arc<ExtendedInverseCatalog>,
+            desired: usize,
+        ) -> Result<Self, WasmExactSearchError> {
+            if geometry.external_targets.is_some() || geometry.candidate_count != 0 {
+                return Err(traversal_error());
+            }
+            Ok(Self {
+                geometry,
+                catalog,
+                desired: desired.max(1),
+                phase: Phase::Compile,
+                counts: Vec::new(),
+                seeds: Vec::new(),
+                branches: Vec::new(),
+                ready: None,
+                frozen_geometry_bytes: 0,
+                scratch_credit: 0,
+            })
+        }
+
+        pub(super) fn advance(
+            &mut self,
+            node_budget: Option<&SharedExecutionNodeBudget>,
+            bound: ExecutionMemoryBound,
+            outside: u128,
+            budget: usize,
+            control: &ExecutionControl,
+        ) -> Result<(PreparationStatus, usize), WasmExactSearchError> {
+            let outside = outside
+                .checked_add(size_of::<Self>() as u128)
+                .ok_or_else(preparation_projection_error)?;
+            let mut used = 0;
+            loop {
+                if control.is_cancelled() {
+                    self.phase = Phase::Stopped;
+                    return Ok((PreparationStatus::Cancelled, used));
+                }
+                if !matches!(&self.phase, Phase::Compile | Phase::Stopped) {
+                    if let Err(error) = self.check_scratch(bound, outside, 0) {
+                        self.phase = Phase::Stopped;
+                        return Err(error);
+                    }
+                }
+                match &self.phase {
+                    Phase::Done => return Ok((PreparationStatus::Ready, used)),
+                    Phase::Stopped => return Err(traversal_error()),
+                    _ => {}
+                }
+                if used == budget {
+                    return Ok((PreparationStatus::Pending, used));
+                }
+                used += 1;
+                if let Some(reason) = self.step(node_budget, bound, outside)? {
+                    return Ok((PreparationStatus::ResourceIncomplete(reason), used));
+                }
+            }
+        }
+
+        pub(super) fn into_result(
+            self,
+        ) -> Result<
+            (ExtendedGeometrySearch, Option<ExtendedParallelGeometryPlan>),
+            WasmExactSearchError,
+        > {
+            if !matches!(self.phase, Phase::Done) {
+                return Err(traversal_error());
+            }
+            Ok((self.geometry, self.ready))
+        }
+
+        fn step(
+            &mut self,
+            node_budget: Option<&SharedExecutionNodeBudget>,
+            bound: ExecutionMemoryBound,
+            outside: u128,
+        ) -> Result<Option<&'static str>, WasmExactSearchError> {
+            let phase = core::mem::replace(&mut self.phase, Phase::Stopped);
+            self.phase = match phase {
+                Phase::Compile if self.geometry.is_compiling() => {
+                    match self.geometry.advance_bounded_with_count_policy(
+                        &self.catalog,
+                        node_budget,
+                        bound,
+                        outside,
+                        true,
+                    )? {
+                        ExtendedGeometryAdvance::Pending => Phase::Compile,
+                        ExtendedGeometryAdvance::ResourceIncomplete(reason) => {
+                            return Ok(Some(reason));
+                        }
+                        _ => return Err(traversal_error()),
+                    }
+                }
+                Phase::Compile => {
+                    let Some(enumerator) = self.geometry.enumerator.as_ref() else {
+                        self.phase = Phase::Done;
+                        return Ok(None);
+                    };
+                    if enumerator.tasks.is_empty() {
+                        self.geometry.candidate_family_count = Some(0);
+                        self.phase = Phase::Done;
+                        return Ok(None);
+                    }
+                    if enumerator.tasks.len() != 1 {
+                        return Err(traversal_error());
+                    }
+                    let entries = count_entries(&enumerator.family)?;
+                    self.frozen_geometry_bytes = (self.geometry.retained_bytes() as u128)
+                        .checked_add(if Arc::strong_count(&enumerator.family) == 1 {
+                            0
+                        } else {
+                            enumerator.family.retained_bytes() as u128
+                        })
+                        .and_then(|bytes| {
+                            bytes.checked_add(if Arc::strong_count(&enumerator.targets) == 1 {
+                                0
+                            } else {
+                                core::mem::size_of_val(enumerator.targets.as_ref()) as u128
+                            })
+                        })
+                        .ok_or_else(preparation_projection_error)?;
+                    let count_bytes = (entries as u128) * size_of::<u128>() as u128;
+                    self.check_scratch(bound, outside, count_bytes)?;
+                    self.counts
+                        .try_reserve_exact(entries)
+                        .map_err(|_| storage_error())?;
+                    self.counts.extend([0, 1]);
+                    self.scratch_credit =
+                        self.counts.capacity() as u128 * size_of::<u128>() as u128;
+                    self.check_scratch(bound, outside, 0)?;
+                    Phase::Count
+                }
+                Phase::Count => {
+                    let enumerator = self
+                        .geometry
+                        .enumerator
+                        .as_ref()
+                        .ok_or_else(traversal_error)?;
+                    if self.counts.len() < count_entries(&enumerator.family)? {
+                        let reference = u32::try_from(self.counts.len())
+                            .map_err(|_| preparation_projection_error())?;
+                        let count = enumerator
+                            .family
+                            .path_count_for_reference(reference, &self.counts)
+                            .ok_or_else(count_unavailable)?;
+                        self.counts.push(count);
+                        Phase::Count
+                    } else {
+                        let task = enumerator.tasks[0];
+                        let rows = enumerator.rows;
+                        let weight = traversal_weight(task, &self.counts)?;
+                        if self
+                            .geometry
+                            .candidate_family_count
+                            .is_some_and(|known| known != weight)
+                        {
+                            return Err(traversal_error());
+                        }
+                        self.geometry.candidate_family_count = Some(weight);
+                        if weight == 0 {
+                            self.phase = Phase::Done;
+                            return Ok(None);
+                        }
+                        self.desired = self
+                            .desired
+                            .min(usize::try_from(weight).unwrap_or(usize::MAX));
+                        let layouts = (size_of::<Seed>()
+                            + size_of::<ExtendedParallelGeometryBranch>()
+                            + size_of::<TraversalTask>())
+                            as u128;
+                        let future = (self.desired as u128)
+                            .checked_mul(layouts)
+                            .and_then(|bytes| bytes.checked_add(64))
+                            .ok_or_else(preparation_projection_error)?;
+                        self.check_scratch(bound, outside, future)?;
+                        self.seeds
+                            .try_reserve_exact(self.desired)
+                            .map_err(|_| storage_error())?;
+                        self.branches
+                            .try_reserve_exact(self.desired)
+                            .map_err(|_| storage_error())?;
+                        self.scratch_credit = self
+                            .scratch_credit
+                            .checked_add(self.seeds.capacity() as u128 * size_of::<Seed>() as u128)
+                            .and_then(|bytes| {
+                                bytes.checked_add(
+                                    self.branches.capacity() as u128
+                                        * (size_of::<ExtendedParallelGeometryBranch>()
+                                            + size_of::<TraversalTask>())
+                                            as u128,
+                                )
+                            })
+                            .and_then(|bytes| bytes.checked_add(64))
+                            .ok_or_else(preparation_projection_error)?;
+                        self.check_scratch(bound, outside, 0)?;
+                        self.seeds.push(Seed {
+                            task,
+                            rows,
+                            weight,
+                            splittable: true,
+                        });
+                        Phase::Select {
+                            next: 0,
+                            best: None,
+                        }
+                    }
+                }
+                Phase::Select { next, mut best } => {
+                    if self.seeds.len() == self.desired {
+                        Phase::Emit {
+                            index: 0,
+                            ordinal: 0,
+                        }
+                    } else if let Some(seed) = self.seeds.get(next) {
+                        // Same tie rule as max_by_key: the last maximum wins.
+                        if seed.splittable
+                            && best.is_none_or(|index| self.seeds[index].weight <= seed.weight)
+                        {
+                            best = Some(next);
+                        }
+                        Phase::Select {
+                            next: next + 1,
+                            best,
+                        }
+                    } else {
+                        match best {
+                            Some(index) => Phase::Split {
+                                index,
+                                seed: self.seeds[index],
+                            },
+                            None => Phase::Emit {
+                                index: 0,
+                                ordinal: 0,
+                            },
+                        }
+                    }
+                }
+                Phase::Split { index, mut seed } => {
+                    let enumerator = self
+                        .geometry
+                        .enumerator
+                        .as_ref()
+                        .ok_or_else(traversal_error)?;
+                    match advance_split_seed(&enumerator.family, &self.counts, &mut seed)? {
+                        SplitSeedAdvance::Pending => Phase::Split { index, seed },
+                        SplitSeedAdvance::Unsplittable => {
+                            self.seeds[index].splittable = false;
+                            Phase::Select {
+                                next: 0,
+                                best: None,
+                            }
+                        }
+                        SplitSeedAdvance::Split(left, right) => {
+                            self.seeds[index] = left;
+                            self.seeds.insert(index + 1, right);
+                            Phase::Select {
+                                next: 0,
+                                best: None,
+                            }
+                        }
+                    }
+                }
+                Phase::Emit { index, mut ordinal } => {
+                    if let Some(&seed) = self.seeds.get(index) {
+                        let enumerator = self
+                            .geometry
+                            .enumerator
+                            .as_ref()
+                            .ok_or_else(traversal_error)?;
+                        append_branch(enumerator, &mut self.branches, &mut ordinal, seed)?;
+                        Phase::Emit {
+                            index: index + 1,
+                            ordinal,
+                        }
+                    } else {
+                        self.ready = Some(
+                            self.geometry
+                                .seal_parallel_plan(core::mem::take(&mut self.branches), ordinal)?,
+                        );
+                        Phase::Done
+                    }
+                }
+                _ => return Err(traversal_error()),
+            };
+            Ok(None)
+        }
+
+        fn check_scratch(
+            &self,
+            bound: ExecutionMemoryBound,
+            outside: u128,
+            future: u128,
+        ) -> Result<(), WasmExactSearchError> {
+            let live = outside
+                .checked_add(self.frozen_geometry_bytes)
+                .and_then(|bytes| bytes.checked_add(self.scratch_credit))
+                .ok_or_else(preparation_projection_error)?;
+            bound
+                .ensure(live, future)
+                .map_err(WasmExactSearchError::resource_admission)
+        }
+    }
+
+    fn count_entries(family: &GeometrySolutionFamily) -> Result<usize, WasmExactSearchError> {
+        usize::try_from(family.node_count())
+            .ok()
+            .and_then(|count| count.checked_add(2))
+            .ok_or_else(preparation_projection_error)
+    }
+
+    fn count_unavailable() -> WasmExactSearchError {
+        WasmExactSearchError::InvalidProblem("extended_parallel_geometry_count_unavailable")
+    }
+
+    fn preparation_projection_error() -> WasmExactSearchError {
+        WasmExactSearchError::InvalidProblem(
+            "extended_parallel_geometry_memory_projection_overflow",
+        )
+    }
 }
 
 #[cfg(test)]

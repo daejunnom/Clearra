@@ -166,15 +166,21 @@ impl GeometrySolutionFamily {
         counts.resize(value_count, 0_u128);
         counts[FAMILY_EMPTY as usize] = 1;
         for reference in 2..self.node_count + 2 {
-            let node = self.node(reference)?;
-            let left = *counts.get(node.left as usize)?;
-            counts[reference as usize] = match node.kind {
-                FamilyNodeKind::Append => left,
-                FamilyNodeKind::Union => left.checked_add(*counts.get(node.right as usize)?)?,
-                FamilyNodeKind::Product => left.checked_mul(*counts.get(node.right as usize)?)?,
-            };
+            counts[reference as usize] = self.path_count_for_reference(reference, &counts)?;
         }
         Some(counts)
+    }
+
+    /// Direct and resumable owners use the same checked DAG recurrence.
+    /// A resumable owner supplies only the already counted prefix.
+    pub(super) fn path_count_for_reference(&self, reference: u32, counts: &[u128]) -> Option<u128> {
+        let node = self.node(reference)?;
+        let left = *counts.get(node.left as usize)?;
+        match node.kind {
+            FamilyNodeKind::Append => Some(left),
+            FamilyNodeKind::Union => left.checked_add(*counts.get(node.right as usize)?),
+            FamilyNodeKind::Product => left.checked_mul(*counts.get(node.right as usize)?),
+        }
     }
 
     pub fn checkpoint(&self) -> FamilyCheckpoint {

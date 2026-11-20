@@ -60,6 +60,7 @@ jobs:
             compact_kick_authority::
             candidate_projection_clear_fact_reuse_ distributed_pc2_replay_ compact_pc2_
             family_root_count_ family_handoff_ prepared_parallel_family_
+            extended_parallel_cooperative_preparation_
             split_family_traversal_matches_serial_geometry_on_small_search
             capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_
             candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move

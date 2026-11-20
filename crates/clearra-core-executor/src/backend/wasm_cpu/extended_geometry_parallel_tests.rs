@@ -15,6 +15,30 @@ fn fixture(
     ExtendedInverseCatalog,
     ExtendedGeometrySearch,
 ) {
+    let (problem, catalog, mut geometry) = uncompiled_fixture(height);
+    for _ in 0..100_000 {
+        if !geometry.is_compiling() {
+            break;
+        }
+        assert!(matches!(
+            geometry.advance(&catalog),
+            ExtendedGeometryAdvance::Pending
+        ));
+    }
+    assert!(
+        !geometry.is_compiling(),
+        "the two-solution fixture is bounded, not a large empty-height run"
+    );
+    (problem, catalog, geometry)
+}
+
+fn uncompiled_fixture(
+    height: u8,
+) -> (
+    SearchProblem,
+    ExtendedInverseCatalog,
+    ExtendedGeometrySearch,
+) {
     let mut holes = Board256Mask::EMPTY;
     for y in 0..4 {
         for x in 0..4 {
@@ -52,20 +76,7 @@ fn fixture(
         false,
         crate::backend::wasm_cpu::packing_hold_projection(&problem),
     );
-    let mut geometry = ExtendedGeometrySearch::new(universe, &family, &catalog).unwrap();
-    for _ in 0..100_000 {
-        if !geometry.is_compiling() {
-            break;
-        }
-        assert!(matches!(
-            geometry.advance(&catalog),
-            ExtendedGeometryAdvance::Pending
-        ));
-    }
-    assert!(
-        !geometry.is_compiling(),
-        "the two-solution fixture is bounded, not a large empty-height run"
-    );
+    let geometry = ExtendedGeometrySearch::new(universe, &family, &catalog).unwrap();
     (problem, catalog, geometry)
 }
 
@@ -228,8 +239,12 @@ fn extended_parallel_real_family_preserves_disjoint_ordered_intervals_and_shared
     }
 }
 
-#[test]
-fn extended_parallel_product_splits_preserve_sixty_row_prefix_and_continuations() {
+fn sixty_row_product_fixture() -> (
+    SearchProblem,
+    ExtendedInverseCatalog,
+    ExtendedGeometrySearch,
+    u32,
+) {
     let (problem, catalog, mut geometry) = fixture(24);
     let mut target = geometry.enumerator.as_ref().unwrap().targets[0].clone();
     target.counts = [0; 7];
@@ -262,6 +277,12 @@ fn extended_parallel_product_splits_preserve_sixty_row_prefix_and_continuations(
         60,
     ));
     geometry.candidate_family_count = Some(16);
+    (problem, catalog, geometry, ids[0])
+}
+
+#[test]
+fn extended_parallel_product_splits_preserve_sixty_row_prefix_and_continuations() {
+    let (problem, catalog, mut geometry, prefix_id) = sixty_row_product_fixture();
     let enumerator = geometry.enumerator.as_ref().unwrap();
     let serial = rows(
         ExtendedFamilyEnumerator {
@@ -286,7 +307,7 @@ fn extended_parallel_product_splits_preserve_sixty_row_prefix_and_continuations(
         let before = actual.len();
         while let Some(candidate) = branch.next_candidate(&catalog, bound, 0).unwrap() {
             assert_eq!(candidate.row_ids().len(), 60);
-            assert_eq!(&candidate.row_ids()[..52], vec![ids[0]; 52].as_slice());
+            assert_eq!(&candidate.row_ids()[..52], &[prefix_id; 52]);
             actual.push(candidate.row_ids().to_vec());
         }
         assert_eq!((actual.len() - before) as u128, branch.candidate_count);
@@ -294,6 +315,107 @@ fn extended_parallel_product_splits_preserve_sixty_row_prefix_and_continuations(
     }
     assert_eq!(ordinal, 16);
     assert_eq!(actual, serial);
+}
+
+#[test]
+fn extended_parallel_cooperative_preparation_budgets_real_and_sixty_row_ordinal_splits() {
+    use super::cooperative::{Preparation, PreparationStatus};
+    use clearra_core_domain::execution_cancellation::ExecutionControl;
+
+    for (problem, catalog, baseline, unconsumed, partitions, minimum_yields) in [
+        {
+            let (problem, catalog, baseline) = fixture(24);
+            let (_, _, unconsumed) = uncompiled_fixture(24);
+            (problem, catalog, baseline, unconsumed, 2, 10)
+        },
+        {
+            let (problem, catalog, baseline, _) = sixty_row_product_fixture();
+            let (_, _, unconsumed, _) = sixty_row_product_fixture();
+            (problem, catalog, baseline, unconsumed, 11, 60)
+        },
+    ] {
+        let serial = rows(baseline.enumerator.unwrap(), &catalog);
+        let bound = ExecutionMemoryBound::unbounded_for_problem(&problem).unwrap();
+        let outside = catalog.retained_bytes() as u128;
+        let control = ExecutionControl::default();
+        let catalog = Arc::new(catalog);
+        let mut prep = Preparation::new(unconsumed, Arc::clone(&catalog), partitions).unwrap();
+        assert_eq!(
+            prep.advance(None, bound, outside, 0, &control).unwrap(),
+            (PreparationStatus::Pending, 0)
+        );
+        let mut yields = 0;
+        let finished = (0..10_000).any(|_| {
+            let (status, used) = prep.advance(None, bound, outside, 1, &control).unwrap();
+            assert_eq!(used, 1, "every nonterminal call spends only its own credit");
+            match status {
+                PreparationStatus::Ready => true,
+                PreparationStatus::Pending => {
+                    yields += 1;
+                    false
+                }
+                other => panic!("unexpected parallel preparation outcome: {other:?}"),
+            }
+        });
+        assert!(finished && yields > minimum_yields);
+        let (mut geometry, plan) = prep.into_result().unwrap();
+        let mut plan = plan.expect("nonempty family plan");
+        assert_eq!(plan.branches.len(), partitions);
+        assert_eq!(plan.candidate_count, serial.len() as u128);
+        let mut actual = Vec::new();
+        let mut ordinal = 0;
+        for branch in &mut plan.branches {
+            assert!(Arc::ptr_eq(&branch.enumerator.family, &plan.family));
+            assert!(Arc::ptr_eq(&branch.enumerator.targets, &plan.targets));
+            assert_eq!(branch.first_ordinal, ordinal);
+            let before = actual.len();
+            while let Some(candidate) = branch.next_candidate(&catalog, bound, 0).unwrap() {
+                actual.push(candidate.row_ids().to_vec());
+            }
+            assert_eq!((actual.len() - before) as u128, branch.candidate_count);
+            ordinal += branch.candidate_count;
+        }
+        assert_eq!(actual, serial);
+        geometry
+            .complete_parallel_enumeration(actual.len())
+            .unwrap();
+    }
+}
+
+#[test]
+fn extended_parallel_cooperative_preparation_withholds_plan_on_cancellation_or_refusal() {
+    use super::cooperative::{Preparation, PreparationStatus};
+    use clearra_core_domain::execution_cancellation::{
+        ExecutionCancellationToken, ExecutionControl,
+    };
+
+    let (problem, catalog, geometry, _) = sixty_row_product_fixture();
+    let bound = ExecutionMemoryBound::unbounded_for_problem(&problem).unwrap();
+    let token = ExecutionCancellationToken::new();
+    let handle = token.handle();
+    let control = ExecutionControl::new(token);
+    let outside = catalog.retained_bytes() as u128;
+    let catalog = Arc::new(catalog);
+    let mut prep = Preparation::new(geometry, Arc::clone(&catalog), 11).unwrap();
+    assert_eq!(
+        prep.advance(None, bound, outside, 5, &control).unwrap(),
+        (PreparationStatus::Pending, 5)
+    );
+    handle.cancel();
+    assert_eq!(
+        prep.advance(None, bound, outside, 1, &control).unwrap(),
+        (PreparationStatus::Cancelled, 0)
+    );
+    assert!(prep.into_result().is_err());
+
+    let (_, _, geometry, _) = sixty_row_product_fixture();
+    let mut prep = Preparation::new(geometry, catalog, 11).unwrap();
+    let control = ExecutionControl::default();
+    assert!(matches!(
+        prep.advance(None, bound.with_cap(1).unwrap(), outside, 1, &control),
+        Err(WasmExactSearchError::ResourceAdmission(_))
+    ));
+    assert!(prep.into_result().is_err());
 }
 
 #[test]
