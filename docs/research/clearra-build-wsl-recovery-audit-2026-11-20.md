@@ -32,6 +32,15 @@ Windows clearance.
 | Retained guest provisioning | [Sanitize](../../scripts/runtime/clearra-wsl-sanitize.sh) expects a transaction-matching imported owner marker and a usable rustup from a clone. [Provision](../../scripts/runtime/clearra-wsl-provision.sh) expects that transaction's sanitized marker and rustup before installing tools and writing the runtime marker. Neither is a standalone, clean-image host installer. |
 | Historical host provisioning | [Python v1](../../scripts/management/history/python-v1/clearra_runtime.py#L2726) exported a *stopped* Ubuntu, imported the dedicated clone, then ran sanitization and pinned-tool provisioning under transaction ownership. Commit `03eb0d3b` removed that active host route and moved Python v1 to history. [Current policy](../management-policy.md#L130) explicitly does not authorize executing it as a fallback. |
 
+## Build and retirement order
+
+| Surface | Established boundary | Work still required |
+| --- | --- | --- |
+| Host lease and archive | Exact `Clearra-Build` launch/cleanup identity, permanent OS lock across run and cleanup, and a staging guard acquired before archive creation. Present legacy leases fail closed; do not run the historical manager concurrently. | Bound the complete WSL list/terminate/readback phase and report cleanup separately from child exit. Stop before staging when a bounded registration/ownership preflight can disprove availability. |
+| Guest source | Verify the exact staged archive bytes before extraction; failed staging must not replace the ext4 snapshot. | Bind one stable host checkout ID to one ext4 owned source slot. Keep digest as snapshot identity, not the checkout's lifetime key; do not remove historical digest directories without reader/owner evidence. |
+| Native and WASM build owner | Native/C transactions select an experiment or product owner. The guest's direct WASM Cargo directory remains outside that transaction; the systemd boundary does not guarantee host-build-root environment inheritance. | Pass a validated host build-root and stable checkout identity before admitting the guest. Route WASM into the existing transaction rather than creating a second independent cache/catalog. Qualify ext4 versus Windows-mounted I/O as a separate decision. |
+| Output and retirement | Benchmark output refuses existing data; retirement preflights all candidate trees under their leases before deleting any, refusing nested links and foreign owner records. Retention remains latest five products and one active experiment slot per admitted source/purpose. | Test the complete lifecycle on the dedicated real runtime; fixture tests establish individual behavior only. Do not use storage size as proof of ownership or safe disposal. |
+
 ## A safe recovery contract (not implemented)
 
 The existing Ubuntu distribution and its lease take precedence. Do not
