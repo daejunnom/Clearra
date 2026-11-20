@@ -81,16 +81,28 @@ part of an already-running branch needs its own exact ordinal coverage,
 reservation, cancellation and late-work proof. The current change does not
 add a fixed small-input cap or split active branches.
 
-The legacy Native C adapter schedules Geometry shards in Rust, then
-checks batches of already materialized candidates in a later BuildUp
-stage. It is a useful correctness reference but its task unit, phase
-ordering and retained candidate volume differ. Compare the same normalized
-request and evidence at each actual worker count first. Record admitted
-and participating workers separately. For timing, compare old/new Rust
-on one runner with the same options, worker width, fixture and result
+For Native C PC All/Unique, the Rust adapter first materializes a C
+buildable Geometry DAG, then statically distributes graph tasks. The
+independent BuildUp pass subsequently claims chunks of retained
+candidates. C raw Tiling uses a different prefix/family shard path;
+it does not measure combined Geometry and BuildUp. These are useful
+correctness references, but the task unit, phase ordering, and retained
+candidate volume differ. The positive 2L `IIOOO`, no-hold CountAll fixture
+compares normalized solution keys and records per-stage evidence at
+requested widths one and two. A missing active BuildUp worker count
+cannot qualify a C/Rust parallel speed comparison. For timing, compare
+old/new Rust on one runner with the same options, worker width, fixture and result
 digest; separate C-vs-Rust architecture comparison from Rust-vs-Rust
 scheduler cost. Keep peak and per-stage work separate from wall time.
 A lock-attempt regression is not a wall-time or memory result.
+For the remaining expanding-branch tail, start with a bounded suffix
+donation at an enum cursor boundary, only in response to actual idle
+demand. Preserve the original branch plus a checked subrange/lineage;
+the compact consumer's filtered rank is not a raw Geometry ordinal.
+Prove gap-free final merge in original order and reserve the extra
+cursor before transfer. If a large tail is a single in-flight BuildUp
+verification rather than Geometry enumeration, suffix donation cannot
+split it; measure the two cases separately.
 
 Progress reports observed stage work, not a percentage of unknown total
 search time. Geometry and BuildUp may both advance; a later event from

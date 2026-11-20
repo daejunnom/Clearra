@@ -1,9 +1,14 @@
 #![cfg(feature = "native-c-core")]
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+};
 
 use clearra_core_domain::{
-    execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
+    execution_cancellation::{
+        ExecutionCancellationToken, ExecutionControl, ExecutionProgress, ProgressSink,
+    },
     pc::pc_target::PcTarget,
     piece::piece_kind::PieceKind,
     solution::{PiecePlacementMask, StandardBoard64TilingIdentity},
@@ -100,6 +105,136 @@ fn execute_rust(
 ) -> Result<CoreExecutionResult, CoreExecutionError> {
     WasmCpuSearchBackend::execute_with_control(problem, control)
         .map_err(|error| error.into_core_execution_error())
+}
+
+#[derive(Default)]
+struct ProgressLog(Mutex<Vec<ExecutionProgress>>);
+
+impl ProgressSink for ProgressLog {
+    fn report(&self, progress: ExecutionProgress) {
+        self.0.lock().expect("progress log").push(progress);
+    }
+}
+
+fn count_all_problem(workers: usize) -> SearchProblem {
+    let policy = PcExecutionPolicy::mvp_default()
+        .with_requested_backend(RequestedSearchBackend::Cpu)
+        .with_allow_backend_fallback(false)
+        .with_workers(workers)
+        .with_worker_hardware_limit(workers)
+        .with_use_all_logical_processors(true)
+        .with_exact_legal_board_enabled(false)
+        .with_conditioned_reachability_enabled(false)
+        .with_tablebase_requested(false);
+    ProblemCompiler::compile_opening_pc(
+        &OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(
+                IIOOO.to_vec(),
+            )))
+            .with_hold_policy(PcHoldPolicy::Disabled)
+            .with_objective(ObjectivePolicy::all())
+            .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit)
+            .with_execution_policy(policy),
+    )
+    .expect("valid fixed-queue two-line CountAll request")
+}
+
+fn report_count_all_witness(
+    backend: &str,
+    requested_workers: usize,
+    result: &CoreExecutionResult,
+    progress: &ProgressLog,
+) {
+    let active_workers = result.usize_field("parallel_active_workers");
+    let parallel_observed = result.bool_field("cpu_parallel_execution") == Some(true)
+        && active_workers == Some(requested_workers);
+    let observed_stages: Vec<_> = progress
+        .0
+        .lock()
+        .expect("progress log")
+        .iter()
+        .map(|event| {
+            serde_json::json!({
+                "stage": event.stage,
+                "completed": event.completed,
+                "total": event.total,
+            })
+        })
+        .collect();
+    // The legacy result's workers_used describes its packing executor,
+    // not the active workers of the independent BuildUp stage. A request
+    // for two workers is not evidence of a whole-search parallel run.
+    let witness = serde_json::json!({
+        "fixture": "empty-2l-iiooo-no-hold-count-all",
+        "backend": backend,
+        "requested_workers": requested_workers,
+        "reported_workers_used": result.usize_field("workers_used"),
+        "reported_active_workers": active_workers,
+        "parallel_observed": requested_workers > 1 && parallel_observed,
+        "packing_candidate_count": result.usize_field("packing_candidate_count"),
+        "backend_searched_nodes": result.usize_field("searched_nodes"),
+        "buildup_backend": result.field("buildup_backend"),
+        "build_variant_count": result.field("build_variant_count"),
+        "build_order_nodes": result.usize_field("total_build_order_nodes"),
+        "covered_pattern_count": result.usize_field("covered_pattern_count"),
+        "normalized_solution_count": result.usize_field("normalized_unique_solution_count"),
+        "normalized_solution_set_hash": result.field("normalized_solution_set_hash"),
+        "observed_stages": observed_stages,
+    });
+    println!("{witness}");
+}
+
+#[test]
+fn native_rust_fixed_queue_count_all_preserves_verified_identity_family() {
+    // On this empty 2L board the first I can rest on the floor, the second
+    // on the first, and the O pieces can hard-drop into the remaining gaps.
+    let expected: BTreeSet<_> = expected_iiooo_identities()
+        .into_iter()
+        .map(|identity| {
+            let mut key = String::new();
+            identity
+                .write_canonical(&mut key)
+                .expect("write canonical identity");
+            key
+        })
+        .collect();
+    assert_eq!(expected.len(), 4);
+    let backends: [(&str, Execute); 2] = [
+        ("native-c", CoreExecutor::execute_with_control),
+        ("rust-cpu", execute_rust),
+    ];
+    for requested_workers in [1, 2] {
+        let problem = count_all_problem(requested_workers);
+        for (backend, execute) in backends {
+            let progress = Arc::new(ProgressLog::default());
+            let control = ExecutionControl::default().with_progress_sink(progress.clone());
+            let result = execute(&problem, &control)
+                .unwrap_or_else(|error| panic!("{backend} CountAll: {error:?}"));
+            report_count_all_witness(backend, requested_workers, &result, &progress);
+            assert_eq!(result.bool_field("count_complete"), Some(true), "{backend}");
+            assert!(result.solution_found(), "{backend}");
+            assert_eq!(
+                result.usize_field("normalized_unique_solution_count"),
+                Some(expected.len()),
+                "{backend}",
+            );
+            assert_eq!(
+                result
+                    .normalized_solution_keys()
+                    .iter()
+                    .collect::<BTreeSet<_>>(),
+                expected.iter().collect::<BTreeSet<_>>(),
+                "{backend}",
+            );
+            assert!(
+                result
+                    .field("build_variant_count")
+                    .and_then(|count| count.parse::<u128>().ok())
+                    .is_some_and(|count| count > 0),
+                "{backend} must run BuildUp",
+            );
+        }
+    }
 }
 
 #[test]
