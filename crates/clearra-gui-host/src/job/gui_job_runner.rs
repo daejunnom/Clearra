@@ -1,12 +1,9 @@
-use std::{
-    sync::{
-        mpsc::{self, Receiver, Sender, TryRecvError},
-        Arc,
-    },
-    thread::{self, JoinHandle},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 
-use crate::{GuiJob, GuiJobCancelHandle, GuiJobEvent, GuiJobProgress, GuiJobResult};
+use crate::{GuiJob, GuiJobCancelHandle, GuiJobEvent, GuiJobId, GuiJobProgress, GuiJobResult};
 use clearra_app::{AppContext, AppResponse, AppStatus};
 use clearra_core_domain::execution_cancellation::{
     ExecutionControl, ExecutionProgress, ProgressSink,
@@ -39,10 +36,7 @@ impl GuiJobRunner {
                     job_id,
                     progress: GuiJobProgress::new(0, 1, "clearra-app"),
                 });
-                let progress_sink = Arc::new(GuiProgressSink {
-                    job_id,
-                    sender: sender.clone(),
-                });
+                let progress_sink = Arc::new(GuiProgressSink::new(job_id, sender.clone()));
                 let control = ExecutionControl::new(cancel_token.execution_token().clone())
                     .with_progress_sink(progress_sink);
                 let response = app_context.run_with_execution_control(request, &control);
@@ -90,21 +84,80 @@ impl GuiJobRunner {
 }
 
 struct GuiProgressSink {
-    job_id: crate::GuiJobId,
+    job_id: GuiJobId,
     sender: Sender<GuiJobEvent>,
+    // This hint neither orders concurrent samples nor signals a phase boundary.
+    // Racing reporters may emit a duplicate rather than blocking a search worker.
+    previous_counter: AtomicU64,
+}
+
+impl GuiProgressSink {
+    fn new(job_id: GuiJobId, sender: Sender<GuiJobEvent>) -> Self {
+        Self {
+            job_id,
+            sender,
+            previous_counter: AtomicU64::new(0),
+        }
+    }
 }
 
 impl ProgressSink for GuiProgressSink {
     fn report(&self, progress: ExecutionProgress) {
-        let total = progress.total.unwrap_or(progress.completed.max(1));
+        let done = saturating_u32(progress.completed);
+        let previous = self.previous_counter.load(Ordering::Relaxed);
+        let counter = if progress.total.is_none() {
+            SolverCounter::from_stage(progress.stage).map(|counter| counter.key(done))
+        } else {
+            None
+        };
+        if let Some(counter) = counter {
+            if counter == previous {
+                return;
+            }
+            self.previous_counter.store(counter, Ordering::Relaxed);
+        } else if previous != 0 {
+            // A different kind of event starts a new sequence of samples.
+            self.previous_counter.store(0, Ordering::Relaxed);
+        }
         let _ = self.sender.send(GuiJobEvent::Progress {
             job_id: self.job_id,
             progress: GuiJobProgress::new(
-                saturating_u32(progress.completed),
-                saturating_u32(total),
+                done,
+                // Keep an indeterminate total in the numeric Desktop wire schema.
+                progress.total.map_or(0, saturating_u32),
                 progress.stage,
             ),
         });
+    }
+}
+
+#[repr(u8)]
+enum SolverCounter {
+    Geometry = 1,
+    BuildUp,
+    BuildGeometry,
+    BuildCandidates,
+    BuildVerification,
+    BuildProbabilityCandidates,
+    WasmExactCover,
+}
+
+impl SolverCounter {
+    fn from_stage(stage: &str) -> Option<Self> {
+        match stage {
+            "geometry" => Some(Self::Geometry),
+            "buildup" => Some(Self::BuildUp),
+            "build-geometry" => Some(Self::BuildGeometry),
+            "build-candidates" => Some(Self::BuildCandidates),
+            "build-verification" => Some(Self::BuildVerification),
+            "build-probability-candidates" => Some(Self::BuildProbabilityCandidates),
+            "wasm-exact-cover" => Some(Self::WasmExactCover),
+            _ => None,
+        }
+    }
+
+    fn key(self, done: u32) -> u64 {
+        (u64::from(self as u8) << u32::BITS) | u64::from(done)
     }
 }
 
@@ -183,3 +236,7 @@ fn emit_diagnostics(
         });
     }
 }
+
+#[cfg(test)]
+#[path = "gui_job_runner_progress_tests.rs"]
+mod progress_tests;

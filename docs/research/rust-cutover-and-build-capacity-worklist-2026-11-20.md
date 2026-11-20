@@ -67,3 +67,41 @@ Implementation order: disjoint GUI/Discord/projection owners and Rust
 family fixtures may proceed now; App route integration and Rust release
 defaults depend on typed producer seams and parity; WSL/Cargo live
 storage changes depend on a single admitted slot and cleanup authority.
+
+## Multiworker and progress qualification
+
+The compact native Rust queue dynamically hands out **whole, sealed
+Geometry branches**; a worker verifies candidates as it enumerates them.
+The last successful claim may mark the queue exhausted, but exhaustion
+is not cancellation and does not end in-flight branches. An exhausted
+probe may skip the mutex because this queue has no producer after seal.
+Do not carry that assumption over to a queue that accepts donated work.
+An initially small branch can become the entire tail; slicing or donating
+part of an already-running branch needs its own exact ordinal coverage,
+reservation, cancellation and late-work proof. The current change does not
+add a fixed small-input cap or split active branches.
+
+The legacy Native C adapter schedules Geometry shards in Rust, then
+checks batches of already materialized candidates in a later BuildUp
+stage. It is a useful correctness reference but its task unit, phase
+ordering and retained candidate volume differ. Compare the same normalized
+request and evidence at each actual worker count first. Record admitted
+and participating workers separately. For timing, compare old/new Rust
+on one runner with the same options, worker width, fixture and result
+digest; separate C-vs-Rust architecture comparison from Rust-vs-Rust
+scheduler cost. Keep peak and per-stage work separate from wall time.
+A lock-attempt regression is not a wall-time or memory result.
+
+Progress reports observed stage work, not a percentage of unknown total
+search time. Geometry and BuildUp may both advance; a later event from
+one does not complete the other. Sending the last root to a Web verifier
+does not finish the verifier's in-flight Geometry. Native polling can
+miss intermediate events; report the counters actually observed rather
+than infer missing ones. Dependency checks can use their own progress
+when they have an independent owner and a real count; do not serialize
+the solver to make the progress bar easier to render.
+
+New Rust code follows the common [Google Rust Style Guide](https://google.github.io/styleguide/rustguide.html):
+named states, explicit ownership, module-scoped imports, and no recovery
+from a poisoned branch lock. Chromium-specific threading rules do not
+apply to this Cargo repository.

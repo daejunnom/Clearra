@@ -287,6 +287,9 @@ jobs:
       - name: Check the actual compact distributed continuation boundary
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-wasm --lib tests::fixed_no_hold_opening_ -- --test-threads=1
+      - name: Verify native Desktop progress relay without launching the GUI
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-gui-host --features wasm-cpu-runtime --lib desktop_relay_
   desktop-cli-readback:
     if: >-
       github.repository == 'daejunnom/Clearra' &&
