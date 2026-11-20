@@ -130,7 +130,12 @@ fn run_opening_continue(
             };
             AppResponse::success(AppRenderModel::Continue(AppMessage::new(
                 AppResultKind::Continue,
-                continue_fields(status, continuation_kind, token, result.summary_fields()),
+                continue_fields(
+                    status,
+                    continuation_kind,
+                    token,
+                    result.into_summary_fields(),
+                ),
             )))
         }
         Err(error) => core_execution_error_response(error),
@@ -196,7 +201,12 @@ fn scenario_restart_response(
     };
     AppResponse::success(AppRenderModel::Continue(AppMessage::new(
         AppResultKind::Continue,
-        continue_fields(status, continuation_kind, token, result.summary_fields()),
+        continue_fields(
+            status,
+            continuation_kind,
+            token,
+            result.into_summary_fields(),
+        ),
     )))
 }
 

@@ -1252,6 +1252,13 @@ impl CoreExecutionResult {
         self.fields.clone()
     }
 
+    /// Move the producer's ordered summary fields into a terminal consumer.
+    /// Other result owners are released; choose the borrowed view if they
+    /// still carry evidence the caller needs.
+    pub fn into_summary_fields(self) -> Vec<(String, String)> {
+        self.fields
+    }
+
     /// Checked retained storage used by the public Build/PC result surface and
     /// by guarded post-processing. Outer vector slots are counted from their
     /// actual capacities; nested string/bitset/spin-shard owners are added
@@ -2872,6 +2879,19 @@ mod tests {
                 ("duplicate", "first"),
                 ("duplicate", "second"),
             ]
+        );
+        let field_owner = result.fields.as_ptr();
+        let value_owner = result.fields[1].1.as_ptr();
+        let fields = result.into_summary_fields();
+        assert_eq!(fields.as_ptr(), field_owner);
+        assert_eq!(fields[1].1.as_ptr(), value_owner);
+        assert_eq!(
+            (fields[1].0.as_str(), fields[1].1.as_str()),
+            ("duplicate", "first")
+        );
+        assert_eq!(
+            (fields[2].0.as_str(), fields[2].1.as_str()),
+            ("duplicate", "second")
         );
     }
 
