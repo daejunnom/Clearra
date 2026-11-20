@@ -38,7 +38,7 @@ pub(super) fn bounded_no_entry_on_minimum_board(
     minimum_board: u64,
     target: usize,
 ) -> bool {
-    bounded_no_entry::<false>(template, minimum_board, 0, target)
+    bounded_no_entry::<false>(template, minimum_board, 0, target).0
 }
 
 /// Experimental fixed-frame refinement: an earlier kick that is free on
@@ -49,18 +49,18 @@ pub(super) fn bounded_no_entry_on_minimum_board(
 /// This proof is valid only inside [minimum_board, maximum_board]. It must
 /// not become the all-supersets `MovementProof::Closed` used by BuildUp.
 #[cfg(test)]
-fn bounded_no_entry_on_ordered_interval(
+pub(super) fn bounded_no_entry_on_ordered_interval(
     template: &ReachabilityTemplate,
     minimum_board: u64,
     maximum_board: u64,
     target: usize,
-) -> bool {
+) -> (bool, usize) {
     let bits = u32::from(template.width) * u32::from(template.height);
     if !(1..=64).contains(&bits)
         || minimum_board & !maximum_board != 0
         || (bits < 64 && maximum_board >> bits != 0)
     {
-        return false;
+        return (false, 0);
     }
     bounded_no_entry::<true>(template, minimum_board, maximum_board, target)
 }
@@ -70,18 +70,18 @@ fn bounded_no_entry<const USE_ORDERED_INTERVAL: bool>(
     minimum_board: u64,
     maximum_board: u64,
     target: usize,
-) -> bool {
+) -> (bool, usize) {
     let Some(&target_mask) = template.state_masks.get(target) else {
-        return false;
+        return (false, 0);
     };
     let Ok(target) = u16::try_from(target) else {
-        return false;
+        return (false, 0);
     };
     if target == INVALID_STATE_INDEX
         || target_mask == INVALID_STATE_MASK
         || (minimum_board & target_mask) != 0
     {
-        return false;
+        return (false, 0);
     }
 
     let mut poses = [target; MAX_NO_ENTRY_POSES];
@@ -91,7 +91,7 @@ fn bounded_no_entry<const USE_ORDERED_INTERVAL: bool>(
         let pose = usize::from(poses[cursor]);
         cursor += 1;
         if template.is_sky_seed(pose) {
-            return false;
+            return (false, cursor);
         }
 
         let begin = template.reverse_rotation_offsets[pose] as usize;
@@ -116,13 +116,13 @@ fn bounded_no_entry<const USE_ORDERED_INTERVAL: bool>(
                 continue;
             }
             let Some(next) = poses.get_mut(count) else {
-                return false;
+                return (false, cursor);
             };
             *next = source;
             count += 1;
         }
     }
-    true
+    (true, cursor)
 }
 
 /// Additional bounded scratch for one serial static-mask compilation.
@@ -465,33 +465,14 @@ mod tests {
         assert!(!bounded_no_entry_on_minimum_board(
             &template, MINIMUM, target
         ));
-        assert!(bounded_no_entry_on_ordered_interval(
-            &template, MINIMUM, MINIMUM, target
-        ));
-        assert!(bounded_no_entry_on_ordered_interval(
-            &template,
-            MINIMUM,
-            WITH_IRRELEVANT_BLOCKER,
-            target
-        ));
-        assert!(!bounded_no_entry_on_ordered_interval(
-            &template,
-            MINIMUM,
-            WITH_EARLIER_KICK_BLOCKED,
-            target
-        ));
-        assert!(!bounded_no_entry_on_ordered_interval(
-            &template,
-            WITH_IRRELEVANT_BLOCKER,
-            MINIMUM,
-            target
-        ));
-        assert!(!bounded_no_entry_on_ordered_interval(
-            &template,
-            MINIMUM,
-            MINIMUM | (1 << 30),
-            target
-        ));
+        let attempt = |minimum, maximum| {
+            bounded_no_entry_on_ordered_interval(&template, minimum, maximum, target)
+        };
+        assert_eq!(attempt(MINIMUM, MINIMUM), (true, 1));
+        assert_eq!(attempt(MINIMUM, WITH_IRRELEVANT_BLOCKER), (true, 1));
+        assert!(!attempt(MINIMUM, WITH_EARLIER_KICK_BLOCKED).0);
+        assert_eq!(attempt(WITH_IRRELEVANT_BLOCKER, MINIMUM), (false, 0));
+        assert_eq!(attempt(MINIMUM, MINIMUM | (1 << 30)), (false, 0));
         for (board, reachable) in [
             (MINIMUM, false),
             (WITH_IRRELEVANT_BLOCKER, false),
@@ -534,6 +515,7 @@ mod tests {
                         }
                     }) & !base;
                     if !bounded_no_entry_on_ordered_interval(&template, base, base | extra, target)
+                        .0
                     {
                         continue;
                     }

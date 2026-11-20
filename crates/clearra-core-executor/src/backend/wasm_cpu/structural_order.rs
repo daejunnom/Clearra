@@ -32,6 +32,17 @@ pub struct StructuralOrderMetrics {
     pub ordered_kick_interval: KickIntervalMetrics,
     pub ordered_kick_guard_reuse: KickGuardReuseMetrics,
     pub conditional_order: ConditionalOrderMetrics,
+    #[cfg(test)]
+    pub conditional_ordered_negative: ConditionalOrderedNegativeMetrics,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ConditionalOrderedNegativeMetrics {
+    pub attempts: u64,
+    pub proofs: u64,
+    /// Poses checked even when the ordered closure returns Unknown.
+    pub checked_poses: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -109,6 +120,28 @@ thread_local! {
     static KICK_GUARD_REUSE_MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static CONDITIONAL_ORDER_MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static METRICS: Cell<StructuralOrderMetrics> = Cell::new(StructuralOrderMetrics::default());
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONDITIONAL_ORDERED_NEGATIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn conditional_ordered_negative_enabled() -> bool {
+    CONDITIONAL_ORDERED_NEGATIVE.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(super) fn record_conditional_ordered_negative(proven: bool, checked_poses: usize) {
+    METRICS.with(|slot| {
+        let mut value = slot.get();
+        let ordered = &mut value.conditional_ordered_negative;
+        ordered.attempts += 1;
+        ordered.proofs += u64::from(proven);
+        ordered.checked_poses += checked_poses as u64;
+        slot.set(value);
+    });
 }
 
 pub(super) fn conditional_order_enabled() -> bool {
@@ -334,6 +367,8 @@ mod process_totals {
                 graph_bypasses: CONDITIONAL_BYPASSES.load(Ordering::Relaxed),
                 reused_pose_proofs: CONDITIONAL_REUSED.load(Ordering::Relaxed),
             },
+            #[cfg(test)]
+            conditional_ordered_negative: Default::default(),
         }
     }
 
@@ -621,5 +656,17 @@ pub(super) fn with_conditional_order_mode<T>(enabled: bool, action: impl FnOnce(
         }
     }
     let _restore = Restore(CONDITIONAL_ORDER_MODE.with(|slot| slot.replace(Some(enabled))));
+    action()
+}
+
+#[cfg(test)]
+pub(super) fn with_conditional_ordered_negative<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CONDITIONAL_ORDERED_NEGATIVE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(CONDITIONAL_ORDERED_NEGATIVE.with(|slot| slot.replace(enabled)));
     action()
 }

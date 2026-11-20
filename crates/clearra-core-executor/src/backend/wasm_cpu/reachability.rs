@@ -916,18 +916,59 @@ impl ReachabilityWorkspace {
         realization: InstantiatedRealization,
         frame: Option<LocalRelationRowFrame>,
     ) -> bool {
+        let Some((template, target)) =
+            self.no_entry_pose(catalog, minimum_board, piece, profile, realization, frame)
+        else {
+            return false;
+        };
+        if no_entry_components::enabled() {
+            no_entry_components::proves_no_entry(template, minimum_board, target)
+        } else {
+            independence::bounded_no_entry_on_minimum_board(template, minimum_board, target)
+        }
+    }
+
+    /// The experimental conditional-language caller owns exactly one concrete
+    /// board. The returned negative only applies to that point and is never
+    /// retained as a minimum-board certificate.
+    #[cfg(test)]
+    pub(super) fn try_prove_ordered_lock_pose_unreachable_at_point(
+        &mut self,
+        catalog: &GeometryCatalog,
+        board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> (bool, usize) {
+        let Some((template, target)) =
+            self.no_entry_pose(catalog, board, piece, profile, realization, frame)
+        else {
+            return (false, 0);
+        };
+        independence::bounded_no_entry_on_ordered_interval(template, board, board, target)
+    }
+
+    #[cfg(any(test, feature = "local-search-ab"))]
+    fn no_entry_pose(
+        &mut self,
+        catalog: &GeometryCatalog,
+        board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> Option<(&ReachabilityTemplate, usize)> {
         // Use the workspace's existing exact template, without reconfiguring
         // its profile or lazily compiling a second transition graph.
         if self.kick_profile_id != profile || builtin_kick_profile(profile).is_none() {
-            return false;
+            return None;
         }
-        let Some(frame) = frame.filter(|frame| frame.target_height() == catalog.height()) else {
-            return false;
-        };
-        if !frame.accepts_physical_board(catalog.width(), minimum_board | realization.lock_mask)
+        let frame = frame.filter(|frame| frame.target_height() == catalog.height())?;
+        if !frame.accepts_physical_board(catalog.width(), board | realization.lock_mask)
             || realization.lock_mask.count_ones() != 4
         {
-            return false;
+            return None;
         }
         let template = self.template(catalog, piece);
         let state = State {
@@ -935,17 +976,8 @@ impl ReachabilityWorkspace {
             x: realization.x,
             y: realization.lock_y,
         };
-        let Some(target) = state_index(template.width, template.ceiling, state) else {
-            return false;
-        };
-        if template.state_masks[target] != realization.lock_mask {
-            return false;
-        }
-        if no_entry_components::enabled() {
-            no_entry_components::proves_no_entry(template, minimum_board, target)
-        } else {
-            independence::bounded_no_entry_on_minimum_board(template, minimum_board, target)
-        }
+        let target = state_index(template.width, template.ceiling, state)?;
+        (template.state_masks[target] == realization.lock_mask).then_some((template, target))
     }
 
     #[allow(clippy::too_many_arguments)]

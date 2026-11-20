@@ -1302,6 +1302,159 @@ fn first_kick_certificate_saves_primitive_search_without_collapsing_support_or()
 }
 
 #[test]
+fn conditional_ordered_negative_bypasses_graph_and_reduces_total_pose_work() {
+    use clearra_core_domain::solution::normalized_tiling_solution::{
+        PiecePlacementMask, StandardBoard64ColoredTilingIdentity, StandardBoard64TilingIdentity,
+    };
+    use clearra_coverage::pattern::pattern_id::PatternId;
+    use clearra_rules::profile::builtin_rules::srs;
+    use PieceKind::{I, J, L, T};
+
+    let _guard = product_guard();
+    for (placements, board, oracle_words, new_proof_poses, require_net_reduction) in [
+        (
+            &[(I, 0x01e0_0000), (J, 0xe020), (T, 0x1c02)][..],
+            0x3e1f_03dd,
+            vec![vec![T, I, J]],
+            2,
+            false,
+        ),
+        (
+            &[
+                (I, 0x03c0_0000),
+                (T, 0x1c020),
+                (J, 0x1c04_0000),
+                (L, 0x3802),
+            ][..],
+            0x203a_07dd,
+            vec![vec![T, I, J, L], vec![T, J, I, L], vec![J, T, I, L]],
+            4,
+            true,
+        ),
+    ] {
+        let (catalog, candidate) = fixture(3, placements);
+        assert_eq!(catalog.initial_board(), board);
+        assert!(
+            placement_poset::CandidateGeometry::for_conditional_order(&catalog, &candidate)
+                .is_some()
+        );
+        let pieces: Vec<_> = candidate
+            .row_ids()
+            .iter()
+            .map(|&row| catalog.skeleton(row).piece)
+            .collect();
+        let transitions = physical_transitions(&catalog, &candidate, KickTableProfileId::Srs90);
+        let words = operation_words(&pieces, &transitions);
+        assert_eq!(words, oracle_words.into_iter().collect::<BTreeSet<_>>());
+
+        // The D=0 misses do not make these poses impossible after I's row clear.
+        let identity = StandardBoard64TilingIdentity::from_placements(
+            board,
+            placements
+                .iter()
+                .map(|&(piece, cells)| PiecePlacementMask::new(piece, cells)),
+        )
+        .unwrap();
+        let colored =
+            StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(identity);
+        let problem = ProblemCompiler::compile_scenario_pc(
+            &PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(3, board),
+                PcQueueInput::standard_7_bag(),
+                PieceWindow::new(placements.len()),
+            )
+            .with_rule(srs())
+            .with_allow_hold(false)
+            .with_exact_pieces(Some(placements.len()))
+            .with_supply_window_size(SupplyWindowSize::new(placements.len()))
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+            .with_allowed_colored_solution_identities([colored])
+            .with_retained_trace_limit(0)
+            .with_execution_policy(policy()),
+        )
+        .unwrap()
+        .with_output_policy(SearchOutputPolicy::CoverageSummary);
+        let run = |enabled| {
+            structural_order::with_conditional_ordered_negative(enabled, || {
+                structural_order::with_conditional_order_mode(true, || {
+                    structural_order::with_first_kick_interval_mode(false, || {
+                        structural_order::with_ordered_kick_interval_mode(false, || {
+                            structural_order::with_movement_clear_mode(false, || {
+                                structural_order::with_mode(false, || {
+                                    placement_dependency::with_mode(false, || {
+                                        WasmCpuSearchBackend::execute_with_control(
+                                            &problem,
+                                            &ExecutionControl::default(),
+                                        )
+                                        .unwrap()
+                                    })
+                                    .0
+                                })
+                            })
+                        })
+                    })
+                })
+            })
+        };
+        let (baseline, before) = run(false);
+        let (treatment, after) = run(true);
+        assert_parity(&baseline, &treatment);
+        assert_eq!(before.conditional_ordered_negative, Default::default());
+        assert_eq!(before.conditional_order.unknown_candidates, 1);
+        assert_eq!(before.conditional_order.graph_bypasses, 0);
+        assert_eq!(after.conditional_order.graph_bypasses, 1);
+        assert_eq!(after.conditional_ordered_negative.proofs, new_proof_poses);
+        assert_eq!(
+            after.conditional_ordered_negative.checked_poses,
+            new_proof_poses
+        );
+        assert!(baseline.usize_field("total_build_order_nodes").unwrap() > 0);
+        assert_eq!(treatment.usize_field("total_build_order_nodes"), Some(0));
+        let primitive_before = baseline.usize_field("total_reachability_states").unwrap();
+        let primitive_after = treatment.usize_field("total_reachability_states").unwrap();
+        let checked_poses =
+            usize::try_from(after.conditional_ordered_negative.checked_poses).unwrap();
+        if require_net_reduction {
+            // The first blocked L aborts the old compiler before it can warm a
+            // later T reachability witness. This branch eliminates more ordinary
+            // poses than the new bounded proofs consume.
+            assert!(
+            primitive_after + checked_poses < primitive_before,
+            "ordinary primitive poses {primitive_before} -> {primitive_after}, plus {checked_poses} ordered proof poses"
+        );
+        }
+        eprintln!(
+        "ordered negative {board:#x}: ordinary primitive poses {primitive_before} -> {primitive_after}; {checked_poses} ordered proof poses; conditional transitions {} -> {}",
+        before.conditional_order.checked_transitions, after.conditional_order.checked_transitions
+    );
+
+        let universe = problem.piece_source().materialized_universe().unwrap();
+        assert_eq!(
+            universe.pattern_count(),
+            if placements.len() == 3 { 210 } else { 840 }
+        );
+        let [coverage] = treatment.solution_coverages() else {
+            panic!("the colored filter must admit exactly the intended solution");
+        };
+        assert_eq!(coverage.identity(), identity);
+        assert_eq!(
+            coverage.covered_patterns().count_ones() as usize,
+            words.len()
+        );
+        for ordinal in 0..universe.pattern_count() {
+            assert_eq!(
+                coverage
+                    .covered_patterns()
+                    .contains(PatternId::new(ordinal)),
+                words.contains::<[PieceKind]>(universe.sequence_at(ordinal).as_ref()),
+                "ordered-negative candidate queue ordinal {ordinal}"
+            );
+        }
+    }
+}
+
+#[test]
 fn conditional_support_or_created_by_one_clear_preserves_four_line_coverage() {
     use clearra_core_domain::solution::normalized_tiling_solution::{
         PiecePlacementMask, StandardBoard64ColoredTilingIdentity, StandardBoard64TilingIdentity,

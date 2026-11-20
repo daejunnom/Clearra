@@ -2299,9 +2299,27 @@ fn prove_conditional_transition(
                 },
                 MovementProofSource::ConditionalOrder,
             );
-        } else {
-            unknown = true;
+            continue;
         }
+        #[cfg(test)]
+        if super::structural_order::conditional_ordered_negative_enabled() {
+            let (proven, checked_poses) = reachability
+                .try_prove_ordered_lock_pose_unreachable_at_point(
+                    catalog,
+                    board,
+                    piece,
+                    profile,
+                    realization,
+                    frame,
+                );
+            super::structural_order::record_conditional_ordered_negative(proven, checked_poses);
+            if proven {
+                // Only this executed subset and this ILC pose were proved.
+                // Do not publish an all-supersets Closed fact to fallback.
+                continue;
+            }
+        }
+        unknown = true;
     }
     if unknown {
         Unknown
@@ -4521,18 +4539,31 @@ impl BuildOrderGraph {
                     }
                 }
             }
-            edge_scratch.sort_unstable_by_key(|edge| {
-                (
-                    edge.to,
-                    edge.operation_index,
-                    edge.piece,
-                    edge.rotation,
-                    edge.x,
-                    edge.y,
-                    edge.cleared_lines,
-                )
-            });
-            edge_scratch.dedup();
+            if piece_language_projection_only
+                && reachability_mode == BuildReachabilityMode::Existing
+            {
+                // The exact one-edge-per-operation branch above emits in
+                // increasing operation-bit order. Before the BFS remap, each
+                // destination is subset | bit, with bit absent from subset:
+                // destinations are strictly increasing, so the sort's first
+                // key already fixes the order and no duplicate can exist.
+                debug_assert!(edge_scratch.windows(2).all(|pair| pair[0].to < pair[1].to));
+            } else {
+                // CountAll and geometry-only/finesse can retain several
+                // candidate realizations for the same operation.
+                edge_scratch.sort_unstable_by_key(|edge| {
+                    (
+                        edge.to,
+                        edge.operation_index,
+                        edge.piece,
+                        edge.rotation,
+                        edge.x,
+                        edge.y,
+                        edge.cleared_lines,
+                    )
+                });
+                edge_scratch.dedup();
+            }
             for edge in &mut edge_scratch {
                 let child_subset = edge.to as usize;
                 if workspace.graph_reachable_generations[child_subset] != graph_generation
