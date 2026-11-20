@@ -33,7 +33,7 @@ impl KickOffset {
 /// zero kick therefore need not mean that the anchor stays in place. Apply
 /// this conversion in kick-table order: it does not select a successful kick.
 #[inline]
-pub const fn normalized_kick_delta(
+pub fn normalized_kick_delta(
     piece: PieceKind,
     from: RotationState,
     to: RotationState,
@@ -45,7 +45,7 @@ pub const fn normalized_kick_delta(
     (kick_dx + from_x - to_x, kick_dy + from_y - to_y)
 }
 
-const fn normalized_rotation_center(piece: PieceKind, rotation: RotationState) -> (i8, i8) {
+fn normalized_rotation_center(piece: PieceKind, rotation: RotationState) -> (i8, i8) {
     const JLSTZ: [(i8, i8); 4] = [(1, 0), (0, 1), (1, 1), (1, 1)];
     const I: [(i8, i8); 4] = [(0, 0), (-2, 2), (0, 1), (-1, 2)];
     let index = rotation.quarter_turns() as usize;
