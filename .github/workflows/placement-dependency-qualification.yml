@@ -239,7 +239,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Check bounded Windows startup-proof fixtures without launching the application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/tools/verify-windows-desktop-runtime.test.ps1
       - name: Compare actual Desktop bridge requests with the native CLI at 7–24L
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $source = git rev-parse HEAD
