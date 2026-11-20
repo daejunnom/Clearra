@@ -30,7 +30,7 @@ const ROTATIONS: [RotationState; 4] = [
 const TRANSLATIONS: [(i16, i16); 3] = [(0, -1), (-1, 0), (1, 0)];
 type Cells = [[(i16, i16); 4]; 4];
 type Offset = (i16, i16);
-type InverseRotation = (u16, u8, u8);
+type InverseRotationEdge = (u16, u8, u8);
 
 // Independent footprint-anchor offsets from the scalar geometry convention:
 // raw offset + source anchor offset − target anchor offset.
@@ -222,7 +222,7 @@ fn verify_template(
         masks[usize::from(index)].map(|_| index)
     };
     let mut expected_inv_translations = vec![[u16::MAX; 3]; poses];
-    let mut expected_inv_rotations = vec![Vec::<InverseRotation>::new(); poses];
+    let mut expected_inv_rotations = vec![Vec::<InverseRotationEdge>::new(); poses];
     if template.translation_targets.len() != poses {
         return Err(Translation);
     }
