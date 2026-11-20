@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { evaluatePlacementGraphAdoption } from "./placement-graph-adoption.mjs";
 
 const AXIS = "movement_clear_certificates_mode";
+const MINIMUM_AXIS = "minimum_domain_cutoff_mode";
 const ORDER = "ABBABAAB";
 const PEAK = "linux-sampled-process-group-rss";
 const SOLUTIONS = 456_459;
@@ -196,4 +197,80 @@ test("timed exact-mapping files must be bound to the compared canonical artifact
   assert.equal(result.scope, "measured-artifacts-bound-to-exact-per-solution-comparison");
   rewriteReport(evidence.runs[2], (report) => { report.solution_coverage.sha256 = digest("f"); });
   assert.throws(() => evaluatePlacementGraphAdoption(evidence), /not the verified canonical mapping/u);
+});
+
+function setupMinimum() {
+  const evidence = setup();
+  evidence.axis = MINIMUM_AXIS;
+  evidence.experiment = "minimum-domain-cutoff";
+  evidence.custody = {
+    source_commit: "a".repeat(40), binary_sha256: digest("a"),
+    manager_sha256: digest("b"), host_fingerprint: digest("c"),
+  };
+  evidence.mapping.reference = run(-3, "A", 120, 1000, "solution-coverage");
+  evidence.mapping.candidate = run(-2, "B", 95, 998, "solution-coverage");
+  evidence.mapping.comparison.covered_pairs = QUEUES;
+  const bind = (tracked, arm, command) => {
+    tracked.supervisor.outcome.producer = "benchmark";
+    tracked.supervisor.outcome.command = command;
+    rewriteReport(tracked, (report) => {
+      report.compiled_source_commit = evidence.custody.source_commit;
+      report.cpu.expected_vcpus = null;
+      for (const name of [
+        "mode", "structural_mode", AXIS, "minimum_domain_work_mode",
+        "ordered_kick_guard_reuse_mode", "geometric_edge_reuse_mode",
+      ]) report[name] = "0";
+      report[MINIMUM_AXIS] = arm === "A" ? "0" : "1";
+      report.geometry_domain = {
+        completed_families: 2, minimum_compiles: 2, minimum_empty_origin: 2,
+        minimum_resource_authoritative: 0, minimum_below_seven_pieces: 0,
+        advanced_full_compiles: 0, advanced_incremental_compiles: 0, minimum_profiled_compiles: 0,
+        minimum_incidence_rows_scanned: 0, minimum_incidence_rows_skipped: 0, minimum_cells_cut_off: 0,
+      };
+      if (report.solution_coverage) report.solution_coverage.covered_pairs = QUEUES;
+    });
+  };
+  evidence.runs.forEach((tracked, index) => bind(tracked, ORDER[index], ["placement_graph_bench"]));
+  bind(evidence.mapping.reference, "A", ["placement_graph_bench", "--coverage-slot", "proof-a"]);
+  bind(evidence.mapping.candidate, "B", ["placement_graph_bench", "--coverage-slot", "proof-b"]);
+  const comparator = run(-1, "A", 100, 1000);
+  comparator.supervisor.stdout_tail = JSON.stringify(evidence.mapping.comparison);
+  comparator.supervisor.outcome.producer = "benchmark";
+  comparator.supervisor.outcome.command = ["placement_graph_bench", "--compare-coverage", "proof-a.bin", "proof-b.bin"];
+  evidence.mapping.comparison_supervisor = comparator.supervisor;
+  evidence.mapping.proof = {
+    schema: "clearra.placement-graph-coverage-proof.v1", state: "completed-exact-per-solution",
+    source_binding: "compile-time-and-checkout", case: "empty-4L-P7P4-jstris180",
+    axis: MINIMUM_AXIS, experiment: evidence.experiment, ...evidence.custody,
+    release_authority: false, timing_adoption_authority: false,
+    observations: [evidence.mapping.reference, evidence.mapping.candidate, comparator].map(({ supervisor }, index) => {
+      const name = ["reference", "candidate", "comparison"][index];
+      return { name, state: "completed", run_id: supervisor.outcome.run_id,
+        supervisor: name + "-runtime.json", command: supervisor.outcome.command };
+    }),
+  };
+  return evidence;
+}
+
+test("minimum-domain evaluation demands an unprofiled empty route, neutral other axes, and exact custody", () => {
+  const complete = setupMinimum();
+  const result = evaluatePlacementGraphAdoption(complete);
+  assert.equal(result.status, "adoptable");
+  assert.equal(result.experiment, "minimum-domain-cutoff");
+  assert.equal(result.custody.host_fingerprint, complete.custody.host_fingerprint);
+  for (const corrupt of [
+    (evidence) => { evidence.mapping.proof.host_fingerprint = digest("d"); },
+    (evidence) => { evidence.mapping.comparison_supervisor.stdout_tail = "{}"; },
+    (evidence) => { evidence.mapping.comparison_supervisor.outcome.run_id = evidence.runs[0].supervisor.outcome.run_id; },
+    (evidence) => { evidence.runs[3].supervisor.outcome.command = ["other-binary"]; },
+    (evidence) => rewriteReport(evidence.runs[0], (report) => { report.compiled_source_commit = null; }),
+    (evidence) => rewriteReport(evidence.runs[1], (report) => { report.geometry_domain.minimum_profiled_compiles = 1; }),
+    (evidence) => rewriteReport(evidence.runs[2], (report) => { report.minimum_domain_work_mode = "1"; }),
+    (evidence) => rewriteReport(evidence.runs[3], (report) => { report[AXIS] = "1"; }),
+    (evidence) => rewriteReport(evidence.runs[4], (report) => { report.cpu.expected_vcpus = 9; }),
+  ]) {
+    const tampered = setupMinimum();
+    corrupt(tampered);
+    assert.throws(() => evaluatePlacementGraphAdoption(tampered));
+  }
 });

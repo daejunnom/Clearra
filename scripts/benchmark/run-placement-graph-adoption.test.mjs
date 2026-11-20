@@ -5,7 +5,8 @@ import test from "node:test";
 import {
   adoptionSchedule, collectPlacementGraphAdoption, parseAdoptionArguments, validateAdoptionProof,
 } from "./run-placement-graph-adoption.mjs";
-import { AXIS, parseProofArguments, proofSchedule } from "./run-placement-coverage-proof.mjs";
+import { parseProofArguments, proofSchedule } from "./run-placement-coverage-proof.mjs";
+import { DEFAULT_PLACEMENT_EXPERIMENT, placementExperiment } from "./placement-experiment-contract.mjs";
 
 const sourceCommit = "a".repeat(40);
 const binary = join("test-build", "placement_graph_bench");
@@ -13,7 +14,10 @@ const artifactRoot = join("test-artifacts", "coverage");
 const custody = { binarySha: "a".repeat(64), managerSha: "b".repeat(64), hostFingerprint: "c".repeat(64) };
 const cli = ["--id", "timings-42", "--proof-id", "proof-42", "--source-sha", sourceCommit];
 const options = parseAdoptionArguments(cli);
-const plan = parseProofArguments(["--case", "p7p4", "--id", options.proofId, "--source-sha", sourceCommit]);
+const minimumOptions = parseAdoptionArguments([...cli, "--experiment", "minimum-domain-cutoff"]);
+const planFor = (configured) => parseProofArguments(["--case", "p7p4", "--id", configured.proofId,
+  "--source-sha", sourceCommit, "--experiment", configured.experiment.name]);
+const plan = planFor(options);
 const schedule = adoptionSchedule(binary, plan.timeout);
 const digest = (byte) => byte.repeat(64);
 
@@ -43,15 +47,24 @@ function bind(phase) {
 
 function report(step, receipt, output, sha) {
   const { fixture } = plan;
+  const experiment = step.experiment ?? placementExperiment(DEFAULT_PLACEMENT_EXPERIMENT);
   return {
     schema: "clearra.placement-graph-benchmark.v1", case: fixture.name, valid: true, validation_errors: [],
     binary_sha256: custody.binarySha, compiled_source_commit: sourceCommit,
     supervisor_run_id: receipt.outcome.run_id, output_mode: output,
-    [AXIS]: step.value, mode: "1", structural_mode: "1",
+    movement_clear_certificates_mode: "0", minimum_domain_cutoff_mode: "0", minimum_domain_work_mode: "0",
+    [experiment.axis]: step.value, mode: experiment.dependencyMode, structural_mode: experiment.structuralMode,
     static_influence_mode: "0", translation_interval_mode: "0", incremental_domain_mode: "0",
     first_kick_interval_mode: "0", ordered_kick_interval_mode: "0", ilc_lazy_frame_mode: "0",
     no_entry_components_mode: "0", same_tile_parent_reuse_mode: "0",
     conditional_order_mode: "0", terminal_identity_move_mode: "0",
+    ordered_kick_guard_reuse_mode: "0", geometric_edge_reuse_mode: "0",
+    geometry_domain: {
+      completed_families: 2, minimum_compiles: 2, minimum_empty_origin: 2,
+      minimum_resource_authoritative: 0, minimum_below_seven_pieces: 0,
+      advanced_full_compiles: 0, advanced_incremental_compiles: 0, minimum_profiled_compiles: 0,
+      minimum_incidence_rows_scanned: 0, minimum_incidence_rows_skipped: 0, minimum_cells_cut_off: 0,
+    },
     input: {
       board: fixture.board, height: fixture.height, placed_pieces: fixture.placed, supplied_pieces: fixture.supplied,
       supply: fixture.supply, original_supply_count: fixture.queues, hold: fixture.hold,
@@ -77,8 +90,9 @@ function report(step, receipt, output, sha) {
   };
 }
 
-function proofBundle() {
-  const steps = proofSchedule(plan, binary, artifactRoot);
+function proofBundle(configured = options) {
+  const proofPlan = planFor(configured);
+  const steps = proofSchedule(proofPlan, binary, artifactRoot);
   const [reference, candidate, comparison] = steps.map((step, index) => {
     const receipt = runtime(step, index);
     return index < 2 ? bind({
@@ -99,7 +113,8 @@ function proofBundle() {
       release_authority: false, timing_adoption_authority: false,
       source_commit: sourceCommit, source_binding: "compile-time-and-checkout",
       binary_sha256: custody.binarySha, manager_sha256: custody.managerSha, host_fingerprint: custody.hostFingerprint,
-      case: plan.fixture.name, axis: AXIS,
+      case: plan.fixture.name, axis: configured.experiment.axis,
+      ...(configured === options ? {} : { experiment: configured.experiment.name }),
       observations: steps.map((step, index) => ({
         name: step.name, state: "completed", command: step.command, supervisor: step.name + "-runtime.json",
         run_id: [reference, candidate, comparison][index].runtime.outcome.run_id,
@@ -217,5 +232,41 @@ test("different compiled source or actual worker contract stops instead of takin
     assert.equal(evidence.state, "failed");
     assert.equal(evidence.decision, null);
     assert.equal(io.started.length, 1);
+  }
+});
+
+test("minimum-domain scheduling is opt-in and cannot borrow a movement-clear mapping", () => {
+  assert.throws(() => parseAdoptionArguments([...cli, "--experiment", "minimum-domain-work"]), /Unknown placement/u);
+  assert.equal(options.experiment.name, DEFAULT_PLACEMENT_EXPERIMENT);
+  assert.equal(minimumOptions.experiment.name, "minimum-domain-cutoff");
+  const minimumSchedule = adoptionSchedule(binary, plan.timeout, minimumOptions.experiment);
+  assert.equal(minimumSchedule.map((step) => step.arm).join(""), "ABBABAAB");
+  assert.ok(minimumSchedule.every((step) => step.experiment.axis === "minimum_domain_cutoff_mode"));
+  assert.throws(() => validateAdoptionProof(minimumOptions, binary, artifactRoot, custody, proofBundle()),
+    /proof for minimum-domain-cutoff/u);
+});
+
+test("minimum-domain timing binds a complete same-host setup only on the unprofiled empty route", async () => {
+  const configured = minimumOptions;
+  const proof = validateAdoptionProof(configured, binary, artifactRoot, custody, proofBundle(configured));
+  const minimumSchedule = adoptionSchedule(binary, proof.proofOptions.timeout, configured.experiment);
+  const io = recordingIo();
+  const timing = await collectPlacementGraphAdoption(configured, custody, proof, minimumSchedule, io);
+  assert.equal(timing.state, "completed-adoptable", timing.error);
+  assert.equal(timing.axis, "minimum_domain_cutoff_mode");
+  assert.equal(io.writes.get("manifest.json").custody.host_fingerprint, custody.hostFingerprint);
+  assert.equal(io.writes.get("mapping-proof.json").experiment, "minimum-domain-cutoff");
+  assert.equal(io.writes.get("mapping-comparison-runtime.json").outcome.command[1], "--compare-coverage");
+  for (const tamper of [
+    (result) => { result.geometry_domain.minimum_profiled_compiles = 1; },
+    (result) => { result.geometry_domain.minimum_empty_origin = 0; },
+    (result) => { result.minimum_domain_work_mode = "1"; },
+    (result) => { result.mode = "1"; },
+  ]) {
+    const failedIo = recordingIo((_, execution) => tamper(execution.report));
+    const denied = await collectPlacementGraphAdoption(configured, custody, proof, minimumSchedule, failedIo);
+    assert.equal(denied.state, "failed");
+    assert.equal(denied.decision, null);
+    assert.equal(failedIo.started.length, 1);
   }
 });

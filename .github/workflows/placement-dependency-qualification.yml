@@ -56,7 +56,7 @@ jobs:
             ordered_kick_interval_requires ordered_kick_witness_guard_ candidate_kick_guard_
             reachability::reference_tests incremental_domain_ minimum_domain_cutoff_
             exact_clear_domain_tests placement_conditions::tests geometric_edge_reuse_
-            candidate_projection_clear_fact_reuse_
+            candidate_projection_clear_fact_reuse_ distributed_pc2_replay_
             family_root_count_ family_handoff_
             capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_
             candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move
@@ -416,14 +416,20 @@ jobs:
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           case "$GITHUB_EVENT_NAME" in
             push)
-              [[ "$GITHUB_REF" == "refs/heads/codex/v090-relation-rust-adoption-$GITHUB_SHA" ]]
               [[ "$PUSH_AFTER_SHA" == "$GITHUB_SHA" ]]
+              case "$GITHUB_REF" in
+                "refs/heads/codex/v090-relation-rust-adoption-$GITHUB_SHA") experiment=movement-clear ;;
+                "refs/heads/codex/v090-relation-rust-adoption-minimum-domain-cutoff-$GITHUB_SHA") experiment=minimum-domain-cutoff ;;
+                *) exit 2 ;;
+              esac
               ;;
             workflow_dispatch)
               [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ && "$REQUESTED_SHA" == "$GITHUB_SHA" ]]
+              experiment=movement-clear
               ;;
             *) exit 2 ;;
           esac
+          printf 'PLACEMENT_EXPERIMENT=%s\n' "$experiment" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
@@ -449,7 +455,8 @@ jobs:
         run: |
           set -eu
           node scripts/benchmark/run-placement-coverage-proof.mjs --case p7p4 \
-            --id "$PROOF_ID" --source-sha "$GITHUB_SHA" --timeout-seconds "$LEASE_SECONDS"
+            --id "$PROOF_ID" --source-sha "$GITHUB_SHA" --timeout-seconds "$LEASE_SECONDS" \
+            --experiment "$PLACEMENT_EXPERIMENT"
       - name: Measure global-only ABBA and BAAB against the same-runner proof
         timeout-minutes: 215
         shell: bash
@@ -457,22 +464,26 @@ jobs:
           set -eu
           status=0
           node scripts/benchmark/run-placement-graph-adoption.mjs --id "$ADOPTION_ID" \
-            --proof-id "$PROOF_ID" --source-sha "$GITHUB_SHA" || status=$?
+            --proof-id "$PROOF_ID" --source-sha "$GITHUB_SHA" \
+            --experiment "$PLACEMENT_EXPERIMENT" || status=$?
           directory="_local/artifacts/benchmarks/placement-graph-coverage/$ADOPTION_ID-adoption"
-          outcome="$(node --input-type=module - "$directory" "$GITHUB_SHA" <<'NODE'
+          outcome="$(node --input-type=module - "$directory" "$GITHUB_SHA" "$PLACEMENT_EXPERIMENT" <<'NODE'
           import { readFileSync } from "node:fs";
           import { join } from "node:path";
-          const [directory, sha] = process.argv.slice(2);
+          import { placementExperiment } from "./scripts/benchmark/placement-experiment-contract.mjs";
+          const [directory, sha, experiment] = process.argv.slice(2);
+          const { axis } = placementExperiment(experiment);
           const read = (name) => JSON.parse(readFileSync(join(directory, name), "utf8"));
           const summary = read("summary.json");
           if (summary.schema !== "clearra.placement-graph-adoption-run.v1" ||
-              summary.source_commit !== sha || summary.release_authority !== false) process.exit(2);
+              summary.source_commit !== sha || summary.axis !== axis ||
+              summary.release_authority !== false) process.exit(2);
           if (summary.decision !== "decision.json") {
             if (!["failed", "censored", "confounded"].includes(summary.state)) process.exit(2);
           } else {
             const decision = read("decision.json");
             if (decision.schema !== "clearra.placement-graph-adoption.v1" ||
-                decision.release_authority !== false ||
+                decision.axis !== axis || decision.release_authority !== false ||
                 summary.binary_sha256 !== decision.binary_sha256 ||
                 !["adoptable", "not-adoptable"].includes(decision.status) ||
                 summary.state !== "completed-" + decision.status) process.exit(2);

@@ -11,6 +11,7 @@ const binarySha = "b".repeat(64);
 const artifacts = join("test-artifacts", "coverage");
 const binary = join("test-build", "placement_graph_bench");
 const cli = (key, rest = []) => ["--case", key, "--id", "proof-42", "--source-sha", source, ...rest];
+const minimumArgs = ["--experiment", "minimum-domain-cutoff"];
 const [reference, candidate, comparison] = proofSchedule(parseProofArguments(cli("p7p4")), binary, artifacts);
 
 function runtime(step, index) {
@@ -28,10 +29,12 @@ function runtime(step, index) {
 }
 
 function armReport(step, receipt, fixture) {
+  const minimum = step.experiment?.name === "minimum-domain-cutoff";
   return {
     schema: "clearra.placement-graph-benchmark.v1", case: fixture.name, valid: true, validation_errors: [],
     binary_sha256: binarySha, supervisor_run_id: receipt.outcome.run_id, output_mode: "solution-coverage",
-    movement_clear_certificates_mode: step.value, mode: "1", structural_mode: "1",
+    movement_clear_certificates_mode: minimum ? "0" : step.value,
+    mode: minimum ? "0" : "1", structural_mode: minimum ? "0" : "1",
     static_influence_mode: "0", translation_interval_mode: "0", incremental_domain_mode: "0",
     first_kick_interval_mode: "0",
     conditional_order_mode: "0",
@@ -39,6 +42,17 @@ function armReport(step, receipt, fixture) {
     ordered_kick_interval_mode: "0",
     no_entry_components_mode: "0",
     same_tile_parent_reuse_mode: "0",
+    ...(minimum ? {
+      compiled_source_commit: source,
+      minimum_domain_cutoff_mode: step.value, minimum_domain_work_mode: "0",
+      ordered_kick_guard_reuse_mode: "0", geometric_edge_reuse_mode: "0", ilc_lazy_frame_mode: "0",
+      geometry_domain: {
+        completed_families: 100, minimum_compiles: 42, minimum_empty_origin: 42,
+        minimum_resource_authoritative: 0, minimum_below_seven_pieces: 0,
+        advanced_full_compiles: 0, advanced_incremental_compiles: 0, minimum_profiled_compiles: 0,
+        minimum_incidence_rows_scanned: 0, minimum_incidence_rows_skipped: 0, minimum_cells_cut_off: 0,
+      },
+    } : {}),
     input: {
       board: fixture.board, height: fixture.height, placed_pieces: fixture.placed, supplied_pieces: fixture.supplied,
       supply: fixture.supply, original_supply_count: fixture.queues, hold: fixture.hold,
@@ -54,7 +68,7 @@ function armReport(step, receipt, fixture) {
       count: fixture.solutions, reported_total_count: fixture.solutions, covers_reported_family: true,
       sha256_ordered_ctk1_v1: "0".repeat(64),
     },
-    coverage: { set_bit_count: fixture.queues, sha256_le_v1: "1".repeat(64) },
+    coverage: { set_bit_count: fixture.queues, word_count: fixture.queues / 64, sha256_le_v1: "1".repeat(64) },
     solution_coverage: {
       complete: true, sha256: step.name === "reference" ? "c".repeat(64) : "d".repeat(64),
       solution_count: fixture.solutions, total_weight: fixture.queues, covered_weight: fixture.queues,
@@ -162,6 +176,82 @@ test("movement-clear proof neutralizes APDP, kick and geometric edge follow-on m
   }
 });
 
+test("explicit minimum-domain proof is P7P4-only and neutralizes every other experiment", () => {
+  assert.throws(() => parseProofArguments(cli("small", minimumArgs)), /requires the empty-origin P7P4/u);
+  assert.throws(() => parseProofArguments(cli("p7p4", ["--experiment", "unregistered"])), /Unknown placement experiment/u);
+  const options = parseProofArguments(cli("p7p4", minimumArgs));
+  const steps = proofSchedule(options, binary, artifacts);
+  assert.deepEqual(steps.map((step) => step.experiment), [options.experiment, options.experiment, options.experiment]);
+  assert.equal(options.experiment.axis, "minimum_domain_cutoff_mode");
+  const inherited = {
+    CLEARRA_PLACEMENT_DEPENDENCY: "1", CLEARRA_STRUCTURAL_ORDER: "1",
+    clearra_minimum_domain_cutoff: "1", clearra_movement_clear_certificates: "1", CLEARRA_MINIMUM_DOMAIN_WORK: "1",
+    CLEARRA_INCREMENTAL_DOMAIN: "1", CLEARRA_GEOMETRIC_EDGE_REUSE: "1", VALID_UNRELATED_SETTING: "1",
+  };
+  for (const [step, cutoff] of steps.map((step, index) => [step, index === 1 ? "1" : "0"])) {
+    const environment = benchmarkEnvironment(inherited, step);
+    assert.equal(environment.CLEARRA_MINIMUM_DOMAIN_CUTOFF, cutoff);
+    for (const key of [
+      "CLEARRA_PLACEMENT_DEPENDENCY", "CLEARRA_STRUCTURAL_ORDER", "CLEARRA_MOVEMENT_CLEAR_CERTIFICATES",
+      "CLEARRA_MINIMUM_DOMAIN_WORK", "CLEARRA_INCREMENTAL_DOMAIN", "CLEARRA_GEOMETRIC_EDGE_REUSE",
+    ]) assert.equal(environment[key], "0");
+    assert.equal(environment.clearra_minimum_domain_cutoff, undefined);
+    assert.equal(environment.clearra_movement_clear_certificates, undefined);
+    assert.equal(environment.VALID_UNRELATED_SETTING, "1");
+  }
+});
+
+test("minimum proof rejects mixed axes, unknown modes, older binding and false route receipts", () => {
+  const options = parseProofArguments(cli("p7p4", minimumArgs));
+  const [, cutoff] = proofSchedule(options, binary, artifacts);
+  const receipt = runtime(cutoff, 1);
+  const report = armReport(cutoff, receipt, options.fixture);
+  const validate = (changes = {}, step = cutoff) =>
+    validatedProofArm({ ...report, ...changes }, receipt, step, options, binarySha);
+  assert.doesNotThrow(() => validate());
+  assert.throws(() => validate({}, candidate), /wrong scheduled proof experiment/u);
+  for (const bad of [
+    { minimum_domain_cutoff_mode: undefined }, { minimum_domain_cutoff_mode: "0" },
+    { minimum_domain_work_mode: "1" }, { mode: "1" }, { structural_mode: "1" },
+    { movement_clear_certificates_mode: "1" }, { geometric_edge_reuse_mode: "1" },
+    { hypothetical_future_mode: "0" },
+  ]) assert.throws(() => validate(bad), /unexpected source, mode, or coverage output/u);
+  assert.throws(() => validate({ compiled_source_commit: null }), /compile-time source/u);
+  assert.throws(() => validate({ coverage: { ...report.coverage, word_count: 12 } }), /incomplete or incorrect/u);
+  for (const value of [
+    null, { minimum_empty_origin: 0 }, { minimum_empty_origin: 41 }, { minimum_empty_origin: 43 },
+    { minimum_resource_authoritative: 1 }, { minimum_below_seven_pieces: 1 }, { advanced_full_compiles: 1 },
+    { minimum_profiled_compiles: 1 }, { minimum_incidence_rows_skipped: 1 },
+  ]) {
+    assert.throws(() => validate({ geometry_domain: value && { ...report.geometry_domain, ...value } }),
+      /active unprofiled empty-origin route/u);
+  }
+});
+
+test("minimum comparison binds both captured arms without acquiring adoption authority", async () => {
+  const options = parseProofArguments(cli("p7p4", minimumArgs));
+  const steps = proofSchedule(options, binary, artifacts);
+  const io = mockIo(options, steps);
+  const proof = await collectPlacementCoverageProof(options, binarySha, steps, io);
+  assert.deepEqual(io.invoked, ["reference", "candidate", "comparison"]);
+  assert.equal(proof.experiment, "minimum-domain-cutoff");
+  assert.equal(proof.axis, "minimum_domain_cutoff_mode");
+  assert.equal(proof.source_binding, "compile-time-and-checkout");
+  assert.equal(proof.state, "completed-exact-per-solution");
+  assert.equal(proof.release_authority, false);
+  assert.equal(proof.timing_adoption_authority, false);
+  assert.ok(io.writes.has("comparison-runtime.json"));
+
+  const bad = mockIo(options, steps, (step, execution) => {
+    if (step.name === "candidate") execution.report.minimum_domain_cutoff_mode = "0";
+    return execution;
+  });
+  const rejected = await collectPlacementCoverageProof(options, binarySha, steps, bad);
+  assert.deepEqual(bad.invoked, ["reference", "candidate"]);
+  assert.equal(rejected.state, "failed");
+  assert.equal(rejected.mapping, null);
+});
+
 test("successful exact sequence writes bound mapping and no release/performance authority", async () => {
   for (const key of ["small", "p7p4"]) {
     const options = parseProofArguments(cli(key));
@@ -170,6 +260,8 @@ test("successful exact sequence writes bound mapping and no release/performance 
     const proof = await collectPlacementCoverageProof(options, binarySha, steps, io);
     assert.deepEqual(io.invoked, ["reference", "candidate", "comparison"]);
     assert.equal(proof.state, key === "small" ? "completed-small-preflight" : "completed-exact-per-solution");
+    assert.equal(proof.axis, "movement_clear_certificates_mode");
+    assert.equal(Object.hasOwn(proof, "experiment"), false, "legacy receipt shape stays unchanged");
     assert.equal(proof.release_authority, false);
     assert.equal(proof.timing_adoption_authority, false);
     assert.equal(proof.mapping.reference.benchmark, "reference.json");

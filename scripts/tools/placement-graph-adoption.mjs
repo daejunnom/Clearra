@@ -8,12 +8,15 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { pathToFileURL } from "node:url";
+import { placementExperiment, unprofiledEmptyMinimumRoute } from "../benchmark/placement-experiment-contract.mjs";
 
 const INPUT_SCHEMA = "clearra.placement-graph-adoption-input.v1";
 const BENCHMARK_SCHEMA = "clearra.placement-graph-benchmark.v1";
 const MAPPING_SCHEMA = "clearra.placement-graph-solution-coverage-comparison.v1";
 const RUNTIME_SCHEMA = "clearra.runtime-receipt.v2";
 const ORDER = "ABBABAAB";
+const MINIMUM = placementExperiment("minimum-domain-cutoff");
+const PROOF_SCHEMA = "clearra.placement-graph-coverage-proof.v1";
 const AXES = [
   "mode", "structural_mode", "static_influence_mode", "translation_interval_mode",
   "movement_clear_certificates_mode", "first_kick_interval_mode", "conditional_order_mode",
@@ -31,6 +34,7 @@ const SOLUTIONS = 456_459;
 const QUEUES = 4_233_600;
 const SOLUTION_SET_HASH = "cts1:2fcbc950acdffa31";
 const SHA256 = /^[a-f0-9]{64}$/u;
+const SOURCE_SHA = /^[a-f0-9]{40}$/u;
 const RUN_ID = /^(\d{16,21})-[1-9]\d*$/u;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 
@@ -105,7 +109,13 @@ function peakOf(outcome, label) {
   return peak;
 }
 
-function readCompletedRun(run, label, axis, arm, outputMode) {
+function assertMinimumDomainCutoffRun(report, sourceCommit, label) {
+  requireThat(SOURCE_SHA.test(sourceCommit ?? "") && report?.compiled_source_commit === sourceCommit &&
+    report.cpu?.expected_vcpus === null && unprofiledEmptyMinimumRoute(report),
+  `${label}: wrong compiled source, forced CPU count or missing unprofiled empty minimum domain route`);
+}
+
+function readCompletedRun(run, label, axis, arm, outputMode, custody) {
   const { outcome, stampNs } = runtimeOutcome(run?.supervisor, label);
   requireThat(outcomeState(outcome) === "completed", `${label}: not an uncontended completed run`);
   let captured;
@@ -155,20 +165,31 @@ function readCompletedRun(run, label, axis, arm, outputMode) {
     report.other_process_configuration && typeof report.other_process_configuration === "object" &&
     !Array.isArray(report.other_process_configuration), `${label}: missing runtime or process configuration`);
   const fixedModes = {};
+  if (custody) assertMinimumDomainCutoffRun(report, custody.source_commit, label);
   // Advanced APDP needs a non-empty target; the component experiment needs
   // movement-clear on both arms. Neither is an axis of this P7P4 handoff.
   requireThat(Object.keys(report).every((key) => !key.endsWith("_mode") || key === "output_mode" ||
     AXES.includes(key) || FIXED_P7P4_AXES.includes(key) || NEUTRAL_FOLLOW_ON_AXES.includes(key)),
   `${label}: unknown experimental axis`);
-  for (const key of NEUTRAL_FOLLOW_ON_AXES) {
-    requireThat(!Object.hasOwn(report, key) || report[key] === "0", `${label}: non-neutral axis ${key}`);
-  }
-  for (const key of [...AXES, ...FIXED_P7P4_AXES]) {
-    requireThat(["0", "1"].includes(report[key]), `${label}: missing or invalid axis ${key}`);
-    if (key === axis) {
-      requireThat(report[key] === (arm === "A" ? "0" : "1"), `${label}: wrong A/B mode order`);
-    } else {
-      fixedModes[key] = report[key];
+  if (custody) {
+    const treated = arm === "A" ? "0" : "1";
+    for (const key of [...AXES, ...FIXED_P7P4_AXES, ...NEUTRAL_FOLLOW_ON_AXES]) {
+      const expected = key === axis ? treated :
+        key === "mode" ? MINIMUM.dependencyMode : key === "structural_mode" ? MINIMUM.structuralMode : "0";
+      requireThat(report[key] === expected, `${label}: wrong A/B mode or non-neutral axis ${key}`);
+      if (key !== axis) fixedModes[key] = report[key];
+    }
+  } else {
+    for (const key of NEUTRAL_FOLLOW_ON_AXES) {
+      requireThat(!Object.hasOwn(report, key) || report[key] === "0", `${label}: non-neutral axis ${key}`);
+    }
+    for (const key of [...AXES, ...FIXED_P7P4_AXES]) {
+      requireThat(["0", "1"].includes(report[key]), `${label}: missing or invalid axis ${key}`);
+      if (key === axis) {
+        requireThat(report[key] === (arm === "A" ? "0" : "1"), `${label}: wrong A/B mode order`);
+      } else {
+        fixedModes[key] = report[key];
+      }
     }
   }
   const searchMs = report.timing_ms?.search;
@@ -196,9 +217,52 @@ function readCompletedRun(run, label, axis, arm, outputMode) {
   };
 }
 
-function verifyMapping(mapping, axis, contract) {
-  const reference = readCompletedRun(mapping?.reference, "mapping reference", axis, "A", "solution-coverage");
-  const candidate = readCompletedRun(mapping?.candidate, "mapping candidate", axis, "B", "solution-coverage");
+function verifyMinimumProofCustody(mapping, reference, candidate, custody, completed) {
+  const proof = mapping.proof;
+  const [referenceObservation, candidateObservation, comparisonObservation] =
+    Array.isArray(proof?.observations) ? proof.observations : [];
+  requireThat(proof?.schema === PROOF_SCHEMA && proof.state === "completed-exact-per-solution" &&
+    proof.source_binding === "compile-time-and-checkout" && proof.case === reference.contract.case &&
+    proof.axis === MINIMUM.axis && proof.experiment === MINIMUM.name &&
+    proof.source_commit === custody.source_commit && proof.binary_sha256 === custody.binary_sha256 &&
+    proof.manager_sha256 === custody.manager_sha256 && proof.host_fingerprint === custody.host_fingerprint &&
+    proof.release_authority === false && proof.timing_adoption_authority === false &&
+    Array.isArray(proof.observations) && proof.observations.length === 3,
+  "minimum-domain proof source, binary, supervisor or host custody is missing");
+  const comparisonRun = runtimeOutcome(mapping.comparison_supervisor, "mapping comparator");
+  requireThat(outcomeState(comparisonRun.outcome) === "completed" &&
+    isDeepStrictEqual(JSON.parse(mapping.comparison_supervisor.stdout_tail), mapping.comparison),
+  "minimum-domain comparator is not bound to its completed supervisor receipt");
+  const runs = [reference, candidate, comparisonRun];
+  const phases = ["reference", "candidate", "comparison"];
+  const benchmarkExecutable = reference.outcome.command?.[0];
+  requireThat(typeof benchmarkExecutable === "string" && benchmarkExecutable.length > 0 &&
+    [referenceObservation, candidateObservation, comparisonObservation].every((observation, index) =>
+      observation?.name === phases[index] && observation.state === "completed" &&
+      observation.run_id === runs[index].outcome.run_id &&
+      observation.supervisor === phases[index] + "-runtime.json" &&
+      isDeepStrictEqual(observation.command, runs[index].outcome.command)) &&
+    runs.every(({ outcome }) => outcome.producer === "benchmark" && outcome.command?.length === (outcome === comparisonRun.outcome ? 4 : 3) &&
+      outcome.command[0] === benchmarkExecutable &&
+      outcome.command[1] === (outcome === comparisonRun.outcome ? "--compare-coverage" : "--coverage-slot")) &&
+    completed.every(({ outcome }) => outcome.producer === "benchmark" &&
+      isDeepStrictEqual(outcome.command, [benchmarkExecutable])),
+  "minimum-domain mapping and timing do not bind the same supervised benchmark executable");
+  const chronological = [...runs, completed[0]];
+  requireThat(chronological.slice(1).every(({ stampNs }, index) =>
+    stampNs > chronological[index].stampNs + BigInt(chronological[index].outcome.duration_ms) * 1_000_000n),
+  "minimum-domain mapping must finish in order before the timing suite starts");
+  requireThat(asPositiveInt(mapping.comparison.covered_pairs) &&
+    mapping.comparison.covered_pairs >= Math.max(SOLUTIONS, QUEUES) &&
+    mapping.comparison.covered_pairs <= SOLUTIONS * QUEUES &&
+    mapping.comparison.covered_pairs === reference.mapping.covered_pairs &&
+    mapping.comparison.covered_pairs === candidate.mapping.covered_pairs,
+  "minimum-domain exact mapping pair count does not agree across supervised receipts");
+}
+
+function verifyMapping(mapping, axis, contract, custody, completed) {
+  const reference = readCompletedRun(mapping?.reference, "mapping reference", axis, "A", "solution-coverage", custody);
+  const candidate = readCompletedRun(mapping?.candidate, "mapping candidate", axis, "B", "solution-coverage", custody);
   const comparison = mapping?.comparison;
   requireThat(reference.outcome.run_id !== candidate.outcome.run_id &&
     isDeepStrictEqual(reference.contract, contract) && isDeepStrictEqual(candidate.contract, contract),
@@ -209,14 +273,23 @@ function verifyMapping(mapping, axis, contract) {
     comparison.covered_weight === QUEUES && comparison.left_sha256 === reference.mapping.sha256 &&
     comparison.right_sha256 === candidate.mapping.sha256,
   "complete per-solution comparator evidence is missing or does not bind both artifacts");
+  if (custody) verifyMinimumProofCustody(mapping, reference, candidate, custody, completed);
   return { A: reference.mapping.sha256, B: candidate.mapping.sha256 };
 }
 
 export function evaluatePlacementGraphAdoption(input) {
   const { axis, output_mode: outputMode, time_resolution_ms: resolution, runs } = input ?? {};
-  requireThat(input?.schema === INPUT_SCHEMA && AXES.includes(axis) && asFinitePositive(resolution) &&
+  const minimum = axis === MINIMUM.axis;
+  const custody = minimum ? input.custody : null;
+  requireThat(input?.schema === INPUT_SCHEMA && (minimum || AXES.includes(axis)) && asFinitePositive(resolution) &&
     ["global-only", "solution-coverage"].includes(outputMode) && Array.isArray(runs) && runs.length === ORDER.length,
   "invalid adoption manifest: exactly one known axis and ordered ABBA + BAAB are required");
+  if (minimum) {
+    requireThat(input.experiment === MINIMUM.name && outputMode === "global-only" &&
+      SOURCE_SHA.test(custody?.source_commit ?? "") && [custody?.binary_sha256, custody?.manager_sha256, custody?.host_fingerprint]
+        .every((field) => SHA256.test(field ?? "")),
+    "minimum-domain adoption requires exact compile/run custody and global-only unprofiled timing");
+  }
   const evidence = {
     schema: "clearra.placement-graph-adoption.v1", release_authority: false, axis,
     order: "ABBA+BAAB", output_mode: outputMode, time_resolution_ms: resolution,
@@ -238,13 +311,15 @@ export function evaluatePlacementGraphAdoption(input) {
   if (observations.some(({ state }) => state === "failed")) return { ...evidence, status: "failed" };
   if (observations.some(({ state }) => state !== "completed")) return { ...evidence, status: "inconclusive" };
 
-  const completed = runs.map((run, index) => readCompletedRun(run, `run ${index + 1}`, axis, ORDER[index], outputMode));
+  const completed = runs.map((run, index) =>
+    readCompletedRun(run, `run ${index + 1}`, axis, ORDER[index], outputMode, custody));
   const { contract, peak } = completed[0];
   requireThat(completed.every((run) => isDeepStrictEqual(run.contract, contract)),
     "binary, CPU/request/result identity, fixed axes or supervisor contracts differ");
   requireThat(completed.every((run) => run.peak.source === peak.source),
     "cannot compare different sampled/kernel peak provenance");
-  const maps = verifyMapping(input.mapping, axis, contract);
+  if (custody) requireThat(contract.binarySha256 === custody.binary_sha256, "minimum-domain custody binary differs");
+  const maps = verifyMapping(input.mapping, axis, contract, custody, completed);
   if (outputMode === "solution-coverage") {
     requireThat(completed.every((run, index) => run.mapping.sha256 === maps[ORDER[index]]),
       "measured solution-coverage artifact is not the verified canonical mapping");
@@ -273,6 +348,7 @@ export function evaluatePlacementGraphAdoption(input) {
     peakMax.candidate - peakMax.baseline <= peakNoise;
   return {
     ...evidence, status: timeImproved && memoryNonregressing ? "adoptable" : "not-adoptable",
+    ...(minimum ? { experiment: MINIMUM.name, custody } : {}),
     scope: outputMode === "solution-coverage"
       ? "measured-artifacts-bound-to-exact-per-solution-comparison"
       : "global-only-timings-with-separate-exact-per-solution-qualification",
@@ -327,6 +403,10 @@ export function evaluateManifest(path) {
     comparison: readReference(manifest.mapping?.comparison),
     reference: loadRun(manifest.mapping?.reference),
     candidate: loadRun(manifest.mapping?.candidate),
+    ...(manifest.axis === MINIMUM.axis ? {
+      proof: readReference(manifest.mapping?.proof),
+      comparison_supervisor: readReference(manifest.mapping?.comparison_supervisor),
+    } : {}),
   } : null;
   return evaluatePlacementGraphAdoption({ ...manifest, runs, mapping });
 }

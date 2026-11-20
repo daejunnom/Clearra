@@ -11,13 +11,17 @@ import { availableParallelism, cpus, hostname, totalmem, version } from "node:os
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import {
+  DEFAULT_PLACEMENT_EXPERIMENT, placementExperiment, unprofiledEmptyMinimumRoute,
+} from "./placement-experiment-contract.mjs";
 
 const SHA = /^[a-f0-9]{64}$/u;
 const COMMIT = /^[a-f0-9]{40}$/u;
 const RUN_ID = /^\d{16,21}-[1-9]\d*$/u;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 const P7P4_FREE_RESERVE = 33n * 1024n * 1024n * 1024n;
-const AXIS = "movement_clear_certificates_mode";
+const DEFAULT_EXPERIMENT = placementExperiment(DEFAULT_PLACEMENT_EXPERIMENT);
+const AXIS = DEFAULT_EXPERIMENT.axis;
 const ARTIFACT = "solution-coverage.clrcov";
 const COVERAGE_ROOT = ["_local", "artifacts", "benchmarks", "placement-graph-coverage"];
 const MODES = Object.freeze({
@@ -26,6 +30,7 @@ const MODES = Object.freeze({
   CLEARRA_STATIC_INFLUENCE: "0",
   CLEARRA_TRANSLATION_INTERVAL: "0",
   CLEARRA_INCREMENTAL_DOMAIN: "0",
+  CLEARRA_MOVEMENT_CLEAR_CERTIFICATES: "0",
   CLEARRA_MINIMUM_DOMAIN_CUTOFF: "0",
   CLEARRA_MINIMUM_DOMAIN_WORK: "0",
   CLEARRA_FIRST_KICK_INTERVAL: "0",
@@ -38,6 +43,22 @@ const MODES = Object.freeze({
   CLEARRA_NO_ENTRY_COMPONENTS: "0",
   CLEARRA_SAME_TILE_PARENT_REUSE: "0",
 });
+const NEUTRAL_AXES = [
+  "static_influence_mode", "translation_interval_mode", "incremental_domain_mode",
+  "first_kick_interval_mode", "conditional_order_mode", "terminal_identity_move_mode",
+];
+// Some legacy movement-clear reports were generated before these axes
+// existed. Only that legacy lane accepts their corresponding absent fields.
+const LEGACY_OPTIONAL_AXES = [
+  "minimum_domain_cutoff_mode", "minimum_domain_work_mode",
+  "ordered_kick_guard_reuse_mode", "geometric_edge_reuse_mode",
+];
+const LEGACY_NULLABLE_AXES = [
+  "ordered_kick_interval_mode", "ilc_lazy_frame_mode", "no_entry_components_mode", "same_tile_parent_reuse_mode",
+];
+const KNOWN_MODE_KEYS = new Set([
+  "output_mode", "structural_mode", AXIS, ...NEUTRAL_AXES, ...LEGACY_OPTIONAL_AXES, ...LEGACY_NULLABLE_AXES,
+]);
 const CASES = Object.freeze({
   small: Object.freeze({
     name: "one-I-preflight", universe: "small-i", solutions: 1, queues: 1,
@@ -56,11 +77,15 @@ function requireThat(value, message) {
   if (!value) throw new Error(message);
 }
 
+function experimentFor(options) {
+  return options.experiment === undefined ? DEFAULT_EXPERIMENT : placementExperiment(options.experiment?.name ?? null);
+}
+
 export function parseProofArguments(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index], value = argv[index + 1];
-    requireThat(["--case", "--id", "--source-sha", "--timeout-seconds", "--build-profile"].includes(key) &&
+    requireThat(["--case", "--id", "--source-sha", "--timeout-seconds", "--build-profile", "--experiment"].includes(key) &&
       typeof value === "string" && !Object.hasOwn(options, key), "Distinct known option/value pairs required");
     options[key] = value;
   }
@@ -70,7 +95,10 @@ export function parseProofArguments(argv) {
   requireThat(Object.hasOwn(CASES, key) &&
     /^[a-z0-9][a-z0-9-]{0,47}$/u.test(id ?? "") &&
     COMMIT.test(sourceCommit ?? ""),
-  "Usage: run-placement-coverage-proof --case small|p7p4 --id UNIQUE-LEAF --source-sha FULL-HEAD [--timeout-seconds N]");
+  "Usage: run-placement-coverage-proof --case small|p7p4 --id UNIQUE-LEAF --source-sha FULL-HEAD [--timeout-seconds N] [--experiment movement-clear|minimum-domain-cutoff]");
+  const experiment = placementExperiment(options["--experiment"]);
+  requireThat(experiment === DEFAULT_EXPERIMENT || key === "p7p4",
+    "The minimum-domain cutoff proof requires the empty-origin P7P4 fixture");
   const fixture = CASES[key];
   const buildProfile = options["--build-profile"] ?? "release";
   requireThat(buildProfile === "release" || (key === "small" && buildProfile === "debug"),
@@ -79,10 +107,11 @@ export function parseProofArguments(argv) {
   const timeout = Number(raw);
   requireThat(/^[1-9]\d*$/u.test(raw) && Number.isSafeInteger(timeout) && timeout <= fixture.maxTimeout,
     "Invalid finite timeout for the selected fixture");
-  return { id, sourceCommit, key, fixture, timeout, buildProfile };
+  return { id, sourceCommit, key, fixture, timeout, buildProfile, experiment };
 }
 
 export function proofSchedule(options, binary, artifactRoot) {
+  const experiment = experimentFor(options);
   const arm = (name, value, suffix) => {
     const slot = options.id + suffix;
     return {
@@ -98,7 +127,7 @@ export function proofSchedule(options, binary, artifactRoot) {
       name: "comparison", value: "0", timeout: options.fixture.comparisonTimeout,
       args: ["--compare-coverage", reference.artifact, candidate.artifact],
     },
-  ].map((step) => ({ ...step, command: [binary, ...step.args] }));
+  ].map((step) => ({ ...step, experiment, command: [binary, ...step.args] }));
 }
 
 // Require all receipts to bind to this sequence's concrete invocation. A
@@ -128,24 +157,29 @@ function summaryEquals(value, expected) {
 
 export function validatedProofArm(report, receipt, step, options, binarySha, outputMode = "solution-coverage") {
   const fixture = options.fixture;
-  const neutralFollowOn = (name) => !Object.hasOwn(report, name) || report[name] === "0";
+  const experiment = experimentFor(options);
+  const minimumCutoff = experiment !== DEFAULT_EXPERIMENT;
+  const neutralFollowOn = (name) => name === experiment.axis || report[name] === "0" ||
+    (!minimumCutoff && !Object.hasOwn(report, name));
+  requireThat(experimentFor(step) === experiment && (step.value === "0" || step.value === "1"),
+    step.name + ": wrong scheduled proof experiment or arm");
   requireThat(report?.schema === "clearra.placement-graph-benchmark.v1" &&
     report.case === fixture.name && report.valid === true &&
     Array.isArray(report.validation_errors) && report.validation_errors.length === 0 &&
     report.binary_sha256 === binarySha && report.supervisor_run_id === receipt.outcome.run_id &&
-    report.output_mode === outputMode && report[AXIS] === step.value &&
-    report.mode === "1" && report.structural_mode === "1" &&
-    report.static_influence_mode === "0" && report.translation_interval_mode === "0" &&
-    report.incremental_domain_mode === "0" && report.first_kick_interval_mode === "0" &&
-    neutralFollowOn("minimum_domain_cutoff_mode") && neutralFollowOn("minimum_domain_work_mode") &&
-    report.conditional_order_mode === "0" && report.terminal_identity_move_mode === "0" &&
-    (report.ordered_kick_interval_mode ?? "0") === "0" &&
-    neutralFollowOn("ordered_kick_guard_reuse_mode") &&
-    neutralFollowOn("geometric_edge_reuse_mode") &&
-    (report.ilc_lazy_frame_mode ?? "0") === "0" &&
-    (report.no_entry_components_mode ?? "0") === "0" &&
-    (report.same_tile_parent_reuse_mode ?? "0") === "0",
+    report.output_mode === outputMode && report[experiment.axis] === step.value &&
+    report.mode === experiment.dependencyMode && report.structural_mode === experiment.structuralMode &&
+    (experiment.axis === AXIS || report[AXIS] === "0") &&
+    NEUTRAL_AXES.every((name) => report[name] === "0") && LEGACY_OPTIONAL_AXES.every(neutralFollowOn) &&
+    LEGACY_NULLABLE_AXES.every((name) => report[name] === "0" || (!minimumCutoff && report[name] == null)) &&
+    (!minimumCutoff || Object.keys(report).every((key) => !key.endsWith("_mode") || KNOWN_MODE_KEYS.has(key))),
   step.name + ": unexpected source, mode, or coverage output");
+  if (minimumCutoff) {
+    requireThat(options.key === "p7p4" && report.compiled_source_commit === options.sourceCommit,
+      step.name + ": minimum-domain proof requires the exact P7P4 compile-time source");
+    requireThat(unprofiledEmptyMinimumRoute(report),
+      step.name + ": minimum-domain proof requires the active unprofiled empty-origin route");
+  }
   const input = report.input;
   requireThat(input?.board === fixture.board && input.height === fixture.height &&
     input.placed_pieces === fixture.placed && input.supplied_pieces === fixture.supplied &&
@@ -171,6 +205,7 @@ export function validatedProofArm(report, receipt, step, options, binarySha, out
     ids?.count === fixture.solutions && ids.reported_total_count === fixture.solutions &&
     ids.covers_reported_family === true && SHA.test(ids.sha256_ordered_ctk1_v1 ?? "") &&
     coverage?.set_bit_count === fixture.queues && SHA.test(coverage.sha256_le_v1 ?? "") &&
+    (!minimumCutoff || coverage.word_count === fixture.queues / 64) &&
     (outputMode === "global-only" ? mapping == null : (
       outputMode === "solution-coverage" && mapping?.complete === true && SHA.test(mapping.sha256 ?? "") &&
       mapping.solution_count === fixture.solutions && mapping.total_weight === fixture.queues &&
@@ -200,6 +235,7 @@ export function assertExactComparison(comparison, reference, candidate, fixture)
 // Hook injection lets tests cover sequence and cutoff without invoking a bench
 // or needing an actual managed worktree or large coverage files.
 export async function collectPlacementCoverageProof(options, binarySha, steps, io) {
+  const experiment = experimentFor(options);
   const observations = [];
   const reports = {};
   const evidence = {
@@ -211,7 +247,8 @@ export async function collectPlacementCoverageProof(options, binarySha, steps, i
     manager_sha256: io.custody?.managerSha,
     host_fingerprint: io.custody?.hostFingerprint,
     case: options.fixture.name,
-    axis: AXIS,
+    axis: experiment.axis,
+    ...(experiment === DEFAULT_EXPERIMENT ? {} : { experiment: experiment.name }),
     observations,
     mapping: null,
   };
@@ -220,6 +257,7 @@ export async function collectPlacementCoverageProof(options, binarySha, steps, i
     for (const step of steps) {
       active = { name: step.name, state: "invalid", command: step.command, supervisor: null };
       observations.push(active);
+      requireThat(experimentFor(step) === experiment, step.name + ": wrong scheduled proof experiment");
       await io.checkInputs();
       const execution = await io.execute(step);
       const receipt = io.receipt(execution);
@@ -285,7 +323,12 @@ export function parseBoundBenchmarkOutput(receipt, execution) {
 }
 
 export function benchmarkEnvironment(environment, step) {
-  const expected = { ...MODES, CLEARRA_MOVEMENT_CLEAR_CERTIFICATES: step.value };
+  const experiment = experimentFor(step);
+  requireThat(step.value === "0" || step.value === "1", "Invalid placement experiment arm");
+  const expected = {
+    ...MODES, CLEARRA_PLACEMENT_DEPENDENCY: experiment.dependencyMode,
+    CLEARRA_STRUCTURAL_ORDER: experiment.structuralMode, [experiment.environmentKey]: step.value,
+  };
   const allowed = Object.fromEntries(Object.entries(environment).filter(([key]) =>
     !Object.hasOwn(expected, key.toUpperCase())));
   return { ...allowed, ...expected };
