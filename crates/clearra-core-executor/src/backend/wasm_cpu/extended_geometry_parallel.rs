@@ -388,6 +388,7 @@ fn traversal_error() -> WasmExactSearchError {
 #[cfg(test)]
 pub(super) mod cooperative {
     use super::*;
+    use crate::backend::wasm_cpu::extended_geometry::ExtendedGeometryAdvance;
     use crate::resource::SharedExecutionNodeBudget;
     use clearra_core_domain::execution_cancellation::ExecutionControl;
     use core::mem::size_of;
