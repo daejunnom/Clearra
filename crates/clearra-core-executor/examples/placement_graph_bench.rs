@@ -77,11 +77,14 @@ mod run {
     const EIGHT_I_INITIAL: u64 = 0xc030_0c03;
     const EIGHT_I_CAPTURE_ERROR: &str =
         "--nonempty-eight-i supports global-only output; --coverage-slot is unavailable";
+    const TEN_I_CAPTURE_ERROR: &str =
+        "--empty-ten-i supports global-only output; --coverage-slot is unavailable";
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Fixture {
         OneI,
         NonemptyEightI,
+        EmptyTenI,
         P7P4,
     }
 
@@ -90,6 +93,7 @@ mod run {
             match self {
                 Self::OneI => "one-I-preflight",
                 Self::NonemptyEightI => "nonempty-4L-eight-I-jstris180",
+                Self::EmptyTenI => "empty-4L-ten-I-jstris180",
                 Self::P7P4 => "empty-4L-P7P4-jstris180",
             }
         }
@@ -97,7 +101,7 @@ mod run {
         const fn height(self) -> u16 {
             match self {
                 Self::OneI => 1,
-                Self::NonemptyEightI | Self::P7P4 => 4,
+                Self::NonemptyEightI | Self::EmptyTenI | Self::P7P4 => 4,
             }
         }
 
@@ -105,7 +109,7 @@ mod run {
             match self {
                 Self::OneI => 1,
                 Self::NonemptyEightI => 8,
-                Self::P7P4 => 10,
+                Self::EmptyTenI | Self::P7P4 => 10,
             }
         }
 
@@ -113,7 +117,7 @@ mod run {
             match self {
                 Self::OneI => Some(0x3f0),
                 Self::NonemptyEightI => Some(EIGHT_I_INITIAL),
-                Self::P7P4 => None,
+                Self::EmptyTenI | Self::P7P4 => None,
             }
         }
 
@@ -121,6 +125,7 @@ mod run {
             let (board, supply, supplied_pieces, original_supply_count, hold) = match self {
                 Self::OneI => ("0x3f0", "I", 1, 1, "disabled"),
                 Self::NonemptyEightI => ("0xc0300c03", "IIIIIIII", 8, 1, "disabled"),
+                Self::EmptyTenI => ("0", "IIIIIIIIII", 10, 1, "disabled"),
                 Self::P7P4 => ("0", "P7P4", 11, 4_233_600, "enabled-empty"),
             };
             json!({
@@ -136,6 +141,7 @@ mod run {
                 Self::OneI => Ok(CoverageUniverse::SmallI),
                 Self::P7P4 => Ok(CoverageUniverse::P7P4),
                 Self::NonemptyEightI => Err(EIGHT_I_CAPTURE_ERROR.into()),
+                Self::EmptyTenI => Err(TEN_I_CAPTURE_ERROR.into()),
             }
         }
     }
@@ -145,6 +151,7 @@ mod run {
             [] => Ok((Fixture::P7P4, None)),
             [flag] if flag == "--small" => Ok((Fixture::OneI, None)),
             [flag] if flag == "--nonempty-eight-i" => Ok((Fixture::NonemptyEightI, None)),
+            [flag] if flag == "--empty-ten-i" => Ok((Fixture::EmptyTenI, None)),
             [flag, slot] if flag == "--coverage-slot" => Ok((Fixture::P7P4, Some(slot.as_str()))),
             [small, flag, slot] if small == "--small" && flag == "--coverage-slot" => {
                 Ok((Fixture::OneI, Some(slot.as_str())))
@@ -152,8 +159,11 @@ mod run {
             [fixture, flag, _] if fixture == "--nonempty-eight-i" && flag == "--coverage-slot" => {
                 Err(EIGHT_I_CAPTURE_ERROR.into())
             }
+            [fixture, flag, _] if fixture == "--empty-ten-i" && flag == "--coverage-slot" => {
+                Err(TEN_I_CAPTURE_ERROR.into())
+            }
             _ => Err(
-                "usage: placement_graph_bench [[--small] [--coverage-slot SLOT] | --nonempty-eight-i | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
+                "usage: placement_graph_bench [[--small] [--coverage-slot SLOT] | --nonempty-eight-i | --empty-ten-i | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
                     .into(),
             ),
         }
@@ -178,7 +188,7 @@ mod run {
                 || std::env::var("CLEARRA_RUNTIME_PROFILE").as_deref() != Ok("benchmark-search"))
         {
             return Err(
-                "P7P4, nonempty eight-I and coverage capture require the supervised benchmark-search profile".into(),
+                "P7P4, four-row I rectangles and coverage capture require the supervised benchmark-search profile".into(),
             );
         }
         let mode = std::env::var("CLEARRA_PLACEMENT_DEPENDENCY").unwrap_or_else(|_| "0".into());
@@ -214,6 +224,29 @@ mod run {
         let same_tile_parent_reuse_mode = experiment_mode("CLEARRA_SAME_TILE_PARENT_REUSE")?;
         let conditional_order_mode = experiment_mode("CLEARRA_CONDITIONAL_ORDER")?;
         let terminal_identity_move_mode = experiment_mode("CLEARRA_TERMINAL_IDENTITY_MOVE")?;
+        if fixture == Fixture::EmptyTenI
+            && [
+                &mode,
+                &structural_mode,
+                &static_influence_mode,
+                &translation_interval_mode,
+                &movement_clear_certificates_mode,
+                &incremental_domain_mode,
+                &first_kick_interval_mode,
+                &ordered_kick_interval_mode,
+                &ordered_kick_guard_reuse_mode,
+                &geometric_edge_reuse_mode,
+                &ilc_lazy_frame_mode,
+                &no_entry_components_mode,
+                &same_tile_parent_reuse_mode,
+                &conditional_order_mode,
+                &terminal_identity_move_mode,
+            ]
+            .into_iter()
+            .any(|mode| mode != "0")
+        {
+            return Err("--empty-ten-i isolates the minimum-domain cutoff and work modes".into());
+        }
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
         let capacity = CpuCapacity::current();
         let policy = PcExecutionPolicy::mvp_default()
@@ -320,8 +353,12 @@ mod run {
             fixture,
             capacity.hard_limit(),
             geometry_domains,
-            incremental_domain_mode == "1",
-            same_tile_parent_reuse_mode == "1",
+            DomainValidationModes {
+                incremental: incremental_domain_mode == "1",
+                same_tile_reuse: same_tile_parent_reuse_mode == "1",
+                minimum_cutoff: minimum_domain_cutoff_mode == "1",
+                minimum_work: minimum_domain_work_mode == "1",
+            },
         );
         let solution_coverage = match (capture, spool) {
             (Some((dir, universe)), Some(spool)) if errors.is_empty() => {
@@ -794,31 +831,48 @@ mod run {
             ProblemCompiler::compile_scenario_pc(&query)
                 .map_err(|e| format!("{} compile: {e:?}", fixture.name()))
         } else {
+            let (queue, hold, label) = if fixture == Fixture::EmptyTenI {
+                (
+                    PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 10])),
+                    PcHoldPolicy::Disabled,
+                    fixture.name(),
+                )
+            } else {
+                (
+                    PcQueueInput::standard_7_bag(),
+                    PcHoldPolicy::EnabledEmpty,
+                    "P7P4",
+                )
+            };
             let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
                 .with_rule(jstris_180())
-                .with_queue(PcQueueInput::standard_7_bag())
-                .with_hold_policy(PcHoldPolicy::EnabledEmpty)
+                .with_queue(queue)
+                .with_hold_policy(hold)
                 .with_objective(ObjectivePolicy::unique())
                 .with_execution_policy(policy);
-            ProblemCompiler::compile_opening_pc(&query).map_err(|e| format!("P7P4 compile: {e:?}"))
+            ProblemCompiler::compile_opening_pc(&query)
+                .map_err(|e| format!("{label} compile: {e:?}"))
         }
     }
 
-    /// Independent tiling enumeration on the 4x8 rectangle behind the two
-    /// occupied leftmost columns. Its left edge is either one vertical I
-    /// column or a four-column slab of four horizontal I pieces. Any tiling
-    /// is a sequence of those blocks, all achievable by placing the bottom
-    /// rows of the horizontal slabs in order while vertical pieces are down.
-    fn eight_i_identity_oracle() -> BTreeSet<StandardBoard64TilingIdentity> {
+    /// Independent tiling enumeration on a four-row rectangle. Its left edge
+    /// is either one vertical I column or a four-column slab of four
+    /// horizontal I pieces. Any tiling is a sequence of those blocks,
+    /// achievable by filling each horizontal layer after the vertical pieces.
+    fn four_row_i_identity_oracle(
+        initial_board: u64,
+        first_open_col: u8,
+    ) -> BTreeSet<StandardBoard64TilingIdentity> {
         fn visit(
             col: u8,
+            initial_board: u64,
             placed: &mut Vec<PiecePlacementMask>,
             identities: &mut BTreeSet<StandardBoard64TilingIdentity>,
         ) {
             if col == 10 {
                 identities.insert(
                     StandardBoard64TilingIdentity::from_placements(
-                        EIGHT_I_INITIAL,
+                        initial_board,
                         placed.iter().copied(),
                     )
                     .expect("oracle's placements are disjoint"),
@@ -827,7 +881,7 @@ mod run {
             }
             let vertical = (0..4).fold(0_u64, |mask, row| mask | (1_u64 << (row * 10 + col)));
             placed.push(PiecePlacementMask::new(PieceKind::I, vertical));
-            visit(col + 1, placed, identities);
+            visit(col + 1, initial_board, placed, identities);
             placed.pop();
             if col <= 6 {
                 let checkpoint = placed.len();
@@ -837,13 +891,61 @@ mod run {
                         0xf_u64 << (row * 10 + col),
                     ));
                 }
-                visit(col + 4, placed, identities);
+                visit(col + 4, initial_board, placed, identities);
                 placed.truncate(checkpoint);
             }
         }
         let mut identities = BTreeSet::new();
-        visit(2, &mut Vec::with_capacity(8), &mut identities);
+        visit(
+            first_open_col,
+            initial_board,
+            &mut Vec::with_capacity(usize::from(10 - first_open_col)),
+            &mut identities,
+        );
         identities
+    }
+
+    #[derive(Clone, Copy)]
+    struct DomainValidationModes {
+        incremental: bool,
+        same_tile_reuse: bool,
+        minimum_cutoff: bool,
+        minimum_work: bool,
+    }
+
+    fn validate_empty_minimum_work(
+        geometry: GeometryDomainExperimentTotals,
+        cutoff: bool,
+        work: bool,
+        errors: &mut Vec<String>,
+    ) {
+        if geometry.completed_families == 0
+            || geometry.minimum_empty_origin == 0
+            || geometry.advanced_full_compiles != 0
+            || geometry.advanced_incremental_compiles != 0
+        {
+            errors.push("empty ten-I must actually use the empty-origin minimum route".into());
+        }
+        if work {
+            if geometry.minimum_profiled_compiles != geometry.minimum_compiles
+                || geometry.minimum_profiled_compiles == 0
+                || geometry.minimum_incidence_rows_scanned == 0
+            {
+                errors.push("empty ten-I work mode must account for every minimum compile".into());
+            }
+            if cutoff != (geometry.minimum_incidence_rows_skipped > 0)
+                || cutoff != (geometry.minimum_cells_cut_off > 0)
+            {
+                errors
+                    .push("empty ten-I work counters did not match the selected cutoff arm".into());
+            }
+        } else if geometry.minimum_profiled_compiles != 0
+            || geometry.minimum_incidence_rows_scanned != 0
+            || geometry.minimum_incidence_rows_skipped != 0
+            || geometry.minimum_cells_cut_off != 0
+        {
+            errors.push("empty ten-I timing mode requires the work counters to be disabled".into());
+        }
     }
 
     fn validate(
@@ -851,8 +953,7 @@ mod run {
         fixture: Fixture,
         workers: usize,
         geometry: GeometryDomainExperimentTotals,
-        incremental: bool,
-        same_tile_reuse: bool,
+        modes: DomainValidationModes,
     ) -> Vec<String> {
         let mut errors = Vec::new();
         for key in ["count_complete", "probability_complete"] {
@@ -866,6 +967,7 @@ mod run {
         let expected_count = match fixture {
             Fixture::OneI => 1,
             Fixture::NonemptyEightI => 7,
+            Fixture::EmptyTenI => 14,
             Fixture::P7P4 => LARGE_COUNT,
         };
         if result.usize_field("normalized_unique_solution_count") != Some(expected_count) {
@@ -888,13 +990,21 @@ mod run {
                     "parallel_active_workers must equal detected auto limit {workers}"
                 ));
             }
-        } else if fixture == Fixture::NonemptyEightI {
+        } else if matches!(fixture, Fixture::NonemptyEightI | Fixture::EmptyTenI) {
+            let (board, first_open_col) = if fixture == Fixture::NonemptyEightI {
+                (EIGHT_I_INITIAL, 2)
+            } else {
+                (0, 0)
+            };
+            let label = fixture.name();
             let actual_identities = result.normalized_solution_identities();
             if actual_identities.len() != expected_count
                 || actual_identities.iter().copied().collect::<BTreeSet<_>>()
-                    != eight_i_identity_oracle()
+                    != four_row_i_identity_oracle(board, first_open_col)
             {
-                errors.push("eight-I canonical identities differ from the rectangle oracle".into());
+                errors.push(format!(
+                    "{label}: canonical identities differ from the rectangle oracle"
+                ));
             }
             // This compact CPU result exposes coverage_calculated and
             // probability_complete (checked above), not coverage_complete.
@@ -913,7 +1023,7 @@ mod run {
                 || words != [1]
             {
                 errors.push(format!(
-                    "eight-I must completely cover its only fixed queue: calculated={calculated:?}, patterns={patterns:?}, covered={covered:?}, probability={probability:?}, words={}, first word={:?}",
+                    "{label} must completely cover its only fixed queue: calculated={calculated:?}, patterns={patterns:?}, covered={covered:?}, probability={probability:?}, words={}, first word={:?}",
                     words.len(),
                     words.first(),
                 ));
@@ -924,10 +1034,20 @@ mod run {
                 .usize_field("workers_used")
                 .is_some_and(|used| (1..=workers).contains(&used))
             {
-                errors
-                    .push("eight-I must report an actual worker count within the Auto cap".into());
+                errors.push(format!(
+                    "{label} must report an actual worker count within the Auto cap"
+                ));
             }
-            let (expected, excluded) = if incremental {
+            if fixture == Fixture::EmptyTenI {
+                validate_empty_minimum_work(
+                    geometry,
+                    modes.minimum_cutoff,
+                    modes.minimum_work,
+                    &mut errors,
+                );
+                return errors;
+            }
+            let (expected, excluded) = if modes.incremental {
                 (
                     geometry.advanced_incremental_compiles,
                     geometry.advanced_full_compiles,
@@ -941,13 +1061,13 @@ mod run {
             if geometry.completed_families == 0 || expected == 0 || excluded != 0 {
                 errors.push("eight-I must actually execute its selected advanced route".into());
             }
-            if incremental != (geometry.support_cells_reused > 0) {
+            if modes.incremental != (geometry.support_cells_reused > 0) {
                 errors.push("eight-I support-cell reuse did not match the incremental arm".into());
             }
-            if same_tile_reuse != (geometry.same_tile_parent_reuses > 0) {
+            if modes.same_tile_reuse != (geometry.same_tile_parent_reuses > 0) {
                 errors.push("eight-I parent reuse did not match the SameTile arm".into());
             }
-            if !same_tile_reuse && geometry.same_tile_parent_scans == 0 {
+            if !modes.same_tile_reuse && geometry.same_tile_parent_scans == 0 {
                 errors
                     .push("eight-I reference arm must perform actual SameTile parent scans".into());
             }
@@ -1079,7 +1199,9 @@ mod run {
             })
             .collect::<Result<_, String>>()?;
         let first = &reports[0];
-        let eight_i = first["case"] == Fixture::NonemptyEightI.name();
+        let rectangle_fixture = [Fixture::NonemptyEightI, Fixture::EmptyTenI]
+            .into_iter()
+            .any(|fixture| first["case"] == fixture.name());
         let mut differences = Vec::new();
         let summary_keys = [
             "normalized_unique_solution_count",
@@ -1121,9 +1243,9 @@ mod run {
                     differences.push(format!("{}: summary.{key} mismatch", paths[index]));
                 }
             }
-            if eight_i {
+            if rectangle_fixture {
                 if report["output_mode"] != "global-only" {
-                    differences.push(format!("{}: eight-I must be global-only", paths[index]));
+                    differences.push(format!("{}: I rectangle must be global-only", paths[index]));
                 }
                 for key in ["workers_used", "cpu_parallel_execution"] {
                     if report["summary"][key].is_null()
@@ -1231,11 +1353,11 @@ mod run {
             let all_axes = format!(
                 "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ordered_kick_guard_reuse={ordered_kick_guard_reuse},geometric_edge_reuse={geometric_edge_reuse},ilc_lazy_frame={ilc_lazy_frame},no_entry_components={no_entry_components},same_tile_parent_reuse={same_tile_parent_reuse},conditional_order={conditional},terminal_identity_move={terminal_move},minimum_domain_cutoff={minimum_domain_cutoff},minimum_domain_work={minimum_domain_work}"
             );
-            if eight_i {
+            if rectangle_fixture {
                 let work = report
                     .get("geometry_domain")
                     .filter(|work| work.is_object())
-                    .ok_or("eight-I result is missing geometry_domain work counters")?;
+                    .ok_or("I rectangle result is missing geometry_domain work counters")?;
                 domain_work.entry(all_axes.clone()).or_default().push(work);
             }
             all_axes_times.entry(all_axes).or_default().push(ms);
@@ -1360,7 +1482,7 @@ mod run {
             },
             "scope": "same binary/input/CPU, exact reported full-set hash and global coverage; no p95 claim"
         });
-        if eight_i {
+        if rectangle_fixture {
             comparison["geometry_domain_work_samples_by_all_axes"] = json!(domain_work);
         }
         println!(
@@ -1420,6 +1542,10 @@ mod run {
                 (Fixture::NonemptyEightI, None)
             );
             assert_eq!(
+                parse(&["--empty-ten-i"]).unwrap(),
+                (Fixture::EmptyTenI, None)
+            );
+            assert_eq!(
                 parse(&["--small", "--coverage-slot", "sample"]).unwrap(),
                 (Fixture::OneI, Some("sample".to_owned()))
             );
@@ -1428,12 +1554,74 @@ mod run {
                 EIGHT_I_CAPTURE_ERROR
             );
             assert!(Fixture::NonemptyEightI.capture_universe().is_err());
+            assert_eq!(
+                parse(&["--empty-ten-i", "--coverage-slot", "sample"]).unwrap_err(),
+                TEN_I_CAPTURE_ERROR
+            );
+            assert!(Fixture::EmptyTenI.capture_universe().is_err());
         }
 
         #[test]
         fn eight_i_rectangle_oracle_derives_all_seven_placements() {
             assert_eq!(EIGHT_I_INITIAL.count_ones(), 8);
-            assert_eq!(eight_i_identity_oracle().len(), 7);
+            assert_eq!(four_row_i_identity_oracle(EIGHT_I_INITIAL, 2).len(), 7);
+        }
+
+        #[test]
+        fn empty_ten_i_rectangle_oracle_derives_all_fourteen_placements() {
+            use clearra_core_domain::solution::normalized_tiling_solution as normalized;
+
+            let identities = four_row_i_identity_oracle(0, 0);
+            assert_eq!(identities.len(), 14);
+            assert_eq!(
+                normalized::normalized_tiling_solution_set_hash_from_sorted_standard_board64_identity_iter(
+                    identities
+                ),
+                "cts1:66d4ef8ac39a1839"
+            );
+        }
+
+        #[test]
+        fn empty_ten_i_work_modes_require_active_route_and_accurate_counts() {
+            let timing = GeometryDomainExperimentTotals {
+                completed_families: 1,
+                minimum_compiles: 12,
+                minimum_empty_origin: 12,
+                ..GeometryDomainExperimentTotals::default()
+            };
+            let baseline = GeometryDomainExperimentTotals {
+                minimum_profiled_compiles: 12,
+                minimum_incidence_rows_scanned: 20,
+                ..timing
+            };
+            let cutoff = GeometryDomainExperimentTotals {
+                minimum_incidence_rows_scanned: 15,
+                minimum_incidence_rows_skipped: 5,
+                minimum_cells_cut_off: 2,
+                ..baseline
+            };
+            let valid = |metrics, cutoff, work| {
+                let mut errors = Vec::new();
+                validate_empty_minimum_work(metrics, cutoff, work, &mut errors);
+                errors.is_empty()
+            };
+            assert!(valid(timing, false, false));
+            assert!(valid(timing, true, false));
+            assert!(valid(baseline, false, true));
+            assert!(valid(cutoff, true, true));
+            assert!(!valid(timing, false, true));
+            assert!(!valid(cutoff, true, false));
+            assert!(!valid(baseline, true, true));
+            assert!(!valid(cutoff, false, true));
+            assert!(!valid(
+                GeometryDomainExperimentTotals {
+                    minimum_empty_origin: 0,
+                    minimum_below_seven_pieces: 12,
+                    ..timing
+                },
+                false,
+                false
+            ));
         }
     }
 }
