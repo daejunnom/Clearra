@@ -4275,7 +4275,7 @@ pub(crate) fn response_from_search_with_build_score_derivation(
         CooperativeSearchResponseKind::PcTiling {
             authority,
             expected_problem,
-        } => pc_tiling_response(authority, &expected_problem, result, false),
+        } => authority.execution_response(&expected_problem, result),
         CooperativeSearchResponseKind::PcSave {
             authority,
             expected_problem,
@@ -4301,7 +4301,7 @@ pub(crate) fn response_from_search_with_build_score_derivation(
         CooperativeSearchResponseKind::ScenarioTiling {
             authority,
             expected_problem,
-        } => pc_tiling_response(authority, &expected_problem, result, true),
+        } => authority.execution_response(&expected_problem, result),
         CooperativeSearchResponseKind::ScenarioSave {
             authority,
             expected_problem,
@@ -4380,32 +4380,6 @@ fn pc_chance_response(
         AppResponse::success(AppRenderModel::Pc(result))
     };
     response.with_pc_chance_execution_evidence(evidence)
-}
-
-fn pc_tiling_response(
-    authority: PcTilingCompiledAuthority,
-    expected_problem: &clearra_problem::SearchProblem,
-    result: clearra_core_executor::CoreExecutionResult,
-    scenario: bool,
-) -> AppResponse {
-    let evidence = match authority.validate_execution_result(expected_problem, &result) {
-        Ok(evidence) => evidence,
-        Err(error) => {
-            return AppResponse::failed(
-                AppStatus::ExecutionFailed,
-                AppError::new(
-                    AppErrorCode::ExecutionFailed,
-                    format!("pc tiling result rejected: {error}"),
-                ),
-            )
-        }
-    };
-    let response = if scenario {
-        AppResponse::success(AppRenderModel::Scenario(result))
-    } else {
-        AppResponse::success(AppRenderModel::Pc(result))
-    };
-    response.with_pc_tiling_execution_evidence(evidence)
 }
 
 fn pc_save_response(
@@ -6530,6 +6504,10 @@ mod raw_pc_tiling_cooperative_tests {
     };
 
     fn canonical_raw_tiling_request() -> AppRequest {
+        canonical_raw_tiling_request_with_candidate_limit(5_000)
+    }
+
+    fn canonical_raw_tiling_request_with_candidate_limit(max_candidates: usize) -> AppRequest {
         let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
             .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
                 PieceKind::I,
@@ -6544,7 +6522,7 @@ mod raw_pc_tiling_cooperative_tests {
                     .with_requested_backend(RequestedSearchBackend::Cpu)
                     .with_workers(1)
                     .with_allow_backend_fallback(false)
-                    .with_max_candidates(5_000),
+                    .with_max_candidates(max_candidates),
             )
             .with_objective(ObjectivePolicy::tiling());
         AppRequest::new(AppCommand::Pc(
@@ -6564,9 +6542,11 @@ mod raw_pc_tiling_cooperative_tests {
             .expect("successful PC response must retain its typed Core result")
     }
 
-    #[cfg(feature = "native-c-core")]
-    fn complete_cooperative_tiling(context: &AppContext) -> crate::AppResponse {
-        let mut execution = context.start_cooperative_execution(canonical_raw_tiling_request());
+    fn complete_cooperative_tiling(
+        context: &AppContext,
+        request: AppRequest,
+    ) -> crate::AppResponse {
+        let mut execution = context.start_cooperative_execution(request);
         let control = ExecutionControl::default();
         for _ in 0..512 {
             match execution.advance(4_096, &control) {
@@ -6584,6 +6564,51 @@ mod raw_pc_tiling_cooperative_tests {
             }
         }
         panic!("canonical RAW tiling fixture must complete within the bounded work budget")
+    }
+
+    #[test]
+    fn pc_tiling_candidate_budget_preserves_failure_without_publishing() {
+        use clearra_host_contract::{
+            ExecutionAvailabilityReason, ExecutionAvailabilityState, ExecutionCompletenessState,
+        };
+
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let request = canonical_raw_tiling_request_with_candidate_limit(1);
+        let rust = AppContext::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+        );
+        let assert_budget_failure = |response: crate::AppResponse| {
+            assert_eq!(
+                response.status(),
+                AppStatus::ExecutionFailed,
+                "{response:?}"
+            );
+            assert!(response.render_model().is_none());
+            assert!(response.product_capability_result().is_none());
+            let report = response.resource_report();
+            assert!(report.solver_executed());
+            assert_eq!(
+                report.truncation_reason(),
+                Some("candidate_budget_exceeded")
+            );
+            assert_eq!(
+                report.result_completeness(),
+                ExecutionCompletenessState::Incomplete
+            );
+            assert_eq!(
+                report.execution_availability().state(),
+                ExecutionAvailabilityState::Exhausted
+            );
+            assert_eq!(
+                report.execution_availability().reason(),
+                Some(ExecutionAvailabilityReason::ComputeBudgetExceeded),
+            );
+        };
+        assert_budget_failure(rust.run(request.clone()));
+        assert_budget_failure(complete_cooperative_tiling(&rust, request.clone()));
+        #[cfg(feature = "native-c-core")]
+        assert_budget_failure(AppContext::default().run(request));
     }
 
     #[cfg(feature = "native-c-core")]
@@ -6624,7 +6649,8 @@ mod raw_pc_tiling_cooperative_tests {
         let cooperative_context = AppContext::new(
             AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
         );
-        let cooperative = complete_cooperative_tiling(&cooperative_context);
+        let cooperative =
+            complete_cooperative_tiling(&cooperative_context, canonical_raw_tiling_request());
         assert_eq!(cooperative.status(), AppStatus::Success, "{cooperative:?}");
         let cooperative_result = core_result(&cooperative);
         assert_eq!(cooperative_result.field("objective"), Some("tiling"));

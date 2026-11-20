@@ -251,7 +251,7 @@ pub(crate) fn resource_diagnostics_from_failure(error: &AppError) -> DiagnosticR
     report
 }
 
-fn resource_report_from_core_result(result: &CoreExecutionResult) -> ResourceReport {
+pub(crate) fn resource_report_from_core_result(result: &CoreExecutionResult) -> ResourceReport {
     let mut report = ResourceReport::new(true, result.field("memory_status").unwrap_or("reported"));
     report.peak_frontier_states = result
         .usize_field("resource_peak_frontier_states")

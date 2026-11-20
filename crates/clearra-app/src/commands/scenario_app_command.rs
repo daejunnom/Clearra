@@ -271,19 +271,7 @@ impl RunnableAppCommand for ScenarioAppCommand {
                     .execute_native_pc_tiling_with_control(&authority, context.execution_control())
             };
             return match execution {
-                Ok(result) => {
-                    match authority.validate_execution_result(authority.problem(), &result) {
-                        Ok(evidence) => AppResponse::success(AppRenderModel::Scenario(result))
-                            .with_pc_tiling_execution_evidence(evidence),
-                        Err(error) => AppResponse::failed(
-                            AppStatus::ExecutionFailed,
-                            AppError::new(
-                                AppErrorCode::ExecutionFailed,
-                                format!("pc tiling result rejected: {error}"),
-                            ),
-                        ),
-                    }
-                }
+                Ok(result) => authority.execution_response(authority.problem(), result),
                 Err(error) => core_execution_error_response(error),
             };
         }

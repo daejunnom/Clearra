@@ -16,9 +16,15 @@ use clearra_problem::{
     ProblemCompileError, ProblemCompiler, SearchOutputPolicy, SearchProblem, SearchProblemPreset,
 };
 
-use crate::pc_result_projection::{
-    validate_pc_tiling_opening_request_contract, validate_pc_tiling_scenario_request_contract,
-    PC_TILING_EXTERNAL_RETAINED_UPPER_BOUND_BYTES,
+use crate::{
+    app_error::{AppError, AppErrorCode},
+    app_response::{AppResponse, AppStatus},
+    pc_result_projection::{
+        validate_pc_tiling_opening_request_contract, validate_pc_tiling_scenario_request_contract,
+        PC_TILING_EXTERNAL_RETAINED_UPPER_BOUND_BYTES,
+    },
+    render::AppRenderModel,
+    resource_contract::resource_report_from_core_result,
 };
 
 pub const PC_TILING_FAMILY_RESULT_CONTRACT: &str = "pc-tiling-family.v1";
@@ -503,6 +509,62 @@ impl PcTilingCompiledAuthority {
             self.query.problem_preset(),
         )?;
         Ok(ValidatedPcTilingExecutionEvidence { report })
+    }
+
+    /// The three App sinks share publication and failure projection. The
+    /// completed family still needs positive memory and page-store evidence;
+    /// a trusted, budget-cut producer may only supply a failure report.
+    pub(crate) fn execution_response(
+        &self,
+        executed_problem: &SearchProblem,
+        result: CoreExecutionResult,
+    ) -> AppResponse {
+        let evidence = match self.validate_execution_result(executed_problem, &result) {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                let response = AppResponse::failed(
+                    AppStatus::ExecutionFailed,
+                    AppError::new(
+                        AppErrorCode::ExecutionFailed,
+                        format!("pc tiling result rejected: {error}"),
+                    ),
+                );
+                return if self.produced_compute_budget_cut(executed_problem, &result) {
+                    response.with_resource_report(resource_report_from_core_result(&result))
+                } else {
+                    response
+                };
+            }
+        };
+        let model = match self.query.as_ref() {
+            PcTilingQuerySnapshot::Opening(_) => AppRenderModel::Pc(result),
+            PcTilingQuerySnapshot::Scenario(_) => AppRenderModel::Scenario(result),
+        };
+        AppResponse::success(model).with_pc_tiling_execution_evidence(evidence)
+    }
+
+    fn produced_compute_budget_cut(
+        &self,
+        executed_problem: &SearchProblem,
+        result: &CoreExecutionResult,
+    ) -> bool {
+        if !core::ptr::eq(executed_problem, self.problem.as_ref())
+            || result.unique_field("problem_preset") != Some(self.query.problem_preset().as_str())
+            || result.unique_field("compiled_goal") != Some("clear-to-empty")
+            || result.unique_field("search_output_policy") != Some("tiling-only")
+            || result.unique_field("resource_truncated") != Some("true")
+            || result.unique_field("count_complete") != Some("false")
+            || result.unique_field("tiling_family_complete") != Some("false")
+        {
+            return false;
+        }
+        match result.unique_field("resource_truncation_reason") {
+            Some("candidate_budget_exceeded") => {
+                executed_problem.backend_request().max_candidates() != 0
+            }
+            Some("frontier_budget_exceeded") => executed_problem.budget().max_nodes() != 0,
+            _ => false,
+        }
     }
 }
 
