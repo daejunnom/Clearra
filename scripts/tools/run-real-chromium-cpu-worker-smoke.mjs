@@ -86,7 +86,8 @@ const forced24 = forcedFixture(fixture, 24, 6);
 const forced7 = forcedFixture(fixture, 7, 2);
 const { height, mask, pieces, queue } = forced24;
 function pcProductCommand(fixture, product, preserveB2b = false) {
-  return 'clearra pc ' + product + ' --lines ' + fixture.height + ' --height ' + fixture.height +
+  return 'clearra pc' + (product ? ' ' + product : '') +
+    ' --lines ' + fixture.height + ' --height ' + fixture.height +
     ' --board-mask 0x' + fixture.mask + ' --pieces ' + fixture.pieces + ' --queue ' + fixture.queue +
     ' --no-hold --rule srs-plus --backend cpu --no-tablebase ' + ACCELERATORS_OFF +
     (preserveB2b ? ' --preserve-b2b --spin-profile t-spins' : '');
@@ -135,16 +136,18 @@ const scripts = await build({
     clearraVerifierWorker: 'apps/clearra-web/src/workers/clearraVerifierWorker.ts',
     capabilities: 'packages/clearra-ui/src/lib/wasm/hostCapabilitySnapshot.ts',
     workerClient: 'packages/clearra-ui/src/lib/wasm/wasmCommandClient.ts',
+    wasmRuntime: 'apps/clearra-web/src/workers/clearraWasmRuntime.ts',
     productPager: 'packages/clearra-ui/src/lib/workspace/productResultPager.ts',
     replayPager: 'packages/clearra-ui/src/lib/workspace/pcReplayPager.ts',
     replayPresentation: 'packages/clearra-ui/src/lib/workspace/pcPathReplayPresentation.ts'
   }
 });
 const compiled = new Map(scripts.outputFiles.map(file => [basename(file.path), file.contents]));
-assert.equal(compiled.size, 7);
+assert.equal(compiled.size, 8);
 for (const [url, entry] of [[ROOT_WORKER, 'clearraWorker.js'],
   [VERIFIER_WORKER, 'clearraVerifierWorker.js'], ['/capabilities.js', 'capabilities.js'],
-  ['/worker-client.js', 'workerClient.js'], ['/product-pager.js', 'productPager.js'],
+  ['/worker-client.js', 'workerClient.js'], ['/wasm-runtime.js', 'wasmRuntime.js'],
+  ['/product-pager.js', 'productPager.js'],
   ['/replay-pager.js', 'replayPager.js'], ['/replay-presentation.js', 'replayPresentation.js']]) {
   const bytes = compiled.get(entry);
   assert.ok(bytes, 'missing compiled entry ' + entry);
@@ -193,6 +196,7 @@ try {
   assert.equal(response?.status(), 200);
   const available = await page.evaluate(() => navigator.hardwareConcurrency);
   assert.ok(Number.isSafeInteger(available) && available >= 3, 'the Chromium smoke needs three real logical processors');
+  await readbackLocalSr3(page);
   let forced24GeometryKey;
   for (const test of tests) {
     const runs = [];
@@ -262,6 +266,128 @@ try {
       // Incomplete launch/close leaves an unresolved lease for reviewed
       // recovery. The outer supervisor still owns the entire process tree.
       if (browserDrained) await scratch.release();
+    }
+  }
+}
+
+async function readbackLocalSr3(page) {
+  const label = 'pc-forced-7l-visible-seven-sr3';
+  const before = verifierLoads;
+  const run = command => page.evaluate(runWorker, {
+    rootWorker: ROOT_WORKER, command, workers: 1, timeoutMs: CASE_TIMEOUT_MS, label
+  });
+  const { terminal: seed } = await run(pcProductCommand(forced7, '') +
+    ' --objective all --count all --queue-knowledge visible-7 --workers 1');
+  assert.equal(seed.event, 'final_response', label);
+  assert.equal(seed.response.status, 'success', label);
+  assert.equal(seed.response.result?.kind, 'pc-scenario', label);
+  assert.deepEqual(seed.response.runtime_identity, manifest.build.runtime_identity);
+  assert.equal(seed.search_report.workers_used, 1, label);
+  exactProjection({
+    label, count: 1, keyPrefix: 'ctk2|height=7|initial=' + forced7.mask + '|placements='
+  }, seed.search_report);
+  const fields = new Map(seed.search_report.summary_fields);
+  assert.equal(fields.get('queue_knowledge'), 'visible-7', label);
+  assert.equal(fields.get('observation_policy_evaluated'), 'true', label);
+  assert.equal(fields.get('scenario_replay_token_version'), 'sr3', label);
+  const token = fields.get('scenario_replay_token');
+  assert.match(token, /^sr3:w10:v7:[^\s]+$/u, label);
+  assert.notEqual(fields.get('continuation_token'), token, 'sr3 is an input replay, not a next-state token');
+
+  // Continue's public parser only accepts the token. Worker authority is
+  // carried by the host message, not by appending PC options to Continue.
+  const command = 'clearra continue --token ' + token;
+  const { terminal: replay } = await run(command);
+  assertContinueTerminal(replay, label);
+  assert.equal(verifierLoads, before, 'local sr3 must not start a distributed verifier');
+
+  // The browser product worker proves real ingress/completion, not how many
+  // times the ABI advanced. A second view over the same WASM exercises unit
+  // work budgets and interleaved cancellation without racing browser timers.
+  const stepped = await page.evaluate(stepLocalSr3, { command, timeoutMs: CASE_TIMEOUT_MS });
+  assertContinueTerminal(stepped.completed, label);
+  assert.equal(stepped.cancelled.event, 'cancelled', label);
+  assert.equal(stepped.cancelled.scope_released, true, label);
+  assert.equal(stepped.cancelled.execution_availability.reason, 'cancelled-by-caller', label);
+  assert.equal(stepped.cancelled.result_completeness, 'incomplete', label);
+  assert.notEqual(stepped.completed.job_id, stepped.cancelled.job_id, label);
+  console.log('chromium_local_sr3=passed height=7 visible_seven=true worker_terminal=continue ' +
+    'cooperative_slices=' + stepped.slices + ' cancelled_scope_released=true');
+}
+
+function assertContinueTerminal(terminal, label) {
+  assert.equal(terminal.event, 'final_response', label);
+  assert.equal(terminal.response.status, 'success', label);
+  assert.equal(terminal.response.command, 'continue', label);
+  assert.equal(terminal.response.result?.kind, 'continue', label);
+  assert.deepEqual(terminal.response.runtime_identity, manifest.build.runtime_identity);
+  // Continue is an AppMessage, not a Core-backed search result or product
+  // page. The native App readback owns its summary fields and result parity.
+  assert.equal(terminal.search_report ?? null, null, label);
+}
+
+// In Chromium, step the existing serial job ABI exactly as the product worker
+// does, but with budget one so an Immediate Continue cannot pass this check.
+async function stepLocalSr3({ command, timeoutMs }) {
+  const deadline = performance.now() + timeoutMs;
+  const { loadClearraWasmModule } = await import('/wasm-runtime.js');
+  const wasm = await loadClearraWasmModule();
+  let owned = null;
+  const live = status => status === 'pending' || status === 'progress';
+  const terminalEvent = event => ['final_response', 'failed', 'cancelled', 'terminated'].includes(event.event);
+  function drain(job) {
+    const events = JSON.parse(wasm.drain_job_events_json(job));
+    if (events.some(event => event.job_id !== job)) throw new Error('sr3 event escaped its job scope');
+    return events;
+  }
+  function advance(job) {
+    if (performance.now() >= deadline) throw new Error('sr3 unit-work stepping timed out');
+    const status = wasm.advance_job(job, 1);
+    if (!live(status)) owned = null;
+    return { status, events: drain(job) };
+  }
+  function begin() {
+    const job = wasm.start_job(command);
+    owned = job;
+    // Common parsing preparation is Pending even for the old Immediate path.
+    const preparation = advance(job);
+    if (preparation.status !== 'pending' || preparation.events.some(terminalEvent)) {
+      throw new Error('sr3 did not prepare a live job: ' + preparation.status);
+    }
+    const firstSearch = advance(job);
+    if (!live(firstSearch.status) || firstSearch.events.some(terminalEvent) ||
+        !firstSearch.events.some(event => event.event === 'progress' &&
+          ['geometry', 'buildup'].includes(event.progress.label))) {
+      throw new Error('sr3 did not yield a live search slice after preparation');
+    }
+    return job;
+  }
+  try {
+    const cancelledJob = begin();
+    wasm.cancel_job(cancelledJob);
+    owned = null;
+    const cancellation = drain(cancelledJob).filter(terminalEvent);
+    if (cancellation.length !== 1 || cancellation[0].event !== 'cancelled') {
+      throw new Error('sr3 cancellation did not publish one cancelled terminal');
+    }
+    const completedJob = begin();
+    for (let slices = 2; slices <= 4096; slices++) {
+      const { status, events } = advance(completedJob);
+      if (live(status)) {
+        if (events.some(terminalEvent)) throw new Error('live sr3 job published a terminal event');
+        continue;
+      }
+      const completions = events.filter(terminalEvent);
+      if (status !== 'completed' || completions.length !== 1 || completions[0].event !== 'final_response') {
+        throw new Error('replacement sr3 job did not complete: ' + status);
+      }
+      return { completed: completions[0], cancelled: cancellation[0], slices };
+    }
+    throw new Error('sr3 did not complete after 4096 unit-work advances');
+  } finally {
+    if (owned !== null) {
+      // Preserve the original error; exiting the browser also ends the owner.
+      try { wasm.cancel_job(owned); } catch { /* already released */ }
     }
   }
 }
