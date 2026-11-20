@@ -207,13 +207,13 @@ tetromino 하나가 새로 완성할 수 있는 원래 행은 최대 네 개다.
 
 CountAll이 요구하지 않는 한 동일 배치의 여러 terminal 증거가 결과 수를 늘리면 안 된다. 순서 교환도 물리 관계, 삭제 사건, 목표 상태, 공급 계약을 모두 보존할 때만 허용한다.
 
-### 5.6 수동 CEGIS 방식의 발전
+### 5.6 증명 우선, 조건부 CEGIS
 
-반례 기록은 두 종류로 구분한다. 첫째는 실제 허용/불허·확률이 잘못된 의미 반례, 둘째는 정답이지만 관계 완성에 탐색이 많이 필요한 비용 반례다.
+테트리스 필드 전체를 순회하며 새 반례를 찾는 것을 선행조건으로 삼지 않는다. [관계의 수학적 증명 의무](tetris-relation-proof-obligations-2026-11-20.md)를 기준으로 먼저 적용 영역과 고정 owner, 상태 변수, 보존해야 할 관측 결과를 명시한다. 영역의 모든 허용 상태에 대해 무엇이 필요조건·충분조건·정확한 동치인지 정리하고, 초기 조건·경계·전이의 폐쇄성과 owner가 바뀔 때의 무효화를 증명한다. 특정 물리 자세의 부정, 배치 전체의 부정, 레이블이 붙은 실행 언어의 동치는 각각 양화 범위가 다르므로 한 증명으로 승격하지 않는다.
 
-각 사례에서 관련 placement, row 사건, kick prefix를 최소화한다. 그다음 여러 사례를 포괄하는 규칙을 만들고 적용 범위를 증명한다. 기존 작은 물리 oracle과 제품 계약으로 검증한 뒤, residual 검색이 얼마나 제거됐는지 측정한다. 유한 테스트에서 반례가 없었다는 사실을 모든 필드의 증명으로 승격하지 않는다.
+증명에서 성립하지 않는 가정이 드러나거나 독립 oracle이 불일치를 보인 때만, 관련 미노·원래 행 사건·kick 후보·공급 관측을 줄여 반례를 일반화한다. 한 필드를 예외 처리하지 않고 더 강한 전제, 실제로 보존되는 동치, 또는 미지원 영역의 `Unknown`을 계약에 반영한다. 기존 반례와 독립 회귀는 계속 유지한다. 의미 반례(가능/불가능, 결과, 확률의 오류)와 비용 반례(정답은 같지만 작업량이 늘어남)는 따로 판단한다. 비용 때문에 정확성 검증을 완화하지 않는다.
 
-개발 중에는 기존 정확 BuildUp을 비교·fallback으로 사용할 수 있다. 하지만 fallback이 남은 비율과 비용을 공개해야 하며, 모든 대상 관계가 완성됐다고 선언할 때는 predicate 내부에 물리 탐색을 숨길 수 없다. 일반화가 아직 안 된 범위는 범위별 미완성으로 남긴다.
+제품의 guard가 증명의 전제를 실제로 검사하는지 독립 물리 oracle 및 해당 제품 계약으로 비교한다. 유한 테스트에서 반례가 없었다는 사실은 전체 영역의 증명이 아니며, 정리의 증명 또한 구현·제품 parity·성능 채택을 대신하지 않는다. 증명되지 않은 정상 요청은 기존 정확 BuildUp으로 돌아가며, 취소·자원 제한으로 끝난 실행을 불가능으로 판정하지 않는다. fallback이 남은 범위와 비용을 공개하고, 완료된 관계라고 선언한 범위에서는 predicate 내부에 물리 탐색을 숨기지 않는다.
 
 ### 5.7 병행 CEGIS 구현의 결과와 다음 우선순위
 
@@ -546,8 +546,8 @@ V01·V02·V03 같은 검증 작업은 전체 항목이 끝날 때까지 기다�
 - [ ] 수정 파일: `crates/clearra-postprocess/src/score_batch/b2b_execution_filter.rs`, `crates/clearra-scoring/src/b2b_preservation.rs`, `crates/clearra-scoring/src/event/spin_detector.rs`, `crates/clearra-spin/src`, 구현 내용: **G11 — 기존 B2B·spin 정책을 중립 조건으로 준비한다.** 선행: G10. 완료: 정책을 solver에 복사하지 않고 기존 판정과 동등한 조건을 생산한다. save의 PC 예외와 수치 chain은 구분한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/buildup.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/result.rs`, `crates/clearra-app/src/app_services.rs`, 구현 내용: **G12 — 관계와 목표 전이를 결합하여 불필요한 증거 계산을 생략한다.** 선행: G03, G05, G10, G11. 완료: 0줄/4줄/PC 등 확정 조건을 먼저 처리하고 필요한 terminal evidence만 계산하며 runtime scoring 직접 의존을 추가하지 않는다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/geometry_family.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/geometry.rs`, 구현 내용: **G13 — Append/Union에 support/clear 조각부터 증분 결합한다.** 선행: I07, A02, G02, G03, G04. 완료: 대안의 상관관계·prefix 경계를 유지하면서 관계 재생성이 감소한다. 이동 조각은 G05·G08·G09의 해당 증명 이후 별도 연결하며, 큰 summary 연구를 초기 완료 조건에 묶지 않는다.
-- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/reachability_dependency_differential_tests.rs`, `docs/research`, 구현 내용: **G14 — 의미 반례와 비용 반례를 별도 축적·최소화한다.** 선행: F08, G01. 완료: 관련 미노·clear 사건·kick 후보로 줄인 재현 사례와 일반화 규칙의 적용 범위를 검토할 수 있다.
-- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/structural_order.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/buildup.rs`, 구현 내용: **G15 — 증명된 범위마다 관계 완성과 fallback의 경계를 연결한다.** 선행: G02, G03, G04, G05, G06, G07, G14, V01의 support/clear gate, V02의 기본 규칙 gate. 완료: 해당 범위는 물리 prefix 없이 평가하고 미완성 범위·구성용 physical 호출·fallback을 공개한다. G08·G09·G12·G13은 해당 증명과 검증 후 각각 추가 연결하며 초기 개선을 모든 연구 완료에 묶지 않는다.
+- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/reachability_dependency_differential_tests.rs`, `docs/research`, 구현 내용: **G14 — 증명 또는 독립 검산이 드러낸 의미 반례와 비용 반례를 별도 일반화한다.** 선행: F08, G01. 적용: 증명 의무가 성립하지 않거나 검산 결과가 어긋난 범위에서 기존 사례를 보존하고 새 사례를 최소화한다. 완료: 줄인 재현 사례와 수정한 일반 규칙, 적용 범위 및 fallback을 검토할 수 있다. 새 반례의 발견 자체는 gate나 활동량 목표가 아니다.
+- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/structural_order.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/buildup.rs`, 구현 내용: **G15 — 증명된 범위마다 관계 완성과 fallback의 경계를 연결한다.** 선행: G02, G03, G04, G05, G06, G07, V01의 support/clear gate, V02의 기본 규칙 gate. 해당 범위에 드러난 G14 의미 반례는 해결하거나 가드로 제외하고 회귀를 보존한다. 완료: 해당 범위는 물리 prefix 없이 평가하고 미완성 범위·구성용 physical 호출·fallback을 공개한다. G08·G09·G12·G13은 해당 증명과 검증 후 각각 추가 연결하며 초기 개선을 모든 연구 완료에 묶지 않는다.
 
 ### Q. 큐·확률·순열 — 5개
 
@@ -587,7 +587,7 @@ V01·V02·V03 같은 검증 작업은 전체 항목이 끝날 때까지 기다�
 ### V. 정확성·성능·최종 gate — 6개
 
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/geometry_domain.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/placement_conditions.rs`, 구현 내용: **V01 — ILC·APDP·support/clear를 독립 gate로 비교한다.** 선행: support/clear는 I02·G02·G03, instantiation 재사용은 I03, 증분 APDP는 A04. 완료: 준비된 범위마다 full parent/domain·후보 집합과 반례를 검증하며 다른 범위 구현을 기다리지 않는다.
-- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/reachability_reference_tests.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/reachability_dependency_differential_tests.rs`, 구현 내용: **V02 — 지원 미노·프로필의 관계를 독립 물리 oracle로 검증한다.** 선행: 기본 규칙은 G06·G07·G14, 새 kick/분리 규칙은 G08·G09. 완료: 준비된 범위마다 도달/불가 양쪽·kick·먼 통로·공동 차단·같은 kind 사례를 비교하며 적용 범위를 명시한다.
+- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/reachability_reference_tests.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/reachability_dependency_differential_tests.rs`, 구현 내용: **V02 — 지원 미노·프로필의 관계를 독립 물리 oracle로 검증한다.** 선행: 기본 규칙은 G06·G07, 새 kick/분리 규칙은 G08·G09. 완료: 준비된 범위마다 도달/불가 양쪽·kick·먼 통로·공동 차단·같은 kind와 기존 회귀 사례를 비교하며 증명의 적용 범위를 명시한다. 불일치가 드러난 범위는 G14로 보내며 정정 전에는 그 범위를 승인하지 않는다.
 - [ ] 수정 파일: `crates/clearra-core-ffi/src/native`, `crates/clearra-invariant-tests/src`, 구현 내용: **V03 — C/Rust parity를 제품 기능별로 완료한다.** 선행: F08 및 해당 기능의 R03·R04·R05·R06. 완료: 준비된 기능부터 identity·coverage·CountAll·hold·terminal evidence·취소/부분 결과를 비교한다. R08은 통과한 기능만 전환하며 전체 지원 기능 합집합은 V06에서 확인한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/examples/placement_graph_bench.rs`, 구현 내용: **V04 — 동일 계약의 단계별 작은·중간 A/B를 수행한다.** 선행: F06, M01, M02, V01, V02, Q03. 완료: 정확성 일치 뒤 관계 구성 연산·ILC/APDP 재계산·메모리·시간을 분리하고 변화 요인 하나씩 비교한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/examples/placement_graph_bench.rs`, `docs/research`, 구현 내용: **V05 — P7P4 완료 실행과 규모 증가 검증을 수행한다.** 선행: V04, Q05. 완료: Auto 워커·같은 resource 정책으로 전체 결과를 검산하고 10~11미노 구간의 생성 관계·물리 호출·state·시간·peak를 비교한다. 실패 실행 시간을 speedup으로 쓰지 않는다.
@@ -619,24 +619,39 @@ flowchart TD
 
 화살표는 **소비할 범위의 계약**을 뜻한다. O 전체가 끝나야 G/I/R을 시작한다는 의미가 아니다. 예를 들어 O03의 순수 행사상 계약이 정해지면 I01을 시작할 수 있으며, support/clear 검증과 O01의 kick 정규화 작업도 독립된 파일에서 진행할 수 있다. S02의 작업 규약 수정은 소스 집계 F05나 알고리즘 구현을 기다리지 않는다.
 
-### 12.2 3명 작업자와 1명 통합자 기준 배치
+### 12.2 작업자 배치와 확장
+
+아래는 작업자 세 명일 때의 배치 예다. 고정 인원이나 고정 세 갈래를 뜻하지 않는다.
 
 | 준비 상태 | 작업자 A | 작업자 B | 작업자 C | 통합자 |
 | --- | --- | --- | --- | --- |
 | 조사·계약 작성 | R01·R02의 backend/ABI 지도 | F05·S02의 소스·검증 문서 | F07·M01의 종료 진단 | F01·F02·F03, 서로 다른 계약 조정 |
 | 공통 인터페이스 확정 | O01·O02의 규칙 원천 | O03·I01·I02·O04의 frame/catalog | M02 및 R02의 기능별 oracle 준비 | 공개 API·Cargo·모듈 선언 편집 |
 | 기본 관계 준비 | G02·G03의 support/clear | A02·A03·A04의 APDP 부모 전파 | G05·G06의 ordered kick/진입 규칙 | G01, shared-file 변경 연결, V01/V02 범위별 검증 |
-| 기본 관계 연결 후 | G08·G09·G14의 일반화 | I03·I05·I06·G13의 재사용 | R03~R06의 제품 격차 해소 | G15, 공통 workspace/result 연결 |
+| 기본 관계 연결 후 | G08·G09의 정리, 필요한 범위의 G14 | I03·I05·I06·G13의 재사용 | R03~R06의 제품 격차 해소 | G15, 공통 workspace/result 연결 |
 | 의미 계약 안정 후 | G10·G11의 목표 조건 생산 | Q01~Q03·Q05의 공급 결합 | H01~H04의 host adapter | G12·M03~M05, 기능별 R08 전환 |
 | 증거 확보 후 | S03·S04의 작은 가족 정리 | I04·A06·A07·Q04의 독립 연구 | 필요한 ABI·배포 연결 | 순차 벤치마크, S05·S07, R10~R12, V06 |
 
 이 표는 담당 분야의 예시다. 선행조건이 준비되지 않았으면 해당 작업자는 독립 조사·oracle 설계·다른 ready 작업을 먼저 한다. 특히 같은 파일에 도착한 두 작업을 병렬 적용하지 않는다. 별도 작업 공간을 사용해도 공통 인터페이스 변경의 통합은 순차로 한다.
 
+통합자는 **선행 계약, 편집 경로, 실행 자원, 산출물 권한**을 각각 확인한다. 네 항목이 충돌하지 않는 작업은 가능한 한 동시에 배정한다. 계약이 필요한 소비자는 인터페이스가 고정되기 전에도 읽기 전용 감사와 독립 oracle을 준비할 수 있다. 활성 소유자가 있는 파일의 다른 변경은 별도 제안으로 받아 대기열에서 한 명씩 연결한다. 통합자가 전체 순서·빌드·외부 권한을 관리하고, 각 작업자는 요청 범위의 설계·구현·검증 증거를 책임진다.
+
+| 독립 작업줄기 | 첫 인계와 경계 |
+| --- | --- |
+| 관계 증명 | 이동·ordered kick, 원래 행 frame·support/clear, APDP/parity, 공급·레이블의 증명을 별도 작성한다. 공통 핫 파일을 수정하지 않고 필요한 전제와 guard를 해당 소유자에게 넘긴다. |
+| 네이티브 terminal 결과 | `extended_pc_family_parallel.rs`·`extended_build_probability.rs`와 워커 회귀에 한 소유자를 둔다. 고정 큐 단일 ordinal의 후보 정리·coverage·`CountAll`·대표 경로를 하나의 실행권 아래 비교한다. App 경로 변경은 정확한 terminal 계약의 후속이다. |
+| Legacy Cover | `clearra-build-coverage`와 `legacy_cover_native_witness.rs`에서 원래 큐 ordinal·구체 배치의 결합을 검증한다. 완결된 한정 요청과 더 큰 공급의 일부만 증명한 prefix를 구별하며, prefix만으로 App 기본 경로를 바꾸지 않는다. |
+| Compact PC2 전달 | WASM coordinator/wire에서 실제 적용·완료·병합을 요청/시도/브랜치/작업 마스크에 결박하는 계약을 준비한다. Web Worker 담당은 별도 경로에서 준비하되 wire 계약 확정 전에 토큰 발급을 열지 않는다. |
+| 목표·결과 의미 | `clearra-objectives`·`clearra-replay`에서 B2B/spin에 필요한 중립적 이벤트 계약을 검토한다. 컴퓨팅과 점수 계산은 분리하고 물리 관계의 핫 파일 및 기존 점수 정책을 함께 바꾸지 않는다. |
+| 제품·ABI 및 데스크톱 | [기존 호스트 표](v090-rust-host-contract-2026-11-20.md)와 [ABI·소유권 감사](v090-ownership-and-abi-contract.md)의 변경분만 추적한다. 네이티브 Windows GUI 시작 증거는 실제 x64/WebView2 실행권을 별도 배정하며, CLI/브리지 검사와 합쳐 보고하지 않는다. 작은 Cover/데스크톱 구조 감사(S06)는 독립적으로 준비할 수 있다. |
+| 빌드·실행 수명 | [Clearra-Build 복구 감사](clearra-build-wsl-recovery-audit-2026-11-20.md)에 설치 신뢰 경계, 경로, 실행권 및 산출물 보존을 별도로 기록한다. 관리자·설정·공용 진입점은 소유권을 조정하고 일반 Ubuntu를 대신 사용하지 않는다. |
+| 비교 실행 | F06/V04의 비교 계약과 영수증 검증은 실행 없이 준비한다. 대형 실행은 적격 후보·동일 소스·정확한 출력·여유 자원·빈 실행권을 확인한 뒤 통합자만 시작한다. 이미 검증한 같은 비교나 작업량 감소가 없는 시간 측정을 증거 없이 반복하지 않는다. |
+
 ### 12.3 파일 편집권
 
 | 충돌 지점 | 편집 책임 | 병렬로 할 수 있는 일 |
 | --- | --- | --- |
-| `Cargo.toml`, 공개 `lib.rs`, `backend/mod.rs`, `wasm_cpu/mod.rs` | 통합자 한 명 | 각 owner 내부 구현·소비자 조사 |
+| `Cargo.toml`, 공개 `lib.rs`, `backend/mod.rs`, `wasm_cpu/mod.rs`, 공용 검증·배포 workflow | 통합자 한 명 | 각 owner 내부 구현·소비자 조사, 독립 검증 설계 |
 | `catalog.rs`, `placement_conditions.rs` | ILC/catalog 담당; 관계 담당의 요구를 계약으로 받음 | APDP index·물리 규칙의 독립 구현 |
 | `geometry.rs`, `geometry_domain.rs` | 해당 단계의 domain/family 담당 | 관계 증명·제품 adapter |
 | `reachability.rs`, `reachability_independence.rs` | movement 담당 | support/clear·supply·manager |
@@ -646,6 +661,8 @@ flowchart TD
 | C 삭제·공개 rename·feature 전환 | 통합자 순차 | 다른 안정된 모듈의 조사·작은 변경 |
 
 작업자는 담당 밖의 shared 파일을 임의로 수정하지 않고 필요한 최소 API 변경을 통합자에게 전달한다. 계약만 같으면 테스트·실험의 설계는 병렬화할 수 있다. **큰 메모리 실행은 작업 간 코드 의존성이 없어도 병렬화하지 않는다.**
+
+통합자가 충돌하는 빌드 루트, 전용 WSL 실행권, 고정 포트와 대형 벤치마크에 실행기를 한 명씩 배정한다. 서로 다른 호스팅 러너가 실제로 독립적이면 좁은 기능 CI와 host 증거를 병행할 수 있지만, 같은 A/B의 양쪽 실행은 같은 러너와 바이너리에서 순차로 진행한다. 작업자가 임의로 CI를 중복 실행하거나 브랜치·태그를 바꾸지 않는다. 산출물은 용도·소스 SHA·실행 ID·시도·무결성 정보를 포함하는 원래의 관리 경로와 검증 범위를 유지한다. 비게시 집중 검증, 후보 검증, canonical acceptance 및 제품 readback은 서로의 권한을 대신하지 않는다.
 
 ### 12.4 불필요한 선행조건을 만들지 않는 예
 
@@ -660,12 +677,12 @@ flowchart TD
 
 88개 기본 작업은 담당 범위이며 한 번의 큰 변경 단위가 아니다. 담당자는 각 작업을 아래 순서로 잘라 진행한다. 이 절의 단계마다 새 파일·crate·상태 타입을 만들지 않는다.
 
-1. **계약 작성:** OP 연산군, 실제 입력/출력, 필요조건/충분조건/정확 결과의 강도, 지원 보드·미노·프로필을 적는다. key 밖에서 owner가 고정하는 값과 변경 시 무효화할 값도 지정한다. 이 단계는 읽기 전용 조사로 병렬 진행할 수 있다.
+1. **계약과 증명 작성:** OP 연산군, 실제 입력/출력, 필요조건/충분조건/정확 결과의 강도, 지원 보드·미노·프로필을 적는다. key 밖에서 owner가 고정하는 값과 변경 시 무효화할 값도 지정한다. 관계나 가지치기를 바꿀 때는 5.6절의 전제와 폐쇄성 의무를 먼저 대조한다. 이 단계는 읽기 전용 조사로 병렬 진행할 수 있다.
 2. **소비자 한 곳 선택:** 가장 작은 실제 소비자와 비교 oracle을 정한다. 기존 결과를 전달할 수 있는지 먼저 확인한다. 전 저장소 rename이나 추상 인터페이스를 먼저 만들지 않는다.
 3. **한 경로 연결:** 기존 계산 결과를 그 소비자에서 사용하게 하고, 남아 있는 중복 계산과 fallback을 명시한다. stale owner·다른 D·다른 profile·부분 계산을 정확 결과로 재사용하지 않는 사례를 해당 범위에서 검증한다.
 4. **동일 계약의 소비자 확대:** 같은 의미인 소비자만 순차 연결하고, compact/extended 또는 Boolean/evidence 차이는 별도 하위 범위로 남긴다. C와 Rust의 이름이 같다는 이유로 연결하지 않는다.
 5. **중복 퇴역:** 마지막 실제 소비자가 사라진 계산·wrapper만 제거한다. 필요한 독립 oracle은 보존한다. 파일 이동은 동작 변경과 분리한다.
-6. **인계와 통합:** 변경한 경로, 감소시킨 연산, 기존/새 owner, 실제 검증 결과, 미지원·미완성 범위를 다음 소비자 담당자에게 넘긴다. 검사 문구 존재나 체크박스 수로 완료를 판정하지 않는다. 큰 실행은 통합자가 준비된 범위의 gate를 확인한 뒤 순차 수행한다.
+6. **인계와 통합:** 기준 SHA와 변경 경로, 기존/새 owner, 감소시킨 연산, 정리의 전제·검사하는 guard·남은 fallback, 독립 검산·실측·호스트 결과 중 실제로 확보한 근거를 넘긴다. 소스 검토, 테스트 작성, 통과, 성능 채택, 배포는 서로 다른 상태다. 검사 문구 존재나 체크박스 수로 완료를 판정하지 않는다. 큰 실행은 통합자가 준비된 범위의 gate를 확인한 뒤 순차 수행한다.
 
 다음은 동시에 배정할 수 있는 구체적인 작업 묶음이다. 계약 정리와 oracle 설계는 해당 구현 파일의 편집권이 없어도 진행할 수 있다. 표의 준비 조건은 각 묶음의 연결 단계에 적용하고, 최종 완료 조건은 11절을 유지한다.
 
@@ -677,7 +694,7 @@ flowchart TD
 | 앞단 투영 재사용 | I05에서 같은 shape/row 조건이 다시 계산되는 호출군 선정 | I02 | catalog 담당: 의미가 완전한 공유 입력과 제거한 projection 계산 |
 | APDP 증분 | A02의 full parent 대안 확인, A03의 영향받은 parent 갱신, A04의 rollback 비교 | F02·O04 | A05/G13: 변화한 cell/partial과 보존되는 parent 대안 |
 | Support와 clear | G02의 supporter OR와 G03의 row contributor를 각각 준비 | G01·I02·O04; clear는 O03 | G15/G13: 직접 영향과 clear 간접 영향이 분리된 관계 |
-| Movement·CEGIS | G05/G06의 전제와 positive proof, G14의 반례 최소화 | F08·G01·O01의 해당 규칙 계약 | G15/V02: 범용/미노/프로필별 적용 범위와 residual fallback |
+| Movement 증명 | G05/G06의 전제·양성/부정 증명, 실패한 의무만 G14에서 일반화 | F08·G01·O01의 해당 규칙 계약 | G15/V02: 범용/미노/프로필별 적용 범위와 residual fallback |
 | 공급 product | Q01의 관계 언어 입력 및 Q02의 canonical 공급 전이 | G01·F02 | Q03: occurrence·hold 다중성과 request/epoch namespace |
 | 소유권·증거 | O05/O06의 수명 지도와 M02 계측 후 M03의 한 결과 모드 | F03·F07, 해당 compiled 계약 | M04/R06: 공유/worker/후보/결과와 incomplete 처리 |
 | 제품·ABI | R01/R02에서 기능 가족 하나의 소비자와 지원 범위 확인 | F01·F02 | R03~R06: 재사용/미연결/미구현을 구분한 실제 요청 fixture |
@@ -735,7 +752,7 @@ flowchart TD
 | --- | --- | --- |
 | MS0: 계약 정리 | 현재/목표 구조, 소유자·기능 격차·검증 기준 | 기존 코어를 무엇에 재사용할지 확정; 구현 중복 금지 |
 | MS1: 기본 관계 | 모든 미노의 support OR·clear 사건·incidence 기반 제외 | 검증된 진입 범위에서 관계 구성 비용 감소; 미완성 범위 명시 |
-| MS2: 일반 이동 규칙 | ordered kick·먼 통로·공동 차단 반례와 일반화 | 프로필별 완전 관계 적용 범위 확대; 물리 구성 호출 감소 |
+| MS2: 일반 이동 규칙 | ordered kick·먼 통로·공동 차단의 일반 정리와 증명·검산이 드러낸 반례의 수정 | 프로필별 완전 관계 적용 범위 확대; 물리 구성 호출 감소 |
 | MS3: 앞단 재사용 | ILC/domain 단일 소유·증분 APDP·초기 family 조각 | 활성 경로에서 반복 평가 감소, 후보 집합 보존 |
 | MS4: Rust 공통 코어 | 기능별 native/WASM 서비스와 호환 경계 | 기존 Rust 구현 기반 parity; host의 알고리즘 중복 없음 |
 | MS5: 그래프와 확률 | 목표 조건·같은 kind·hold·weighted union의 결합 | 확률 전용 요청에서 불필요한 큐·물리 prefix 감소 |

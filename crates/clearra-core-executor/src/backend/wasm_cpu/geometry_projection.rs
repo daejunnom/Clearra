@@ -838,6 +838,10 @@ fn counts_dominate(counts: [u8; 7], used_counts: [u8; 7]) -> bool {
 }
 
 #[cfg(test)]
+#[path = "geometry_projection_checker_proof_tests.rs"]
+mod checker_proof_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
