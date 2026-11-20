@@ -318,7 +318,8 @@ mod case_invariant_core_executor_uses_checkpoint_schedule_metadata_without_cache
             ])),
         );
         let problem = ProblemCompiler::compile_opening_pc(&query).expect("opening problem");
-        let result = CoreExecutor::execute(&problem).expect("opening execution");
+        let result = CoreExecutor::execute_native_c_reference(&problem)
+            .expect("C reference opening execution");
         let fields = result.summary_fields();
 
         assert!(fields.contains(&(
@@ -346,7 +347,8 @@ mod case_invariant_observed_opening_uses_same_schedule_metadata_without_cache_co
                 ObservedQueue::new(vec![PieceKind::I, PieceKind::O, PieceKind::T]),
             ));
         let problem = ProblemCompiler::compile_opening_pc(&query).expect("opening problem");
-        let result = CoreExecutor::execute(&problem).expect("opening execution");
+        let result = CoreExecutor::execute_native_c_reference(&problem)
+            .expect("C reference opening execution");
         let fields = result.summary_fields();
 
         assert!(fields.contains(&(
@@ -402,7 +404,8 @@ mod case_invariant_scenario_service_keeps_full_queue_for_min_remaining_queue {
         .with_min_remaining_queue(4);
 
         let problem = ProblemCompiler::compile_scenario_pc(&query).expect("scenario problem");
-        let result = CoreExecutor::execute(&problem).expect("scenario execution");
+        let result = CoreExecutor::execute_native_c_reference(&problem)
+            .expect("C reference scenario execution");
         let fields = result.summary_fields();
 
         assert!(fields.contains(&("solution_found".to_owned(), "true".to_owned())));

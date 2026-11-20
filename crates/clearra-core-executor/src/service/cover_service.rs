@@ -230,8 +230,8 @@ mod pipeline_fields {
         ]
     }
 }
-mod probability_formatter {
-    pub(super) fn format_probability(value: f64) -> String {
+pub(super) mod probability_formatter {
+    pub(in crate::service) fn format_probability(value: f64) -> String {
         if value == 0.0 {
             return "0.0".to_owned();
         }
@@ -245,7 +245,7 @@ mod probability_formatter {
             .to_owned()
     }
 }
-mod query_bridge {
+pub(super) mod query_bridge {
     use clearra_build_coverage::{
         domain::slot_domain::SlotDomain,
         query::{
@@ -256,7 +256,9 @@ mod query_bridge {
     use clearra_core_domain::{board::cell::CellCoord, piece::piece_kind::PieceKind};
     use clearra_problem::BuildQuery;
 
-    pub(super) fn build_coverage_query_from_bridge(query: &BuildQuery) -> BuildCoverageQuery {
+    pub(in crate::service) fn build_coverage_query_from_bridge(
+        query: &BuildQuery,
+    ) -> BuildCoverageQuery {
         let board_size = query.template().board_size();
         let width = usize::from(board_size.width()).max(1);
         let height = usize::from(board_size.height()).max(1);
@@ -279,9 +281,11 @@ mod query_bridge {
                 SlotDomain::new(slot.id(), vec![piece])
             })
             .collect::<Vec<_>>();
-        let template = BuildTemplate::new(query.template().id(), slots)
-            .with_board_size(board_size)
-            .with_label(query.template().label().unwrap_or("bridge-template"));
+        let mut template =
+            BuildTemplate::new(query.template().id(), slots).with_board_size(board_size);
+        if let Some(label) = query.template().label() {
+            template = template.with_label(label);
+        }
 
         BuildCoverageQuery::new(
             template,

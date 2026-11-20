@@ -4,9 +4,11 @@ use clearra_problem::ProblemCompiler;
 use clearra_scoring::profile::ScoreProfile;
 
 use super::{
-    post_pc_error_reason::scenario_error_reason, post_pc_evaluation::PostPcEvaluation,
-    post_pc_evaluation_summary::PostPcEvaluationSummary,
-    post_pc_scenario_input::PostPcScenarioInput, post_pc_score_evaluator::PostPcScoreEvaluator,
+    post_pc_error_reason::scenario_error_reason,
+    post_pc_evaluation::PostPcEvaluation,
+    post_pc_evaluation_summary::{PostPcEvaluationSummary, PostPcWitness},
+    post_pc_scenario_input::PostPcScenarioInput,
+    post_pc_score_evaluator::PostPcScoreEvaluator,
     post_pc_score_summary::PostPcScoreSummary,
 };
 
@@ -64,12 +66,13 @@ impl PostPcEvaluator {
                 };
             }
         };
+        let witness = PostPcWitness::from_result(query, &result);
         let score = profile.map_or_else(PostPcScoreSummary::none, |profile| {
-            PostPcScoreEvaluator::score_retained_traces(&result, profile)
+            PostPcScoreEvaluator::score_retained_traces(&result, witness, profile)
         });
 
         PostPcEvaluation::Evaluated(PostPcEvaluationSummary::from_query_result(
-            query, &result, score,
+            query, &result, witness, score,
         ))
     }
 }
@@ -87,6 +90,6 @@ fn preflight_unsupported_reason(query: &PcScenarioQuery) -> Option<&'static str>
     None
 }
 
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(test)]
 #[path = "post_pc_evaluator_tests.rs"]
 mod tests;

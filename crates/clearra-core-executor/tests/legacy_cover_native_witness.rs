@@ -53,13 +53,15 @@ use clearra_supply::{
 
 const LEGACY_PATTERN_ID: u32 = 0;
 
-fn exact_o_cover_query(board: BoardSize, pattern_count: usize) -> BuildCoverageQuery {
+fn o_cover_query(board: BoardSize, pattern_count: usize, concrete: bool) -> BuildCoverageQuery {
     let (slots, domains) = (0_u16..5)
         .map(|index| {
             let id = BuildSlotId::new(u32::from(index));
             let x = index * 2;
-            let cells = [(x, 0), (x + 1, 0), (x, 1), (x + 1, 1)]
-                .into_iter()
+            let physical_cells = [(x, 0), (x + 1, 0), (x, 1), (x + 1, 1)];
+            let cells = physical_cells[..if concrete { 4 } else { 1 }]
+                .iter()
+                .copied()
                 .map(|(x, y)| CellCoord::new_unchecked(x, y))
                 .collect();
             (
@@ -115,7 +117,7 @@ fn native_and_rust_agree_on_complete_bounded_legacy_fixed_and_finite_sources() {
         ),
     ];
     for (case, queue, pattern_count, expected_hits) in cases {
-        let query = exact_o_cover_query(board, pattern_count);
+        let query = o_cover_query(board, pattern_count, true);
         let build = BuildQuery::coverage_bridge(
             BuildTemplateBridge::new(query.template().id(), board, 5),
             pattern_count,
@@ -127,13 +129,16 @@ fn native_and_rust_agree_on_complete_bounded_legacy_fixed_and_finite_sources() {
         // Exercise the public typed Core Build entry with its real complete
         // fixed/finite queue. The CLI/App Legacy default still supplies an
         // Observed queue; this is not a claim about that default route.
-        let source_query =
-            PcScenarioQuery::new(PcScenarioBoard::standard_10(2, 0), queue, PieceWindow::new(5))
-                .with_allow_hold(false)
-                .with_exact_pieces(Some(5))
-                .with_count_policy(PcCountPolicy::CountAll)
-                .with_retained_trace_limit(1)
-                .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1));
+        let source_query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0),
+            queue,
+            PieceWindow::new(5),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(5))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_retained_trace_limit(1)
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1));
         let legacy = SearchProblem::new(
             SearchProblemPreset::Build,
             ScenarioQuery::build_preset(source_query, build),
@@ -178,7 +183,9 @@ fn native_and_rust_agree_on_complete_bounded_legacy_fixed_and_finite_sources() {
                 0
             } else {
                 let row = &build.coverage_rows()[0];
-                let candidate = packing.candidate_view_at(0).expect("the one physical candidate");
+                let candidate = packing
+                    .candidate_view_at(0)
+                    .expect("the one physical candidate");
                 assert_eq!(
                     candidate.standard_board64_tiling_identity(0).unwrap(),
                     expected_assignment
@@ -225,7 +232,8 @@ fn native_and_rust_agree_on_complete_bounded_legacy_fixed_and_finite_sources() {
                 "solution_probability_complete",
             ] {
                 assert_eq!(
-                    result.bool_field(field), Some(true),
+                    result.bool_field(field),
+                    Some(true),
                     "{case}: {ordinal}, {field}",
                 );
             }
@@ -268,23 +276,29 @@ fn native_and_rust_agree_on_complete_bounded_legacy_fixed_and_finite_sources() {
         .expect("exact concrete Rust row, including an explicit zero");
         assert!(covered.exact_cover_complete(), "{case}");
         assert_eq!(covered.union().covered_patterns(), &bits, "{case}");
-        let product = CoreExecutor::execute_build_coverage_with_control(&legacy, &query, &control)
-            .expect("real Legacy Core projection on the admitted request");
+        let product = CoreExecutor::execute_native_c_reference_build_coverage_with_control(
+            &legacy, &query, &control,
+        )
+        .expect("real Legacy Core projection on the admitted request");
         assert_eq!(product.bool_field("count_complete"), Some(true), "{case}");
         assert_eq!(
-            product.bool_field("probability_complete"), Some(true),
+            product.bool_field("probability_complete"),
+            Some(true),
             "{case}"
         );
         assert_eq!(
-            product.bool_field("resource_truncated"), Some(false),
+            product.bool_field("resource_truncated"),
+            Some(false),
             "{case}"
         );
         assert_eq!(
-            product.usize_field("pattern_count"), Some(pattern_count),
+            product.usize_field("pattern_count"),
+            Some(pattern_count),
             "{case}"
         );
         assert_eq!(
-            product.usize_field("union_covered_patterns"), Some(expected_hits),
+            product.usize_field("union_covered_patterns"),
+            Some(expected_hits),
             "{case}"
         );
         assert_eq!(
@@ -296,6 +310,32 @@ fn native_and_rust_agree_on_complete_bounded_legacy_fixed_and_finite_sources() {
             covered.result().probability().get(),
             "{case}: complete uniform requested denominator",
         );
+        for concrete in [true, false] {
+            let query = o_cover_query(board, pattern_count, concrete);
+            let rust = CoreExecutor::execute_build_coverage_with_control(&legacy, &query, &control)
+                .expect("Rust product projection of the same complete typed Legacy request");
+            assert_eq!(
+                rust.coverage_pattern_words(),
+                &[oracle_word],
+                "{case}: {concrete}"
+            );
+            for field in [
+                "count_complete",
+                "probability_complete",
+                "resource_truncated",
+                "pattern_count",
+                "assignment_count",
+                "coverage_matrix_row_count",
+                "union_covered_patterns",
+                "build_coverage_probability",
+            ] {
+                assert_eq!(
+                    rust.field(field),
+                    product.field(field),
+                    "{case}: {concrete}: {field}"
+                );
+            }
+        }
     }
 }
 

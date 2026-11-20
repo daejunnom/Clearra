@@ -2549,6 +2549,17 @@ fn best_scoring_lock_evidence(
     y: i8,
     scratch: &mut ReachabilityScratch,
 ) -> Option<ScoringLockEvidence> {
+    preferred_scoring_lock_evidence::<false>(template, board, rotation, x, y, scratch)
+}
+
+fn preferred_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
+    template: &ReachabilityTemplate,
+    board: u64,
+    rotation: RotationState,
+    x: i8,
+    y: i8,
+    scratch: &mut ReachabilityScratch,
+) -> Option<ScoringLockEvidence> {
     let target = State { rotation, x, y };
     let target_index = state_index(template.width, template.ceiling, target)?;
     if template.state_masks[target_index] == INVALID_STATE_MASK
@@ -2592,11 +2603,18 @@ fn best_scoring_lock_evidence(
             predecessor.y,
         );
         let is_quarter_turn = source.slot < 2;
-        let rank = (
-            is_quarter_turn && kick_index == 4,
-            is_quarter_turn,
-            kick_index,
-        );
+        let rank = if LEGACY_T_SPIN {
+            // Native highest-T-spin trace first tries a final kick at index
+            // four, then any reachable final rotation. Its DFS tie order
+            // within either tier is not part of this evidence contract.
+            (kick_index == 4, false, 0)
+        } else {
+            (
+                is_quarter_turn && kick_index == 4,
+                is_quarter_turn,
+                kick_index,
+            )
+        };
         if best.as_ref().is_none_or(|(current, _)| rank > *current) {
             best = Some((rank, evidence));
         }
@@ -2645,6 +2663,46 @@ impl DocumentReachabilityEngine {
         x: i8,
         y: i8,
     ) -> DocumentLockReachability {
+        self.analyze_lock_with_evidence::<true>(board, piece, rotation, x, y)
+    }
+
+    pub(super) fn check_lock(
+        &mut self,
+        board: u64,
+        piece: PieceKind,
+        rotation: RotationState,
+        x: i8,
+        y: i8,
+    ) -> DocumentLockReachability {
+        self.analyze_lock_with_evidence::<false>(board, piece, rotation, x, y)
+    }
+
+    pub(super) fn preferred_t_spin_rotation(
+        &mut self,
+        board: u64,
+        rotation: RotationState,
+        x: i8,
+        y: i8,
+    ) -> Option<ScoringLockEvidence> {
+        let template = self.templates[piece_index(PieceKind::T)].get_or_insert_with(|| {
+            ReachabilityTemplate::compile(self.width, self.height, PieceKind::T, self.profile_id)
+        });
+        preferred_scoring_lock_evidence::<true>(template, board, rotation, x, y, &mut self.scratch)
+            .map(|evidence| {
+                evidence.with_immobile_before_clear(scoring_lock_is_immobile(
+                    template, board, rotation, x, y,
+                ))
+            })
+    }
+
+    fn analyze_lock_with_evidence<const CAPTURE_KICK: bool>(
+        &mut self,
+        board: u64,
+        piece: PieceKind,
+        rotation: RotationState,
+        x: i8,
+        y: i8,
+    ) -> DocumentLockReachability {
         let piece_slot = piece_index(piece);
         let template = self.templates[piece_slot].get_or_insert_with(|| {
             ReachabilityTemplate::compile(self.width, self.height, piece, self.profile_id)
@@ -2674,7 +2732,8 @@ impl DocumentReachabilityEngine {
             };
         }
         let result = reverse_lock_reachable(template, board, rotation, x, y, &mut self.scratch);
-        let kick = result.reachable
+        let kick = CAPTURE_KICK
+            && result.reachable
             && best_scoring_lock_evidence(template, board, rotation, x, y, &mut self.scratch)
                 .is_some();
         DocumentLockReachability {

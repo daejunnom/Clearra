@@ -24,7 +24,8 @@ use clearra_supply::{PackingHoldProjection, PackingPatternMembershipKind, PieceM
 use crate::{
     backend::{
         execute_selected_buildable_packing, execute_selected_raw_geometry_packing,
-        BackendTrustReport, NativePackingExecutorRegistry, NativeSearchBackendCapabilityProvider,
+        search_backend_executor::NativeCpuPackingWorkers, BackendTrustReport,
+        NativePackingExecutorRegistry, NativeSearchBackendCapabilityProvider,
         PackingCandidateProvenance, SearchBackendCapabilityProvider, SearchBackendExecutorResolver,
         SearchBackendReport, SelectedSearchBackend,
     },
@@ -66,6 +67,7 @@ pub struct PackingRunResult {
     multiset_group_count: usize,
     multiset_membership_kind: PackingPatternMembershipKind,
     candidate_provenance: PackingCandidateProvenance,
+    native_cpu_workers: Option<NativeCpuPackingWorkers>,
     execution_admission: Option<PackingExecutionAdmission>,
 }
 
@@ -110,6 +112,7 @@ impl PackingRunResult {
         multiset_group_count: usize,
         multiset_membership_kind: PackingPatternMembershipKind,
         candidate_provenance: PackingCandidateProvenance,
+        native_cpu_workers: Option<NativeCpuPackingWorkers>,
         execution_admission: Option<Arc<ExecutionAdmission>>,
     ) -> Self {
         let memory_report = PackingMemoryReport::from_execution(
@@ -135,6 +138,7 @@ impl PackingRunResult {
             multiset_group_count,
             multiset_membership_kind,
             candidate_provenance,
+            native_cpu_workers,
             execution_admission: execution_admission.map(PackingExecutionAdmission),
         }
     }
@@ -264,6 +268,10 @@ impl PackingRunResult {
 
     pub(crate) const fn candidate_provenance(&self) -> PackingCandidateProvenance {
         self.candidate_provenance
+    }
+
+    pub(crate) const fn native_cpu_workers(&self) -> Option<NativeCpuPackingWorkers> {
+        self.native_cpu_workers
     }
 }
 impl PackingRunResult {
@@ -618,6 +626,7 @@ impl PackingRunner {
             family.len(),
             family.membership_kind(),
             candidate_provenance,
+            outcome.native_cpu_workers,
             execution_admission,
         ))
     }
@@ -831,6 +840,7 @@ impl PackingRunner {
             1,
             membership_kind,
             candidate_provenance,
+            outcome.native_cpu_workers,
             execution_admission,
         );
 
@@ -1153,6 +1163,10 @@ fn merge_group_result(
         result.candidate_patterns.candidate_count()
     );
     merge_resource_reports(&mut result.resource_report, &group.resource_report);
+    result.native_cpu_workers = result
+        .native_cpu_workers
+        .zip(group.native_cpu_workers)
+        .and_then(|(left, right)| left.merge_sequential(right));
     result.refresh_memory_report();
     Ok(())
 }
@@ -1188,9 +1202,7 @@ fn truncate_candidates(result: &mut PackingRunResult, max_candidates: usize) {
 }
 
 fn merge_resource_reports(target: &mut ResourceReport, source: &ResourceReport) {
-    if let Some(reason) = source.truncation_reason {
-        target.mark_truncated(reason);
-    }
+    target.merge_completion_from(source);
     target.observe_frontier_states(source.peak_frontier_states);
     target.observe_candidate_rows(source.peak_candidate_rows);
     target.observe_hash_buckets(source.peak_hash_buckets);
@@ -1200,7 +1212,6 @@ fn merge_resource_reports(target: &mut ResourceReport, source: &ResourceReport) 
     target.coverage_rows_emitted = target
         .coverage_rows_emitted
         .saturating_add(source.coverage_rows_emitted);
-    target.probability_complete &= source.probability_complete;
 }
 
 impl PackingRunnerError {

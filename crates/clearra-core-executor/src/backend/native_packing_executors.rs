@@ -485,9 +485,7 @@ mod tests {
 }
 
 pub(crate) fn merge_parallel_resource_report(target: &mut ResourceReport, source: &ResourceReport) {
-    if let Some(reason) = source.truncation_reason {
-        target.mark_truncated(reason);
-    }
+    target.merge_completion_from(source);
     target.peak_frontier_states = target
         .peak_frontier_states
         .saturating_add(source.peak_frontier_states);
@@ -505,7 +503,6 @@ pub(crate) fn merge_parallel_resource_report(target: &mut ResourceReport, source
     target.coverage_rows_emitted = target
         .coverage_rows_emitted
         .saturating_add(source.coverage_rows_emitted);
-    target.probability_complete &= source.probability_complete;
 }
 
 #[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]

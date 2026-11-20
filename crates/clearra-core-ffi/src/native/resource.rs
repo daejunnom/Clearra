@@ -1,4 +1,6 @@
-use clearra_core_domain::resource::{ResourceReport, ResourceTruncationReason};
+use clearra_core_domain::resource::{
+    ExecutionAvailability, ResourceReport, ResourceTruncationReason,
+};
 
 pub const C_RESOURCE_TRUNCATION_NONE: u16 = 0;
 pub const C_RESOURCE_TRUNCATION_FRONTIER_BUDGET_EXCEEDED: u16 = 1;
@@ -12,6 +14,7 @@ pub const C_RESOURCE_TRUNCATION_PATTERN_BITS_EXCEEDED: u16 = 8;
 pub const C_RESOURCE_TRUNCATION_CPU_TIME_EXCEEDED: u16 = 9;
 pub const C_RESOURCE_TRUNCATION_MEMORY_EXCEEDED: u16 = 10;
 pub const C_RESOURCE_TRUNCATION_OBSERVED_UNIVERSE_TRUNCATED: u16 = 11;
+pub const C_RESOURCE_TRUNCATION_CANCELLED: u16 = 12;
 pub const C_RESOURCE_TRUNCATION_OPERATION_TABLE_CAPACITY_EXCEEDED: u16 = 13;
 pub const C_RESOURCE_TRUNCATION_PRUNING_EVIDENCE_CAPACITY_EXCEEDED: u16 = 14;
 
@@ -32,7 +35,14 @@ pub struct CNativeResourceReport {
 
 impl CNativeResourceReport {
     pub fn to_domain(self) -> ResourceReport {
-        let mut report = ResourceReport::complete();
+        let reason = (self.truncated != 0)
+            .then(|| truncation_reason(self.truncation_reason))
+            .flatten();
+        let mut report = if reason == Some(ResourceTruncationReason::Cancelled) {
+            ResourceReport::execution_incomplete(ExecutionAvailability::cancelled())
+        } else {
+            ResourceReport::complete()
+        };
         report.peak_frontier_states = self.peak_frontier_states;
         report.peak_candidate_rows = self.peak_candidate_rows;
         report.peak_hash_buckets = self.peak_hash_buckets;
@@ -42,7 +52,7 @@ impl CNativeResourceReport {
         report.coverage_rows_emitted = self.coverage_rows_emitted;
         report.probability_complete = self.probability_complete != 0 && self.truncated == 0;
         if self.truncated != 0 {
-            if let Some(reason) = truncation_reason(self.truncation_reason) {
+            if let Some(reason) = reason {
                 report.mark_truncated(reason);
             } else {
                 report.mark_truncated_unknown();
@@ -84,6 +94,7 @@ fn truncation_reason(reason: u16) -> Option<ResourceTruncationReason> {
         C_RESOURCE_TRUNCATION_OBSERVED_UNIVERSE_TRUNCATED => {
             Some(ResourceTruncationReason::ObservedUniverseTruncated)
         }
+        C_RESOURCE_TRUNCATION_CANCELLED => Some(ResourceTruncationReason::Cancelled),
         C_RESOURCE_TRUNCATION_OPERATION_TABLE_CAPACITY_EXCEEDED => {
             Some(ResourceTruncationReason::OperationTableCapacityExceeded)
         }
@@ -115,6 +126,31 @@ mod tests {
             Some(ResourceTruncationReason::CandidateBudgetExceeded)
         );
         assert_eq!(report.peak_candidate_rows, 257);
+        assert!(!report.probability_complete);
+    }
+
+    #[test]
+    fn native_cancelled_report_retains_partial_metrics_and_typed_cancellation() {
+        let report = CNativeResourceReport {
+            truncated: 1,
+            truncation_reason: C_RESOURCE_TRUNCATION_CANCELLED,
+            peak_cpu_bytes: 257,
+            ..Default::default()
+        }
+        .to_domain();
+
+        assert_eq!(
+            report.execution_availability(),
+            ExecutionAvailability::cancelled()
+        );
+        assert!(report.execution_started());
+        assert!(report.truncated);
+        assert_eq!(
+            report.truncation_reason,
+            Some(ResourceTruncationReason::Cancelled)
+        );
+        assert_eq!(report.peak_cpu_bytes, 257);
+        assert!(!report.result_complete());
         assert!(!report.probability_complete);
     }
 }

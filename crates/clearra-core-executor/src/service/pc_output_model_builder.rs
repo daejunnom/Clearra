@@ -485,6 +485,7 @@ mod opening_search_fields {
 }
 mod resource_summary_fields {
     use crate::{
+        backend::search_backend_executor::NativeCpuPackingWorkers,
         buildup::BuildUpRunResult,
         packing::PackingRunResult,
         service::{field, pc_tiling_materialization::PcTilingMaterialization},
@@ -516,7 +517,7 @@ mod resource_summary_fields {
             .peak_cpu_bytes
             .saturating_add(buildup.peak_workspace_bytes());
 
-        vec![
+        let mut fields = vec![
             field("resource_truncated", resource_truncated),
             field("resource_truncation_reason", truncation_reason),
             field("resource_peak_frontier_states", report.peak_frontier_states),
@@ -539,7 +540,9 @@ mod resource_summary_fields {
                     .max(buildup.coverage_row_count()),
             ),
             field("resource_probability_complete", probability_complete),
-        ]
+        ];
+        append_native_cpu_worker_evidence(&mut fields, packing, buildup.participating_workers());
+        fields
     }
 
     pub(super) fn tiling_resource_summary_fields(
@@ -552,7 +555,7 @@ mod resource_summary_fields {
             .truncation_reason
             .map(|reason| reason.as_str())
             .unwrap_or("none");
-        vec![
+        let mut fields = vec![
             field("resource_truncated", resource_truncated),
             field("resource_truncation_reason", truncation_reason),
             field("resource_peak_frontier_states", report.peak_frontier_states),
@@ -575,7 +578,27 @@ mod resource_summary_fields {
             ),
             field("resource_coverage_rows_emitted", 0),
             field("resource_probability_complete", false),
-        ]
+        ];
+        append_native_cpu_worker_evidence(&mut fields, packing, 0);
+        fields
+    }
+
+    fn append_native_cpu_worker_evidence(
+        fields: &mut Vec<(String, String)>,
+        packing: &PackingRunResult,
+        buildup_workers: usize,
+    ) {
+        match packing.native_cpu_workers() {
+            Some(NativeCpuPackingWorkers::RawGeometrySerial) => {
+                fields.push(field("native_cpu_raw_geometry_workers", 1));
+            }
+            Some(NativeCpuPackingWorkers::BuildableDag { candidate_workers }) => {
+                fields.push(field("native_cpu_geometry_dag_workers", 1));
+                fields.push(field("native_cpu_candidate_workers", candidate_workers));
+            }
+            None => return,
+        }
+        fields.push(field("native_cpu_buildup_workers", buildup_workers));
     }
 }
 mod scenario_continuation_fields {

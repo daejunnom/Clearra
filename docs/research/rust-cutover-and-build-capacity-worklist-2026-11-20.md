@@ -84,8 +84,9 @@ add a fixed small-input cap or split active branches.
 For Native C PC All/Unique, the Rust adapter first materializes a C
 buildable Geometry DAG, then statically distributes graph tasks. The
 independent BuildUp pass subsequently claims chunks of retained
-candidates. C raw Tiling uses a different prefix/family shard path;
-it does not measure combined Geometry and BuildUp. These are useful
+candidates. C raw product Tiling instead streams serially to preserve
+global sink caps; the older sharded runner is a test reference.
+Raw Tiling does not measure combined Geometry and BuildUp. These are useful
 correctness references, but the task unit, phase ordering, and retained
 candidate volume differ. The positive 2L `IIOOO`, no-hold CountAll fixture
 compares normalized solution keys and records per-stage evidence at
@@ -117,3 +118,36 @@ New Rust code follows the common [Google Rust Style Guide](https://google.github
 named states, explicit ownership, module-scoped imports, and no recovery
 from a poisoned branch lock. Chromium-specific threading rules do not
 apply to this Cargo repository.
+
+## Whole-C port and non-regression evidence
+
+The migration denominator is the linked C source manifest (119 translation
+units, 25 public headers). Treat the six additional C test-oracle units,
+native memory/callback ABI, and explicit C benchmark arms as reference
+contracts. An equivalent production path does not require a second unsafe
+allocator or a spelling-identical Rust copy of the C API. A feature flag,
+FFI declaration, or switched default alone does not prove equivalence.
+
+| C execution responsibility | Rust authority and outstanding evidence |
+| --- | --- |
+| Board/field/piece/rule/supply | Core domain, geometry, piece registry, ordered rules and supply automata. Test custom packing shapes, terminal replay, row-remapping and exact clear-state semantics separately from standard PC. |
+| Candidate/Geometry/ILC/APDP | Compact and extended catalog/geometry and typed projection. Reuse only equivalent exact predicates; a necessary domain superset is not a C exact-realization answer. |
+| BuildUp and reachability | Reuse Rust BuildOrderGraph, physical/kick witnesses, supply filtering and cost annotations. Keep geometry-only and finalized witness capabilities distinct. |
+| Coverage/reducers/scoring | Compare candidate assignments and exact original pattern ordinals—not only the number of visible queues or displayed percentage. Preserve exact result scope across full-height and continued searches. |
+| Resource/parallel control | Distinguish requested, admitted and useful worker participation; keep reservation, termination and incomplete evidence typed. Do not insert timing probes in default worker hot loops. |
+| Product and tooling callers | Native CLI/GUI/Discord, release verification and offline artifact tooling need executable Rust routes. Keep real C as a named differential-only backend. Do not substitute a Rust-vs-Rust comparison after changing defaults. |
+
+ProductE2E's C-specific percent and GPU proofs remain native reference
+evidence. The Rust product process suite is separate; it must qualify on
+the exact selected CLI before it can replace a product-process acceptance
+input. Do not reclassify a native-C receipt by renaming its subject.
+
+For C-vs-Rust runtime comparison, build one release example containing both
+implementations once. Run A=C, B=Rust, B=Rust, A=C as separate supervised
+processes on the same runner, with the same compiled request, worker budget
+and disabled optional assets. Verify complete normalized identities and
+coverage before interpreting time or peak-memory deltas. Keep engine time
+separate from owner-supervised wall time. Report censored, mismatched,
+resource-limited and serial-fallback arms explicitly. A runner with fewer
+than 11 logical processors does not qualify the 11-worker case. Hosted
+qualification does not replace the Windows proof or release a product.

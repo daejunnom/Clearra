@@ -51,10 +51,16 @@ impl AppContext {
         }
     }
 
-    /// Select the shared Rust CPU product service without changing the
-    /// default context or the host's decision to use it.
+    /// Use the shared Rust CPU product service.
     pub fn rust_cpu_product() -> Self {
-        Self::new(AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()))
+        Self::default()
+    }
+
+    /// Use the independent C backend for explicit comparison.
+    pub fn native_c_reference() -> Self {
+        Self::new(
+            AppServices::default().with_core_executor(AppCoreExecutorService::native_c_reference()),
+        )
     }
 }
 impl AppContext {
@@ -488,7 +494,7 @@ mod tests;
 
 #[cfg(test)]
 #[test]
-fn explicit_rust_cpu_product_context_preserves_default_service_selection() {
+fn default_and_product_context_use_rust_even_when_c_reference_is_available() {
     let product = AppContext::rust_cpu_product();
     let default = AppContext::default();
     assert_eq!(
@@ -497,11 +503,11 @@ fn explicit_rust_cpu_product_context_preserves_default_service_selection() {
     );
     assert_eq!(
         default.services().core_executor(),
-        &AppCoreExecutorService::default()
+        &AppCoreExecutorService::wasm_cpu()
     );
     assert_ne!(
-        product.services().core_executor(),
-        default.services().core_executor()
+        default.services().core_executor(),
+        AppContext::native_c_reference().services().core_executor()
     );
     assert_eq!(product.language(), default.language());
     assert_eq!(product.file_policy, default.file_policy);

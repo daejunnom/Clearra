@@ -36,6 +36,7 @@ pub struct BuildUpRunResult {
     count_complete: bool,
     count_truncated_reason: &'static str,
     peak_workspace_bytes: usize,
+    participating_workers: usize,
     trace_retention_truncated: bool,
     trace_retention_reason: &'static str,
     queue_consumed: usize,
@@ -72,6 +73,7 @@ impl BuildUpRunResult {
         count_complete: bool,
         count_truncated_reason: &'static str,
         peak_workspace_bytes: usize,
+        participating_workers: usize,
         trace_retention_truncated: bool,
         solution_set_contract: BuildUpSolutionSetContract,
         coverage_probability: String,
@@ -105,6 +107,7 @@ impl BuildUpRunResult {
             count_complete,
             count_truncated_reason,
             peak_workspace_bytes,
+            participating_workers,
             trace_retention_truncated,
             trace_retention_reason: if trace_retention_truncated {
                 "retained_trace_limit"
@@ -255,6 +258,10 @@ impl BuildUpRunResult {
 impl BuildUpRunResult {
     pub const fn peak_workspace_bytes(&self) -> usize {
         self.peak_workspace_bytes
+    }
+
+    pub(crate) const fn participating_workers(&self) -> usize {
+        self.participating_workers
     }
 }
 impl BuildUpRunResult {

@@ -268,7 +268,8 @@ mod case_scenario_fixtures_drive_clear_to_empty_search_and_count_contracts {
             );
 
             let problem = ProblemCompiler::compile_scenario_pc(&query).expect("scenario problem");
-            let result = CoreExecutor::execute(&problem).expect("scenario fixture execution");
+            let result = CoreExecutor::execute_native_c_reference(&problem)
+                .expect("C reference scenario fixture execution");
             let fields = result.summary_fields();
             assert_field(&fields, "solution_found", fixture.expected.solution_exists);
             if let Some(count_complete) = fixture.expected.count_complete {

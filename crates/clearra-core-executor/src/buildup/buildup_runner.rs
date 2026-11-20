@@ -298,6 +298,7 @@ impl BuildUpRunner {
             count_complete,
             count_truncated_reason,
             c_execution.peak_workspace_bytes,
+            c_execution.participating_workers,
             trace_retention_truncated,
             solution_set_contract,
             coverage_probability,

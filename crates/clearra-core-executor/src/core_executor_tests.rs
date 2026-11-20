@@ -22,7 +22,7 @@ fn core_executor_routes_opening_problem_to_pc_service() {
         ])))
         .with_hold_policy(clearra_pc_graph::request::PcHoldPolicy::Disabled);
     let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
-    let result = CoreExecutor::execute(&problem).expect("execution");
+    let result = CoreExecutor::execute_native_c_reference(&problem).expect("C reference execution");
     let fields = result.summary_fields();
 
     assert!(fields.contains(&("problem_layer".to_owned(), "clearra-problem".to_owned())));
@@ -55,7 +55,7 @@ fn core_executor_routes_opening_problem_to_pc_service() {
 
 #[cfg(not(feature = "native-c-core"))]
 #[test]
-fn default_build_reports_native_runtime_unavailable() {
+fn explicit_c_reference_without_linked_native_runtime_reports_unavailable() {
     let query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(2, 0x3f0),
         PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
@@ -65,11 +65,31 @@ fn default_build_reports_native_runtime_unavailable() {
     .with_retained_trace_limit(1);
     let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
     assert_eq!(
-        CoreExecutor::execute(&problem),
+        CoreExecutor::execute_native_c_reference(&problem),
         Err(CoreExecutionError::RuntimeUnavailable {
             component: "core_c_packing_runtime_unavailable"
         })
     );
+}
+
+#[test]
+fn default_executor_verifies_a_scenario_with_rust_independently_of_c_linkage() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(1, 0x3f0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+        PieceWindow::new(1),
+    )
+    .with_exact_pieces(Some(1))
+    .with_retained_trace_limit(1);
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+    let result = CoreExecutor::execute(&problem).expect("Rust scenario");
+
+    assert_eq!(result.field("actual_backend"), Some("wasm-cpu"));
+    assert!(result.solution_found());
+    assert_eq!(result.field("normalized_unique_solution_count"), Some("1"));
+    assert_eq!(result.coverage_pattern_words(), &[1]);
+    assert_eq!(result.path_steps().len(), 1);
+    assert_eq!(result.path_steps()[0].piece(), PieceKind::I);
 }
 
 #[cfg(feature = "native-c-core")]
@@ -83,7 +103,7 @@ fn scenario_pc_native_result_uses_native_trace_key() {
     .with_exact_pieces(Some(1))
     .with_retained_trace_limit(1);
     let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
-    let result = CoreExecutor::execute(&problem).expect("execution");
+    let result = CoreExecutor::execute_native_c_reference(&problem).expect("C reference execution");
 
     assert!(result.solution_found());
     assert!(result.summary_fields().contains(&(
@@ -103,7 +123,8 @@ fn scenario_coverage_summary_routes_to_percent_service() {
     .with_exact_pieces(Some(1))
     .with_retained_trace_limit(0);
     let problem = ProblemCompiler::compile_scenario_percent(&query).expect("problem");
-    let result = CoreExecutor::execute(&problem).expect("percent execution");
+    let result =
+        CoreExecutor::execute_native_c_reference(&problem).expect("C reference percent execution");
 
     assert_eq!(result.field("status"), Some("percent-executed"));
     assert_eq!(
@@ -136,7 +157,8 @@ fn opening_coverage_summary_routes_to_percent_service() {
         ])))
         .with_hold_policy(clearra_pc_graph::request::PcHoldPolicy::Disabled);
     let problem = ProblemCompiler::compile_opening_percent(&query).expect("problem");
-    let result = CoreExecutor::execute(&problem).expect("percent execution");
+    let result =
+        CoreExecutor::execute_native_c_reference(&problem).expect("C reference percent execution");
 
     assert_eq!(result.field("status"), Some("percent-executed"));
     assert_eq!(result.field("problem_preset"), Some("opening-pc"));
@@ -198,8 +220,16 @@ fn core_executor_routes_build_coverage_query_to_cover_service() {
         BuildCoverageLimits::new(12, 4),
     );
 
+    let result = CoreExecutor::execute_build_coverage(&problem, &coverage_query)
+        .expect("Rust proves the one-slot frame is too large");
+    assert_eq!(result.field("build_coverage_probability"), Some("0.0"));
+    assert_eq!(result.bool_field("count_complete"), Some(true));
     assert_eq!(
-        CoreExecutor::execute_build_coverage(&problem, &coverage_query),
+        CoreExecutor::execute_native_c_reference_build_coverage_with_control(
+            &problem,
+            &coverage_query,
+            &ExecutionControl::default()
+        ),
         Err(CoreExecutionError::RuntimeUnavailable {
             component: "core_c_packing_runtime_unavailable"
         })

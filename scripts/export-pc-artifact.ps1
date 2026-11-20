@@ -28,7 +28,11 @@ param(
     [switch]$PrewarmGpu,
     [switch]$SkipFumen,
     [switch]$ProfileStages,
-    [switch]$VerboseLog
+    [switch]$VerboseLog,
+    [ValidateSet('NativeCReference', 'RustFamily')]
+    [string]$Engine = 'NativeCReference',
+    [ValidateRange(1, 7200)]
+    [int]$RustTimeoutSeconds = 1800
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,15 +69,37 @@ if ($MaxFrontierStates -lt 0 -or $MaxFrontierStates -gt 4294967294) {
 if ($GpuDevice -ne 'auto' -and $GpuDevice -notmatch '^\d+$') {
     throw '-GpuDevice must be auto or a non-negative adapter index.'
 }
+if ($Engine -eq 'RustFamily' -and
+    ($Backend -in @('gpu', 'hybrid') -or $GpuDevice -ne 'auto' -or
+     $ListGpuDevices.IsPresent -or $PrewarmGpu.IsPresent -or $ProfileStages.IsPresent -or
+     -not [string]::IsNullOrWhiteSpace($SfinderOutputPath))) {
+    throw 'RustFamily export is CPU-only; use NativeCReference for GPU, stage profiling, or the legacy Sfinder comparison.'
+}
 
 $applicationControl = Get-ClearraApplicationControlStatus
 
+$artifactNamespace = if ($Engine -eq 'RustFamily') { 'pc-family-artifacts' } else { 'pc-artifacts' }
 $resolvedOutput = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-    Resolve-ClearraReportPath (Join-Path 'pc-artifacts' $Scenario) $Root
+    Resolve-ClearraReportPath (Join-Path $artifactNamespace $Scenario) $Root
 } else {
     Resolve-ClearraReportPath $OutputDirectory $Root
 }
+if ($Engine -eq 'RustFamily') {
+    . (Join-Path $PSScriptRoot 'lib/clearra-manage-command.ps1')
+    $manager = Get-ClearraManageExecutable -RepositoryRoot $Root
+    & $manager --root $Root storage verify --path $resolvedOutput
+    if ($LASTEXITCODE -ne 0) {
+        throw "Clearra manager refused the family output path: $resolvedOutput"
+    }
+}
 New-Item -ItemType Directory -Force -Path $resolvedOutput | Out-Null
+if ($Engine -eq 'RustFamily') {
+    foreach ($name in @('family-summary.json', 'family-solutions.jsonl', 'family-solutions.fumen')) {
+        if (Test-Path -LiteralPath (Join-Path $resolvedOutput $name)) {
+            throw 'RustFamily does not replace previous output. Select a new -OutputDirectory.'
+        }
+    }
+}
 
 $sfinderHtml = $null
 if (-not [string]::IsNullOrWhiteSpace($SfinderOutputPath)) {
@@ -87,17 +113,20 @@ if (-not [string]::IsNullOrWhiteSpace($SfinderOutputPath)) {
     $sfinderHtml = $candidate
 }
 
+$binaryName = if ($Engine -eq 'RustFamily') { 'clearra-pc-family-artifact' } else { 'clearra-pc-artifact' }
+$cargoFeature = if ($Engine -eq 'RustFamily') { 'rust-family-export' } else { 'native-c-reference' }
 $resolvedExecutable = if ([string]::IsNullOrWhiteSpace($ExecutablePath)) {
     # Export is a read-only artifact consumer. Selecting its default must not
     # create an owner that replaces the very experiment being consumed.
-    Join-Path (Get-ClearraBuildTransactionRoot -RepositoryRoot $Root) 'cargo-target/release/clearra-pc-artifact.exe'
+    Join-Path (Get-ClearraBuildTransactionRoot -RepositoryRoot $Root) "cargo-target/release/$binaryName.exe"
 } else {
     [System.IO.Path]::GetFullPath($ExecutablePath)
 }
 if (-not (Test-Path -LiteralPath $resolvedExecutable -PathType Leaf)) {
     throw (
-        'E_PC_ARTIFACT_BINARY_UNAVAILABLE: PC artifact export executes a prebuilt product ' +
-        "binary and never compiles source at request time. Missing artifact: $resolvedExecutable"
+        "E_PC_ARTIFACT_BINARY_UNAVAILABLE: $Engine export requires a prebuilt " +
+        "$binaryName binary (Cargo feature $cargoFeature) and never compiles " +
+        "source at request time. Missing artifact: $resolvedExecutable"
     )
 }
 $runtimeAuthorization = Assert-ClearraWindowsRuntimeArtifactAllowed `
@@ -169,14 +198,24 @@ if ($null -ne $sfinderHtml) {
 
 Push-Location $Root
 try {
+    $program = $resolvedExecutable
+    $programArgs = $arguments.ToArray()
+    if ($Engine -eq 'RustFamily') {
+        $program = $manager
+        $programArgs = @(
+            '--root', $Root, 'runtime', 'run',
+            '--producer', 'benchmark', '--profile', 'benchmark-search',
+            '--timeout', [string]$RustTimeoutSeconds, '--', $resolvedExecutable
+        ) + $programArgs
+    }
     if ($VerboseLog.IsPresent) {
-        Write-Output "==> $resolvedExecutable $($arguments -join ' ')"
+        Write-Output "==> $program $($programArgs -join ' ')"
     }
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $runtimeOutput = [System.Collections.Generic.List[string]]::new()
     try {
-        & $resolvedExecutable @arguments 2>&1 | ForEach-Object {
+        & $program @programArgs 2>&1 | ForEach-Object {
             $line = $_.ToString()
             $runtimeOutput.Add($line)
             Write-Output $line
@@ -200,4 +239,12 @@ finally {
     Pop-Location
 }
 
-Write-Output "[pc-artifact] complete | scenario=$Scenario | output=$resolvedOutput | runner_surface=windows-native | wsl_used=false"
+if ($Engine -eq 'RustFamily') {
+    $receiptPath = Join-Path $resolvedOutput 'family-summary.json'
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+    if ($receipt.schema -cne 'clearra.rust-pc-family-artifact.v1' -or
+        $receipt.execution_engine -cne 'rust-cpu' -or $receipt.scenario -cne $Scenario) {
+        throw 'Rust family export did not produce a matching Rust CPU family receipt.'
+    }
+}
+Write-Output "[pc-artifact] complete | engine=$Engine | scenario=$Scenario | output=$resolvedOutput | runner_surface=windows-native | wsl_used=false"

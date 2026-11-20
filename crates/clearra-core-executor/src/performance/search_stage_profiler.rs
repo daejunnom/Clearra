@@ -1,3 +1,8 @@
+#[cfg(all(
+    not(target_family = "wasm"),
+    any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+))]
+use std::sync::{Arc, Mutex};
 #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
 use std::{cell::RefCell, marker::PhantomData, rc::Rc, time::Duration};
 
@@ -137,11 +142,16 @@ pub(crate) enum ExecutorSearchStage {
     FinesseProductDp,
     FinesseAggregation,
     FinesseWitness,
+    #[cfg_attr(
+        not(all(feature = "parallel", not(target_family = "wasm"))),
+        allow(dead_code)
+    )]
+    ExtendedPcCandidateVerifyAndReduce,
 }
 
 impl ExecutorSearchStage {
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
-    const COUNT: usize = Self::FinesseWitness as usize + 1;
+    const COUNT: usize = Self::ExtendedPcCandidateVerifyAndReduce as usize + 1;
 
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     const ALL: [Self; Self::COUNT] = [
@@ -214,6 +224,7 @@ impl ExecutorSearchStage {
         Self::FinesseProductDp,
         Self::FinesseAggregation,
         Self::FinesseWitness,
+        Self::ExtendedPcCandidateVerifyAndReduce,
     ];
 
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
@@ -288,6 +299,9 @@ impl ExecutorSearchStage {
             Self::FinesseProductDp => "finesse.product_dp",
             Self::FinesseAggregation => "finesse.aggregation",
             Self::FinesseWitness => "finesse.witness",
+            Self::ExtendedPcCandidateVerifyAndReduce => {
+                "rust.extended_pc.candidate_verify_and_reduce"
+            }
         }
     }
 }
@@ -301,9 +315,141 @@ struct StageTotals {
 }
 
 #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+type SearchStageTotals = [StageTotals; ExecutorSearchStage::COUNT];
+
+#[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+struct ThreadSearchProfile {
+    totals: SearchStageTotals,
+    #[cfg(not(target_family = "wasm"))]
+    worker_totals: Option<Arc<Mutex<SearchStageTotals>>>,
+}
+
+#[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+impl Default for ThreadSearchProfile {
+    fn default() -> Self {
+        Self {
+            totals: [StageTotals::default(); ExecutorSearchStage::COUNT],
+            #[cfg(not(target_family = "wasm"))]
+            worker_totals: None,
+        }
+    }
+}
+
+#[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
 thread_local! {
-    static ACTIVE_PROFILE: RefCell<Option<[StageTotals; ExecutorSearchStage::COUNT]>> =
-        const { RefCell::new(None) };
+    static ACTIVE_PROFILE: RefCell<Option<ThreadSearchProfile>> = const { RefCell::new(None) };
+}
+
+/// A token captured by the submitting thread, not by a process-wide profile.
+/// Measure only the job body, and publish its completion after this returns.
+/// A pooled thread then leaves with no residual state from the request.
+#[cfg(feature = "parallel")]
+pub(crate) struct WorkerSearchProfile {
+    #[cfg(all(
+        not(target_family = "wasm"),
+        any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+    ))]
+    totals: Option<Arc<Mutex<SearchStageTotals>>>,
+}
+
+#[cfg(feature = "parallel")]
+impl WorkerSearchProfile {
+    #[inline]
+    pub(crate) fn capture() -> Self {
+        Self {
+            #[cfg(all(
+                not(target_family = "wasm"),
+                any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+            ))]
+            totals: ACTIVE_PROFILE.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let profile = slot.as_mut()?;
+                Some(Arc::clone(profile.worker_totals.get_or_insert_with(|| {
+                    Arc::new(Mutex::new(
+                        [StageTotals::default(); ExecutorSearchStage::COUNT],
+                    ))
+                })))
+            }),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn measure<R>(self, job: impl FnOnce() -> R) -> R {
+        #[cfg(all(
+            not(target_family = "wasm"),
+            any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+        ))]
+        let _guard = self.totals.map(|totals| {
+            // Keep the parent accumulator in the active TLS for any worker jobs
+            // that this job itself submits. Its own hot counters remain private.
+            let previous = ACTIVE_PROFILE.with(|slot| {
+                slot.replace(Some(ThreadSearchProfile {
+                    worker_totals: Some(Arc::clone(&totals)),
+                    ..ThreadSearchProfile::default()
+                }))
+            });
+            WorkerSearchProfileGuard { totals, previous }
+        });
+        job()
+    }
+}
+
+#[cfg(all(
+    feature = "parallel",
+    not(target_family = "wasm"),
+    any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+))]
+struct WorkerSearchProfileGuard {
+    totals: Arc<Mutex<SearchStageTotals>>,
+    previous: Option<ThreadSearchProfile>,
+}
+
+#[cfg(all(
+    feature = "parallel",
+    not(target_family = "wasm"),
+    any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+))]
+impl Drop for WorkerSearchProfileGuard {
+    fn drop(&mut self) {
+        let Some(job) = ACTIVE_PROFILE.with(|slot| slot.replace(self.previous.take())) else {
+            return;
+        };
+        // At most one merge per logical job, outside every timed span. Duration
+        // is accumulated work time; overlapping stages can exceed wall time.
+        let mut totals = self.totals.lock().expect("worker profile totals");
+        add_stage_totals(&mut totals, job.totals);
+    }
+}
+
+#[cfg(all(
+    not(target_family = "wasm"),
+    any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+))]
+fn add_stage_totals(totals: &mut SearchStageTotals, additional: SearchStageTotals) {
+    for (total, next) in totals.iter_mut().zip(additional) {
+        total.duration = total.duration.saturating_add(next.duration);
+        total.invocation_count = total.invocation_count.saturating_add(next.invocation_count);
+        total.work_item_count = total.work_item_count.saturating_add(next.work_item_count);
+    }
+}
+
+#[inline]
+pub(crate) const fn profile_sample_scale(ordinal: usize) -> u64 {
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    {
+        if ordinal <= 4_096 {
+            1
+        } else if ordinal & 1_023 == 0 {
+            1_024
+        } else {
+            0
+        }
+    }
+    #[cfg(not(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")))]
+    {
+        let _ = ordinal;
+        0
+    }
 }
 
 pub(crate) struct SearchStageSpan {
@@ -366,10 +512,10 @@ impl SearchStageSpan {
         if let Some(elapsed) = elapsed {
             ACTIVE_PROFILE.with(|profile| {
                 let mut profile = profile.borrow_mut();
-                let Some(totals) = profile.as_mut() else {
+                let Some(profile) = profile.as_mut() else {
                     return;
                 };
-                let stage = &mut totals[stage as usize];
+                let stage = &mut profile.totals[stage as usize];
                 stage.duration = stage.duration.saturating_add(elapsed);
                 stage.invocation_count = stage.invocation_count.saturating_add(1);
                 stage.work_item_count = stage.work_item_count.saturating_add(work_items);
@@ -399,10 +545,10 @@ impl SearchStageSpan {
             .unwrap_or_default();
         ACTIVE_PROFILE.with(|profile| {
             let mut profile = profile.borrow_mut();
-            let Some(totals) = profile.as_mut() else {
+            let Some(profile) = profile.as_mut() else {
                 return;
             };
-            let stage = &mut totals[self.stage as usize];
+            let stage = &mut profile.totals[self.stage as usize];
             stage.duration = stage.duration.saturating_add(elapsed);
             stage.invocation_count = stage.invocation_count.saturating_add(self.scale);
             stage.work_item_count = stage
@@ -429,6 +575,9 @@ pub enum ExecutorSearchProfileError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutorSearchProfileStage {
     pub name: &'static str,
+    /// Accumulated stage time, not end-to-end wall time. Sampled spans scale
+    /// their durations and counters; overlapping stages may count the same
+    /// interval on one thread or across workers.
     pub duration_ns: u64,
     pub invocation_count: u64,
     pub work_item_count: u64,
@@ -448,7 +597,7 @@ impl ExecutorSearchProfileSession {
             if profile.is_some() {
                 return false;
             }
-            *profile = Some([StageTotals::default(); ExecutorSearchStage::COUNT]);
+            *profile = Some(ThreadSearchProfile::default());
             true
         });
         if !installed {
@@ -462,9 +611,21 @@ impl ExecutorSearchProfileSession {
 
     pub fn finish(mut self) -> Vec<ExecutorSearchProfileStage> {
         self.active = false;
-        let totals = ACTIVE_PROFILE
-            .with(|profile| profile.borrow_mut().take())
-            .unwrap_or([StageTotals::default(); ExecutorSearchStage::COUNT]);
+        let profile = ACTIVE_PROFILE
+            .with(|slot| slot.borrow_mut().take())
+            .unwrap_or_default();
+        let totals = profile.totals;
+        #[cfg(not(target_family = "wasm"))]
+        let totals = {
+            let mut totals = totals;
+            if let Some(worker_totals) = profile.worker_totals {
+                add_stage_totals(
+                    &mut totals,
+                    *worker_totals.lock().expect("worker profile totals"),
+                );
+            }
+            totals
+        };
         ExecutorSearchStage::ALL
             .into_iter()
             .zip(totals)
@@ -486,5 +647,107 @@ impl Drop for ExecutorSearchProfileSession {
                 profile.borrow_mut().take();
             });
         }
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "parallel",
+    not(target_family = "wasm"),
+    any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+))]
+mod tests {
+    use std::{
+        panic::{catch_unwind, AssertUnwindSafe},
+        sync::{mpsc, Barrier},
+        thread,
+    };
+
+    use super::{
+        ExecutorSearchProfileSession, ExecutorSearchProfileStage, ExecutorSearchStage,
+        SearchStageSpan, WorkerSearchProfile, ACTIVE_PROFILE,
+    };
+
+    const STAGE: ExecutorSearchStage = ExecutorSearchStage::WasmGeometryAdvance;
+
+    fn stage(stages: &[ExecutorSearchProfileStage]) -> &ExecutorSearchProfileStage {
+        stages
+            .iter()
+            .find(|stage| stage.name == STAGE.name())
+            .expect("fixed stage")
+    }
+
+    #[test]
+    fn worker_profile_is_merged_before_completion_is_published() {
+        let session = ExecutorSearchProfileSession::start().expect("caller profile");
+        SearchStageSpan::begin(STAGE).finish(3);
+        let (sender, receiver) = mpsc::channel();
+        let stages = thread::scope(|scope| {
+            for items in [5, 7] {
+                let profile = WorkerSearchProfile::capture();
+                let sender = sender.clone();
+                scope.spawn(move || {
+                    profile.measure(|| SearchStageSpan::begin_scaled(STAGE, 2).finish(items));
+                    sender.send(()).expect("completion receiver");
+                });
+            }
+            drop(sender);
+            receiver.recv().expect("first completion");
+            receiver.recv().expect("second completion");
+            // Match the real pool protocol: finish after acknowledgements, not
+            // after joining the operating-system threads.
+            session.finish()
+        });
+        assert_eq!(stage(&stages).invocation_count, 5);
+        assert_eq!(stage(&stages).work_item_count, 27);
+    }
+
+    #[test]
+    fn worker_profile_sessions_are_isolated_on_one_reused_worker() {
+        let both_submitted = Barrier::new(2);
+        let (jobs, jobs_rx) = mpsc::channel::<(WorkerSearchProfile, u64, mpsc::Sender<()>)>();
+        let run_request = |items| {
+            let profile = ExecutorSearchProfileSession::start().expect("request profile");
+            let (done, wait) = mpsc::channel();
+            jobs.send((WorkerSearchProfile::capture(), items, done))
+                .expect("reused worker");
+            both_submitted.wait();
+            wait.recv().expect("job completion");
+            let stages = profile.finish();
+            assert_eq!(stage(&stages).invocation_count, 1);
+            assert_eq!(stage(&stages).work_item_count, items);
+        };
+        thread::scope(|scope| {
+            scope.spawn(move || {
+                for (profile, items, done) in jobs_rx.iter().take(2) {
+                    profile.measure(|| SearchStageSpan::begin(STAGE).finish(items));
+                    assert!(ACTIVE_PROFILE.with(|slot| slot.borrow().is_none()));
+                    done.send(()).expect("completion receiver");
+                }
+            });
+            scope.spawn(|| run_request(19));
+            run_request(23);
+        });
+    }
+
+    #[test]
+    fn worker_profile_restores_thread_state_when_a_job_panics() {
+        let session = ExecutorSearchProfileSession::start().expect("caller profile");
+        let profile = WorkerSearchProfile::capture();
+        thread::spawn(move || {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                profile.measure(|| {
+                    SearchStageSpan::begin(STAGE).finish(4);
+                    panic!("synthetic worker panic");
+                });
+            }));
+            assert!(result.is_err());
+            assert!(ACTIVE_PROFILE.with(|slot| slot.borrow().is_none()));
+            let separate = ExecutorSearchProfileSession::start().expect("fresh worker profile");
+            assert_eq!(stage(&separate.finish()).work_item_count, 0);
+        })
+        .join()
+        .expect("worker handled panic");
+        assert_eq!(stage(&session.finish()).work_item_count, 4);
     }
 }

@@ -493,6 +493,71 @@ fn full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family() {
     }
 }
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[test]
+fn full_height_ordinary_scenario_uses_bounded_native_worker_waves() {
+    use clearra_core_domain::runtime_cpu_capacity::CpuCapacity;
+
+    if CpuCapacity::current().hard_limit() < 2 {
+        return;
+    }
+    let context = AppContext::rust_cpu_product();
+    for height in [7, 24] {
+        let (base, _, _) = ordinary_request(height, false);
+        let AppCommand::Scenario(scenario) = base.command() else {
+            panic!("scenario fixture");
+        };
+        let source = scenario.query();
+        let query = source.clone().with_execution_policy(
+            source
+                .execution_policy()
+                .clone()
+                .with_workers(2)
+                .with_use_all_logical_processors(true),
+        );
+        let request = AppRequest::new(AppCommand::Scenario(ScenarioAppCommand::new(query)));
+        let direct = context.run(request.clone());
+        assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
+        let expected = direct.render_model().unwrap().core_result().unwrap();
+
+        let mut session = context.start_cooperative_execution(request);
+        let control = ExecutionControl::default();
+        assert!(matches!(
+            session.advance(1, &control),
+            CooperativeAppAdvance::Pending
+        ));
+        let response = (0..4096)
+            .find_map(|_| match session.advance(64, &control) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => None,
+                CooperativeAppAdvance::Completed(response) => Some(response),
+                other => panic!("unexpected cooperative result: {other:?}"),
+            })
+            .expect("bounded fixed queue must settle");
+        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+        let actual = response.render_model().unwrap().core_result().unwrap();
+        assert_eq!(
+            actual.normalized_solution_keys(),
+            expected.normalized_solution_keys()
+        );
+        assert_eq!(actual.path_steps(), expected.path_steps());
+        assert_eq!(
+            actual.coverage_pattern_words(),
+            expected.coverage_pattern_words()
+        );
+        for field in [
+            "workers_used",
+            "build_variant_count",
+            "scenario_replay_token",
+        ] {
+            assert_eq!(
+                actual.field(field),
+                expected.field(field),
+                "{height}L {field}"
+            );
+        }
+    }
+}
+
 fn assert_cancelled_at_postprocess_publication(context: &AppContext, request: AppRequest) {
     use clearra_core_domain::execution_cancellation::{
         ExecutionCancellationHandle, ExecutionCancellationToken, ExecutionProgress, ProgressSink,
@@ -684,6 +749,32 @@ fn full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint() {
     use clearra_app::{AppRenderModel, ContinueAppCommand, PcPathIngressOrigin};
     use clearra_pc_graph::request::{PcContinuationToken, PcContinuationTokenCodec};
 
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::{env, process::Command};
+
+        const CHILD: &str = "CLEARRA_TEST_SC3_COOPERATIVE_CHILD";
+        if env::var_os(CHILD).is_none() {
+            let output = Command::new(env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint",
+                ])
+                .env(CHILD, "1")
+                .env("CLEARRA_EXPECTED_VCPUS", "1")
+                .output()
+                .expect("run isolated one-worker sc3 regression");
+            assert!(
+                output.status.success(),
+                "isolated sc3 regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        assert_eq!(PcExecutionPolicy::mvp_default().workers(), 1);
+    }
+
     let context = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     );
@@ -772,35 +863,54 @@ fn full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint() {
     assert_eq!(identity.height(), 20);
     let request = AppRequest::new(AppCommand::Continue(ContinueAppCommand::new(Some(token))));
     let continued = context.run(request.clone());
+    let cooperative = {
+        let control = ExecutionControl::default();
+        let mut execution = context.start_cooperative_execution(request.clone());
+        assert!(matches!(
+            execution.advance(1, &control),
+            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress
+        ));
+        (0..4096)
+            .find_map(|_| match execution.advance(1, &control) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => None,
+                CooperativeAppAdvance::Completed(response) => Some(response),
+                other => panic!("unexpected cooperative checkpoint result: {other:?}"),
+            })
+            .expect("bounded cooperative checkpoint completed")
+    };
     assert_eq!(continued.status(), AppStatus::Success, "{continued:?}");
-    let Some(AppRenderModel::Continue(message)) = continued.render_model() else {
-        panic!("expected checkpoint result");
-    };
-    let field = |key: &str| {
-        message
-            .fields()
-            .iter()
-            .find(|field| field.key() == key)
-            .unwrap()
-            .value()
-            .as_text()
-    };
-    assert_eq!(field("continuation_kind"), "scenario");
-    assert_eq!(field("actual_backend"), "wasm-cpu-pc-extended");
-    for key in [
-        "normalized_solution_set_hash",
-        "unique_solution_count",
-        "coverage_pattern_count",
-        "covered_pattern_count",
-        "coverage_probability",
-        "build_variant_count",
-        "count_complete",
-    ] {
-        assert_eq!(field(key), expected.field(key).unwrap(), "{key}");
+    assert_eq!(cooperative.status(), AppStatus::Success, "{cooperative:?}");
+    for response in [&continued, &cooperative] {
+        let Some(AppRenderModel::Continue(message)) = response.render_model() else {
+            panic!("expected checkpoint result");
+        };
+        let field = |key: &str| {
+            message
+                .fields()
+                .iter()
+                .find(|field| field.key() == key)
+                .unwrap()
+                .value()
+                .as_text()
+        };
+        assert_eq!(field("continuation_kind"), "scenario");
+        assert_eq!(field("actual_backend"), "wasm-cpu-pc-extended");
+        for key in [
+            "normalized_solution_set_hash",
+            "unique_solution_count",
+            "coverage_pattern_count",
+            "covered_pattern_count",
+            "coverage_probability",
+            "build_variant_count",
+            "count_complete",
+        ] {
+            assert_eq!(field(key), expected.field(key).unwrap(), "{key}");
+        }
     }
+    assert_cancelled_at_postprocess_publication(&context, request.clone());
     #[cfg(feature = "native-c-core")]
     {
-        let native = AppContext::default().run(request);
+        let native = AppContext::native_c_reference().run(request);
         assert_ne!(native.status(), AppStatus::Success, "{native:?}");
         assert!(native.render_model().is_none());
     }

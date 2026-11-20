@@ -1,0 +1,102 @@
+name: Native C and Rust CPU ABBA
+
+on:
+  push:
+    branches: [codex/v090-relation-rust-cpu-abba-*]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact comparison commit (40 lowercase hex digits)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-rust-cpu-abba-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  same-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    env:
+      CARGO_INCREMENTAL: '0'
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      MEASUREMENT_ROOT: _local/artifacts/benchmarks/native-rust-cpu-abba/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind to the selected source
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ && "$REQUESTED_SHA" == "$GITHUB_SHA" ]]
+          fi
+      - name: Build both CPU implementations once
+        id: build
+        timeout-minutes: 38
+        shell: bash
+        run: |
+          set -eu
+          node scripts/tools/invoke-clearra-build.mjs --purpose experiment -- bash -eu <<'SH'
+          core="$CLEARRA_BUILD_TRANSACTION_ROOT/abba-core-c"
+          cmake -S core-c -B "$core" -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
+            -DCLEARRA_BUILD_TEST_ORACLE=ON
+          cmake --build "$core" --target clearra_core clearra_core_test_oracle --parallel 2
+          cargo build --locked --release -p clearra-manage -j 2
+          export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-L native=$core"
+          cargo build --locked --release -j 2 -p clearra-core-executor \
+            --no-default-features --features native-c-core --example native_rust_cpu_abba
+          printf 'manager=%s\n' "$CARGO_TARGET_DIR/release/clearra-manage" >> "$GITHUB_OUTPUT"
+          printf 'binary=%s\n' "$CARGO_TARGET_DIR/release/examples/native_rust_cpu_abba" >> "$GITHUB_OUTPUT"
+          SH
+      - name: Measure serial ABBA with identical CPU allocation on every arm
+        timeout-minutes: 152
+        shell: bash
+        env:
+          ABBA_MANAGER: ${{ steps.build.outputs.manager }}
+          ABBA_BINARY: ${{ steps.build.outputs.binary }}
+        run: |
+          set -eu
+          test -x "$ABBA_MANAGER"
+          test -x "$ABBA_BINARY"
+          workers="$(nproc)"
+          if (( workers > 11 )); then workers=11; fi
+          printf 'Runner logical capacity: %s; parallel sample request: %s\n' "$(nproc)" "$workers"
+          status=0
+          sample() {
+            local fixture="$1" width="$2" timeout="$3"
+            local outcome=0
+            node scripts/benchmark/run-native-rust-cpu-abba.mjs \
+              --manager "$ABBA_MANAGER" --binary "$ABBA_BINARY" \
+              --output "$GITHUB_WORKSPACE/$MEASUREMENT_ROOT/$fixture-w$width" \
+              --case "$fixture" --workers "$width" --timeout-seconds "$timeout" || outcome=$?
+            case "$outcome" in
+              0) ;;
+              1) status=1 ;;
+              *) exit "$outcome" ;;
+            esac
+          }
+          sample fixed-2l 1 60
+          sample existing-p7 1 120
+          if (( workers > 1 )); then
+            sample existing-p7 "$workers" 120
+          fi
+          sample full-p7p4 "$workers" 1800
+          exit "$status"
+      - name: Upload ABBA evidence, including rejected and censored samples
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-rust-cpu-abba-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MEASUREMENT_ROOT }}/**/*.json
+          if-no-files-found: warn
+          retention-days: 14

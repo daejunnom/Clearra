@@ -33,7 +33,7 @@ fn fixture_with_height(
             .map(|row| 11 * row)
             .chain([69])
             .collect::<Vec<_>>()
-    } else {
+    } else if height == HEIGHT {
         // Known ordinary Oracle conformance fixture with multiple supported
         // candidate ordinals, not a packet/replay/score-owned family.
         (0..height)
@@ -42,6 +42,10 @@ fn fixture_with_height(
                 (start..start + 4).map(move |x| 10 * row + x)
             })
             .collect()
+    } else {
+        // A four-cell vertical I channel per four rows. No initially full
+        // rows, and one candidate even at 24L, spanning all four board words.
+        (0..height).map(|row| row * 10 + row / 4).collect()
     };
     let missing = missing_cells
         .into_iter()
@@ -165,8 +169,8 @@ fn ordinary_native_pc_cooperative_session_preserves_admission_and_exact_family()
         return;
     }
     let control = ExecutionControl::default();
-    for empty_geometry in [false, true] {
-        let problem = fixture(empty_geometry, policy());
+    for (height, empty_geometry) in [(7, false), (7, true), (8, false), (12, false), (24, false)] {
+        let problem = fixture_with_height(height, empty_geometry, policy());
         let mut direct = WasmCpuSearchSession::new(&problem).unwrap();
         let (direct_result, _) = drive(&mut direct, 1).unwrap();
         drop(direct);
@@ -231,15 +235,6 @@ fn ordinary_native_pc_cooperative_session_preserves_admission_and_exact_family()
     let single = fixture(false, policy().with_workers(1));
     assert_eq!(
         WasmCpuSearchSession::new_native_cooperative_for_test(&single, 0)
-            .err()
-            .unwrap()
-            .reason(),
-        "extended_pc_native_cooperative_ineligible"
-    );
-    let greater_height = fixture_with_height(8, false, policy());
-    assert_eq!(greater_height.visible_height(), 8);
-    assert_eq!(
-        WasmCpuSearchSession::new_native_cooperative_for_test(&greater_height, 0)
             .err()
             .unwrap()
             .reason(),
@@ -312,6 +307,32 @@ fn ordinary_native_pc_cooperative_session_preserves_admission_and_exact_family()
         NativePcCooperativeAdvance::Cancelled
     ));
     assert!(leases(&experimental).1.is_none());
+    assert!(admit_budget_bound_search_execution(&problem, WORKERS).is_ok());
+    // The actual App-dispatched API must retain the same admission even
+    // after the session is gone and while projecting the terminal result.
+    let problem = fixture_with_height(24, false, policy());
+    let control = ExecutionControl::default();
+    let expected = WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap();
+    let mut sliced = NativePcCooperativeSession::try_new(&problem, 0)
+        .unwrap()
+        .expect("ordinary 24L fixed queue is in the sliced domain");
+    assert!(matches!(
+        sliced.advance(1, &control).unwrap(),
+        NativePcCooperativeAdvance::Pending
+    ));
+    let result = (0..100_000)
+        .find_map(|_| match sliced.advance(64, &control).unwrap() {
+            NativePcCooperativeAdvance::Pending => None,
+            NativePcCooperativeAdvance::Cancelled => panic!("no cancellation requested"),
+            NativePcCooperativeAdvance::Completed(result) => Some(result),
+        })
+        .expect("bounded forced 24L fixture did not settle");
+    assert_eq!(result.lease_token().grant().compute_units as usize, WORKERS);
+    drop(sliced);
+    result.finish(|result| {
+        assert!(admit_budget_bound_search_execution(&problem, WORKERS).is_err());
+        assert_family_parity(&expected, &result);
+    });
     assert!(admit_budget_bound_search_execution(&problem, WORKERS).is_ok());
     println!("clearra_native_admission_seam=complete");
 }

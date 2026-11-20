@@ -116,7 +116,10 @@ fn rust_legacy_cover_positive_mechanism_uses_original_ordinal_and_exact_assignme
 #[test]
 fn rust_legacy_cover_complete_observed_keeps_all_original_ordinals() {
     let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
-    let count = PieceKind::STANDARD_TETROMINOES.len();
+    // Empty Observed has seven possible bag offsets. Each offset contributes
+    // seven first-piece ordinals; repeated visible queues are distinct events.
+    let piece_count = PieceKind::STANDARD_TETROMINOES.len();
+    let count = piece_count * piece_count;
     let query = one_horizontal_i(count, SearchDefaults::MVP1.build_max_patterns());
     let legacy = compile(&query);
     let universe = legacy.piece_source().materialized_universe().unwrap();
@@ -130,19 +133,33 @@ fn rust_legacy_cover_complete_observed_keeps_all_original_ordinals() {
     assert_eq!(result.matrix().matrix().rows().len(), 1);
     let original = result.union().covered_patterns();
     assert_eq!(original.pattern_count(), count);
-    assert_eq!(original.count_ones(), 1);
+    assert_eq!(original.count_ones(), u32::try_from(piece_count).unwrap());
     for ordinal in 0..count {
         assert_eq!(
             original.contains(PatternId::new(ordinal)),
             universe.try_sequence_at(ordinal).unwrap().as_ref() == [PieceKind::I],
         );
     }
-    assert_eq!(result.result().probability().get(), 1.0 / count as f64);
+    let expected_probability = piece_count as f64 / count as f64;
+    assert!((result.result().probability().get() - expected_probability).abs() < f64::EPSILON);
+
+    let product = clearra_core_executor::CoreExecutor::execute_build_coverage_with_control(
+        &legacy,
+        &query,
+        &ExecutionControl::default(),
+    )
+    .expect("production Cover consumes the same complete original Observed ordinal language");
+    assert_eq!(product.coverage_pattern_words(), original.words());
+    assert_eq!(
+        product.usize_field("union_covered_patterns"),
+        Some(piece_count)
+    );
+    assert_eq!(product.bool_field("original_supply_complete"), Some(true));
 }
 
 #[test]
 fn rust_legacy_cover_complete_observed_rejects_partial_denominators_and_cancellation() {
-    let count = PieceKind::STANDARD_TETROMINOES.len();
+    let count = PieceKind::STANDARD_TETROMINOES.len().pow(2);
     // First input requests only a prefix even though the available source is
     // complete. Second input asks for the same prefix of a truncated source.
     for max_patterns in [SearchDefaults::MVP1.build_max_patterns(), count - 1] {

@@ -5,13 +5,17 @@ use clearra_problem::SearchProblem;
 use sha2::{Digest, Sha256};
 
 use crate::{
+    pc_failed_queue_evidence::{PcFailedQueueEvidence, PcFailedQueueExecutionAuthority},
     CoreExecutionResult, CorePostProcessScoreCell, WasmCpuSearchError,
     WasmCpuTerminalResourceAuthority,
 };
 
 use super::{
     mix_digest,
-    result::{DistributedGeometryAdvance, ExactSearchAdvance, WasmExactSearchSession},
+    result::{
+        compact_pc_failed_queue, DistributedGeometryAdvance, ExactSearchAdvance,
+        WasmExactSearchSession,
+    },
     WasmExactSearchError,
 };
 
@@ -199,6 +203,17 @@ pub struct WasmCpuCandidateProducer {
     candidate_digest: u64,
     verification_required: bool,
     finished: bool,
+    failed_queue_owner: Option<CompactFailedQueueDistributedOwner>,
+}
+
+struct CompactFailedQueueDistributedOwner {
+    problem: Arc<SearchProblem>,
+    example_limit: usize,
+    dispatch_commitment: Option<(usize, u64)>,
+    admitted_candidate_count: usize,
+    admitted_candidate_commitment: u64,
+    allow_completion: bool,
+    _terminal_authority: WasmCpuTerminalResourceAuthority,
 }
 
 impl WasmCpuCandidateProducer {
@@ -216,6 +231,7 @@ impl WasmCpuCandidateProducer {
             candidate_digest: 0,
             verification_required,
             finished: false,
+            failed_queue_owner: None,
         })
     }
 
@@ -241,6 +257,57 @@ impl WasmCpuCandidateProducer {
             candidate_digest: 0,
             verification_required: true,
             finished: false,
+            failed_queue_owner: None,
+        })
+    }
+
+    /// Retains the coordinator's original request owner. Verifiers compute
+    /// fragments; only this owner may seal the complete complement.
+    pub fn new_failed_queue(
+        problem: Arc<SearchProblem>,
+        checked_coexisting_bytes: u128,
+    ) -> Result<Self, WasmCpuSearchError> {
+        let example_limit = compact_pc_failed_queue::validate_problem(&problem)?;
+        let external = checked_coexisting_bytes
+            .checked_add(problem.checked_pc_family_pointee_retained_bytes().ok_or(
+                WasmCpuSearchError::InvalidProblem {
+                    reason: "compact_pc_failed_queue_memory_projection_unavailable",
+                },
+            )?)
+            .and_then(|bytes| {
+                let inline = core::mem::size_of::<WasmDistributedResultMerger>()
+                    .max(core::mem::size_of::<Self>())
+                    .checked_sub(core::mem::size_of::<WasmExactSearchSession>())?
+                    .checked_add(6 * core::mem::size_of::<usize>())?;
+                bytes.checked_add(inline as u128)
+            })
+            .ok_or(WasmCpuSearchError::InvalidProblem {
+                reason: "compact_pc_failed_queue_memory_projection_unavailable",
+            })?;
+        let terminal_authority = WasmCpuTerminalResourceAuthority::try_acquire_full_capacity()
+            .map_err(WasmCpuSearchError::resource_admission)?;
+        let session = compact_pc_failed_queue::new_authorized_engine(
+            Arc::clone(&problem),
+            external,
+            &terminal_authority,
+            1,
+        )?;
+        Ok(Self {
+            session,
+            preparation_progress_steps: 0,
+            candidate_count: 0,
+            candidate_digest: 0,
+            verification_required: true,
+            finished: false,
+            failed_queue_owner: Some(CompactFailedQueueDistributedOwner {
+                problem,
+                example_limit,
+                dispatch_commitment: None,
+                admitted_candidate_count: 0,
+                admitted_candidate_commitment: 0,
+                allow_completion: true,
+                _terminal_authority: terminal_authority,
+            }),
         })
     }
 
@@ -269,9 +336,21 @@ impl WasmCpuCandidateProducer {
                 row_ids,
                 identity_hash,
             } => {
-                let ordinal = self.candidate_count as u64;
-                self.candidate_count = self.candidate_count.saturating_add(1);
-                self.candidate_digest = mix_digest(self.candidate_digest, identity_hash);
+                let ordinal = u64::try_from(self.candidate_count)
+                    .map_err(|_| "wasm_distributed_candidate_ordinal_overflow")?;
+                self.candidate_count = self
+                    .candidate_count
+                    .checked_add(1)
+                    .ok_or("wasm_distributed_candidate_count_overflow")?;
+                self.candidate_digest = if self.failed_queue_owner.is_some() {
+                    compact_pc_failed_queue::mix_candidate_commitment(
+                        self.candidate_digest,
+                        ordinal,
+                        identity_hash,
+                    )
+                } else {
+                    mix_digest(self.candidate_digest, identity_hash)
+                };
                 let candidate = WasmCandidatePacket::new(ordinal, target_index, row_ids);
                 if !self.verification_required {
                     match self
@@ -309,6 +388,9 @@ impl WasmCpuCandidateProducer {
             }
             DistributedGeometryAdvance::Complete => {
                 self.finished = true;
+                if let Some(owner) = self.failed_queue_owner.as_mut() {
+                    owner.dispatch_commitment = Some((self.candidate_count, self.candidate_digest));
+                }
                 Ok(WasmCandidateProducerAdvance::Completed(
                     self.session.distributed_geometry_summary(
                         self.candidate_count,
@@ -324,11 +406,13 @@ impl WasmCpuCandidateProducer {
         if !self.finished {
             return Err("wasm_distributed_geometry_not_finished");
         }
-        Ok(WasmDistributedResultMerger::from_session(
+        let mut merger = WasmDistributedResultMerger::from_session(
             self.session
                 .into_distributed_finalizer()
                 .map_err(map_error)?,
-        ))
+        );
+        merger.failed_queue_owner = self.failed_queue_owner;
+        Ok(merger)
     }
 
     pub fn progress(&self) -> WasmDistributedProgress {
@@ -492,6 +576,8 @@ pub struct WasmDistributedResultMerger {
     tiling_hall_pruned_states: usize,
     tiling_column_pruned_states: usize,
     tiling_component_compositions: usize,
+    // Drop the session's compute child before the coordinator's parent.
+    failed_queue_owner: Option<CompactFailedQueueDistributedOwner>,
 }
 
 impl WasmDistributedResultMerger {
@@ -509,6 +595,7 @@ impl WasmDistributedResultMerger {
             tiling_hall_pruned_states: 0,
             tiling_column_pruned_states: 0,
             tiling_component_compositions: 0,
+            failed_queue_owner: None,
         }
     }
 
@@ -569,6 +656,9 @@ impl WasmDistributedResultMerger {
     }
 
     pub fn absorb(&mut self, result: &CoreExecutionResult) -> Result<(), &'static str> {
+        if self.failed_queue_owner.is_some() {
+            return self.absorb_failed_queue_worker(result);
+        }
         if let Some(profile_id) = result.postprocess_score_profile_id() {
             if self
                 .score_profile_id
@@ -585,6 +675,42 @@ impl WasmDistributedResultMerger {
         self.session
             .absorb_distributed_result(result)
             .map_err(map_error)
+    }
+
+    fn absorb_failed_queue_worker(
+        &mut self,
+        result: &CoreExecutionResult,
+    ) -> Result<(), &'static str> {
+        let owner = self
+            .failed_queue_owner
+            .as_mut()
+            .ok_or("wasm_distributed_pc_failed_queue_owner_missing")?;
+        if !std::mem::replace(&mut owner.allow_completion, false) {
+            return Err("wasm_distributed_pc_failed_queue_poisoned");
+        }
+        let count = parse_canonical_unsigned::<usize>(result, "packing_candidate_count")
+            .ok_or("wasm_distributed_pc_failed_queue_candidate_count_invalid")?;
+        let commitment =
+            parse_canonical_unsigned::<u64>(result, "compact_failed_queue_worker_commitment")
+                .ok_or("wasm_distributed_pc_failed_queue_commitment_invalid")?;
+        if (count == 0 && commitment != 0)
+            || result.postprocess_score_profile_id().is_some()
+            || result.pc_chance_coverage_evidence().is_some()
+        {
+            return Err("wasm_distributed_pc_failed_queue_worker_unqualified");
+        }
+        let next_count = owner
+            .admitted_candidate_count
+            .checked_add(count)
+            .ok_or("wasm_distributed_pc_failed_queue_candidate_count_overflow")?;
+        self.session
+            .absorb_distributed_result(result)
+            .map_err(map_error)?;
+        owner.admitted_candidate_count = next_count;
+        owner.admitted_candidate_commitment =
+            owner.admitted_candidate_commitment.wrapping_add(commitment);
+        owner.allow_completion = true;
+        Ok(())
     }
 
     pub(super) fn normalize_pc_root_representative_rank(
@@ -631,6 +757,62 @@ impl WasmDistributedResultMerger {
         summary: &WasmDistributedGeometrySummary,
         workers_used: usize,
     ) -> Result<CoreExecutionResult, &'static str> {
+        if self.failed_queue_owner.is_some() {
+            return Err("wasm_distributed_pc_failed_queue_owned_terminal_required");
+        }
+        self.finish_ordinary(summary, workers_used)
+    }
+
+    pub fn finish_failed_queue(
+        &mut self,
+        summary: &WasmDistributedGeometrySummary,
+        workers_used: usize,
+        control: &ExecutionControl,
+    ) -> Result<(CoreExecutionResult, PcFailedQueueEvidence), WasmCpuSearchError> {
+        let invalid = |reason| WasmCpuSearchError::InvalidProblem { reason };
+        if control.is_cancelled() {
+            return Err(WasmCpuSearchError::Cancelled);
+        }
+        let owner = self
+            .failed_queue_owner
+            .as_mut()
+            .ok_or_else(|| invalid("wasm_distributed_pc_failed_queue_owner_missing"))?;
+        if !std::mem::replace(&mut owner.allow_completion, false)
+            || summary.truncated_reason.is_some()
+            || owner.dispatch_commitment
+                != Some((summary.candidate_count, summary.candidate_digest))
+            || owner.admitted_candidate_count != summary.candidate_count
+            || owner.admitted_candidate_commitment != summary.candidate_digest
+            || !self
+                .session
+                .compact_failed_queue_rows_fit_candidate_count(summary.candidate_count)
+            || !matches!(
+                summary.backend_execution,
+                WasmDistributedBackendExecution::Cpu
+            )
+        {
+            return Err(invalid(
+                "wasm_distributed_pc_failed_queue_transcript_mismatch",
+            ));
+        }
+        let authority = PcFailedQueueExecutionAuthority::new(Arc::clone(&owner.problem));
+        let example_limit = owner.example_limit;
+        let result = self
+            .finish_ordinary(summary, workers_used)
+            .map_err(invalid)?;
+        let finished =
+            compact_pc_failed_queue::finish(&self.session, authority, example_limit, result)?;
+        if control.is_cancelled() {
+            return Err(WasmCpuSearchError::Cancelled);
+        }
+        Ok(finished)
+    }
+
+    fn finish_ordinary(
+        &mut self,
+        summary: &WasmDistributedGeometrySummary,
+        workers_used: usize,
+    ) -> Result<CoreExecutionResult, &'static str> {
         let mut summary = summary.clone();
         if self.tiling_candidate_count != 0 || self.tiling_expanded_nodes != 0 {
             summary.candidate_count = self.tiling_candidate_count;
@@ -662,6 +844,15 @@ impl WasmDistributedResultMerger {
             None => result,
         })
     }
+}
+
+fn parse_canonical_unsigned<T>(result: &CoreExecutionResult, key: &str) -> Option<T>
+where
+    T: std::str::FromStr + ToString,
+{
+    let encoded = result.unique_field(key)?;
+    let value = encoded.parse::<T>().ok()?;
+    (value.to_string() == encoded).then_some(value)
 }
 
 pub(super) fn map_error(error: WasmExactSearchError) -> &'static str {

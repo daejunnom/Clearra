@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 
 #[path = "extended_geometry_parallel.rs"]
 mod parallel;
-#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 pub(super) use parallel::cooperative::{
     Preparation as ExtendedParallelPreparation, PreparationStatus as ExtendedPreparationStatus,
 };

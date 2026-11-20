@@ -382,10 +382,9 @@ fn traversal_error() -> WasmExactSearchError {
     WasmExactSearchError::InvalidProblem("extended_parallel_geometry_family_invalid")
 }
 
-// Until a request owner can drive its worker waves, keep the new preparation
-// private to Core conformance. Native direct and distributed callers continue
-// to use take_parallel_plan without entering this cursor.
-#[cfg(test)]
+// Native callers with a cooperative polling contract use this cursor.
+// Native synchronous and distributed callers retain the direct preparation.
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 pub(super) mod cooperative {
     use super::*;
     use crate::backend::wasm_cpu::extended_geometry::ExtendedGeometryAdvance;
@@ -428,6 +427,10 @@ pub(super) mod cooperative {
     }
 
     impl Preparation {
+        pub(in crate::backend::wasm_cpu) fn expanded_nodes(&self) -> usize {
+            self.geometry.expanded_nodes()
+        }
+
         pub(in crate::backend::wasm_cpu) fn new(
             geometry: ExtendedGeometrySearch,
             catalog: Arc<ExtendedInverseCatalog>,

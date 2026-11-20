@@ -79,7 +79,11 @@ jobs:
             extended_pc_native_cooperative_worker_waves_preserve_exact_family_and_drain
             cooperative_canonical_reduction
             ordinary_native_pc_cooperative_session_preserves_admission_and_exact_family
-            compact_pc_failed_queue_exact_compiled_ordinals_and_fail_closed_boundaries
+            compact_pc_failed_queue_
+            rust_compact_snapshot_
+            generic_geometry_
+            generic_board64_
+            default_executor_verifies_a_scenario_with_rust_independently_of_c_linkage
             cooperative_fixed_ordinal_verification_stats_and_serial_handoff
             extended_pc_sealed_terminal_preserves_direct_result_and_admission
             extended_pc_terminal_projection_moves_private_solution_owners
@@ -103,6 +107,9 @@ jobs:
             cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib "$filter" || status=1
           done
           exit "$status"
+      - name: Check request-local profiling across pooled Rust workers
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-core-executor --features parallel,wasm-stage-profiling --lib worker_profile_
       - name: Test the bounded solution stream and exact comparison
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
@@ -255,6 +262,9 @@ jobs:
           cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core \
             --test legacy_cover_native_witness --test pc_tiling_control_parity --no-fail-fast \
             -- --nocapture || status=1
+          for filter in rust_compact_snapshot_ generic_geometry_ generic_board64_; do
+            cargo test --locked -p clearra-core-executor --features native-c-core --lib "$filter" || status=1
+          done
           # Measure the opt-in bounded prefix with the same C build and test binary.
           cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core \
             --test legacy_cover_native_witness -- --ignored --exact \
@@ -266,7 +276,7 @@ jobs:
             for filter in legacy_cover_tests legacy_cover_rust::tests:: \
               pc_tiling_candidate_budget_preserves_failure_without_publishing setup_score_ordinals \
               setup_score_evaluation_identity_binds \
-              explicit_rust_cpu_product_context_preserves_default_service_selection \
+              default_and_product_context_use_rust_even_when_c_reference_is_available \
               compact_pc_failed_queue_ \
               full_height_replay_shares_exact_graph_owner_across_staged_promotion; do
               "${app_lib[@]}" "$filter" || status=1
@@ -275,6 +285,7 @@ jobs:
             status=1
           fi
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
+          cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_ordinary_scenario_uses_bounded_native_worker_waves || status=1
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_replay_direct_cooperative_and_lazy_pages_preserve_all_words || status=1
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_sr3_local_continue_is_cooperative_on_one_worker || status=1
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint || status=1
@@ -285,6 +296,11 @@ jobs:
           cargo test --locked -p clearra-app --features native-c-core --test exact_accelerator_product_execution setup_score_reuse || status=1
           exit "$status"
           SH
+      - name: Execute the Rust-only CLI product contract
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime
+          --test rust_product_process_contract
       - name: Check the actual compact distributed continuation boundary
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-wasm --lib tests::fixed_no_hold_opening_ -- --test-threads=1

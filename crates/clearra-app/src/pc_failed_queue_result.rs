@@ -340,6 +340,15 @@ impl PcFailedQueueCompiledAuthority {
         self.failed_pattern_limit
     }
 
+    pub(crate) fn checked_query_retained_capacity_bytes(&self) -> Option<u128> {
+        match &self.query {
+            PcFailedQueueQuerySnapshot::Opening(query) => query
+                .queue()
+                .checked_build_probability_retained_capacity_bytes(),
+            PcFailedQueueQuerySnapshot::Scenario(query) => query.checked_retained_capacity_bytes(),
+        }
+    }
+
     pub(crate) fn validate_and_decorate(
         &self,
         result: CoreExecutionResult,

@@ -6,9 +6,15 @@ use clearra_pc_graph::{
 };
 use clearra_problem::{PcQuery, SearchProblem, SearchProblemPreset};
 use clearra_rules::profile::rule_profile::RuleProfile;
-use clearra_supply::QueueObservationPolicy;
+use clearra_supply::{
+    execution_automaton::SupplyProvenanceId,
+    hold::hold_policy::HoldPolicy,
+    piece_source::{PieceSourceId, PieceSourceKind},
+    QueueObservationPolicy, SupplyBranchKind, SupplyExecutionAutomaton, SupplyExecutionState,
+    SupplyObservationIdentity,
+};
 
-use crate::{service::field, CoreExecutionResult};
+use crate::{service::field, CoreExecutionResult, CorePathStep};
 
 pub(crate) fn opening_continuation_fields(
     pc_query: &PcQuery,
@@ -78,26 +84,29 @@ fn continuation_fields(
     ]
 }
 
-const FIXED_NO_HOLD_2L_PLACEMENTS: usize = 5;
-const MAX_FIXED_NO_HOLD_2L_QUEUE: usize = FIXED_NO_HOLD_2L_PLACEMENTS + 9;
+// The compact compatibility path supports a 64-entry fixed queue. Do not
+// keep an unbounded suffix or the whole SearchProblem through postprocess.
+const MAX_FIXED_OPENING_CONTINUATION_QUEUE: usize = 64;
 
-/// Bounded input for one admitted ordinary 2L continuation. It carries no
-/// search problem, coverage universe, heap-backed rules, or execution owner
-/// across cooperative phases. Preparing an input does not prove an outcome.
-pub struct PreparedFixedNoHold2lOpeningContinuation {
-    fixed: [PieceKind; MAX_FIXED_NO_HOLD_2L_QUEUE],
+/// Bounded input for an admitted standard compact PC opening. Preparing it
+/// does not prove that the accepted result reaches the suffix.
+pub struct PreparedFixedOpeningContinuation {
+    fixed: [PieceKind; MAX_FIXED_OPENING_CONTINUATION_QUEUE],
     fixed_len: usize,
+    placements: usize,
+    target: PcTarget,
     rule: RuleProfile,
     objective: ObjectivePolicy,
     count_policy: PcCountPolicy,
+    initial_hold: PcHoldPolicy,
+    source_id: PieceSourceId,
 }
 
-impl PreparedFixedNoHold2lOpeningContinuation {
+impl PreparedFixedOpeningContinuation {
     pub fn prepare(problem: &SearchProblem) -> Option<Self> {
         let pc_query = problem.scenario().pc_query()?;
         if problem.preset() != SearchProblemPreset::OpeningPc
-            || pc_query.target() != PcTarget::two_lines()
-            || pc_query.hold_policy() != PcHoldPolicy::Disabled
+            || problem.piece_source().kind() != PieceSourceKind::FixedQueue
         {
             return None;
         }
@@ -106,12 +115,19 @@ impl PreparedFixedNoHold2lOpeningContinuation {
             .remaining_queue()
             .as_fixed_sequence()?
             .pieces();
-        let consumed = pc_query.exact_piece_count();
-        // pc2 retains the source target. Do not publish a 4L/6L next-puzzle
-        // label with a 2L token before those distinct contracts are qualified.
-        let hint = ContinuationHint::for_remaining_queue(fixed.len().checked_sub(consumed)?);
-        if hint.next_target() != Some(pc_query.target()) || consumed != FIXED_NO_HOLD_2L_PLACEMENTS
-        {
+        let placements = pc_query.exact_piece_count();
+        let initial_hold = pc_query.hold_policy();
+        // The compatibility token retains the source target. A larger
+        // residual horizon is not proof of a different target query. An
+        // initially empty hold can draw one extra verified queue entry.
+        let remaining = fixed.len().checked_sub(placements)?;
+        let target = pc_query.target();
+        let fits_without_hold_draw = remaining_fits_target(remaining, target);
+        let fits_with_hold_draw = initial_hold == PcHoldPolicy::EnabledEmpty
+            && remaining
+                .checked_sub(1)
+                .is_some_and(|remaining| remaining_fits_target(remaining, target));
+        if !fits_without_hold_draw && !fits_with_hold_draw {
             return None;
         }
         let objective = pc_query.objective();
@@ -130,19 +146,24 @@ impl PreparedFixedNoHold2lOpeningContinuation {
         {
             return None;
         }
-        let mut pieces = [PieceKind::I; MAX_FIXED_NO_HOLD_2L_QUEUE];
+        let mut pieces = [PieceKind::I; MAX_FIXED_OPENING_CONTINUATION_QUEUE];
         pieces.get_mut(..fixed.len())?.copy_from_slice(fixed);
         Some(Self {
             fixed: pieces,
             fixed_len: fixed.len(),
+            placements,
+            target,
             rule: pc_query.rule(),
             objective,
             count_policy,
+            initial_hold,
+            source_id: problem.piece_source().id(),
         })
     }
 
-    /// Called only on the accepted outcome of the prepared request. A
-    /// complete fixed, no-hold witness uniquely binds the consumed prefix.
+    /// Called only on the accepted outcome of the prepared request. The
+    /// concrete lock witness, not the existence of a suffix, binds the
+    /// reached queue cursor and hold state.
     pub fn attach(&self, result: CoreExecutionResult) -> CoreExecutionResult {
         if result.field("continuation_token").is_some()
             || result.bool_field("solution_found") != Some(true)
@@ -154,48 +175,105 @@ impl PreparedFixedNoHold2lOpeningContinuation {
             return result;
         }
         let steps = result.path_steps();
-        let (prefix, remaining) =
-            self.fixed[..self.fixed_len].split_at(FIXED_NO_HOLD_2L_PLACEMENTS);
-        let target = PcTarget::two_lines();
-        if steps.len() != prefix.len()
-            || !steps
-                .iter()
-                .map(|step| step.piece())
-                .eq(prefix.iter().copied())
+        if steps.len() != self.placements
             || steps
                 .iter()
                 .map(|step| u16::from(step.cleared_lines()))
                 .sum::<u16>()
-                != u16::from(target.lines())
+                != u16::from(self.target.lines())
         {
             return result;
         }
-        let query = OpeningPcSearchQuery::new(target)
+        let Some((remaining, hold)) = self.remaining_supply(steps) else {
+            return result;
+        };
+        let hint = ContinuationHint::for_remaining_queue(remaining.len());
+        if hint.next_target() != Some(self.target) {
+            return result;
+        }
+        let query = OpeningPcSearchQuery::new(self.target)
             .with_rule(self.rule)
-            .with_hold_policy(PcHoldPolicy::Disabled)
+            .with_hold_policy(hold)
             .with_objective(self.objective)
             .with_count_policy(self.count_policy)
             .with_queue_observation_policy(QueueObservationPolicy::FullQueueOracle);
-        let token = PcContinuationTokenCodec::encode_opening_continuation(&query, None, remaining);
-        let hint = ContinuationHint::for_remaining_queue(remaining.len());
+        let token = PcContinuationTokenCodec::encode_opening_continuation(
+            &query,
+            hold.initial_piece(),
+            remaining,
+        );
         result.with_additional_fields(continuation_fields(
             remaining,
-            PcHoldPolicy::Disabled,
+            hold,
             Some(hint.next_label()),
             Some(token),
         ))
     }
+
+    fn remaining_supply(&self, steps: &[CorePathStep]) -> Option<(&[PieceKind], PcHoldPolicy)> {
+        let fixed = &self.fixed[..self.fixed_len];
+        if !self.initial_hold.is_enabled() {
+            let (prefix, remaining) = fixed.split_at(self.placements);
+            return steps
+                .iter()
+                .map(CorePathStep::piece)
+                .eq(prefix.iter().copied())
+                .then_some((remaining, PcHoldPolicy::Disabled));
+        }
+
+        let automaton = SupplyExecutionAutomaton::sequence();
+        let mut state = SupplyExecutionState::with_contract(
+            self.source_id,
+            PieceSourceKind::FixedQueue,
+            0,
+            self.initial_hold.initial_piece(),
+            HoldPolicy::Allowed,
+            0,
+            0,
+            SupplyObservationIdentity::full_queue_oracle(),
+            SupplyProvenanceId(self.source_id.get()),
+        );
+        for step in steps {
+            let branch = match step.hold() {
+                "use-current" => SupplyBranchKind::Current,
+                "swap-held" => SupplyBranchKind::SwapHeld,
+                "store-current-use-next" => SupplyBranchKind::StoreCurrent,
+                // A projected/unplaced piece or terminal release does not
+                // establish the state of this concrete fixed suffix.
+                _ => return None,
+            };
+            let cursor = usize::from(state.cursor());
+            let next = automaton
+                .transition(
+                    state,
+                    branch,
+                    *fixed.get(cursor)?,
+                    fixed.get(cursor + 1).copied(),
+                )
+                .ok()?;
+            if next.used_piece != step.piece() {
+                return None;
+            }
+            state = next.next_state;
+        }
+        let hold = state
+            .hold_piece()
+            .map_or(PcHoldPolicy::EnabledEmpty, PcHoldPolicy::EnabledWithPiece);
+        Some((fixed.get(usize::from(state.cursor())..)?, hold))
+    }
+}
+
+fn remaining_fits_target(remaining: usize, target: PcTarget) -> bool {
+    ContinuationHint::for_remaining_queue(remaining).next_target() == Some(target)
 }
 
 /// Attach the existing pc2 continuation contract to an accepted compact Rust
-/// Opening result. For a fixed, no-hold 2L search the five accepted locks
-/// consume the first five queue entries exactly. We use the path already
-/// retained by the solver; this adapter does not request a replay family.
-pub fn attach_exact_fixed_no_hold_2l_opening_continuation(
+/// Opening result using the already retained path, not a second search.
+pub fn attach_exact_fixed_opening_continuation(
     problem: &SearchProblem,
     result: CoreExecutionResult,
 ) -> CoreExecutionResult {
-    match PreparedFixedNoHold2lOpeningContinuation::prepare(problem) {
+    match PreparedFixedOpeningContinuation::prepare(problem) {
         Some(prepared) => prepared.attach(result),
         None => result,
     }

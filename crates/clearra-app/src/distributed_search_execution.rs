@@ -161,9 +161,8 @@ impl AppContext {
             );
         }
 
-        // The full-height compiler preserves a request-owned failed-queue
-        // authority. Compact distributed failed-queue remains unconnected;
-        // keep its established ingress refusal rather than relabelling it.
+        // Failed-queue requires the typed, request-owned producer; never
+        // relabel an ordinary Percent result after a compile failure.
         let failed_queue_product = product_capability_contract
             .as_ref()
             .is_some_and(|contract| {
@@ -234,7 +233,7 @@ fn distributed_product_capability_matches_response_kind(
 }
 
 impl PreparedDistributedSearch {
-    /// A full-height failed-queue terminal must carry the producer's separate
+    /// A failed-queue terminal must carry the producer's separate
     /// complement proof. A complete chance result alone cannot authorize this
     /// product, and no worker or presenter is permitted to manufacture it.
     pub fn complete_failed_queue(
@@ -254,7 +253,7 @@ impl PreparedDistributedSearch {
                 component: "distributed_pc_failed_queue_finite_completion_unavailable",
             });
         }
-        if !(7..=24).contains(&self.problem.visible_height())
+        if !(1..=24).contains(&self.problem.visible_height())
             || !evidence.matches_problem_owner(&self.problem)
             || !matches!(
                 &self.response_kind,
@@ -320,6 +319,25 @@ impl PreparedDistributedSearch {
             &self.output_policy,
             self.product_capability_contract,
         )
+    }
+
+    /// Checked App allocations coexisting with the compact coordinator.
+    /// The Core producer accounts the shared problem pointee separately.
+    pub fn compact_pc_failed_queue_source_retained_bytes(&self) -> Result<u128, &'static str> {
+        let CooperativeSearchResponseKind::PcFailedQueue { authority } = &self.response_kind else {
+            return Err("distributed_pc_failed_queue_authority_mismatch");
+        };
+        if authority.uses_extended_family() {
+            return Err("distributed_pc_failed_queue_authority_mismatch");
+        }
+        checked_distributed_terminal_external_retained_bytes(
+            &self.response_kind,
+            &self.output_policy,
+            &self.validation_report,
+        )
+        .and_then(|bytes| bytes.checked_add(self.context.checked_retained_capacity_bytes()?))
+        .and_then(|bytes| bytes.checked_add(authority.checked_query_retained_capacity_bytes()?))
+        .ok_or("distributed_pc_failed_queue_memory_projection_overflow")
     }
 
     pub fn requires_cooperative_product_completion(&self) -> bool {

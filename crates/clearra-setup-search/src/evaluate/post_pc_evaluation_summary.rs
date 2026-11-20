@@ -1,4 +1,4 @@
-use clearra_core_executor::CoreExecutionResult;
+use clearra_core_executor::{CoreExecutionResult, CorePathStep};
 use clearra_pc_graph::request::{PcCompletionGoal, PcScenarioQuery};
 
 use super::{
@@ -26,6 +26,50 @@ pub struct PostPcEvaluationSummary {
     searched_nodes: u64,
     budget_exceeded: bool,
     score: PostPcScoreSummary,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PostPcWitness {
+    pub(crate) placed_pieces: usize,
+    pub(crate) consumed_queue: usize,
+    pub(crate) cleared_lines: u8,
+}
+
+impl PostPcWitness {
+    pub(crate) fn from_retained_path(path: &[CorePathStep], queue_len: usize) -> Option<Self> {
+        if path.is_empty() {
+            return None;
+        }
+        let mut witness = Self {
+            placed_pieces: path.len(),
+            ..Self::default()
+        };
+        for (index, step) in path.iter().enumerate() {
+            let consumes = match step.hold() {
+                "use-current" | "swap-held" => 1,
+                "store-current-use-next" => 2,
+                "release-held-at-terminal"
+                    if index + 1 == path.len() && witness.consumed_queue == queue_len =>
+                {
+                    0
+                }
+                _ => return None,
+            };
+            witness.consumed_queue = witness.consumed_queue.checked_add(consumes)?;
+            witness.cleared_lines = witness.cleared_lines.checked_add(step.cleared_lines())?;
+        }
+        (witness.consumed_queue <= queue_len).then_some(witness)
+    }
+
+    pub(crate) fn from_result(
+        query: &PcScenarioQuery,
+        result: &CoreExecutionResult,
+    ) -> Option<Self> {
+        if query.retained_trace_limit() == 0 || !result.solution_found() {
+            return None;
+        }
+        Self::from_retained_path(result.path_steps(), query.remaining_queue().len())
+    }
 }
 
 impl PostPcEvaluationSummary {
@@ -68,27 +112,40 @@ impl PostPcEvaluationSummary {
     pub(crate) fn from_query_result(
         query: &PcScenarioQuery,
         result: &CoreExecutionResult,
+        witness: Option<PostPcWitness>,
         score: PostPcScoreSummary,
     ) -> Self {
-        let continuation = PostPcContinuationStatus::from_query_result(query, result);
+        let remaining_queue_len =
+            witness.map(|witness| query.remaining_queue().len() - witness.consumed_queue);
+        let continuation =
+            PostPcContinuationStatus::from_query_result(query, result, remaining_queue_len);
+        let exact_family_count = result
+            .usize_field("normalized_unique_solution_count")
+            .unwrap_or(0);
+        let consumed = witness.map_or(0, |witness| witness.consumed_queue);
         Self {
             solution_found: result.solution_found(),
             completion_goal: query.completion_goal(),
-            cleared_lines: result.u8_field("cleared_lines").unwrap_or(0),
-            total_solution_count: result.usize_field("total_solution_count").unwrap_or(0),
+            cleared_lines: witness.map_or(0, |witness| witness.cleared_lines),
+            // Rust counts canonical search-family members here. BuildUp path
+            // multiplicity is separate and is not a second solution count.
+            total_solution_count: exact_family_count,
             unique_solution_count: result.usize_field("unique_solution_count").unwrap_or(0),
-            min_queue_consumed: result.usize_field("min_queue_consumed").unwrap_or(0),
-            max_queue_consumed: result.usize_field("max_queue_consumed").unwrap_or(0),
-            sample_queue_consumed: result.usize_field("sample_queue_consumed").unwrap_or(0),
-            placed_piece_count: result.usize_field("placed_piece_count").unwrap_or(0),
-            best_remaining_queue_len: result.usize_field("best_remaining_queue_len").unwrap_or(0),
-            retained_trace_count: result.usize_field("retained_trace_count").unwrap_or(0),
+            // This interface reports queue lengths for its retained witness
+            // (historically the first accepted candidate). It does not claim
+            // that one representative established global extrema.
+            min_queue_consumed: consumed,
+            max_queue_consumed: consumed,
+            sample_queue_consumed: consumed,
+            placed_piece_count: witness.map_or(0, |witness| witness.placed_pieces),
+            best_remaining_queue_len: remaining_queue_len.unwrap_or(0),
+            retained_trace_count: usize::from(witness.is_some()),
             count_complete: result.bool_field("count_complete").unwrap_or(false),
-            sample_trace_available: result.sample_trace_available(),
+            sample_trace_available: witness.is_some(),
             continuation_available: continuation.available(),
             continuation_available_complete: continuation.complete(),
             searched_nodes: result.u64_field("searched_nodes").unwrap_or(0),
-            budget_exceeded: result.bool_field("budget_exceeded").unwrap_or(false),
+            budget_exceeded: result.bool_field("resource_truncated").unwrap_or(false),
             score,
         }
     }

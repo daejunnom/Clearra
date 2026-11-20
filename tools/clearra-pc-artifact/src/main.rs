@@ -5,6 +5,8 @@ mod gpu_inventory;
 mod scenario;
 mod sfinder_reference;
 
+const EXECUTION_ENGINE: &str = "native-c-reference";
+
 fn main() {
     let result = args::ArtifactArgs::parse(std::env::args().skip(1)).and_then(|args| {
         if args.list_gpu_devices {
@@ -24,7 +26,7 @@ fn main() {
         Ok(Some(outcomes)) => {
             for outcome in outcomes {
                 println!(
-                    "artifact complete | output={} | solutions={} | covered_patterns={}/{} | probability={}",
+                    "artifact complete | engine={EXECUTION_ENGINE} | output={} | solutions={} | covered_patterns={}/{} | probability={}",
                     outcome.output_directory.display(),
                     outcome.solution_count,
                     outcome.covered_pattern_count,

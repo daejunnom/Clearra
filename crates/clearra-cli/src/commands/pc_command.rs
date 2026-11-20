@@ -1,4 +1,4 @@
-use clearra_app::{AppCommand, AppContext, AppRequest, PcAppCommand};
+use clearra_app::{AppCommand, AppRequest, PcAppCommand};
 
 use crate::{
     args::pc_args::PcArgs,
@@ -89,7 +89,8 @@ impl PcCommand {
             }
         };
         AppResponseRenderer::render(
-            AppContext::default().run(AppRequest::new(AppCommand::Pc(PcAppCommand::new(query)))),
+            crate::cli_routing::product_app_context()
+                .run(AppRequest::new(AppCommand::Pc(PcAppCommand::new(query)))),
             format,
             CliErrorCode::PcSearchInternal,
         )

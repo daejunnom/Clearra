@@ -113,7 +113,7 @@ fn imported_srs_plus_requires_the_same_ordered_transition_table_in_rust() {
 
     #[cfg(feature = "native-c-core")]
     {
-        let native = AppContext::default();
+        let native = AppContext::native_c_reference();
         for profile in [&canonical, &reordered] {
             let response = native.run(scenario_request(profile));
             assert_eq!(
@@ -224,7 +224,7 @@ fn local_compact_rust_executes_the_submitted_srs90_order_only_in_its_authorized_
     {
         // The native C descriptor already accepts these checked SRS90
         // transitions; it is a differential authority, not a fallback.
-        let native = AppContext::default();
+        let native = AppContext::native_c_reference();
         for (profile, expected) in [(&canonical, false), (&changed, true)] {
             let response = native.run(request(profile, 1, 0));
             assert_eq!(response.status(), AppStatus::Success, "{response:?}");

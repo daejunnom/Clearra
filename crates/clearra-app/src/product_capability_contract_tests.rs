@@ -3952,7 +3952,7 @@ fn pc_score_native_fails_closed_while_distributed_binds_typed_authority() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let origin = PcScoreIngressOrigin::CanonicalPcScore;
     let request = score_request(origin, PieceKind::I);
-    let native = AppContext::default().run(request.clone());
+    let native = AppContext::native_c_reference().run(request.clone());
     assert_eq!(native.status(), AppStatus::Unsupported);
     assert!(native.product_capability_result().is_none());
     assert!(native.pc_score_execution_evidence().is_none());
@@ -4180,7 +4180,7 @@ fn compact_failed_queue_request(
         // Exactly one O fits this original two-row cavity.
         PcScenarioBoard::standard_10(2, 0xf3fcf),
         PcQueueInput::pattern_expression(
-            QueuePatternExpression::parse(pattern, 1).expect("one-piece expression"),
+            QueuePatternExpression::parse(pattern, 7).expect("one-piece expression"),
         ),
         PieceWindow::new(1),
     )
@@ -4279,7 +4279,6 @@ fn compact_pc_failed_queue_direct_rejects_unsupported_and_incomplete_work() {
     );
     let one = PcExecutionPolicy::mvp_default().with_workers(1);
     for (policy, expected) in [
-        (one.clone().with_workers(2), AppStatus::Unsupported),
         (
             one.clone()
                 .with_requested_backend(RequestedSearchBackend::Gpu)
@@ -4326,8 +4325,8 @@ fn compact_pc_failed_queue_direct_keeps_the_exact_owner_and_lease_until_completi
     )
     .unwrap();
     let original = authority.problem_arc();
-    let native =
-        AppCoreExecutorService::default().prepare_direct_pc_failed_queue_authority(authority);
+    let native = AppCoreExecutorService::native_c_reference()
+        .prepare_direct_pc_failed_queue_authority(authority);
     assert!(Arc::ptr_eq(&original, &native.problem_arc()));
     assert_eq!(
         original
@@ -4361,26 +4360,62 @@ fn compact_pc_failed_queue_direct_keeps_the_exact_owner_and_lease_until_completi
 }
 
 #[test]
-fn compact_pc_failed_queue_distributed_path_stays_closed() {
-    let request = failed_queue_request(
-        PcFailedQueueIngressOrigin::CanonicalFailedQueue,
-        PieceKind::I,
-        1,
+fn compact_pc_failed_queue_cooperative_uses_same_owner_and_refuses_ordinary_distributed_result() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let request =
+        compact_failed_queue_request("[IOT]", 2, PcExecutionPolicy::mvp_default().with_workers(1));
+    let app = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     );
-    let DistributedSearchPreparation::Ready(distributed) =
-        AppContext::default().prepare_distributed_search(request)
-    else {
-        panic!("typed failed-queue must stop before distributed search preparation");
+    let direct = app.run(request.clone());
+    let mut execution = app.start_cooperative_execution(request.clone());
+    let control = ExecutionControl::default();
+    let serial = (0..4096)
+        .find_map(|_| match execution.advance(1, &control) {
+            crate::CooperativeAppAdvance::Pending | crate::CooperativeAppAdvance::Progress => None,
+            crate::CooperativeAppAdvance::Completed(result) => Some(result),
+            other => panic!("unexpected cooperative failed-queue state {other:?}"),
+        })
+        .expect("bounded cooperative completion");
+    assert_eq!(serial.status(), AppStatus::Success, "{serial:#?}");
+    assert!(serial.pc_failed_queue_execution_evidence().is_none());
+    let report = |response: &AppResponse| {
+        response
+            .product_capability_result()
+            .unwrap()
+            .pc_failed_queue_v2()
+            .unwrap()
+            .clone()
     };
-    assert_eq!(distributed.status(), AppStatus::ValidationFailed);
+    let direct_report = report(&direct);
+    let serial_report = report(&serial);
+    assert_eq!(serial_report.problem_id(), direct_report.problem_id());
+    assert_eq!(
+        serial_report.failed_probability_bits(),
+        direct_report.failed_probability_bits()
+    );
+    assert_eq!(serial_report.examples(), direct_report.examples());
+    let DistributedSearchPreparation::Search(prepared) = app.prepare_distributed_search(request)
+    else {
+        panic!("compact distributed request must retain its typed producer");
+    };
+    assert_eq!(
+        prepared
+            .problem()
+            .pc_chance_evidence_policy()
+            .pc_failed_queue_example_limit(),
+        Some(2)
+    );
+    let unrelated_result = direct
+        .render_model()
+        .and_then(crate::AppRenderModel::core_result)
+        .unwrap()
+        .clone();
+    let distributed = prepared.complete(unrelated_result, &control);
+    assert_eq!(distributed.status(), AppStatus::ExecutionFailed);
     assert_eq!(distributed.command(), Some(AppCommandKind::Percent));
     assert!(distributed.product_capability_result().is_none());
     assert!(distributed.pc_failed_queue_execution_evidence().is_none());
-    assert!(distributed
-        .error()
-        .expect("distributed typed failed-queue rejection")
-        .message()
-        .contains("distributed product capability result binding is unavailable"));
 }
 
 #[test]
@@ -4397,7 +4432,10 @@ fn pc_failed_queue_native_success_returns_one_v2_wrapper_and_strips_private_evid
             .expect("scenario failed-queue query")
             .clone(),
     );
-    let response = AppContext::default().run(failed_queue_request(origin, PieceKind::I, 2));
+    let response = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::native_c_reference()),
+    )
+    .run(failed_queue_request(origin, PieceKind::I, 2));
 
     assert_eq!(response.status(), AppStatus::Success, "{response:#?}");
     assert!(response.pc_failed_queue_execution_evidence().is_none());

@@ -1,4 +1,4 @@
-use clearra_app::{AppCommand, AppContext, AppRequest, PathAppCommand};
+use clearra_app::{AppCommand, AppRequest, PathAppCommand};
 
 use crate::{
     args::PathArgs,
@@ -17,9 +17,9 @@ impl PathCommand {
             Err(error) => return pc_assembly_error(error),
         };
         AppResponseRenderer::render(
-            AppContext::default().run(AppRequest::new(AppCommand::Path(PathAppCommand::new(
-                query,
-            )))),
+            crate::cli_routing::product_app_context().run(AppRequest::new(AppCommand::Path(
+                PathAppCommand::new(query),
+            ))),
             format,
             CliErrorCode::PathSearchInternal,
         )

@@ -33,19 +33,19 @@ pub(crate) struct ExtendedPcSearchSession {
 struct ExtendedPcDirectOwner {
     engine: ExtendedBuildProbabilitySession,
     admission: ExecutionAdmission,
-    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     original_lease: clearra_core_domain::resource::ResourceLeaseToken,
 }
 
 #[allow(clippy::large_enum_variant)]
 enum ExtendedPcSearchOwner {
     Direct(ExtendedPcDirectOwner),
-    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
-    NativeCooperative(native_cooperative::Driver),
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    NativeCooperative(Box<native_cooperative::Driver>),
 }
 
-#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
-pub(crate) use native_cooperative::NativePcCooperativeAdvance;
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+pub use native_cooperative::{NativePcCooperativeAdvance, NativePcCooperativeResult};
 
 pub(super) fn validate_pc_family_problem(
     problem: &SearchProblem,
@@ -273,7 +273,7 @@ impl ExtendedPcSearchSession {
             admit_budget_bound_search_execution(problem, problem.backend_policy().workers())
         }
         .map_err(WasmExactSearchError::resource_admission)?;
-        #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
         let original_lease = admission.lease_token();
         // The legacy ordinary execution API borrows a caller-owned problem;
         // both that input and the engine's owned snapshot coexist.
@@ -297,30 +297,32 @@ impl ExtendedPcSearchSession {
         Ok(ExtendedPcDirectOwner {
             engine,
             admission,
-            #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
             original_lease,
         })
     }
 
-    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
-    pub(crate) fn new_native_cooperative_for_test(
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub(crate) fn try_new_native_cooperative(
         problem: &SearchProblem,
         checked_external_retained_bytes: u128,
-    ) -> Result<Self, WasmExactSearchError> {
-        let field = Self::validated_family_field(problem)?;
-        if !native_cooperative::Driver::is_eligible(problem, field) {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "extended_pc_native_cooperative_ineligible",
-            ));
+    ) -> Result<Option<Self>, WasmExactSearchError> {
+        if !native_cooperative::Driver::is_problem_eligible(problem) {
+            return Ok(None);
         }
-        let direct =
-            Self::admit_direct_owner(problem, field, checked_external_retained_bytes, None)?;
-        Ok(Self {
-            owner: ExtendedPcSearchOwner::NativeCooperative(native_cooperative::Driver::new(
-                direct,
-            )?),
+        let field = Self::validated_family_field(problem)?;
+        let external = checked_external_retained_bytes
+            .checked_add(core::mem::size_of::<native_cooperative::Driver>() as u128)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "extended_pc_memory_projection_unavailable",
+            ))?;
+        let direct = Self::admit_direct_owner(problem, field, external, None)?;
+        Ok(Some(Self {
+            owner: ExtendedPcSearchOwner::NativeCooperative(Box::new(
+                native_cooperative::Driver::new(direct)?,
+            )),
             terminal_authority_supplied: false,
-        })
+        }))
     }
 
     #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
@@ -336,8 +338,8 @@ impl ExtendedPcSearchSession {
         Some((owner.original_lease(), owner.publication_lease()))
     }
 
-    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
-    pub(crate) fn advance_native_cooperative_for_test(
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub(crate) fn advance_native_cooperative(
         &mut self,
         budget: usize,
         control: &ExecutionControl,
@@ -353,7 +355,7 @@ impl ExtendedPcSearchSession {
     fn direct_owner(&self) -> Option<&ExtendedPcDirectOwner> {
         match &self.owner {
             ExtendedPcSearchOwner::Direct(owner) => Some(owner),
-            #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
             ExtendedPcSearchOwner::NativeCooperative(_) => None,
         }
     }
@@ -365,7 +367,7 @@ impl ExtendedPcSearchSession {
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
         match &mut self.owner {
             ExtendedPcSearchOwner::Direct(owner) => owner.advance(budget, control),
-            #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
             ExtendedPcSearchOwner::NativeCooperative(_) => {
                 Err(WasmExactSearchError::InvalidProblem(
                     "extended_pc_native_cooperative_requires_leased_result_advance",
@@ -384,7 +386,6 @@ impl ExtendedPcSearchSession {
             ExtendedPcSearchOwner::Direct(owner) => owner
                 .engine
                 .execute_pc_family_parallel(requested_workers, control),
-            #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
             ExtendedPcSearchOwner::NativeCooperative(_) => {
                 Err(WasmExactSearchError::InvalidProblem(
                     "extended_pc_native_cooperative_requires_bounded_advance",
@@ -458,7 +459,7 @@ fn advance_serial(
     })
 }
 
-#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 mod native_cooperative {
     use clearra_core_domain::resource::ResourceLeaseToken;
 
@@ -476,7 +477,7 @@ mod native_cooperative {
     }
 
     #[allow(clippy::large_enum_variant)]
-    pub(crate) enum NativePcCooperativeAdvance {
+    pub enum NativePcCooperativeAdvance {
         Pending,
         Completed(NativePcCooperativeResult),
         Cancelled,
@@ -487,15 +488,16 @@ mod native_cooperative {
         Serial(ExecutionAdmission),
     }
 
-    /// Both the artifact and the original admission cross together. The
-    /// caller cannot extract the backing allocation and leave its authority
-    /// behind; only borrowed observation is exposed by the test seam.
-    pub(crate) struct NativePcCooperativeResult {
+    /// A complete native result together with its original admission.
+    /// Terminal owners consume the result in a callback while that same
+    /// admission is still live; no request is readmitted.
+    pub struct NativePcCooperativeResult {
         result: CoreExecutionResult,
         retention: PublicationRetention,
     }
 
     impl NativePcCooperativeResult {
+        #[cfg(test)]
         pub(crate) fn result(&self) -> &CoreExecutionResult {
             &self.result
         }
@@ -506,6 +508,15 @@ mod native_cooperative {
                 PublicationRetention::Serial(admission) => admission.lease_token(),
             }
         }
+
+        /// Move the completed result through its terminal transformation.
+        /// The original execution lease remains held for the whole callback.
+        pub fn finish<R>(self, terminal: impl FnOnce(CoreExecutionResult) -> R) -> R {
+            let Self { result, retention } = self;
+            let output = terminal(result);
+            drop(retention);
+            output
+        }
     }
 
     pub(super) struct Driver {
@@ -514,8 +525,8 @@ mod native_cooperative {
     }
 
     impl Driver {
-        pub(super) fn is_eligible(problem: &SearchProblem, field: BuildProbabilityField) -> bool {
-            DryRunOwner::is_eligible(problem, field)
+        pub(super) fn is_problem_eligible(problem: &SearchProblem) -> bool {
+            DryRunOwner::is_problem_eligible(problem)
         }
 
         pub(super) fn new(direct: ExtendedPcDirectOwner) -> Result<Self, WasmExactSearchError> {
@@ -537,6 +548,7 @@ mod native_cooperative {
             }
         }
 
+        #[cfg(test)]
         pub(super) fn original_lease(&self) -> ResourceLeaseToken {
             self.original_lease
         }

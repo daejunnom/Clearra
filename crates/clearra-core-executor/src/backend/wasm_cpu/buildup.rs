@@ -1,6 +1,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod compact_snapshot;
+pub mod generic_board64_search;
+pub use compact_snapshot::{
+    CompactBuildUpEdge, CompactBuildUpNode, CompactBuildUpSnapshot, CompactBuildUpSnapshotError,
+    CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
+};
+
 use clearra_core_domain::{
     board::board_size::BoardSize,
     execution_cancellation::ExecutionControl,
@@ -829,6 +836,7 @@ mod finesse_target_grouping_tests {
 enum BuildReachabilityMode {
     Existing,
     GeometryOnly,
+    GroundedGeometryOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5015,9 +5023,14 @@ impl BuildOrderGraph {
                             realization,
                         )
                     };
-                if reachability_mode == BuildReachabilityMode::GeometryOnly {
+                if reachability_mode != BuildReachabilityMode::Existing {
+                    // The product finesse preparation may keep floating
+                    // poses until movement annotation. The exact snapshot
+                    // contract, like the C geometry-only export, only
+                    // exposes grounded lock poses.
+                    let grounded = reachability_mode == BuildReachabilityMode::GroundedGeometryOnly;
                     for realization in catalog.instantiations(row_id, deleted_rows) {
-                        if let Some(edge) = prepare_edge(projection, realization, false) {
+                        if let Some(edge) = prepare_edge(projection, realization, grounded) {
                             if !legal_admission_checked {
                                 if !workspace.legal_board_child_allows(
                                     catalog,

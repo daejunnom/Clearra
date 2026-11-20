@@ -1,4 +1,4 @@
-use clearra_app::{AppCommand, AppContext, AppRenderModel, AppRequest, ScenarioAppCommand};
+use clearra_app::{AppCommand, AppRenderModel, AppRequest, ScenarioAppCommand};
 
 use crate::{
     args::pc_scenario_args::PcScenarioArgs,
@@ -23,9 +23,9 @@ impl PcScenarioCommand {
                 return CliOutput::error(CliErrorCode::PcScenarioFixtureInvalid, error.message());
             }
         };
-        let response = AppContext::default().run(AppRequest::new(AppCommand::Scenario(
-            ScenarioAppCommand::new(assembly.query().clone()),
-        )));
+        let response = crate::cli_routing::product_app_context().run(AppRequest::new(
+            AppCommand::Scenario(ScenarioAppCommand::new(assembly.query().clone())),
+        ));
         if response.status() == clearra_app::AppStatus::ValidationFailed {
             let report = response.diagnostics().validation();
             if let Some(output) = expected_unsupported_output(args, &assembly, report, format) {

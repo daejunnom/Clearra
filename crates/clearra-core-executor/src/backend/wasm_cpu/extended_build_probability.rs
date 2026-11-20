@@ -7,7 +7,7 @@ use std::{
 #[path = "extended_pc_family_parallel.rs"]
 mod pc_parallel;
 
-#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 pub(super) use pc_parallel::cooperative::{DryRunOwner, ParallelTerminalRetention, SerialHandoff};
 
 use clearra_core_domain::{
@@ -146,7 +146,7 @@ struct ExtendedDistributedPartial {
 /// Output of the exact native canonical cursor, not a decoded or
 /// user-supplied solution family. The cursor validates every row and records
 /// its retained text capacity while ordering and hashing it.
-#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 struct SealedPcFamily {
     keys: Vec<String>,
     hash: String,
@@ -2966,11 +2966,11 @@ impl ExtendedBuildProbabilitySession {
         Ok(result.with_normalized_solution_keys(keys))
     }
 
-    /// Terminal join for the test-private native coordinator. Its existing
+    /// Terminal join for the sliced native coordinator. Its existing
     /// request ledger continues to charge the root, remaining workers, and
     /// this cursor slot; the slot already owns the received keys and hash.
     /// No public or distributed input can construct a sealed family.
-    #[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     fn complete_pc_family_with_sealed_keys(
         &mut self,
         family: SealedPcFamily,

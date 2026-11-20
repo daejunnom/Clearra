@@ -36,6 +36,7 @@ pub struct ConcreteCoverageScope {
     // Issued by the producer owner for the exact movement/rules, hold policy,
     // and admitted ordinal mapping of this request. Not a placement hash.
     execution_scope: u64,
+    initial_occupancy: u64,
 }
 
 impl ConcreteCoverageScope {
@@ -52,7 +53,17 @@ impl ConcreteCoverageScope {
             universe,
             uniform_weight_model,
             execution_scope,
+            initial_occupancy: 0,
         }
+    }
+
+    pub const fn with_initial_occupancy(mut self, occupancy: u64) -> Self {
+        self.initial_occupancy = occupancy;
+        self
+    }
+
+    pub(super) const fn initial_occupancy(self) -> u64 {
+        self.initial_occupancy
     }
 }
 
@@ -105,6 +116,10 @@ pub(super) fn validate_verified_query(
         || expected_scope.universe.get() == 0
         || expected_scope.uniform_weight_model.get() == 0
         || expected_scope.execution_scope == 0
+        || expected_scope
+            .initial_occupancy
+            .checked_shr(board.area())
+            .is_some_and(|extra| extra != 0)
     {
         return Err(Error::InvalidConcreteCoverageScope);
     }
@@ -115,8 +130,7 @@ pub(super) fn validate_verified_query(
     {
         return Err(Error::InvalidConcreteCoverageLimits);
     }
-    if board.area() > u64::BITS
-        || template.slots().is_empty()
+    if template.slots().is_empty()
         || template.slots().len() > STANDARD_BOARD64_TILING_MAX_PLACEMENTS
         || template.slots().len() != query.domains().len()
         || template.symmetry() != TemplateSymmetry::None
@@ -125,7 +139,7 @@ pub(super) fn validate_verified_query(
         return Err(Error::InvalidConcreteAssignmentTemplate);
     }
 
-    let mut seen_cells = 0;
+    let mut seen_cells = expected_scope.initial_occupancy;
     let mut slots = Vec::with_capacity(template.slots().len());
     for slot in template.slots() {
         if slot.cells().len() != 4
@@ -142,6 +156,9 @@ pub(super) fn validate_verified_query(
                 return Err(Error::InvalidConcreteAssignmentTemplate);
             }
             let bit = u64::from(board.width()) * u64::from(cell.y()) + u64::from(cell.x());
+            if bit >= u64::from(u64::BITS) {
+                return Err(Error::InvalidConcreteAssignmentTemplate);
+            }
             let cell_mask = 1_u64 << bit;
             if seen_cells & cell_mask != 0 {
                 return Err(Error::InvalidConcreteAssignmentTemplate);
@@ -207,9 +224,10 @@ pub(super) fn validate_verified_query(
 }
 
 impl ConcreteAssignmentTemplate {
-    fn identity(
+    pub(super) fn identity(
         &self,
         assignment: &SlotAssignment,
+        initial_occupancy: u64,
     ) -> Result<StandardBoard64TilingIdentity, Error> {
         if assignment.assigned_slots().len() != self.sorted_slots.len() {
             return Err(Error::InvalidConcreteAssignmentTemplate);
@@ -225,8 +243,11 @@ impl ConcreteAssignmentTemplate {
                 return Err(Error::InvalidConcreteAssignmentTemplate);
             }
         }
-        StandardBoard64TilingIdentity::from_placements(0, placements.into_iter().flatten())
-            .map_err(|_| Error::InvalidConcreteAssignmentTemplate)
+        StandardBoard64TilingIdentity::from_placements(
+            initial_occupancy,
+            placements.into_iter().flatten(),
+        )
+        .map_err(|_| Error::InvalidConcreteAssignmentTemplate)
     }
 }
 
@@ -242,7 +263,10 @@ pub(super) fn join_verified_rows(
         .try_reserve_exact(assignments.len())
         .map_err(|_| Error::ConcreteCoverageStorageUnavailable)?;
     for (index, assignment) in assignments.iter().enumerate() {
-        expected.push((template.identity(assignment)?, index));
+        expected.push((
+            template.identity(assignment, expected_scope.initial_occupancy)?,
+            index,
+        ));
     }
     expected.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     if expected.windows(2).any(|pair| pair[0].0 == pair[1].0) {

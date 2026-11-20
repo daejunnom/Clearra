@@ -170,6 +170,9 @@ fn report_count_all_witness(
         "requested_workers": requested_workers,
         "reported_workers_used": result.usize_field("workers_used"),
         "reported_active_workers": active_workers,
+        "native_cpu_geometry_dag_workers": result.usize_field("native_cpu_geometry_dag_workers"),
+        "native_cpu_candidate_workers": result.usize_field("native_cpu_candidate_workers"),
+        "native_cpu_buildup_workers": result.usize_field("native_cpu_buildup_workers"),
         "parallel_observed": requested_workers > 1 && parallel_observed,
         "packing_candidate_count": result.usize_field("packing_candidate_count"),
         "backend_searched_nodes": result.usize_field("searched_nodes"),
@@ -200,7 +203,10 @@ fn native_rust_fixed_queue_count_all_preserves_verified_identity_family() {
         .collect();
     assert_eq!(expected.len(), 4);
     let backends: [(&str, Execute); 2] = [
-        ("native-c", CoreExecutor::execute_with_control),
+        (
+            "native-c",
+            CoreExecutor::execute_native_c_reference_with_control,
+        ),
         ("rust-cpu", execute_rust),
     ];
     for requested_workers in [1, 2] {
@@ -213,6 +219,21 @@ fn native_rust_fixed_queue_count_all_preserves_verified_identity_family() {
             report_count_all_witness(backend, requested_workers, &result, &progress);
             assert_eq!(result.bool_field("count_complete"), Some(true), "{backend}");
             assert!(result.solution_found(), "{backend}");
+            if backend == "native-c" {
+                assert_eq!(
+                    result.usize_field("native_cpu_geometry_dag_workers"),
+                    Some(1)
+                );
+                assert!(result
+                    .usize_field("native_cpu_candidate_workers")
+                    .is_some_and(|workers| (1..=requested_workers).contains(&workers)));
+                // Four retained candidates do not meet the 64-candidate
+                // threshold for the second, independent final BuildUp pass.
+                assert_eq!(result.usize_field("native_cpu_buildup_workers"), Some(1));
+            } else {
+                assert_eq!(result.usize_field("native_cpu_candidate_workers"), None);
+                assert_eq!(result.usize_field("native_cpu_buildup_workers"), None);
+            }
             assert_eq!(
                 result.usize_field("normalized_unique_solution_count"),
                 Some(expected.len()),
@@ -249,7 +270,10 @@ fn native_rust_pc_tiling_controls_do_not_conflate_cancelled_incomplete_and_empty
     assert_eq!(expected.len(), 4);
 
     let backends: [(&str, Execute); 2] = [
-        ("native C", CoreExecutor::execute_with_control),
+        (
+            "native C",
+            CoreExecutor::execute_native_c_reference_with_control,
+        ),
         ("Rust CPU", execute_rust),
     ];
     for (label, execute) in backends {
@@ -275,6 +299,14 @@ fn native_rust_pc_tiling_controls_do_not_conflate_cancelled_incomplete_and_empty
             "{label}"
         );
         assert_eq!(page_identities(&result), expected, "{label}");
+        if label == "native C" {
+            assert_eq!(
+                result.usize_field("native_cpu_raw_geometry_workers"),
+                Some(1)
+            );
+            assert_eq!(result.usize_field("native_cpu_geometry_dag_workers"), None);
+            assert_eq!(result.usize_field("native_cpu_buildup_workers"), Some(0));
+        }
         drop(result);
 
         let result = execute(&capped, &ExecutionControl::default())

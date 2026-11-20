@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clearra_app::{AppCommand, AppContext, AppRenderModel, AppRequest, ScenarioAppCommand};
+use clearra_app::{AppCommand, AppRenderModel, AppRequest, ScenarioAppCommand};
 use clearra_validation::diagnostic::diagnostic_code::DiagnosticCode;
 
 use crate::{
@@ -127,9 +127,9 @@ fn retained_trace_key_for_example_query() -> String {
             .with_retained_trace_limit(Some(1)),
     )
     .expect("example query");
-    let response = AppContext::default().run(AppRequest::new(AppCommand::Scenario(
-        ScenarioAppCommand::new(assembly.query().clone()),
-    )));
+    let response = crate::cli_routing::product_app_context().run(AppRequest::new(
+        AppCommand::Scenario(ScenarioAppCommand::new(assembly.query().clone())),
+    ));
     let Some(AppRenderModel::Scenario(result)) = response.render_model() else {
         panic!("scenario app result");
     };

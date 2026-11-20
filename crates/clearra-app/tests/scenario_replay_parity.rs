@@ -121,7 +121,7 @@ fn compact_fixed_scenario_input_replay_matches_native_and_cooperative() {
     }
     #[cfg(feature = "native-c-core")]
     {
-        let native = AppContext::default().run(legacy_scenario(scenario_query()));
+        let native = AppContext::native_c_reference().run(legacy_scenario(scenario_query()));
         let native = core(&native);
         for field in fields {
             assert_eq!(direct.field(field), native.field(field), "{field}");
@@ -255,7 +255,7 @@ fn assert_legacy_tall_visible_scenario(rust: &AppContext) {
         assert_eq!(cooperative.field("covered_pattern_count"), Some("1"));
         #[cfg(feature = "native-c-core")]
         {
-            let native = AppContext::default().run(request());
+            let native = AppContext::native_c_reference().run(request());
             let native = core(&native);
             assert_eq!(
                 direct.normalized_solution_keys(),
@@ -409,7 +409,7 @@ fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
         }
         #[cfg(feature = "native-c-core")]
         {
-            let native = AppContext::default().run(request());
+            let native = AppContext::native_c_reference().run(request());
             let native = core(&native);
             assert_eq!(
                 direct.normalized_solution_keys(),
@@ -468,7 +468,7 @@ fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
     }
     #[cfg(feature = "native-c-core")]
     {
-        let native = AppContext::default().run(request);
+        let native = AppContext::native_c_reference().run(request);
         assert_eq!(native.status(), AppStatus::ExecutionFailed);
         assert_eq!(
             native.error().map(clearra_app::AppError::code),
@@ -485,7 +485,8 @@ fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
     );
     #[cfg(feature = "native-c-core")]
     assert_eq!(
-        core(&AppContext::default().run(legacy_scenario(prefix))).bool_field("solution_found"),
+        core(&AppContext::native_c_reference().run(legacy_scenario(prefix)))
+            .bool_field("solution_found"),
         Some(true)
     );
 

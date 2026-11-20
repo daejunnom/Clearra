@@ -104,7 +104,7 @@ fn warmup_entry(
 #[cfg(not(feature = "gpu-backend"))]
 pub fn print_gpu_inventory() -> Result<(), String> {
     Err(
-        "gpu_inventory_not_compiled; rebuild clearra-pc-artifact with --features gpu-backend"
+        "gpu_inventory_not_compiled; rebuild clearra-pc-artifact with --features native-c-reference,gpu-backend"
             .to_owned(),
     )
 }
@@ -114,7 +114,7 @@ pub fn print_gpu_warmup_probe(
     _device: clearra_pc_graph::request::GpuDeviceSelection,
 ) -> Result<(), String> {
     Err(
-        "gpu_warmup_probe_not_compiled; rebuild clearra-pc-artifact with --features gpu-backend"
+        "gpu_warmup_probe_not_compiled; rebuild clearra-pc-artifact with --features native-c-reference,gpu-backend"
             .to_owned(),
     )
 }
@@ -122,7 +122,7 @@ pub fn print_gpu_warmup_probe(
 #[cfg(not(feature = "gpu-backend"))]
 pub fn prewarm_gpu(_device: clearra_pc_graph::request::GpuDeviceSelection) -> Result<(), String> {
     Err(
-        "gpu_prewarm_not_compiled; rebuild clearra-pc-artifact with --features gpu-backend"
+        "gpu_prewarm_not_compiled; rebuild clearra-pc-artifact with --features native-c-reference,gpu-backend"
             .to_owned(),
     )
 }

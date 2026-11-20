@@ -9,12 +9,16 @@ use minimum_finalize::{
 };
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
-use clearra_core_executor::service::pc_continuation_fields::PreparedFixedNoHold2lOpeningContinuation;
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+use clearra_core_executor::backend::wasm_cpu_search_backend::{
+    NativePcCooperativeAdvance, NativePcCooperativeResult, NativePcCooperativeSession,
+};
+use clearra_core_executor::service::pc_continuation_fields::PreparedFixedOpeningContinuation;
 use clearra_core_executor::{
     CoreExecutionError, PcFailedQueueEvidence, WasmBuildProbabilityAdvance,
-    WasmBuildProbabilitySession, WasmCpuSearchAdvance, WasmCpuSearchError, WasmCpuSearchSession,
-    WasmPcFailedQueueAdvance, WasmPcFailedQueueSession, WasmSetupSearchAdvance,
-    WasmSetupSearchSession,
+    WasmBuildProbabilitySession, WasmCompactPcFailedQueueSession, WasmCpuSearchAdvance,
+    WasmCpuSearchError, WasmCpuSearchSession, WasmPcFailedQueueAdvance, WasmPcFailedQueueSession,
+    WasmSetupSearchAdvance, WasmSetupSearchSession,
 };
 use clearra_forward_search::{
     ForwardSearchAdvance, ForwardSearchError, ForwardSearchReport, ForwardSearchSession,
@@ -41,7 +45,7 @@ use crate::{
     commands::{
         build_probability_app_command::{BuildProbabilityAppCommand, BuildProbabilityResultMode},
         build_v2_app_command::BuildV2AppRequest,
-        continue_app_command::ContinueAppCommand,
+        continue_app_command::CooperativeContinueResult,
         core_execution_error_response,
         path_app_command::path_response,
         scenario_app_command::{FullHeightScenarioInputReplay, ScenarioAppCommand},
@@ -196,6 +200,8 @@ enum CooperativeExecutionState {
     Ready(Option<AppResponse>),
     Search(CooperativeSearchExecution),
     Postprocess(CooperativePostprocessExecution),
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    NativePcPostprocess(Box<CooperativeNativePcPostprocessExecution>),
     MinimumFinalize(Box<CooperativeMinimumFinalizeExecution>),
     PcReplayFinalize(Box<CooperativePcReplayFinalizeExecution>),
     FiniteRequiresCallerMemory,
@@ -250,6 +256,16 @@ struct CooperativePostprocessExecution {
     product_capability_contract: Option<ValidatedProductCapabilityContract>,
 }
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+struct CooperativeNativePcPostprocessExecution {
+    result: NativePcCooperativeResult,
+    response_kind: CooperativeSearchResponseKind,
+    command_kind: AppCommandKind,
+    output_policy: AppOutputPolicy,
+    validation_report: DiagnosticReport,
+    resource_budget: ResourceBudget,
+}
+
 impl CooperativePostprocessExecution {
     fn has_plain_pc_response(&self) -> bool {
         self.product_capability_contract.is_none()
@@ -263,7 +279,7 @@ impl CooperativePostprocessExecution {
                 } => projection.projection().is_standard(),
                 CooperativeSearchResponseKind::PcOpeningContinuation(_)
                 | CooperativeSearchResponseKind::ScenarioFullHeightInputReplay { .. }
-                | CooperativeSearchResponseKind::LocalContinueSr3(_) => true,
+                | CooperativeSearchResponseKind::LocalContinue(_) => true,
                 _ => false,
             }
     }
@@ -370,10 +386,96 @@ impl FiniteBuildCompileRemainder {
 #[allow(clippy::large_enum_variant)]
 enum CooperativeSearchSession {
     Pc(WasmCpuSearchSession),
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    NativePc(NativePcCooperativeSession),
     PcFailedQueue(WasmPcFailedQueueSession),
+    CompactPcFailedQueue(WasmCompactPcFailedQueueSession),
     Setup(WasmSetupSearchSession),
     BuildProbability(WasmBuildProbabilitySession),
     Forward(ForwardSearchSession),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_ordinary_cooperative_pc(
+    context: &AppContext,
+    problem: &clearra_problem::SearchProblem,
+    response_kind: &CooperativeSearchResponseKind,
+    output_policy: &AppOutputPolicy,
+    validation_report: &DiagnosticReport,
+    backend_requested: &String,
+    gpu_device_requested: Option<&String>,
+    has_typed_authority: bool,
+) -> Result<CooperativeSearchSession, WasmCpuSearchError> {
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    if problem.visible_height() > 6 && !has_typed_authority {
+        if let Some(session) = try_start_native_cooperative_pc(
+            context,
+            problem,
+            response_kind,
+            output_policy,
+            validation_report,
+            backend_requested,
+            gpu_device_requested,
+        )? {
+            return Ok(session);
+        }
+    }
+    #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
+    let _ = (
+        context,
+        response_kind,
+        output_policy,
+        validation_report,
+        backend_requested,
+        gpu_device_requested,
+        has_typed_authority,
+    );
+    WasmCpuSearchSession::new(problem).map(CooperativeSearchSession::Pc)
+}
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn try_start_native_cooperative_pc(
+    context: &AppContext,
+    problem: &clearra_problem::SearchProblem,
+    response_kind: &CooperativeSearchResponseKind,
+    output_policy: &AppOutputPolicy,
+    validation_report: &DiagnosticReport,
+    backend_requested: &String,
+    gpu_device_requested: Option<&String>,
+) -> Result<Option<CooperativeSearchSession>, WasmCpuSearchError> {
+    let response_heap = match response_kind {
+        CooperativeSearchResponseKind::Pc(projection)
+        | CooperativeSearchResponseKind::Scenario {
+            render_contract: None,
+            result_projection: projection,
+        } if projection.projection().is_standard() => Some(0),
+        CooperativeSearchResponseKind::ScenarioFullHeightInputReplay {
+            render_contract: None,
+            replay,
+        } => replay.checked_retained_capacity_bytes(),
+        _ => return Ok(None),
+    };
+    let external = (|| {
+        (core::mem::size_of::<CooperativeAppExecution>() as u128)
+            .checked_add(core::mem::size_of::<CooperativeSearchExecution>() as u128)?
+            .checked_add(core::mem::size_of::<CooperativeNativePcPostprocessExecution>() as u128)?
+            .checked_add(core::mem::size_of::<CooperativePostprocessExecution>() as u128)?
+            .checked_add(core::mem::size_of::<CooperativeAppAdvance>() as u128)?
+            .checked_add(core::mem::size_of::<[usize; 2]>() as u128)?
+            .checked_add(context.checked_retained_capacity_bytes()?)?
+            .checked_add(response_heap?)?
+            .checked_add(output_policy.checked_retained_capacity_bytes()?)?
+            .checked_add(validation_report.checked_retained_capacity_bytes()?)?
+            .checked_add(checked_string_retained_capacity_bytes(backend_requested)?)?
+            .checked_add(checked_optional_string_retained_capacity_bytes(
+                gpu_device_requested,
+            )?)
+    })()
+    .ok_or(WasmCpuSearchError::InvalidProblem {
+        reason: "extended_native_cooperative_app_owner_projection_unavailable",
+    })?;
+    NativePcCooperativeSession::try_new(problem, external)
+        .map(|session| session.map(CooperativeSearchSession::NativePc))
 }
 
 const FORWARD_SEARCH_COOPERATIVE_WORK_BUDGET: usize = 256;
@@ -667,6 +769,12 @@ fn validate_finite_build_advance_memory(
                 )
                 .map_err(WasmCpuSearchError::into_core_execution_error)
         }
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        CooperativeExecutionState::NativePcPostprocess(_) => {
+            Err(CoreExecutionError::RuntimeUnavailable {
+                component: "finite_cooperative_search_session_mismatch",
+            })
+        }
         CooperativeExecutionState::MinimumFinalize(_)
         | CooperativeExecutionState::PcReplayFinalize(_) => {
             Err(CoreExecutionError::RuntimeUnavailable {
@@ -731,7 +839,7 @@ impl CooperativePcScoreProduct {
 
 pub(crate) enum CooperativeSearchResponseKind {
     Pc(ValidatedPcResultProjection),
-    PcOpeningContinuation(Box<PreparedFixedNoHold2lOpeningContinuation>),
+    PcOpeningContinuation(Box<PreparedFixedOpeningContinuation>),
     PcFailedQueue {
         authority: PcFailedQueueCompiledAuthority,
     },
@@ -761,7 +869,7 @@ pub(crate) enum CooperativeSearchResponseKind {
         render_contract: Option<crate::commands::ScenarioAppRenderContract>,
         replay: FullHeightScenarioInputReplay,
     },
-    LocalContinueSr3(ContinueAppCommand),
+    LocalContinue(CooperativeContinueResult),
     ScenarioChance {
         authority: PcChanceCompiledAuthority,
         expected_problem: Arc<clearra_problem::SearchProblem>,
@@ -803,9 +911,7 @@ impl CooperativeSearchResponseKind {
     /// dedicated evidence merger or coordinator-owned exact replay.
     pub(crate) fn distributed_product_capability(&self) -> Option<ProductCapabilityContract> {
         match self {
-            Self::PcFailedQueue { authority } if authority.uses_extended_family() => {
-                Some(ProductCapabilityContract::PcFailedQueue)
-            }
+            Self::PcFailedQueue { .. } => Some(ProductCapabilityContract::PcFailedQueue),
             Self::PcTiling { .. } | Self::ScenarioTiling { .. } => {
                 Some(ProductCapabilityContract::PcTiling)
             }
@@ -1243,20 +1349,20 @@ impl AppContext {
             .services()
             .core_executor()
             .supports_cooperative_wasm_search();
-        // sr3 carries no execution-policy override. On a multiworker host
-        // ExtendedPc may enter a blocking native pool from advance(), hence
-        // the unchanged synchronous Continue path remains its owner.
-        let prepared_continue_sr3 = match &execution_parts.0 {
+        // The tokens carry no execution-policy override. On a multiworker
+        // host keep the native parallel driver instead of replacing it with
+        // a serial cooperative session.
+        let prepared_continue = match &execution_parts.0 {
             AppCommand::Continue(command)
                 if cooperative_backend
                     && execution_parts.5.is_none()
                     && PcExecutionPolicy::mvp_default().workers() == 1 =>
             {
-                command.compile_cooperative_sr3()
+                command.compile_cooperative()
             }
             _ => None,
         };
-        let core_search = prepared_continue_sr3.is_some()
+        let core_search = prepared_continue.is_some()
             || matches!(
                 &execution_parts.0,
                 AppCommand::Pc(_)
@@ -1463,11 +1569,14 @@ impl AppContext {
             }
             _ => None,
         };
-        let compiled = match (command, prepared_continue_sr3) {
-            (AppCommand::Continue(command), Some(problem)) => Ok((
-                Arc::new(problem),
-                CooperativeSearchResponseKind::LocalContinueSr3(command),
-            )),
+        let compiled = match (command, prepared_continue) {
+            (AppCommand::Continue(command), Some((problem, kind))) => {
+                let projection = command.into_cooperative_result(kind, &problem);
+                Ok((
+                    Arc::new(problem),
+                    CooperativeSearchResponseKind::LocalContinue(projection),
+                ))
+            }
             (command, _) => compile_search_command(command),
         };
         let (problem, response_kind) = match compiled {
@@ -1496,7 +1605,7 @@ impl AppContext {
                 if projection.projection().is_standard()
                     && product_capability_contract.is_none() =>
             {
-                match PreparedFixedNoHold2lOpeningContinuation::prepare(&problem) {
+                match PreparedFixedOpeningContinuation::prepare(&problem) {
                     Some(prepared) => {
                         CooperativeSearchResponseKind::PcOpeningContinuation(Box::new(prepared))
                     }
@@ -1580,9 +1689,14 @@ impl AppContext {
                 }
             };
         let session = match &response_kind {
-            CooperativeSearchResponseKind::PcFailedQueue { .. } => {
-                WasmPcFailedQueueSession::new(Arc::clone(&problem))
-                    .map(CooperativeSearchSession::PcFailedQueue)
+            CooperativeSearchResponseKind::PcFailedQueue { authority } => {
+                if authority.uses_extended_family() {
+                    WasmPcFailedQueueSession::new(Arc::clone(&problem))
+                        .map(CooperativeSearchSession::PcFailedQueue)
+                } else {
+                    WasmCompactPcFailedQueueSession::new(Arc::clone(&problem))
+                        .map(CooperativeSearchSession::CompactPcFailedQueue)
+                }
             }
             CooperativeSearchResponseKind::BuildCover {
                 request,
@@ -1641,7 +1755,16 @@ impl AppContext {
                 )
                 .map(CooperativeSearchSession::Pc)
             }
-            _ => WasmCpuSearchSession::new(&problem).map(CooperativeSearchSession::Pc),
+            _ => start_ordinary_cooperative_pc(
+                self,
+                &problem,
+                &response_kind,
+                &output_policy,
+                &validation_report,
+                &backend_requested,
+                gpu_device_requested.as_ref(),
+                product_capability_contract.is_some(),
+            ),
         };
         let session = match session {
             Ok(session) => session,
@@ -2815,7 +2938,7 @@ impl CooperativeAppExecution {
             &postprocess.response_kind,
             CooperativeSearchResponseKind::PcOpeningContinuation(_)
                 | CooperativeSearchResponseKind::ScenarioFullHeightInputReplay { .. }
-                | CooperativeSearchResponseKind::LocalContinueSr3(_)
+                | CooperativeSearchResponseKind::LocalContinue(_)
         ) && control.is_cancelled()
         {
             return CooperativeAppAdvance::Cancelled;
@@ -2960,6 +3083,21 @@ impl CooperativeAppExecution {
                         None => advance_search_session(&mut search.session, work_budget, control),
                     };
                     match backend_advance {
+                        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+                        Ok(CooperativeBackendAdvance::CompletedNativePc(result)) => {
+                            control.report_progress("postprocess", 0, Some(1));
+                            self.state = CooperativeExecutionState::NativePcPostprocess(Box::new(
+                                CooperativeNativePcPostprocessExecution {
+                                    result,
+                                    response_kind: search.response_kind,
+                                    command_kind: search.command_kind,
+                                    output_policy: search.output_policy,
+                                    validation_report: search.validation_report,
+                                    resource_budget: search.resource_budget,
+                                },
+                            ));
+                            CooperativeAppAdvance::Progress
+                        }
                         Ok(CooperativeBackendAdvance::CompletedPcFailedQueue(result, evidence)) => {
                             let response = match search.response_kind {
                                 CooperativeSearchResponseKind::PcFailedQueue { authority } => {
@@ -3147,6 +3285,33 @@ impl CooperativeAppExecution {
                             )
                         }
                     }
+                })
+            }
+            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+            CooperativeExecutionState::NativePcPostprocess(postprocess) => {
+                let CooperativeNativePcPostprocessExecution {
+                    result,
+                    response_kind,
+                    command_kind,
+                    output_policy,
+                    validation_report,
+                    resource_budget,
+                } = *postprocess;
+                result.finish(move |result| {
+                    self.advance_plain_pc_postprocess(
+                        CooperativePostprocessExecution {
+                            result: Some(result),
+                            pc_score_session: None,
+                            build_probability_session: None,
+                            response_kind,
+                            command_kind,
+                            output_policy,
+                            validation_report,
+                            resource_budget,
+                            product_capability_contract: None,
+                        },
+                        control,
+                    )
                 })
             }
             CooperativeExecutionState::Postprocess(mut postprocess) => {
@@ -3934,15 +4099,7 @@ pub(crate) fn compile_search_command(
             };
             let authority = match authority {
                 Ok(authority) if authority.uses_extended_family() => authority,
-                Ok(_) => {
-                    return Err(AppResponse::failed(
-                        AppStatus::ExecutionFailed,
-                        AppError::new(
-                            AppErrorCode::ExecutionFailed,
-                            "pc_failed_queue_compact_cooperative_not_connected",
-                        ),
-                    ))
-                }
+                Ok(authority) => authority.into_compact_rust_source(),
                 Err(error) => {
                     return Err(AppResponse::failed(
                         AppStatus::ExecutionFailed,
@@ -4394,9 +4551,7 @@ pub(crate) fn response_from_search_with_build_score_derivation(
                 None => AppResponse::success(AppRenderModel::Scenario(result)),
             }
         }
-        CooperativeSearchResponseKind::LocalContinueSr3(command) => {
-            command.cooperative_sr3_response(result)
-        }
+        CooperativeSearchResponseKind::LocalContinue(projection) => projection.response(result),
         CooperativeSearchResponseKind::ScenarioChance {
             authority,
             expected_problem,
@@ -4524,8 +4679,20 @@ enum CooperativeBackendAdvance {
         PcFailedQueueEvidence,
     ),
     CompletedCore(clearra_core_executor::CoreExecutionResult),
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    CompletedNativePc(NativePcCooperativeResult),
     CompletedForward(ForwardSearchReport),
     Cancelled,
+}
+
+fn project_pc_failed_queue_advance(advance: WasmPcFailedQueueAdvance) -> CooperativeBackendAdvance {
+    match advance {
+        WasmPcFailedQueueAdvance::Pending => CooperativeBackendAdvance::Pending,
+        WasmPcFailedQueueAdvance::Completed(result, evidence) => {
+            CooperativeBackendAdvance::CompletedPcFailedQueue(result, evidence)
+        }
+        WasmPcFailedQueueAdvance::Cancelled => CooperativeBackendAdvance::Cancelled,
+    }
 }
 
 fn advance_search_session(
@@ -4534,15 +4701,12 @@ fn advance_search_session(
     control: &ExecutionControl,
 ) -> Result<CooperativeBackendAdvance, WasmCpuSearchError> {
     match session {
-        CooperativeSearchSession::PcFailedQueue(session) => {
-            match session.advance(work_budget, control)? {
-                WasmPcFailedQueueAdvance::Pending => Ok(CooperativeBackendAdvance::Pending),
-                WasmPcFailedQueueAdvance::Completed(result, evidence) => Ok(
-                    CooperativeBackendAdvance::CompletedPcFailedQueue(result, evidence),
-                ),
-                WasmPcFailedQueueAdvance::Cancelled => Ok(CooperativeBackendAdvance::Cancelled),
-            }
-        }
+        CooperativeSearchSession::PcFailedQueue(session) => Ok(project_pc_failed_queue_advance(
+            session.advance(work_budget, control)?,
+        )),
+        CooperativeSearchSession::CompactPcFailedQueue(session) => Ok(
+            project_pc_failed_queue_advance(session.advance(work_budget, control)?),
+        ),
         CooperativeSearchSession::Pc(session) => match session.advance(work_budget, control)? {
             WasmCpuSearchAdvance::Pending => Ok(CooperativeBackendAdvance::Pending),
             WasmCpuSearchAdvance::Completed(result) => {
@@ -4550,6 +4714,16 @@ fn advance_search_session(
             }
             WasmCpuSearchAdvance::Cancelled => Ok(CooperativeBackendAdvance::Cancelled),
         },
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        CooperativeSearchSession::NativePc(session) => {
+            match session.advance(work_budget, control)? {
+                NativePcCooperativeAdvance::Pending => Ok(CooperativeBackendAdvance::Pending),
+                NativePcCooperativeAdvance::Completed(result) => {
+                    Ok(CooperativeBackendAdvance::CompletedNativePc(result))
+                }
+                NativePcCooperativeAdvance::Cancelled => Ok(CooperativeBackendAdvance::Cancelled),
+            }
+        }
         CooperativeSearchSession::Setup(session) => match session.advance(work_budget, control)? {
             WasmSetupSearchAdvance::Pending => Ok(CooperativeBackendAdvance::Pending),
             WasmSetupSearchAdvance::Completed(result) => {
@@ -4644,7 +4818,7 @@ fn cooperative_core_search_error_response(
 ) -> AppResponse {
     let local_continue = matches!(
         &response_kind,
-        CooperativeSearchResponseKind::LocalContinueSr3(_)
+        CooperativeSearchResponseKind::LocalContinue(_)
     );
     drop(response_kind);
     if local_continue {
@@ -6732,7 +6906,7 @@ mod raw_pc_tiling_cooperative_tests {
         assert_budget_failure(rust.run(request.clone()));
         assert_budget_failure(complete_cooperative_tiling(&rust, request.clone()));
         #[cfg(feature = "native-c-core")]
-        assert_budget_failure(AppContext::default().run(request));
+        assert_budget_failure(AppContext::native_c_reference().run(request));
     }
 
     #[cfg(feature = "native-c-core")]
@@ -6740,7 +6914,7 @@ mod raw_pc_tiling_cooperative_tests {
     fn canonical_raw_pc_tiling_direct_and_cooperative_semantics_match() {
         let _resource_guard =
             crate::execution_resource_test_support::execution_resource_test_guard();
-        let direct = AppContext::default().run(canonical_raw_tiling_request());
+        let direct = AppContext::native_c_reference().run(canonical_raw_tiling_request());
         assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
         let direct_result = core_result(&direct);
         assert_eq!(

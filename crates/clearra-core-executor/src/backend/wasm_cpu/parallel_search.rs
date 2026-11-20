@@ -8,9 +8,13 @@ use clearra_core_domain::{
     solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
 };
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+use clearra_coverage::row::{coverage_row::CoverageRow, coverage_row_kind::CoverageRowKind};
 use clearra_problem::SearchProblem;
 
-use crate::{cpu_worker_pool, solution_probability::SolutionCoverage, CorePathStep};
+use crate::{
+    cpu_worker_pool, performance::WorkerSearchProfile, solution_probability::SolutionCoverage,
+    CorePathStep,
+};
 
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::result::SolutionCoverageCapture;
@@ -45,6 +49,7 @@ pub(super) struct ParallelSearchOutcome {
     pub covered_patterns: PatternBitSet,
     pub buildable_identities: Vec<StandardBoard64TilingIdentity>,
     pub solution_coverage: Vec<SolutionCoverage>,
+    pub failed_queue_rows: Vec<CoverageRow>,
     pub packing_candidate_count: usize,
     pub packing_candidate_digest: u64,
     pub coverage_row_count: usize,
@@ -300,17 +305,20 @@ fn execute_plan(
         let worker_coverage = Arc::clone(&shared_coverage);
         let worker_request = shared_request.clone();
         let worker_sender = sender.clone();
+        let profile = WorkerSearchProfile::capture();
         cpu_worker_pool::submit_cpu_job(move || {
             let result = catch_unwind(AssertUnwindSafe(|| {
-                run_branch_worker(
-                    &worker_problem,
-                    &worker_catalog,
-                    &worker_targets,
-                    &worker_control,
-                    &worker_queue,
-                    &worker_coverage,
-                    worker_request,
-                )
+                profile.measure(|| {
+                    run_branch_worker(
+                        &worker_problem,
+                        &worker_catalog,
+                        &worker_targets,
+                        &worker_control,
+                        &worker_queue,
+                        &worker_coverage,
+                        worker_request,
+                    )
+                })
             }))
             .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_parallel_worker_panicked"))
             .and_then(|result| result);
@@ -466,6 +474,8 @@ fn merge_results(
         )?,
         None => (Vec::new(), None),
     };
+    let failed_queue_rows =
+        collect_failed_queue_rows(problem, &mut branch_outcomes, merged.coverage_row_count)?;
     let searches = branch_outcomes
         .into_iter()
         .map(|branch| branch.geometry)
@@ -485,6 +495,7 @@ fn merge_results(
             .into_iter()
             .map(|(identity, coverage)| SolutionCoverage::new(identity, coverage))
             .collect(),
+        failed_queue_rows,
         packing_candidate_count,
         packing_candidate_digest,
         coverage_row_count: merged.coverage_row_count,
@@ -520,6 +531,61 @@ fn merge_results(
         minimum_worker_candidates,
         maximum_worker_candidates,
     })
+}
+
+fn collect_failed_queue_rows(
+    problem: &SearchProblem,
+    branches: &mut [BranchSearchOutcome],
+    expected_rows: usize,
+) -> Result<Vec<CoverageRow>, WasmExactSearchError> {
+    if problem
+        .pc_chance_evidence_policy()
+        .pc_failed_queue_example_limit()
+        .is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let source = problem.piece_source();
+    let universe = source
+        .materialized_universe()
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_piece_source_not_materialized",
+        ))?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(expected_rows).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_parallel_failed_queue_row_storage_unavailable")
+    })?;
+    let mut prefix = 0usize;
+    for branch in branches {
+        for (ordinal, coverage) in std::mem::take(&mut branch.failed_queue_rows) {
+            let id = (ordinal < branch.candidate_count)
+                .then(|| prefix.checked_add(ordinal)?.checked_add(1))
+                .flatten()
+                .and_then(|id| u64::try_from(id).ok())
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_parallel_failed_queue_candidate_ordinal_invalid",
+                ))?;
+            rows.push(CoverageRow::new_with_piece_source(
+                id,
+                CoverageRowKind::Build,
+                source.id().get(),
+                universe.pattern_universe_id(),
+                universe.pattern_weight_model_id(),
+                coverage,
+            ));
+        }
+        prefix = prefix.checked_add(branch.candidate_count).ok_or(
+            WasmExactSearchError::InvalidProblem(
+                "wasm_parallel_failed_queue_candidate_count_overflow",
+            ),
+        )?;
+    }
+    if rows.len() != expected_rows {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_parallel_failed_queue_coverage_cardinality_mismatch",
+        ));
+    }
+    Ok(rows)
 }
 
 fn candidate_identity_summary(

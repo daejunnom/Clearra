@@ -498,7 +498,7 @@ mod tests {
             ])))
             .with_hold_policy(clearra_pc_graph::request::PcHoldPolicy::Disabled);
 
-        let response = AppContext::default().run(AppRequest::new(AppCommand::Percent(
+        let response = AppContext::native_c_reference().run(AppRequest::new(AppCommand::Percent(
             PercentAppCommand::failed_queue_opening(query),
         )));
 

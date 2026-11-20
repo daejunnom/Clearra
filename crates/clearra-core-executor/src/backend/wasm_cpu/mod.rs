@@ -6,6 +6,11 @@ mod build_clear_rows;
 mod build_probability;
 mod build_probability_distributed;
 mod buildup;
+pub use buildup::generic_board64_search;
+pub use buildup::{
+    CompactBuildUpEdge, CompactBuildUpNode, CompactBuildUpSnapshot, CompactBuildUpSnapshotError,
+    CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
+};
 mod catalog;
 mod compact_exact_u64_map;
 #[cfg(not(target_family = "wasm"))]
@@ -31,6 +36,7 @@ mod extended_pc_search;
 mod extended_pc_tiling;
 mod extended_reachability;
 mod finesse_score;
+pub mod generic_geometry;
 mod geometry;
 mod geometry_apdp;
 mod geometry_component;
@@ -119,8 +125,8 @@ pub use extended_build_probability::pc_distributed::{
 };
 pub use extended_pc_failed_queue::{WasmPcFailedQueueAdvance, WasmPcFailedQueueSession};
 pub(crate) use extended_pc_search::ExtendedPcSearchSession;
-#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
-pub(crate) use extended_pc_search::NativePcCooperativeAdvance;
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+pub use extended_pc_search::{NativePcCooperativeAdvance, NativePcCooperativeResult};
 pub use extended_pc_tiling::distributed::{
     WasmFullHeightTilingProducer, WasmFullHeightTilingResultMerger, WasmFullHeightTilingWorker,
 };

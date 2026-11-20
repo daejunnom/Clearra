@@ -165,6 +165,9 @@ fn execute_cpu(
         BackendTrustReport::cpu_exact(),
     )
     .with_workers_used(workers_used)
+    .with_native_cpu_workers(
+        super::search_backend_executor::NativeCpuPackingWorkers::RawGeometrySerial,
+    )
     .with_geometry_catalog(catalog)
     .with_pruning_ledger(streamed.pruning_ledger))
 }

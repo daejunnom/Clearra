@@ -24,6 +24,10 @@ local-search-ab = []
 # It is not consulted by product search.
 qualification-reference = []
 
+[[example]]
+name = "native_rust_cpu_abba"
+required-features = ["native-c-core"]
+
 [dependencies]
 clearra-accelerator-activation = { path = "../clearra-accelerator-activation" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }

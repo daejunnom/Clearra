@@ -1488,6 +1488,7 @@ impl WasmDistributedCoordinator {
         let problem = prepared.problem();
         let full_height_pc = WasmFullHeightPcProducer::supports(problem);
         let full_height_tiling = WasmFullHeightTilingProducer::supports(problem);
+        let compact_pc_failed_queue = is_compact_pc_failed_queue(problem);
         if problem
             .queue_observation_policy()
             .requires_observation_policy()
@@ -1643,6 +1644,18 @@ impl WasmDistributedCoordinator {
             .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_START", error))?;
             (
                 DistributedCandidateProducer::FullHeightPc(producer),
+                WasmDistributedMode::CpuMulti,
+                worker_count,
+            )
+        } else if compact_pc_failed_queue {
+            let external = prepared
+                .compact_pc_failed_queue_source_retained_bytes()
+                .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
+            let producer =
+                WasmCpuCandidateProducer::new_failed_queue(prepared.problem_arc(), external)
+                    .map_err(|error| distributed_search_error("E_WASM_DISTRIBUTED_START", error))?;
+            (
+                DistributedCandidateProducer::Cpu(producer),
                 WasmDistributedMode::CpuMulti,
                 worker_count,
             )
@@ -2784,6 +2797,15 @@ impl WasmDistributedCoordinator {
             .pc_failed_queue_example_limit()
             .is_some();
         let response = match merger {
+            DistributedResultMerger::Pc(mut merger) if pc_failed_queue => {
+                let (result, evidence) = merger
+                    .finish_failed_queue(&summary, workers_used, control)
+                    .map_err(|error| {
+                        distributed_search_error("E_WASM_DISTRIBUTED_FINISH", error)
+                    })?;
+                drop(merger);
+                prepared.complete_failed_queue(result, evidence, control)
+            }
             DistributedResultMerger::FullHeightPc(mut merger) if pc_failed_queue => {
                 let result = merger
                     .finish(&summary, workers_used, control)
@@ -3676,7 +3698,9 @@ impl WasmDistributedVerifierRuntime {
                         distributed_search_error("E_WASM_DISTRIBUTED_VERIFIER_START", error)
                     })?,
                 )
-            } else if WasmPcRootProducer::supports(prepared.problem()) {
+            } else if WasmPcRootProducer::supports(prepared.problem())
+                && !is_compact_pc_failed_queue(prepared.problem())
+            {
                 DistributedVerifier::PcRoots(
                     WasmTilingRootWorker::new_for_pc_unique(prepared.problem()).map_err(
                         |reason| distributed_error("E_WASM_DISTRIBUTED_VERIFIER_START", reason),
@@ -4540,16 +4564,11 @@ fn request_needs_distributed_execution(request: &AppRequest) -> bool {
                 && request.product_capability_contract()
                     == Some(ProductCapabilityContract::PcFailedQueue) =>
         {
-            // Canonical failed-queue lowers to Percent, not Pc/Scenario. Only
-            // its connected full-height family can transfer complete coverage
-            // to the original typed owner; compact/legacy Percent stay serial.
+            // Canonical failed-queue lowers to Percent. A legacy Percent
+            // above lacks the product binding and must still stay serial.
             match (command.query(), command.opening_query()) {
-                (Some(query), None) if query.initial_board().visible_height() > 6 => {
-                    query.execution_policy().workers()
-                }
-                (None, Some(query)) if query.target().lines() > 6 => {
-                    query.execution_policy().workers()
-                }
+                (Some(query), None) => query.execution_policy().workers(),
+                (None, Some(query)) => query.execution_policy().workers(),
                 _ => return false,
             }
         }
@@ -4570,6 +4589,14 @@ fn request_needs_distributed_execution(request: &AppRequest) -> bool {
         _ => return false,
     };
     workers >= 2
+}
+
+fn is_compact_pc_failed_queue(problem: &clearra_problem::SearchProblem) -> bool {
+    (1..=6).contains(&problem.visible_height())
+        && problem
+            .pc_chance_evidence_policy()
+            .pc_failed_queue_example_limit()
+            .is_some()
 }
 
 fn score_product_worker_count(request: &AppRequest) -> Option<usize> {
@@ -6145,7 +6172,7 @@ mod build_probability_partial_ingress_tests {
             clearra_app::PercentAppCommand::failed_queue(percent.query().unwrap().clone()),
         ));
         assert!(!request_needs_distributed_execution(&legacy));
-        for (lines, eligible) in [(4, false), (8, true)] {
+        for lines in [4, 8] {
             let opening = format!(
                 "clearra pc failed-queue --lines {lines} --queue {} \
                 --rule srs-plus --no-tablebase --workers {workers} --failed-count 1",
@@ -6156,7 +6183,7 @@ mod build_probability_partial_ingress_tests {
                 .unwrap()
                 .into_parts()
                 .0;
-            assert_eq!(request_needs_distributed_execution(&request), eligible);
+            assert!(request_needs_distributed_execution(&request));
         }
         let single = runtime
             .prepare_command_text(&command.replace(&format!("--workers {workers}"), "--workers 1"))

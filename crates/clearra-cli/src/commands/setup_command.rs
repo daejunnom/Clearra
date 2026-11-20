@@ -1,4 +1,4 @@
-use clearra_app::{AppCommand, AppContext, AppRequest, SetupAppCommand};
+use clearra_app::{AppCommand, AppRequest, SetupAppCommand};
 
 use crate::{
     args::setup_args::SetupArgs,
@@ -21,7 +21,7 @@ impl SetupCommand {
         let request = AppRequest::new(AppCommand::Setup(SetupAppCommand::new(query)))
             .with_resource_budget(setup_resource_budget(args));
         AppResponseRenderer::render(
-            AppContext::default().run(request),
+            crate::cli_routing::product_app_context().run(request),
             format,
             CliErrorCode::SetupQueryInvalid,
         )

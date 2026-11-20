@@ -13,6 +13,9 @@ use std::{
 
 use crate::{
     cpu_worker_pool,
+    performance::{
+        profile_sample_scale, ExecutorSearchStage, SearchStageSpan, WorkerSearchProfile,
+    },
     resource::{ExecutionMemoryOwner, SharedExecutionMemoryBudget},
 };
 
@@ -32,26 +35,21 @@ struct WorkerResult {
     engine: ExtendedBuildProbabilitySession,
     digests: Vec<DigestSegment>,
     private_peak_bytes: u128,
-    #[cfg(test)]
     bounded_rows: Option<BoundedWorkerRows>,
-    #[cfg(test)]
     terminal_base: Option<u128>,
 }
 
-#[cfg(test)]
 const ROW_BLOCK_WIDTH: usize = 16;
 
 // Fixed-width blocks avoid whole-Vec copies during candidate reduction. The
 // one-key HashSet is only the immediate producer hand-off; its iterator never
 // becomes a terminal work cursor.
-#[cfg(test)]
 struct WorkerRowBlock {
     next: Option<Box<Self>>,
     keys: [Option<super::ExtendedTilingKey>; ROW_BLOCK_WIDTH],
     used: usize,
 }
 
-#[cfg(test)]
 #[derive(Default)]
 struct BoundedWorkerRows {
     head: Option<Box<WorkerRowBlock>>,
@@ -59,7 +57,6 @@ struct BoundedWorkerRows {
     retained: u128,
 }
 
-#[cfg(test)]
 impl BoundedWorkerRows {
     fn growth(&self) -> u128 {
         if self
@@ -126,7 +123,6 @@ impl BoundedWorkerRows {
     }
 }
 
-#[cfg(test)]
 impl Drop for BoundedWorkerRows {
     fn drop(&mut self) {
         // Cancellation may leave arbitrarily many blocks: never recurse.
@@ -137,7 +133,7 @@ impl Drop for BoundedWorkerRows {
 }
 
 impl WorkerResult {
-    fn checked_auxiliary_retained_bytes(&self) -> Option<u128> {
+    fn checked_auxiliary_retained_bytes<const RETAIN_ROWS: bool>(&self) -> Option<u128> {
         let mut bytes =
             (self.digests.capacity() as u128).checked_mul(size_of::<DigestSegment>() as u128)?;
         for segment in &self.digests {
@@ -145,20 +141,18 @@ impl WorkerResult {
                 (segment.values.capacity() as u128).checked_mul(size_of::<u64>() as u128)?,
             )?;
         }
-        #[cfg(test)]
-        if let Some(rows) = self.bounded_rows.as_ref() {
-            bytes = bytes.checked_add(rows.retained)?;
+        if RETAIN_ROWS {
+            bytes = bytes.checked_add(self.bounded_rows.as_ref()?.retained)?;
         }
         Some(bytes)
     }
 
-    fn checked_retained_bytes(&self) -> Option<u128> {
+    fn checked_retained_bytes<const RETAIN_ROWS: bool>(&self) -> Option<u128> {
         self.engine
             .checked_retained_bytes()?
-            .checked_add(self.checked_auxiliary_retained_bytes()?)
+            .checked_add(self.checked_auxiliary_retained_bytes::<RETAIN_ROWS>()?)
     }
 
-    #[cfg(test)]
     fn take_private_candidate_row(
         &mut self,
         probe: super::ExtendedTilingKey,
@@ -191,7 +185,7 @@ impl WorkerResult {
             .ok_or_else(contract_error)
     }
 
-    fn reserve_branch(
+    fn reserve_branch<const RETAIN_ROWS: bool>(
         &mut self,
         branch: &ExtendedParallelGeometryBranch,
     ) -> Result<usize, WasmExactSearchError> {
@@ -205,7 +199,7 @@ impl WorkerResult {
             })
             .ok_or_else(projection_error)?;
         let private = self
-            .checked_retained_bytes()
+            .checked_retained_bytes::<RETAIN_ROWS>()
             .and_then(|bytes| bytes.checked_add(branch.private_retained_bytes() as u128))
             .and_then(|bytes| bytes.checked_add(growth))
             .ok_or_else(projection_error)?;
@@ -227,17 +221,23 @@ impl WorkerResult {
     /// Consume one existing candidate unit with the same row identity,
     /// exact BuildUp/supply reducer and private memory accounting in both
     /// the full native loop and a paused cooperative wave.
-    fn reduce_next_candidate(
+    fn reduce_next_candidate<const RETAIN_ROWS: bool>(
         &mut self,
         branch: &mut ExtendedParallelGeometryBranch,
         digest_index: usize,
         progress: &AtomicUsize,
         control: &ExecutionControl,
     ) -> Result<bool, WasmExactSearchError> {
-        let owned = self.checked_retained_bytes().ok_or_else(projection_error)?;
-        let Some(candidate) =
-            branch.next_candidate_with_owner(&self.engine.catalog, self.memory_owner()?, owned)?
-        else {
+        let owned = self
+            .checked_retained_bytes::<RETAIN_ROWS>()
+            .ok_or_else(projection_error)?;
+        let scale = profile_sample_scale(self.engine.processed_candidate_count.saturating_add(1));
+        let memory_owner = self.memory_owner()?;
+        let geometry =
+            SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmGeometryAdvance, scale);
+        let candidate = branch.next_candidate_with_owner(&self.engine.catalog, memory_owner, owned);
+        geometry.finish(1);
+        let Some(candidate) = candidate? else {
             return Ok(false);
         };
         let ordinal = branch
@@ -259,62 +259,70 @@ impl WorkerResult {
             .map_err(WasmExactSearchError::resource_admission)?;
         let tiling = super::ExtendedTilingKey::from_candidate(&self.engine.catalog, &candidate);
         let digest = tiling.digest();
-        #[cfg(not(test))]
-        drop(tiling);
-        #[cfg(test)]
-        let row_probe = self.bounded_rows.is_some().then_some(tiling);
+        let row_probe = RETAIN_ROWS.then_some(tiling);
         let before_nodes = self.engine.searched_build_nodes;
         let auxiliary = self
-            .checked_auxiliary_retained_bytes()
+            .checked_auxiliary_retained_bytes::<RETAIN_ROWS>()
             .ok_or_else(projection_error)?
             .checked_add(branch.private_retained_bytes() as u128)
             .ok_or_else(projection_error)?;
-        #[cfg(test)]
         let auxiliary = auxiliary
             .checked_add(row_probe.as_ref().map_or(0, |key| key.retained_bytes()) as u128)
             .ok_or_else(projection_error)?;
-        #[cfg(test)]
         if row_probe.is_some() && !self.engine.buildable_tilings.is_empty() {
             return Err(contract_error());
         }
         self.engine.coexisting_retained_bytes = auxiliary;
         self.engine.ensure_memory_bound(0)?;
-        self.engine
-            .process_candidate(candidate, Some(ordinal), control)?;
+        let verify = SearchStageSpan::begin_scaled(
+            ExecutorSearchStage::ExtendedPcCandidateVerifyAndReduce,
+            scale,
+        );
+        let verified = self
+            .engine
+            .process_candidate(candidate, Some(ordinal), control);
+        let added = self
+            .engine
+            .searched_build_nodes
+            .saturating_sub(before_nodes);
+        verify.finish(added as u64);
+        verified?;
         if let Some(reason) = self.engine.truncated_reason {
             return Err(self.engine.pc_resource_stop_error(reason));
         }
-        #[cfg(test)]
         if let Some(key) = row_probe {
             self.take_private_candidate_row(key)?;
             self.engine.coexisting_retained_bytes = self
-                .checked_auxiliary_retained_bytes()
+                .checked_auxiliary_retained_bytes::<RETAIN_ROWS>()
                 .and_then(|bytes| bytes.checked_add(branch.private_retained_bytes() as u128))
                 .ok_or_else(projection_error)?;
         }
         self.digests[digest_index].values.push(digest);
         self.engine.ensure_memory_bound(0)?;
         let retained = self
-            .checked_retained_bytes()
+            .checked_retained_bytes::<RETAIN_ROWS>()
             .ok_or_else(projection_error)?
             .checked_add(branch.private_retained_bytes() as u128)
             .ok_or_else(projection_error)?;
         self.private_peak_bytes = self.private_peak_bytes.max(retained);
-        let added = self
-            .engine
-            .searched_build_nodes
-            .saturating_sub(before_nodes);
-        let nodes = progress
-            .fetch_add(added, Ordering::Relaxed)
-            .saturating_add(added);
-        control.report_progress("buildup", nodes as u64, None);
+        if !RETAIN_ROWS {
+            let nodes = progress
+                .fetch_add(added, Ordering::Relaxed)
+                .saturating_add(added);
+            control.report_progress("buildup", nodes as u64, None);
+        }
         Ok(true)
     }
 
-    fn settle_without_branch(&mut self) -> Result<(), WasmExactSearchError> {
+    fn settle_without_branch<const RETAIN_ROWS: bool>(
+        &mut self,
+    ) -> Result<(), WasmExactSearchError> {
         self.engine.coexisting_retained_bytes = 0;
         self.memory_owner()?
-            .ensure(self.checked_retained_bytes().ok_or_else(projection_error)?)
+            .ensure(
+                self.checked_retained_bytes::<RETAIN_ROWS>()
+                    .ok_or_else(projection_error)?,
+            )
             .map_err(WasmExactSearchError::resource_admission)
     }
 }
@@ -481,16 +489,19 @@ impl ExtendedBuildProbabilitySession {
             let queued_memory = queued_memory.clone();
             let worker_control = control.clone();
             let sender = sender.clone();
+            let profile = WorkerSearchProfile::capture();
             let queued = cpu_worker_pool::submit_cpu_job(move || {
-                let result = caught_worker(
-                    engine,
-                    first,
-                    &queue,
-                    &queued_memory,
-                    &abort_worker,
-                    &progress,
-                    &worker_control,
-                );
+                let result = profile.measure(|| {
+                    caught_worker(
+                        engine,
+                        first,
+                        &queue,
+                        &queued_memory,
+                        &abort_worker,
+                        &progress,
+                        &worker_control,
+                    )
+                });
                 if result.is_err() {
                     abort_worker.store(true, Ordering::Release);
                     worker_control.cancellation.handle().cancel();
@@ -671,7 +682,7 @@ impl ExtendedBuildProbabilitySession {
                 .ok_or_else(contract_error)?;
             self.coexisting_retained_bytes = fixed
                 .checked_sub(root_retained)
-                .and_then(|bytes| bytes.checked_add(worker.checked_retained_bytes()?))
+                .and_then(|bytes| bytes.checked_add(worker.checked_retained_bytes::<false>()?))
                 .and_then(|bytes| bytes.checked_add(checked_worker_bytes(&successful).ok()?))
                 .ok_or_else(projection_error)?;
             self.merge_pc_verifier(worker.engine)?;
@@ -862,9 +873,7 @@ fn run_worker(
         engine,
         digests: Vec::new(),
         private_peak_bytes: 0,
-        #[cfg(test)]
         bounded_rows: None,
-        #[cfg(test)]
         terminal_base: None,
     };
     let mut assigned = first;
@@ -879,13 +888,13 @@ fn run_worker(
         let Some(mut branch) = next else {
             break;
         };
-        let index = result.reserve_branch(&branch)?;
+        let index = result.reserve_branch::<false>(&branch)?;
         let before_count = result.engine.processed_candidate_count;
         loop {
             if control.is_cancelled() || abort.load(Ordering::Acquire) {
                 return Err(WasmExactSearchError::Cancelled);
             }
-            if !result.reduce_next_candidate(&mut branch, index, progress, control)? {
+            if !result.reduce_next_candidate::<false>(&mut branch, index, progress, control)? {
                 break;
             }
         }
@@ -895,9 +904,9 @@ fn run_worker(
             return Err(contract_error());
         }
         drop(branch);
-        result.settle_without_branch()?;
+        result.settle_without_branch::<false>()?;
     }
-    result.settle_without_branch()?;
+    result.settle_without_branch::<false>()?;
     Ok(result)
 }
 
@@ -922,7 +931,7 @@ fn checked_worker_bytes(workers: &[WorkerResult]) -> Result<u128, WasmExactSearc
     workers
         .iter()
         .try_fold(0_u128, |bytes, worker| {
-            bytes.checked_add(worker.checked_retained_bytes()?)
+            bytes.checked_add(worker.checked_retained_bytes::<false>()?)
         })
         .ok_or_else(projection_error)
 }
@@ -943,19 +952,20 @@ fn pool_error() -> WasmExactSearchError {
     WasmExactSearchError::InvalidProblem("extended_pc_family_worker_pool_unavailable")
 }
 
-// A private foundation: only a conformance owner drives these waves for now.
-// The full native path remains the only product entry.
-#[cfg(test)]
+// Bounded native work waves, independent of the synchronous throughput path.
 pub(in crate::backend::wasm_cpu) mod cooperative {
     use super::*;
     use crate::backend::wasm_cpu::extended_geometry::{
         ExtendedGeometrySearch, ExtendedParallelGeometryPlan, ExtendedParallelPreparation,
         ExtendedPreparationStatus,
     };
-    use crate::backend::wasm_cpu::extended_pc_search::{
-        checked_pc_family_problem_nested_retained_bytes, validate_pc_family_problem,
+    use crate::backend::wasm_cpu::extended_pc_search::validate_pc_family_problem;
+    use crate::resource::ExecutionAdmission;
+    #[cfg(test)]
+    use crate::{
+        backend::wasm_cpu::extended_pc_search::checked_pc_family_problem_nested_retained_bytes,
+        resource::admit_budget_bound_search_execution,
     };
-    use crate::resource::{admit_budget_bound_search_execution, ExecutionAdmission};
     use clearra_core_domain::{
         board::standard_pc_board::Board256Mask, objective::objective_kind::ObjectiveKind,
         resource::ResourceLeaseToken,
@@ -1002,7 +1012,24 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
             shared: &WaveShared,
             control: &ExecutionControl,
         ) -> Result<usize, WasmExactSearchError> {
+            #[cfg(test)]
+            if self.result.bounded_rows.is_none() {
+                // Bare wave tests retain the original direct row store and
+                // per-worker observer injection. Production waves use the
+                // cheaper coordinator reports and bounded output cursor.
+                return self.advance_with_rows::<false>(credit, shared, control);
+            }
+            self.advance_with_rows::<true>(credit, shared, control)
+        }
+
+        fn advance_with_rows<const RETAIN_ROWS: bool>(
+            &mut self,
+            credit: usize,
+            shared: &WaveShared,
+            control: &ExecutionControl,
+        ) -> Result<usize, WasmExactSearchError> {
             let mut used = 0;
+            let before_build_nodes = self.result.engine.searched_build_nodes;
             while used < credit && !self.done {
                 if control.is_cancelled() || shared.abort.load(Ordering::Acquire) {
                     return Err(WasmExactSearchError::Cancelled);
@@ -1013,21 +1040,23 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                         take_worker_branch(&shared.queue, &shared.queued_memory, &self.result)?;
                 }
                 let Some(branch) = self.branch.as_mut() else {
-                    self.result.settle_without_branch()?;
+                    self.result.settle_without_branch::<RETAIN_ROWS>()?;
                     self.done = true;
                     break;
                 };
                 let Some((index, before_count)) = self.digest else {
                     self.digest = Some((
-                        self.result.reserve_branch(branch)?,
+                        self.result.reserve_branch::<RETAIN_ROWS>(branch)?,
                         self.result.engine.processed_candidate_count,
                     ));
                     continue;
                 };
-                if !self
-                    .result
-                    .reduce_next_candidate(branch, index, &shared.progress, control)?
-                {
+                if !self.result.reduce_next_candidate::<RETAIN_ROWS>(
+                    branch,
+                    index,
+                    &shared.progress,
+                    control,
+                )? {
                     let count = self
                         .result
                         .engine
@@ -1039,11 +1068,19 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                     }
                     self.branch = None;
                     self.digest = None;
-                    self.result.settle_without_branch()?;
+                    self.result.settle_without_branch::<RETAIN_ROWS>()?;
                 }
             }
             if control.is_cancelled() || shared.abort.load(Ordering::Acquire) {
                 return Err(WasmExactSearchError::Cancelled);
+            }
+            let built = self
+                .result
+                .engine
+                .searched_build_nodes
+                .saturating_sub(before_build_nodes);
+            if RETAIN_ROWS && built != 0 {
+                shared.progress.fetch_add(built, Ordering::Relaxed);
             }
             Ok(used)
         }
@@ -1128,6 +1165,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
         queue: Arc<Mutex<Vec<ExtendedParallelGeometryBranch>>>,
         queued_memory: ExecutionMemoryOwner,
         progress: Arc<AtomicUsize>,
+        reported_build_nodes: usize,
         lease: ResourceLeaseToken,
         next_slot: usize,
         failed: bool,
@@ -1170,6 +1208,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                 queue: Arc::new(Mutex::new(queue)),
                 queued_memory,
                 progress: Arc::new(AtomicUsize::new(0)),
+                reported_build_nodes: 0,
                 lease,
                 next_slot: 0,
                 failed: false,
@@ -1229,8 +1268,9 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                     let work = shared.clone();
                     let worker_control = control.clone();
                     let sender = wave.sender.as_ref().ok_or_else(contract_error)?.clone();
+                    let profile = WorkerSearchProfile::capture();
                     cpu_worker_pool::submit_cpu_job(move || {
-                        let result = work.run(cursor, credit, worker_control);
+                        let result = profile.measure(|| work.run(cursor, credit, worker_control));
                         let _ = sender.send((index, result));
                     })
                     .map_err(|_| pool_error())?;
@@ -1261,6 +1301,19 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                 return Err(contract_error());
             }
             self.failed = false;
+            #[cfg(test)]
+            let has_bounded_rows = self
+                .slots
+                .first()
+                .and_then(Option::as_ref)
+                .is_some_and(|cursor| cursor.result.bounded_rows.is_some());
+            #[cfg(not(test))]
+            let has_bounded_rows = true;
+            let build_nodes = self.progress.load(Ordering::Relaxed);
+            if has_bounded_rows && build_nodes != self.reported_build_nodes {
+                self.reported_build_nodes = build_nodes;
+                control.report_progress("buildup", build_nodes as u64, None);
+            }
             let done = self
                 .slots
                 .iter()
@@ -1420,12 +1473,14 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
         }
     }
 
+    #[cfg(test)]
     pub(super) struct VerifiedStats<'a> {
         pub(super) count_all: u128,
         pub(super) coverage_word: u64,
         pub(super) representative: Option<(u64, u32, &'a [crate::CorePathStep])>,
     }
 
+    #[cfg(test)]
     pub(super) struct CompletedFacts<'a> {
         pub(super) digest: u64,
         pub(super) candidate_count: u128,
@@ -1471,8 +1526,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
         }
     }
 
-    /// Test-private exact owner. Proof facts remain borrowed; publication is
-    /// an explicit consuming operation under the same admission.
+    /// Exact sliced owner; publication consumes it under the same admission.
     pub(in crate::backend::wasm_cpu) struct DryRunOwner {
         // Move-out owners precede the admission in destruction order.
         preparation: Option<ExtendedParallelPreparation>,
@@ -1497,53 +1551,56 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
         fold_range: usize,
         fold_offset: usize,
         digest: u64,
+        reported_geometry_nodes: usize,
         root: ExtendedBuildProbabilitySession,
         admission: ExecutionAdmission,
     }
 
     impl DryRunOwner {
-        pub(in crate::backend::wasm_cpu) fn is_eligible(
-            problem: &SearchProblem,
-            field: BuildProbabilityField,
-        ) -> bool {
+        pub(in crate::backend::wasm_cpu) fn is_problem_eligible(problem: &SearchProblem) -> bool {
             let width = problem.backend_policy().workers();
-            if problem.visible_height() != 7
-                || field.height() != 7
-                || width < 2
-                || problem.objective().kind() != ObjectiveKind::All
-                || problem.count_policy() != PcCountPolicy::CountAll
-                || !matches!(
+            let height = problem.visible_height();
+            (7..=24).contains(&height)
+                && width >= 2
+                && problem.objective().kind() == ObjectiveKind::All
+                && problem.count_policy() == PcCountPolicy::CountAll
+                && matches!(
                     problem.output_policy(),
                     SearchOutputPolicy::Summary | SearchOutputPolicy::Trace
                 )
-                || problem
+                && problem
                     .piece_source()
                     .materialized_universe()
-                    .is_none_or(|universe| !universe.complete() || universe.pattern_count() != 1)
-                || problem
+                    .is_some_and(|universe| universe.complete() && universe.pattern_count() == 1)
+                && !problem
                     .queue_observation_policy()
                     .requires_observation_policy()
-                || problem.objective().score().requested()
-                || problem.objective().execution_constraints().requested()
-                || problem.solution_probability_policy().requested()
-                || problem.pc_chance_evidence_policy()
-                    != clearra_problem::PcChanceEvidencePolicy::Disabled
-                || problem
+                && !problem.objective().score().requested()
+                && !problem.objective().execution_constraints().requested()
+                && !problem.solution_probability_policy().requested()
+                && problem.pc_chance_evidence_policy()
+                    == clearra_problem::PcChanceEvidencePolicy::Disabled
+                && problem
                     .core_query()
                     .remaining_queue()
                     .as_fixed_sequence()
-                    .is_none()
-                || validate_pc_family_problem(problem).is_err()
-            {
+                    .is_some()
+                && validate_pc_family_problem(problem).is_ok()
+        }
+
+        pub(super) fn is_eligible(problem: &SearchProblem, field: BuildProbabilityField) -> bool {
+            let height = problem.visible_height();
+            if !Self::is_problem_eligible(problem) || u16::from(field.height()) != height {
                 return false;
             }
             let initial = Board256Mask::from_words(problem.initial_board().occupied_words());
-            let Ok(full) = Board256Mask::all_cells(70) else {
+            let cells_in_board = height * 10;
+            let Ok(full) = Board256Mask::all_cells(cells_in_board) else {
                 return false;
             };
             let required = full.without(initial);
             let cells = required.count_ones() as usize;
-            initial.fits_cell_count(70).unwrap_or(false)
+            initial.fits_cell_count(cells_in_board).unwrap_or(false)
                 && field.base_words() == initial.words()
                 && field.target_words() == required.words()
                 && cells != 0
@@ -1551,6 +1608,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                 && problem.exact_pieces() == Some(cells / 4)
         }
 
+        #[cfg(test)]
         pub(super) fn new(
             problem: &SearchProblem,
             field: BuildProbabilityField,
@@ -1635,6 +1693,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                 fold_range: 0,
                 fold_offset: 0,
                 digest: 0,
+                reported_geometry_nodes: 0,
                 root,
                 admission,
             })
@@ -1676,17 +1735,20 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                             .checked_retained_bytes_with_coexisting_owners()
                             .and_then(|bytes| bytes.checked_add(size_of::<Self>() as u128))
                             .ok_or_else(projection_error)?;
-                        let (status, used) = self
-                            .preparation
-                            .as_mut()
-                            .ok_or_else(contract_error)?
-                            .advance(
-                                self.root.request_node_budget.as_deref(),
-                                self.root.memory_bound,
-                                outside,
-                                remaining,
-                                control,
-                            )?;
+                        let preparation = self.preparation.as_mut().ok_or_else(contract_error)?;
+                        let (status, used) = preparation.advance(
+                            self.root.request_node_budget.as_deref(),
+                            self.root.memory_bound,
+                            outside,
+                            remaining,
+                            control,
+                        )?;
+                        let geometry_nodes = preparation.expanded_nodes();
+                        if !control.is_cancelled() && geometry_nodes != self.reported_geometry_nodes
+                        {
+                            self.reported_geometry_nodes = geometry_nodes;
+                            control.report_progress("geometry", geometry_nodes as u64, None);
+                        }
                         remaining = remaining.checked_sub(used).ok_or_else(contract_error)?;
                         match status {
                             ExtendedPreparationStatus::Pending => break,
@@ -2083,7 +2145,9 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                 // scratch. Those are already dropped; the original active
                 // charges and aggregate high-water mark remain intact.
                 .and_then(|bytes| bytes.checked_sub(worker.engine.peak_build_scratch_bytes as u128))
-                .and_then(|bytes| bytes.checked_add(worker.checked_auxiliary_retained_bytes()?))
+                .and_then(|bytes| {
+                    bytes.checked_add(worker.checked_auxiliary_retained_bytes::<true>()?)
+                })
                 .ok_or_else(projection_error)?;
             let base = retained
                 .checked_sub(rows.retained)
@@ -2185,6 +2249,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
             Ok(())
         }
 
+        #[cfg(test)]
         pub(super) fn completed(&self) -> Option<CompletedFacts<'_>> {
             if self.phase != DryPhase::Complete {
                 return None;
@@ -2301,6 +2366,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
             })
         }
 
+        #[cfg(test)]
         pub(super) fn canonical_last_row_imported(&self) -> bool {
             self.phase == DryPhase::ImportCanonical
                 && self.source_rows != 0
@@ -2310,6 +2376,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                     .is_some_and(|cursor| cursor.imported_rows() == self.source_rows)
         }
 
+        #[cfg(test)]
         pub(super) fn catalog(&self) -> &Arc<super::super::ExtendedInverseCatalog> {
             &self.root.catalog
         }
@@ -2320,7 +2387,6 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
 #[path = "extended_pc_family_parallel_worker_tests.rs"]
 mod worker_tests;
 
-#[cfg(test)]
 #[path = "extended_pc_cooperative_canonical.rs"]
 mod cooperative_canonical;
 

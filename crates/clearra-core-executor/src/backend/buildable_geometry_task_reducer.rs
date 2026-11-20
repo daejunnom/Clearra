@@ -37,6 +37,7 @@ pub(crate) struct BuildableGeometryReduction {
     pub(crate) reducer_bytes: usize,
     pub(crate) truncation: usize,
     pub(crate) worker_count: usize,
+    pub(crate) candidate_workers: usize,
     pub(crate) pruning_ledger: Option<NativePruningLedger>,
 }
 
@@ -391,10 +392,15 @@ where
     if cancellation.is_cancelled() {
         return Err(PackingRunnerError::ExecutionCancelled);
     }
-    let generated_count = worker_reducers
-        .iter()
-        .map(|worker| worker.generated_count)
-        .fold(0usize, usize::saturating_add);
+    let (generated_count, candidate_workers) =
+        worker_reducers
+            .iter()
+            .fold((0usize, 0usize), |(total, workers), worker| {
+                (
+                    total.saturating_add(worker.generated_count),
+                    workers + usize::from(worker.generated_count != 0),
+                )
+            });
     let buildable_count = worker_reducers
         .iter()
         .map(|worker| worker.buildable_count)
@@ -449,6 +455,7 @@ where
         reducer_bytes,
         truncation: truncation.load(Ordering::Acquire),
         worker_count,
+        candidate_workers,
         pruning_ledger,
     })
 }

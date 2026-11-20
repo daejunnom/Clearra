@@ -7,6 +7,7 @@ use clearra_core_ffi::NativeCoreError;
 use clearra_problem::{SearchOutputPolicy, SearchProblem, SearchProblemPreset};
 
 use crate::{
+    backend::WasmCpuSearchBackend,
     buildup::BuildUpRunnerError,
     core_execution_result::CoreExecutionResult,
     packing::PackingRunnerError,
@@ -48,6 +49,33 @@ impl CoreExecutor {
     }
 
     pub fn execute_with_control(
+        problem: &SearchProblem,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        if control.is_cancelled() {
+            return Err(CoreExecutionError::Cancelled);
+        }
+        match problem.preset() {
+            SearchProblemPreset::OpeningPc | SearchProblemPreset::ScenarioPc => {
+                WasmCpuSearchBackend::execute_with_control(problem, control)
+                    .map_err(|error| error.into_core_execution_error())
+            }
+            SearchProblemPreset::Setup => Err(CoreExecutionError::UnsupportedProblem),
+            SearchProblemPreset::Build => Self::execute_legacy_build_with_control(problem, control),
+        }
+    }
+
+    /// Executes the independent C route for differential tests and benchmarks.
+    ///
+    /// The caller must select this path explicitly, even when the C library is
+    /// linked into the same executable as the Rust product.
+    pub fn execute_native_c_reference(
+        problem: &SearchProblem,
+    ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        Self::execute_native_c_reference_with_control(problem, &ExecutionControl::default())
+    }
+
+    pub fn execute_native_c_reference_with_control(
         problem: &SearchProblem,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, CoreExecutionError> {
@@ -96,6 +124,21 @@ impl CoreExecutor {
     }
 
     pub fn execute_build_coverage_with_control(
+        problem: &SearchProblem,
+        query: &BuildCoverageQuery,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        crate::service::rust_legacy_cover::execute(problem, query, control)
+    }
+
+    pub(crate) fn execute_legacy_build_with_control(
+        problem: &SearchProblem,
+        control: &ExecutionControl,
+    ) -> Result<CoreExecutionResult, CoreExecutionError> {
+        crate::service::rust_legacy_cover::execute_bridge(problem, control)
+    }
+
+    pub fn execute_native_c_reference_build_coverage_with_control(
         problem: &SearchProblem,
         query: &BuildCoverageQuery,
         control: &ExecutionControl,

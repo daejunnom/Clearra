@@ -15,7 +15,7 @@ use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
 use super::*;
 
 fn fixture(input: &str, example_limit: usize, policy: PcExecutionPolicy) -> Arc<SearchProblem> {
-    let expression = QueuePatternExpression::parse(input, 1).expect("one-piece expression");
+    let expression = QueuePatternExpression::parse(input, 7).expect("one-piece expression");
     let query = PcScenarioQuery::new(
         // An O-shaped cavity, already used by exact compact execution tests.
         PcScenarioBoard::standard_10(2, 0xf3fcf),
@@ -175,4 +175,159 @@ fn compact_pc_failed_queue_exact_compiled_ordinals_and_fail_closed_boundaries() 
             reason: "compact_pc_failed_queue_requires_one_cpu_worker"
         })
     ));
+}
+
+fn multi_candidate_fixture(workers: usize) -> Arc<SearchProblem> {
+    let expression =
+        QueuePatternExpression::parse("IIOO[OT]", 7).expect("deterministic five-piece patterns");
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(2, 0),
+        PcQueueInput::pattern_expression(expression),
+        PieceWindow::new(5),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(5))
+    .with_retained_trace_limit(0)
+    .with_count_policy(PcCountPolicy::CountAll)
+    .with_execution_policy(
+        PcExecutionPolicy::mvp_default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_use_all_logical_processors(true)
+            .with_workers(workers),
+    )
+    .with_objective(ObjectivePolicy::all());
+    Arc::new(
+        ProblemCompiler::compile_scenario_percent(&query)
+            .expect("compiled compact PC")
+            .with_pc_failed_queue_v2_evidence(2),
+    )
+}
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[test]
+fn compact_pc_failed_queue_native_workers_keep_complete_original_coverage() {
+    let control = ExecutionControl::default();
+    let run = |workers| {
+        let problem = multi_candidate_fixture(workers);
+        let mut session =
+            WasmCompactPcFailedQueueSession::new_for_direct_execution(Arc::clone(&problem))
+                .expect("native CPU session");
+        let WasmPcFailedQueueAdvance::Completed(result, evidence) =
+            advance_to_terminal(&mut session, &control).expect("complete compact result")
+        else {
+            panic!("complete compact result");
+        };
+        assert!(evidence.matches_problem_owner(&problem));
+        assert_eq!(evidence.pattern_count(), 2);
+        assert_eq!(evidence.success_pattern_count(), 1);
+        assert_eq!(evidence.failed_pattern_count(), 1);
+        (result, evidence)
+    };
+    let (serial, serial_evidence) = run(1);
+    if clearra_core_domain::runtime_cpu_capacity::CpuCapacity::current().hard_limit() < 2 {
+        return;
+    }
+    let (parallel, parallel_evidence) = run(2);
+    assert_eq!(parallel.usize_field("workers_used"), Some(2));
+    assert_eq!(parallel.bool_field("cpu_parallel_execution"), Some(true));
+    assert_eq!(
+        serial.coverage_pattern_words(),
+        parallel.coverage_pattern_words()
+    );
+    assert_eq!(
+        serial_evidence.source_row_count(),
+        parallel_evidence.source_row_count()
+    );
+    assert_eq!(serial_evidence.examples(), parallel_evidence.examples());
+}
+
+#[test]
+fn compact_pc_failed_queue_distributed_worker_rows_require_complete_dispatch() {
+    use crate::{
+        pc_chance_coverage_evidence::DistributedPcChanceCoverageRows, WasmCandidateProducerAdvance,
+        WasmCpuCandidateProducer, WasmDistributedVerifier,
+    };
+
+    let problem = multi_candidate_fixture(1);
+    let control = ExecutionControl::default();
+    // A real worker owns a separate WASM realm and capacity ledger. Use a
+    // serial transcript for the native fixture to avoid overlapping its
+    // worker admission with the coordinator's full-capacity parent lease.
+    let partial = {
+        let mut producer = WasmCpuCandidateProducer::new_typed(&problem).unwrap();
+        let mut worker = WasmDistributedVerifier::new(&problem).unwrap();
+        loop {
+            match producer.advance(&control).unwrap() {
+                WasmCandidateProducerAdvance::Pending => {}
+                WasmCandidateProducerAdvance::Candidate(packet) => {
+                    worker.consume(&packet, &control).unwrap();
+                }
+                WasmCandidateProducerAdvance::Completed(_) => break,
+                WasmCandidateProducerAdvance::Cancelled => panic!("unexpected cancellation"),
+            }
+        }
+        let raw = worker.finish().unwrap();
+        let source = raw
+            .pc_chance_coverage_evidence()
+            .expect("actual worker evidence");
+        let transport = DistributedPcChanceCoverageRows::try_from_untrusted_rows(
+            source.piece_source_id(),
+            source.pattern_universe_id(),
+            source.pattern_weight_model_id(),
+            source.pattern_count(),
+            source.rows().to_vec(),
+            source.complete(),
+        )
+        .unwrap();
+        raw.without_pc_chance_transient_evidence()
+            .with_distributed_pc_chance_coverage_rows(transport)
+    };
+    let open_merger = || {
+        let mut producer =
+            WasmCpuCandidateProducer::new_failed_queue(Arc::clone(&problem), 0).unwrap();
+        loop {
+            match producer.advance(&control).unwrap() {
+                WasmCandidateProducerAdvance::Pending
+                | WasmCandidateProducerAdvance::Candidate(_) => {}
+                WasmCandidateProducerAdvance::Completed(summary) => {
+                    return (producer.into_merger().unwrap(), summary)
+                }
+                WasmCandidateProducerAdvance::Cancelled => panic!("unexpected cancellation"),
+            }
+        }
+    };
+    {
+        let (mut merger, summary) = open_merger();
+        assert!(summary.candidate_count > 1);
+        assert!(
+            merger.finish(&summary, 1).is_err(),
+            "ordinary terminal cannot seal a complement"
+        );
+        assert!(
+            merger.finish_failed_queue(&summary, 1, &control).is_err(),
+            "missing worker"
+        );
+    }
+    {
+        let (mut merger, summary) = open_merger();
+        merger.absorb(&partial).unwrap();
+        assert!(merger.absorb(&partial).is_err(), "duplicate candidate rows");
+        assert!(
+            merger.finish_failed_queue(&summary, 1, &control).is_err(),
+            "failed ingress poisons authority"
+        );
+    }
+    {
+        let (mut merger, summary) = open_merger();
+        merger.absorb(&partial).unwrap();
+        let (result, evidence) = merger.finish_failed_queue(&summary, 1, &control).unwrap();
+        assert!(evidence.matches_problem_owner(&problem));
+        assert_eq!(
+            result.coverage_pattern_words(),
+            evidence.success_coverage().words()
+        );
+        assert_eq!(evidence.success_pattern_count(), 1);
+        assert_eq!(evidence.failed_pattern_count(), 1);
+        assert!(result.pc_chance_coverage_evidence().is_none());
+    }
 }

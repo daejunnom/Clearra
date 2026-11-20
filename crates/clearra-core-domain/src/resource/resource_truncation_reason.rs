@@ -11,6 +11,7 @@ pub enum ResourceTruncationReason {
     CpuTimeExceeded,
     MemoryExceeded,
     ObservedUniverseTruncated,
+    Cancelled,
     OperationTableCapacityExceeded,
     PruningEvidenceCapacityExceeded,
 }
@@ -29,6 +30,7 @@ impl ResourceTruncationReason {
             Self::CpuTimeExceeded => "cpu_time_exceeded",
             Self::MemoryExceeded => "memory_exceeded",
             Self::ObservedUniverseTruncated => "observed_universe_truncated",
+            Self::Cancelled => "cancelled",
             Self::OperationTableCapacityExceeded => "operation_table_capacity_exceeded",
             Self::PruningEvidenceCapacityExceeded => "pruning_evidence_capacity_exceeded",
         }

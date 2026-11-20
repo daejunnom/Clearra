@@ -5,7 +5,7 @@ pub mod build_union_coverage;
 
 pub use build_coverage_executor::{
     BuildCoverageExecution, BuildCoverageExecutionError, ConcreteAssignmentCoverageRow,
-    ConcreteCoverageCompleteness, ConcreteCoverageScope,
+    ConcreteCoverageCompleteness, ConcreteCoverageScope, PreparedConcreteAssignmentCoverage,
 };
 pub use build_coverage_matrix::{BuildCoverageMatrix, BuildCoverageMatrixError};
 pub use build_coverage_result::BuildCoverageResult;

@@ -214,6 +214,11 @@ pub(crate) fn execute_cpu_buildable_geometry_graph(
         BackendTrustReport::cpu_exact(),
     )
     .with_workers_used(reduction.worker_count)
+    .with_native_cpu_workers(
+        super::search_backend_executor::NativeCpuPackingWorkers::BuildableDag {
+            candidate_workers: reduction.candidate_workers,
+        },
+    )
     .with_geometry_catalog(catalog)
     .with_pruning_ledger(pruning_ledger))
 }
@@ -332,11 +337,7 @@ fn merge_sequential_stage_metrics(target: &mut ResourceReport, source: &Resource
     target.coverage_rows_emitted = target
         .coverage_rows_emitted
         .saturating_add(source.coverage_rows_emitted);
-    if source.truncated {
-        target.truncated = true;
-        target.truncation_reason = target.truncation_reason.or(source.truncation_reason);
-    }
-    target.probability_complete &= source.probability_complete;
+    target.merge_completion_from(source);
 }
 
 struct NativeBuildableGeometryPathAdapter<'consumer, 'context> {

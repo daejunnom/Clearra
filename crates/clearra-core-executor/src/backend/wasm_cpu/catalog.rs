@@ -486,81 +486,17 @@ impl GeometryCatalog {
         } else {
             ClearRowDomain::unrestricted()
         };
-        let registry = standard_tetromino_registry();
-        let inverse_policy = inverse_projection_policy();
-        let row_mask = u64::MAX >> (u64::BITS - u32::from(width));
-        let availability = ProjectionAvailability::compile(inverse_policy, width, height, |row| {
-            (required_cells >> (u32::from(row) * u32::from(width))) & row_mask
-        });
-        let realization_capacity = checked_realization_count_upper_bound(width, height)
-            .and_then(|count| usize::try_from(count).ok())
-            .ok_or(WasmExactSearchError::InvalidProblem(
-                "wasm_geometry_catalog_projection_overflow",
-            ))?;
-        let mut realizations = Vec::new();
-        realizations
-            .try_reserve_exact(realization_capacity)
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_geometry_catalog_realization_storage_unavailable",
-                )
-            })?;
-        for piece in PieceKind::STANDARD_TETROMINOES {
-            let definition = registry
-                .get(piece)
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "standard_piece_missing",
-                ))?;
-            for rotation in RotationState::ALL {
-                let shape = definition.shape(rotation);
-                let max_x = i16::from(width) - i16::from(shape.width());
-                if max_x < 0 {
-                    continue;
-                }
-                let mut local_rows = shape
-                    .cells()
-                    .into_iter()
-                    .map(|cell| cell.y() as u8)
-                    .collect::<Vec<_>>();
-                local_rows.sort_unstable();
-                local_rows.dedup();
-                for x in 0..=max_x {
-                    let row_filter = availability.as_ref().and_then(|available| {
-                        ProjectionRowFilter::compile_from_availability(
-                            available,
-                            shape.cells(),
-                            &local_rows,
-                            x as i8,
-                        )
-                    });
-                    if row_filter
-                        .as_ref()
-                        .is_some_and(|filter| !filter.columns_possible())
-                    {
-                        continue;
-                    }
-                    let mut target_rows = [0_u8; 4];
-                    enumerate_row_projections(
-                        width,
-                        height,
-                        initial_board,
-                        required_cells,
-                        piece,
-                        rotation,
-                        shape.cells(),
-                        &local_rows,
-                        &mut target_rows,
-                        0,
-                        x as i8,
-                        row_filter.as_ref(),
-                        clear_rows,
-                        &mut realizations,
-                    );
-                }
-            }
-        }
-        realizations.sort_unstable();
-        realizations.dedup();
+        let realization_capacity = checked_realization_capacity(width, height).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_geometry_catalog_projection_overflow"),
+        )?;
+        let realizations = compile_inverse_clear_realizations(
+            width,
+            height,
+            initial_board,
+            required_cells,
+            clear_rows,
+            realization_capacity,
+        )?;
 
         let mut skeletons = Vec::new();
         skeletons
@@ -1040,6 +976,103 @@ impl GeometryCatalog {
     }
 }
 
+/// Callers validate Board64 dimensions and pass the complete disjoint set of
+/// cells that the projected pieces may own. Standard PC and generic packing
+/// share these exact realizations, not PC-specific projection/pruning indexes.
+pub(super) fn compile_inverse_clear_realizations(
+    width: u8,
+    height: u8,
+    initial_board: u64,
+    required_cells: u64,
+    clear_rows: ClearRowDomain,
+    realization_capacity: usize,
+) -> Result<Vec<Realization>, WasmExactSearchError> {
+    let registry = standard_tetromino_registry();
+    let inverse_policy = inverse_projection_policy();
+    let row_mask = u64::MAX >> (u64::BITS - u32::from(width));
+    let availability = ProjectionAvailability::compile(inverse_policy, width, height, |row| {
+        (required_cells >> (u32::from(row) * u32::from(width))) & row_mask
+    });
+    let mut realizations = Vec::new();
+    realizations
+        .try_reserve_exact(realization_capacity)
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_geometry_catalog_realization_storage_unavailable",
+            )
+        })?;
+    for piece in PieceKind::STANDARD_TETROMINOES {
+        let definition = registry
+            .get(piece)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "standard_piece_missing",
+            ))?;
+        for rotation in RotationState::ALL {
+            let shape = definition.shape(rotation);
+            let max_x = i16::from(width) - i16::from(shape.width());
+            if max_x < 0 {
+                continue;
+            }
+            let (local_rows, row_count) = occupied_shape_rows(shape.cells());
+            let local_rows = &local_rows[..row_count];
+            for x in 0..=max_x {
+                let row_filter = availability.as_ref().and_then(|available| {
+                    ProjectionRowFilter::compile_from_availability(
+                        available,
+                        shape.cells(),
+                        local_rows,
+                        x as i8,
+                    )
+                });
+                if row_filter
+                    .as_ref()
+                    .is_some_and(|filter| !filter.columns_possible())
+                {
+                    continue;
+                }
+                enumerate_row_projections(
+                    width,
+                    height,
+                    initial_board,
+                    required_cells,
+                    piece,
+                    rotation,
+                    shape.cells(),
+                    local_rows,
+                    &mut [0; 4],
+                    0,
+                    x as i8,
+                    row_filter.as_ref(),
+                    clear_rows,
+                    &mut realizations,
+                );
+            }
+        }
+    }
+    realizations.sort_unstable();
+    realizations.dedup();
+    Ok(realizations)
+}
+
+fn occupied_shape_rows(
+    cells: [clearra_piece_registry::registry::piece_registry::ShapeCell; 4],
+) -> ([u8; 4], usize) {
+    let mut rows = cells.map(|cell| cell.y() as u8);
+    rows.sort_unstable();
+    let mut count = 0;
+    for row in rows {
+        if count == 0 || rows[count - 1] != row {
+            rows[count] = row;
+            count += 1;
+        }
+    }
+    (rows, count)
+}
+
+pub(super) fn checked_realization_capacity(width: u8, height: u8) -> Option<usize> {
+    usize::try_from(checked_realization_count_upper_bound(width, height)?).ok()
+}
+
 fn checked_realization_count_upper_bound(width: u8, height: u8) -> Option<u128> {
     let registry = standard_tetromino_registry();
     let mut total = 0_u128;
@@ -1051,18 +1084,7 @@ fn checked_realization_count_upper_bound(width: u8, height: u8) -> Option<u128> 
             if max_x < 0 {
                 continue;
             }
-            let mut local_rows = [0_u8; 4];
-            for (index, cell) in shape.cells().into_iter().enumerate() {
-                local_rows[index] = cell.y() as u8;
-            }
-            local_rows.sort_unstable();
-            let mut local_row_count = 0_usize;
-            for row in local_rows {
-                if local_row_count == 0 || local_rows[local_row_count - 1] != row {
-                    local_rows[local_row_count] = row;
-                    local_row_count += 1;
-                }
-            }
+            let (local_rows, local_row_count) = occupied_shape_rows(shape.cells());
             let row_projection_count = checked_row_projection_count(
                 &local_rows[..local_row_count],
                 height,
@@ -1228,7 +1250,7 @@ fn sort_unique_realizations(
     write
 }
 
-fn instantiate_realization_raw(
+pub(super) fn instantiate_realization_raw(
     width: u8,
     height: u8,
     target_cells: u64,

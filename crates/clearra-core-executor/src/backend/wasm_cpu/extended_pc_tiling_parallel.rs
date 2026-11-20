@@ -10,6 +10,9 @@ use std::{
 
 use crate::{
     cpu_worker_pool,
+    performance::{
+        profile_sample_scale, ExecutorSearchStage, SearchStageSpan, WorkerSearchProfile,
+    },
     resource::{ExecutionMemoryOwner, SharedExecutionMemoryBudget},
 };
 
@@ -160,16 +163,19 @@ impl ExtendedPcTilingSession {
             let sender = sender.clone();
             let memory_owner = private_memory.owner(index);
             let queued_memory = queued_memory.clone();
+            let profile = WorkerSearchProfile::capture();
             let queued = cpu_worker_pool::submit_cpu_job(move || {
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    run_worker(
-                        &queue,
-                        &catalog,
-                        &abort_worker,
-                        &worker_control,
-                        memory_owner,
-                        &queued_memory,
-                    )
+                    profile.measure(|| {
+                        run_worker(
+                            &queue,
+                            &catalog,
+                            &abort_worker,
+                            &worker_control,
+                            memory_owner,
+                            &queued_memory,
+                        )
+                    })
                 }))
                 .map_err(|_| {
                     WasmExactSearchError::InvalidProblem("extended_parallel_tiling_worker_panicked")
@@ -338,9 +344,13 @@ fn run_worker(
                 return Err(WasmExactSearchError::Cancelled);
             }
             let owned = result.retained_bytes();
-            let Some(candidate) =
-                branch.next_candidate_with_owner(catalog, &result.memory_owner, owned)?
-            else {
+            let geometry = SearchStageSpan::begin_scaled(
+                ExecutorSearchStage::WasmGeometryAdvance,
+                profile_sample_scale(result.candidate_count.saturating_add(1)),
+            );
+            let candidate = branch.next_candidate_with_owner(catalog, &result.memory_owner, owned);
+            geometry.finish(1);
+            let Some(candidate) = candidate? else {
                 break;
             };
             let retained = owned + branch.private_retained_bytes() as u128;

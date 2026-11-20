@@ -30,6 +30,8 @@ pub mod search_backend_executor;
 pub mod search_backend_warmup;
 pub mod wasm_build_probability_backend;
 mod wasm_cpu;
+pub use wasm_cpu::generic_board64_search;
+pub use wasm_cpu::generic_geometry;
 pub(crate) use wasm_cpu::exact_entry_lock_anchors;
 pub(crate) use wasm_cpu::exact_local_relation;
 #[cfg(any(test, feature = "qualification-reference"))]
@@ -50,6 +52,10 @@ pub use wasm_cpu::{
 pub use wasm_cpu::{with_operation_mask_experiment, OperationMaskExperimentReport};
 #[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{CapturedSolutionCoverage, P7P4CoverageBlocks};
+pub use wasm_cpu::{
+    CompactBuildUpEdge, CompactBuildUpNode, CompactBuildUpSnapshot, CompactBuildUpSnapshotError,
+    CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
+};
 pub use wasm_cpu::{
     WasmCompactPcFailedQueueSession, WasmPcFailedQueueAdvance, WasmPcFailedQueueSession,
 };

@@ -11,8 +11,6 @@ use clearra_problem::{SearchOutputPolicy, SearchProblem};
 
 use crate::{resource::WasmCpuTerminalResourceAuthority, CoreExecutionError, CoreExecutionResult};
 
-#[cfg(all(test, feature = "parallel", not(target_family = "wasm")))]
-use super::wasm_cpu::NativePcCooperativeAdvance;
 #[cfg(feature = "webgpu-search")]
 use super::wasm_cpu::WasmWebGpuSearchSession;
 #[cfg(any(test, feature = "local-search-ab"))]
@@ -21,6 +19,8 @@ use super::wasm_cpu::{
     ExactSearchAdvance, ExtendedPcSearchSession, ExtendedPcTilingSession, WasmExactSearchError,
     WasmExactSearchSession,
 };
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+pub use super::wasm_cpu::{NativePcCooperativeAdvance, NativePcCooperativeResult};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WasmCpuSearchError {
@@ -123,6 +123,46 @@ pub struct WasmCpuSearchSession {
     inner: WasmSearchSessionInner,
 }
 
+/// Native, bounded polling for ordinary fixed-queue PC families above 6L.
+/// The synchronous executor intentionally retains its separate fast path.
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+pub struct NativePcCooperativeSession {
+    inner: ExtendedPcSearchSession,
+}
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+impl NativePcCooperativeSession {
+    /// Selects the supported lane before doing any work. `Ok(None)` is
+    /// inapplicable, not an empty family. The caller owns the checked memory
+    /// bound for its coexisting allocations, excluding the borrowed problem
+    /// that Core accounts for at construction.
+    pub fn try_new(
+        problem: &SearchProblem,
+        checked_external_retained_bytes: u128,
+    ) -> Result<Option<Self>, WasmCpuSearchError> {
+        if problem.visible_height() <= 6 {
+            return Ok(None);
+        }
+        validate_extended_pc_backend(problem)?;
+        ExtendedPcSearchSession::try_new_native_cooperative(
+            problem,
+            checked_external_retained_bytes,
+        )
+        .map(|session| session.map(|inner| Self { inner }))
+        .map_err(map_error)
+    }
+
+    pub fn advance(
+        &mut self,
+        work_budget: usize,
+        control: &ExecutionControl,
+    ) -> Result<NativePcCooperativeAdvance, WasmCpuSearchError> {
+        self.inner
+            .advance_native_cooperative(work_budget, control)
+            .map_err(map_error)
+    }
+}
+
 /// Read-only terminal validator borrowed from a completed direct WASM search.
 ///
 /// The borrow keeps the underlying search session, including its shared
@@ -217,11 +257,14 @@ impl WasmCpuSearchSession {
         validate_extended_pc_backend(problem)?;
         Ok(Self {
             inner: WasmSearchSessionInner::ExtendedPc(
-                ExtendedPcSearchSession::new_native_cooperative_for_test(
+                ExtendedPcSearchSession::try_new_native_cooperative(
                     problem,
                     checked_external_retained_bytes,
                 )
-                .map_err(map_error)?,
+                .map_err(map_error)?
+                .ok_or(WasmCpuSearchError::InvalidProblem {
+                    reason: "extended_pc_native_cooperative_ineligible",
+                })?,
             ),
         })
     }
@@ -238,7 +281,7 @@ impl WasmCpuSearchSession {
             });
         };
         session
-            .advance_native_cooperative_for_test(work_budget, control)
+            .advance_native_cooperative(work_budget, control)
             .map_err(map_error)
     }
 

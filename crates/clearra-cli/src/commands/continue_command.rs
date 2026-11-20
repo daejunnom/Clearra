@@ -1,4 +1,4 @@
-use clearra_app::{AppCommand, AppContext, AppRequest, ContinueAppCommand};
+use clearra_app::{AppCommand, AppRequest, ContinueAppCommand};
 
 use crate::{
     args::continue_args::ContinueArgs,
@@ -11,9 +11,9 @@ pub struct ContinueCommand;
 
 impl ContinueCommand {
     pub fn run(args: &ContinueArgs, format: RenderFormat) -> CliOutput {
-        let response = AppContext::default().run(AppRequest::new(AppCommand::Continue(
-            ContinueAppCommand::new(args.token().map(ToOwned::to_owned)),
-        )));
+        let response = crate::cli_routing::product_app_context().run(AppRequest::new(
+            AppCommand::Continue(ContinueAppCommand::new(args.token().map(ToOwned::to_owned))),
+        ));
         let default_error = match response.error().map(|error| error.code()) {
             Some(clearra_app::AppErrorCode::MissingInput) => CliErrorCode::ContinueTokenRequired,
             Some(clearra_app::AppErrorCode::InvalidInput) => CliErrorCode::ContinueTokenInvalid,

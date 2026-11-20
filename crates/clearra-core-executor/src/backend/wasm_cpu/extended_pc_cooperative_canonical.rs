@@ -1,4 +1,4 @@
-//! Private terminal reduction experiment for the native fixed-queue Oracle
+//! Bounded terminal reduction for the native fixed-queue Oracle
 //! All/Omit lane. The coordinator must first prove candidate-range completeness
 //! and enumerate the exact worker row count under the original lease. This
 //! cursor reduces those rows, not execution counts, coverage, or replay proof.
@@ -14,7 +14,9 @@ use clearra_core_domain::{
     solution::{ExtendedTilingSolutionKey, NormalizedTilingSolutionSetHasher},
 };
 
-use crate::resource::{ExecutionMemoryBound, ExecutionMemoryOwner};
+#[cfg(test)]
+use crate::resource::ExecutionMemoryBound;
+use crate::resource::ExecutionMemoryOwner;
 
 use super::{
     super::{super::extended_board::ExtendedBoard, ExtendedTilingKey, SealedPcFamily},
@@ -33,11 +35,13 @@ enum Phase {
 pub(super) enum SourceKey<'a> {
     Concrete(&'a ExtendedTilingKey),
     // Independent lexical/codec oracle, not an input to the product.
+    #[cfg(test)]
     Fixture(&'a str),
 }
 
 enum MemoryAccount {
     // Standalone bounded conformance. Count the cursor header here.
+    #[cfg(test)]
     Standalone {
         fixed_outside: u128,
         bound: ExecutionMemoryBound,
@@ -66,6 +70,7 @@ pub(super) struct CanonicalReduction {
 }
 
 impl CanonicalReduction {
+    #[cfg(test)]
     fn new(
         expected_rows: usize,
         height: u8,
@@ -165,6 +170,7 @@ impl CanonicalReduction {
             })
             .ok_or_else(contract_error)?;
         match &self.account {
+            #[cfg(test)]
             MemoryAccount::Standalone {
                 fixed_outside,
                 bound,
@@ -220,6 +226,7 @@ impl CanonicalReduction {
         }
         let key_len = match source {
             SourceKey::Concrete(key) => key.canonical_key_len(self.height),
+            #[cfg(test)]
             SourceKey::Fixture(text) => text.len(),
         };
         if self.phase != Phase::Collect
@@ -234,6 +241,7 @@ impl CanonicalReduction {
             SourceKey::Concrete(key) => {
                 key.canonical_key(ExtendedBoard::from_mask(self.initial), self.height)
             }
+            #[cfg(test)]
             SourceKey::Fixture(text) => text.to_owned(),
         };
         if key.len() != key_len || key.capacity() != key_len {
@@ -318,6 +326,7 @@ impl CanonicalReduction {
         Some((&self.unique, self.hash.as_deref()?))
     }
 
+    #[cfg(test)]
     pub(super) fn imported_rows(&self) -> usize {
         self.accepted_rows
     }
@@ -346,6 +355,7 @@ fn storage_error() -> WasmExactSearchError {
     WasmExactSearchError::InvalidProblem("extended_pc_cooperative_canonical_storage_unavailable")
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::wasm_cpu::extended_build_probability::ExtendedBuildProbabilitySession;

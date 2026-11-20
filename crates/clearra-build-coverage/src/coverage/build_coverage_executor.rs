@@ -309,6 +309,7 @@ mod execution {
     }
 }
 mod execution_builder {
+    use clearra_core_domain::solution::StandardBoard64TilingIdentity;
     use clearra_coverage::{
         pattern::weighted_pattern_set::WeightedPatternSet, row::coverage_row::CoverageRow,
     };
@@ -325,11 +326,77 @@ mod execution_builder {
         assignment_solver::{solve_assignments_from_exact_report, solve_exact_cover},
         coverage_identity_factory::coverage_identity_for_query_or_rows,
         coverage_row_validator::validate_c_coverage_rows,
+        exact_cover_summary::ExactCoverSummary,
         row_coverage_extractor::coverage_for_assignments,
-        verified_assignment_coverage::{join_verified_rows, validate_verified_query},
+        verified_assignment_coverage::{
+            join_verified_rows, validate_verified_query, ConcreteAssignmentTemplate,
+        },
         BuildCoverageExecution, BuildCoverageExecutionError, ConcreteAssignmentCoverageRow,
         ConcreteCoverageScope,
     };
+
+    /// One solved Legacy template. Producing and reducing physical coverage
+    /// must consume the same bounded assignment enumeration.
+    pub struct PreparedConcreteAssignmentCoverage<'a> {
+        query: &'a BuildCoverageQuery,
+        scope: ConcreteCoverageScope,
+        template: ConcreteAssignmentTemplate,
+        exact: ExactCoverSummary,
+    }
+
+    impl<'a> PreparedConcreteAssignmentCoverage<'a> {
+        pub fn new(
+            query: &'a BuildCoverageQuery,
+            scope: ConcreteCoverageScope,
+        ) -> Result<Self, BuildCoverageExecutionError> {
+            let template = validate_verified_query(query, scope)?;
+            let exact = solve_exact_cover(query)?;
+            if !exact.complete {
+                return Err(BuildCoverageExecutionError::ConcreteAssignmentSearchIncomplete);
+            }
+            if exact.assignments.is_empty() {
+                return Err(BuildCoverageExecutionError::NoAssignments);
+            }
+            Ok(Self {
+                query,
+                scope,
+                template,
+                exact,
+            })
+        }
+
+        pub fn identities(
+            &self,
+        ) -> impl ExactSizeIterator<
+            Item = Result<StandardBoard64TilingIdentity, BuildCoverageExecutionError>,
+        > + '_ {
+            self.exact.assignments.iter().map(|assignment| {
+                self.template
+                    .identity(assignment, self.scope.initial_occupancy())
+            })
+        }
+
+        pub fn reduce_rows(
+            self,
+            rows: Vec<ConcreteAssignmentCoverageRow>,
+        ) -> Result<BuildCoverageExecution, BuildCoverageExecutionError> {
+            let matrix = join_verified_rows(
+                self.template,
+                &self.exact.assignments,
+                self.query.pattern_count(),
+                self.scope,
+                rows,
+            )?;
+            finish_execution(
+                self.query,
+                self.exact.assignments,
+                true,
+                self.exact.searched_nodes,
+                0,
+                matrix,
+            )
+        }
+    }
 
     impl BuildCoverageExecution {
         /// Reduces complete, independently verified queue rows by concrete
@@ -345,32 +412,28 @@ mod execution_builder {
             expected_scope: ConcreteCoverageScope,
             rows: Vec<ConcreteAssignmentCoverageRow>,
         ) -> Result<Self, BuildCoverageExecutionError> {
-            let template = validate_verified_query(query, expected_scope)?;
-            let exact = solve_exact_cover(query)?;
-            if !exact.complete {
-                return Err(BuildCoverageExecutionError::ConcreteAssignmentSearchIncomplete);
-            }
-            if exact.assignments.is_empty() {
-                return Err(BuildCoverageExecutionError::NoAssignments);
-            }
-            let matrix = join_verified_rows(
-                template,
-                &exact.assignments,
-                query.pattern_count(),
-                expected_scope,
-                rows,
-            )?;
-            finish_execution(
-                query,
-                exact.assignments,
-                true,
-                exact.searched_nodes,
-                0,
-                matrix,
-            )
+            PreparedConcreteAssignmentCoverage::new(query, expected_scope)?.reduce_rows(rows)
+        }
+
+        /// Uses the legacy assignment reducer after an independent physical
+        /// impossibility proof. No provider row is needed in this case.
+        pub fn from_proved_empty_packing(
+            query: &BuildCoverageQuery,
+        ) -> Result<Self, BuildCoverageExecutionError> {
+            Self::from_legacy_positional_rows(query, &[])
         }
 
         pub fn from_c_buildup_rows(
+            query: &BuildCoverageQuery,
+            rows: &[CoverageRow],
+        ) -> Result<Self, BuildCoverageExecutionError> {
+            Self::from_legacy_positional_rows(query, rows)
+        }
+
+        /// Compatibility for placeholder templates whose assignment slots have
+        /// no concrete four-cell identity. Preserve the old row-count/union
+        /// semantics, not a claim of an assignment-keyed physical join.
+        pub fn from_legacy_positional_rows(
             query: &BuildCoverageQuery,
             rows: &[CoverageRow],
         ) -> Result<Self, BuildCoverageExecutionError> {
@@ -497,6 +560,7 @@ mod verified_assignment_coverage;
 
 pub use error::BuildCoverageExecutionError;
 pub use execution::BuildCoverageExecution;
+pub use execution_builder::PreparedConcreteAssignmentCoverage;
 pub use verified_assignment_coverage::{
     ConcreteAssignmentCoverageRow, ConcreteCoverageCompleteness, ConcreteCoverageScope,
 };

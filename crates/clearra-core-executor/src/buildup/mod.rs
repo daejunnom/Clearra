@@ -23,6 +23,7 @@ mod candidate_execution_aggregate;
 mod candidate_execution_aggregate_builder;
 mod execution_variant_set;
 pub mod generic_buildup;
+pub use crate::backend::generic_board64_search;
 #[cfg(feature = "native-c-core")]
 pub mod native_compact_finesse_language;
 mod objective_incomplete_reason;
@@ -35,6 +36,10 @@ pub(crate) use execution_variant_set::ExecutionVariantSet;
 
 use clearra_core_ffi::{CBuildUpEvent, CBuildUpState, CResultReducerCounts};
 
+pub use crate::backend::{
+    CompactBuildUpEdge, CompactBuildUpNode, CompactBuildUpSnapshot, CompactBuildUpSnapshotError,
+    CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
+};
 pub use buildup_candidate_acceptance::BuildUpCandidateAcceptance;
 pub use buildup_error::BuildUpRunnerError;
 pub use buildup_execution_mode::BuildUpExecutionMode;

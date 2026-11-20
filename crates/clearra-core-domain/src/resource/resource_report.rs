@@ -1,4 +1,4 @@
-use super::{ExecutionAvailability, ResourceTruncationReason};
+use super::{ExecutionAvailability, ExecutionAvailabilityState, ResourceTruncationReason};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResourceReport {
@@ -91,6 +91,24 @@ impl ResourceReport {
         self.result_complete = false;
         self.probability_complete = false;
     }
+
+    /// Folds a required stage or worker's terminal evidence without merging
+    /// resource counters. The caller owns whether peaks overlap or are sequential.
+    pub fn merge_completion_from(&mut self, source: &Self) {
+        self.result_complete &= source.result_complete;
+        self.probability_complete &= source.probability_complete;
+        if source.truncated {
+            match source.truncation_reason {
+                Some(reason) => self.mark_truncated(reason),
+                None => self.mark_truncated_unknown(),
+            }
+        }
+        if self.execution_availability.state() == ExecutionAvailabilityState::Available
+            && source.execution_availability.state() != ExecutionAvailabilityState::Available
+        {
+            self.execution_availability = source.execution_availability;
+        }
+    }
 }
 impl ResourceReport {
     pub fn observe_frontier_states(&mut self, value: usize) {
@@ -167,7 +185,7 @@ mod tests {
 
     #[test]
     fn typed_execution_exhaustion_preserves_started_but_not_complete() {
-        use super::super::{ExecutionAvailabilityReason, ExecutionAvailabilityState};
+        use super::super::ExecutionAvailabilityReason;
         let report = ResourceReport::execution_incomplete(ExecutionAvailability::exhausted(
             ExecutionAvailabilityReason::ComputeBudgetExceeded,
         ));
@@ -181,6 +199,37 @@ mod tests {
         assert_eq!(
             report.execution_availability().reason(),
             Some(ExecutionAvailabilityReason::ComputeBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn merging_a_required_stage_cannot_hide_unknown_truncation_or_typed_stop() {
+        let mut report = ResourceReport::complete();
+        let mut stage = ResourceReport::complete();
+        stage.mark_truncated_unknown();
+        report.merge_completion_from(&stage);
+        report.merge_completion_from(&ResourceReport::complete());
+
+        assert!(report.execution_started());
+        assert!(!report.result_complete());
+        assert!(!report.probability_complete);
+        assert!(report.truncated);
+        assert_eq!(report.truncation_reason, None);
+
+        let mut cancelled =
+            ResourceReport::execution_incomplete(ExecutionAvailability::cancelled());
+        cancelled.mark_truncated(ResourceTruncationReason::Cancelled);
+        report.merge_completion_from(&cancelled);
+        report.merge_completion_from(&ResourceReport::complete());
+
+        assert!(!report.result_complete());
+        assert_eq!(
+            report.execution_availability(),
+            ExecutionAvailability::cancelled()
+        );
+        assert_eq!(
+            report.truncation_reason,
+            Some(ResourceTruncationReason::Cancelled)
         );
     }
 }

@@ -529,6 +529,15 @@ impl RunnableAppCommand for ScenarioAppCommand {
 pub(crate) struct FullHeightScenarioInputReplay(Arc<PcScenarioQuery>);
 
 impl FullHeightScenarioInputReplay {
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub(crate) fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        // The Arc pointer is already in the App carrier; include its
+        // pointee, the reference counts and the original query's heap.
+        (core::mem::size_of::<PcScenarioQuery>() as u128)
+            .checked_add(core::mem::size_of::<[usize; 2]>() as u128)?
+            .checked_add(self.0.checked_retained_capacity_bytes()?)
+    }
+
     pub(crate) fn prepare(query: &Arc<PcScenarioQuery>, problem: &SearchProblem) -> Option<Self> {
         (query.initial_board().has_extended_occupancy()
             && problem.visible_height() > 6

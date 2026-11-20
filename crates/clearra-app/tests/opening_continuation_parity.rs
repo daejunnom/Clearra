@@ -81,7 +81,8 @@ fn fixed_no_hold_opening_continuation_matches_native_pc2_and_solves_the_suffix()
 
     #[cfg(feature = "native-c-core")]
     {
-        let native = AppContext::default().run(request("IIOOOIIOOO", PcHoldPolicy::Disabled));
+        let native =
+            AppContext::native_c_reference().run(request("IIOOOIIOOO", PcHoldPolicy::Disabled));
         let native = pc_result(&native);
         for key in [
             "remaining_queue_len",
@@ -132,7 +133,7 @@ fn fixed_no_hold_opening_continuation_matches_native_pc2_and_solves_the_suffix()
 
     #[cfg(feature = "native-c-core")]
     {
-        let native = AppContext::default().run(continuation_request());
+        let native = AppContext::native_c_reference().run(continuation_request());
         assert_eq!(native.status(), AppStatus::Success, "{native:?}");
         let Some(AppRenderModel::Continue(native)) = native.render_model() else {
             panic!("native continuation response");
@@ -164,8 +165,10 @@ fn fixed_no_hold_opening_continuation_omits_unproven_handoffs() {
     assert_eq!(no_witness.bool_field("solution_found"), Some(false));
     assert_eq!(no_witness.field("continuation_token"), None);
 
-    let hold = rust.run(request("IIOOOIIOOO", PcHoldPolicy::EnabledEmpty));
-    assert_eq!(pc_result(&hold).field("continuation_token"), None);
+    let mismatched_target = rust.run(request("IIOOOIIOOOIIOOO", PcHoldPolicy::Disabled));
+    let mismatched_target = pc_result(&mismatched_target);
+    assert_eq!(mismatched_target.bool_field("solution_found"), Some(true));
+    assert_eq!(mismatched_target.field("continuation_token"), None);
 }
 
 fn complete_cooperatively(context: &AppContext, request: AppRequest) -> AppResponse {
@@ -179,6 +182,92 @@ fn complete_cooperatively(context: &AppContext, request: AppRequest) -> AppRespo
         }
     }
     panic!("bounded cooperative Opening fixture did not finish")
+}
+
+#[test]
+fn fixed_opening_continuation_preserves_four_and_six_line_targets() {
+    use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+
+    let _execution = lock_fixture_execution();
+    let rust = rust_context();
+    for (target, placements, target_label) in [
+        (PcTarget::four_lines(), 10, "4L"),
+        (PcTarget::six_lines(), 15, "6L"),
+    ] {
+        // A grid of O placements admits exactly one colored tiling without
+        // making this contract test an unbounded 6L search fixture.
+        let queue = "O".repeat(placements * 2);
+        let query = OpeningPcSearchQuery::new(target)
+            .with_queue(PcQueueInput::fixed_sequence(
+                parse_fixed_sequence(&queue).unwrap(),
+            ))
+            .with_hold_policy(PcHoldPolicy::Disabled)
+            .with_objective(ObjectivePolicy::unique())
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_execution_policy(
+                PcExecutionPolicy::mvp_default()
+                    .with_workers(1)
+                    .with_allow_backend_fallback(false),
+            );
+        let request = AppRequest::new(AppCommand::Pc(PcAppCommand::new(query)));
+        let direct = rust.run(request.clone());
+        let cooperative = complete_cooperatively(&rust, request);
+        let direct = pc_result(&direct);
+        let cooperative = pc_result(&cooperative);
+        assert_eq!(direct.bool_field("solution_found"), Some(true));
+        assert_eq!(direct.path_steps().len(), placements);
+        assert_eq!(direct.field("next_pc_candidate"), Some(target_label));
+        let token = direct.field("continuation_token").expect("witnessed pc2");
+        assert_eq!(cooperative.field("continuation_token"), Some(token));
+        assert_eq!(
+            cooperative.field("normalized_solution_set_hash"),
+            direct.field("normalized_solution_set_hash")
+        );
+        let PcContinuationToken::Opening(decoded) = PcContinuationTokenCodec::parse(token).unwrap()
+        else {
+            panic!("must publish a same-target opening");
+        };
+        assert_eq!(decoded.target(), target);
+        assert_eq!(decoded.count_policy(), PcCountPolicy::CountUnique);
+        assert_eq!(decoded.hold_policy(), PcHoldPolicy::Disabled);
+        assert_eq!(
+            decoded.queue().as_fixed_sequence().unwrap().len(),
+            placements
+        );
+    }
+}
+
+#[test]
+fn fixed_opening_continuation_keeps_the_reached_hold_and_exact_suffix() {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+
+    let _execution = lock_fixture_execution();
+    let rust = rust_context();
+    // A lone T has nonzero checkerboard imbalance, but the other available
+    // I and O pieces do not. The first move must store T, consume the next I
+    // and leave T held at the first empty-field checkpoint.
+    let source = request("TIIOOOIIOOO", PcHoldPolicy::EnabledEmpty);
+    let direct = rust.run(source.clone());
+    let cooperative = complete_cooperatively(&rust, source);
+    let direct = pc_result(&direct);
+    let cooperative = pc_result(&cooperative);
+    assert_eq!(direct.bool_field("solution_found"), Some(true));
+    assert_eq!(direct.path_steps()[0].hold(), "store-current-use-next");
+    assert_eq!(direct.field("remaining_hold"), Some("T"));
+    let token = direct.field("continuation_token").expect("witnessed pc2");
+    assert_eq!(cooperative.field("continuation_token"), Some(token));
+    let PcContinuationToken::Opening(decoded) = PcContinuationTokenCodec::parse(token).unwrap()
+    else {
+        panic!("must publish opening continuation");
+    };
+    assert_eq!(
+        decoded.hold_policy(),
+        PcHoldPolicy::EnabledWithPiece(PieceKind::T)
+    );
+    assert_eq!(
+        decoded.queue().as_fixed_sequence().unwrap(),
+        &parse_fixed_sequence("IIOOO").unwrap()
+    );
 }
 
 #[test]
@@ -258,4 +347,182 @@ fn fixed_no_hold_opening_continuation_is_not_published_after_cooperative_cancell
         }
     }
     panic!("cooperative Opening did not reach the cancellation boundary")
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn compact_continue_families_run_cooperatively_and_preserve_their_restart_state() {
+    use std::{env, process::Command, sync::Arc};
+
+    use clearra_core_domain::{
+        execution_cancellation::{
+            ExecutionCancellationHandle, ExecutionCancellationToken, ExecutionProgress,
+            ProgressSink,
+        },
+        piece::piece_kind::PieceKind,
+    };
+    use clearra_pc_graph::request::{PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    // Tokens do not encode workers. Do not modify the parallel test runner's
+    // global capacity to qualify these single-worker cooperative boundaries.
+    const TEST: &str =
+        "compact_continue_families_run_cooperatively_and_preserve_their_restart_state";
+    const CHILD: &str = "CLEARRA_TEST_COMPACT_CONTINUE_CHILD";
+    if env::var_os(CHILD).is_none() {
+        let output = Command::new(env::current_exe().expect("current test executable"))
+            .args(["--exact", TEST])
+            .env(CHILD, "1")
+            .env("CLEARRA_EXPECTED_VCPUS", "1")
+            .output()
+            .expect("run isolated one-worker compact Continue");
+        assert!(
+            output.status.success(),
+            "compact Continue failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    assert_eq!(PcExecutionPolicy::mvp_default().workers(), 1);
+
+    struct CancelAtPublication(ExecutionCancellationHandle);
+    impl ProgressSink for CancelAtPublication {
+        fn report(&self, progress: ExecutionProgress) {
+            if progress.stage == "postprocess" && progress.completed == 1 {
+                self.0.cancel();
+            }
+        }
+    }
+
+    let scenario = |board, pieces: &[PieceKind], count| {
+        PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, board),
+            PcQueueInput::fixed_sequence(FixedSequence::new(pieces.to_vec())),
+            PieceWindow::new(count),
+        )
+        .with_exact_pieces(Some(count))
+        .with_allow_hold(false)
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_retained_trace_limit(1)
+    };
+    // After O closes the holes in the first row, its two upper cells
+    // become the 0x3 row of the accepted checkpoint. The checkpoint starts
+    // with two I pieces, while replay must redo the O lock first.
+    let replay_query = scenario(0x3fc, &[PieceKind::O, PieceKind::I, PieceKind::I], 3);
+    let checkpoint_query = scenario(0x3, &[PieceKind::I, PieceKind::I], 2);
+    let queue = parse_fixed_sequence("IIOOOIIOOO").unwrap();
+    let opening = OpeningPcSearchQuery::new(PcTarget::two_lines())
+        .with_hold_policy(PcHoldPolicy::Disabled)
+        .with_count_policy(PcCountPolicy::CountAll);
+    let tokens = [
+        (
+            PcContinuationTokenCodec::encode_opening_continuation(&opening, None, queue.pieces()),
+            "opening",
+            "continued-searched",
+        ),
+        (
+            PcContinuationTokenCodec::encode_scenario_replay(&replay_query).unwrap(),
+            "scenario-replay",
+            "scenario-replayed-searched",
+        ),
+        (
+            PcContinuationTokenCodec::encode_scenario_continuation(&checkpoint_query).unwrap(),
+            "scenario",
+            "scenario-continued-searched",
+        ),
+    ];
+    let rust = rust_context();
+    let mut scenario_families = Vec::new();
+    for (token, expected_kind, expected_status) in tokens {
+        let request = AppRequest::new(AppCommand::Continue(ContinueAppCommand::new(Some(
+            token.clone(),
+        ))));
+        let direct = rust.run(request.clone());
+        let cooperative = {
+            let mut execution = rust.start_cooperative_execution(request.clone());
+            let control = ExecutionControl::default();
+            assert!(
+                matches!(
+                    execution.advance(1, &control),
+                    CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress
+                ),
+                "{expected_kind} did not yield"
+            );
+            (0..4096)
+                .find_map(|_| match execution.advance(64, &control) {
+                    CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => None,
+                    CooperativeAppAdvance::Completed(response) => Some(response),
+                    other => panic!("unexpected {expected_kind}: {other:?}"),
+                })
+                .expect("bounded cooperative Continue")
+        };
+        assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
+        assert_eq!(cooperative.status(), AppStatus::Success, "{cooperative:?}");
+        let (Some(AppRenderModel::Continue(direct)), Some(AppRenderModel::Continue(cooperative))) =
+            (direct.render_model(), cooperative.render_model())
+        else {
+            panic!("{expected_kind} must preserve the Continue model");
+        };
+        let value = |message: &clearra_app::AppMessage, key: &str| {
+            message
+                .fields()
+                .iter()
+                .find(|field| field.key() == key)
+                .map(|field| field.value().as_text())
+        };
+        for (key, expected) in [
+            ("status", expected_status),
+            ("continuation_kind", expected_kind),
+            ("input_continuation_token", token.as_str()),
+            ("solution_found", "true"),
+            ("count_complete", "true"),
+        ] {
+            assert_eq!(value(direct, key).as_deref(), Some(expected), "{key}");
+            assert_eq!(value(cooperative, key).as_deref(), Some(expected), "{key}");
+        }
+        for key in [
+            "normalized_solution_set_hash",
+            "covered_pattern_count",
+            "build_variant_count",
+        ] {
+            assert!(
+                value(direct, key).is_some(),
+                "{expected_kind}: missing {key}"
+            );
+            assert_eq!(value(direct, key), value(cooperative, key), "{key}");
+        }
+        if expected_kind == "opening" {
+            let next = value(cooperative, "continuation_token").expect("eligible pc2");
+            assert_eq!(Some(next.clone()), value(direct, "continuation_token"));
+            let PcContinuationToken::Opening(decoded) =
+                PcContinuationTokenCodec::parse(&next).unwrap()
+            else {
+                panic!("opening continuation must preserve the accepted suffix");
+            };
+            assert_eq!(
+                decoded.queue().as_fixed_sequence().unwrap(),
+                &parse_fixed_sequence("IIOOO").unwrap()
+            );
+        } else {
+            scenario_families.push(value(cooperative, "normalized_solution_set_hash"));
+        }
+
+        let new_control = || {
+            let cancellation = ExecutionCancellationToken::new();
+            let handle = cancellation.handle();
+            ExecutionControl::new(cancellation)
+                .with_progress_sink(Arc::new(CancelAtPublication(handle)))
+        };
+        let cancelled = rust.run_with_execution_control(request.clone(), &new_control());
+        assert!(cancelled.render_model().is_none(), "{cancelled:?}");
+        let mut execution = rust.start_cooperative_execution(request);
+        let control = new_control();
+        assert!((0..4096).any(|_| match execution.advance(64, &control) {
+            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => false,
+            CooperativeAppAdvance::Cancelled => true,
+            other => panic!("cancelled {expected_kind} published: {other:?}"),
+        }));
+    }
+    assert_ne!(scenario_families[0], scenario_families[1]);
 }

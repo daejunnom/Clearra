@@ -13,6 +13,8 @@ use clearra_core_domain::{
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::SearchProblem;
 
+use crate::performance::{profile_sample_scale, ExecutorSearchStage, SearchStageSpan};
+
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::result::{capture_candidate_solution_coverage, SolutionCoverageCapture};
 use super::{
@@ -120,6 +122,7 @@ pub(super) struct BranchSearchOutcome {
     pub geometry: GeometrySearch,
     pub candidate_count: usize,
     pub candidate_digest: CandidateDigestEvidence,
+    pub failed_queue_rows: Vec<(usize, PatternBitSet)>,
     pub truncated_reason: Option<&'static str>,
 }
 
@@ -672,7 +675,17 @@ pub(super) fn run_branch_worker(
             .solution_coverage
             .values()
             .map(PatternBitSet::retained_bytes)
-            .sum(),
+            .sum::<usize>()
+            .saturating_add(outcomes.iter().fold(0usize, |bytes, branch| {
+                let rows = &branch.failed_queue_rows;
+                let backing = rows
+                    .capacity()
+                    .saturating_mul(core::mem::size_of::<(usize, PatternBitSet)>());
+                rows.iter()
+                    .fold(bytes.saturating_add(backing), |total, (_, bits)| {
+                        total.saturating_add(bits.retained_bytes())
+                    })
+            })),
         candidate_digest_bytes: aggregate.candidate_digest_retained_bytes,
         standard_bag_memo_payload_bytes: workspace.standard_bag_memo_retained_payload_bytes(),
         standard_bag_memo: workspace.standard_bag_memo_accounting(),
@@ -731,6 +744,14 @@ fn run_branch(
     );
     let mut local_ordinal = 0usize;
     let mut truncated_reason = None;
+    let retain_failed_queue_rows = problem
+        .pc_chance_evidence_policy()
+        .pc_failed_queue_example_limit()
+        .is_some();
+    let mut failed_queue_rows = Vec::new();
+    let solution_coverage_required = retains_solution_coverage_evidence(problem);
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    let mut geometry_advance_calls = 0_usize;
     loop {
         if control.is_cancelled() {
             queue.abort();
@@ -741,7 +762,20 @@ fn run_branch(
                 "wasm_parallel_branch_queue_aborted",
             ));
         }
-        match search.advance(catalog) {
+        #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+        let geometry_profile_scale = {
+            geometry_advance_calls = geometry_advance_calls.saturating_add(1);
+            profile_sample_scale(geometry_advance_calls)
+        };
+        #[cfg(not(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")))]
+        let geometry_profile_scale = 0;
+        let geometry_span = SearchStageSpan::begin_scaled(
+            ExecutorSearchStage::WasmGeometryAdvance,
+            geometry_profile_scale,
+        );
+        let advancement = search.advance(catalog);
+        geometry_span.finish(1);
+        match advancement {
             GeometryAdvance::Pending => {}
             GeometryAdvance::Complete => break,
             GeometryAdvance::ResourceIncomplete(reason) => {
@@ -765,12 +799,11 @@ fn run_branch(
                         "wasm_geometry_candidate_target_out_of_range",
                     ),
                 )?;
-                let solution_coverage_required = retains_solution_coverage_evidence(problem);
+                let exact_candidate_coverage =
+                    solution_coverage_required || retain_failed_queue_rows;
                 #[cfg(any(test, feature = "local-search-ab"))]
                 let exact_candidate_coverage =
-                    solution_coverage_required || solution_coverage_capture.is_some();
-                #[cfg(not(any(test, feature = "local-search-ab")))]
-                let exact_candidate_coverage = solution_coverage_required;
+                    exact_candidate_coverage || solution_coverage_capture.is_some();
                 let witness_mode = CandidateWitnessMode::for_candidate(
                     problem,
                     target,
@@ -780,7 +813,7 @@ fn run_branch(
                     },
                     exact_candidate_coverage,
                 );
-                let result = verify_candidate(
+                let mut result = verify_candidate(
                     problem,
                     catalog,
                     &candidate,
@@ -789,7 +822,7 @@ fn run_branch(
                     evaluator,
                     witness_mode,
                     false,
-                    0,
+                    profile_sample_scale(local_ordinal.saturating_add(1)),
                     control,
                 )?;
                 let mut solution_coverage = None;
@@ -809,9 +842,25 @@ fn run_branch(
                     }
                 }
                 if let Some(root) = result.symbolic_coverage_root {
-                    if solution_coverage_required {
+                    if solution_coverage_required || retain_failed_queue_rows {
                         let materialized = workspace.materialize_standard_bag_root(root)?;
-                        if let Some(solution_coverage) = solution_coverage.as_mut() {
+                        if retain_failed_queue_rows {
+                            // Concrete and symbolic results are disjoint; a
+                            // second row for one candidate is not valid proof.
+                            if result.covered_patterns.is_some() {
+                                return Err(WasmExactSearchError::InvalidProblem(
+                                    "wasm_parallel_failed_queue_candidate_row_ambiguous",
+                                ));
+                            }
+                            if solution_coverage_required {
+                                solution_coverage = Some(materialized.clone());
+                            }
+                            record_failed_queue_branch_row(
+                                &mut failed_queue_rows,
+                                local_ordinal,
+                                materialized,
+                            )?;
+                        } else if let Some(solution_coverage) = solution_coverage.as_mut() {
                             solution_coverage.union_with(&materialized).map_err(|_| {
                                 WasmExactSearchError::InvalidProblem(
                                     "wasm_parallel_solution_coverage_universe_mismatch",
@@ -822,6 +871,22 @@ fn run_branch(
                         }
                     }
                     workspace.merge_standard_bag_coverage(root)?;
+                }
+                if retain_failed_queue_rows {
+                    if let Some(coverage) = result.covered_patterns.take() {
+                        // Account the row and covered ordinals exactly as
+                        // WorkerAggregate::observe would, then move the bits.
+                        aggregate.coverage_row_count =
+                            aggregate.coverage_row_count.saturating_add(1);
+                        aggregate.pattern_verified_execution_count = aggregate
+                            .pattern_verified_execution_count
+                            .saturating_add(coverage.count_ones() as usize);
+                        record_failed_queue_branch_row(
+                            &mut failed_queue_rows,
+                            local_ordinal,
+                            coverage,
+                        )?;
+                    }
                 }
                 aggregate.observe(
                     task.canonical_index,
@@ -842,10 +907,23 @@ fn run_branch(
             geometry: search,
             candidate_count: local_ordinal,
             candidate_digest,
+            failed_queue_rows,
             truncated_reason,
         },
         local_ordinal,
     ))
+}
+
+fn record_failed_queue_branch_row(
+    rows: &mut Vec<(usize, PatternBitSet)>,
+    local_ordinal: usize,
+    coverage: PatternBitSet,
+) -> Result<(), WasmExactSearchError> {
+    rows.try_reserve(1).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_parallel_failed_queue_row_storage_unavailable")
+    })?;
+    rows.push((local_ordinal, coverage));
+    Ok(())
 }
 
 fn retains_solution_coverage_evidence(problem: &SearchProblem) -> bool {

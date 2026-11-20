@@ -31,6 +31,7 @@ use crate::{
     args::{ArtifactArgs, ArtifactCountMode, ArtifactRule},
     scenario::ArtifactScenarioSpec,
     sfinder_reference::{SfinderReference, SfinderReferenceReport},
+    EXECUTION_ENGINE,
 };
 
 pub struct ArtifactOutcome {
@@ -44,6 +45,7 @@ pub struct ArtifactOutcome {
 #[derive(Serialize)]
 struct ArtifactSummary {
     schema_version: u32,
+    execution_engine: &'static str,
     scenario: String,
     rule_profile: String,
     count_mode: String,
@@ -490,6 +492,7 @@ pub fn run_and_write(args: ArtifactArgs) -> Result<ArtifactOutcome, String> {
     let memory = packing.memory_report();
     let summary = ArtifactSummary {
         schema_version: 2,
+        execution_engine: EXECUTION_ENGINE,
         scenario: scenario.id.to_owned(),
         rule_profile: args.rule.as_str().to_owned(),
         count_mode: scenario.count_mode.as_str().to_owned(),

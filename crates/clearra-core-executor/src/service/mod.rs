@@ -11,6 +11,7 @@ mod pc_service_tests;
 pub mod pc_summary_builder;
 mod pc_tiling_materialization;
 pub mod percent_service;
+pub(crate) mod rust_legacy_cover;
 
 pub use cover_service::{CoverService, CoverServiceError};
 pub use pc_service::{PcService, PcServiceError};

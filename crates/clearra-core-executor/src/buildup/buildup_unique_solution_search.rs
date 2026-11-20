@@ -72,6 +72,7 @@ pub(crate) fn c_buildup_unique_solution_results(
         count_complete: candidate_batch.count_complete,
         count_truncated_reason: candidate_batch.count_truncated_reason,
         peak_workspace_bytes: candidate_batch.peak_workspace_bytes,
+        participating_workers: candidate_batch.participating_workers,
     })
 }
 
@@ -88,6 +89,7 @@ struct UniqueCandidateBatch {
     count_complete: bool,
     count_truncated_reason: &'static str,
     peak_workspace_bytes: usize,
+    participating_workers: usize,
 }
 
 struct UniqueWorkerChunk {
@@ -163,6 +165,7 @@ fn execute_candidates(
             count_complete,
             count_truncated_reason,
             peak_workspace_bytes: workspace.retained_bytes(),
+            participating_workers: usize::from(candidate_count != 0),
         });
     }
 
@@ -253,7 +256,9 @@ fn execute_candidates(
     let mut count_complete = true;
     let mut count_truncated_reason = "none";
     let mut peak_workspace_bytes = 0usize;
+    let mut participating_workers = 0;
     for batch in worker_batches {
+        participating_workers += usize::from(!batch.chunks.is_empty());
         chunks.extend(batch.chunks);
         if !batch.count_complete {
             count_complete = false;
@@ -272,6 +277,7 @@ fn execute_candidates(
         count_complete,
         count_truncated_reason,
         peak_workspace_bytes,
+        participating_workers,
     })
 }
 

@@ -857,10 +857,12 @@ fn emit_partial_result(
         checked_put_u8(output, u8::from(coverage.complete()))?;
     }
     let typed_chance_evidence = result.pc_chance_coverage_evidence().filter(|evidence| {
-        evidence
-            .problem()
-            .pc_chance_evidence_policy()
-            .retains_pc_probability_v2_evidence()
+        let policy = evidence.problem().pc_chance_evidence_policy();
+        policy.retains_pc_probability_v2_evidence()
+            || policy.pc_failed_queue_example_limit().is_some()
+                && result
+                    .unique_field("compact_failed_queue_worker_commitment")
+                    .is_some()
     });
     let transported_chance_rows = result.distributed_pc_chance_coverage_rows();
     if typed_chance_evidence.is_some() && transported_chance_rows.is_some() {

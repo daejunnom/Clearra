@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
-use clearra_core_executor::service::pc_continuation_fields::attach_exact_fixed_no_hold_2l_opening_continuation;
+use clearra_core_executor::service::pc_continuation_fields::attach_exact_fixed_opening_continuation;
 use clearra_pc_graph::request::OpeningPcSearchQuery;
 use clearra_problem::ProblemCompiler;
 use clearra_validation::validators::pc_query_validator::validate_opening_pc_search_query;
@@ -437,7 +437,7 @@ impl RunnableAppCommand for PcAppCommand {
                         .core_executor()
                         .supports_cooperative_wasm_search()
                 {
-                    attach_exact_fixed_no_hold_2l_opening_continuation(&problem, result)
+                    attach_exact_fixed_opening_continuation(&problem, result)
                 } else {
                     result
                 };

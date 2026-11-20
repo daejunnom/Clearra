@@ -131,7 +131,36 @@ pub struct PackingBackendOutcome {
     pub workers_used: usize,
     pub geometry_catalog: Option<NativeGeometryCatalog>,
     pub pruning_ledger: Option<NativePruningLedger>,
+    pub(crate) native_cpu_workers: Option<NativeCpuPackingWorkers>,
     candidate_provenance: PackingCandidateProvenance,
+}
+
+/// Counts from the executing C adapter, not requested widths or timestamps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeCpuPackingWorkers {
+    RawGeometrySerial,
+    BuildableDag { candidate_workers: usize },
+}
+
+impl NativeCpuPackingWorkers {
+    /// Multiset groups run serially with fresh worker owners. Keep the
+    /// greatest per-group participation, never sum unrelated worker lifetimes.
+    pub(crate) fn merge_sequential(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (Self::RawGeometrySerial, Self::RawGeometrySerial) => Some(Self::RawGeometrySerial),
+            (
+                Self::BuildableDag {
+                    candidate_workers: left,
+                },
+                Self::BuildableDag {
+                    candidate_workers: right,
+                },
+            ) => Some(Self::BuildableDag {
+                candidate_workers: left.max(right),
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl PackingBackendOutcome {
@@ -184,6 +213,7 @@ impl PackingBackendOutcome {
             workers_used: 1,
             geometry_catalog: None,
             pruning_ledger: None,
+            native_cpu_workers: None,
             candidate_provenance,
         }
     }
@@ -194,6 +224,12 @@ impl PackingBackendOutcome {
 
     pub fn with_workers_used(mut self, workers_used: usize) -> Self {
         self.workers_used = workers_used.max(1);
+        self
+    }
+
+    #[cfg(feature = "native-c-core")]
+    pub(crate) fn with_native_cpu_workers(mut self, workers: NativeCpuPackingWorkers) -> Self {
+        self.native_cpu_workers = Some(workers);
         self
     }
 

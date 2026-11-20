@@ -31,14 +31,14 @@ use clearra_rules::profile::rule_capability::RuleCapability;
 use clearra_supply::pattern_universe::{PackingPatternMembershipKind, PieceMultisetKey};
 
 #[path = "compact_pc_failed_queue.rs"]
-mod compact_pc_failed_queue;
+pub(super) mod compact_pc_failed_queue;
 pub use compact_pc_failed_queue::WasmCompactPcFailedQueueSession;
 
 use crate::{
     pc_chance_coverage_evidence::{
         strict_coverage_pattern_bitset_from_words, PcChanceCoverageEvidence, PcScoreProblemEvidence,
     },
-    performance::{ExecutorSearchStage, SearchStageSpan},
+    performance::{profile_sample_scale, ExecutorSearchStage, SearchStageSpan},
     resource::{
         admit_budget_bound_search_execution,
         admit_budget_bound_search_execution_under_terminal_authority, admit_search_execution,
@@ -523,18 +523,6 @@ fn exact_distributed_worker_scalar_evidence(
     })
 }
 
-#[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
-#[inline]
-const fn profile_sample_scale(ordinal: usize) -> u64 {
-    if ordinal <= 4_096 {
-        1
-    } else if ordinal & 1_023 == 0 {
-        1_024
-    } else {
-        0
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 struct TilingIdentityEntry {
     bucket_hash: u64,
@@ -882,6 +870,7 @@ pub(crate) struct WasmExactSearchSession {
     solution_coverage_bytes: usize,
     packing_candidate_count: usize,
     packing_candidate_digest: u64,
+    compact_failed_queue_worker_commitment: u64,
     order_independent_candidate_digest: bool,
     coverage_row_count: usize,
     pattern_verified_execution_count: usize,
@@ -1752,6 +1741,7 @@ impl WasmExactSearchSession {
             solution_coverage_bytes: 0,
             packing_candidate_count: 0,
             packing_candidate_digest: 0,
+            compact_failed_queue_worker_commitment: 0,
             order_independent_candidate_digest,
             coverage_row_count: 0,
             pattern_verified_execution_count: 0,
@@ -2038,7 +2028,15 @@ impl WasmExactSearchSession {
                 WasmExactSearchError::InvalidProblem("wasm_parallel_coverage_universe_mismatch")
             })?;
         if self.problem.objective().kind() != ObjectiveKind::Tiling {
-            self.coverage_rows_complete &= canonical_minimum_source_complete;
+            let failed_queue_rows = self
+                .problem
+                .pc_chance_evidence_policy()
+                .pc_failed_queue_example_limit()
+                .is_some();
+            if failed_queue_rows {
+                self.coverage_rows = std::mem::take(&mut outcome.failed_queue_rows);
+            }
+            self.coverage_rows_complete &= canonical_minimum_source_complete || failed_queue_rows;
         }
         // Native family workers retain complete per-solution rows, not the
         // serial verifier's raw candidate row log. Reuse the same validated
@@ -2381,11 +2379,23 @@ impl WasmExactSearchSession {
         }
         Ok(match self.geometry.advance(&self.catalog) {
             GeometryAdvance::Pending => DistributedGeometryAdvance::Pending,
-            GeometryAdvance::Candidate(candidate) => DistributedGeometryAdvance::Candidate {
-                target_index: candidate.target_index,
-                row_ids: candidate.row_ids().to_vec(),
-                identity_hash: candidate.identity.bucket_hash(),
-            },
+            GeometryAdvance::Candidate(candidate) => {
+                if self
+                    .problem
+                    .pc_chance_evidence_policy()
+                    .pc_failed_queue_example_limit()
+                    .is_some()
+                    && !self.problem.allows_solution_identity(&candidate.identity)
+                {
+                    DistributedGeometryAdvance::Pending
+                } else {
+                    DistributedGeometryAdvance::Candidate {
+                        target_index: candidate.target_index,
+                        row_ids: candidate.row_ids().to_vec(),
+                        identity_hash: candidate.identity.bucket_hash(),
+                    }
+                }
+            }
             GeometryAdvance::Complete => DistributedGeometryAdvance::Complete,
             GeometryAdvance::ResourceIncomplete(reason) => {
                 DistributedGeometryAdvance::ResourceIncomplete(reason)
@@ -3249,10 +3259,7 @@ impl WasmExactSearchSession {
         if self.problem.objective().kind() == ObjectiveKind::Tiling {
             return self.observe_tiling_candidate(candidate, candidate_ordinal);
         }
-        #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
         let profile_scale = profile_sample_scale(self.packing_candidate_count);
-        #[cfg(not(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")))]
-        let profile_scale = 0;
         let target = self.geometry.target(candidate.target_index).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_geometry_candidate_target_out_of_range"),
         )?;
@@ -3269,6 +3276,16 @@ impl WasmExactSearchSession {
             .pc_chance_evidence_policy()
             .pc_failed_queue_example_limit()
             .is_some();
+        if failed_queue_rows {
+            if let Some(ordinal) = external_ordinal {
+                self.compact_failed_queue_worker_commitment =
+                    compact_pc_failed_queue::mix_candidate_commitment(
+                        self.compact_failed_queue_worker_commitment,
+                        ordinal,
+                        candidate.identity.bucket_hash(),
+                    );
+            }
+        }
         let exact_candidate_coverage = solution_coverage_required || failed_queue_rows;
         #[cfg(any(test, feature = "local-search-ab"))]
         let exact_candidate_coverage =
@@ -3739,7 +3756,9 @@ impl WasmExactSearchSession {
         let distributed_minimum_cover = evidence_policy == PcChanceEvidencePolicy::PcMinimumCoverV2;
         if distributed_minimum_cover {
             self.absorb_distributed_minimum_cover_source(result, pattern_count, &coverage)?;
-        } else if evidence_policy == PcChanceEvidencePolicy::PcProbabilityV2 {
+        } else if evidence_policy == PcChanceEvidencePolicy::PcProbabilityV2
+            || evidence_policy.pc_failed_queue_example_limit().is_some()
+        {
             self.absorb_distributed_pc_chance_rows(result, pattern_count, &coverage)?;
         } else {
             self.pc_chance_coverage_evidence_available = false;
@@ -3982,6 +4001,16 @@ impl WasmExactSearchSession {
         aggregate_coverage: &PatternBitSet,
     ) -> Result<(), WasmExactSearchError> {
         let Some(transport) = result.distributed_pc_chance_coverage_rows() else {
+            if self
+                .problem
+                .pc_chance_evidence_policy()
+                .pc_failed_queue_example_limit()
+                .is_some()
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_distributed_pc_failed_queue_rows_missing",
+                ));
+            }
             self.pc_chance_coverage_evidence_available = false;
             self.coverage_rows_complete = false;
             self.coverage_rows = Vec::new();
@@ -4204,6 +4233,19 @@ impl WasmExactSearchSession {
             self.mark_truncated(reason);
         }
         self.complete()
+    }
+
+    pub(super) fn compact_failed_queue_rows_fit_candidate_count(
+        &self,
+        candidate_count: usize,
+    ) -> bool {
+        self.coverage_rows.last().is_none_or(|row| {
+            row.candidate_id() != 0
+                && usize::try_from(row.candidate_id()).is_ok_and(|id| id <= candidate_count)
+        }) && self
+            .coverage_rows
+            .first()
+            .is_none_or(|row| row.candidate_id() != 0)
     }
 
     // External geometry completion is the optional WebGPU backend's finalization seam.
@@ -5697,6 +5739,21 @@ impl WasmExactSearchSession {
             WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
         })?;
         fields.extend(field_values);
+        if !include_normalized_keys
+            && self
+                .problem
+                .pc_chance_evidence_policy()
+                .pc_failed_queue_example_limit()
+                .is_some()
+        {
+            fields.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
+            })?;
+            fields.push(field(
+                "compact_failed_queue_worker_commitment",
+                self.compact_failed_queue_worker_commitment,
+            ));
+        }
         // This snapshot exists only for the native parallel worker path. Do not
         // label distributed peak estimates or the shared asset owner as worker
         // allocations. Sampling occurs at worker exit, never in a hot loop.

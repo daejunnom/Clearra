@@ -388,7 +388,7 @@ fn single_slot_legacy_cover_runs_rust_assignment_and_proves_zero_coverage() {
 #[test]
 fn single_slot_legacy_cover_numeric_result_matches_c_reference() {
     let query = product_cover_template("basic", 1);
-    let native = run_app(AppCoreExecutorService::default(), query.clone());
+    let native = run_app(AppCoreExecutorService::native_c_reference(), query.clone());
     let rust = run_app(AppCoreExecutorService::wasm_cpu(), query);
     for key in [
         "assignment_count",
@@ -409,20 +409,24 @@ fn single_slot_legacy_cover_numeric_result_matches_c_reference() {
 }
 
 #[test]
-fn legacy_cover_does_not_claim_zero_for_unproved_or_mismatched_queries() {
+fn legacy_cover_rejects_mismatched_queries() {
     let rust = AppCoreExecutorService::wasm_cpu();
-    let five_slots = product_cover_template("area-can-fit", 5);
     let one_slot = product_cover_template("basic", 1);
     let different_template = product_cover_template("other-template", 1);
-    for (problem, query) in [
-        (compile(&five_slots), &five_slots),
-        (compile(&one_slot), &different_template),
-    ] {
-        let error = rust
-            .execute_build_coverage(&problem, query)
-            .expect_err("unsupported coverage must not appear as a completed zero result");
-        assert!(error.unsupported_reason().is_some());
-    }
+    let error = rust
+        .execute_build_coverage(&compile(&one_slot), &different_template)
+        .expect_err("a different template must not appear as a completed zero result");
+    assert!(error.unsupported_reason().is_some());
+}
+
+#[test]
+fn legacy_cover_product_admits_positive_original_observed_ordinal() {
+    let result = run_app(AppCoreExecutorService::wasm_cpu(), horizontal_i_import());
+    assert_eq!(result.coverage_pattern_words(), &[1]);
+    assert_eq!(result.usize_field("pattern_count"), Some(1));
+    assert_eq!(result.usize_field("union_covered_patterns"), Some(1));
+    assert_eq!(result.field("build_coverage_probability"), Some("1.0"));
+    assert_eq!(result.bool_field("probability_complete"), Some(true));
 }
 
 #[test]

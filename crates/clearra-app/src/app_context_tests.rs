@@ -1,5 +1,5 @@
 use clearra_core_domain::{pc::pc_target::PcTarget, piece::piece_kind::PieceKind};
-use clearra_core_executor::{native_core_runtime_available, CoreExecutionResult};
+use clearra_core_executor::CoreExecutionResult;
 use clearra_i18n::LanguageId;
 use clearra_output::model::RenderFieldValue;
 use clearra_pc_graph::request::{
@@ -9,10 +9,11 @@ use clearra_pc_graph::request::{
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 use crate::{
+    app_services::AppCoreExecutorService,
     commands::{PcAppCommand, RulesAppCommand, ScenarioAppCommand},
     io::AppFilePolicy,
-    AppCommand, AppCommandKind, AppContext, AppErrorCode, AppMessage, AppOutputPolicy,
-    AppRenderModel, AppRequest, AppResponse, AppServices, AppStatus, QueryEnvelope,
+    AppCommand, AppCommandKind, AppContext, AppMessage, AppOutputPolicy, AppRenderModel,
+    AppRequest, AppResponse, AppServices, AppStatus, QueryEnvelope,
 };
 use clearra_validation::diagnostic::diagnostic_code::DiagnosticCode;
 
@@ -66,35 +67,13 @@ mod case_app_pc_request_runs_without_cli_parser {
         let response =
             AppContext::default().run(AppRequest::new(AppCommand::Pc(PcAppCommand::new(query))));
 
-        if !native_core_runtime_available() {
-            assert_eq!(response.status(), AppStatus::Unsupported);
-            assert!(response.result().is_none());
-            assert!(response.render_model().is_none());
-            assert_eq!(
-                response.error().map(|error| error.code()),
-                Some(AppErrorCode::Unsupported)
-            );
-            assert_eq!(response.backend_report().backend_selected(), "none");
-            assert!(!response.backend_report().fallback_used());
-            assert!(!response.resource_report().solver_executed());
-            assert!(!response.resource_report().probability_complete());
-            assert!(!response
-                .diagnostics()
-                .validation()
-                .contains_code(DiagnosticCode::ENativeCoreUnavailable));
-            return;
-        }
-
         assert_eq!(response.status(), AppStatus::Success);
         let Some(AppRenderModel::Pc(result)) = response.render_model() else {
             panic!("pc render model");
         };
-        assert_eq!(result.field("route"), Some("search-problem-core-executor"));
-        assert_eq!(result.field("problem_layer"), Some("clearra-problem"));
-        assert_eq!(
-            result.field("executor_layer"),
-            Some("clearra-core-executor")
-        );
+        assert_eq!(result.field("actual_backend"), Some("wasm-cpu"));
+        assert!(result.solution_found());
+        assert_eq!(result.coverage_pattern_words(), &[1]);
     }
 }
 
@@ -104,7 +83,7 @@ mod case_app_scenario_request_runs_without_cli_parser {
     #[test]
     fn app_scenario_request_runs_without_cli_parser() {
         let query = PcScenarioQuery::new(
-            PcScenarioBoard::standard_10(2, 0x3f0),
+            PcScenarioBoard::standard_10(1, 0x3f0),
             PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
             PieceWindow::new(1),
         )
@@ -115,23 +94,14 @@ mod case_app_scenario_request_runs_without_cli_parser {
             ScenarioAppCommand::new(query),
         )));
 
-        if !native_core_runtime_available() {
-            assert_eq!(response.status(), AppStatus::Unsupported);
-            assert!(response.result().is_none());
-            assert!(response.render_model().is_none());
-            assert_eq!(response.backend_report().backend_selected(), "none");
-            assert!(!response.backend_report().fallback_used());
-            assert!(!response.resource_report().solver_executed());
-            assert!(!response.resource_report().probability_complete());
-            return;
-        }
-
         assert_eq!(response.status(), AppStatus::Success);
         let Some(AppRenderModel::Scenario(result)) = response.render_model() else {
             panic!("scenario render model");
         };
-        assert_eq!(result.field("solution_found"), Some("true"));
-        assert_eq!(result.field("total_solution_count"), Some("1"));
+        assert_eq!(result.field("actual_backend"), Some("wasm-cpu"));
+        assert!(result.solution_found());
+        assert_eq!(result.field("normalized_unique_solution_count"), Some("1"));
+        assert_eq!(result.path_steps().len(), 1);
     }
 }
 
@@ -152,17 +122,10 @@ mod case_app_response_contains_diagnostics_and_render_model {
         let valid = AppContext::default().run(AppRequest::new(AppCommand::Pc(PcAppCommand::new(
             valid_query,
         ))));
-        if native_core_runtime_available() {
-            assert_eq!(valid.status(), AppStatus::Success);
-            assert!(valid.render_model().is_some());
-            assert!(!valid.diagnostics().has_errors());
-            assert!(!valid.resource_report().truncated());
-        } else {
-            assert_eq!(valid.status(), AppStatus::Unsupported);
-            assert!(valid.result().is_none());
-            assert!(valid.render_model().is_none());
-            assert!(valid.error().is_some());
-        }
+        assert_eq!(valid.status(), AppStatus::Success);
+        assert!(valid.render_model().is_some());
+        assert!(!valid.diagnostics().has_errors());
+        assert!(!valid.resource_report().truncated());
 
         let invalid = AppContext::default().run(invalid_execution_policy_request());
         assert_eq!(invalid.status(), AppStatus::ValidationFailed);
@@ -278,7 +241,7 @@ mod case_warning_allows_execution {
     #[test]
     fn warning_allows_execution() {
         let query = PcScenarioQuery::new(
-            PcScenarioBoard::standard_10(2, 0x3f0),
+            PcScenarioBoard::standard_10(1, 0x3f0),
             PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
             PieceWindow::new(1),
         )
@@ -293,37 +256,12 @@ mod case_warning_allows_execution {
             ScenarioAppCommand::new(query),
         )));
 
-        assert_eq!(
-            response.status(),
-            if native_core_runtime_available() {
-                AppStatus::Success
-            } else {
-                AppStatus::Unsupported
-            }
-        );
-        if native_core_runtime_available() {
-            assert!(
-                !response.diagnostics().has_errors(),
-                "unexpected diagnostics: {:#?}",
-                response.diagnostics()
-            );
-        } else {
-            assert_eq!(
-                response.error().map(|error| error.code()),
-                Some(AppErrorCode::Unsupported)
-            );
-            assert!(!response
-                .diagnostics()
-                .validation()
-                .contains_code(DiagnosticCode::ENativeCoreUnavailable));
-        }
+        assert_eq!(response.status(), AppStatus::Success);
+        assert!(!response.diagnostics().has_errors());
         assert!(!response.diagnostics().validation().is_empty());
-        if native_core_runtime_available() {
-            assert!(response.render_model().is_some());
-        } else {
-            assert!(response.result().is_none());
-            assert!(response.render_model().is_none());
-        }
+        assert!(response.render_model().is_some());
+        assert!(response.backend_report().fallback_used());
+        assert_eq!(response.backend_report().backend_selected(), "wasm-cpu");
     }
 }
 
@@ -355,8 +293,8 @@ mod case_app_services_exposes_real_di_slots {
         let services = AppServices::default();
 
         assert_eq!(
-            services.core_executor().service_name(),
-            "clearra-core-executor"
+            services.core_executor(),
+            &AppCoreExecutorService::wasm_cpu()
         );
         assert_eq!(services.file_resolver().service_name(), "app-file-resolver");
         assert_eq!(

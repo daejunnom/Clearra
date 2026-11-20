@@ -2,6 +2,7 @@ use clearra_core_domain::{
     ids::setup_id::{BuildVariantId, TilingVariantId},
     piece::piece_kind::PieceKind,
 };
+use clearra_core_executor::CorePathStep;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_pc_graph::request::{
     PcCompletionGoal, PcCountPolicy, PcQueueInput, PcScenarioBoard, PieceWindow,
@@ -54,19 +55,12 @@ fn post_pc_evaluator_runs_clear_to_empty_scenario_query_from_setup_variant() {
         summary.score().score_evaluation_trace_count(),
         summary.retained_trace_count()
     );
-    if cfg!(feature = "native-c-core") {
-        assert!(summary.score().score_evaluation_complete());
-        assert_eq!(
-            summary.score().score_evaluation_basis(),
-            ScoreEvaluationBasis::AllTraces
-        );
-    } else {
-        assert!(!summary.score().score_evaluation_complete());
-        assert_eq!(
-            summary.score().score_evaluation_basis(),
-            ScoreEvaluationBasis::RetainedTraces
-        );
-    }
+    assert_eq!(summary.retained_trace_count(), 1);
+    assert!(!summary.score().score_evaluation_complete());
+    assert_eq!(
+        summary.score().score_evaluation_basis(),
+        ScoreEvaluationBasis::Sample
+    );
 }
 
 #[test]
@@ -150,4 +144,20 @@ fn post_pc_evaluator_reports_unsupported_for_unexpanded_observed_queue() {
             reason: "observed scenario queues must be expanded before post-PC evaluation"
         }
     );
+}
+
+#[test]
+fn post_pc_witness_counts_draws_including_terminal_held_release() {
+    let path = [
+        CorePathStep::new(PieceKind::I, 0, 0, 0, "store-current-use-next", 0),
+        CorePathStep::new(PieceKind::T, 0, 4, 0, "release-held-at-terminal", 1),
+    ];
+    let witness = PostPcWitness::from_retained_path(&path, 2).expect("finite witness");
+    assert_eq!(witness.placed_pieces, 2);
+    assert_eq!(witness.consumed_queue, 2);
+    assert_eq!(witness.cleared_lines, 1);
+    // A release is not a draw and cannot occur early or before finite EOF.
+    assert!(PostPcWitness::from_retained_path(&path, 3).is_none());
+    let reversed = [path[1].clone(), path[0].clone()];
+    assert!(PostPcWitness::from_retained_path(&reversed, 2).is_none());
 }

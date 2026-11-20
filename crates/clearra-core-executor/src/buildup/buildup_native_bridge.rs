@@ -54,6 +54,7 @@ pub(crate) struct CBuildUpExecution {
     pub(crate) count_complete: bool,
     pub(crate) count_truncated_reason: &'static str,
     pub(crate) peak_workspace_bytes: usize,
+    pub(crate) participating_workers: usize,
 }
 
 struct CandidateBuildUpExecution {
@@ -81,6 +82,7 @@ struct CandidateBuildUpBatch {
     results: Vec<CBuildUpResult>,
     details: Vec<CandidateBuildUpExecutionDetail>,
     peak_workspace_bytes: usize,
+    participating_workers: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -148,6 +150,7 @@ pub(crate) fn c_buildup_results(
         results,
         details,
         peak_workspace_bytes: worker_workspace_bytes,
+        participating_workers,
     } = candidate_batch;
     let mut retained_pattern_indices = HashSet::new();
     let pattern_index_bytes = pattern_indices.iter().fold(0usize, |total, index| {
@@ -207,6 +210,7 @@ pub(crate) fn c_buildup_results(
         count_complete,
         count_truncated_reason,
         peak_workspace_bytes,
+        participating_workers,
     })
 }
 
@@ -305,6 +309,7 @@ fn execute_candidates(
             peak_workspace_bytes: workspace
                 .retained_bytes()
                 .saturating_add(language_evaluator.retained_bytes()),
+            participating_workers: usize::from(candidate_count != 0),
         });
     }
 
@@ -393,9 +398,15 @@ fn execute_candidates(
         }
         Ok::<_, BuildUpRunnerError>(worker_outputs)
     })?;
-    let peak_workspace_bytes = worker_outputs.iter().fold(0usize, |total, output| {
-        total.saturating_add(output.workspace_bytes)
-    });
+    let (peak_workspace_bytes, participating_workers) =
+        worker_outputs
+            .iter()
+            .fold((0usize, 0usize), |(total, workers), output| {
+                (
+                    total.saturating_add(output.workspace_bytes),
+                    workers + usize::from(!output.chunks.is_empty()),
+                )
+            });
     let mut chunk_order = Vec::with_capacity(candidate_count.div_ceil(CANDIDATE_WORK_CHUNK_SIZE));
     let mut details = Vec::new();
     for (worker_index, output) in worker_outputs.iter_mut().enumerate() {
@@ -425,6 +436,7 @@ fn execute_candidates(
         results,
         details,
         peak_workspace_bytes,
+        participating_workers,
     })
 }
 

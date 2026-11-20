@@ -1,4 +1,4 @@
-use clearra_app::{AppCommand, AppContext, AppRequest, PercentAppCommand};
+use clearra_app::{AppCommand, AppRequest, PercentAppCommand};
 
 use crate::{
     args::PercentArgs,
@@ -17,7 +17,7 @@ impl PercentCommand {
             Err(error) => return percent_assembly_error(error),
         };
         AppResponseRenderer::render(
-            AppContext::default().run(AppRequest::new(AppCommand::Percent(
+            crate::cli_routing::product_app_context().run(AppRequest::new(AppCommand::Percent(
                 PercentAppCommand::new(assembly.query().clone())
                     .with_failed_pattern_limit(assembly.failed_pattern_limit()),
             ))),

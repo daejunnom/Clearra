@@ -377,15 +377,14 @@ fn command_requests_tablebase(command: &ParsedCliCommand) -> bool {
     }
 }
 
-fn product_app_context() -> AppContext {
-    #[cfg(feature = "wasm-cpu-runtime")]
-    {
+pub(crate) fn product_app_context() -> AppContext {
+    if cfg!(all(
+        feature = "native-c-core",
+        not(feature = "wasm-cpu-runtime")
+    )) {
+        AppContext::native_c_reference()
+    } else {
         AppContext::rust_cpu_product()
-    }
-
-    #[cfg(not(feature = "wasm-cpu-runtime"))]
-    {
-        AppContext::default()
     }
 }
 
