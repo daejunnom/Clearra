@@ -8,6 +8,7 @@ on:
       # Pre-main opt-in: only an owner-created, SHA-addressed branch can
       # request the entire proof and timing suite on one hosted runner.
       - codex/v090-relation-rust-adoption-*
+      - codex/v090-relation-rust-host-*
   workflow_dispatch:
     inputs:
       run_adoption:
@@ -48,7 +49,7 @@ jobs:
           set -eu
           cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib --no-run
           status=0
-          for filter in structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves ordered_kick_interval_requires reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_ candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move nonempty_eight_i_advanced_domain_preserves_fixture_identities same_tile_parent_reuse_requires lazy_frame_ occupied_same_kind_hold_visits; do
+          for filter in structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves ordered_kick_interval_requires reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_ candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move nonempty_eight_i_advanced_domain_preserves_fixture_identities same_tile_parent_reuse_requires lazy_frame_ occupied_same_kind_hold_visits terminal_result_moves_solution_coverage; do
             cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib "$filter" || status=1
           done
           exit "$status"
@@ -122,6 +123,12 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Test normalized ordered kicks and stable replay identifiers
         run: cargo test --locked -p clearra-rules -p clearra-finesse -p clearra-core-ffi -p clearra-pc-graph --lib --no-fail-fast
+      - name: Compare physical clear and Perfect Clear facts across scoring and B2B
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-scoring --lib clear_fact_parity
+      - name: Validate the exact Legacy assignment join independently of the C adapter
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-build-coverage --lib verified_assignment_rows_
       - name: Test Legacy Cover, full-height replay and Setup continuation ownership
         if: ${{ !cancelled() }}
         shell: bash
@@ -132,7 +139,8 @@ jobs:
           cmake --build "$out" --target clearra_core clearra_core_test_oracle --parallel 2
           export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-L native=$out"
           status=0
-          cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core --test legacy_cover_native_witness || status=1
+          cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core \
+            --test legacy_cover_native_witness --test pc_tiling_control_parity --no-fail-fast || status=1
           cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_tests || status=1
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
           cargo test --locked -p clearra-app --features native-c-core --test exact_accelerator_product_execution setup_score_reuse || status=1
@@ -140,14 +148,23 @@ jobs:
           SH
   desktop-cli-readback:
     if: >-
-      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
-      (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
+      github.repository == 'daejunnom/Clearra' &&
+      github.event_name == 'push' && github.ref_type == 'branch' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      github.run_attempt == '1' && github.event.created &&
+      !github.event.deleted && !github.event.forced &&
+      github.event.before == '0000000000000000000000000000000000000000' &&
+      github.event.after == github.sha &&
+      github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
       CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
       CLEARRA_REAL_DESKTOP_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_REAL_PC24_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_REAL_PC24_CLI: ${{ github.workspace }}/build/cargo/default/debug/clearra
     steps:
       - uses: actions/checkout@v4
         with:
@@ -160,6 +177,73 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/_local/artifacts/v081-desktop-native-smoke"
           cargo test --locked -p clearra-cli --test desktop_full_height_products --no-default-features \
             --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1
+      - uses: actions/setup-node@v4
+        if: ${{ !cancelled() }}
+        id: node
+        with:
+          node-version: 22.23.2
+      - name: Prepare the locked Discord render dependencies
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        id: ctk3
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts
+          node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
+      - name: Read back the Desktop test build's same CLI through the Discord adapter
+        if: ${{ !cancelled() && steps.ctk3.outcome == 'success' }}
+        run: |
+          test -x "$CLEARRA_REAL_PC24_CLI"
+          node --test apps/clearra-discord-bot/test/realCliFullHeightProducts.test.mjs
+  web-cpu-readback:
+    # An owner-created exact-source ref is the pre-main opt-in. Unlike the
+    # usual source CI, it builds WASM, without downloading accelerator data.
+    if: >-
+      github.repository == 'daejunnom/Clearra' &&
+      github.event_name == 'push' && github.ref_type == 'branch' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      github.run_attempt == '1' && github.event.created &&
+      !github.event.deleted && !github.event.forced &&
+      github.event.before == '0000000000000000000000000000000000000000' &&
+      github.event.after == github.sha &&
+      github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CLEARRA_BUILD_PURPOSE: experiment
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+      CLEARRA_REAL_ACCELERATOR_WASM_DIR: ${{ github.workspace }}/_local/artifacts/v081-browser-peer-smoke/wasm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Prepare only the locked CPU worker test dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Prepare the current-source native WASM toolchain
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
+          cargo build --locked --release -p clearra-manage
+          manager="$GITHUB_WORKSPACE/build/cargo/default/release/clearra-manage"
+          "$manager" storage verify --path "$CLEARRA_REAL_ACCELERATOR_WASM_DIR"
+          echo "CLEARRA_MANAGE_BIN=$manager" >> "$GITHUB_ENV"
+      - name: Install the pinned managed WASM binding tool
+        shell: pwsh
+        run: |
+          & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the ordinary exact-source product WASM once
+        run: node scripts/tools/build-clearra-wasm.mjs --destination "$CLEARRA_REAL_ACCELERATOR_WASM_DIR"
+      - name: Compare the actual Web verifier Worker with serial WASM
+        run: node scripts/tools/run-real-web-verifier-pool-smoke.mjs --without-accelerators
   p7p4-exact-handoff:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/v090-relation-rust-p7p4'
     runs-on: ubuntu-latest

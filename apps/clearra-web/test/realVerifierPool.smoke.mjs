@@ -1,5 +1,5 @@
 // SRP rationale: execute the production Web pool and verifier entrypoint with
-// actual signed assets and WASM. Node supplies isolated message transports,
+// actual WASM, optionally with signed assets. Node supplies isolated message transports,
 // not an alternate solver, browser/OPFS proof or performance instrumentation.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -9,6 +9,7 @@ import { Worker } from 'node:worker_threads';
 import { assertNoBuildLinks } from '../../../scripts/tools/clearra-build-policy.mjs';
 import { installFileArtifactSurface } from './helpers/nodeVerifierRealm.mjs';
 import { ClearraVerifierPool } from '../src/workers/ClearraVerifierPool.ts';
+import { ClearraProductJobRunner } from '../src/workers/ClearraProductJobRunner.ts';
 import { DistributedWasmJobRunner } from '../src/workers/DistributedWasmJobRunner.ts';
 import { WasmJobRunner } from '../src/workers/WasmJobRunner.ts';
 import { loadClearraWasmModule } from '../src/workers/clearraWasmRuntime.ts';
@@ -31,6 +32,7 @@ const profiles = ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick'];
 const counts = [245, 246, 289, 246, 175];
 const caps = { logicalProcessorCount: 4, webGpuAvailable: false, crossOriginIsolated: false,
   transferByteCap: 64 * 1024 * 1024, productRetentionByteCap: 128 * 1024 * 1024 };
+const withoutAccelerators = process.argv[2] === '--without-accelerators';
 const fullHeightInput = process.env.CLEARRA_REAL_FULL_HEIGHT_INPUT;
 assert.ok(fullHeightInput, 'the launcher must bind the tracked full-height input before bundling');
 assertNoBuildLinks(fullHeightInput);
@@ -38,7 +40,7 @@ assert.equal(await realpath(fullHeightInput), fullHeightInput);
 const extendedRows = (await readFile(fullHeightInput, 'utf8'))
   .split(/\r?\n/u).filter(line => line && !line.startsWith('#'));
 const wasmRoot = await realpath(process.env.CLEARRA_REAL_ACCELERATOR_WASM_DIR);
-const assetRoot = await realpath(process.env.CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR);
+const assetRoot = withoutAccelerators ? null : await realpath(process.env.CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR);
 assertNoBuildLinks(join(wasmRoot, 'clearra_wasm.manifest.json'));
 const manifest = JSON.parse(await readFile(join(wasmRoot, 'clearra_wasm.manifest.json'), 'utf8'));
 assert.match(process.env.CLEARRA_SOURCE_COMMIT ?? '', /^[0-9a-f]{40}$/u);
@@ -336,6 +338,7 @@ function command(profile, workers, legal, relation, input = 'existing') {
     (relation ? '--conditioned-reachability' : '--no-conditioned-reachability');
 }
 async function assets(profile, legal, relation) {
+  assert.notEqual(assetRoot, null, 'the signed asset matrix is not part of the asset-free mode');
   for (const kind of [0, 1]) wasm.accelerator_remove(kind, profile);
   let synopsis = null, pack = null;
   for (const [kind, enabled] of [[0, legal], [1, relation]]) {
@@ -359,7 +362,8 @@ async function assets(profile, legal, relation) {
 }
 async function distributed(text, activated, {
   cancel = false, expectedRootTasks = false, expectedFullHeight = false,
-  expectedStreamingPc = false, expectedVisibleSeven = false, projectTerminal = result
+  expectedStreamingPc = false, expectedVisibleSeven = false, expectedWorkerCount = 3,
+  projectTerminal = result
 } = {}) {
   const admissions = () => transports.reduce((sum, transport) => ({
     legal: sum.legal + transport.admitted.legal, relation: sum.relation + transport.admitted.relation
@@ -371,14 +375,14 @@ async function distributed(text, activated, {
     await runner.acquire();
     const plan = runner.prepare(text);
     assert.equal(plan.mode, 'cpu-multi', 'a serial or ready fallback is not a pool proof');
-    assert.equal(plan.workerCount, 3);
+    assert.equal(plan.workerCount, expectedWorkerCount);
     if (expectedRootTasks) assert.equal(plan.rootTaskParallel, true,
       'the requested root-partition product must exercise its actual root producer');
     if (expectedRootTasks) assert.equal(plan.verificationRequired, true,
       'root-partition products must execute their actual remote worker');
     if (expectedStreamingPc) {
       assert.equal(plan.rootTaskParallel, false,
-        'one complete bag must stream candidates instead of admitting one multiset root');
+        'a streaming PC job must not transfer natural multiset roots');
       assert.equal(plan.verificationRequired, true,
         'a streaming PC family must still cross the actual remote verifier boundary');
     }
@@ -406,7 +410,78 @@ async function distributed(text, activated, {
     return await projectTerminal(terminal);
   } finally { cancelOnConsume = null; runner.dispose(); }
 }
+
+async function oneIProductWithoutAccelerators() {
+  const base = 'clearra pc --lines 1 --height 1 --board-mask 0x3f0 --pieces 1 --queue I --no-hold ' +
+    '--rule srs-plus --objective unique --count unique --queue-knowledge oracle --backend cpu ' +
+    '--no-tablebase --no-legal-board --no-conditioned-reachability';
+  const serial = await new ClearraProductJobRunner(wasm, jobId++, '', caps)
+    .run(`${base} --workers 1`, () => {});
+  assert.equal(serial.response.result?.kind, 'pc-scenario');
+  assert.equal(serial.search_report.workers_used, 1);
+  const baseline = result(serial);
+  assert.deepEqual(baseline.keys, ['ctk1|initial=00000000000003f0|placements=I:000000000000000f']);
+  assert.equal(baseline.covered, 1);
+  assert.equal(baseline.total, '1');
+  assert.equal(baseline.probability, '1');
+  // The fixed queue is not a natural-bag root task. Its one candidate is
+  // enough to exercise the coordinator plus one real verifier realm.
+  const before = verifierConsumes();
+  const actual = await distributed(`${base} --workers 2`, { synopsis: null, pack: null }, {
+    expectedStreamingPc: true, expectedWorkerCount: 2, projectTerminal: terminal => {
+      assert.equal(terminal.response.result?.kind, 'pc-scenario');
+      assert.equal(terminal.search_report.workers_used, 2);
+      return result(terminal);
+    }
+  });
+  assert.deepEqual(actual, baseline);
+  assert.ok(verifierConsumes() > before, 'the one-I candidate must reach a real verifier');
+  console.log('real_web_one_i_cpu=passed workers_requested=2 workers_used=2 solutions=1');
+}
+
+async function signedAcceleratorCases() {
+  for (let profile = 0; profile < profiles.length; profile++) {
+    for (const input of ['existing', 'empty']) {
+      await assets(profile, false, false);
+      const baseline = result(await new WasmJobRunner(wasm).run(
+        command(profiles[profile], 1, false, false, input), () => {}));
+      assert.equal(baseline.keys.length, input === 'existing' ? counts[profile] : 159);
+      for (const [legal, relation] of [[false, false], [true, false], [false, true], [true, true]]) {
+        const activated = await assets(profile, legal, relation);
+        const actual = await distributed(command(profiles[profile], 3, legal, relation, input), activated);
+        assert.deepEqual(actual, baseline, `${profiles[profile]}/${input}/${legal}/${relation}`);
+        console.log(`real_web_verifier_case=passed profile=${profiles[profile]} input=${input} legal=${legal} relation=${relation}`);
+      }
+    }
+    for (const kind of [0, 1]) wasm.accelerator_remove(kind, profile);
+  }
+  const activated = await assets(1, true, true);
+  await distributed(command('srs-plus', 3, true, true), activated, { cancel: true });
+  // Browser Worker.terminate stops synchronously from the host's perspective;
+  // Node's transport adapter has an asynchronous exit. Drain that owned boundary
+  // before creating replacement transports, without altering solver scheduling.
+  await Promise.all(transports.map(transport => transport.exited));
+  for (const kind of [0, 1]) wasm.accelerator_remove(kind, 1);
+  const restarted = await distributed(command('srs-plus', 3, false, false), { synopsis: null, pack: null });
+  assert.equal(restarted.keys.length, 246);
+  assert.ok(exchanges > 0, 'actual relation broker queries must be observed');
+  const sent = transports.flatMap(transport => transport.sent);
+  const received = transports.flatMap(transport => transport.received);
+  for (const type of ['accelerator-pack', 'accelerator-synopsis', 'initialize', 'consume', 'finish', 'delegation-offer', 'delegation-run']) {
+    assert.ok(sent.includes(type), `missing actual worker transport: ${type}`);
+  }
+  assert.ok(received.includes('conditioned-queries'));
+  assert.ok(sent.includes('conditioned-reply'));
+  assert.ok(received.includes('delegation-accepted'));
+  console.log(`real_web_verifier_pool=passed profiles=5 completed=${jobs - cancelledJobs} cancelled=${cancelledJobs} relation_exchanges=${exchanges}`);
+}
+
 try {
+  if (withoutAccelerators) {
+    assert.deepEqual(extendedRows.map(row => row.split('\t')[0]),
+      ['forced-7L', 'forced-8L', 'forced-12L', 'forced-24L']);
+    await oneIProductWithoutAccelerators();
+  }
   // The older smoke always requested per-solution probabilities and therefore
   // bypassed the ordinary GUI's PcRoots producer entirely. Use real solver
   // results, reuse one pool, and vary readiness independently of input.
@@ -599,40 +674,19 @@ try {
       console.log('real_web_full_height_empty_minimum=passed height=7 preserve_b2b=true workers=3');
     }
   }
-  for (let profile = 0; profile < profiles.length; profile++) {
-    for (const input of ['existing', 'empty']) {
-      await assets(profile, false, false);
-      const baseline = result(await new WasmJobRunner(wasm).run(
-        command(profiles[profile], 1, false, false, input), () => {}));
-      assert.equal(baseline.keys.length, input === 'existing' ? counts[profile] : 159);
-      for (const [legal, relation] of [[false, false], [true, false], [false, true], [true, true]]) {
-        const activated = await assets(profile, legal, relation);
-        const actual = await distributed(command(profiles[profile], 3, legal, relation, input), activated);
-        assert.deepEqual(actual, baseline, `${profiles[profile]}/${input}/${legal}/${relation}`);
-        console.log(`real_web_verifier_case=passed profile=${profiles[profile]} input=${input} legal=${legal} relation=${relation}`);
-      }
+  if (withoutAccelerators) {
+    assert.equal(exchanges, 0);
+    assert.ok(transports.length > 0, 'extended cases must exercise actual verifier worker realms');
+    for (const transport of transports) {
+      assert.deepEqual(transport.admitted, { legal: 0, relation: 0 });
+      assert.ok(transport.sent.every(type => !['accelerator-pack', 'accelerator-synopsis', 'conditioned-reply'].includes(type)),
+        'the asset-free mode must not install or broker an accelerator');
+      assert.ok(!transport.received.includes('conditioned-queries'));
     }
-    for (const kind of [0, 1]) wasm.accelerator_remove(kind, profile);
+    console.log(`real_web_verifier_pool_without_accelerators=passed source=${process.env.CLEARRA_SOURCE_COMMIT} heights=1,7,8,12,24 profiles=5 completed_distributed=${jobs - cancelledJobs} cancelled=${cancelledJobs}`);
+  } else {
+    await signedAcceleratorCases();
   }
-  const activated = await assets(1, true, true);
-  await distributed(command('srs-plus', 3, true, true), activated, { cancel: true });
-  // Browser Worker.terminate stops synchronously from the host's perspective;
-  // Node's transport adapter has an asynchronous exit. Drain that owned boundary
-  // before creating replacement transports, without altering solver scheduling.
-  await Promise.all(transports.map(transport => transport.exited));
-  for (const kind of [0, 1]) wasm.accelerator_remove(kind, 1);
-  const restarted = await distributed(command('srs-plus', 3, false, false), { synopsis: null, pack: null });
-  assert.equal(restarted.keys.length, 246);
-  assert.ok(exchanges > 0, 'actual relation broker queries must be observed');
-  const sent = transports.flatMap(transport => transport.sent);
-  const received = transports.flatMap(transport => transport.received);
-  for (const type of ['accelerator-pack', 'accelerator-synopsis', 'initialize', 'consume', 'finish', 'delegation-offer', 'delegation-run']) {
-    assert.ok(sent.includes(type), `missing actual worker transport: ${type}`);
-  }
-  assert.ok(received.includes('conditioned-queries'));
-  assert.ok(sent.includes('conditioned-reply'));
-  assert.ok(received.includes('delegation-accepted'));
-  console.log(`real_web_verifier_pool=passed profiles=5 completed=${jobs - cancelledJobs} cancelled=${cancelledJobs} relation_exchanges=${exchanges}`);
 } finally {
   pool.cancel();
   for (const transport of transports) transport.terminate();

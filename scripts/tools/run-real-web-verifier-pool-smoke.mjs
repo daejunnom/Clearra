@@ -11,14 +11,22 @@ import { createClearraWasmBuildContract, clearraWasmBuildContractsEqual }
 
 const self = fileURLToPath(import.meta.url);
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-for (const name of ['CLEARRA_REAL_ACCELERATOR_WASM_DIR', 'CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR',
-  'CLEARRA_SOURCE_COMMIT', 'CLEARRA_ENGINE_BUILD_ID']) {
+const options = process.argv.slice(2);
+const withoutAccelerators = options.length === 1 && options[0] === '--without-accelerators';
+assert.ok(options.length === 0 || withoutAccelerators,
+  'usage: run-real-web-verifier-pool-smoke.mjs [--without-accelerators]');
+const fixtureEnvironment = ['CLEARRA_REAL_ACCELERATOR_WASM_DIR',
+  'CLEARRA_SOURCE_COMMIT', 'CLEARRA_ENGINE_BUILD_ID'];
+if (!withoutAccelerators) fixtureEnvironment.splice(1, 0, 'CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR');
+for (const name of fixtureEnvironment) {
   if (!process.env[name]) throw new Error(`Required real functional fixture: ${name}`);
 }
 assert.equal(await realpath(process.env.CLEARRA_REAL_ACCELERATOR_WASM_DIR),
   join(await realpath(repository), '_local', 'artifacts', 'v081-browser-peer-smoke', 'wasm'));
-assert.equal(await realpath(process.env.CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR),
-  join(await realpath(repository), '_local', 'artifacts', 'v081-peer-signed-smoke'));
+if (!withoutAccelerators) {
+  assert.equal(await realpath(process.env.CLEARRA_SIGNED_CONDITIONED_SMOKE_DIR),
+    join(await realpath(repository), '_local', 'artifacts', 'v081-peer-signed-smoke'));
+}
 const manifest = JSON.parse(await readFile(join(process.env.CLEARRA_REAL_ACCELERATOR_WASM_DIR,
   'clearra_wasm.manifest.json'), 'utf8'));
 assert.ok(clearraWasmBuildContractsEqual(manifest.build, await createClearraWasmBuildContract(repository)),
@@ -31,7 +39,7 @@ assertNoBuildLinks(fullHeightInput);
 assert.equal(await realpath(fullHeightInput), fullHeightInput);
 await readFile(fullHeightInput, 'utf8');
 // Reject missing/stale inputs before opening or retiring any managed build slot.
-const owner = enterManagedBuildOrRelaunch(repository, [self]);
+const owner = enterManagedBuildOrRelaunch(repository, [self, ...options]);
 const output = join(owner.transaction, 'functional-web-verifier-pool');
 assertNoBuildLinks(output);
 await mkdir(output, { recursive: true });
