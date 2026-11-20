@@ -71,10 +71,11 @@ use super::{
         BuildCoveragePortfolioV2PreparationAdvance, BuildCoveragePortfolioV2Result,
     },
     build_v2_supplied_result::{
-        validate_build_colored_replay_allow_empty, validate_build_supplied_cover_percent_v1_result,
+        validate_build_colored_replay_for_setup_score,
+        validate_build_supplied_cover_percent_v1_result,
         validate_build_supplied_coverage_v1_result,
         validate_build_supplied_minimum_cover_v1_result, validate_build_supplied_score_v1_result,
-        BuildSuppliedCoverPercentV1Result, BuildSuppliedCoverageV1Result,
+        BuildCoverageOrdinals, BuildSuppliedCoverPercentV1Result, BuildSuppliedCoverageV1Result,
         BuildSuppliedMinimumCoverV1Result, BuildSuppliedScoreV1Result,
     },
 };
@@ -432,7 +433,7 @@ pub struct BuildSetupV1Request {
 pub(crate) struct SetupScoreCoverageEvidence {
     row: PatternBitSet,
     weights: WeightedPatternSet,
-    pattern_universe_identity: String,
+    ordinals: BuildCoverageOrdinals,
     covered_probability: String,
 }
 
@@ -445,8 +446,8 @@ impl SetupScoreCoverageEvidence {
         &self.weights
     }
 
-    pub(crate) fn pattern_universe_identity(&self) -> &str {
-        &self.pattern_universe_identity
+    pub(crate) fn ordinals(&self) -> BuildCoverageOrdinals {
+        self.ordinals
     }
 
     pub(crate) fn covered_probability(&self) -> &str {
@@ -508,7 +509,7 @@ impl BuildSetupV1Request {
         .map_err(|error| BuildColoredTargetV1FacadeError::ResultRejected {
             detail: format!("evidence:{error:?}"),
         })?;
-        let replay = validate_build_colored_replay_allow_empty(
+        let (replay, ordinals) = validate_build_colored_replay_for_setup_score(
             &self.request.query,
             &self.request.target,
             &result,
@@ -535,7 +536,7 @@ impl BuildSetupV1Request {
         Ok(SetupScoreCoverageEvidence {
             row,
             weights: replay.weights,
-            pattern_universe_identity: replay.pattern_universe_identity,
+            ordinals,
             covered_probability,
         })
     }

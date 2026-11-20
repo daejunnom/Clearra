@@ -18,12 +18,15 @@ use clearra_core_domain::{
 use clearra_core_executor::{solution_probability_pattern_weights, CoreExecutionResult};
 use clearra_coverage::{
     cover::ExactMinimumCoverError,
-    pattern::{pattern_bitset::PatternBitSet, pattern_id::PatternId},
+    pattern::{
+        pattern_bitset::PatternBitSet, pattern_id::PatternId,
+        weighted_pattern_set::WeightedPatternSet,
+    },
     probability::union_probability::union_probability,
 };
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityQuery, BuildSolutionProbabilityPolicy,
-    ProblemCompiler,
+    ProblemCompiler, SearchProblem,
 };
 use sha2::{Digest, Sha256};
 
@@ -647,6 +650,7 @@ pub(crate) enum BuildSuppliedEvaluationResultError {
     ReplayEvidenceInvalid,
     ScoreEvidenceInvalid(&'static str),
     PatternUniverseInvalid,
+    CoverageOrdinalAuthorityMismatch(&'static str),
     EmptyReachableCoverage,
     QueryCompileFailed,
     ProbabilityUnionInvalid,
@@ -669,6 +673,73 @@ pub(crate) struct ValidatedBuildColoredReplay {
     pub(crate) kick_profile_id: String,
     pub(crate) pattern_universe_identity: String,
     pub(crate) product_build_identity: String,
+}
+
+/// The producer-bound axis shared by Setup score coverage rows. Coverage
+/// membership is not part of this identity; different Setup drawings can use
+/// the same queue ordinals while reaching different rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BuildCoverageOrdinals {
+    piece_source_id: u64,
+    pattern_universe_id: u64,
+    pattern_weight_model_id: u64,
+    pattern_count: usize,
+}
+
+impl BuildCoverageOrdinals {
+    fn validate(
+        problem: &SearchProblem,
+        result: &CoreExecutionResult,
+        weights: &WeightedPatternSet,
+    ) -> Result<Self, BuildSuppliedEvaluationResultError> {
+        use BuildSuppliedEvaluationResultError::CoverageOrdinalAuthorityMismatch as Mismatch;
+
+        let source = problem.piece_source();
+        let universe = source
+            .materialized_universe()
+            .ok_or(Mismatch("materialized_piece_source"))?;
+        let ordinals = Self {
+            piece_source_id: source.id().get(),
+            pattern_universe_id: universe.pattern_universe_id().get(),
+            pattern_weight_model_id: universe.pattern_weight_model_id().get(),
+            pattern_count: universe.pattern_count(),
+        };
+        for (field, expected) in [
+            ("piece_source_id", ordinals.piece_source_id),
+            ("pattern_universe_id", ordinals.pattern_universe_id),
+            ("pattern_weight_model_id", ordinals.pattern_weight_model_id),
+        ] {
+            if result.unique_field(field) != Some(expected.to_string().as_str()) {
+                return Err(Mismatch(field));
+            }
+        }
+        if canonical_usize(result, "materialized_pattern_count") != Some(ordinals.pattern_count)
+            || canonical_usize(result, "coverage_pattern_count") != Some(ordinals.pattern_count)
+            || weights.len() != ordinals.pattern_count
+        {
+            return Err(Mismatch("pattern_count"));
+        }
+        for index in 0..ordinals.pattern_count {
+            if weights
+                .weight(PatternId::new(index))
+                .map(|weight| weight.get().to_bits())
+                != Some(universe.weight_at(index).get().to_bits())
+            {
+                return Err(Mismatch("pattern_weight_ordinal"));
+            }
+        }
+        Ok(ordinals)
+    }
+
+    pub(crate) fn evaluation_identity_component(self) -> String {
+        format!(
+            "build-coverage-ordinals.v1:{}:{}:{}:{}",
+            self.piece_source_id,
+            self.pattern_universe_id,
+            self.pattern_weight_model_id,
+            self.pattern_count,
+        )
+    }
 }
 
 pub(crate) fn validate_build_supplied_minimum_cover_v1_result(
@@ -1090,18 +1161,20 @@ pub(crate) fn validate_build_colored_replay<S>(
 where
     S: BuildColoredReplaySource + ?Sized,
 {
-    validate_build_colored_replay_internal(query, source, result, false)
+    validate_build_colored_replay_internal(query, source, result, false).map(|(replay, _)| replay)
 }
 
-pub(crate) fn validate_build_colored_replay_allow_empty<S>(
+pub(crate) fn validate_build_colored_replay_for_setup_score<S>(
     query: &BuildProbabilityQuery,
     source: &S,
     result: &CoreExecutionResult,
-) -> Result<ValidatedBuildColoredReplay, BuildSuppliedEvaluationResultError>
+) -> Result<(ValidatedBuildColoredReplay, BuildCoverageOrdinals), BuildSuppliedEvaluationResultError>
 where
     S: BuildColoredReplaySource + ?Sized,
 {
-    validate_build_colored_replay_internal(query, source, result, true)
+    let (replay, problem) = validate_build_colored_replay_internal(query, source, result, true)?;
+    let ordinals = BuildCoverageOrdinals::validate(&problem, result, &replay.weights)?;
+    Ok((replay, ordinals))
 }
 
 fn validate_build_colored_replay_internal<S>(
@@ -1109,7 +1182,7 @@ fn validate_build_colored_replay_internal<S>(
     source: &S,
     result: &CoreExecutionResult,
     allow_empty_required: bool,
-) -> Result<ValidatedBuildColoredReplay, BuildSuppliedEvaluationResultError>
+) -> Result<(ValidatedBuildColoredReplay, SearchProblem), BuildSuppliedEvaluationResultError>
 where
     S: BuildColoredReplaySource + ?Sized,
 {
@@ -1227,7 +1300,7 @@ where
         return Err(BuildSuppliedEvaluationResultError::ReplayEvidenceInvalid);
     }
 
-    Ok(ValidatedBuildColoredReplay {
+    let replay = ValidatedBuildColoredReplay {
         pattern_count,
         required,
         rows,
@@ -1239,7 +1312,8 @@ where
         kick_profile_id: problem.kick_profile().profile_id().as_str().to_owned(),
         pattern_universe_identity: supplied_pattern_universe_identity(pattern_count, result),
         product_build_identity: product_build_identity_component(),
-    })
+    };
+    Ok((replay, problem))
 }
 
 pub(crate) fn target_cells(identity: StandardBoard64ColoredTilingIdentity) -> u64 {
@@ -1377,4 +1451,109 @@ fn hex_sha256(bytes: impl AsRef<[u8]>) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::probability::probability_value::ProbabilityValue;
+    use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use super::*;
+
+    fn ordinal_problem(board: u64, pieces: Vec<PieceKind>) -> SearchProblem {
+        ProblemCompiler::compile_scenario_pc(
+            &PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(2, board),
+                PcQueueInput::fixed_sequence(FixedSequence::new(pieces)),
+                PieceWindow::new(2),
+            )
+            .with_exact_pieces(Some(2))
+            .with_allow_hold(false),
+        )
+        .unwrap()
+    }
+
+    fn ordinal_result(problem: &SearchProblem, covered_word: u64) -> CoreExecutionResult {
+        let source = problem.piece_source();
+        let universe = source.materialized_universe().unwrap();
+        CoreExecutionResult::new(
+            [
+                ("piece_source_id", source.id().get()),
+                ("pattern_universe_id", universe.pattern_universe_id().get()),
+                (
+                    "pattern_weight_model_id",
+                    universe.pattern_weight_model_id().get(),
+                ),
+                (
+                    "materialized_pattern_count",
+                    universe.pattern_count() as u64,
+                ),
+                ("coverage_pattern_count", universe.pattern_count() as u64),
+            ]
+            .into_iter()
+            .map(|(field, value)| (field.to_owned(), value.to_string()))
+            .collect(),
+            Vec::new(),
+        )
+        .with_coverage_pattern_words(vec![covered_word])
+    }
+
+    #[test]
+    fn setup_score_ordinals_ignore_coverage_membership_but_bind_queue_order() {
+        let first = ordinal_problem(0, vec![PieceKind::I, PieceKind::O]);
+        let same_supply = ordinal_problem(0xf0, vec![PieceKind::I, PieceKind::O]);
+        let other_order = ordinal_problem(0, vec![PieceKind::O, PieceKind::I]);
+        let covered = ordinal_result(&first, 1);
+        let not_covered = ordinal_result(&same_supply, 0);
+        let reordered = ordinal_result(&other_order, 1);
+        let weights = WeightedPatternSet::new(vec![ProbabilityValue::new(1.0).unwrap()]).unwrap();
+        let first_ordinals = BuildCoverageOrdinals::validate(&first, &covered, &weights).unwrap();
+        let same_ordinals =
+            BuildCoverageOrdinals::validate(&same_supply, &not_covered, &weights).unwrap();
+        let other_ordinals =
+            BuildCoverageOrdinals::validate(&other_order, &reordered, &weights).unwrap();
+        assert_eq!(first_ordinals, same_ordinals);
+        assert_ne!(first_ordinals, other_ordinals);
+        assert!(matches!(
+            BuildCoverageOrdinals::validate(&first, &reordered, &weights),
+            Err(BuildSuppliedEvaluationResultError::CoverageOrdinalAuthorityMismatch(_))
+        ));
+        // Existing portfolios still bind the reachable union independently.
+        assert_ne!(
+            supplied_pattern_universe_identity(1, &covered),
+            supplied_pattern_universe_identity(1, &not_covered)
+        );
+    }
+
+    #[test]
+    fn setup_score_ordinals_require_canonical_weight_bits_and_unique_producer_ids() {
+        let problem = ordinal_problem(0, vec![PieceKind::I, PieceKind::O]);
+        let result = ordinal_result(&problem, 1);
+        let foreign_weights =
+            WeightedPatternSet::new(vec![ProbabilityValue::new(0.5).unwrap()]).unwrap();
+        assert!(matches!(
+            BuildCoverageOrdinals::validate(&problem, &result, &foreign_weights),
+            Err(
+                BuildSuppliedEvaluationResultError::CoverageOrdinalAuthorityMismatch(
+                    "pattern_weight_ordinal"
+                )
+            )
+        ));
+        let reported_id = result
+            .unique_field("pattern_universe_id")
+            .unwrap()
+            .to_owned();
+        let duplicated =
+            result.with_additional_fields(vec![("pattern_universe_id".to_owned(), reported_id)]);
+        let weights = WeightedPatternSet::new(vec![ProbabilityValue::new(1.0).unwrap()]).unwrap();
+        assert!(matches!(
+            BuildCoverageOrdinals::validate(&problem, &duplicated, &weights),
+            Err(
+                BuildSuppliedEvaluationResultError::CoverageOrdinalAuthorityMismatch(
+                    "pattern_universe_id"
+                )
+            )
+        ));
+    }
 }

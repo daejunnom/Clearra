@@ -340,7 +340,7 @@ fn execute(
     let mut reduced: Vec<ReducedCandidate> = Vec::with_capacity(candidates.len());
     let continuation_producers = continuation_producer_indices(&candidates);
     let mut canonical_weights = None;
-    let mut pattern_universe_identity = None;
+    let mut shared_ordinals = None;
     for (index, candidate) in candidates.into_iter().enumerate() {
         let coverage = candidate
             .coverage
@@ -362,14 +362,14 @@ fn execute(
         } else {
             canonical_weights = Some(coverage.weights().clone());
         }
-        if let Some(identity) = &pattern_universe_identity {
-            if identity != coverage.pattern_universe_identity() {
+        if let Some(ordinals) = shared_ordinals {
+            if ordinals != coverage.ordinals() {
                 return Err(SetupScoreRunError::Rejected(
-                    "setup score Build pattern universe differs between candidates".to_owned(),
+                    "setup score Build coverage ordinals differ between candidates".to_owned(),
                 ));
             }
         } else {
-            pattern_universe_identity = Some(coverage.pattern_universe_identity().to_owned());
+            shared_ordinals = Some(coverage.ordinals());
         }
 
         if context.execution_control().is_cancelled() {
@@ -421,15 +421,14 @@ fn execute(
             .total_cmp(&f64::from_bits(left.continuation.expected_score_bits))
             .then_with(|| left.candidate_id.cmp(&right.candidate_id))
     });
-    let evaluation_identity_sha256 = evaluation_identity(
-        &command,
-        pattern_universe_identity.as_deref().ok_or_else(|| {
+    let ordinal_identity = shared_ordinals
+        .ok_or_else(|| {
             SetupScoreRunError::Rejected(
-                "setup score pattern universe identity is missing".to_owned(),
+                "setup score Build coverage ordinal identity is missing".to_owned(),
             )
-        })?,
-        &reduced,
-    );
+        })?
+        .evaluation_identity_component();
+    let evaluation_identity_sha256 = evaluation_identity(&command, &ordinal_identity, &reduced);
     let candidates = reduced
         .iter()
         .enumerate()
@@ -594,7 +593,8 @@ fn evaluation_identity(
     candidates: &[ReducedCandidate],
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"clearra.setup-score-ranking.v1\0");
+    // This is an evidence-hash domain, independent of the public payload schema.
+    hasher.update(b"clearra.setup-score-evaluation.v2\0");
     for value in [
         command.document_hash.as_str(),
         pattern_universe_identity,
@@ -610,7 +610,14 @@ fn evaluation_identity(
         hash_text(&mut hasher, candidate.candidate_id.as_str());
         hasher.update(candidate.completed_board_mask.to_be_bytes());
         hasher.update(candidate.continuation.expected_score_bits.to_be_bytes());
+        hash_text(&mut hasher, candidate.continuation.probability.as_str());
         hasher.update((candidate.setup_covered_pattern_count as u128).to_be_bytes());
+        for pattern in candidate
+            .setup_row
+            .covered_patterns_before(candidate.setup_row.pattern_count())
+        {
+            hasher.update((pattern.index() as u128).to_be_bytes());
+        }
     }
     format!("{:x}", hasher.finalize())
 }
@@ -689,6 +696,37 @@ mod tests {
                 observation_differs,
             ]),
             [0, 1, 0, 3]
+        );
+    }
+
+    #[test]
+    fn setup_score_evaluation_identity_binds_covered_ordinals_not_just_count() {
+        use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+
+        let command = setup_score_command(
+            PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_allow_backend_fallback(false),
+        );
+        let candidate = |ordinal| {
+            let mut setup_row = PatternBitSet::new(2);
+            setup_row.insert(PatternId::new(ordinal)).unwrap();
+            ReducedCandidate {
+                candidate_id: command.candidates[0].candidate_id.clone(),
+                completed_board_mask: command.candidates[0].completed_board_mask,
+                setup_covered_pattern_count: 1,
+                setup_covered_probability: "0.5".to_owned(),
+                setup_row,
+                continuation: ValidatedContinuationScore {
+                    probability: "1".to_owned(),
+                    expected_score_bits: 1.0_f64.to_bits(),
+                    expected_score: "1".to_owned(),
+                },
+            }
+        };
+        assert_ne!(
+            evaluation_identity(&command, "same-axis", &[candidate(0)]),
+            evaluation_identity(&command, "same-axis", &[candidate(1)])
         );
     }
 
