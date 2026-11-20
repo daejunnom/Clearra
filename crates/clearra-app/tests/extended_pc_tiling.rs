@@ -410,15 +410,43 @@ fn full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family() {
             .query()
             .clone()
             .with_queue_observation_policy(observation);
-        let direct = context.run(AppRequest::new(AppCommand::Scenario(
-            ScenarioAppCommand::new(query),
-        )));
+        let request = AppRequest::new(AppCommand::Scenario(ScenarioAppCommand::new(query)));
+        let direct = context.run(request.clone());
         assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
         let core = direct.render_model().unwrap().core_result().unwrap();
         assert_eq!(core.field("actual_backend"), Some("wasm-cpu-pc-extended"));
         assert_eq!(core.field("unique_solution_count"), Some("1"));
+        assert_eq!(core.bool_field("count_complete"), Some(true));
+        assert_eq!(core.bool_field("resource_truncated"), Some(false));
         assert_eq!(core.field("scenario_replay_token_version"), Some("sr3"));
         let token = core.field("scenario_replay_token").unwrap();
+
+        let mut execution = context.start_cooperative_execution(request);
+        let control = ExecutionControl::default();
+        let cooperative = (0..4096)
+            .find_map(|_| match execution.advance(1, &control) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => None,
+                CooperativeAppAdvance::Completed(response) => Some(response),
+                other => panic!("unexpected cooperative Scenario replay result: {other:?}"),
+            })
+            .expect("bounded full-height Scenario completed");
+        assert_eq!(cooperative.status(), AppStatus::Success, "{cooperative:?}");
+        let cooperative = cooperative.render_model().unwrap().core_result().unwrap();
+        for key in [
+            "scenario_replay_token_version",
+            "scenario_replay_token",
+            "replay_hint",
+            "continuation_token",
+            "normalized_solution_set_hash",
+            "queue_knowledge",
+            "observation_policy_evaluated",
+            "covered_pattern_count",
+            "coverage_pattern_count",
+            "count_complete",
+            "resource_truncated",
+        ] {
+            assert_eq!(cooperative.field(key), core.field(key), "{height}L: {key}");
+        }
         let PcContinuationToken::ScenarioReplay(decoded) =
             PcContinuationTokenCodec::parse(token).unwrap()
         else {

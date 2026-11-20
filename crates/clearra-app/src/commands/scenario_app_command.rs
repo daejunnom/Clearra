@@ -492,16 +492,11 @@ impl RunnableAppCommand for ScenarioAppCommand {
                     None => None,
                 };
                 let result = project_pc_allspin_result(result, result_projection);
-                // The ordinary Rust full-height producer has no compact
-                // scenario replay renderer. Publish input replay here after
-                // execution, without treating typed reducer evidence as a
-                // generic scenario or claiming an output-state continuation.
-                let result = if result_projection.projection().is_standard()
-                    && self.query.initial_board().has_extended_occupancy()
-                    && problem.visible_height() > 6
-                    && result.field("scenario_replay_token").is_none()
-                {
-                    attach_full_height_replay(result, &self.query)
+                let result = if result_projection.projection().is_standard() {
+                    match FullHeightScenarioInputReplay::prepare(&self.query, &problem) {
+                        Some(replay) => replay.attach(result),
+                        None => result,
+                    }
                 } else {
                     result
                 };
@@ -528,25 +523,45 @@ impl RunnableAppCommand for ScenarioAppCommand {
     }
 }
 
-fn attach_full_height_replay(
-    result: clearra_core_executor::CoreExecutionResult,
-    query: &PcScenarioQuery,
-) -> clearra_core_executor::CoreExecutionResult {
-    let Ok(token) = PcContinuationTokenCodec::encode_scenario_replay(query) else {
-        return result;
-    };
-    let Some((version, _)) = token.split_once(':') else {
-        return result;
-    };
-    result.with_replaced_fields(vec![
-        (
-            "scenario_replay_token_version".to_owned(),
-            version.to_owned(),
-        ),
-        (
-            "replay_hint".to_owned(),
-            format!("clearra continue {token}"),
-        ),
-        ("scenario_replay_token".to_owned(), token),
-    ])
+/// Local ordinary full-height input replay. Keep a reference to the original
+/// immutable query rather than copying or encoding it while search is live.
+/// This is not evidence of an output-state continuation.
+pub(crate) struct FullHeightScenarioInputReplay(Arc<PcScenarioQuery>);
+
+impl FullHeightScenarioInputReplay {
+    pub(crate) fn prepare(query: &Arc<PcScenarioQuery>, problem: &SearchProblem) -> Option<Self> {
+        (query.initial_board().has_extended_occupancy()
+            && problem.visible_height() > 6
+            && query.remaining_queue().as_fixed_sequence().is_some())
+        .then(|| Self(Arc::clone(query)))
+    }
+
+    pub(crate) fn attach(
+        self,
+        result: clearra_core_executor::CoreExecutionResult,
+    ) -> clearra_core_executor::CoreExecutionResult {
+        if result.field("scenario_replay_token").is_some()
+            || result.bool_field("count_complete") != Some(true)
+            || result.bool_field("resource_truncated") != Some(false)
+        {
+            return result;
+        }
+        let Ok(token) = PcContinuationTokenCodec::encode_scenario_replay(&self.0) else {
+            return result;
+        };
+        let Some((version, _)) = token.split_once(':') else {
+            return result;
+        };
+        result.with_replaced_fields(vec![
+            (
+                "scenario_replay_token_version".to_owned(),
+                version.to_owned(),
+            ),
+            (
+                "replay_hint".to_owned(),
+                format!("clearra continue {token}"),
+            ),
+            ("scenario_replay_token".to_owned(), token),
+        ])
+    }
 }

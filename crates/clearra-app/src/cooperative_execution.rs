@@ -43,7 +43,7 @@ use crate::{
         build_v2_app_command::BuildV2AppRequest,
         core_execution_error_response,
         path_app_command::path_response,
-        scenario_app_command::ScenarioAppCommand,
+        scenario_app_command::{FullHeightScenarioInputReplay, ScenarioAppCommand},
         setup_app_command::setup_success_response,
     },
     pc_allspin_result::project_pc_allspin_result,
@@ -260,7 +260,8 @@ impl CooperativePostprocessExecution {
                     result_projection: projection,
                     ..
                 } => projection.projection().is_standard(),
-                CooperativeSearchResponseKind::PcOpeningContinuation(_) => true,
+                CooperativeSearchResponseKind::PcOpeningContinuation(_)
+                | CooperativeSearchResponseKind::ScenarioFullHeightInputReplay { .. } => true,
                 _ => false,
             }
     }
@@ -753,6 +754,10 @@ pub(crate) enum CooperativeSearchResponseKind {
     Scenario {
         render_contract: Option<crate::commands::ScenarioAppRenderContract>,
         result_projection: ValidatedPcResultProjection,
+    },
+    ScenarioFullHeightInputReplay {
+        render_contract: Option<crate::commands::ScenarioAppRenderContract>,
+        replay: FullHeightScenarioInputReplay,
     },
     ScenarioChance {
         authority: PcChanceCompiledAuthority,
@@ -1429,6 +1434,19 @@ impl AppContext {
             command => command,
         };
 
+        // Only the local Scenario driver owns this ordinary input replay
+        // projection. The shared compiler is also used by distributed
+        // compatibility callers and must not confer this local authority.
+        let full_height_replay_query = match &command {
+            AppCommand::Scenario(command)
+                if product_capability_contract.is_none()
+                    && command.result_projection().is_standard()
+                    && command.query().initial_board().has_extended_occupancy() =>
+            {
+                Some(command.query_arc())
+            }
+            _ => None,
+        };
         let compiled = compile_search_command(command);
         let (problem, response_kind) = match compiled {
             Ok(compiled) => compiled,
@@ -1463,6 +1481,22 @@ impl AppContext {
                     None => CooperativeSearchResponseKind::Pc(projection),
                 }
             }
+            CooperativeSearchResponseKind::Scenario {
+                render_contract,
+                result_projection,
+            } if result_projection.projection().is_standard() => match full_height_replay_query
+                .as_ref()
+                .and_then(|query| FullHeightScenarioInputReplay::prepare(query, &problem))
+            {
+                Some(replay) => CooperativeSearchResponseKind::ScenarioFullHeightInputReplay {
+                    render_contract,
+                    replay,
+                },
+                None => CooperativeSearchResponseKind::Scenario {
+                    render_contract,
+                    result_projection,
+                },
+            },
             other => other,
         };
         let pc_score_external_retained_upper_bound_bytes =
@@ -4321,6 +4355,16 @@ pub(crate) fn response_from_search_with_build_score_derivation(
             result_projection,
         } => {
             let result = project_pc_allspin_result(result, result_projection);
+            match render_contract {
+                Some(contract) => contract.success_response(result),
+                None => AppResponse::success(AppRenderModel::Scenario(result)),
+            }
+        }
+        CooperativeSearchResponseKind::ScenarioFullHeightInputReplay {
+            render_contract,
+            replay,
+        } => {
+            let result = replay.attach(result);
             match render_contract {
                 Some(contract) => contract.success_response(result),
                 None => AppResponse::success(AppRenderModel::Scenario(result)),
