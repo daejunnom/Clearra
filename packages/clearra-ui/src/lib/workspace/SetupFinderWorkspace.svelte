@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createWorkspaceElapsedTimer } from './workspaceElapsedTimer';
   import { componentMessage } from '../i18n/componentCatalog';
   import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
@@ -88,8 +89,11 @@
   let desktopDetailPump: Promise<void> | null = null;
   let language: WorkspaceLanguage = 'en';
   let elapsedMs = 0;
-  let runStartedAt = 0;
-  let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+  let elapsedTimerRunning = false;
+  const elapsedTimer = createWorkspaceElapsedTimer((value, running) => {
+    elapsedMs = value;
+    elapsedTimerRunning = running;
+  });
   let prewarmWorkerCount = 1;
 
   $: workerController.setWorkerFactory(workerFactory);
@@ -117,7 +121,7 @@
   $: mainJobActive = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: active = mainJobActive || detailWorkerBusy;
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
-  $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
+  $: if (isTerminal(runtimeView.status) && elapsedTimerRunning) elapsedTimer.stop();
 
   onMount(() => {
     language = readWorkspaceLanguage();
@@ -142,7 +146,7 @@
   onDestroy(disposeWorkspace);
 
   function disposeWorkspace() {
-    stopElapsedTimer();
+    elapsedTimer.stop();
     if (runtime === 'desktop') void stopDesktopDetail(false);
     else disposeDetailWorker();
     workerController.dispose();
@@ -195,10 +199,10 @@
     resultRequest = { ...request };
     if (runtime === 'web') {
       updateWasmCommandText(buildSetupFinderCommand(request, prewarmWorkerCount));
-      if (workerController.run()) startElapsedTimer();
+      if (workerController.run()) elapsedTimer.start();
       return;
     }
-    startElapsedTimer();
+    elapsedTimer.start();
     updateDesktopRequest(setupFinderRequestForDesktop(request, language, prewarmWorkerCount));
     await startDesktopJob();
   }
@@ -212,23 +216,6 @@
     }
     if (runtime === 'web') workerController.cancel();
     else await cancelDesktopJob();
-  }
-
-  function startElapsedTimer() {
-    stopElapsedTimer();
-    elapsedMs = 0;
-    runStartedAt = performance.now();
-    elapsedTimer = setInterval(() => {
-      elapsedMs = performance.now() - runStartedAt;
-    }, 100);
-  }
-
-  function stopElapsedTimer() {
-    if (elapsedTimer !== null) {
-      clearInterval(elapsedTimer);
-      elapsedTimer = null;
-    }
-    if (runStartedAt > 0) elapsedMs = performance.now() - runStartedAt;
   }
 
   function isTerminal(status: WorkspaceRuntimeStatus): boolean {

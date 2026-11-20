@@ -28,6 +28,8 @@ test('GUI search controls omit data-product toggles and asset managers', async (
 });
 
 test('Web and Desktop no longer mount GUI asset-management panels', async () => {
+  const router = await readFile(new URL('WorkspaceToolRouter.svelte', workspace), 'utf8');
+  assert.doesNotMatch(router, /(?:Pc4DownloadPanel|AcceleratorDownloadPanel|AcceleratorAssetPanel)\b/u);
   for (const app of ['clearra-web', 'clearra-desktop']) {
     const route = await readFile(new URL(`../../../apps/${app}/src/routes/+page.svelte`, import.meta.url), 'utf8');
     assert.doesNotMatch(route, /clearra\.(?:pc4|accelerator)-download-control\.v1/u);

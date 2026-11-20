@@ -3,7 +3,7 @@ import type { WorkspaceLanguage } from '../i18n/languageManifest.ts';
 import {
   cliCommandRequestForDesktop,
   serializeCliCommandArguments
-} from './cliCommandModel';
+} from './cliCommandModel.ts';
 
 export type OperationDocumentCommandInput = {
   capability: 'sequence' | 'sequence-dependencies';

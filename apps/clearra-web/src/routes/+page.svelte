@@ -2,7 +2,13 @@
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
   import { page } from '$app/stores';
-  import { BoundaryRecoveryWorkspace, BuildProbabilityWorkspace, BuildV2Workspace, CtkDrawerWorkspace, DocumentUtilityWorkspace, ForwardSearchWorkspace, OperationSequenceWorkspace, PC_SOLVER_HREF_CONTEXT, PlayerWorkspace, SequenceDependenciesWorkspace, SetupFinderWorkspace, SetupScoreWorkspace, SolverWorkspace, SpinStructureWorkspace, WORKSPACE_MODE_VISIBILITY_CONTEXT } from '@clearra/ui/workspace';
+  import {
+    isWorkspaceMode,
+    PC_SOLVER_HREF_CONTEXT,
+    WORKSPACE_MODE_VISIBILITY_CONTEXT,
+    WorkspaceToolRouter,
+    type WorkspaceMode
+  } from '@clearra/ui/workspace';
   import {
     HOST_CAPABILITY_SNAPSHOT_CONTEXT,
     sharedBrowserHostCapabilitySnapshot
@@ -17,7 +23,7 @@
   const pagesModes = [
     'pc', 'setup', 'build-probability', 'recovery',
     'damage', 'spin-finder', 'ctk', 'player'
-  ] as const;
+  ] as const satisfies readonly WorkspaceMode[];
   setContext(WORKSPACE_MODE_VISIBILITY_CONTEXT, pagesModes);
 
   const showLocalProfile = isLocalSearchProfileMode(import.meta.env.MODE);
@@ -43,51 +49,24 @@
   $: ctkViewer = resolveCtkViewerQuery($page.url);
   $: selectedTool =
     $page.url.searchParams.get('tool') ?? (ctkViewer.document ? 'ctk' : null);
+  $: workspaceMode = isWorkspaceMode(selectedTool) ? selectedTool : null;
 
   onMount(() => {
     const removeWasmArtifactHotUpdate = installWasmArtifactHotUpdate(import.meta.hot, import.meta.env.MODE);
-    if (!['pc', 'setup', 'setup-score', 'spin-structure', 'build', 'build-probability', 'recovery', 'sequence', 'sequence-dependencies', 'parity', 'fumen', 'render', 'to-gray', 'mirror', 'damage', 'spin-finder', 'ren', 'ctk', 'player'].includes(selectedTool ?? '')) {
+    if (workspaceMode === null) {
       void goto(`${base}/?tool=pc`, { replaceState: true, noScroll: true, keepFocus: true });
     }
     return removeWasmArtifactHotUpdate;
   });
 </script>
 
-{#if selectedTool === 'build'}
-  <BuildV2Workspace {workerFactory} />
-{:else if selectedTool === 'build-probability'}
-  <BuildProbabilityWorkspace {workerFactory} />
-{:else if selectedTool === 'recovery'}
-  <BoundaryRecoveryWorkspace {workerFactory} />
-{:else if selectedTool === 'sequence-dependencies'}
-  <SequenceDependenciesWorkspace {workerFactory} />
-{:else if selectedTool === 'sequence'}
-  <OperationSequenceWorkspace {workerFactory} />
-{:else if selectedTool === 'parity' || selectedTool === 'fumen' || selectedTool === 'render' || selectedTool === 'to-gray' || selectedTool === 'mirror'}
-  {#key selectedTool}
-    <DocumentUtilityWorkspace tool={selectedTool} {workerFactory} />
-  {/key}
-{:else if selectedTool === 'setup'}
-  <SetupFinderWorkspace {workerFactory} />
-{:else if selectedTool === 'setup-score'}
-  <SetupScoreWorkspace {workerFactory} />
-{:else if selectedTool === 'spin-structure'}
-  <SpinStructureWorkspace {workerFactory} />
-{:else if selectedTool === 'ctk'}
-  <CtkDrawerWorkspace
-    initialDocument={ctkViewer.document ?? undefined}
-    viewerMode={ctkViewer.viewer}
-    {workerFactory}
-  />
-{:else if selectedTool === 'player'}
-  <PlayerWorkspace {workerFactory} />
-{:else if selectedTool === 'damage' || selectedTool === 'spin-finder' || selectedTool === 'ren'}
-  {#key selectedTool}
-    <ForwardSearchWorkspace tool={selectedTool} {workerFactory} />
-  {/key}
-{:else}
-  <SolverWorkspace runtime="web" {workerFactory} />
-{/if}
+<WorkspaceToolRouter
+  runtime="web"
+  selectedTool={workspaceMode}
+  ctkDocument={ctkViewer.document ?? undefined}
+  ctkViewerMode={ctkViewer.viewer}
+  {workerFactory}
+/>
 
 {#if showLocalProfile && localProfile}
   <details class="local-search-profile">

@@ -12,7 +12,8 @@ function Invoke-SetupSearchProductPathValidation() {
         "crates/clearra-supply/src/queue/queue_observation_policy.rs",
         "crates/clearra-core-executor/src/setup_finder_report.rs",
         "crates/clearra-app/src/commands/setup_app_command.rs",
-        "packages/clearra-ui/src/lib/workspace/SetupFinderWorkspace.svelte"
+        "packages/clearra-ui/src/lib/workspace/SetupFinderWorkspace.svelte",
+        "packages/clearra-ui/src/lib/workspace/WorkspaceToolRouter.svelte"
     )
     foreach ($requiredPath in $requiredPaths) {
         if (-not (Test-Path -LiteralPath (Join-Path $Root $requiredPath))) {
@@ -141,7 +142,9 @@ function Invoke-SetupSearchProductPathValidation() {
 
     $tabs = Read-Text "packages/clearra-ui/src/lib/workspace/ProductModeTabs.svelte"
     $route = Read-Text "apps/clearra-web/src/routes/+page.svelte"
-    if ($tabs -notlike "*setup*" -or $route -notlike "*SetupFinderWorkspace*") {
+    $workspaceToolRouter = Read-Text "packages/clearra-ui/src/lib/workspace/WorkspaceToolRouter.svelte"
+    if ($tabs -notlike "*setup*" -or $route -notlike "*<WorkspaceToolRouter*" -or
+        $workspaceToolRouter -notmatch "route\.kind === 'setup'[\s\S]*?<SetupFinderWorkspace \{runtime\} \{workerFactory\}") {
         Add-ArchitectureError "setup finder UI must be routed through the shared product workspace"
     }
 

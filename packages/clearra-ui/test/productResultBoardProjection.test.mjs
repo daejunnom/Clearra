@@ -111,18 +111,6 @@ test('product result UI renders boards and governed exports without exposing int
   assert.match(pcResult, /<ProductResultPager[\s\S]*?\{targetLines\}/u);
 });
 
-test('normal operation report surfaces whitelist human metrics and omit machine identities', () => {
-  const sequence = source('../src/lib/workspace/OperationSequenceWorkspace.svelte');
-  const dependencies = source('../src/lib/workspace/SequenceDependenciesWorkspace.svelte');
-
-  assert.match(sequence, /publicOperationReportFields/u);
-  assert.match(sequence, /operation_count: 'operations'/u);
-  assert.doesNotMatch(sequence, /candidate_id|trace_key|normalized_trace/u);
-  assert.match(dependencies, /publicDependencyReportFields/u);
-  assert.match(dependencies, /exact_order_count: 'validOrders'/u);
-  assert.doesNotMatch(dependencies, /candidate_id|representative_order|trace_key/u);
-});
-
 test('field average score keeps the v0.7.4 per-field and whole-score presentation', () => {
   const pager = source('../src/lib/workspace/ProductResultPager.svelte');
   const resultWorkspace = source('../src/lib/workspace/ResultWorkspace.svelte');

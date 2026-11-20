@@ -6,6 +6,8 @@ import { transform } from 'esbuild';
 import { compile, preprocess } from 'svelte/compiler';
 import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 
+import { isWorkspaceMode, workspaceToolRoute } from '../packages/clearra-ui/src/lib/workspace/workspaceMode.ts';
+
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(scriptDirectory, '..');
 const svelteSources = [
@@ -21,6 +23,7 @@ const svelteSources = [
   'packages/clearra-ui/src/lib/workspace/SolutionToolbar.svelte',
   'packages/clearra-ui/src/lib/workspace/SolutionGallery.svelte',
   'apps/clearra-desktop/src/routes/+page.svelte',
+  'packages/clearra-ui/src/lib/workspace/WorkspaceToolRouter.svelte',
   'packages/clearra-ui/src/lib/components/DesktopHostShell.svelte',
   'packages/clearra-ui/src/lib/render/RenderStatusPanel.svelte',
   'packages/clearra-ui/src/lib/wasm/WasmTerminalShell.svelte',
@@ -108,26 +111,24 @@ const desktopEntrySource = await readFile(
   path.join(root, 'apps/clearra-desktop/src/routes/+page.svelte'),
   'utf8'
 );
-for (const requiredMarker of [
-  "'pc'",
-  "'setup'",
-  "'build-probability'",
-  "'damage'",
-  "'spin-finder'",
-  "'ctk'",
-  "'player'",
-  '<SolverWorkspace runtime="desktop"',
-  '<SetupFinderWorkspace runtime="desktop"',
-  '<BuildProbabilityWorkspace runtime="desktop"',
-  '<ForwardSearchWorkspace tool={selectedTool} runtime="desktop"',
-  '<CtkDrawerWorkspace',
-  '<PlayerWorkspace'
-]) {
-  if (!desktopEntrySource.includes(requiredMarker)) {
-    throw new Error(`desktop tool route is missing ${requiredMarker}`);
+if (!/<WorkspaceToolRouter\s+runtime="desktop"\s+selectedTool=\{workspaceMode\}/u.test(desktopEntrySource)) {
+  throw new Error('desktop must mount the shared workspace router in desktop mode');
+}
+const desktopToolRoutes = {
+  pc: 'pc',
+  setup: 'setup',
+  'build-probability': 'build-probability',
+  damage: 'forward-search',
+  'spin-finder': 'forward-search',
+  ctk: 'ctk',
+  player: 'player'
+};
+for (const [tool, renderer] of Object.entries(desktopToolRoutes)) {
+  if (!isWorkspaceMode(tool) || workspaceToolRoute(tool).kind !== renderer) {
+    throw new Error(`desktop tool ${tool} must resolve to ${renderer}`);
   }
 }
 
 console.log(
-  `desktop_ui_in_memory_compile=passed svelte=${svelteSources.length} typescript=${typescriptSources.length} tool_routes=7 artifact_write=${artifactWrite}`
+  `desktop_ui_in_memory_compile=passed svelte=${svelteSources.length} typescript=${typescriptSources.length} tool_routes=${Object.keys(desktopToolRoutes).length} artifact_write=${artifactWrite}`
 );

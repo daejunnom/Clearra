@@ -8,12 +8,14 @@ function source(path) {
 
 test('CTK owns the Pages render entry and executes it through the local browser worker', () => {
   const route = source('../../../apps/clearra-web/src/routes/+page.svelte');
+  const router = source('../src/lib/workspace/WorkspaceToolRouter.svelte');
   const ctk = source('../src/lib/workspace/CtkDrawerWorkspace.svelte');
   const documentUtilityModel = source('../src/lib/workspace/documentUtilityModel.ts');
   const wasmRuntime = source('../../../apps/clearra-web/src/workers/clearraWasmRuntime.ts');
   const tablebaseAssets = source('../../../apps/clearra-web/src/workers/pc4TablebaseAssets.ts');
 
-  assert.match(route, /<CtkDrawerWorkspace[\s\S]*?\{workerFactory\}[\s\S]*?\/>/u);
+  assert.match(route, /<WorkspaceToolRouter[\s\S]*?\{workerFactory\}[\s\S]*?\/>/u);
+  assert.match(router, /<CtkDrawerWorkspace[\s\S]*?\{workerFactory\}[\s\S]*?\/>/u);
   assert.match(route, /const worker = new Worker\(new URL\('\.\.\/workers\/clearraWorker\.ts'[\s\S]*?return worker;/u);
   assert.match(route, /const showLocalProfile = isLocalSearchProfileMode\(import\.meta\.env\.MODE\)/u);
   assert.match(route, /if \(showLocalProfile\) worker\.addEventListener\('message'/u);

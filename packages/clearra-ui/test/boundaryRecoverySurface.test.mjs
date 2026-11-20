@@ -12,6 +12,7 @@ test('boundary recovery and pinned Build selectors compile for browser use', asy
   const surfaces = [
     new URL('BoundaryRecoveryWorkspace.svelte', workspace),
     new URL('BuildV2PinnedSelector.svelte', workspace),
+    new URL('WorkspaceToolRouter.svelte', workspace),
     new URL('../../../apps/clearra-web/src/routes/+page.svelte', import.meta.url),
     new URL('../../../apps/clearra-desktop/src/routes/+page.svelte', import.meta.url)
   ];

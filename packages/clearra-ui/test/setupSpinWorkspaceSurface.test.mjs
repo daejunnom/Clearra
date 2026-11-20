@@ -9,16 +9,16 @@ function source(path) {
 test('Setup and Spin workspaces are real Web and Desktop entry surfaces', () => {
   const webRoute = source('../../../apps/clearra-web/src/routes/+page.svelte');
   const desktopRoute = source('../../../apps/clearra-desktop/src/routes/+page.svelte');
+  const router = source('../src/lib/workspace/WorkspaceToolRouter.svelte');
   const setupScore = source('../src/lib/workspace/SetupScoreWorkspace.svelte');
   const spin = source('../src/lib/workspace/SpinStructureWorkspace.svelte');
   const catalog = source('../src/lib/i18n/componentCatalog.ts');
 
   for (const route of [webRoute, desktopRoute]) {
-    assert.match(route, /selectedTool === 'setup-score'/u);
-    assert.match(route, /selectedTool === 'spin-structure'/u);
-    assert.match(route, /SetupScoreWorkspace/u);
-    assert.match(route, /SpinStructureWorkspace/u);
+    assert.match(route, /<WorkspaceToolRouter/u);
   }
+  assert.match(router, /route\.kind === 'setup-score'[\s\S]*?<SetupScoreWorkspace \{runtime\} \{workerFactory\}/u);
+  assert.match(router, /route\.kind === 'spin-structure'[\s\S]*?<SpinStructureWorkspace \{runtime\} \{workerFactory\}/u);
   assert.match(setupScore, /buildSetupScoreCommand\(request\)/u);
   assert.match(setupScore, /setupScoreRequestForDesktop\(request, language\)/u);
   assert.match(setupScore, /componentMessage\(language, 'setupScoreIsCpuOnlyAndExposes'\)/u);

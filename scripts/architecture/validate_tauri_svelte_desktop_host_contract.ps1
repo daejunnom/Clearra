@@ -12,6 +12,8 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
         "apps/clearra-desktop/src-tauri/src/main.rs",
         "apps/clearra-desktop/src-tauri/src/commands.rs",
         "packages/clearra-ui/src/lib/components/DesktopHostShell.svelte",
+        "packages/clearra-ui/src/lib/workspace/WorkspaceToolRouter.svelte",
+        "packages/clearra-ui/src/lib/workspace/workspaceMode.ts",
         "packages/clearra-ui/src/lib/workspace/PlayerWorkspace.svelte",
         "packages/clearra-ui/src/lib/workspace/ctkBoardTheme.ts",
         "packages/clearra-ui/src/lib/host/clearraDesktopHost.ts",
@@ -53,6 +55,7 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
     ) -join "`n"
     $desktopClient = Read-Text "packages/clearra-ui/src/lib/host/clearraDesktopHost.ts"
     $desktopEntry = Read-Text "apps/clearra-desktop/src/routes/+page.svelte"
+    $workspaceToolRouter = Read-Text "packages/clearra-ui/src/lib/workspace/WorkspaceToolRouter.svelte"
     $desktopStore = Read-Text "packages/clearra-ui/src/lib/stores/desktopJobStore.ts"
     $desktopShell = Read-Text "packages/clearra-ui/src/lib/components/DesktopHostShell.svelte"
     $desktopGate = Read-Text "scripts/desktop-host-check.ps1"
@@ -112,24 +115,10 @@ function Invoke-TauriSvelteDesktopHostContractValidation() {
             Add-ArchitectureError "U6 Tauri command surface is missing '$requiredMarker'"
         }
     }
-    foreach ($requiredMarker in @(
-        "'pc'",
-        "'setup'",
-        "'build-probability'",
-        "'damage'",
-        "'spin-finder'",
-        "'ctk'",
-        "'player'",
-        '<SolverWorkspace runtime="desktop"',
-        '<SetupFinderWorkspace runtime="desktop"',
-        '<BuildProbabilityWorkspace runtime="desktop"',
-        '<ForwardSearchWorkspace tool={selectedTool} runtime="desktop"',
-        '<CtkDrawerWorkspace',
-        '<PlayerWorkspace'
-    )) {
-        if ($desktopEntry -notlike "*$requiredMarker*") {
-            Add-ArchitectureError "U6 desktop entrypoint is missing product tool route '$requiredMarker'"
-        }
+    if ($desktopEntry -notmatch '<WorkspaceToolRouter\s+runtime="desktop"\s+selectedTool=\{workspaceMode\}' -or
+        $desktopEntry -notmatch 'isWorkspaceMode\(selectedTool\)' -or
+        $workspaceToolRouter -notmatch 'workspaceToolRoute\(selectedTool\)') {
+        Add-ArchitectureError "U6 desktop must forward a validated tool and its desktop runtime to the shared workspace router"
     }
     foreach ($requiredMarker in @(
         "DesktopTauriCommandBridge",

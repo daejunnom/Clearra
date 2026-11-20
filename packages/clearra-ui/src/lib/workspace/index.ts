@@ -12,6 +12,8 @@ export { default as DocumentUtilityWorkspace } from './DocumentUtilityWorkspace.
 export { default as CtkDrawerWorkspace } from './CtkDrawerWorkspace.svelte';
 export { default as PlayerWorkspace } from './PlayerWorkspace.svelte';
 export { default as PcSolverStandalone } from './PcSolverStandalone.svelte';
+export { default as WorkspaceToolRouter } from './WorkspaceToolRouter.svelte';
+export { isWorkspaceMode, type WorkspaceMode } from './workspaceMode';
 export * from './buildProbabilityModel';
 export * from './cliCommandModel';
 export * from './operationDocumentCommandModel';

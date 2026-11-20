@@ -19,6 +19,7 @@
     encodeSolutionPagesForClipboard,
     type SolutionExportKeySource
   } from './solutionExportAsync';
+  import { createSolutionExportOperation } from './solutionExportOperation';
   import {
     workspaceMessage,
     workspaceSolutionCopyFailureKey,
@@ -40,21 +41,20 @@
 
   let state: 'idle' | 'loading' | 'copied' | 'failed' = 'idle';
   let failureKey: WorkspaceSolutionCopyFailureKey = 'solutionCopyFailed';
-  let timer = 0;
-  let copyController: AbortController | null = null;
-  let destroyed = false;
-
-  onMount(() => {
-    const handlePageHide = () => abortCopy();
-    window.addEventListener('pagehide', handlePageHide);
-    return () => window.removeEventListener('pagehide', handlePageHide);
+  const operation = createSolutionExportOperation({
+    success: 'copied',
+    abortMessage: 'Solution copy was aborted.',
+    onState(next) {
+      if (next === 'copied') failureKey = 'solutionCopyFailed';
+      state = next;
+    },
+    onFailure(error) {
+      failureKey = solutionCopyFailureKey(error);
+    }
   });
 
-  onDestroy(() => {
-    destroyed = true;
-    abortCopy();
-    clearTimeout(timer);
-  });
+  onMount(() => operation.bindPageHide(window));
+  onDestroy(operation.destroy);
 
   $: label = (
     key: Parameters<typeof workspaceMessage>[1],
@@ -68,87 +68,29 @@
       ? label('copyAllPending')
       : label('copyAllSolutions');
 
-  async function copyAll() {
-    if (!available || state === 'loading') return;
-    window.clearTimeout(timer);
-    copyController?.abort();
-    const controller = new AbortController();
-    copyController = controller;
-    state = 'loading';
-    await nextPaint();
-    try {
-      throwIfAborted(controller.signal);
+  function copyAll() {
+    return operation.run(available, async (signal, checkAbort) => {
       let encoded: string;
       if (keySource) {
         encoded = await encodeSolutionKeySourceForClipboard(keySource, format, {
-          signal: controller.signal,
+          signal,
           hostCapabilitySnapshot
         });
       } else if (loadPages) {
-        const pages = await loadPages(controller.signal);
-        throwIfAborted(controller.signal);
+        const pages = await loadPages(signal);
+        checkAbort();
         encoded = await encodeSolutionPagesForClipboard(pages, format, {
-          signal: controller.signal,
+          signal,
           hostCapabilitySnapshot
         });
       } else {
         encoded = await encodeSolutionKeysForClipboard(solutionKeys, format, {
-          signal: controller.signal,
+          signal,
           hostCapabilitySnapshot
         });
       }
-      await writeClipboardText(encoded, controller.signal);
-      if (copyController !== controller || destroyed) return;
-      failureKey = 'solutionCopyFailed';
-      setTerminalState('copied');
-    } catch (error) {
-      if (controller.signal.aborted || isAbortError(error)) {
-        if (!destroyed && copyController === controller) state = 'idle';
-        return;
-      }
-      failureKey = solutionCopyFailureKey(error);
-      setTerminalState('failed');
-    } finally {
-      if (copyController === controller) copyController = null;
-    }
-  }
-
-  function abortCopy() {
-    if (copyController && !copyController.signal.aborted) {
-      const error = new Error('Solution copy was aborted.');
-      error.name = 'AbortError';
-      copyController.abort(error);
-    }
-  }
-
-  function setTerminalState(next: 'copied' | 'failed') {
-    state = next;
-    window.clearTimeout(timer);
-    timer = window.setTimeout(() => {
-      state = 'idle';
-    }, next === 'failed' ? 4000 : 1600);
-  }
-
-  function nextPaint(): Promise<void> {
-    return new Promise((resolve) => {
-      if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => resolve());
-      } else {
-        setTimeout(resolve, 0);
-      }
+      await writeClipboardText(encoded, signal);
     });
-  }
-
-  function throwIfAborted(signal: AbortSignal) {
-    if (!signal.aborted) return;
-    if (signal.reason instanceof Error) throw signal.reason;
-    const error = new Error('Solution copy was aborted.');
-    error.name = 'AbortError';
-    throw error;
-  }
-
-  function isAbortError(error: unknown): boolean {
-    return error instanceof Error && error.name === 'AbortError';
   }
 
   function solutionCopyFailureKey(error: unknown): typeof failureKey {

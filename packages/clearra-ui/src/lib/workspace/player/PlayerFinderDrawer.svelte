@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createWorkspaceElapsedTimer } from '../workspaceElapsedTimer';
   import { Search, Square, X } from '@lucide/svelte';
   import { createEventDispatcher, getContext, onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
@@ -78,8 +79,11 @@
   let setupSearchMode: 'oracle' | 'qb' = 'oracle';
   let issue: PlayerFinderIssue | null = null;
   let elapsedMs = 0;
-  let runStartedAt = 0;
-  let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+  let elapsedTimerRunning = false;
+  const elapsedTimer = createWorkspaceElapsedTimer((value, running) => {
+    elapsedMs = value;
+    elapsedTimerRunning = running;
+  });
   const hardwareConcurrency = hostCapabilitySnapshot.reportedLogicalProcessors;
   let lastStateRevision: number | null = null;
   let previousOpen = open;
@@ -113,7 +117,7 @@
     values: Record<string, string | number> = {}
   ) => workspaceMessage(language, key, values);
   $: if (!setupVisible && selected === 'setup') selected = 'pc';
-  $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
+  $: if (isTerminal(runtimeView.status) && elapsedTimerRunning) elapsedTimer.stop();
   $: if (open !== previousOpen) {
     const shouldRestoreLauncher = restoreLauncherFocus;
     previousOpen = open;
@@ -140,8 +144,7 @@
     if (active || (next === 'setup' && !setupVisible)) return;
     if (selected !== next) {
       resultKind = null;
-      elapsedMs = 0;
-      runStartedAt = 0;
+      elapsedTimer.reset();
     }
     selected = next;
     issue = null;
@@ -155,8 +158,7 @@
   function invalidatePcResult() {
     issue = null;
     resultKind = null;
-    elapsedMs = 0;
-    runStartedAt = 0;
+    elapsedTimer.reset();
     if (runtime === 'web') clearWasmTerminalResult();
     else clearDesktopTerminalResult();
   }
@@ -176,7 +178,7 @@
       }
       resultKind = 'pc';
       resultTargetLines = prepared.targetLines;
-      startElapsedTimer();
+      elapsedTimer.start();
       if (runtime === 'web') {
         clearWasmTerminalResult();
         workerController.prewarm(
@@ -186,7 +188,7 @@
           automaticWorkerAuthority(hostCapabilitySnapshot)
         );
         updateWasmCommandText(buildWorkspaceCommand(prepared.request));
-        if (!workerController.run()) stopElapsedTimer();
+        if (!workerController.run()) elapsedTimer.stop();
       } else {
         clearDesktopTerminalResult();
         updateDesktopRequest(workspaceRequestForDesktop(prepared.request, language));
@@ -203,7 +205,7 @@
     const workers = automaticWorkerAuthority(hostCapabilitySnapshot).workersEffective;
     resultKind = 'setup';
     setupSearchMode = prepared.request.searchMode;
-    startElapsedTimer();
+    elapsedTimer.start();
     if (runtime === 'web') {
       clearWasmTerminalResult();
       workerController.prewarm(
@@ -213,7 +215,7 @@
         automaticWorkerAuthority(hostCapabilitySnapshot)
       );
       updateWasmCommandText(buildPlayerSetupFinderCommand(prepared.request, workers));
-      if (!workerController.run()) stopElapsedTimer();
+      if (!workerController.run()) elapsedTimer.stop();
     } else {
       clearDesktopTerminalResult();
       updateDesktopRequest(
@@ -236,25 +238,10 @@
     requestOpen(false, false);
   }
 
-  function startElapsedTimer() {
-    stopElapsedTimer();
-    elapsedMs = 0;
-    runStartedAt = performance.now();
-    elapsedTimer = setInterval(() => {
-      elapsedMs = performance.now() - runStartedAt;
-    }, 100);
-  }
-
-  function stopElapsedTimer() {
-    if (elapsedTimer !== null) clearInterval(elapsedTimer);
-    elapsedTimer = null;
-    if (runStartedAt > 0) elapsedMs = performance.now() - runStartedAt;
-  }
-
   function dispose() {
     if (disposed) return;
     disposed = true;
-    stopElapsedTimer();
+    elapsedTimer.stop();
     if (runtime === 'web') {
       workerController.dispose();
       clearWasmTerminalResult();

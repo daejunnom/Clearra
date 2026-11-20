@@ -270,8 +270,7 @@ test('normal workspace failure DOM surfaces use the shared public notice only', 
     'BuildV2Result.svelte',
     'PcSolverResult.svelte',
     'SetupFinderResult.svelte',
-    'OperationSequenceWorkspace.svelte',
-    'SequenceDependenciesWorkspace.svelte',
+    'OperationDocumentWorkspace.svelte',
     'DocumentUtilityWorkspace.svelte',
     'CtkDrawerWorkspace.svelte'
   ]) {
@@ -355,6 +354,10 @@ test('Build v2 workspace owns all surfaces without collapsing nominal document s
     new URL('../../../apps/clearra-desktop/src/routes/+page.svelte', import.meta.url),
     'utf8'
   );
+  const router = readFileSync(
+    new URL('../src/lib/workspace/WorkspaceToolRouter.svelte', import.meta.url),
+    'utf8'
+  );
 
   assert.match(workspace, /buildV2Command\(executionRequest\)/u);
   assert.match(workspace, /buildV2RequestForDesktop/u);
@@ -364,8 +367,9 @@ test('Build v2 workspace owns all surfaces without collapsing nominal document s
   assertComponentPhrase(source, 'theSuppliedSolutionDocumentIsReplayedAnd', /never reinterpreted as a target/u);
   assertComponentPhrase(controls, 'equalitySelectionAndOrderingUseScoreOnly', /Equality, selection, and ordering use score only/u);
   assertComponentPhrase(controls, 'buildV2IsCpuOnlyMemoryOptions', /Memory options remain unavailable/u);
-  assert.match(webRoute, /selectedTool === 'build'/u);
-  assert.match(desktopRoute, /selectedTool === 'build'/u);
+  assert.match(webRoute, /<WorkspaceToolRouter/u);
+  assert.match(desktopRoute, /<WorkspaceToolRouter/u);
+  assert.match(router, /route\.kind === 'build'[\s\S]*?<BuildV2Workspace \{runtime\} \{workerFactory\}/u);
 });
 
 test('draft mode roundtrips preserve inactive PC and build selections', () => {

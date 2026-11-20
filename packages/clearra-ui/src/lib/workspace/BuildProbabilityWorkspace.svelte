@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createWorkspaceElapsedTimer } from './workspaceElapsedTimer';
   import { componentMessage } from '../i18n/componentCatalog';
   import { TriangleAlert } from '@lucide/svelte';
   import { getContext, onDestroy, onMount, tick } from 'svelte';
@@ -64,8 +65,11 @@
   let request = createDefaultBuildProbabilityRequest();
   let language: WorkspaceLanguage = 'en';
   let elapsedMs = 0;
-  let runStartedAt = 0;
-  let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+  let elapsedTimerRunning = false;
+  const elapsedTimer = createWorkspaceElapsedTimer((value, running) => {
+    elapsedMs = value;
+    elapsedTimerRunning = running;
+  });
   let resultHeight = request.height;
   let resultExistingMask = request.existingMask;
   let resultTargetMask = request.targetMask;
@@ -112,7 +116,7 @@
   $: validationCodes = buildProbabilityValidationCodes(request);
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
-  $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
+  $: if (isTerminal(runtimeView.status) && elapsedTimerRunning) elapsedTimer.stop();
 
   onMount(() => {
     language = readWorkspaceLanguage();
@@ -138,7 +142,7 @@
   onDestroy(disposeWorkspace);
 
   function disposeWorkspace() {
-    stopElapsedTimer();
+    elapsedTimer.stop();
     workerController.dispose();
     if (runtime === 'desktop') {
       disposeDesktopJobPolling();
@@ -199,10 +203,10 @@
     resultMode = executionRequest.resultMode;
     if (runtime === 'web') {
       updateWasmCommandText(buildProbabilityCommand(executionRequest));
-      if (workerController.run()) startElapsedTimer();
+      if (workerController.run()) elapsedTimer.start();
       return;
     }
-    startElapsedTimer();
+    elapsedTimer.start();
     updateDesktopRequest(buildProbabilityRequestForDesktop(executionRequest, language));
     await startDesktopJob();
   }
@@ -236,23 +240,6 @@
     if (!active) return;
     if (runtime === 'web') workerController.cancel();
     else await cancelDesktopJob();
-  }
-
-  function startElapsedTimer() {
-    stopElapsedTimer();
-    elapsedMs = 0;
-    runStartedAt = performance.now();
-    elapsedTimer = setInterval(() => {
-      elapsedMs = performance.now() - runStartedAt;
-    }, 100);
-  }
-
-  function stopElapsedTimer() {
-    if (elapsedTimer !== null) {
-      clearInterval(elapsedTimer);
-      elapsedTimer = null;
-    }
-    if (runStartedAt > 0) elapsedMs = performance.now() - runStartedAt;
   }
 
   function isTerminal(status: WorkspaceRuntimeStatus): boolean {

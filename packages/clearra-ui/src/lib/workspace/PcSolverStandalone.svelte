@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createWorkspaceElapsedTimer } from './workspaceElapsedTimer';
   import MandatorySelectionSummary from './MandatorySelectionSummary.svelte';
   import { componentMessage } from '../i18n/componentCatalog';
   import {
@@ -91,8 +92,11 @@
   let executedSourceIdentity = '';
   let elapsedMs = 0;
   let resultTargetLines = request.lines;
-  let runStartedAt = 0;
-  let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+  let elapsedTimerRunning = false;
+  const elapsedTimer = createWorkspaceElapsedTimer((value, running) => {
+    elapsedMs = value;
+    elapsedTimerRunning = running;
+  });
   let pathTimer: ReturnType<typeof setTimeout> | null = null;
   let copiedTimer: ReturnType<typeof setTimeout> | null = null;
   let lastPathState = '';
@@ -115,7 +119,7 @@
     values: Record<string, string | number> = {}
   ) => workspaceMessage(language, key, values);
   $: if (mounted && encodedPathState !== lastPathState) schedulePathUpdate(encodedPathState);
-  $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
+  $: if (isTerminal(runtimeView.status) && elapsedTimerRunning) elapsedTimer.stop();
 
   onMount(() => {
     mounted = true;
@@ -288,7 +292,7 @@
     executedSourceIdentity = pcMandatorySource(executionRequest);
     executedScoreMode = executionRequest.scoreMode;
     hasRun = true;
-    startElapsedTimer();
+    elapsedTimer.start();
   }
 
   function toggleMandatory(key: string) {
@@ -345,23 +349,6 @@
     return `${basePath.replace(/\/$/, '')}/${state}`;
   }
 
-  function startElapsedTimer() {
-    stopElapsedTimer();
-    elapsedMs = 0;
-    runStartedAt = performance.now();
-    elapsedTimer = setInterval(() => {
-      elapsedMs = performance.now() - runStartedAt;
-    }, 100);
-  }
-
-  function stopElapsedTimer() {
-    if (elapsedTimer !== null) {
-      clearInterval(elapsedTimer);
-      elapsedTimer = null;
-    }
-    if (runStartedAt > 0) elapsedMs = performance.now() - runStartedAt;
-  }
-
   function clearCopiedTimer() {
     if (copiedTimer !== null) clearTimeout(copiedTimer);
     copiedTimer = null;
@@ -369,7 +356,7 @@
 
   function dispose() {
     mounted = false;
-    stopElapsedTimer();
+    elapsedTimer.stop();
     clearCopiedTimer();
     if (pathTimer !== null) clearTimeout(pathTimer);
     pathTimer = null;

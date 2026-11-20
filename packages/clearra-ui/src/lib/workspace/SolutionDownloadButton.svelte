@@ -15,6 +15,7 @@
     encodeSolutionPagesForClipboard,
     type SolutionExportKeySource
   } from './solutionExportAsync';
+  import { createSolutionExportOperation } from './solutionExportOperation';
   import { workspaceMessage, type WorkspaceLanguage } from './workspaceI18n';
 
   export let language: WorkspaceLanguage;
@@ -33,9 +34,17 @@
     | 'solutionDownloadFailed'
     | 'fumenCommentTooLong'
     | 'invalidFumenComment' = 'solutionDownloadFailed';
-  let controller: AbortController | null = null;
-  let timer = 0;
-  let destroyed = false;
+  const operation = createSolutionExportOperation({
+    success: 'saved',
+    abortMessage: 'Solution download was aborted.',
+    onState(next) {
+      if (next === 'saved') failureKey = 'solutionDownloadFailed';
+      state = next;
+    },
+    onFailure(error) {
+      failureKey = solutionDownloadFailureKey(error);
+    }
+  });
 
   $: available = solutionKeys.length > 0 || loadPages !== null || keySource !== null;
   $: label = (
@@ -43,93 +52,33 @@
     values: Record<string, string | number> = {}
   ) => workspaceMessage(language, key, values);
 
-  onMount(() => {
-    const handlePageHide = () => abortDownload();
-    window.addEventListener('pagehide', handlePageHide);
-    return () => window.removeEventListener('pagehide', handlePageHide);
-  });
+  onMount(() => operation.bindPageHide(window));
+  onDestroy(operation.destroy);
 
-  onDestroy(() => {
-    destroyed = true;
-    abortDownload();
-    window.clearTimeout(timer);
-  });
-
-  async function downloadAll() {
-    if (!available || state === 'loading') return;
-    window.clearTimeout(timer);
-    abortDownload();
-    const nextController = new AbortController();
-    controller = nextController;
-    state = 'loading';
-    await nextPaint();
-    try {
+  function downloadAll() {
+    return operation.run(available, async (signal, checkAbort) => {
       let encoded: string;
       if (keySource) {
         encoded = await encodeSolutionKeySource(keySource, 'ctk', {
-          signal: nextController.signal,
+          signal,
           hostCapabilitySnapshot
         });
       } else if (loadPages) {
-        const pages = await loadPages(nextController.signal);
-        throwIfAborted(nextController.signal);
+        const pages = await loadPages(signal);
+        checkAbort();
         encoded = await encodeSolutionPagesForClipboard(pages, 'ctk', {
-          signal: nextController.signal,
+          signal,
           hostCapabilitySnapshot
         });
       } else {
         encoded = await encodeSolutionKeysForClipboard(solutionKeys, 'ctk', {
-          signal: nextController.signal,
+          signal,
           hostCapabilitySnapshot
         });
       }
-      throwIfAborted(nextController.signal);
+      checkAbort();
       saveCtk3Source(encoded, 'clearra-solutions.ctk3');
-      if (controller !== nextController || destroyed) return;
-      failureKey = 'solutionDownloadFailed';
-      setTerminalState('saved');
-    } catch (error) {
-      if (nextController.signal.aborted || isAbortError(error)) {
-        if (!destroyed && controller === nextController) state = 'idle';
-      } else {
-        failureKey = solutionDownloadFailureKey(error);
-        setTerminalState('failed');
-      }
-    } finally {
-      if (controller === nextController) controller = null;
-    }
-  }
-
-  function abortDownload() {
-    if (!controller || controller.signal.aborted) return;
-    const error = new Error('Solution download was aborted.');
-    error.name = 'AbortError';
-    controller.abort(error);
-  }
-
-  function setTerminalState(next: 'saved' | 'failed') {
-    state = next;
-    window.clearTimeout(timer);
-    timer = window.setTimeout(() => (state = 'idle'), next === 'failed' ? 4000 : 1600);
-  }
-
-  function nextPaint(): Promise<void> {
-    return new Promise((resolve) => {
-      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
-      else setTimeout(resolve, 0);
     });
-  }
-
-  function throwIfAborted(signal: AbortSignal) {
-    if (!signal.aborted) return;
-    if (signal.reason instanceof Error) throw signal.reason;
-    const error = new Error('Solution download was aborted.');
-    error.name = 'AbortError';
-    throw error;
-  }
-
-  function isAbortError(error: unknown): boolean {
-    return error instanceof Error && error.name === 'AbortError';
   }
 
   function solutionDownloadFailureKey(error: unknown): typeof failureKey {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createWorkspaceElapsedTimer } from './workspaceElapsedTimer';
   import { componentMessage } from '../i18n/componentCatalog';
   import { TriangleAlert } from '@lucide/svelte';
   import { getContext, onDestroy, onMount } from 'svelte';
@@ -70,8 +71,11 @@
   let request = createDefaultWorkspaceRequest();
   let language: WorkspaceLanguage = 'en';
   let elapsedMs = 0;
-  let runStartedAt = 0;
-  let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+  let elapsedTimerRunning = false;
+  const elapsedTimer = createWorkspaceElapsedTimer((value, running) => {
+    elapsedMs = value;
+    elapsedTimerRunning = running;
+  });
   let clearedRowsWarning = 0;
   let resultTargetLines = request.lines;
   let resultScoreMode = request.scoreMode;
@@ -130,7 +134,7 @@
     key: Parameters<typeof workspaceMessage>[1],
     values: Record<string, string | number> = {}
   ) => workspaceMessage(language, key, values);
-  $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
+  $: if (isTerminal(runtimeView.status) && elapsedTimerRunning) elapsedTimer.stop();
 
   onMount(() => {
     language = readWorkspaceLanguage();
@@ -159,7 +163,7 @@
   onDestroy(disposeWorkspace);
 
   function disposeWorkspace() {
-    stopElapsedTimer();
+    elapsedTimer.stop();
     workerController.dispose();
     if (runtime === 'desktop') {
       void releaseDesktopProductPages().catch(() => undefined);
@@ -243,10 +247,10 @@
     resultScoreMode = executionRequest.scoreMode;
     if (runtime === 'web') {
       updateWasmCommandText(buildWorkspaceCommand(executionRequest));
-      if (workerController.run()) startElapsedTimer();
+      if (workerController.run()) elapsedTimer.start();
       return;
     }
-    startElapsedTimer();
+    elapsedTimer.start();
     updateDesktopRequest(workspaceRequestForDesktop(executionRequest, language));
     await startDesktopJob();
   }
@@ -255,23 +259,6 @@
     if (!active) return;
     if (runtime === 'web') workerController.cancel();
     else await cancelDesktopJob();
-  }
-
-  function startElapsedTimer() {
-    stopElapsedTimer();
-    elapsedMs = 0;
-    runStartedAt = performance.now();
-    elapsedTimer = setInterval(() => {
-      elapsedMs = performance.now() - runStartedAt;
-    }, 100);
-  }
-
-  function stopElapsedTimer() {
-    if (elapsedTimer !== null) {
-      clearInterval(elapsedTimer);
-      elapsedTimer = null;
-    }
-    if (runStartedAt > 0) elapsedMs = performance.now() - runStartedAt;
   }
 
   function isTerminal(status: WorkspaceRuntimeStatus): boolean {

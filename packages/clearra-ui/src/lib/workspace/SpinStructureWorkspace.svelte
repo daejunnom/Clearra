@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createWorkspaceElapsedTimer } from './workspaceElapsedTimer';
   import { componentMessage, type ComponentMessageKey } from '../i18n/componentCatalog';
   import { readWorkspaceLanguage, persistWorkspaceLanguage } from './workspaceLanguagePreference';
   import { getContext, onDestroy, onMount } from 'svelte';
@@ -59,8 +60,11 @@
   let request = createDefaultSpinStructureRequest();
   let language: WorkspaceLanguage = 'en';
   let elapsedMs = 0;
-  let runStartedAt = 0;
-  let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+  let elapsedTimerRunning = false;
+  const elapsedTimer = createWorkspaceElapsedTimer((value, running) => {
+    elapsedMs = value;
+    elapsedTimerRunning = running;
+  });
 
   $: workerController.setWorkerFactory(workerFactory);
   $: runtimeView = runtime === 'web'
@@ -69,7 +73,7 @@
   $: validationCodes = spinStructureValidationCodes(request);
   $: active = runtimeView.status === 'running' || runtimeView.status === 'cancelling';
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
-  $: if (isTerminal(runtimeView.status) && elapsedTimer !== null) stopElapsedTimer();
+  $: if (isTerminal(runtimeView.status) && elapsedTimerRunning) elapsedTimer.stop();
 
   onMount(() => {
     language = readWorkspaceLanguage();
@@ -134,11 +138,11 @@
     if (active || validationCodes.length) return;
     if (runtime === 'web') {
       updateWasmCommandText(buildSpinStructureCommand(request));
-      if (workerController.run()) startElapsedTimer();
+      if (workerController.run()) elapsedTimer.start();
       return;
     }
     updateDesktopRequest(spinStructureRequestForDesktop(request, language));
-    startElapsedTimer();
+    elapsedTimer.start();
     await startDesktopJob();
   }
 
@@ -153,25 +157,8 @@
     persistWorkspaceLanguage(next);
   }
 
-  function startElapsedTimer() {
-    stopElapsedTimer();
-    elapsedMs = 0;
-    runStartedAt = performance.now();
-    elapsedTimer = setInterval(() => {
-      elapsedMs = performance.now() - runStartedAt;
-    }, 100);
-  }
-
-  function stopElapsedTimer() {
-    if (elapsedTimer !== null) {
-      clearInterval(elapsedTimer);
-      elapsedTimer = null;
-    }
-    if (runStartedAt > 0) elapsedMs = performance.now() - runStartedAt;
-  }
-
   function disposeWorkspace() {
-    stopElapsedTimer();
+    elapsedTimer.stop();
     workerController.dispose();
     if (runtime === 'desktop') {
       disposeDesktopJobPolling();
