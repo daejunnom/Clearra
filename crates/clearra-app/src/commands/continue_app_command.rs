@@ -51,20 +51,12 @@ impl RunnableAppCommand for ContinueAppCommand {
             PcContinuationToken::Opening(query) => {
                 run_opening_continue(context, query, &token, "continued-searched", "opening")
             }
-            PcContinuationToken::Scenario(query) => run_scenario_continue(
-                context,
-                query,
-                &token,
-                "scenario-continued-searched",
-                "scenario",
-            ),
-            PcContinuationToken::ScenarioReplay(query) => run_scenario_continue(
-                context,
-                query,
-                &token,
-                "scenario-replayed-searched",
-                "scenario-replay",
-            ),
+            PcContinuationToken::Scenario(query) => {
+                run_scenario_continue(context, query, &token, ScenarioRestartKind::Continuation)
+            }
+            PcContinuationToken::ScenarioReplay(query) => {
+                run_scenario_continue(context, query, &token, ScenarioRestartKind::Replay)
+            }
         }
     }
 }
@@ -113,18 +105,34 @@ fn run_opening_continue(
     }
 }
 
+enum ScenarioRestartKind {
+    Continuation,
+    Replay,
+}
+
 fn run_scenario_continue(
     context: &AppExecutionContext<'_>,
     query: PcScenarioQuery,
     token: &str,
-    status: &str,
-    continuation_kind: &str,
+    restart: ScenarioRestartKind,
 ) -> AppResponse {
     let report = validate_pc_scenario_query(&query);
     if report.has_errors() {
         return AppResponse::validation_failed(report);
     }
-    let problem = match ProblemCompiler::compile_scenario_pc(&query) {
+    let (compiled, status, continuation_kind) = match restart {
+        ScenarioRestartKind::Continuation => (
+            ProblemCompiler::compile_scenario_pc(&query),
+            "scenario-continued-searched",
+            "scenario",
+        ),
+        ScenarioRestartKind::Replay => (
+            ProblemCompiler::compile_legacy_scenario_pc(&query),
+            "scenario-replayed-searched",
+            "scenario-replay",
+        ),
+    };
+    let problem = match compiled {
         Ok(problem) => problem,
         Err(error) => {
             return AppResponse::failed(

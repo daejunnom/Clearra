@@ -2,7 +2,7 @@
 use clearra_app::{
     AppCommand, AppContext, AppCoreExecutorService, AppRenderModel, AppRequest, AppResponse,
     AppServices, AppStatus, ContinueAppCommand, CooperativeAppAdvance, ScenarioAppCommand,
-    ScenarioAppRenderContract,
+    ScenarioAppExpected, ScenarioAppRenderContract,
 };
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_core_executor::CoreExecutionResult;
@@ -10,6 +10,8 @@ use clearra_pc_graph::request::{
     PcContinuationToken, PcContinuationTokenCodec, PcCountPolicy, PcExecutionPolicy, PcQueueInput,
     PcScenarioBoard, PcScenarioQuery, PieceWindow, RequestedSearchBackend, SupplyWindowSize,
 };
+use clearra_problem::ProblemCompiler;
+use clearra_rules::profile::builtin_rules::srs;
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 fn scenario_query() -> PcScenarioQuery {
@@ -165,4 +167,110 @@ fn compact_fixed_scenario_input_replay_matches_native_and_cooperative() {
     )));
     assert_eq!(core(&bare).field("scenario_replay_token"), None);
     assert_eq!(core(&bare).field("expected_checked"), None);
+
+    assert_legacy_tall_visible_scenario(&rust);
+}
+
+fn assert_legacy_tall_visible_scenario(rust: &AppContext) {
+    let query = |occupied_mask, allow_hold| {
+        PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, occupied_mask),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_rule(srs())
+        .with_exact_pieces(Some(1))
+        .with_allow_hold(allow_hold)
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_retained_trace_limit(1)
+    };
+    let raw = query((0x3f0 << 10) | 0x3ff, false).with_count_policy(PcCountPolicy::CountUnique);
+    // Matches the public scenario_simple_4l fixture: holding the only I
+    // cannot substitute another current piece, so the legal lock is unchanged.
+    let singleton_hold = query(0x3f0, true);
+    for input in [&raw, &singleton_hold] {
+        let explicit = ProblemCompiler::compile_scenario_pc(input).unwrap();
+        let legacy = ProblemCompiler::compile_legacy_scenario_pc(input).unwrap();
+        assert_eq!(legacy.core_query(), explicit.core_query());
+        assert_eq!(legacy.initial_board(), explicit.initial_board());
+        assert_eq!(legacy.visible_height(), 4);
+        assert_eq!(legacy.compact_pc_geometry_height(), 1);
+        assert_eq!(explicit.compact_pc_geometry_height(), 4);
+        assert_ne!(legacy.problem_id(), explicit.problem_id());
+
+        let request = || {
+            let contract = ScenarioAppRenderContract::new(true, Vec::new())
+                .with_expected(Some(ScenarioAppExpected::new(true, Some(true))));
+            AppRequest::new(AppCommand::Scenario(
+                ScenarioAppCommand::new(input.clone()).with_render_contract(contract),
+            ))
+        };
+        let direct = rust.run(request());
+        let cooperative = complete_cooperatively(rust, request());
+        let direct = core(&direct);
+        let cooperative = core(&cooperative);
+        assert_eq!(direct.normalized_solution_keys().len(), 1);
+        assert_eq!(
+            direct.normalized_solution_keys()[0],
+            "ctk1|initial=00000000000003f0|placements=I:000000000000000f"
+        );
+        assert_eq!(direct.field("visible_height"), Some("4"));
+        assert_eq!(
+            direct.field("initial_board_mask"),
+            Some("0x00000000000003f0")
+        );
+        assert_eq!(direct.bool_field("expected_match"), Some(true));
+        let token = direct.field("scenario_replay_token").unwrap();
+        assert!(token.starts_with("sr2:w10:v4:"));
+        let PcContinuationToken::ScenarioReplay(decoded) =
+            PcContinuationTokenCodec::parse(token).unwrap()
+        else {
+            panic!("legacy scenario input replay");
+        };
+        assert_eq!(decoded.initial_board(), legacy.initial_board());
+        assert_eq!(decoded.allow_hold(), input.allow_hold());
+        let keys = [
+            "scenario_replay_token",
+            "visible_height",
+            "initial_board_mask",
+            "normalized_solution_set_hash",
+            "covered_pattern_count",
+            "count_complete",
+        ];
+        for key in keys {
+            assert_eq!(direct.field(key), cooperative.field(key), "{key}");
+        }
+        #[cfg(feature = "native-c-core")]
+        {
+            let native = AppContext::default().run(request());
+            let native = core(&native);
+            for key in keys {
+                assert_eq!(direct.field(key), native.field(key), "{key}");
+            }
+        }
+        let replayed = rust.run(AppRequest::new(AppCommand::Continue(
+            ContinueAppCommand::new(Some(token.to_owned())),
+        )));
+        assert_eq!(replayed.status(), AppStatus::Success, "{replayed:?}");
+        let Some(AppRenderModel::Continue(message)) = replayed.render_model() else {
+            panic!("scenario Continue result");
+        };
+        let hash = message
+            .fields()
+            .iter()
+            .find(|field| field.key() == "normalized_solution_set_hash");
+        assert_eq!(
+            hash.map(|field| field.value().as_text()).as_deref(),
+            direct.field("normalized_solution_set_hash")
+        );
+    }
+
+    let explicit_request =
+        AppRequest::new(AppCommand::Scenario(ScenarioAppCommand::new(raw.clone())));
+    let explicit = rust.run(explicit_request);
+    assert_ne!(explicit.status(), AppStatus::Success);
+    assert!(explicit.render_model().is_none());
+    let variable_depth =
+        ProblemCompiler::compile_legacy_scenario_pc(&raw.with_exact_pieces(None)).unwrap();
+    assert_eq!(variable_depth.compact_pc_geometry_height(), 4);
 }

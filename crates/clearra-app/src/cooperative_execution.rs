@@ -43,6 +43,7 @@ use crate::{
         build_v2_app_command::BuildV2AppRequest,
         core_execution_error_response,
         path_app_command::path_response,
+        scenario_app_command::ScenarioAppCommand,
         setup_app_command::setup_success_response,
     },
     pc_allspin_result::project_pc_allspin_result,
@@ -4103,22 +4104,24 @@ pub(crate) fn compile_search_command(
                     },
                 ));
             }
-            ProblemCompiler::compile_scenario_pc(&query).map(|problem| {
-                let problem = if result_projection.projection().minimals_origin().is_some() {
-                    problem.with_pc_minimum_cover_v2_evidence()
-                } else if result_projection.projection().path_origin().is_some() {
-                    problem.with_pc_path_v2_evidence()
-                } else {
-                    problem
-                };
-                (
-                    Arc::new(problem),
-                    CooperativeSearchResponseKind::Scenario {
-                        render_contract,
-                        result_projection,
-                    },
-                )
-            })
+            ScenarioAppCommand::compile_standard_scenario(&query, render_contract.is_some()).map(
+                |problem| {
+                    let problem = if result_projection.projection().minimals_origin().is_some() {
+                        problem.with_pc_minimum_cover_v2_evidence()
+                    } else if result_projection.projection().path_origin().is_some() {
+                        problem.with_pc_path_v2_evidence()
+                    } else {
+                        problem
+                    };
+                    (
+                        Arc::new(problem),
+                        CooperativeSearchResponseKind::Scenario {
+                            render_contract,
+                            result_projection,
+                        },
+                    )
+                },
+            )
         }
         AppCommand::BuildProbability(command) => {
             if let Some(reason) = command.invalid_reason() {

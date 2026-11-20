@@ -5,7 +5,12 @@ mod board_accessors {
     use clearra_pc_graph::request::PcScenarioBoard;
     use clearra_profiles::board::board_profile::BoardProfile;
 
-    use super::{OccupancyField, SearchProblem, SearchProblemBoard};
+    use crate::goal::SearchGoal;
+
+    use super::{
+        OccupancyField, PcChanceEvidencePolicy, SearchOutputPolicy, SearchProblem,
+        SearchProblemBoard,
+    };
 
     impl SearchProblem {
         pub fn board(&self) -> &SearchProblemBoard {
@@ -25,6 +30,21 @@ mod board_accessors {
     impl SearchProblem {
         pub fn visible_height(&self) -> u16 {
             self.board.visible_height()
+        }
+    }
+    impl SearchProblem {
+        /// The Board64 PC catalog's target, not the caller's display frame.
+        pub fn compact_pc_geometry_height(&self) -> u16 {
+            // A transformed problem cannot carry the ordinary legacy frame
+            // into path/score/coverage authority or a different search goal.
+            if self.pc_chance_evidence_policy() != PcChanceEvidencePolicy::Disabled
+                || self.output_policy() != SearchOutputPolicy::Trace
+                || !matches!(self.search_goal(), SearchGoal::ClearToEmpty)
+            {
+                return self.visible_height();
+            }
+            self.legacy_scenario_pc_active_height
+                .map_or_else(|| self.visible_height(), core::num::NonZeroU16::get)
         }
     }
     impl SearchProblem {
@@ -162,6 +182,7 @@ mod constructor {
                 preset,
                 initial_occupancy,
                 board,
+                legacy_scenario_pc_active_height: None,
                 board_profile:
                     clearra_profiles::bundle::standard_profile_bundle::standard_profile_bundle()
                         .board(),
@@ -269,6 +290,7 @@ mod constructor {
                 scenario,
                 initial_occupancy,
                 board,
+                legacy_scenario_pc_active_height: None,
                 board_profile:
                     clearra_profiles::bundle::standard_profile_bundle::standard_profile_bundle()
                         .board(),
@@ -606,6 +628,7 @@ mod model {
         pub(super) scenario: ScenarioQuery,
         pub(super) initial_occupancy: Option<OccupancyField>,
         pub(super) board: SearchProblemBoard,
+        pub(super) legacy_scenario_pc_active_height: Option<core::num::NonZeroU16>,
         pub(super) board_profile: BoardProfile,
         pub(super) piece_source: PieceSource,
         pub(super) initial_hold: HoldAutomatonState,
@@ -1728,6 +1751,82 @@ mod search_height_policy {
                 .map(|query| query.template().board_size().height())
                 .unwrap_or_else(|| scenario.initial_board().visible_height()),
         }
+    }
+}
+mod legacy_scenario_pc_extent {
+    use core::num::NonZeroU16;
+
+    use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+    use clearra_pc_graph::request::{PcCountPolicy, RequestedSearchBackend};
+
+    use super::{SearchProblem, SearchProblemId, SearchProblemPreset};
+
+    impl SearchProblem {
+        /// Select only exact area that the legacy ScenarioPc extent would
+        /// admit. The canonical input and scenario layout remain unchanged.
+        pub(crate) fn with_legacy_fixed_exact_scenario_extent(mut self) -> Self {
+            if let Some(rows) = active_height(&self) {
+                self.problem_id = SearchProblemId::new(format!(
+                    "{}:legacy-pc-active-rows:{}",
+                    self.problem_id.as_str(),
+                    rows.get()
+                ));
+                self.legacy_scenario_pc_active_height = Some(rows);
+            }
+            self
+        }
+    }
+
+    fn active_height(problem: &SearchProblem) -> Option<NonZeroU16> {
+        let query = problem.core_query();
+        let board = problem.initial_board();
+        let policy = query.execution_policy();
+        let ordinary_objective = match query.count_policy() {
+            PcCountPolicy::CountAll => ObjectivePolicy::all(),
+            PcCountPolicy::CountUnique => ObjectivePolicy::unique(),
+            PcCountPolicy::FirstSolution => return None,
+        };
+        if problem.preset() != SearchProblemPreset::ScenarioPc
+            || board.width() != 10
+            || !(2..=6).contains(&board.visible_height())
+            || board.has_extended_occupancy()
+            || query.objective() != ordinary_objective
+            || query.hold_state().piece().is_some()
+            || query.min_remaining_queue() != 0
+            || query.supply_window_size().is_some()
+            || query.allowed_colored_solution_identities().is_some()
+            || query
+                .queue_observation_policy()
+                .requires_observation_policy()
+            || query.solution_probability_policy().requested()
+            || query.verified_kick_profile().is_some()
+            || policy.requested_backend() != RequestedSearchBackend::Cpu
+            || policy.tablebase_requested()
+            || policy.precompute_build_dependencies()
+        {
+            return None;
+        }
+        let n = query.exact_pieces()?;
+        let queue = query.remaining_queue().as_fixed_sequence()?;
+        if n == 0
+            || query.piece_window().max_pieces() != n
+            || !(n..=64).contains(&queue.len())
+            || (query.allow_hold() && (n != 1 || queue.len() != 1))
+        {
+            return None;
+        }
+        // With no usable alternate piece, the final clear can consume only
+        // the exact window. No clipping or rounding a non-integral area.
+        let occupied = board.occupied_mask();
+        let area = (occupied.count_ones() as usize).checked_add(n.checked_mul(4)?)?;
+        if !area.is_multiple_of(10) {
+            return None;
+        }
+        let rows = u16::try_from(area / 10).ok().and_then(NonZeroU16::new)?;
+        if rows.get() >= board.visible_height() || occupied >> (rows.get() * 10) != 0 {
+            return None;
+        }
+        Some(rows)
     }
 }
 mod supply_accessors {

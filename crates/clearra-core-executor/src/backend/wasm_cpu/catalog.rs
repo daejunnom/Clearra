@@ -247,7 +247,7 @@ impl GeometryCatalog {
     /// claim.
     pub fn checked_compile_peak_upper_bound(problem: &SearchProblem) -> Option<u128> {
         let width = u8::try_from(problem.initial_board().width()).ok()?;
-        let height = u8::try_from(problem.visible_height()).ok()?;
+        let height = u8::try_from(problem.compact_pc_geometry_height()).ok()?;
         let cell_count = usize::from(width).checked_mul(usize::from(height))?;
         if width == 0 || height == 0 || cell_count > u64::BITS as usize || height > 16 {
             return None;
@@ -333,7 +333,7 @@ impl GeometryCatalog {
         // Geometry is compiled in the target frame. The larger spawn/search
         // height belongs to reachability and must not expand the exact-cover
         // universe beyond the active PC rows.
-        let height = u8::try_from(problem.visible_height()).map_err(|_| {
+        let height = u8::try_from(problem.compact_pc_geometry_height()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_target_frame_height_overflow")
         })?;
         let cell_count = usize::from(width) * usize::from(height);
@@ -360,22 +360,7 @@ impl GeometryCatalog {
             ));
         }
 
-        Self::compile_for_required_cells(problem, required_cells)
-    }
-
-    /// Compile the inverse lock-clear catalog for a fixed set of cells that
-    /// must be added to the initial board. PC search passes every unoccupied
-    /// target-frame cell; build-probability search passes only its white setup
-    /// layer.
-    pub fn compile_for_required_cells(
-        problem: &SearchProblem,
-        required_cells: u64,
-    ) -> Result<Self, WasmExactSearchError> {
-        Self::compile_for_required_cells_on_board(
-            problem,
-            problem.initial_board().occupied_mask(),
-            required_cells,
-        )
+        Self::compile_for_required_cells_on_dimensions(width, height, initial_board, required_cells)
     }
 
     pub fn compile_for_required_cells_on_board(

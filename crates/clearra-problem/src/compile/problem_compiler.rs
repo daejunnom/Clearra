@@ -70,6 +70,15 @@ impl ProblemCompiler {
             ScenarioPreset::from_query(query).into_scenario_query(),
         )
     }
+
+    /// Legacy Scenario input used declared height as a visibility bound
+    /// when its exact fixed-queue area fit a smaller clear-to-empty frame.
+    /// Modern explicit-line consumers must use `compile_scenario_pc`.
+    pub fn compile_legacy_scenario_pc(
+        query: &PcScenarioQuery,
+    ) -> Result<SearchProblem, ProblemCompileError> {
+        Self::compile_scenario_pc(query).map(SearchProblem::with_legacy_fixed_exact_scenario_extent)
+    }
 }
 fn normalize_standard_pc_initial_board(query: &PcScenarioQuery) -> PcScenarioQuery {
     query

@@ -87,6 +87,27 @@ impl ScenarioAppRenderContract {
             .with_initial_board(board.after_initial_line_clear());
         self.compact_input_replay_token =
             PcContinuationTokenCodec::encode_scenario_replay(&canonical).ok();
+        if self.compact_input_replay_token.is_some() {
+            // Format the original public extent and normalized field, not
+            // the possibly smaller catalog used to search the legacy input.
+            let normalized = canonical.initial_board();
+            for (key, value) in [
+                ("board_width", normalized.width().to_string()),
+                ("visible_height", normalized.visible_height().to_string()),
+                (
+                    "initial_board_mask",
+                    format!("0x{:016x}", normalized.occupied_mask()),
+                ),
+            ] {
+                if !self
+                    .input_fields
+                    .iter()
+                    .any(|(existing, _)| existing == key)
+                {
+                    self.input_fields.push((key.to_owned(), value));
+                }
+            }
+        }
         self
     }
 }

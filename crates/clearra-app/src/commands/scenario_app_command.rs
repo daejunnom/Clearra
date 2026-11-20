@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
 use clearra_pc_graph::request::{PcContinuationTokenCodec, PcScenarioQuery};
-use clearra_problem::ProblemCompiler;
+use clearra_problem::{ProblemCompileError, ProblemCompiler, SearchProblem};
 use clearra_validation::diagnostic::diagnostic_report::DiagnosticReport;
 use clearra_validation::validators::pc_query_validator::validate_pc_scenario_query;
 
@@ -188,6 +188,17 @@ impl ScenarioAppCommand {
             .render_contract
             .map(|contract| contract.prepare_compact_input_replay(&self.query));
         Ok((self.query, render_contract, result_projection))
+    }
+
+    pub(crate) fn compile_standard_scenario(
+        query: &PcScenarioQuery,
+        has_legacy_render_contract: bool,
+    ) -> Result<SearchProblem, ProblemCompileError> {
+        if has_legacy_render_contract {
+            ProblemCompiler::compile_legacy_scenario_pc(query)
+        } else {
+            ProblemCompiler::compile_scenario_pc(query)
+        }
     }
 }
 
@@ -416,7 +427,9 @@ impl RunnableAppCommand for ScenarioAppCommand {
         }
         let compiled = match chance_origin {
             Some(_) => ProblemCompiler::compile_scenario_percent(self.query.as_ref()),
-            None => ProblemCompiler::compile_scenario_pc(self.query.as_ref()),
+            None => {
+                Self::compile_standard_scenario(self.query.as_ref(), self.render_contract.is_some())
+            }
         };
         let problem = match compiled {
             Ok(problem) => problem,
