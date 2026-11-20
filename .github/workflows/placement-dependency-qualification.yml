@@ -54,6 +54,7 @@ jobs:
           cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib --no-run
           status=0
           filters=(structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves
+            frontier_certificate_reuses_incomparable_boards_but_rejects_rectangular_hull
             ordered_kick_interval_requires ordered_kick_witness_guard_ ordered_negative_ candidate_kick_guard_
             reachability::reference_tests incremental_domain_ minimum_domain_cutoff_
             exact_clear_domain_tests placement_conditions::tests geometric_edge_reuse_

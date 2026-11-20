@@ -11,6 +11,10 @@
 
 use super::*;
 
+#[cfg(test)]
+#[path = "reachability_frontier_certificate_tests.rs"]
+mod frontier_certificate_tests;
+
 // The prototype is deliberately bounded independently of caller allocation
 // policy. Unsupported or malformed templates return no certificate.
 const MAX_DEPENDENCY_STATES: usize = 8 * 1024;
