@@ -2924,25 +2924,41 @@ impl ExtendedBuildProbabilitySession {
         let universe = self.problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
-        let mut keys = self
-            .buildable_tilings
-            .iter()
-            .map(|tiling| tiling.canonical_key(self.catalog.initial_board(), self.field.height()))
-            .collect::<Vec<_>>();
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(self.buildable_tilings.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_build_probability_solution_storage_unavailable",
+                )
+            })?;
+        let mut coverages = Vec::new();
+        if let Some(rows) = self.solution_coverage.as_ref() {
+            coverages.try_reserve_exact(rows.len()).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "extended_pc_result_solution_coverage_storage_unavailable",
+                )
+            })?;
+        }
+        // The terminal resource preflight and representative validation have
+        // already run. End the private producer lifetimes before assembling
+        // probabilities, replay graphs, or typed proof. Each extended coverage
+        // key and its bitset become the public row's actual backing owners.
+        let initial = self.catalog.initial_board();
+        let height = self.field.height();
+        keys.extend(
+            core::mem::take(&mut self.buildable_tilings)
+                .into_iter()
+                .map(|tiling| tiling.canonical_key(initial, height)),
+        );
         keys.sort_unstable();
         keys.dedup();
-        let coverages = self
-            .solution_coverage
-            .as_ref()
-            .map(|rows| {
-                let mut rows = rows
-                    .iter()
-                    .map(|(key, bits)| NormalizedSolutionCoverage::new(key.clone(), bits.clone()))
-                    .collect::<Vec<_>>();
-                rows.sort_unstable_by(|left, right| left.solution_key().cmp(right.solution_key()));
-                rows
-            })
-            .unwrap_or_default();
+        if let Some(rows) = self.solution_coverage.take() {
+            coverages.extend(
+                rows.into_iter()
+                    .map(|(key, bits)| NormalizedSolutionCoverage::new(key, bits)),
+            );
+            coverages.sort_unstable_by(|left, right| left.solution_key().cmp(right.solution_key()));
+        }
         let count_complete = self.supply_projection_complete
             && self.truncated_reason.is_none()
             && self.pc_build_variant_count_complete;
@@ -4176,6 +4192,160 @@ mod tests {
                 checked_build_probability_problem_nested_retained_bytes(&problem),
             Some(source_nested)
         );
+    }
+
+    #[test]
+    fn extended_pc_terminal_projection_moves_private_solution_owners() {
+        use clearra_core_domain::board::standard_pc_board::Board256Mask;
+        use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+        use clearra_pc_graph::request::{PcCountPolicy, PcExecutionPolicy, RequestedSearchBackend};
+        use clearra_rules::profile::builtin_rules::srs_plus;
+
+        let control = ExecutionControl::default();
+        for height in [7_u8, 24] {
+            // The same forced vertical I holes used by the App full-height
+            // fixtures. The upper rows must survive identity projection.
+            let starts = if height == 7 {
+                vec![0_u16, 3]
+            } else {
+                (0..u16::from(height)).step_by(4).collect()
+            };
+            let pieces = starts.len();
+            let mut target = Board256Mask::EMPTY;
+            for (column, start) in starts.into_iter().enumerate() {
+                for row in start..start + 4 {
+                    target = target.union(
+                        Board256Mask::singleton(row * 10 + column as u16).expect("fixture cell"),
+                    );
+                }
+            }
+            let initial = Board256Mask::all_cells(u16::from(height) * 10)
+                .expect("fixture size")
+                .without(target);
+            let field = BuildProbabilityField::from_words_preserving_height(
+                height,
+                initial.words(),
+                target.words(),
+            )
+            .expect("full-height fixture");
+            let mut baseline: Option<CoreExecutionResult> = None;
+            for policy in [
+                PcSolutionProbabilityPolicy::Omit,
+                PcSolutionProbabilityPolicy::Include,
+            ] {
+                let query = PcScenarioQuery::new(
+                    PcScenarioBoard::standard_10_from_words(u16::from(height), initial.words())
+                        .expect("fixture board"),
+                    PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; pieces])),
+                    PieceWindow::new(pieces),
+                )
+                .with_rule(srs_plus())
+                .with_exact_pieces(Some(pieces))
+                .with_allow_hold(false)
+                .with_min_remaining_queue(0)
+                .with_count_policy(PcCountPolicy::CountAll)
+                .with_objective(ObjectivePolicy::all())
+                .with_retained_trace_limit(1)
+                .with_solution_probability_policy(policy)
+                .with_execution_policy(
+                    PcExecutionPolicy::default()
+                        .with_requested_backend(RequestedSearchBackend::Cpu)
+                        .with_workers(1)
+                        .with_allow_backend_fallback(false),
+                );
+                let problem = ProblemCompiler::compile_scenario_pc(&query).expect("fixture PC");
+                let memory_bound =
+                    ExecutionMemoryBound::unbounded_for_problem(&problem).expect("memory owner");
+                let mut session = ExtendedBuildProbabilitySession::new_pc_family(
+                    &problem,
+                    field,
+                    memory_bound,
+                    0,
+                )
+                .expect("ordinary full-height PC session");
+                let mut saw_private_tiling = false;
+                let mut private_row_backing = None;
+                let mut completed = None;
+                for _ in 0..10_000 {
+                    match session
+                        .advance(1, &control)
+                        .expect("cooperative fixture search")
+                    {
+                        BuildProbabilityAdvance::Pending => {
+                            saw_private_tiling |= !session.buildable_tilings.is_empty();
+                            private_row_backing =
+                                session.solution_coverage.as_ref().and_then(|rows| {
+                                    rows.iter()
+                                        .next()
+                                        .map(|(key, row)| (key.as_ptr(), row.storage_component(0)))
+                                });
+                        }
+                        BuildProbabilityAdvance::Completed(result) => {
+                            completed = Some(result);
+                            break;
+                        }
+                        BuildProbabilityAdvance::Cancelled => panic!("unexpected cancellation"),
+                    }
+                }
+                let result = completed.expect("small fixture must finish within its work bound");
+                assert!(saw_private_tiling);
+                assert_eq!(session.buildable_tilings.capacity(), 0);
+                assert!(session.solution_coverage.is_none());
+                assert_eq!(result.normalized_solution_keys().len(), 1);
+                let identity = ExtendedTilingSolutionKey::parse_canonical(
+                    &result.normalized_solution_keys()[0],
+                )
+                .expect("exact published identity");
+                assert_eq!(identity.initial_board(), initial);
+                assert_eq!(identity.placement_count(), pieces);
+                let placed = identity
+                    .placements()
+                    .fold(Board256Mask::EMPTY, |board, placement| {
+                        board.union(placement.cells())
+                    });
+                assert_eq!(placed, target);
+                assert_eq!(result.coverage_pattern_words(), &[1]);
+                assert_eq!(result.bool_field("count_complete"), Some(true));
+                assert_eq!(result.bool_field("build_variant_count_exact"), Some(true));
+                assert_eq!(
+                    result.bool_field("representative_physical_replay_validated"),
+                    Some(true)
+                );
+                if let Some(baseline) = &baseline {
+                    assert_eq!(
+                        result.normalized_solution_keys(),
+                        baseline.normalized_solution_keys()
+                    );
+                    assert_eq!(
+                        result.field("normalized_solution_set_hash"),
+                        baseline.field("normalized_solution_set_hash")
+                    );
+                    assert_eq!(result.path_steps(), baseline.path_steps());
+                    let [coverage] = result.normalized_solution_coverages() else {
+                        panic!("Include must return the exact coverage row");
+                    };
+                    assert_eq!(
+                        coverage.solution_key(),
+                        &result.normalized_solution_keys()[0]
+                    );
+                    let original = private_row_backing.expect("producer row must have existed");
+                    assert!(original.1.is_some());
+                    assert_eq!(
+                        (
+                            coverage.solution_key().as_ptr(),
+                            coverage.covered_patterns().storage_component(0)
+                        ),
+                        original,
+                    );
+                    assert_eq!(coverage.covered_patterns().word_at(0), 1);
+                    assert_eq!(result.solution_probabilities()[0].probability(), "1");
+                } else {
+                    assert!(private_row_backing.is_none());
+                    assert!(result.normalized_solution_coverages().is_empty());
+                    baseline = Some(result);
+                }
+            }
+        }
     }
 
     #[test]
