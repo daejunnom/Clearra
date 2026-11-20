@@ -1,8 +1,8 @@
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, OpenOptions, TryLockError};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -32,24 +32,23 @@ pub fn run_entry(
         .ok_or_else(|| Error::usage(format!("unregistered WSL entrypoint: {entry_name}")))?
         .clone();
     reject_control_characters(arguments)?;
-    let _lease = WslLease::acquire(policy)?;
+    let _lease = WslLease::acquire(repository, policy)?;
     let run_tag = format!("{}-{}", std::process::id(), unix_nanos());
-    let mut temporary_archive = None;
     let mut guest_arguments =
         normalize_entry_arguments(repository, policy, &contract, entry_name, arguments)?;
-    if contract.requires_source {
-        let (archive, digest) = source_archive(repository, policy, &run_tag)?;
-        temporary_archive = archive
-            .parent()
-            .map(|path| OwnedTemporaryDirectory(path.to_path_buf()));
-        let mounted_archive = windows_to_wsl(&archive)?;
+    let temporary_archive = contract
+        .requires_source
+        .then(|| source_archive(repository, policy, &run_tag))
+        .transpose()?;
+    if let Some(archive) = &temporary_archive {
+        let mounted_archive = windows_to_wsl(&archive.path)?;
         guest_arguments.splice(
             0..0,
             [
                 OsString::from("--source-archive"),
                 OsString::from(mounted_archive),
                 OsString::from("--source-digest"),
-                OsString::from(digest),
+                OsString::from(archive.digest.as_str()),
             ],
         );
     }
@@ -235,9 +234,12 @@ fn unique_option_value(arguments: &[OsString], option: &str) -> Result<usize> {
     Ok(indexes[0])
 }
 
-fn source_archive(repository: &Path, policy: &Policy, run_tag: &str) -> Result<(PathBuf, String)> {
+fn source_archive(repository: &Path, policy: &Policy, run_tag: &str) -> Result<WslSourceArchive> {
     let root = temporary_root()?.join("wsl-source").join(run_tag);
-    fs::create_dir_all(&root).map_err(|error| Error::io("create WSL source staging", error))?;
+    let root = storage::verify(repository, policy, &root, false, None)?.path;
+    // Own only a newly created run directory. Early failures in listing,
+    // filtering, tar, or hashing must also release it.
+    let staging = OwnedTemporaryDirectory::create(root)?;
     let listing = Command::new("git")
         .args(["-C", &repository.to_string_lossy(), "ls-files", "-z"])
         .output()
@@ -259,23 +261,27 @@ fn source_archive(repository: &Path, policy: &Policy, run_tag: &str) -> Result<(
             ));
         }
     }
-    let list = root.join("tracked-files.zlist");
+    let list = staging.0.join("tracked-files.zlist");
     fs::write(&list, &listing.stdout).map_err(|error| Error::io("write WSL source list", error))?;
-    let archive = root.join("source.tar.gz");
+    let path = staging.0.join("source.tar.gz");
     let status = Command::new("tar")
         .current_dir(repository)
         .arg("-czf")
-        .arg(&archive)
+        .arg(&path)
         .arg("--null")
         .arg("-T")
         .arg(&list)
         .status()
         .map_err(|error| Error::io("create WSL source archive", error))?;
-    if !status.success() || !archive.is_file() {
+    if !status.success() || !path.is_file() {
         return Err(Error::runtime("tar failed while preparing WSL source"));
     }
-    let digest = sha256_file(&archive)?;
-    Ok((archive, digest))
+    let digest = sha256_file(&path)?;
+    Ok(WslSourceArchive {
+        _staging: staging,
+        path,
+        digest,
+    })
 }
 
 fn marker_digest(policy: &Policy) -> Result<String> {
@@ -434,12 +440,35 @@ fn unix_nanos() -> u128 {
         .as_nanos()
 }
 
+const WSL_LOCK_FILENAME: &str = "Clearra-Build.lock";
+const LEGACY_WSL_LEASE_FILENAME: &str = "Clearra-Build.lease";
+
 struct WslLease {
+    // Closing the handle releases the OS lock. The path must stay in
+    // place so the next manager cannot acquire a different file object.
+    _file: fs::File,
+}
+
+struct WslSourceArchive {
+    _staging: OwnedTemporaryDirectory,
     path: PathBuf,
-    owner: String,
+    digest: String,
 }
 
 struct OwnedTemporaryDirectory(PathBuf);
+
+impl OwnedTemporaryDirectory {
+    fn create(path: PathBuf) -> Result<Self> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::storage("WSL source staging has no parent"))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| Error::io("create WSL source staging root", error))?;
+        fs::create_dir(&path)
+            .map_err(|error| Error::io("create unique WSL source staging", error))?;
+        Ok(Self(path))
+    }
+}
 
 impl Drop for OwnedTemporaryDirectory {
     fn drop(&mut self) {
@@ -448,53 +477,68 @@ impl Drop for OwnedTemporaryDirectory {
 }
 
 impl WslLease {
-    fn acquire(policy: &Policy) -> Result<Self> {
-        let path = runtime::state_root()?.join("wsl/Clearra-Build.lease");
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| Error::io("create WSL lease root", error))?;
+    fn acquire(repository: &Path, policy: &Policy) -> Result<Self> {
+        let directory = runtime::state_root()?.join("wsl");
+        let path = directory.join(WSL_LOCK_FILENAME);
+        let path = storage::verify(repository, policy, &path, false, None)?.path;
+        let lease = Self::lock_at(&path)?;
+        terminate_dedicated(policy)?;
+        Ok(lease)
+    }
+
+    fn lock_at(path: &Path) -> Result<Self> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::storage("WSL lock has no parent"))?;
+        fs::create_dir_all(parent).map_err(|error| Error::io("create WSL lock root", error))?;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(Error::storage("permanent WSL lock is not a regular file"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io("inspect permanent WSL lock", error)),
         }
-        let owner = format!("{}\n{}\n", std::process::id(), unix_nanos());
-        for attempt in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    file.write_all(owner.as_bytes())
-                        .map_err(|error| Error::io("write WSL lease", error))?;
-                    let lease = Self {
-                        path: path.clone(),
-                        owner,
-                    };
-                    terminate_dedicated(policy)?;
-                    return Ok(lease);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let live = fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|value| value.lines().next()?.parse::<u32>().ok())
-                        .is_some_and(runtime::pid_alive);
-                    if live || attempt > 0 {
-                        return Err(Error::runtime(
-                            "E_CLEARRA_WSL_SESSION_BUSY: dedicated distribution already has an owner",
-                        ));
-                    }
-                    terminate_dedicated(policy)?;
-                    fs::remove_file(&path)
-                        .map_err(|error| Error::io("remove stale WSL lease", error))?;
-                }
-                Err(error) => return Err(Error::io("acquire WSL lease", error)),
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_SHARE_READ: u32 = 1;
+            const FILE_SHARE_WRITE: u32 = 2;
+            // Let another caller open the same file and observe contention;
+            // forbid renaming or replacing that file while a handle is live.
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        }
+        let file = options
+            .open(path)
+            .map_err(|error| Error::io("open permanent WSL lock", error))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(Error::runtime(
+                    "E_CLEARRA_WSL_SESSION_BUSY: dedicated distribution already has an owner",
+                ));
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(Error::io("acquire permanent WSL lock", error));
             }
         }
-        Err(Error::runtime(
-            "E_CLEARRA_WSL_SESSION_BUSY: could not acquire dedicated distribution lease",
-        ))
-    }
-}
 
-impl Drop for WslLease {
-    fn drop(&mut self) {
-        if fs::read_to_string(&self.path).ok().as_deref() == Some(&self.owner) {
-            let _ = fs::remove_file(&self.path);
+        // The obsolete PID-lease implementation does not observe this lock.
+        // No mixed-version execution is supported. Any legacy lease is an
+        // explicit migration blocker; we never infer staleness or terminate
+        // on its behalf, even when it is empty, unreadable, or a dangling link.
+        match fs::symlink_metadata(parent.join(LEGACY_WSL_LEASE_FILENAME)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io("verify legacy WSL lease absence", error)),
+            Ok(_) => {
+                return Err(Error::runtime(
+                    "E_CLEARRA_WSL_SESSION_BUSY: stop legacy managers and verify the old WSL lease before migration",
+                ));
+            }
         }
+        Ok(Self { _file: file })
     }
 }
 
@@ -502,6 +546,69 @@ impl Drop for WslLease {
 mod tests {
     use super::*;
     use crate::policy::Policy;
+
+    fn test_staging(label: &str) -> OwnedTemporaryDirectory {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repository root");
+        let policy = Policy::load(repository).expect("load policy");
+        let path = repository.join("_local/state/wsl-tests").join(format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            unix_nanos()
+        ));
+        let path = storage::verify(repository, &policy, &path, false, None)
+            .expect("managed test path")
+            .path;
+        OwnedTemporaryDirectory::create(path).expect("create test staging")
+    }
+
+    #[test]
+    fn permanent_wsl_lock_rejects_a_second_handle_and_remains_for_reuse() {
+        let staging = test_staging("lock");
+        let path = staging.0.join(WSL_LOCK_FILENAME);
+        let owner = WslLease::lock_at(&path).expect("first lock");
+        let Err(busy) = WslLease::lock_at(&path) else {
+            panic!("second handle acquired the lock");
+        };
+        assert!(busy.to_string().contains("E_CLEARRA_WSL_SESSION_BUSY"));
+        drop(owner);
+        assert!(path.is_file(), "the lock path is permanent");
+        WslLease::lock_at(&path).expect("same file can be locked again");
+    }
+
+    #[test]
+    fn empty_legacy_wsl_lease_is_not_interpreted_as_stale() {
+        let staging = test_staging("legacy-lock");
+        let path = staging.0.join(WSL_LOCK_FILENAME);
+        let legacy = staging.0.join(LEGACY_WSL_LEASE_FILENAME);
+        fs::File::create_new(&legacy).expect("empty ownership marker");
+        let Err(error) = WslLease::lock_at(&path) else {
+            panic!("lock accepted while legacy owner may still be active");
+        };
+        assert!(error.to_string().contains("E_CLEARRA_WSL_SESSION_BUSY"));
+        assert!(legacy.is_file(), "the legacy lease was not removed");
+    }
+
+    #[test]
+    fn source_staging_refuses_existing_directory_and_cleans_on_early_error() {
+        let staging = test_staging("source-staging");
+        let existing = staging.0.join("existing");
+        fs::create_dir(&existing).expect("unowned directory");
+        assert!(OwnedTemporaryDirectory::create(existing.clone()).is_err());
+        assert!(existing.is_dir(), "existing paths are never acquired");
+
+        let temporary = staging.0.join("failing-archive");
+        let fail_after_create = || -> Result<()> {
+            let _staging = OwnedTemporaryDirectory::create(temporary.clone())?;
+            fs::File::create_new(temporary.join("tracked-files.zlist"))
+                .map_err(|error| Error::io("simulate partial archive", error))?;
+            Err(Error::runtime("simulated archive error"))
+        };
+        assert!(fail_after_create().is_err());
+        assert!(!temporary.exists(), "partial staging was not cleaned");
+    }
 
     #[test]
     fn utf16_wsl_listing_is_decoded() {

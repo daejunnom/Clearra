@@ -1,4 +1,20 @@
 #!/usr/bin/env bash
+
+start_lease_watch() {
+    local host_stdin
+    exec {host_stdin}<&0
+    # In a noninteractive Bash, an unredirected background command reads
+    # /dev/null. Preserve the actual host lease pipe explicitly.
+    lease_watch <&"$host_stdin" &
+    exec {host_stdin}<&-
+}
+
+# The watcher launcher can be sourced to exercise its real pipe contract
+# without starting a distribution or invoking the guest service manager.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return
+fi
+
 set -euo pipefail
 
 [[ "$(id -u)" -eq 0 ]] || exit 2
@@ -88,7 +104,7 @@ lease_watch() {
     systemctl kill --kill-who=all --signal=KILL "${UNIT}.service" >/dev/null 2>&1 || true
     systemctl poweroff --force --force --no-block >/dev/null 2>&1 || true
 }
-lease_watch &
+start_lease_watch
 watcher=$!
 
 status=0

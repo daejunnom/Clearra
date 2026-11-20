@@ -88,27 +88,69 @@ unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
     CARGO_PROFILE_RELEASE_STRIP
 hash -r
 
-sync_source() {
+copy_verified_source_archive() {
+    local archive="$1" staged_archive="$2" digest="$3" checksum
+    # Do not hash one read of the mounted file and extract a second one.
+    # Tar must see the very bytes that passed the declared digest check.
+    cp -- "$archive" "$staged_archive" || return 2
+    checksum="$(sha256sum -- "$staged_archive")" || return 2
+    if [[ "${checksum%% *}" != "$digest" ]]; then
+        printf 'Clearra WSL source archive digest mismatch\n' >&2
+        return 2
+    fi
+}
+
+sync_source() (
+    # A command substitution normally clears errexit. Keep digest/copy/tar
+    # failures terminal inside this private extraction transaction too.
+    set -euo pipefail
     local archive="$1"
     local digest="$2"
-    [[ "$archive" == /mnt/?/* && -f "$archive" ]] || exit 2
+    [[ "$archive" == /mnt/?/* && -f "$archive" && ! -L "$archive" ]] || exit 2
     [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || exit 2
     local base="$HOME/.local/share/Clearra/workspaces/$digest"
-    local next="$base/source.next.$$"
     local source="$base/source"
-    rm -rf -- "$next"
-    mkdir -p "$next"
-    tar -xzf "$archive" -C "$next"
-    rm -rf -- "$source"
-    mv -- "$next" "$source"
+    [[ "$(realpath -m -- "$base")" == "$base" && ! -L "$source" ]] || exit 2
+    mkdir -p -- "$base"
+    local scratch
+    scratch="$(mktemp -d -- "$base/.incoming.XXXXXXXX")"
+    trap 'rm -rf --one-file-system -- "$scratch"' EXIT
+    copy_verified_source_archive "$archive" "$scratch/source.tar.gz" "$digest"
+    mkdir -- "$scratch/source"
+    tar -xzf "$scratch/source.tar.gz" -C "$scratch/source"
+    # The Rust manager holds the dedicated lease throughout extraction and
+    # this run. Replace only this same-digest source after successful tar.
+    rm -rf --one-file-system -- "$source"
+    mv -T -- "$scratch/source" "$source"
     printf '%s' "$source"
-}
+)
 
 parse_source() {
     [[ "${1:-}" == "--source-archive" && "${3:-}" == "--source-digest" ]] || exit 2
     SOURCE_ROOT="$(sync_source "$2" "$4")"
     shift 4
     SOURCE_ARGS=("$@")
+}
+
+require_fresh_or_empty_directory() {
+    local output="$1" existing
+    [[ ! -L "$output" ]] || return 2
+    if [[ -e "$output" ]]; then
+        [[ -d "$output" ]] || return 2
+        # Print a fixed token instead of the name (even a filename containing
+        # only newlines must make the directory count as non-empty).
+        existing="$(find "$output" -mindepth 1 -maxdepth 1 -exec printf x \; -quit)" || return 2
+        [[ -z "$existing" ]] || {
+            printf 'Clearra WSL benchmark output must be a new or empty directory\n' >&2
+            return 2
+        }
+    fi
+}
+
+require_empty_benchmark_output() {
+    local output="$1"
+    [[ "$output" == /mnt/?/* && "$(realpath -m -- "$output")" == "$output" ]] || return 2
+    require_fresh_or_empty_directory "$output"
 }
 
 verify_toolchains() {
@@ -251,7 +293,7 @@ PY
                 *) ARGUMENTS+=("$1"); shift ;;
             esac
         done
-        [[ "$HOST_OUTPUT" == /mnt/?/* ]] || exit 2
+        require_empty_benchmark_output "$HOST_OUTPUT"
         [[ "${#ARGUMENTS[@]}" -eq 7 ]] || exit 2
         if [[ "${ARGUMENTS[4]}" == auto ]]; then
             auto_workers="$(($(nproc) - 1))"
@@ -266,9 +308,10 @@ PY
         export CLEARRA_WSL_WORKSPACE="$SOURCE_ROOT"
         report="$HOME/.local/state/Clearra/reports/runtime-environments/latest"
         bash "$SOURCE_ROOT/scripts/tools/wsl-pc-runtime-build-and-batch.sh" "${ARGUMENTS[@]}"
-        rm -rf -- "$HOST_OUTPUT"
-        mkdir -p "$HOST_OUTPUT"
-        cp -a -- "$report"/. "$HOST_OUTPUT"/
+        require_empty_benchmark_output "$HOST_OUTPUT"
+        mkdir -p -- "$HOST_OUTPUT"
+        require_empty_benchmark_output "$HOST_OUTPUT"
+        cp -a --no-clobber -- "$report"/. "$HOST_OUTPUT"/
         filesystem="$(stat -f -c %T "$SOURCE_ROOT")"
         python3 - "$HOST_OUTPUT/clearra-runtime-host.json" "$SOURCE_ROOT" \
             "$filesystem" "$(nproc)" "$CLEARRA_WSL_MARKER_DIGEST" "${ARGUMENTS[4]}" <<'PY'
@@ -281,7 +324,8 @@ value = {
     "workers": int(workers),
     "toolchain_digest": digest,
 }
-pathlib.Path(path).write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+with pathlib.Path(path).open("x", encoding="utf-8") as receipt:
+    receipt.write(json.dumps(value, sort_keys=True) + "\n")
 PY
         printf 'clearra_wsl_source_filesystem=%s\n' "$filesystem"
         ;;

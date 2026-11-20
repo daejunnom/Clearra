@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
 
+const DEDICATED_WSL_DISTRIBUTION: &str = "Clearra-Build";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Policy {
     pub schema_id: String,
@@ -278,7 +280,9 @@ impl Policy {
             return Err(Error::policy("process-tree safety contract is weakened"));
         }
         let wsl = &self.runtime_policy.wsl;
-        if wsl.distribution != tree.wsl_terminate_distribution
+        // Agreement between two configurable names does not establish ownership.
+        if wsl.distribution != DEDICATED_WSL_DISTRIBUTION
+            || tree.wsl_terminate_distribution != DEDICATED_WSL_DISTRIBUTION
             || wsl.allow_shutdown
             || !wsl.terminate_only_dedicated_distribution
         {
@@ -447,10 +451,62 @@ fn expand_template(template: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    fn checked_in_policy() -> Policy {
+        serde_json::from_str(include_str!("../../../config/clearra-management.v1.json"))
+            .expect("checked-in policy parses")
+    }
+
     #[test]
     fn repository_roots_reject_parent_traversal() {
         assert!(validate_relative_root("../target").is_err());
         assert!(validate_relative_root("build/../target").is_err());
         assert!(validate_relative_root("build/cargo").is_ok());
+    }
+
+    #[test]
+    fn wsl_policy_accepts_only_the_literal_dedicated_launch_and_termination_target() {
+        let mut policy = checked_in_policy();
+        assert!(policy.validate().is_ok());
+        // Test Ubuntu as a target with a distinct provenance label, so the
+        // rejection must come from the ownership check, not provenance equality.
+        policy.runtime_policy.wsl.source_distribution = "historical-source".into();
+        assert!(policy.validate().is_ok());
+        for alias in ["Ubuntu", "clearra-build", "Clearra-Build ", ""] {
+            let mut changed = policy.clone();
+            changed.runtime_policy.wsl.distribution = alias.into();
+            assert!(changed.validate().is_err(), "launch target {alias:?}");
+
+            let mut changed = policy.clone();
+            changed
+                .runtime_policy
+                .process_tree_contract
+                .wsl_terminate_distribution = alias.into();
+            assert!(changed.validate().is_err(), "termination target {alias:?}");
+
+            changed.runtime_policy.wsl.distribution = alias.into();
+            assert!(changed.validate().is_err(), "matching targets {alias:?}");
+        }
+    }
+
+    #[test]
+    fn wsl_policy_rejects_each_weakened_shutdown_boundary() {
+        let policy = checked_in_policy();
+        let mut changed = policy.clone();
+        changed.runtime_policy.wsl.allow_shutdown = true;
+        assert!(changed.validate().is_err());
+
+        let mut changed = policy.clone();
+        changed
+            .runtime_policy
+            .process_tree_contract
+            .wsl_global_shutdown_allowed = true;
+        assert!(changed.validate().is_err());
+
+        let mut changed = policy;
+        changed
+            .runtime_policy
+            .wsl
+            .terminate_only_dedicated_distribution = false;
+        assert!(changed.validate().is_err());
     }
 }
