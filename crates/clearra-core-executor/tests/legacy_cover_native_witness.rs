@@ -14,7 +14,7 @@ use clearra_core_executor::WasmCpuSearchBackend;
 use clearra_core_ffi::{
     problem::{C_PIECE_I, C_PIECE_J, C_PIECE_L, C_PIECE_O, C_PIECE_S, C_PIECE_T, C_PIECE_Z},
     CBuildUpProblemTemplate, CNativeBuildUpEnumerationLimits, CPackingProblemBuilder, CoreCNative,
-    NativeBuildUpWorkspace, NativeCandidateReducer, C_BUILDUP_STATUS_OK,
+    NativeBuildUpWorkspace, NativeCandidateReducer, PackingCandidateBatch, C_BUILDUP_STATUS_OK,
 };
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
@@ -142,8 +142,11 @@ fn native_and_rust_join_two_legacy_four_line_candidates_on_original_ordinal() {
         .expect("bind original observed ordinal directly in native scratch");
     template.attach_geometry_catalog(&mut scratch, &catalog);
     let mut workspace = NativeBuildUpWorkspace::new();
-    let mut sink = NativeCandidateReducer::new(&compact).expect("canonical candidate sink");
-    for witness in WITNESSES {
+    let mut native_batches = Vec::with_capacity(WITNESSES.len());
+    for (index, witness) in WITNESSES.into_iter().enumerate() {
+        // The native stream counts accepted rows from zero on each call.
+        // Use a task-local reducer so its accepted count has the same scope.
+        let mut sink = NativeCandidateReducer::new(&compact).expect("task-local candidate sink");
         let skeleton_rows = PIECES
             .into_iter()
             .zip(witness)
@@ -168,13 +171,26 @@ fn native_and_rust_join_two_legacy_four_line_candidates_on_original_ordinal() {
                 &mut sink,
             )
             .expect("native candidate admission for the requested ordinal");
-        assert_eq!(outcome.report.buildup_status, C_BUILDUP_STATUS_OK);
-        assert_eq!(outcome.status, 0, "native packing result");
+        assert_eq!(
+            outcome.report.buildup_status, C_BUILDUP_STATUS_OK,
+            "native BuildUp for witness {index}: {:?}",
+            outcome.report
+        );
+        assert_eq!(
+            outcome.status, 0,
+            "native packing for witness {index}: {:?}",
+            outcome.report
+        );
         assert_ne!(outcome.report.complete, 0);
         assert_eq!(outcome.report.generated_count, 1);
         assert_eq!(outcome.report.buildable_count, 1);
+        assert_eq!(sink.accepted_candidate_count(), 1);
+        native_batches.push(sink.into_uncanonicalized_candidates());
     }
-    let native_candidates = sink.into_candidates();
+    let mut native_candidates =
+        PackingCandidateBatch::merge_batches(native_batches, board.width(), board.height())
+            .expect("merge independent native witness batches");
+    native_candidates.canonicalize_identities();
     assert_eq!(native_candidates.len(), 2);
 
     // Rust is deliberately bounded to this one ordinal and the two coarse

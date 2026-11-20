@@ -356,7 +356,9 @@ mod run {
                 break;
             }
         }
-        let output = json!({
+        // Keep report sections separate so json!'s token recursion is
+        // bounded independently of the full published report's field count.
+        let metadata = json!({
             "schema": "clearra.placement-graph-benchmark.v1",
             "case": fixture.name(),
             "binary_sha256": binary_sha,
@@ -379,6 +381,8 @@ mod run {
             "terminal_identity_move_mode": terminal_identity_move_mode,
             "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},ordered_kick={ordered_kick_interval_mode},ilc_lazy_frame={ilc_lazy_frame_mode},no_entry_components={no_entry_components_mode},same_tile_parent_reuse={same_tile_parent_reuse_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode}",
                 variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode)),
+        });
+        let structural_metrics = json!({
             "static_influence": {
                 "scope": "completed search, workspace counters aggregated after worker joins; null means metric not exposed",
                 "queries": result.usize_field("reachability_static_influence_queries"),
@@ -432,6 +436,8 @@ mod run {
                 "graph_bypasses": structural_totals.conditional_order.graph_bypasses,
                 "reused_pose_proofs": structural_totals.conditional_order.reused_pose_proofs
             },
+        });
+        let domains = json!({
             "geometry_domain": {
                 "scope": "completed compact family roots; not memo/column exits, partial roots or extended",
                 "completed_families": geometry_domains.completed_families,
@@ -449,6 +455,8 @@ mod run {
                 "apdp_static_complete": geometry_domains.apdp_static_complete,
                 "apdp_pivot_tightenings": geometry_domains.apdp_pivot_tightenings
             },
+        });
+        let evidence = json!({
             "other_process_configuration": {
                 "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),
                 "CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT": std::env::var("CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT").ok()
@@ -475,6 +483,7 @@ mod run {
             "summary": summary, "summary_field_entries": fields,
             "valid": errors.is_empty(), "validation_errors": errors,
         });
+        let output = join_report_sections([metadata, structural_metrics, domains, evidence])?;
         println!(
             "{}",
             serde_json::to_string_pretty(&output).map_err(|e| e.to_string())?
@@ -483,6 +492,26 @@ mod run {
             return Err("completed result failed benchmark validation; see JSON evidence".into());
         }
         Ok(())
+    }
+
+    fn join_report_sections(sections: impl IntoIterator<Item = Value>) -> Result<Value, String> {
+        let mut report = serde_json::Map::new();
+        for section in sections {
+            let Value::Object(fields) = section else {
+                return Err("benchmark report section must be an object".into());
+            };
+            for (key, value) in fields {
+                match report.entry(key) {
+                    serde_json::map::Entry::Occupied(entry) => {
+                        return Err(format!("duplicate benchmark report key: {}", entry.key()));
+                    }
+                    serde_json::map::Entry::Vacant(entry) => {
+                        entry.insert(value);
+                    }
+                }
+            }
+        }
+        Ok(Value::Object(report))
     }
 
     fn experiment_mode(name: &str) -> Result<String, String> {
@@ -1270,6 +1299,24 @@ mod run {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn report_sections_preserve_flat_keys_and_reject_collisions() {
+            let report = join_report_sections([
+                json!({"schema": "fixture"}),
+                json!({"geometry_domain": {"completed_families": 1}}),
+                json!({"valid": true}),
+            ])
+            .unwrap();
+            assert_eq!(
+                report,
+                json!({"schema": "fixture", "geometry_domain": {"completed_families": 1}, "valid": true})
+            );
+            assert_eq!(
+                join_report_sections([json!({"case": "a"}), json!({"case": "b"})]).unwrap_err(),
+                "duplicate benchmark report key: case"
+            );
+        }
 
         #[test]
         fn fixture_selection_keeps_capture_universes_separate() {
