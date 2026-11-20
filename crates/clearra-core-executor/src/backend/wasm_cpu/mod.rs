@@ -10,6 +10,8 @@ mod catalog;
 mod compact_exact_u64_map;
 mod coverage_product;
 mod distributed;
+#[cfg(test)]
+mod distributed_pc2_replay_proof;
 mod exact_collections;
 mod extended_board;
 mod extended_build_probability;
