@@ -43,6 +43,8 @@ pub use wasm_cpu::{geometric_edge_reuse_experiment_totals, GeometricEdgeReuseMet
 pub use wasm_cpu::{geometry_domain_experiment_totals, GeometryDomainExperimentTotals};
 #[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{structural_order_experiment_totals, StructuralOrderMetrics};
+#[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+pub use wasm_cpu::{with_operation_mask_experiment, OperationMaskExperimentReport};
 #[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{CapturedSolutionCoverage, P7P4CoverageBlocks};
 pub use wasm_cpu::{

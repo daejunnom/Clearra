@@ -59,7 +59,8 @@ mod run {
     };
     use clearra_core_executor::{
         backend::{
-            CapturedSolutionCoverage, GeometricEdgeReuseMetrics, GeometryDomainExperimentTotals,
+            with_operation_mask_experiment, CapturedSolutionCoverage, GeometricEdgeReuseMetrics,
+            GeometryDomainExperimentTotals, OperationMaskExperimentReport,
         },
         CoreExecutionResult, WasmCpuSearchBackend,
     };
@@ -271,6 +272,39 @@ mod run {
         let same_tile_parent_reuse_mode = experiment_mode("CLEARRA_SAME_TILE_PARENT_REUSE")?;
         let conditional_order_mode = experiment_mode("CLEARRA_CONDITIONAL_ORDER")?;
         let terminal_identity_move_mode = experiment_mode("CLEARRA_TERMINAL_IDENTITY_MOVE")?;
+        let operation_mask_mode = match std::env::var("CLEARRA_OPERATION_MASKS") {
+            Ok(mode) if mode == "0" => Some(false),
+            Ok(mode) if mode == "1" => Some(true),
+            Err(std::env::VarError::NotPresent) => None,
+            _ => return Err("CLEARRA_OPERATION_MASKS must be 0 or 1 at process start".into()),
+        };
+        if operation_mask_mode.is_some()
+            && (fixture != Fixture::P7P4
+                || !valid_experiment_source(option_env!("CLEARRA_SOURCE_COMMIT"))
+                || [
+                    &mode,
+                    &structural_mode,
+                    &static_influence_mode,
+                    &translation_interval_mode,
+                    &movement_clear_certificates_mode,
+                    &incremental_domain_mode,
+                    &minimum_domain_cutoff_mode,
+                    &minimum_domain_work_mode,
+                    &first_kick_interval_mode,
+                    &ordered_kick_interval_mode,
+                    &ordered_kick_guard_reuse_mode,
+                    &geometric_edge_reuse_mode,
+                    &ilc_lazy_frame_mode,
+                    &no_entry_components_mode,
+                    &same_tile_parent_reuse_mode,
+                    &conditional_order_mode,
+                    &terminal_identity_move_mode,
+                ]
+                .into_iter()
+                .any(|mode| mode != "0"))
+        {
+            return Err("operation masks require a source-bound P7P4 run with all other experiment axes off".into());
+        }
         if fixture.is_grounded_o()
             && [
                 &mode,
@@ -352,66 +386,81 @@ mod run {
             .transpose()?;
         let search_started = Instant::now();
         let control = ExecutionControl::default();
-        let (result, spool) = if let Some((dir, universe)) = &capture {
-            let universe = *universe;
-            let spool = Arc::new(Mutex::new(
-                CoverageSpool::create(&dir.join("runs"), universe, CoverageSpoolLimits::default())
+        let execute = || -> Result<_, String> {
+            if let Some((dir, universe)) = &capture {
+                let universe = *universe;
+                let spool = Arc::new(Mutex::new(
+                    CoverageSpool::create(
+                        &dir.join("runs"),
+                        universe,
+                        CoverageSpoolLimits::default(),
+                    )
                     .map_err(|e| format!("coverage spool: {e}"))?,
-            ));
-            let owner = Arc::clone(&spool);
-            let failure = Arc::new(Mutex::new(None::<String>));
-            let capture_failure = Arc::clone(&failure);
-            let result = WasmCpuSearchBackend::execute_with_solution_coverage_capture(
-                &problem,
-                &control,
-                move |identity, evidence| {
-                    let save = || -> Result<(), String> {
-                        let fragment = match evidence {
-                            CapturedSolutionCoverage::Bitmap(bits) => {
-                                CoverageFragment::from_bitset(universe, bits)
-                                    .map_err(|e| e.to_string())?
-                            }
-                            CapturedSolutionCoverage::P7P4(blocks) => {
-                                CoverageFragment::from_p7p4_blocks(blocks)
-                            }
+                ));
+                let owner = Arc::clone(&spool);
+                let failure = Arc::new(Mutex::new(None::<String>));
+                let capture_failure = Arc::clone(&failure);
+                let result = WasmCpuSearchBackend::execute_with_solution_coverage_capture(
+                    &problem,
+                    &control,
+                    move |identity, evidence| {
+                        let save = || -> Result<(), String> {
+                            let fragment = match evidence {
+                                CapturedSolutionCoverage::Bitmap(bits) => {
+                                    CoverageFragment::from_bitset(universe, bits)
+                                        .map_err(|e| e.to_string())?
+                                }
+                                CapturedSolutionCoverage::P7P4(blocks) => {
+                                    CoverageFragment::from_p7p4_blocks(blocks)
+                                }
+                            };
+                            let key = NormalizedTilingSolutionKey::from_standard_board64_identity(
+                                identity,
+                            );
+                            owner
+                                .lock()
+                                .map_err(|_| "spool lock poisoned".to_owned())?
+                                .push_fragment(key.as_str(), fragment)
+                                .map_err(|e| e.to_string())
                         };
-                        let key =
-                            NormalizedTilingSolutionKey::from_standard_board64_identity(identity);
-                        owner
-                            .lock()
-                            .map_err(|_| "spool lock poisoned".to_owned())?
-                            .push_fragment(key.as_str(), fragment)
-                            .map_err(|e| e.to_string())
-                    };
-                    save().map_err(|error| {
-                        if let Ok(mut first) = capture_failure.lock() {
-                            if first.is_none() {
-                                *first = Some(error);
+                        save().map_err(|error| {
+                            if let Ok(mut first) = capture_failure.lock() {
+                                if first.is_none() {
+                                    *first = Some(error);
+                                }
                             }
-                        }
-                        "solution_coverage_spool_write_failed"
-                    })
-                },
-            )
-            .map_err(|e| {
-                let cause = failure.lock().ok().and_then(|mut first| first.take());
-                let stats = spool.lock().ok().map(|owner| owner.stats());
-                format!(
+                            "solution_coverage_spool_write_failed"
+                        })
+                    },
+                )
+                .map_err(|e| {
+                    let cause = failure.lock().ok().and_then(|mut first| first.take());
+                    let stats = spool.lock().ok().map(|owner| owner.stats());
+                    format!(
                     "exact capture execution failed: {e:?}; spool diagnostic: {cause:?}; {stats:?}"
                 )
-            })?;
-            let spool = Arc::try_unwrap(spool)
-                .map_err(|_| "coverage workers still hold the spool")?
-                .into_inner()
-                .map_err(|_| "coverage spool lock poisoned")?;
-            (result, Some(spool))
-        } else {
-            (
-                WasmCpuSearchBackend::execute_with_control(&problem, &control)
-                    .map_err(|e| format!("exact core execution failed: {e:?}"))?,
-                None,
-            )
+                })?;
+                let spool = Arc::try_unwrap(spool)
+                    .map_err(|_| "coverage workers still hold the spool")?
+                    .into_inner()
+                    .map_err(|_| "coverage spool lock poisoned")?;
+                Ok((result, Some(spool)))
+            } else {
+                Ok((
+                    WasmCpuSearchBackend::execute_with_control(&problem, &control)
+                        .map_err(|e| format!("exact core execution failed: {e:?}"))?,
+                    None,
+                ))
+            }
         };
+        let (outcome, operation_masks) = match operation_mask_mode {
+            Some(enabled) => {
+                let (outcome, report) = with_operation_mask_experiment(enabled, execute);
+                (outcome, Some((enabled, report)))
+            }
+            None => (execute(), None),
+        };
+        let (result, spool) = outcome?;
         let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
         let structural_totals =
             clearra_core_executor::backend::structural_order_experiment_totals();
@@ -431,6 +480,26 @@ mod run {
                 minimum_work: minimum_domain_work_mode == "1",
             },
         );
+        if let Some((enabled, report)) = operation_masks {
+            if let Err(message) = validate_operation_mask_evidence(
+                enabled,
+                &operation_mask_evidence(report),
+                result.usize_field("workers_used"),
+                result.usize_field("total_build_order_nodes"),
+                result.usize_field("worker_graph_projection_retained_bytes"),
+            ) {
+                errors.push(message);
+            }
+            if result.path_steps().len() != fixture.placed_pieces() {
+                errors
+                    .push("operation-mask run lost its full concrete representative trace".into());
+            }
+            if result.normalized_solution_identities().len() != LARGE_COUNT {
+                errors.push(
+                    "operation-mask run did not retain the complete identity sequence".into(),
+                );
+            }
+        }
         if fixture.is_grounded_o() {
             validate_grounded_o(
                 &result,
@@ -657,6 +726,18 @@ mod run {
             "summary": summary, "summary_field_entries": fields,
             "valid": errors.is_empty(), "validation_errors": errors,
         });
+        let operation_mask_section = operation_masks.map_or_else(
+            || json!({}),
+            |(enabled, report)| {
+                json!({
+                    "operation_mask_mode": if enabled { "1" } else { "0" },
+                    "operation_masks": operation_mask_evidence(report),
+                    "operation_mask_representative": result.path_steps().iter().map(|step| {
+                        json!([step.piece().as_ascii().to_string(), step.rotation(), step.x(), step.y(), step.hold(), step.cleared_lines()])
+                    }).collect::<Vec<_>>(),
+                })
+            },
+        );
         let output = join_report_sections([
             metadata,
             follow_on_axes,
@@ -665,6 +746,7 @@ mod run {
             domains,
             memory_lifetimes,
             evidence,
+            operation_mask_section,
         ])?;
         println!(
             "{}",
@@ -703,6 +785,101 @@ mod run {
         } else {
             Err(format!("{name} must be 0 or 1 at process start"))
         }
+    }
+
+    fn valid_experiment_source(source: Option<&str>) -> bool {
+        source.is_some_and(|sha| {
+            sha.len() == 40
+                && sha
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    }
+
+    fn operation_mask_evidence(report: OperationMaskExperimentReport) -> Value {
+        json!({
+            "scope": "one native search, successful worker exits; concrete representative replay is a separate owner",
+            "workers": report.workers,
+            "requested_workers": report.requested_workers,
+            "executing_workers": report.executing_workers,
+            "graph_passes": report.graph_passes,
+            "mask_passes": report.mask_passes,
+            "mask_live_passes": report.mask_live_passes,
+            "visited_subsets": report.visited_subsets,
+            "selected_edges": report.selected_edges,
+            "graph_node_bytes": report.graph_node_bytes,
+            "graph_edge_bytes": report.graph_edge_bytes,
+            "graph_piece_edge_bytes": report.graph_piece_edge_bytes,
+            "mask_bytes": report.mask_bytes,
+            "graph_projection_bytes": report.graph_projection_bytes,
+        })
+    }
+
+    fn validate_operation_mask_evidence(
+        enabled: bool,
+        evidence: &Value,
+        actual_workers: Option<usize>,
+        actual_nodes: Option<usize>,
+        actual_graph_bytes: Option<usize>,
+    ) -> Result<(), String> {
+        let metric = |key: &str| {
+            evidence[key]
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| format!("operation-mask evidence is missing {key}"))
+        };
+        let workers = metric("workers")?;
+        let requested = metric("requested_workers")?;
+        let executing = metric("executing_workers")?;
+        let graph = metric("graph_passes")?;
+        let masks = metric("mask_passes")?;
+        let live = metric("mask_live_passes")?;
+        let nodes = metric("visited_subsets")?;
+        let mask_bytes = metric("mask_bytes")?;
+        let concrete_bytes = metric("graph_node_bytes")?
+            .saturating_add(metric("graph_edge_bytes")?)
+            .saturating_add(metric("graph_piece_edge_bytes")?);
+        let graph_bytes = metric("graph_projection_bytes")?;
+        if workers < 2
+            || executing < 2
+            || executing > workers
+            || actual_workers != Some(workers)
+            || actual_nodes != Some(nodes)
+            || actual_graph_bytes != Some(graph_bytes)
+            || nodes == 0
+            || metric("selected_edges")? == 0
+            || graph_bytes < concrete_bytes.saturating_add(mask_bytes)
+        {
+            return Err(
+                "operation-mask worker evidence is incomplete or does not match the core result"
+                    .into(),
+            );
+        }
+        if enabled {
+            if requested != workers {
+                return Err(
+                    "operation-mask request was not installed and used across actual workers"
+                        .into(),
+                );
+            }
+            if graph != 0 || concrete_bytes != 0 {
+                return Err("operation-mask workers fell back to concrete graph storage".into());
+            }
+            if live == 0 || masks < live || mask_bytes == 0 {
+                return Err(
+                    "operation-mask workers did not complete a live bounded traversal".into(),
+                );
+            }
+        } else if requested != 0
+            || masks != 0
+            || live != 0
+            || mask_bytes != 0
+            || graph == 0
+            || concrete_bytes == 0
+        {
+            return Err("operation-mask control was not purely concrete".into());
+        }
+        Ok(())
     }
 
     fn new_capture_directory(slot: &str) -> Result<PathBuf, String> {
@@ -1351,6 +1528,9 @@ mod run {
             })
             .collect::<Result<_, String>>()?;
         let first = &reports[0];
+        let operation_mask_comparison = reports
+            .iter()
+            .any(|report| report.get("operation_mask_mode").is_some());
         let rectangle_fixture = [Fixture::NonemptyEightI, Fixture::EmptyTenI]
             .into_iter()
             .any(|fixture| first["case"] == fixture.name());
@@ -1405,6 +1585,8 @@ mod run {
                 if report["output_mode"] != "global-only" {
                     differences.push(format!("{}: fixture must be global-only", paths[index]));
                 }
+            }
+            if rectangle_fixture || grounded_o_fixture || operation_mask_comparison {
                 for key in ["workers_used", "cpu_parallel_execution"] {
                     if report["summary"][key].is_null()
                         || report["summary"][key] != first["summary"][key]
@@ -1412,6 +1594,77 @@ mod run {
                         differences
                             .push(format!("{}: actual topology {key} mismatch", paths[index]));
                     }
+                }
+            }
+            if operation_mask_comparison {
+                let proof = &report["operation_masks"];
+                let reference_proof = &first["operation_masks"];
+                let enabled = match report["operation_mask_mode"].as_str() {
+                    Some("0") => false,
+                    Some("1") => true,
+                    _ => {
+                        return Err(
+                            "operation-mask comparison needs explicit modes in all arms".into()
+                        )
+                    }
+                };
+                let summary_metric =
+                    |key: &str| report["summary"][key].as_str()?.parse::<usize>().ok();
+                if let Err(error) = validate_operation_mask_evidence(
+                    enabled,
+                    proof,
+                    summary_metric("workers_used"),
+                    summary_metric("total_build_order_nodes"),
+                    summary_metric("worker_graph_projection_retained_bytes"),
+                ) {
+                    differences.push(format!("{}: {error}", paths[index]));
+                }
+                if report["case"] != Fixture::P7P4.name()
+                    || !valid_experiment_source(report["compiled_source_commit"].as_str())
+                    || report["compiled_source_commit"] != first["compiled_source_commit"]
+                    || report["materialized_identities"]["covers_reported_family"] != true
+                    || report["materialized_identities"]["count"].as_u64()
+                        != Some(LARGE_COUNT as u64)
+                    || summary_metric("coverage_pattern_count") != Some(4_233_600)
+                    || report["summary"]["normalized_solution_set_hash"] != LARGE_HASH
+                {
+                    differences.push(format!(
+                        "{}: source-bound full P7P4 result evidence is required",
+                        paths[index]
+                    ));
+                }
+                if ["visited_subsets", "selected_edges"]
+                    .into_iter()
+                    .any(|key| proof[key] != reference_proof[key])
+                {
+                    differences.push(format!(
+                        "{}: selected physical traversal work differs",
+                        paths[index]
+                    ));
+                }
+                let pass_count = |evidence: &Value| {
+                    evidence["graph_passes"]
+                        .as_u64()?
+                        .checked_add(evidence["mask_passes"].as_u64()?)
+                };
+                if pass_count(proof) != pass_count(reference_proof) {
+                    differences.push(format!(
+                        "{}: number of physical traversal passes differs",
+                        paths[index]
+                    ));
+                }
+                if report["operation_mask_representative"]
+                    .as_array()
+                    .is_none_or(|steps| steps.len() != Fixture::P7P4.placed_pieces())
+                    || report["operation_mask_representative"]
+                        != first["operation_mask_representative"]
+                    || report["summary"]["representative_pattern_id"]
+                        != first["summary"]["representative_pattern_id"]
+                {
+                    differences.push(format!(
+                        "{}: concrete representative replay differs",
+                        paths[index]
+                    ));
                 }
             }
         }
@@ -1451,6 +1704,7 @@ mod run {
         let mut times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         let mut all_axes_times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         let mut domain_work: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+        let mut operation_mask_times = [Vec::new(), Vec::new()];
         for report in &reports {
             let dependency_mode = report["mode"].as_str().ok_or("mode missing")?;
             let structural_mode = match report.get("structural_mode") {
@@ -1508,9 +1762,40 @@ mod run {
             let same_tile_parent_reuse = extra_mode("same_tile_parent_reuse_mode")?;
             let conditional = extra_mode("conditional_order_mode")?;
             let terminal_move = extra_mode("terminal_identity_move_mode")?;
-            let all_axes = format!(
+            let mut all_axes = format!(
                 "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ordered_kick_guard_reuse={ordered_kick_guard_reuse},geometric_edge_reuse={geometric_edge_reuse},ilc_lazy_frame={ilc_lazy_frame},no_entry_components={no_entry_components},same_tile_parent_reuse={same_tile_parent_reuse},conditional_order={conditional},terminal_identity_move={terminal_move},minimum_domain_cutoff={minimum_domain_cutoff},minimum_domain_work={minimum_domain_work}"
             );
+            if operation_mask_comparison {
+                let op = extra_mode("operation_mask_mode")?;
+                if [
+                    dependency_mode,
+                    structural_mode,
+                    static_influence_mode,
+                    translation_interval_mode,
+                    movement,
+                    incremental,
+                    minimum_domain_cutoff,
+                    minimum_domain_work,
+                    first_kick,
+                    ordered_kick,
+                    ordered_kick_guard_reuse,
+                    geometric_edge_reuse,
+                    ilc_lazy_frame,
+                    no_entry_components,
+                    same_tile_parent_reuse,
+                    conditional,
+                    terminal_move,
+                ]
+                .into_iter()
+                .any(|mode| mode != "0")
+                {
+                    return Err(
+                        "operation-mask comparison may not mix other experiment axes".into(),
+                    );
+                }
+                all_axes.push_str(&format!(",operation_masks={op}"));
+                operation_mask_times[usize::from(op == "1")].push(ms);
+            }
             if rectangle_fixture {
                 let work = report
                     .get("geometry_domain")
@@ -1519,7 +1804,8 @@ mod run {
                 domain_work.entry(all_axes.clone()).or_default().push(work);
             }
             all_axes_times.entry(all_axes).or_default().push(ms);
-            if movement == "0"
+            if !operation_mask_comparison
+                && movement == "0"
                 && incremental == "0"
                 && minimum_domain_cutoff == "0"
                 && minimum_domain_work == "0"
@@ -1642,6 +1928,30 @@ mod run {
         });
         if rectangle_fixture {
             comparison["geometry_domain_work_samples_by_all_axes"] = json!(domain_work);
+        }
+        if operation_mask_comparison {
+            let [control, treatment] = operation_mask_times.each_ref();
+            if control.is_empty() || treatment.is_empty() {
+                return Err(
+                    "operation-mask comparison needs at least one actual control and treatment"
+                        .into(),
+                );
+            }
+            let mean = |times: &[f64]| times.iter().sum::<f64>() / times.len() as f64;
+            comparison["primary_comparison"] = json!({
+                "baseline": "concrete_graph",
+                "treatment": "operation_masks",
+            });
+            comparison["mode_grouping"] = json!("operation-masks");
+            comparison["operation_mask_search_times_ms"] = json!({
+                "concrete_graph": control,
+                "operation_masks": treatment,
+            });
+            comparison["treatment_time_change_percent"] = if differences.is_empty() {
+                json!((mean(treatment) / mean(control) - 1.0) * 100.0)
+            } else {
+                Value::Null
+            };
         }
         println!(
             "{}",

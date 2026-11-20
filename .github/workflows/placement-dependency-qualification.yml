@@ -64,6 +64,7 @@ jobs:
             candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move
             graph_probability_integration_tests::fused_graph_ traversed_subset_masks_
             operation_mask_physical_traversal_preserves_840_queue_coverage_and_graph_replay
+            operation_mask_scope_binds_every_pooled_worker_without_leaking_between_arms
             v081_worker_component_accounting terminal_hold_projection::
             terminal_bag_coverage_borrow_ terminal_borrowed_union_
             nonempty_eight_i_advanced_domain_preserves_fixture_identities same_tile_parent_reuse_requires

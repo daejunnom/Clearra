@@ -535,7 +535,7 @@ impl PieceOrderLanguageCache {
     /// physical query. The owner performed terminal acceptance and emitted a
     /// bit only for an already verified operation. Unvisited entries in the
     /// dense subset lookup may still contain data from an earlier traversal.
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
     pub(super) fn compile_traversed_subset_masks(
         &mut self,
         pieces: &[PieceKind],

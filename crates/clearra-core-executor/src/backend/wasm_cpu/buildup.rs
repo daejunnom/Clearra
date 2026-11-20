@@ -252,13 +252,13 @@ pub(super) struct BuildOrderGraph {
 #[derive(Clone, Copy)]
 enum BuildPassRepresentation {
     Graph,
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
     OperationMasks,
 }
 
 enum BuildPassOutput {
     Graph(BuildOrderGraph),
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
     OperationMasks {
         language_root: Option<u32>,
         visited_subsets: usize,
@@ -270,7 +270,7 @@ impl BuildPassOutput {
     fn into_graph(self) -> BuildOrderGraph {
         match self {
             Self::Graph(graph) => graph,
-            #[cfg(test)]
+            #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
             Self::OperationMasks { .. } => unreachable!("concrete graph requested"),
         }
     }
@@ -279,7 +279,7 @@ impl BuildPassOutput {
     fn set_reachability_states(&mut self, count: usize) {
         match self {
             Self::Graph(graph) => graph.reachability_states = count,
-            #[cfg(test)]
+            #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
             Self::OperationMasks {
                 reachability_states,
                 ..
@@ -288,26 +288,34 @@ impl BuildPassOutput {
     }
 }
 
-// Initial fixture-only admission domain. This bounds the transient mask
-// payload and does not alter the product's existing memory policy.
-#[cfg(test)]
-const OPERATION_MASK_TEST_MAX_SUBSETS: usize = 1024;
+// Ten placed operations, including the P7P4 fixture. This does not change
+// the product's default path or general memory policy.
+#[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+const OPERATION_MASK_MAX_SUBSETS: usize = 1 << 10;
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct OperationMaskComparison {
     pub graph_passes: usize,
     pub mask_passes: usize,
     pub mask_live_passes: usize,
+    #[cfg(test)]
     pub mask_dead_passes: usize,
+    #[cfg(test)]
     pub representative_graph_paths: usize,
     pub visited_subsets: usize,
     pub selected_edges: usize,
+    #[cfg(test)]
     pub max_node_capacity: usize,
+    #[cfg(test)]
     pub max_edge_capacity: usize,
+    #[cfg(test)]
     pub max_piece_edge_capacity: usize,
+    #[cfg(test)]
     pub max_mask_capacity: usize,
+    #[cfg(test)]
     pub max_mask_owner_node_capacity: usize,
+    #[cfg(test)]
     pub max_mask_owner_edge_capacity: usize,
 }
 
@@ -338,11 +346,117 @@ pub(super) fn with_operation_mask_comparison<T>(
 }
 
 #[cfg(test)]
-fn record_operation_mask_pass(update: impl FnOnce(&mut OperationMaskComparison)) {
+fn record_operation_mask_test_pass(update: impl FnOnce(&mut OperationMaskComparison)) {
     if let Some((enabled, mut comparison)) = OPERATION_MASK_TEST.get() {
         update(&mut comparison);
         OPERATION_MASK_TEST.set(Some((enabled, comparison)));
     }
+}
+
+/// Completed native worker snapshots for one explicitly scoped local search.
+/// Byte fields are exit-time Vec capacities, not allocator or process peaks.
+#[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OperationMaskExperimentReport {
+    pub workers: usize,
+    pub requested_workers: usize,
+    pub executing_workers: usize,
+    pub graph_passes: usize,
+    pub mask_passes: usize,
+    pub mask_live_passes: usize,
+    pub visited_subsets: usize,
+    pub selected_edges: usize,
+    pub graph_node_bytes: usize,
+    pub graph_edge_bytes: usize,
+    pub graph_piece_edge_bytes: usize,
+    pub mask_bytes: usize,
+    /// Includes the four specific capacities above, plus shared-per-worker
+    /// queue, scratch, subset stamps/index and physical projection storage.
+    pub graph_projection_bytes: usize,
+}
+
+#[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+#[derive(Default)]
+struct OperationMaskExperimentState {
+    claimed: bool,
+    report: OperationMaskExperimentReport,
+}
+
+#[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+#[derive(Clone)]
+pub(super) struct OperationMaskExperiment {
+    enabled: bool,
+    state: Arc<std::sync::Mutex<OperationMaskExperimentState>>,
+}
+
+#[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+thread_local! {
+    static OPERATION_MASK_EXPERIMENT: std::cell::RefCell<Option<OperationMaskExperiment>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Measure one synchronous native search with the requested mask mode.
+/// The scope belongs to the caller, and each actual worker receives that
+/// request's mode and report owner explicitly. Unscoped searches stay off.
+#[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+pub fn with_operation_mask_experiment<T>(
+    enabled: bool,
+    run: impl FnOnce() -> T,
+) -> (T, OperationMaskExperimentReport) {
+    struct Reset(Option<OperationMaskExperiment>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OPERATION_MASK_EXPERIMENT.with(|scope| scope.replace(self.0.take()));
+        }
+    }
+    let state = Arc::new(std::sync::Mutex::new(
+        OperationMaskExperimentState::default(),
+    ));
+    let _reset = Reset(OPERATION_MASK_EXPERIMENT.with(|scope| {
+        scope.replace(Some(OperationMaskExperiment {
+            enabled,
+            state: Arc::clone(&state),
+        }))
+    }));
+    let result = run();
+    let report = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .report;
+    (result, report)
+}
+
+#[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+pub(super) fn claim_operation_mask_experiment(
+) -> Result<Option<OperationMaskExperiment>, WasmExactSearchError> {
+    let Some(experiment) = OPERATION_MASK_EXPERIMENT.with(|scope| scope.borrow().clone()) else {
+        return Ok(None);
+    };
+    if super::placement_dependency::enabled()
+        || super::structural_order::enabled()
+        || super::structural_order::conditional_order_enabled()
+        || super::structural_order::translation_intervals_enabled()
+        || super::structural_order::movement_clear_certificates_enabled()
+        || super::structural_order::first_kick_intervals_enabled()
+        || super::structural_order::ordered_kick_intervals_enabled()
+        || super::structural_order::ordered_kick_guard_reuse_enabled()
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_operation_mask_experiment_requires_independent_physical_traversal",
+        ));
+    }
+    {
+        let mut state = experiment.state.lock().map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_operation_mask_report_unavailable")
+        })?;
+        if state.claimed {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_operation_mask_experiment_requires_one_parallel_search",
+            ));
+        }
+        state.claimed = true;
+    }
+    Ok(Some(experiment))
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -746,8 +860,10 @@ pub(super) struct BuildUpWorkspace {
     graph_reachable_generations: Vec<u32>,
     graph_subset_node_ids: Vec<u32>,
     graph_subset_queue: Vec<u16>,
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
     graph_allowed_operations: Vec<u16>,
+    #[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+    operation_mask_worker: Option<(bool, OperationMaskComparison)>,
     graph_generation: u32,
     projection_deleted_rows: Vec<u16>,
     projection_physical_boards: Vec<u64>,
@@ -762,6 +878,84 @@ pub(super) struct BuildUpWorkspace {
 }
 
 impl BuildUpWorkspace {
+    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+    fn operation_masks_enabled(&self) -> bool {
+        #[cfg(test)]
+        if let Some((enabled, _)) = OPERATION_MASK_TEST.get() {
+            return enabled;
+        }
+        #[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+        {
+            self.operation_mask_worker
+                .as_ref()
+                .is_some_and(|(enabled, _)| *enabled)
+        }
+        #[cfg(not(all(feature = "local-search-ab", feature = "parallel")))]
+        {
+            false
+        }
+    }
+
+    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+    fn record_operation_mask_pass(&mut self, update: impl Fn(&mut OperationMaskComparison)) {
+        #[cfg(test)]
+        record_operation_mask_test_pass(&update);
+        #[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+        if let Some((_, metrics)) = self.operation_mask_worker.as_mut() {
+            update(metrics);
+        }
+    }
+
+    #[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+    pub(super) fn begin_operation_mask_worker(&mut self, experiment: &OperationMaskExperiment) {
+        self.operation_mask_worker = Some((experiment.enabled, OperationMaskComparison::default()));
+    }
+
+    #[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+    pub(super) fn finish_operation_mask_worker(
+        &self,
+        experiment: &OperationMaskExperiment,
+    ) -> Result<(), WasmExactSearchError> {
+        let &(enabled, metrics) =
+            self.operation_mask_worker
+                .as_ref()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_operation_mask_worker_not_prepared",
+                ))?;
+        let mut state = experiment.state.lock().map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_operation_mask_report_unavailable")
+        })?;
+        let report = &mut state.report;
+        let node_bytes = self.graph_nodes.capacity() * core::mem::size_of::<BuildNode>();
+        let edge_bytes = self.graph_edges.capacity() * core::mem::size_of::<BuildEdge>();
+        let piece_edge_bytes =
+            self.graph_piece_edges.capacity() * core::mem::size_of::<BuildEdge>();
+        let mask_bytes = self.graph_allowed_operations.capacity() * core::mem::size_of::<u16>();
+        report.workers += 1;
+        report.requested_workers += usize::from(enabled);
+        report.executing_workers +=
+            usize::from(metrics.mask_passes != 0 || metrics.graph_passes != 0);
+        report.graph_passes = report.graph_passes.saturating_add(metrics.graph_passes);
+        report.mask_passes = report.mask_passes.saturating_add(metrics.mask_passes);
+        report.mask_live_passes = report
+            .mask_live_passes
+            .saturating_add(metrics.mask_live_passes);
+        report.visited_subsets = report
+            .visited_subsets
+            .saturating_add(metrics.visited_subsets);
+        report.selected_edges = report.selected_edges.saturating_add(metrics.selected_edges);
+        report.graph_node_bytes = report.graph_node_bytes.saturating_add(node_bytes);
+        report.graph_edge_bytes = report.graph_edge_bytes.saturating_add(edge_bytes);
+        report.graph_piece_edge_bytes = report
+            .graph_piece_edge_bytes
+            .saturating_add(piece_edge_bytes);
+        report.mask_bytes = report.mask_bytes.saturating_add(mask_bytes);
+        report.graph_projection_bytes = report
+            .graph_projection_bytes
+            .saturating_add(self.graph_projection_retained_bytes());
+        Ok(())
+    }
+
     #[cfg(not(target_family = "wasm"))]
     pub(super) fn bind_local_import(
         &mut self,
@@ -831,9 +1025,9 @@ impl BuildUpWorkspace {
     }
 
     fn graph_projection_retained_bytes(&self) -> usize {
-        #[cfg(test)]
+        #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
         let mask_bytes = self.graph_allowed_operations.capacity() * core::mem::size_of::<u16>();
-        #[cfg(not(test))]
+        #[cfg(not(any(test, all(feature = "local-search-ab", feature = "parallel"))))]
         let mask_bytes = 0;
         mask_bytes
             + self.graph_nodes.capacity() * core::mem::size_of::<BuildNode>()
@@ -2792,10 +2986,8 @@ fn verify_candidate_with_projection(
         ExecutorSearchStage::WasmBuildOrderReachability,
         profile_scale,
     );
-    #[cfg(test)]
-    if OPERATION_MASK_TEST
-        .get()
-        .is_some_and(|(enabled, _)| enabled)
+    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+    if workspace.operation_masks_enabled()
         && problem.count_policy() == PcCountPolicy::CountUnique
         && matches!(
             problem.objective().kind(),
@@ -2823,7 +3015,7 @@ fn verify_candidate_with_projection(
             .requires_observation_policy()
         && target.pattern_index.is_none()
         && StandardBagCoverage::supports(universe, problem.initial_hold())
-        && (1..=OPERATION_MASK_TEST_MAX_SUBSETS).contains(&projection.state_count())
+        && projection.state_count() <= OPERATION_MASK_MAX_SUBSETS
         && projection.operation_count() != 0
     {
         let output = BuildOrderGraph::build_representation(
@@ -3183,7 +3375,7 @@ fn verify_candidate_with_projection(
     coverage_span.finish(coverage_product_edge_checks as u64);
     #[cfg(test)]
     if retain_trace && !representative_path.is_empty() {
-        record_operation_mask_pass(|metrics| metrics.representative_graph_paths += 1);
+        record_operation_mask_test_pass(|metrics| metrics.representative_graph_paths += 1);
     }
 
     let graph_nodes = graph.nodes.len();
@@ -4521,12 +4713,12 @@ impl BuildOrderGraph {
         let share_piece_edges =
             piece_language_projection_only && matches!(completion, BuildCompletion::ClearToEmpty);
         let materialize_graph = matches!(representation, BuildPassRepresentation::Graph);
-        #[cfg(test)]
+        #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
         debug_assert!(
             materialize_graph
                 || (share_piece_edges
                     && reachability_mode == BuildReachabilityMode::Existing
-                    && (1..=OPERATION_MASK_TEST_MAX_SUBSETS).contains(&state_count)
+                    && state_count <= OPERATION_MASK_MAX_SUBSETS
                     && operation_count != 0)
         );
         let graph_generation = workspace.begin_graph_generation(state_count)?;
@@ -4555,7 +4747,7 @@ impl BuildOrderGraph {
             piece_edges = core::mem::take(&mut workspace.graph_piece_edges);
             piece_edges.clear();
         }
-        #[cfg(test)]
+        #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
         let mut allowed_operations = if materialize_graph {
             Vec::new()
         } else {
@@ -4583,7 +4775,7 @@ impl BuildOrderGraph {
         });
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut accepting_reached = false;
-        #[cfg(test)]
+        #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
         let mut selected_mask_edges = 0usize;
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut movement_metrics = super::structural_order::MovementClearMetrics::default();
@@ -4621,7 +4813,7 @@ impl BuildOrderGraph {
                     nodes[node_index].accepting = accepting;
                     nodes[node_index].live = accepting;
                 }
-                #[cfg(test)]
+                #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
                 if !materialize_graph {
                     debug_assert_eq!(allowed_operations.len(), node_index);
                     allowed_operations.push(0);
@@ -4971,7 +5163,7 @@ impl BuildOrderGraph {
                 });
                 edge_scratch.dedup();
             }
-            #[cfg(test)]
+            #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
             let mut selected_operation_mask = 0_u16;
             for edge in &mut edge_scratch {
                 let child_subset = edge.to as usize;
@@ -5010,12 +5202,12 @@ impl BuildOrderGraph {
                 if materialize_graph {
                     edge.to = workspace.graph_subset_node_ids[child_subset];
                 }
-                #[cfg(test)]
+                #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
                 if !materialize_graph {
                     selected_operation_mask |= 1_u16 << edge.operation_index;
                 }
             }
-            #[cfg(test)]
+            #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
             if !materialize_graph {
                 debug_assert_eq!(allowed_operations.len(), node_index);
                 allowed_operations.push(selected_operation_mask);
@@ -5068,7 +5260,7 @@ impl BuildOrderGraph {
                     workspace.graph_edges = edges;
                     workspace.graph_piece_edges = piece_edges;
                 }
-                #[cfg(test)]
+                #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
                 if !materialize_graph {
                     allowed_operations.clear();
                     workspace.graph_allowed_operations = allowed_operations;
@@ -5083,7 +5275,7 @@ impl BuildOrderGraph {
             }
             super::structural_order::record_ordered_kick_guard_reuse(kick_guard_metrics);
         }
-        #[cfg(test)]
+        #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
         if !materialize_graph {
             let visited_subsets = subset_queue.len();
             let reachability_states = workspace
@@ -5103,19 +5295,22 @@ impl BuildOrderGraph {
                     &workspace.graph_subset_node_ids[..state_count],
                     accepting_reached,
                 );
-            record_operation_mask_pass(|metrics| {
+            workspace.record_operation_mask_pass(|metrics| {
                 metrics.mask_passes += 1;
                 metrics.mask_live_passes += usize::from(accepting_reached);
-                metrics.mask_dead_passes += usize::from(!accepting_reached);
                 metrics.visited_subsets += visited_subsets;
                 metrics.selected_edges += selected_mask_edges;
-                metrics.max_mask_capacity =
-                    metrics.max_mask_capacity.max(allowed_operations.capacity());
-                metrics.max_mask_owner_node_capacity =
-                    metrics.max_mask_owner_node_capacity.max(nodes.capacity());
-                metrics.max_mask_owner_edge_capacity = metrics
-                    .max_mask_owner_edge_capacity
-                    .max(edges.capacity() + piece_edges.capacity());
+                #[cfg(test)]
+                {
+                    metrics.mask_dead_passes += usize::from(!accepting_reached);
+                    metrics.max_mask_capacity =
+                        metrics.max_mask_capacity.max(allowed_operations.capacity());
+                    metrics.max_mask_owner_node_capacity =
+                        metrics.max_mask_owner_node_capacity.max(nodes.capacity());
+                    metrics.max_mask_owner_edge_capacity = metrics
+                        .max_mask_owner_edge_capacity
+                        .max(edges.capacity() + piece_edges.capacity());
+                }
             });
             allowed_operations.clear();
             workspace.graph_allowed_operations = allowed_operations;
@@ -5129,15 +5324,18 @@ impl BuildOrderGraph {
                 reachability_states,
             }));
         }
-        #[cfg(test)]
-        record_operation_mask_pass(|metrics| {
+        #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+        workspace.record_operation_mask_pass(|metrics| {
             metrics.graph_passes += 1;
             metrics.visited_subsets += nodes.len();
             metrics.selected_edges += edges.len();
-            metrics.max_node_capacity = metrics.max_node_capacity.max(nodes.capacity());
-            metrics.max_edge_capacity = metrics.max_edge_capacity.max(edges.capacity());
-            metrics.max_piece_edge_capacity =
-                metrics.max_piece_edge_capacity.max(piece_edges.capacity());
+            #[cfg(test)]
+            {
+                metrics.max_node_capacity = metrics.max_node_capacity.max(nodes.capacity());
+                metrics.max_edge_capacity = metrics.max_edge_capacity.max(edges.capacity());
+                metrics.max_piece_edge_capacity =
+                    metrics.max_piece_edge_capacity.max(piece_edges.capacity());
+            }
         });
         #[cfg(any(test, feature = "local-search-ab"))]
         let fuse_language = super::placement_dependency::enabled()

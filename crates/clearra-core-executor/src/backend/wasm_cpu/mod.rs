@@ -87,6 +87,8 @@ mod structural_graph_probability_tests;
 mod structural_order;
 #[cfg(feature = "local-search-ab")]
 pub use buildup::{geometric_edge_reuse_experiment_totals, GeometricEdgeReuseMetrics};
+#[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+pub use buildup::{with_operation_mask_experiment, OperationMaskExperimentReport};
 #[cfg(feature = "local-search-ab")]
 pub use geometry::{geometry_domain_experiment_totals, GeometryDomainExperimentTotals};
 #[cfg(feature = "local-search-ab")]

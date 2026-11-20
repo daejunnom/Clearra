@@ -146,6 +146,94 @@ mod tests {
         assert_eq!(parallel_worker_count_for_candidates(1, 7), 1);
         assert_eq!(parallel_worker_count_for_candidates(u128::MAX, 7), 7);
     }
+
+    #[cfg(feature = "local-search-ab")]
+    #[test]
+    fn operation_mask_scope_binds_every_pooled_worker_without_leaking_between_arms() {
+        use clearra_core_domain::execution_cancellation::ExecutionControl;
+        use clearra_pc_graph::request::{
+            PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+            PcSolutionProbabilityPolicy, PieceWindow, SupplyWindowSize,
+        };
+        use clearra_problem::ProblemCompiler;
+
+        use super::super::{
+            buildup::with_operation_mask_experiment, result::WasmExactSearchSession,
+        };
+
+        let problem = ProblemCompiler::compile_scenario_pc(
+            &PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, 0xfc3f_0fc3_f0),
+                PcQueueInput::standard_7_bag(),
+                PieceWindow::new(4),
+            )
+            .with_allow_hold(false)
+            .with_exact_pieces(Some(4))
+            .with_supply_window_size(SupplyWindowSize::new(4))
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+            .with_execution_policy(PcExecutionPolicy::default().with_workers(2)),
+        )
+        .expect("mixed 840-queue fixture");
+        let execute = || {
+            WasmExactSearchSession::new(&problem)
+                .expect("exact session")
+                .execute_parallel_if_worthwhile(2, &ExecutionControl::default())
+                .expect("parallel search completes")
+                .expect("the fixture has parallel work")
+        };
+        let (control, before) = with_operation_mask_experiment(false, execute);
+        let (treatment, masks) = with_operation_mask_experiment(true, execute);
+        let (repeated, after) = with_operation_mask_experiment(false, execute);
+        for (summary, report) in [(&control, before), (&treatment, masks), (&repeated, after)] {
+            assert_eq!(summary.bool_field("cpu_parallel_execution"), Some(true));
+            assert_eq!(summary.bool_field("resource_truncated"), Some(false));
+            assert_eq!(summary.usize_field("workers_used"), Some(2));
+            assert_eq!(summary.usize_field("coverage_pattern_count"), Some(840));
+            assert_eq!(summary.usize_field("covered_pattern_count"), Some(173));
+            assert_eq!(summary.normalized_solution_identities().len(), 135);
+            assert_eq!(
+                summary.normalized_solution_identities(),
+                control.normalized_solution_identities()
+            );
+            assert_eq!(summary.solution_coverages(), control.solution_coverages());
+            assert_eq!(
+                summary.coverage_pattern_words(),
+                control.coverage_pattern_words()
+            );
+            assert_eq!(summary.path_steps(), control.path_steps());
+            assert_eq!(
+                report.workers, 2,
+                "caller and pooled worker must each report once"
+            );
+            assert!(report.executing_workers > 0);
+            assert_eq!(
+                summary.usize_field("total_build_order_nodes"),
+                Some(report.visited_subsets)
+            );
+            assert_eq!(
+                summary.usize_field("worker_graph_projection_retained_bytes"),
+                Some(report.graph_projection_bytes)
+            );
+            assert_eq!(report.visited_subsets, before.visited_subsets);
+            assert_eq!(report.selected_edges, before.selected_edges);
+        }
+        for graph in [before, after] {
+            assert_eq!(graph.requested_workers, 0);
+            assert_eq!(graph.mask_passes, 0);
+            assert_eq!(graph.mask_bytes, 0);
+            assert!(graph.graph_node_bytes > 0);
+            assert_eq!(graph.graph_passes, before.graph_passes);
+        }
+        assert_eq!(masks.requested_workers, 2);
+        assert!(masks.mask_live_passes > 0);
+        assert_eq!(masks.mask_passes, before.graph_passes);
+        assert!(masks.mask_bytes > 0);
+        assert_eq!(masks.graph_node_bytes, 0);
+        assert_eq!(masks.graph_edge_bytes, 0);
+        assert_eq!(masks.graph_piece_edge_bytes, 0);
+        assert!(!treatment.path_steps().is_empty());
+    }
 }
 
 fn has_explicit_resource_cap(problem: &SearchProblem) -> bool {
@@ -196,6 +284,8 @@ fn execute_plan(
         )),
         #[cfg(any(test, feature = "local-search-ab"))]
         solution_coverage_capture,
+        #[cfg(feature = "local-search-ab")]
+        operation_masks: super::buildup::claim_operation_mask_experiment()?,
     };
     let branch_count = plan.searches.len();
     let queue = Arc::new(ParallelBranchQueue::new(branch_tasks(plan.searches)));

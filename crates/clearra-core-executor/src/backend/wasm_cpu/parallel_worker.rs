@@ -552,6 +552,8 @@ pub(super) struct SharedWorkerRequest {
     pub reachability: Arc<SharedReachabilityTemplates>,
     #[cfg(any(test, feature = "local-search-ab"))]
     pub solution_coverage_capture: Option<SolutionCoverageCapture>,
+    #[cfg(feature = "local-search-ab")]
+    pub operation_masks: Option<super::buildup::OperationMaskExperiment>,
 }
 
 pub(super) fn run_branch_worker(
@@ -564,6 +566,10 @@ pub(super) fn run_branch_worker(
     shared_request: SharedWorkerRequest,
 ) -> Result<ParallelWorkerResult, WasmExactSearchError> {
     let mut workspace = BuildUpWorkspace::default();
+    #[cfg(feature = "local-search-ab")]
+    if let Some(experiment) = &shared_request.operation_masks {
+        workspace.begin_operation_mask_worker(experiment);
+    }
     workspace.set_shared_reachability_templates(Arc::clone(&shared_request.reachability))?;
     if let Some(shared_standard_bag) = shared_request.standard_bag {
         workspace.set_shared_standard_bag_request(shared_standard_bag)?;
@@ -604,6 +610,10 @@ pub(super) fn run_branch_worker(
 
     if problem.objective().kind() != ObjectiveKind::Tiling {
         workspace.publish_worker_standard_bag_coverage(shared_coverage)?;
+    }
+    #[cfg(feature = "local-search-ab")]
+    if let Some(experiment) = &shared_request.operation_masks {
+        workspace.finish_operation_mask_worker(experiment)?;
     }
     aggregate.candidate_digest_retained_bytes = outcomes
         .iter()
