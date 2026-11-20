@@ -1000,7 +1000,7 @@ impl WasmExactSearchSession {
         problem: &SearchProblem,
     ) -> Result<Self, WasmExactSearchError> {
         Self::new_with_problem(
-            Arc::new(problem.clone().into_selected_cpu_execution()),
+            Arc::new(problem.clone().into_selected_compact_exact_execution()),
             false,
             SearchProblemRetention::SessionOwnedCloneUnaccounted,
         )
@@ -1195,6 +1195,17 @@ impl WasmExactSearchSession {
 
     pub fn new_external_geometry(problem: &SearchProblem) -> Result<Self, WasmExactSearchError> {
         Self::new_with_external_geometry(problem, true)
+    }
+
+    #[cfg(feature = "webgpu-search")]
+    pub(super) fn new_external_geometry_for_webgpu(
+        problem: Arc<SearchProblem>,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_problem(
+            problem,
+            true,
+            SearchProblemRetention::SessionOwnedCloneUnaccounted,
+        )
     }
 
     pub(super) fn new_external_geometry_for_build_probability_on_board(

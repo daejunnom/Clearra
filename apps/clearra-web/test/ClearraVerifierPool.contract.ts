@@ -681,6 +681,89 @@ assert.equal(
   'producer completion retires only the verifier that never became ready'
 );
 
+{
+  const journal = new MemoryDelegationJournal();
+  const authority = await DurableDelegationAuthority.recover(journal);
+  const delayedOffer = signal();
+  const releaseOffer = signal();
+  const finishPublished = signal();
+  const releaseFinish = signal();
+  let retiredTaskId = '';
+  const offered = authority.offered.bind(authority);
+  authority.offered = async (token) => {
+    const offer = await offered(token);
+    if (token.taskId.endsWith(':2:1:initialize')) {
+      retiredTaskId = token.taskId;
+      delayedOffer.resolve();
+      await releaseOffer.promise;
+    }
+    return offer;
+  };
+  const publish = authority.publish.bind(authority);
+  authority.publish = async (token) => {
+    const permit = await publish(token);
+    if (token.taskId.endsWith(':finish')) {
+      finishPublished.resolve();
+      await releaseFinish.promise;
+    }
+    return permit;
+  };
+  const workers: FakeVerifierWorker[] = [];
+  const pool = new ClearraVerifierPool(() => {
+    const worker = new FakeVerifierWorker(false);
+    workers.push(worker);
+    return worker as unknown as Worker;
+  }, { delegationAuthority: authority });
+  const initialization = pool.initialize('clearra pc --lines 4', 2, undefined, 'late-initialization-offer');
+  void initialization.catch(() => undefined);
+  try {
+    await bounded('unready initializer is between its journal append and worker offer', delayedOffer.promise);
+    await bounded('a ready worker accepts the batch', pool.enqueue(Uint8Array.of(7).buffer, () => undefined));
+    const applied: number[] = [];
+    const finishing = pool.finish((partial) => applied.push(new Uint8Array(partial)[0]), { readySubset: true });
+    void finishing.catch(() => undefined);
+    await bounded('surviving worker publishes its finish permit', finishPublished.promise);
+    assert.equal(workers[1].terminated, true);
+    releaseOffer.resolve();
+    await bounded('retired initializer no longer owns the pool', initialization);
+    assert.equal(workers[0].terminated, false);
+    assert.equal(workers.length, 2, 'late journal replies cannot relaunch a retired initializer');
+    const retiredPhases = (await journal.load()).filter((event) => event.taskId === retiredTaskId);
+    assert.equal(retiredPhases.at(-1)?.phase, 'failed-closed');
+    assert.ok(retiredPhases.every((event) => event.phase !== 'published'));
+    releaseFinish.resolve();
+    assert.equal(await bounded('surviving worker finishes after the retired journal reply', finishing), 1);
+    assert.deepEqual(applied, [7]);
+  } finally {
+    releaseOffer.resolve();
+    releaseFinish.resolve();
+    pool.cancel();
+  }
+}
+
+{
+  const workers: FakeVerifierWorker[] = [];
+  const pool = new ClearraVerifierPool(() => {
+    const worker = new FakeVerifierWorker(false);
+    workers.push(worker);
+    return worker as unknown as Worker;
+  });
+  try {
+    await bounded('idle failure initialize', pool.initialize('clearra pc --lines 4', 2));
+    await bounded('idle failure issues an exact batch', pool.enqueue(Uint8Array.of(7).buffer, () => undefined));
+    await bounded('idle failure leaves exact work on the first worker', pool.waitForIdle());
+    workers[0].onerror?.({ message: 'ready verifier lost its state' } as ErrorEvent);
+    await assert.rejects(
+      bounded('previously ready worker cannot be discarded as an initializer',
+        pool.finish(() => assert.fail('cannot publish a partial family'), { readySubset: true })),
+      /ready verifier lost its state/
+    );
+    assert.ok(workers.every((worker) => worker.terminated));
+  } finally {
+    pool.cancel();
+  }
+}
+
 class PrewarmGateVerifierWorker extends FakeVerifierWorker {
   constructor() {
     super(false);

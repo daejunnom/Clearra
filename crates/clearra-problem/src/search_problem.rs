@@ -62,7 +62,7 @@ mod board_accessors {
         fn ordinary_legacy_scenario_pc_extent(&self) -> Option<LegacyScenarioPcExtent> {
             match self.ordinary_legacy_scenario_pc_extent_admission()? {
                 LegacyScenarioPcExtentAdmission::Active(extent) => Some(extent),
-                LegacyScenarioPcExtentAdmission::DeferredToCpu(_) => None,
+                LegacyScenarioPcExtentAdmission::DeferredUntilCompactSelection(_) => None,
             }
         }
 
@@ -1804,7 +1804,7 @@ mod legacy_scenario_pc_extent {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(super) enum LegacyScenarioPcExtentAdmission {
         Active(LegacyScenarioPcExtent),
-        DeferredToCpu(LegacyScenarioPcExtent),
+        DeferredUntilCompactSelection(LegacyScenarioPcExtent),
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1822,21 +1822,22 @@ mod legacy_scenario_pc_extent {
                 if self.backend_policy().requested_backend() == RequestedSearchBackend::Cpu {
                     self.activate_legacy_scenario_extent(extent);
                 } else if extent.family == LegacyScenarioPcFamily::ExactArea {
-                    // A non-CPU request retains the exact-area proof but must
-                    // not use it before routing selects the CPU solver.
-                    self.legacy_scenario_pc_extent =
-                        Some(LegacyScenarioPcExtentAdmission::DeferredToCpu(extent));
+                    // A non-CPU request retains the exact-area proof until
+                    // routing selects a solver that uses the compact catalog.
+                    self.legacy_scenario_pc_extent = Some(
+                        LegacyScenarioPcExtentAdmission::DeferredUntilCompactSelection(extent),
+                    );
                 }
             }
             self
         }
 
-        /// Apply a deferred exact legacy frame after routing has selected
-        /// CPU execution. This does not change the requested backend, permit
-        /// fallback, or admit a modern explicit target to legacy projection.
+        /// Apply a deferred exact legacy frame when the chosen solver uses the
+        /// compact PC catalog (CPU or WebGPU). This does not change the
+        /// requested backend, permit fallback, or project modern targets.
         #[must_use]
-        pub fn into_selected_cpu_execution(mut self) -> Self {
-            if let Some(LegacyScenarioPcExtentAdmission::DeferredToCpu(extent)) =
+        pub fn into_selected_compact_exact_execution(mut self) -> Self {
+            if let Some(LegacyScenarioPcExtentAdmission::DeferredUntilCompactSelection(extent)) =
                 self.ordinary_legacy_scenario_pc_extent_admission()
             {
                 self.activate_legacy_scenario_extent(extent);

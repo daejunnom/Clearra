@@ -2157,7 +2157,7 @@ mod coverage_summary_tests {
             assert_eq!(problem.compact_pc_geometry_height(), 4);
             let modern = ProblemCompiler::compile_scenario_pc(&query)
                 .expect("modern problem")
-                .into_selected_cpu_execution();
+                .into_selected_compact_exact_execution();
             assert_eq!(modern.compact_pc_geometry_height(), 4);
 
             let result = WasmCpuSearchBackend::execute_with_control(&problem, &control)

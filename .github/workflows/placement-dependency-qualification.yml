@@ -257,6 +257,11 @@ jobs:
       (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # The Setup-score fixture registers the real native Build host, which
+      # accepts only the source identity embedded by Cargo at compile time.
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:

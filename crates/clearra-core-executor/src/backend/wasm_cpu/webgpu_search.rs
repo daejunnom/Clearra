@@ -125,15 +125,22 @@ impl WebGpuExactCoverCatalog for WasmGpuCatalog {
 
 impl WasmWebGpuSearchSession {
     pub fn new(problem: &SearchProblem) -> Result<Self, WasmExactSearchError> {
-        let exact = WasmExactSearchSession::new_external_geometry(problem)?;
+        // Dispatch and host verification must consume the same selected
+        // compact target; visible rows still belong to the original request.
+        let problem = Arc::new(problem.clone().into_selected_compact_exact_execution());
+        let exact = WasmExactSearchSession::new_external_geometry_for_webgpu(Arc::clone(&problem))?;
+        let backend_policy = problem.backend_policy();
+        let selection = adapter_selection(backend_policy.gpu_device());
+        let warmup_requested = backend_policy.gpu_warmup();
+        let fallback_allowed = backend_policy.allow_backend_fallback();
         Ok(Self {
-            problem: Arc::new(problem.clone()),
+            problem,
             exact: Some(exact),
             phase: WebGpuSearchPhase::Preparing {
-                selection: adapter_selection(problem.backend_policy().gpu_device()),
-                warmup_requested: problem.backend_policy().gpu_warmup(),
+                selection,
+                warmup_requested,
             },
-            fallback_allowed: problem.backend_policy().allow_backend_fallback(),
+            fallback_allowed,
         })
     }
 
@@ -725,6 +732,102 @@ mod tests {
     use crate::{backend::GpuExecutionFailureClass, CoreExecutionError};
 
     use super::*;
+
+    #[test]
+    fn gpu_and_hybrid_prepare_and_fallback_in_the_legacy_exact_target() {
+        use clearra_pc_graph::request::{
+            PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+            RequestedSearchBackend,
+        };
+        use clearra_problem::ProblemCompiler;
+        use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+        // From the product's scenario_simple_4l fixture: six settled cells
+        // plus an I clear the bottom row of a four-row display.
+        let control = ExecutionControl::default();
+        for backend in [RequestedSearchBackend::Gpu, RequestedSearchBackend::Hybrid] {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, 0x3f0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+                PieceWindow::new(1),
+            )
+            .with_rule(clearra_rules::profile::builtin_rules::srs())
+            .with_exact_pieces(Some(1))
+            .with_count_policy(PcCountPolicy::CountAll)
+            .with_retained_trace_limit(1)
+            .with_execution_policy(
+                PcExecutionPolicy::mvp_default()
+                    .with_requested_backend(backend)
+                    .with_runtime_webgpu_available(true)
+                    .with_allow_backend_fallback(true)
+                    .with_workers(1),
+            );
+            let legacy = ProblemCompiler::compile_legacy_scenario_pc(&query).unwrap();
+            assert_eq!(legacy.compact_pc_geometry_height(), 4);
+            let mut session = WasmWebGpuSearchSession::new(&legacy).expect("legacy GPU admission");
+            assert_eq!(
+                session.problem.backend_policy().requested_backend(),
+                backend
+            );
+            assert_eq!(session.problem.visible_height(), 4);
+            assert_eq!(session.problem.compact_pc_geometry_height(), 1);
+            assert_eq!(session.problem.initial_board().occupied_mask(), 0x3f0);
+
+            // Stop before any adapter is opened; the batch must match the
+            // physical one-piece target even on a runner with no GPU.
+            for _ in 0..32 {
+                assert!(matches!(
+                    session.advance(1, &control).expect("GPU batch preparation"),
+                    ExactSearchAdvance::Pending
+                ));
+                if matches!(&session.phase, WebGpuSearchPhase::Prepared { .. }) {
+                    break;
+                }
+            }
+            let WebGpuSearchPhase::Prepared { batches, .. } = &session.phase else {
+                panic!("must prepare the legacy batch without GPU hardware");
+            };
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].target_depth(), 1);
+            assert_eq!(batches[0].skeleton_cell_masks(), &[0xf]);
+
+            session.phase = WebGpuSearchPhase::Dispatching(Box::pin(async {
+                Err(GpuRunFailure::Execution(GpuExecutionFailure::unavailable(
+                    GpuExecutionFailureStage::CapabilityQuery,
+                    SearchBackendFallbackReason::GpuDeviceNotFound,
+                )))
+            }));
+            let result = (0..32)
+                .find_map(
+                    |_| match session.advance(256, &control).expect("CPU fallback") {
+                        ExactSearchAdvance::Pending => None,
+                        ExactSearchAdvance::Completed(result) => Some(result),
+                        ExactSearchAdvance::Cancelled => panic!("fallback was not cancelled"),
+                    },
+                )
+                .expect("fallback runs the same one-piece target");
+            assert_eq!(result.field("backend_requested"), Some(backend.as_str()));
+            assert_eq!(result.field("backend_selected"), Some("wasm-cpu"));
+            assert_eq!(result.field("backend_fallback_used"), Some("true"));
+            assert_eq!(
+                result.field("backend_fallback_reason"),
+                Some("gpu_device_not_found")
+            );
+            assert_eq!(result.field("count_complete"), Some("true"));
+            assert_eq!(result.field("normalized_unique_solution_count"), Some("1"));
+            assert_eq!(result.path_steps().len(), 1);
+            drop(session);
+
+            let modern = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            assert_eq!(modern.compact_pc_geometry_height(), 4);
+            assert!(matches!(
+                WasmWebGpuSearchSession::new(&modern),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_required_fill_area_not_tetromino_aligned"
+                ))
+            ));
+        }
+    }
 
     #[test]
     fn unavailable_gpu_with_denied_fallback_keeps_the_adapter_reason() {

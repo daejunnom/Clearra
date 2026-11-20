@@ -1972,7 +1972,8 @@ fn wasm_worker_replays_an_extended_visible_seven_token_without_distribution() {
     use clearra_host_contract::AppCommandKind;
     use clearra_pc_graph::request::{PcContinuationToken, PcContinuationTokenCodec};
 
-    let runtime = WasmCommandRuntime::default();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, true));
     let seed = runtime
         .run_command_text(concat!(
             "clearra pc --lines 7 --height 7 --board-mask 0x3fdff7fdff3feffbfe ",
@@ -2001,6 +2002,7 @@ fn wasm_worker_replays_an_extended_visible_seven_token_without_distribution() {
         [0xdff7_fdff_3fef_fbfe, 0x3f, 0, 0]
     );
     assert_eq!(scenario.exact_pieces(), Some(2));
+    assert_eq!(scenario.execution_policy().workers_requested(), None);
     assert_eq!(
         scenario.queue_observation_policy().visible_piece_count(),
         Some(7)

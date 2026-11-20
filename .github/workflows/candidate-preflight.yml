@@ -99,19 +99,24 @@ jobs:
             task: ReleaseAcceptance
             shard: Pages
             pnpm: true
-    # Same hosted Windows family as the canonical executable acceptance leaves.
-    # Keep its native execution policy checks: no signing/unblocking/fallback.
-    runs-on: windows-latest
+    # Native suites retain Windows execution-policy checks. The browser suite
+    # compiles the same WASM target on the Linux/Chromium host used by the
+    # product-worker readback; canonical Windows source contracts remain separate.
+    runs-on: ${{ matrix.suite == 'wasm' && 'ubuntu-24.04' || 'windows-latest' }}
     timeout-minutes: 120
     env:
       CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
       CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
       RUST_MIN_STACK: "16777216"
+      # The independent native test runners need assertions, not full PDBs.
+      # Leave release compilation and the managed slot's capacity unchanged.
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: 1
+          fetch-tags: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
@@ -128,6 +133,7 @@ jobs:
       # Read a compatible canonical build snapshot, but never publish cache or
       # acceptance evidence from this unqualified branch.
       - name: Restore verified native build inputs
+        if: matrix.suite != 'wasm'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -137,9 +143,20 @@ jobs:
           key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-${{ github.sha }}
           restore-keys: |
             release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-
+      - name: Restore verified WASM build inputs
+        if: matrix.suite == 'wasm'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/tools/cargo/wasm-bindgen-cli/0.2.126
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: release-acceptance-wasm-v5-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            release-acceptance-wasm-v5-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'tools/**/Cargo.toml') }}-
       - name: Prepare WASM toolchain
         if: matrix.suite == 'wasm'
-        shell: powershell
+        shell: pwsh
         run: |
           rustup target add wasm32-unknown-unknown
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -154,13 +171,15 @@ jobs:
           CANDIDATE_TASK: ${{ matrix.task }}
           CANDIDATE_SHARD: ${{ matrix.shard }}
           CANDIDATE_SUITE: ${{ matrix.suite }}
-        shell: powershell
+        shell: pwsh
         run: |
           . ./scripts/lib/clearra-path-helpers.ps1
           Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose experiment
           try {
             $candidateWorkers = [Math]::Max(1, [Environment]::ProcessorCount)
-            & powershell -NoProfile -File scripts/clearra.ps1 -Task $env:CANDIDATE_TASK -ReleaseAcceptanceShard $env:CANDIDATE_SHARD -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $candidateWorkers -VerboseLog -ShowWarnings
+            $candidateShell = if ($IsWindows) { 'powershell' } else { 'pwsh' }
+            $candidateRuntime = if ($IsWindows) { 'windows' } else { 'wasm' }
+            & $candidateShell -NoProfile -File scripts/clearra.ps1 -Task $env:CANDIDATE_TASK -ReleaseAcceptanceShard $env:CANDIDATE_SHARD -ExecutionSurface Trusted -RuntimeEnvironment $candidateRuntime -Workers $candidateWorkers -VerboseLog -ShowWarnings
             $gateExitCode = $LASTEXITCODE
             if ($env:CANDIDATE_SUITE -eq 'wasm') {
               # Preserve any produced WASM under the same experiment owner.

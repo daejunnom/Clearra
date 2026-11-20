@@ -269,10 +269,13 @@ function Invoke-WasmBuildTestGate {
             'install', '--prefix', $browserTools, '--ignore-scripts',
             '--no-audit', '--no-fund', 'playwright@1.56.1'
         ) 'clearra-browser pinned tooling'
-        Invoke-WasmReleaseCommand $nodeCommand.Source @(
-            (Join-Path $browserTools 'node_modules/playwright/cli.js'),
-            'install', 'chromium'
-        ) 'clearra-browser Chromium preparation'
+        $browserInstallArgs = @((Join-Path $browserTools 'node_modules/playwright/cli.js'), 'install')
+        if (Test-StartTestsWindows) {
+            $browserInstallArgs += 'chromium'
+        } else {
+            $browserInstallArgs += @('--with-deps', 'chromium')
+        }
+        Invoke-WasmReleaseCommand $nodeCommand.Source $browserInstallArgs 'clearra-browser Chromium preparation'
         $env:CLEARRA_BROWSER_TOOLS_ROOT = $browserTools
         Invoke-WasmReleaseCommand $nodeCommand.Source @(
             (Join-Path $Root 'scripts/tools/workspace-controls-browser-acceptance.mjs')

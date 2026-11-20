@@ -5,7 +5,7 @@ use clearra_core_executor::{
     CoreExecutionResult,
 };
 use clearra_pc_graph::request::{
-    PcContinuationToken, PcContinuationTokenCodec, RequestedSearchBackend,
+    PcContinuationToken, PcContinuationTokenCodec, PcExecutionPolicy, RequestedSearchBackend,
 };
 use clearra_problem::{ProblemCompiler, SearchProblem};
 use clearra_validation::validators::pc_query_validator::{
@@ -26,6 +26,28 @@ pub struct ContinueAppCommand {
     token: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ContinueExecutionHost {
+    Native,
+    LocalWasmWorker,
+}
+
+impl ContinueExecutionHost {
+    fn local_worker_policy(self, policy: &PcExecutionPolicy) -> Option<PcExecutionPolicy> {
+        match self {
+            Self::Native => None,
+            // The token carries scenario semantics, not a worker request.
+            // A local WASM receiver owns one CPU worker and never a pool.
+            Self::LocalWasmWorker => Some(
+                policy
+                    .clone()
+                    .with_requested_backend(RequestedSearchBackend::Cpu)
+                    .with_workers(1),
+            ),
+        }
+    }
+}
+
 impl ContinueAppCommand {
     pub fn new(token: Option<String>) -> Self {
         Self { token }
@@ -35,9 +57,10 @@ impl ContinueAppCommand {
     /// path, including its pre-execution cancellation behavior.
     pub(crate) fn compile_cooperative(
         &self,
+        host: ContinueExecutionHost,
         allow_native_multiworker: bool,
     ) -> Option<(SearchProblem, ContinueKind)> {
-        let (problem, kind) = compile_continue(self.token.as_deref()?).ok()?;
+        let (problem, kind) = compile_continue(self.token.as_deref()?, host).ok()?;
         if problem.backend_request().requested_backend() != RequestedSearchBackend::Cpu {
             return None;
         }
@@ -74,7 +97,7 @@ impl RunnableAppCommand for ContinueAppCommand {
         let Some(token) = self.token else {
             return missing_continue_token_response();
         };
-        let (problem, kind) = match compile_continue(&token) {
+        let (problem, kind) = match compile_continue(&token, ContinueExecutionHost::Native) {
             Ok(prepared) => prepared,
             Err(response) => return response,
         };
@@ -151,15 +174,21 @@ fn missing_continue_token_response() -> AppResponse {
 // An opening or checkpoint starts at the token's accepted residual state.
 // A replay reconstructs the original input, including its legacy extent.
 #[allow(clippy::result_large_err)]
-fn compile_continue(token: &str) -> Result<(SearchProblem, ContinueKind), AppResponse> {
+fn compile_continue(
+    token: &str,
+    host: ContinueExecutionHost,
+) -> Result<(SearchProblem, ContinueKind), AppResponse> {
     let decoded = PcContinuationTokenCodec::parse(token).map_err(|error| {
         AppResponse::failed(
             AppStatus::ExecutionFailed,
             AppError::new(AppErrorCode::ContinueTokenInvalid, error.to_string()),
         )
     })?;
-    let (query, kind) = match decoded {
-        PcContinuationToken::Opening(query) => {
+    let (mut query, kind) = match decoded {
+        PcContinuationToken::Opening(mut query) => {
+            if let Some(policy) = host.local_worker_policy(query.execution_policy()) {
+                query = query.with_execution_policy(policy);
+            }
             let report = validate_opening_pc_search_query(&query);
             if report.has_errors() {
                 return Err(AppResponse::validation_failed(report));
@@ -171,6 +200,9 @@ fn compile_continue(token: &str) -> Result<(SearchProblem, ContinueKind), AppRes
         PcContinuationToken::Scenario(query) => (query, ContinueKind::ScenarioContinuation),
         PcContinuationToken::ScenarioReplay(query) => (query, ContinueKind::ScenarioReplay),
     };
+    if let Some(policy) = host.local_worker_policy(query.execution_policy()) {
+        query = query.with_execution_policy(policy);
+    }
     let report = validate_pc_scenario_query(&query);
     if report.has_errors() {
         return Err(AppResponse::validation_failed(report));
@@ -257,12 +289,22 @@ mod tests {
         // lower field fits in the proven one-line packing target.
         for (mask, geometry_height) in [(0x3f0, 1), (0xfc000, 2)] {
             let token = format!("{prefix}{mask:016x}{suffix}");
-            let (problem, kind) = compile_continue(&token).expect("parse compact checkpoint");
-            assert!(matches!(kind, ContinueKind::ScenarioContinuation));
-            assert_eq!(problem.initial_board().occupied_mask(), mask);
-            assert_eq!(problem.visible_height(), 2);
-            assert_eq!(problem.exact_pieces(), Some(1));
-            assert_eq!(problem.compact_pc_geometry_height(), geometry_height);
+            for (host, requested_workers) in [
+                (ContinueExecutionHost::Native, None),
+                (ContinueExecutionHost::LocalWasmWorker, Some(1)),
+            ] {
+                let (problem, kind) =
+                    compile_continue(&token, host).expect("parse compact checkpoint");
+                assert!(matches!(kind, ContinueKind::ScenarioContinuation));
+                assert_eq!(problem.initial_board().occupied_mask(), mask);
+                assert_eq!(problem.visible_height(), 2);
+                assert_eq!(problem.exact_pieces(), Some(1));
+                assert_eq!(problem.compact_pc_geometry_height(), geometry_height);
+                assert_eq!(
+                    problem.backend_request().workers_requested(),
+                    requested_workers
+                );
+            }
         }
     }
 }

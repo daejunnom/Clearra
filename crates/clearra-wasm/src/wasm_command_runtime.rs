@@ -4109,7 +4109,7 @@ impl WasmCommandRuntime {
         PreparedWasmExecution {
             execution: Some(Box::new(
                 self.app_context
-                    .start_cooperative_execution(prepared.request),
+                    .start_cooperative_wasm_worker_execution(prepared.request),
             )),
             webgpu_requested: prepared.webgpu_requested,
             online_pc4: None,

@@ -227,7 +227,7 @@ class VerifierClient {
     private readonly clientId: string,
     private readonly jobId: string,
     private readonly transportProfile: VerifierTransportProfile,
-    private readonly onFatalRelationError: (error: Error) => void
+    private readonly onFatalWorkerError: (error: Error) => void
   ) {
     this.requestWatchdogScanIntervalMs = watchdogScanInterval(
       requestStallTimeoutMs,
@@ -323,12 +323,15 @@ class VerifierClient {
     this.busy = true;
     this.batchStartedAt = performance.now();
     try {
-      await this.transportProfile.measure(this.prewarmed ? 'prewarm_reuse' : 'prewarm_new', 'initialize',
+      const warming = this.transportProfile.measure(this.prewarmed ? 'prewarm_reuse' : 'prewarm_new', 'initialize',
         () => this.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities));
+      const worker = this.requireWorker();
+      await warming;
+      this.requireWorker(worker);
       await this.installWorkerPack(executionKind === 'geometry-verifier' ? conditionedPack : null);
+      this.requireWorker(worker);
       await this.installWorkerSynopsis(executionKind === 'geometry-verifier' ? legalBoardSynopsis : null);
-      this.worker ??= this.createWorker();
-      const worker = this.worker;
+      this.requireWorker(worker);
       this.candidatesVerified = 0;
       this.candidatesVerifiedAvailable = true;
       this.candidatesVerifiedExact = true;
@@ -336,10 +339,12 @@ class VerifierClient {
       const workerInitialization =
         typeof initialization === 'string' ? initialization : initialization.slice(0);
       const delegation = await this.publishExecutableDelegation(
+        worker,
         'initialize',
         workerInitialization,
         byteLength(workerInitialization)
       );
+      this.requirePublishedWorker(worker, delegation);
       this.rootRequestSha256 = delegation.permit.payloadSha256;
       this.initializationDelegation = delegation;
       this.ready = new Promise<void>((resolve, reject) => {
@@ -647,19 +652,17 @@ class VerifierClient {
     _onPartial?: (partial: ArrayBuffer) => void,
     onExecutablePosted?: () => void
   ): Promise<DelegatedVerifierResponse> {
+    const worker = this.requireWorker();
     const requestId = this.nextRequestId++;
     const payload = message.type === 'consume' ? message.batch : 'clearra-verifier-finish-v1';
     const delegation = await this.publishExecutableDelegation(
+      worker,
       message.type,
       payload,
       message.type === 'consume' ? message.batch.byteLength : 0
     );
+    this.requirePublishedWorker(worker, delegation);
     return new Promise((resolve, reject) => {
-      const worker = this.worker;
-      if (!worker) {
-        reject(new Error('distributed verifier is not initialized'));
-        return;
-      }
       const pending: PendingRequest = {
         resolve,
         reject,
@@ -712,12 +715,12 @@ class VerifierClient {
           worker.postMessage({ type: 'conditioned-reply', profile: response.profile,
             session: response.session, wire }, [wire]);
         } catch (error) {
-          this.onFatalRelationError(asError(error)); // invalidate even idle, already sealed partials
+          this.onFatalWorkerError(asError(error)); // invalidate even idle, already sealed partials
         }
         return;
       }
       if (response.type === 'failed' && response.requestId === undefined && this.initialized) {
-        this.onFatalRelationError(new ClearraWasmRuntimeError(response.code, response.message));
+        this.onFatalWorkerError(new ClearraWasmRuntimeError(response.code, response.message));
         return;
       }
       if (response.type === 'delegation-accepted') {
@@ -796,26 +799,55 @@ class VerifierClient {
       }
     };
     worker.onerror = (event) => {
-      const error = new VerifierTransportError(
-        event.message || 'distributed verifier worker failed'
+      this.handleWorkerTransportFailure(
+        worker, new VerifierTransportError(event.message || 'distributed verifier worker failed')
       );
-      this.release(error);
     };
     worker.onmessageerror = () => {
-      this.release(
-        new VerifierTransportError('distributed verifier worker returned an invalid message')
+      this.handleWorkerTransportFailure(
+        worker, new VerifierTransportError('distributed verifier worker returned an invalid message')
       );
     };
     return worker;
   }
 
+  private handleWorkerTransportFailure(worker: Worker, error: Error): void {
+    if (this.worker !== worker) return;
+    const wasReady = this.initialized;
+    this.release(error);
+    // A ready worker can hold exact state for already committed tasks. It is
+    // not an unissued initializer that ready-subset finalization may discard.
+    if (wasReady) this.onFatalWorkerError(error);
+  }
+
+  private requireWorker(expected?: Worker): Worker {
+    const worker = this.worker;
+    if (!worker || (expected && worker !== expected)) {
+      throw new VerifierTransportError('distributed verifier worker ownership ended');
+    }
+    return worker;
+  }
+
+  private requirePublishedWorker(worker: Worker, delegation: ActiveDelegation): void {
+    try {
+      this.requireWorker(worker);
+    } catch (error) {
+      // A release can land after publish settled but before its caller was
+      // queued. This permit never reached the worker or a pending request.
+      void this.failDelegation(delegation, asError(error).message);
+      throw error;
+    }
+  }
+
   private async publishExecutableDelegation(
+    worker: Worker,
     operation: 'initialize' | 'consume' | 'finish',
     payload: string | ArrayBuffer,
     memoryBytes: number
   ): Promise<ActiveDelegation> {
     const authority = await this.delegationAuthority;
     const payloadSha256 = await this.transportProfile.measure('payload_hash', operation, () => sha256Hex(payload));
+    this.requireWorker(worker);
     const requestSha256 = this.rootRequestSha256 ?? payloadSha256;
     const taskId = `${this.jobId}:${this.clientId}:${this.nextDelegationTask++}:${operation}`;
     const token = await this.transportProfile.measure('prepare', operation, () => authority.prepare(
@@ -832,10 +864,13 @@ class VerifierClient {
       }
     ));
     try {
+      this.requireWorker(worker);
       const offer = await this.transportProfile.measure('offered', operation, () => authority.offered(token));
-      const acceptance = await this.transportProfile.measure('offer_round_trip', operation, () => this.sendDelegationOffer(authority, token, offer));
+      const acceptance = await this.transportProfile.measure('offer_round_trip', operation, () => this.sendDelegationOffer(worker, authority, token, offer));
       await this.transportProfile.measure('accepted', operation, () => authority.accepted(token, acceptance));
+      this.requireWorker(worker);
       const permit = await this.transportProfile.measure('published', operation, () => authority.publish(token));
+      this.requireWorker(worker);
       return { authority, token, permit, profile: this.transportProfile, operation };
     } catch (error) {
       try {
@@ -848,16 +883,13 @@ class VerifierClient {
   }
 
   private sendDelegationOffer(
+    worker: Worker,
     authority: DurableDelegationAuthority,
     token: DelegationToken,
     offer: DelegationOffer
   ): Promise<DelegationAcceptance> {
+    this.requireWorker(worker);
     return new Promise((resolve, reject) => {
-      const worker = this.worker;
-      if (!worker) {
-        reject(new Error('distributed verifier is unavailable for delegation'));
-        return;
-      }
       const timeout = setTimeout(() => {
         this.rejectPendingOffer(
           token.taskId,
@@ -1202,7 +1234,7 @@ export class ClearraVerifierPool {
         try {
           await initializationTask;
         } catch (error) {
-          if (this.isRetiredInitializer(generation, client, error)) return;
+          if (this.isRetiredInitializer(generation, client)) return;
           throw error;
         }
       });
@@ -1481,12 +1513,13 @@ export class ClearraVerifierPool {
 
   private isRetiredInitializer(
     generation: number,
-    client: VerifierClient,
-    error: unknown
+    client: VerifierClient
   ): boolean {
+    // The generation's explicit retirement, not the exception type, revokes
+    // this initializer's authority. A journal operation can still reject after
+    // the worker was dropped, with no pending worker listener to brand it.
     return this.readySubsetFinalization?.generation === generation &&
-      this.readySubsetFinalization.retiredClients.has(client) &&
-      error instanceof VerifierRetiredError;
+      this.readySubsetFinalization.retiredClients.has(client);
   }
 
   private async consumeLease(

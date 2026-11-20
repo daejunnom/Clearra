@@ -45,7 +45,7 @@ use crate::{
     commands::{
         build_probability_app_command::{BuildProbabilityAppCommand, BuildProbabilityResultMode},
         build_v2_app_command::BuildV2AppRequest,
-        continue_app_command::{ContinueKind, CooperativeContinueResult},
+        continue_app_command::{ContinueExecutionHost, ContinueKind, CooperativeContinueResult},
         core_execution_error_response,
         path_app_command::path_response,
         scenario_app_command::{FullHeightScenarioInputReplay, ScenarioAppCommand},
@@ -1018,6 +1018,24 @@ pub(crate) fn build_probability_result_command_matches(
 
 impl AppContext {
     pub fn start_cooperative_execution(&self, request: AppRequest) -> CooperativeAppExecution {
+        self.start_cooperative_execution_for_host(request, ContinueExecutionHost::Native)
+    }
+
+    /// Start inside one local WASM receiver. Continue tokens have no worker
+    /// count of their own, so their resumed search uses that receiver's CPU
+    /// slot rather than inheriting native automatic worker defaults.
+    pub fn start_cooperative_wasm_worker_execution(
+        &self,
+        request: AppRequest,
+    ) -> CooperativeAppExecution {
+        self.start_cooperative_execution_for_host(request, ContinueExecutionHost::LocalWasmWorker)
+    }
+
+    fn start_cooperative_execution_for_host(
+        &self,
+        request: AppRequest,
+        continue_host: ContinueExecutionHost,
+    ) -> CooperativeAppExecution {
         if request.resource_budget().max_memory_mib().is_some() {
             return CooperativeAppExecution {
                 context: Some(self.clone()),
@@ -1026,7 +1044,7 @@ impl AppContext {
                 finite_caller_generation: None,
             };
         }
-        self.start_cooperative_execution_inner(request, None)
+        self.start_cooperative_execution_inner(request, None, continue_host)
     }
 
     /// Drive the admitted native Continue lane for a synchronous host (the
@@ -1049,7 +1067,7 @@ impl AppContext {
                     && !control.is_cancelled() =>
             {
                 command
-                    .compile_cooperative(true)
+                    .compile_cooperative(ContinueExecutionHost::Native, true)
                     .filter(|(problem, _)| problem.backend_policy().workers() > 1)
             }
             _ => None,
@@ -1062,7 +1080,11 @@ impl AppContext {
         let include_render_model = request.output_policy().include_render_model();
         let command_kind = request.command().kind();
         control.report_progress("validation", 0, Some(1));
-        let mut execution = self.start_cooperative_execution_inner(request, Some(prepared));
+        let mut execution = self.start_cooperative_execution_inner(
+            request,
+            Some(prepared),
+            ContinueExecutionHost::Native,
+        );
         control.report_progress("validation", 1, Some(1));
         let error = loop {
             match execution.advance(1024, control) {
@@ -1392,6 +1414,7 @@ impl AppContext {
         &self,
         request: AppRequest,
         prepared: Option<(clearra_problem::SearchProblem, ContinueKind)>,
+        continue_host: ContinueExecutionHost,
     ) -> CooperativeAppExecution {
         let execution_parts = match request.into_execution_parts() {
             Ok(execution_parts) => execution_parts,
@@ -1419,7 +1442,10 @@ impl AppContext {
         // with a one-worker cooperative session.
         let prepared_continue = prepared.or_else(|| match &execution_parts.0 {
             AppCommand::Continue(command) if cooperative_backend && execution_parts.5.is_none() => {
-                command.compile_cooperative(execution_parts.2.max_memory_mib().is_none())
+                command.compile_cooperative(
+                    continue_host,
+                    execution_parts.2.max_memory_mib().is_none(),
+                )
             }
             _ => None,
         });
