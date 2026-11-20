@@ -375,7 +375,7 @@ fn generic_board64_builds_cover_from_stream_without_fixing_a_representative_pose
                 result.outcome,
                 GenericBuildUpOutcome::Buildable { .. }
             ));
-            let count = workspace
+            let variants = workspace
                 .count_all_geometry_cover(
                     0,
                     &cover,
@@ -385,7 +385,7 @@ fn generic_board64_builds_cover_from_stream_without_fixing_a_representative_pose
                     &control,
                 )
                 .unwrap();
-            assert_eq!(count.variants, 4);
+            assert_eq!(variants.variants, 4);
             count += 1;
             std::ops::ControlFlow::Continue(())
         },
