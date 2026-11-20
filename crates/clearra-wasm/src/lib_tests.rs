@@ -3759,6 +3759,110 @@ fn four_piece_high_work_count_all_uses_distributed_workers_with_serial_parity() 
 }
 
 #[test]
+fn fixed_no_hold_opening_cpu_multi_preserves_family_without_pc2() {
+    use crate::wasm_command_runtime::PreparedWasmAdvance;
+    use clearra_pc_graph::request::{
+        PcContinuationToken, PcContinuationTokenCodec, PcCountPolicy, PcHoldPolicy,
+    };
+
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    const BASE: &str =
+        "clearra pc --lines 2 --queue IIOOOIIOOO --no-hold --count all --backend cpu";
+    let prepared = runtime
+        .prepare_command_text(&format!("{BASE} --workers 1"))
+        .expect("fixed opening command");
+    let (request, _) = prepared.clone().into_parts();
+    let AppCommand::Pc(command) = request.command() else {
+        panic!("expected the ordinary opening command");
+    };
+    let fixed_text = |query: &clearra_pc_graph::request::OpeningPcSearchQuery| {
+        query
+            .queue()
+            .as_fixed_sequence()
+            .expect("--queue on ordinary pc must parse as a fixed sequence")
+            .pieces()
+            .iter()
+            .map(|piece| piece.as_ascii())
+            .collect::<String>()
+    };
+    assert_eq!(fixed_text(command.query()), "IIOOOIIOOO");
+    assert_eq!(command.query().hold_policy(), PcHoldPolicy::Disabled);
+    assert_eq!(command.query().count_policy(), PcCountPolicy::CountAll);
+
+    let mut execution = runtime.start_prepared_execution(prepared);
+    let control = ExecutionControl::default();
+    let local = (0..4096)
+        .find_map(|_| match execution.advance(64, &control) {
+            PreparedWasmAdvance::Pending | PreparedWasmAdvance::Progress => None,
+            PreparedWasmAdvance::Completed(result) => Some(result),
+            PreparedWasmAdvance::Failed(error) => panic!("local cooperative PC failed: {error:?}"),
+            _ => panic!("unexpected local cooperative terminal"),
+        })
+        .expect("fixed opening completed within the test-only work bound");
+
+    let coordinator = completed_distributed_cpu_source(&runtime, &format!("{BASE} --workers 2"));
+    assert_eq!(coordinator.mode(), WasmDistributedMode::CpuMulti);
+    assert_eq!(coordinator.worker_count(), 2);
+    let distributed = finish_distributed_cpu_source(coordinator, 2);
+    assert_eq!(local.app_response().status(), AppStatus::Success);
+    assert_eq!(distributed.app_response().status(), AppStatus::Success);
+
+    let local = local.search_report().expect("local cooperative PC report");
+    let distributed = distributed
+        .search_report()
+        .expect("distributed CPU PC report");
+    assert_eq!(local.workers_used, 1);
+    assert_eq!(distributed.workers_used, 2);
+    assert!(distributed.cpu_parallel_execution);
+    for result in [local, distributed] {
+        assert!(result.count_complete && result.solution_keys_complete);
+        assert!(result.coverage_calculated && result.probability_complete);
+        assert!(!result.resource_truncated);
+        assert_eq!(result.unique_solution_count, 4);
+        assert_eq!(result.normalized_solution_keys.len(), 4);
+        assert_eq!(result.total_possible_pattern_count, "1");
+        assert_eq!(result.materialized_pattern_count, 1);
+        assert_eq!(result.covered_pattern_count, 1);
+    }
+    assert_eq!(
+        distributed.normalized_solution_keys,
+        local.normalized_solution_keys
+    );
+    assert_eq!(
+        distributed.normalized_solution_set_hash,
+        local.normalized_solution_set_hash
+    );
+    assert_eq!(distributed.coverage_probability, local.coverage_probability);
+
+    assert_eq!(
+        search_summary_field(local, "continuation_token_available"),
+        "true"
+    );
+    assert_eq!(
+        search_summary_field(local, "continuation_token_version"),
+        "pc2"
+    );
+    let token = search_summary_field(local, "continuation_token");
+    let PcContinuationToken::Opening(suffix) =
+        PcContinuationTokenCodec::parse(token).expect("authorized local pc2 token")
+    else {
+        panic!("expected a pc2 opening token");
+    };
+    assert_eq!(fixed_text(&suffix), "IIOOO");
+    assert_eq!(suffix.hold_policy(), PcHoldPolicy::Disabled);
+
+    // The distributed worker packets complete the family, but do not yet
+    // authorize a locally proven physical continuation witness.
+    assert!(!distributed.summary_fields.iter().any(|(key, value)| {
+        key == "continuation_token"
+            || (key == "continuation_token_available" && value == "true")
+            || (key == "continuation_token_version" && value == "pc2")
+    }));
+}
+
+#[test]
 fn typed_pc_minimals_distributed_geometry_completes_with_the_same_exact_family() {
     let _resource_guard = typed_pc_distributed_test_guard();
     let runtime = WasmCommandRuntime::default()
