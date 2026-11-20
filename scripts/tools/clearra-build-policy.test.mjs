@@ -215,11 +215,15 @@ test('source, lease and output mismatches cannot compile', async t => {
   await owner.finish(false);
 });
 
-test('product keeps five complete generations and zero failed generations', async t => {
+test('product rejects a fifth completed generation without deleting prior outputs', async t => {
   const options = await fixture(t);
   let productRoot;
   let crossHostGeneration;
-  for (let index = 0; index < 7; index += 1) {
+  const failed = await acquireBuildOwner({ ...options, purpose: 'product' });
+  await assert.rejects(acquireBuildOwner({ ...options, purpose: 'product' }), /independent product builds/u);
+  await failed.finish(false);
+  await assert.rejects(stat(failed.transaction.transaction_root), { code: 'ENOENT' });
+  for (let index = 0; index < 4; index += 1) {
     const owner = await acquireBuildOwner({ ...options, purpose: 'product' });
     assert.equal(owner.environment.CARGO_INCREMENTAL, '0');
     assert.equal(owner.transaction.incremental_seed_session_id, null);
@@ -240,19 +244,15 @@ test('product keeps five complete generations and zero failed generations', asyn
       await writeFile(markerPath, `${JSON.stringify(marker)}\n`);
     }
   }
-  assert.equal((await readdir(productRoot)).length, 5);
-  if (crossHostGeneration) await assert.rejects(stat(crossHostGeneration), { code: 'ENOENT' });
-  const failed = await acquireBuildOwner({ ...options, purpose: 'product' });
-  await assert.rejects(acquireBuildOwner({ ...options, purpose: 'product' }), /independent product builds/u);
-  await failed.finish(false);
-  await assert.rejects(stat(failed.transaction.transaction_root), { code: 'ENOENT' });
-  assert.equal((await readdir(productRoot)).length, 5);
-  const experiment = await acquireBuildOwner(options);
-  await experiment.finish(true);
-  assert.equal((await readdir(productRoot)).length, 5);
+  const prior = await readdir(productRoot);
+  assert.equal(prior.length, 4);
+  if (crossHostGeneration) assert.ok((await stat(crossHostGeneration)).isDirectory());
+  await assert.rejects(acquireBuildOwner({ ...options, purpose: 'product' }), /slot limits/u);
+  await assert.rejects(acquireBuildOwner(options), /slot limits/u);
+  assert.deepEqual(await readdir(productRoot), prior);
 });
 
-test('product retirement preflights all eligible generations before deleting any', async t => {
+test('product retirement preflights and refuses to delete generations without proven handoff', async t => {
   const options = await fixture(t);
   const generations = [];
   for (let index = 0; index < 7; index += 1) {
@@ -271,15 +271,15 @@ test('product retirement preflights all eligible generations before deleting any
   assert.equal(await readFile(join(link, 'preserve'), 'utf8'), 'outside generation');
   assert.deepEqual(await readdir(join(oldest.root, '.leases')), []);
 
-  // Removing only the injected link, then marking a different old generation
-  // leased, leaves that generation intact while normal retirement resumes.
+  // Removing only the injected link still does not prove that the pending
+  // artifact consumers handed off the completed generations.
   await rm(link);
   const lease = join(oldest.root, '.leases', `product-${sibling.marker.session_id}.lock`);
   const otherOwner = { schema_version: 1, purpose: 'product', source_id: sibling.marker.source_id,
     session_id: sibling.marker.session_id, owner_pid: process.pid };
   await writeFile(lease, JSON.stringify(otherOwner));
-  await retainProductBuildGenerations(oldest.root);
-  await assert.rejects(stat(oldest.transactionRoot), { code: 'ENOENT' });
+  await assert.rejects(retainProductBuildGenerations(oldest.root), /slot limits/u);
+  assert.equal(await readFile(join(oldest.target, 'Cargo.lock'), 'utf8'), 'fixture compiler input');
   assert.equal(await readFile(join(sibling.target, 'Cargo.lock'), 'utf8'), 'fixture compiler input');
   assert.deepEqual(JSON.parse(await readFile(lease, 'utf8')), otherOwner);
   assert.equal(await readFile(join(foreign, 'preserve'), 'utf8'), 'outside generation');

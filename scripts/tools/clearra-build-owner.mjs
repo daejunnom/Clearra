@@ -7,16 +7,18 @@ import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareRustcLauncher } from './prepare-clearra-rustc-launcher.mjs';
 import { assertManagedTransientSlotsRetired } from './managed-transient-directory.mjs';
-import { BUILD_TRANSACTION_MARKER, BUILD_TRANSACTION_SCHEMA, FORBIDDEN_BUILD_ALIASES, assertBuildRecord, assertBuildPathWithin, assertNoBuildLinks, assertManagedBuildTransaction,
+import { BUILD_STORAGE_POLICY, checkBuildStorage, monitorBuildStorage } from './clearra-build-capacity.mjs';
+import { BUILD_STORAGE_LEASE, BUILD_TRANSACTION_MARKER, BUILD_TRANSACTION_SCHEMA, FORBIDDEN_BUILD_ALIASES, assertBuildRecord, assertBuildPathWithin, assertNoBuildLinks, assertManagedBuildTransaction,
   buildPathIdentity, buildSourceId, canonicalBuildRoot, canonicalNativeBuildPath, nativeBuildPath } from './clearra-build-policy.mjs';
 
 const authorityRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const buildInputRoots = ['apps', 'assets', 'core-c', 'crates', 'packages', 'scripts', 'tests', 'tools'];
-const buildInputFiles = ['Cargo.toml', 'Cargo.lock', 'CMakeLists.txt', 'package.json', 'rust-toolchain.toml', '.cargo/config.toml'];
+const buildInputFiles = ['Cargo.toml', 'Cargo.lock', 'CMakeLists.txt', 'package.json', 'rust-toolchain.toml',
+  '.cargo/config.toml', 'config/build-storage.v1.json'];
 const generatedDirectories = new Set(['.git', '.cache', '.svelte-kit', '.vite-temp', '_local', 'dist', 'dist-server',
   'node_modules', 'build', 'models', 'checkpoints']);
-const retirementEntryLimit = 1_000_000;
-const retirementDepthLimit = 64;
+const retirementEntryLimit = BUILD_STORAGE_POLICY.maxEntries;
+const retirementDepthLimit = BUILD_STORAGE_POLICY.maxDepth;
 
 function secretOrGeneratedInput(path) {
   const name = basename(path);
@@ -214,40 +216,10 @@ async function retainExperimentCompilerCache(marker, root, identity) {
   return true;
 }
 export async function retainProductBuildGenerations(root) {
-  const productRoot = resolve(root, 'products');
-  assertNoBuildLinks(productRoot);
-  const entries = await readdir(productRoot, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
-  const complete = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error('Unowned product catalog entry; refusing retention');
-    const directory = resolve(productRoot, entry.name);
-    const marker = await readJson(resolve(directory, BUILD_TRANSACTION_MARKER));
-    assertBuildRecord(marker, root, directory);
-    if (marker.purpose !== 'product') throw new Error('Unowned product build directory; refusing retention');
-    if (marker.status === 'complete' && Number.isFinite(Date.parse(marker.completed_utc))) complete.push(marker);
-  }
-  complete.sort((a, b) => b.completed_utc.localeCompare(a.completed_utc) || b.session_id.localeCompare(a.session_id));
-  const claims = [];
-  try {
-    for (const marker of complete.slice(5)) {
-      const path = leasePath(root, marker);
-      const identity = leaseIdentity(marker, process.pid);
-      assertNoBuildLinks(path);
-      try { await claimLease(path, identity); }
-      catch (error) { if (error.code === 'EEXIST') continue; throw error; }
-      claims.push({ marker, path, identity });
-    }
-    const inventory = { entries: 0 };
-    for (const { marker, identity } of claims) await preflightOwnedGeneration(marker, root, identity, inventory);
-    for (const { marker, identity } of claims) await removePreflightedGeneration(marker, root, identity);
-  } finally {
-    let releaseError;
-    for (const { path, identity } of claims) {
-      try { await releaseLease(path, identity); }
-      catch (error) { releaseError ??= error; }
-    }
-    if (releaseError) throw releaseError;
-  }
+  // A completed product may still be read by a later artifact upload outside
+  // this process. Until that handoff is explicitly proven, absence of a
+  // compiler lease is not permission to evict it.
+  return checkBuildStorage(root);
 }
 async function assertCleanProductCatalog(root) {
   const directory = resolve(root, 'products');
@@ -270,7 +242,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
   if (environment.CLEARRA_BUILD_SESSION_ID) {
     const transaction = assertManagedBuildTransaction({ environment, sourceRoot });
     if (transaction.purpose !== purpose) throw new Error('Nested build purpose cannot change');
-    return { environment, transaction, finish: async () => {} };
+    return { environment, transaction, finish: async () => {}, monitor: () => async () => {} };
   }
   const root = canonicalBuildRoot(environment);
   const sourceId = buildSourceId(sourceRoot);
@@ -301,21 +273,38 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
   assertNoBuildLinks(resolve(root, '.leases'));
   await mkdir(resolve(root, '.leases'), { recursive: true });
   const path = leasePath(root, marker);
+  const capacityPath = resolve(root, '.leases', BUILD_STORAGE_LEASE);
   const catalogPath = resolve(root, '.leases/products-catalog.lock');
   let catalogOwned = false;
-  if (purpose === 'product') {
-    try { await claimLease(catalogPath, identity); catalogOwned = true; }
-    catch (error) { if (error.code === 'EEXIST') throw new Error('Another product owner or stale catalog lease exists; independent product builds cannot overlap'); throw error; }
-    try { await assertCleanProductCatalog(root); await retainProductBuildGenerations(root); }
-    catch (error) { await releaseLease(catalogPath, identity); throw error; }
-  }
-  try { await claimLease(path, identity); }
+  let slotOwned = false;
+  assertNoBuildLinks(capacityPath);
+  try { await claimLease(capacityPath, identity); }
   catch (error) {
-    if (catalogOwned) await releaseLease(catalogPath, identity);
-    if (error.code === 'EEXIST') throw new Error('Build purpose already has an owner or stale lease; no automatic takeover is allowed');
+    if (error.code === 'EEXIST') throw new Error('Clearra build storage already has an owner or stale lease; independent product builds cannot overlap and no automatic takeover is allowed');
     throw error;
   }
+  const releaseOwnedLeases = async () => {
+    try {
+      if (slotOwned) await releaseLease(path, identity);
+    } finally {
+      try {
+        if (catalogOwned) await releaseLease(catalogPath, identity);
+      } finally {
+        await releaseLease(capacityPath, identity);
+      }
+    }
+  };
   try {
+    if (purpose === 'product') {
+      assertNoBuildLinks(catalogPath);
+      try { await claimLease(catalogPath, identity); catalogOwned = true; }
+      catch (error) { if (error.code === 'EEXIST') throw new Error('Another product owner or stale catalog lease exists; independent product builds cannot overlap'); throw error; }
+      await assertCleanProductCatalog(root);
+    }
+    await checkBuildStorage(root, { phase: 'admit', slot: transactionRoot });
+    assertNoBuildLinks(path);
+    try { await claimLease(path, identity); slotOwned = true; }
+    catch (error) { if (error.code === 'EEXIST') throw new Error('Build purpose already has an owner or stale lease; no automatic takeover is allowed'); throw error; }
     if (purpose === 'experiment') {
       let previous;
       try { previous = await readJson(resolve(transactionRoot, BUILD_TRANSACTION_MARKER)); }
@@ -341,8 +330,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
     await mkdir(cargoTarget, { recursive: true });
     await writeMarker(marker);
   } catch (error) {
-    await releaseLease(path, identity);
-    if (catalogOwned) await releaseLease(catalogPath, identity);
+    await releaseOwnedLeases();
     throw error;
   }
   const childEnvironment = { ...environment, CLEARRA_BUILD_ROOT: root, CLEARRA_BUILD_PURPOSE: purpose,
@@ -352,13 +340,22 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
     CARGO_INCREMENTAL: purpose === 'experiment' ? '1' : '0', RUSTC_WRAPPER: guard };
   if (process.platform !== 'win32' && /^[A-Za-z]:\//u.test(buildPathIdentity(root))) childEnvironment.LOCALAPPDATA = buildPathIdentity(root).replace(/\/Clearra\/build$/iu, '').replaceAll('/', '\\');
   let finished = false;
-  const owner = { environment: childEnvironment, transaction: marker, finish: async success => {
+  const owner = {
+    environment: childEnvironment,
+    transaction: marker,
+    monitor: onError => monitorBuildStorage(async () => {
+      assertManagedBuildTransaction({ environment: childEnvironment, sourceRoot });
+      await checkBuildStorage(root, { slot: transactionRoot });
+      assertManagedBuildTransaction({ environment: childEnvironment, sourceRoot });
+    }, onError),
+    finish: async (success, { preserveOutputs = false } = {}) => {
     if (finished) return;
     assertManagedBuildTransaction({ environment: childEnvironment, sourceRoot });
     finished = true;
     let snapshotError;
     if (success) {
       try {
+        await checkBuildStorage(root, { phase: 'complete', slot: transactionRoot });
         await assertManagedTransientSlotsRetired(transactionRoot);
         const finalSnapshot = await buildCompilerSnapshot(sourceRoot, environment);
         if (finalSnapshot.sourceSha256 !== marker.compiler_snapshot_sha256 ||
@@ -367,20 +364,35 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
           snapshotError = new Error('Clearra build inputs changed while the transaction was active; the incremental seed was not sealed');
           success = false;
         }
-      } catch (error) { snapshotError = error; success = false; }
+      } catch (error) {
+        snapshotError = error;
+        success = false;
+        if (error.code?.startsWith('E_CLEARRA_BUILD_STORAGE_')) preserveOutputs = true;
+      }
     }
     marker.status = success ? 'complete' : 'failed';
     marker.completed_utc = success ? new Date().toISOString() : null;
     try {
-      try {
-        await writeMarker(marker);
-        if (purpose === 'product' && !success) await removeOwnedGeneration(marker, root, identity);
-      } finally { await releaseLease(path, identity); }
-      if (purpose === 'product' && success) await retainProductBuildGenerations(root);
-    } finally { if (catalogOwned) await releaseLease(catalogPath, identity); }
+      await writeMarker(marker);
+      if (success) {
+        try { await checkBuildStorage(root, { phase: 'complete', slot: transactionRoot }); }
+        catch (error) {
+          marker.status = 'failed';
+          marker.completed_utc = null;
+          await writeMarker(marker);
+          throw error;
+        }
+      }
+      if (purpose === 'product' && !success && !preserveOutputs) await removeOwnedGeneration(marker, root, identity);
+    } finally { await releaseOwnedLeases(); }
     if (snapshotError) throw snapshotError;
   } };
-  try { if (process.platform === 'win32') prepareRustcLauncher(childEnvironment); }
-  catch (error) { await owner.finish(false); throw error; }
+  try {
+    if (process.platform === 'win32') prepareRustcLauncher(childEnvironment);
+    await checkBuildStorage(root, { slot: transactionRoot });
+  } catch (error) {
+    await owner.finish(false, { preserveOutputs: error.code?.startsWith('E_CLEARRA_BUILD_STORAGE_') ?? false });
+    throw error;
+  }
   return owner;
 }

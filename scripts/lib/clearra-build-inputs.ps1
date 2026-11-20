@@ -47,7 +47,8 @@ function Test-ClearraGeneratedInputDirectory([System.IO.DirectoryInfo]$Directory
 function Get-ClearraBuildInputFiles([string]$RepositoryRoot) {
     $repository = [System.IO.Path]::GetFullPath($RepositoryRoot)
     $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    foreach ($name in @('Cargo.toml', 'Cargo.lock', 'CMakeLists.txt', 'package.json', 'rust-toolchain.toml', '.cargo/config.toml')) {
+    foreach ($name in @('Cargo.toml', 'Cargo.lock', 'CMakeLists.txt', 'package.json', 'rust-toolchain.toml',
+            '.cargo/config.toml', 'config/build-storage.v1.json')) {
         $path = Join-Path $repository $name
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             $file = [System.IO.FileInfo]::new($path)

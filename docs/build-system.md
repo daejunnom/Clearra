@@ -52,14 +52,16 @@ debug and release artifacts for `clearra-core-ffi`; unchanged native builds
 reuse the existing Cargo graph. This selective invalidation is runner-owned,
 does not use `build.rs`, and does not invoke WSL.
 
-## One build root and bounded generations
+## Managed build capacity and ownership
 
-All managed compilation uses one physical root per host. Windows uses
-`%LOCALAPPDATA%/Clearra/build`; WSL maps the same Windows directory via
-`/mnt/<drive>/...`, without a second ext4 cache. Independent Linux CI hosts
-use `${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build`. The platform selects the
-root. Conflicting root/target/wrapper overrides and symlink/junction escapes
-are rejected before creating a build transaction.
+The managed catalog has one selected physical root. Windows uses
+`%LOCALAPPDATA%/Clearra/build` (an admitted checkout-volume runner root
+on hosted Windows); independent Linux CI uses
+`${XDG_CACHE_HOME:-$HOME/.cache}/Clearra/build`. Conflicting overrides
+and link escapes are rejected. WSL must join the host catalog to share
+its limit. The old guest cache and archive-digest sources are not
+accounted in the host total and cannot be presumed migrated or safe
+to delete.
 
 ```text
 Clearra/build/
@@ -67,7 +69,7 @@ Clearra/build/
     cargo-target/                       Rust, host and WASM targets
     core-c-.../                         C variants
     wasm-stage/                        unpublished staging
-  products/<UTC-timestamp>-<session>/     newest five completed generations
+  products/<UTC-timestamp>-<session>/     owner-tagged product slots
     cargo-target/
   .leases/                              active or unresolved ownership
 ```
@@ -82,14 +84,15 @@ session and input snapshot as cache seeds, not as validation evidence. Scratch
 outside `cargo-target/` is retired at the next admitted owner. Failed, legacy or
 context-mismatched generations cannot seed a cache and are replaced only after
 ownership checks. Nested commands share one generation. Independent owners of
-the same purpose are rejected; different source roots may build in parallel.
+the same purpose are rejected. The replacement policy admits one
+active owner per catalog; nested children share it.
 
 Products are explicitly selected with `CLEARRA_BUILD_PURPOSE=product` or
 `-Purpose product` / `--purpose product`. Only owner-confirmed completion counts
-toward the newest five generations. Normal failure/cancellation exit removes
-failed products. Force-killed owners leave active records/leases that are not
-silently taken over. Unknown or modified ownership records fail closed;
-recovery requires explicitly authorized, path-verified maintenance.
+toward the completed catalog count. An uncertain failure, force-kill or
+unresolved reader must not be treated as a released lease. Unknown or
+modified ownership records fail closed; recovery requires explicitly
+authorized, path-verified maintenance.
 
 Independent product owners on the same host cannot overlap: a catalog lease
 also prevents crashed/incomplete product builds from accumulating new random
@@ -104,7 +107,8 @@ The shared schema binds `CLEARRA_BUILD_ROOT`, `CLEARRA_BUILD_PURPOSE`,
 transactions. Ordinary direct Cargo is also supported: `.cargo/config.toml`
 keeps its output in the declared `build/cargo/default` root and enables
 incremental reuse there. The management policy is not a blanket Cargo blocker.
-For purpose-owned isolation and bounded generation retention, use
+The direct Cargo cache is still a migration exception, not a capacity
+claim. For managed capacity, use
 `scripts/tools/invoke-clearra-build.ps1` or the Node counterpart
 `scripts/tools/invoke-clearra-build.mjs` (also used by Bookworm).
 On Windows the owner prepares a tiny native argv launcher inside the same
@@ -132,10 +136,9 @@ Managed experiments set `CARGO_INCREMENTAL=1`; products set
 Global dependency downloads/toolchains are not build generations. CI must not
 restore an unbound compiled tree into a product generation. Related producer,
 verification and consumer commands share one owner step rather than inheriting
-expired owner state from a previous step. Direct Cargo's single default cache
-is separate from managed five-product/one-experiment retention; clean it only
-with an explicitly reviewed Cargo profile cleanup, never by deleting selected
-dependency/fingerprint files behind an active compiler.
+expired owner state from a previous step. Clean legacy compiler output
+only with an explicitly reviewed Cargo profile cleanup, never by deleting
+selected dependency/fingerprint files behind an active compiler.
 
 ### Shared lifecycle policy and transient slots
 
@@ -155,8 +158,17 @@ The reference policies in Accelerate (`AGENTS.md`, `docs/ENGINEERING-STANDARDS.m
 - Cleanup checks the exact owned path, link boundaries and lease identity.
   A cleanup failure remains a failure and never changes a failed build to a pass.
 
-Clearra keeps its declared roots and five successful product generations; MMMM's
-project-specific byte quotas are not copied into a larger Rust workspace.
+Clearra adopts the reviewed MMMM capacity policy in place of its
+count-only rule: 8 GiB per slot, 12 GiB per managed catalog, at most
+four completed slots and one active owner, with five-second observation
+for launchers that supervise live sizing. An incomplete scan or an
+over-limit observation cannot authorize successful admission/completion.
+The limit is logical bytes, not filesystem allocation. Sampled checks
+cannot prevent all instantaneous overshoot. Cache retirement requires
+owned, drained, regenerable slots; exported release data and unresolved
+readers are protected. The [worklist](research/rust-cutover-and-build-capacity-worklist-2026-11-20.md)
+tracks entrypoints still outside this boundary, including direct Cargo
+and the old WSL/WASM storage paths.
 Schema-2 transient sidecars bind the exact slot, OS, architecture, PID and random
 **token**, not a random directory name. Normal release removes scratch or marks
 it complete for the next owner. Acquisition refuses legacy/invalid/stale leases

@@ -71,6 +71,16 @@ clearra-manage storage verify --path <path>
 clearra-manage storage audit
 ```
 
+The build catalog follows the shared MMMM/RoveZero lifecycle instead of
+Clearra's old count-only retention. Managed compiler outputs use
+`config/build-storage.v1.json` and one catalog owner: 8 GiB per slot,
+12 GiB per catalog, at most four completed slots and one active owner.
+The capacity policy samples logical bytes; it is not an OS quota.
+Preserve published outputs and active, interrupted, or unverified
+owners. Direct Cargo and legacy WSL paths must not be described as
+capacity-managed until they are migrated. These storage rules do not
+replace runtime supervision or credential and path isolation.
+
 Path verification rejects traversal, symlink/junction escapes, and credential
 paths. The local interactive override requires both
 `--force-unmanaged-output` and `--force-reason`; its warning states that forcing

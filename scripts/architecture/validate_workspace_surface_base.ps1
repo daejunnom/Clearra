@@ -45,7 +45,6 @@ foreach ($requiredCachePolicy in @(
     "CARGO_INCREMENTAL = if (`$Record.purpose -eq 'experiment') { '1' } else { '0' }",
     "incremental_seed_snapshot_sha256",
     ".clearra-build-transaction.json",
-    "Select-Object -Skip 5",
     "CreateNew"
 )) {
     if ($artifactCache -notlike "*$requiredCachePolicy*") {
@@ -53,9 +52,6 @@ foreach ($requiredCachePolicy in @(
     }
 }
 $policyTokens = $null
-if ($artifactCache -notmatch 'Select-Object\s+-Skip\s+5(?![0-9])') {
-    Add-ArchitectureError 'Product retention must keep exactly five completed generations.'
-}
 $policyParseErrors = $null
 $pathPolicyAst = [Management.Automation.Language.Parser]::ParseInput($pathHelpers, [ref]$policyTokens, [ref]$policyParseErrors)
 $legacyCleanup = $pathPolicyAst.Find({ param($node)

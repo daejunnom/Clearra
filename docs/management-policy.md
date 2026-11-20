@@ -40,8 +40,11 @@ Generated repository output is limited to the roots declared in the manifest:
 
 Cargo uses `build/cargo/default` by default through `.cargo/config.toml`.
 Specialized build owners may select another declared Clearra build/cache root.
-The default keeps direct `cargo` commands safe without a compiler wrapper and
-allows incremental compilation.
+This compatibility path is not yet covered by the managed capacity
+catalog. Managed builds adopt the shared MMMM slot, catalog and
+ownership limits documented in [the build system](build-system.md).
+These storage bounds are separate from process-tree, credential and
+WSL isolation rules; changing cache retention does not relax them.
 
 Inspect or validate paths with the prebuilt executable:
 

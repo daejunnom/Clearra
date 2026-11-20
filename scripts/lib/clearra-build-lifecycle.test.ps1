@@ -52,6 +52,8 @@ if (Test-StartTestsWindows) {
 }
 $cargoRoot = Get-ClearraCargoTargetDir
 Assert-ArtifactPathCondition (Test-ClearraBuildTransactionOwner) 'owner_public_predicate_matches_bound_session'
+$capacityPath = Get-ClearraBuildCapacityLeasePath $first
+Assert-ArtifactPathCondition (Test-Path -LiteralPath $capacityPath) 'experiment_holds_shared_storage_catalog'
 Assert-ArtifactPathCondition ($first.purpose -eq 'experiment' -and $cargoRoot -eq (Join-Path $experimentRoot 'cargo-target')) 'experiment_uses_one_bound_cargo_target'
 Assert-ArtifactPathCondition ($env:RUSTC_WRAPPER -eq (Get-ClearraExpectedRustcWrapper) -and $env:CARGO_INCREMENTAL -eq '1') 'experiment_owner_installs_guard_and_incremental_policy'
 $oldDependency = Join-Path $cargoRoot 'debug/deps/old-library.rlib'
@@ -78,6 +80,12 @@ $independentCode = '$ErrorActionPreference="Stop"; foreach($n in @(' + $namesLit
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($independentCode))
 $independentOutput = @(& $hostExecutable -NoProfile -NonInteractive -EncodedCommand $encoded 2>&1)
 Assert-ArtifactPathCondition ($LASTEXITCODE -eq 0 -and ($independentOutput -join "`n").Contains('independent_owner=blocked') -and (Test-Path -LiteralPath $oldDependency)) 'independent_active_owner_cannot_replace_current'
+$otherLiteral = $otherSource.Replace("'","''")
+$independentProductCode = '$ErrorActionPreference="Stop"; foreach($n in @(' + $namesLiteral + ')){[Environment]::SetEnvironmentVariable($n,$null,"Process")}; . ''' + $policyFileLiteral + '''; try { Ensure-ClearraBuildArtifactCache -RepositoryRoot ''' + $otherLiteral + ''' -Purpose product; exit 9 } catch { Write-Output "independent_product=blocked" }'
+$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($independentProductCode))
+$independentProductOutput = @(& $hostExecutable -NoProfile -NonInteractive -EncodedCommand $encoded 2>&1)
+Assert-ArtifactPathCondition ($LASTEXITCODE -eq 0 -and ($independentProductOutput -join "`n").Contains('independent_product=blocked') -and
+    (Test-Path -LiteralPath $capacityPath)) 'catalog_lease_blocks_different_source_and_purpose'
 
 $slot = New-TransientBuildDir 'probe'
 [IO.File]::WriteAllText((Join-Path $slot 'old.txt'),'fixture')
@@ -104,6 +112,7 @@ Remove-Item -LiteralPath $interruptedScratchLease
 Complete-ClearraBuildTransaction
 Exit-ClearraBuildArtifactCacheUsage
 Assert-ArtifactPathCondition (-not (Test-ClearraBuildTransactionOwner)) 'owner_public_predicate_false_after_exit'
+Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath $capacityPath)) 'catalog_lease_released_after_owned_exit'
 Assert-ArtifactPathCondition ([string]::IsNullOrWhiteSpace($env:RUSTC_WRAPPER) -and [string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) 'owner_restores_environment'
 $second = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
 Assert-ArtifactPathCondition ($second.transaction_root -eq $experimentRoot -and $second.session_id -ne $firstSession -and
@@ -131,12 +140,18 @@ if (Test-StartTestsWindows) {
     }
 }
 
-# Seven product successes retain exactly the latest five, while the physical
-# root sentinel and unrelated source experiment survive every retention pass.
-$rootSentinel = Join-Path $canonicalFixtureRoot 'root-must-not-reset.txt'
-[IO.File]::WriteAllText($rootSentinel,'not a generation')
+# Reclaim an exact failed generation while the owning lease is still held.
+$failed = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource -Purpose product
+$failedPath = $failed.transaction_root
+[IO.File]::WriteAllText((Join-Path $failedPath 'partial.bin'),'failed fixture')
+Exit-ClearraBuildArtifactCacheUsage
+Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath $failedPath)) 'failed_product_is_reclaimed_and_not_counted'
+
+# Three product generations and one existing experiment consume the four
+# completed slots. A different product is not admitted; a read-only catalog
+# check neither deletes complete trees nor requires acquiring their leases.
 $productPaths = [Collections.Generic.List[string]]::new()
-for ($index=0; $index -lt 7; $index++) {
+for ($index=0; $index -lt 3; $index++) {
     $product = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource -Purpose product
     $productPaths.Add($product.transaction_root)
     [IO.File]::WriteAllText((Join-Path $product.transaction_root 'payload.bin'),"fixture $index")
@@ -144,41 +159,18 @@ for ($index=0; $index -lt 7; $index++) {
     Exit-ClearraBuildArtifactCacheUsage
 }
 $retainedProductDirectories = @(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot 'products') -Directory)
-$prunedProductPaths = @($productPaths | Where-Object { -not (Test-Path -LiteralPath $_) })
-Assert-ArtifactPathCondition ($prunedProductPaths.Count -eq 2) 'old_completed_products_pruned'
-Assert-ArtifactPathCondition ($retainedProductDirectories.Count -eq 5) 'latest_five_completed_products_retained'
-Assert-ArtifactPathCondition ((Test-Path -LiteralPath $rootSentinel) -and (Test-Path -LiteralPath $experimentRoot)) 'retention_never_resets_physical_root_or_experiments'
-$failed = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource -Purpose product
-$failedPath = $failed.transaction_root
-[IO.File]::WriteAllText((Join-Path $failedPath 'partial.bin'),'failed fixture')
-Exit-ClearraBuildArtifactCacheUsage
-Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath $failedPath)) 'failed_product_is_reclaimed_and_not_counted'
-
-$retainedProductRecords = @($retainedProductDirectories | ForEach-Object {
-    Read-ClearraBuildTransactionRecord $_.FullName
-} | Sort-Object @{ Expression = { [DateTimeOffset]::Parse($_.completed_utc) }; Descending = $true },
-    @{ Expression = { $_.session_id }; Descending = $true })
-# Protect the exact record that retention would evict. Creation order alone is
-# not authoritative when several completions share the same platform clock tick.
-$protectedRecord = $retainedProductRecords[-1]
+Assert-ArtifactPathCondition ($retainedProductDirectories.Count -eq 3 -and (Test-Path -LiteralPath $experimentRoot)) 'capacity_counts_product_and_experiment_together'
+Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource -Purpose product }) 'catalog_rejects_fifth_completed_slot_before_write'
+Assert-ArtifactPathCondition (@(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot 'products') -Directory).Count -eq 3 -and
+    -not (Test-Path -LiteralPath $capacityPath)) 'over_capacity_admission_creates_no_generation_and_releases_lease'
+$protectedRecord = Read-ClearraBuildTransactionRecord $productPaths[0]
 $protectedLease = Enter-ClearraBuildLease $protectedRecord
 try {
-    Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource -Purpose product }) 'unreleased_product_session_blocks_independent_product'
-    # Model one already completed generation arriving before this fixture's
-    # retention pass, without starting a second independently owned product.
-    $product = Read-ClearraBuildTransactionRecord $productPaths[6]
-    $product.session_id = [Guid]::NewGuid().ToString('N')
-    $product.transaction_root = Join-Path $canonicalFixtureRoot ('products/' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + $product.session_id)
-    $product.cargo_target_dir = Join-Path $product.transaction_root 'cargo-target'
-    $product.completed_utc = ([DateTimeOffset]::Parse($retainedProductRecords[0].completed_utc)).AddTicks(1).ToString('o')
-    New-Item -ItemType Directory -Path $product.transaction_root | Out-Null
-    Write-ClearraBuildTransactionRecord $product
     Invoke-ClearraBuildArtifactCacheRetention -RepositoryRoot $fixtureSource | Out-Null
     Assert-ArtifactPathCondition ((Test-Path -LiteralPath $protectedRecord.transaction_root) -and
-        @(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot 'products') -Directory).Count -eq 6) 'active_product_lease_preserved_during_retention'
+        (Test-Path -LiteralPath $protectedLease.Path) -and
+        @(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot 'products') -Directory).Count -eq 3) 'read_only_inventory_preserves_completed_generation_and_lease'
 } finally { Exit-ClearraBuildLease $protectedLease }
-Invoke-ClearraBuildArtifactCacheRetention -RepositoryRoot $fixtureSource | Out-Null
-Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath $protectedRecord.transaction_root) -and @(Get-ChildItem -LiteralPath (Join-Path $canonicalFixtureRoot 'products') -Directory).Count -eq 5) 'released_product_lease_allows_five_generation_recovery'
 $unownedProduct = Join-Path $canonicalFixtureRoot 'products/unowned-fixture'
 New-Item -ItemType Directory -Path $unownedProduct | Out-Null
 Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Invoke-ClearraBuildArtifactCacheRetention -RepositoryRoot $fixtureSource }) 'unowned_product_aborts_retention_without_deletion'

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const BUILD_TRANSACTION_MARKER = '.clearra-build-transaction.json';
 export const BUILD_TRANSACTION_SCHEMA = 4;
+export const BUILD_STORAGE_LEASE = 'build-storage-catalog.lock';
 export const FORBIDDEN_BUILD_ALIASES = ['CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR', 'CARGO_BUILD_RUSTC_WRAPPER',
   'RUSTC_WORKSPACE_WRAPPER', 'CLEARRA_WSL_CARGO_TARGET_DIR', 'CLEARRA_RELEASE_BUILD_ROOT',
   'CLEARRA_WSL_NATIVE_BUILD_ROOT', 'CLEARRA_CORE_C_BUILD_DIR'];
@@ -182,6 +183,12 @@ export function assertManagedBuildTransaction({ environment = process.env, platf
   if (lstatSync(leasePath).size > 16384) throw new Error('Clearra build lease is invalid');
   const lease = JSON.parse(readFileSync(leasePath, 'utf8').replace(/^\uFEFF/u, ''));
   if (lease.schema_version !== 1 || ['purpose', 'source_id', 'session_id', 'owner_pid'].some(key => lease[key] !== marker[key])) throw new Error('Clearra build lease does not match its transaction');
+  const capacityPath = resolve(nativeBuildPath(expectedRoot, platform), '.leases', BUILD_STORAGE_LEASE);
+  assertNoBuildLinks(capacityPath);
+  const capacityMetadata = lstatSync(capacityPath);
+  if (!capacityMetadata.isFile() || capacityMetadata.size > 16384) throw new Error('Clearra build storage lease is invalid');
+  const capacity = JSON.parse(readFileSync(capacityPath, 'utf8').replace(/^\uFEFF/u, ''));
+  if (capacity.schema_version !== 1 || ['purpose', 'source_id', 'session_id', 'owner_pid'].some(key => capacity[key] !== marker[key])) throw new Error('Clearra build storage lease does not match its transaction');
   const crossHost = platform !== 'win32' && /^[A-Za-z]:[\\/]/u.test(marker.transaction_root);
   if (!crossHost) {
     try { process.kill(marker.owner_pid, 0); }

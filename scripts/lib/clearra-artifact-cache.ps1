@@ -1,5 +1,5 @@
-# One physical build root; one replaceable experiment per source; five completed
-# product generations. Never resets a root or cleans legacy paths.
+# One physical build root and one shared Node/PowerShell capacity catalog.
+# Never resets a root or adopts legacy paths.
 . (Join-Path $PSScriptRoot 'clearra-build-transaction-record.ps1')
 . (Join-Path $PSScriptRoot 'clearra-build-inputs.ps1')
 . (Join-Path $PSScriptRoot 'clearra-build-product-catalog.ps1')
@@ -10,6 +10,37 @@ if ($null -eq (Get-Variable -Name ClearraBuildTransaction -Scope Script -ErrorAc
     $script:ClearraBuildPreviousEnvironment = $null
     $script:ClearraBuildTransactionOwned = $false
     $script:ClearraProductCatalogLease = $null
+    $script:ClearraBuildCapacityCatalogLease = $null
+}
+
+function Invoke-ClearraBuildCapacityCheck(
+    [string]$Root,
+    [ValidateSet('admit','live','complete')][string]$Phase,
+    [string]$TransactionRoot
+) {
+    $arguments = @(
+        (Join-Path $PSScriptRoot '../tools/clearra-build-capacity.mjs'),
+        'check', '--root', $Root, '--phase', $Phase
+    )
+    if (-not [string]::IsNullOrWhiteSpace($TransactionRoot)) {
+        $arguments += @('--slot', $TransactionRoot)
+    }
+    $node = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    # Windows PowerShell 5 treats redirected native stderr as an ErrorRecord.
+    # Preserve the same capacity diagnostic and child status on PS 5 and 7.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $PSNativeCommandUseErrorActionPreference = $false
+        $output = @(& $node @arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "Clearra build storage check failed during ${Phase}: $($output -join [Environment]::NewLine)"
+    }
+    return (($output -join [Environment]::NewLine) | ConvertFrom-Json)
 }
 
 function Get-ClearraBuildTransactionRoot(
@@ -139,12 +170,16 @@ function Initialize-ClearraBuildArtifactCache(
     # All explicit path/environment checks above precede this first mutation.
     $lease = $null
     $catalogLease = $null
+    $capacityLease = $null
     try {
+        # The Node and PowerShell owners take this same catalog lock before
+        # either may change a transaction. An interrupted lock is never stolen.
+        $capacityLease = Enter-ClearraBuildLease $record -CapacityCatalog
         if ($Purpose -eq 'product') {
             $catalogLease = Enter-ClearraBuildLease $record -ProductCatalog
             Assert-ClearraProductCatalogReady $source
-            Invoke-ClearraBuildArtifactCacheRetention -RepositoryRoot $source | Out-Null
         }
+        Invoke-ClearraBuildCapacityCheck -Root $root -Phase admit -TransactionRoot $transaction | Out-Null
         $lease = Enter-ClearraBuildLease $record
         if (Test-Path -LiteralPath $transaction) {
             if ($Purpose -ne 'experiment') { throw 'A product generation must be new.' }
@@ -178,6 +213,7 @@ function Initialize-ClearraBuildArtifactCache(
         $script:ClearraBuildCacheSessionKey = $session
         $script:ClearraBuildTransactionOwned = $true
         $script:ClearraProductCatalogLease = $catalogLease
+        $script:ClearraBuildCapacityCatalogLease = $capacityLease
         Set-ClearraBuildTransactionEnvironment $record
         Initialize-ClearraNativeRustcLauncher
         return $record
@@ -190,6 +226,7 @@ function Initialize-ClearraBuildArtifactCache(
         } else {
             if ($null -ne $lease) { Exit-ClearraBuildLease $lease }
             if ($null -ne $catalogLease) { Exit-ClearraBuildLease $catalogLease }
+            if ($null -ne $capacityLease) { Exit-ClearraBuildLease $capacityLease }
         }
         throw
     }
@@ -207,6 +244,7 @@ function Test-ClearraBuildTransactionOwner {
     try {
         $record = Read-ClearraBuildTransactionRecord $script:ClearraBuildTransaction.transaction_root
         $lease = Read-ClearraBuildLease $script:ClearraArtifactCacheUsageLock.Path
+        Assert-ClearraBuildCapacityLeaseIdentity $record
         if ($record.purpose -eq 'product') { Assert-ClearraProductCatalogLeaseIdentity $record }
         return $record.owner_pid -eq $PID -and $lease.owner_pid -eq $PID -and
             $record.session_id -eq $script:ClearraBuildTransaction.session_id -and
@@ -223,6 +261,7 @@ function Complete-ClearraBuildTransaction {
     }
     $record = Read-ClearraBuildTransactionRecord $script:ClearraBuildTransaction.transaction_root
     $lease = Read-ClearraBuildLease $script:ClearraArtifactCacheUsageLock.Path
+    Assert-ClearraBuildCapacityLeaseIdentity $record
     if ($record.purpose -eq 'product') { Assert-ClearraProductCatalogLeaseIdentity $record }
     if ($record.session_id -ne $script:ClearraBuildTransaction.session_id -or
         $record.source_id -ne $script:ClearraBuildTransaction.source_id -or
@@ -246,6 +285,7 @@ function Complete-ClearraBuildTransaction {
         $script:ClearraBuildTransaction = $record
         throw "Clearra build inputs changed while the transaction was active; the incremental seed was not sealed. source_changed=$sourceChanged input_count_changed=$countChanged context_changed=$contextChanged"
     }
+    Invoke-ClearraBuildCapacityCheck -Root (Get-ClearraCanonicalBuildRoot) -Phase complete -TransactionRoot $record.transaction_root | Out-Null
     $record.status = 'complete'
     $record.completed_utc = [DateTime]::UtcNow.ToString('o')
     Write-ClearraBuildTransactionRecord $record
@@ -261,38 +301,10 @@ function Invoke-ClearraBuildArtifactCacheRetention(
         throw 'Retention cannot select a noncanonical artifact root.'
     }
     Assert-ClearraBuildEnvironmentBeforeMutation $RepositoryRoot
-    $products = Assert-ClearraCanonicalBuildPath (Join-Path $root 'products') $RepositoryRoot
-    $deleted = [Collections.Generic.List[string]]::new()
-    if (-not (Test-Path -LiteralPath $products -PathType Container)) {
-        return [pscustomobject]@{ action = 'absent'; retained_completed = 0; deleted = @() }
-    }
-    $completed = @()
-    foreach ($directory in Get-ChildItem -LiteralPath $products -Directory -Force) {
-        try {
-            $record = Read-ClearraBuildTransactionRecord $directory.FullName
-            if ($record.purpose -eq 'product' -and $record.status -eq 'complete') { $completed += $record }
-        } catch { throw "Unverified product generation preserved; retention aborted: $($directory.FullName)" }
-    }
-    $ordered = @($completed | Sort-Object @{ Expression = { [DateTimeOffset]::Parse($_.completed_utc) }; Descending = $true },
-        @{ Expression = { $_.session_id }; Descending = $true })
-    foreach ($record in @($ordered | Select-Object -Skip 5)) {
-        if (Test-Path -LiteralPath (Get-ClearraBuildLeasePath $record)) { continue }
-        $lease = $null
-        try {
-            $lease = Enter-ClearraBuildLease $record
-            $verified = Read-ClearraBuildTransactionRecord $record.transaction_root
-            if ($verified.status -ne 'complete' -or $verified.session_id -ne $record.session_id) {
-                throw 'Product generation changed during retention.'
-            }
-            Remove-ClearraOwnedBuildTransaction $verified $lease
-            $deleted.Add($record.transaction_root)
-        } catch {
-            if ($null -ne $lease -or -not (Test-Path -LiteralPath (Get-ClearraBuildLeasePath $record))) { throw }
-            # Another owner atomically claimed this generation after our scan.
-        }
-        finally { if ($null -ne $lease) { Exit-ClearraBuildLease $lease } }
-    }
-    return [pscustomobject]@{ action = 'product-generation-retention'; retained_completed = $completed.Count - $deleted.Count; deleted = $deleted.ToArray() }
+    Assert-ClearraCanonicalBuildPath $root $RepositoryRoot -AllowRoot | Out-Null
+    # Compatibility name only. A read-only inventory cannot establish reader
+    # lifetimes for deleting completed trees; fail closed instead of pruning.
+    return Invoke-ClearraBuildCapacityCheck -Root $root -Phase live
 }
 
 function Exit-ClearraBuildArtifactCacheUsage {
@@ -307,6 +319,7 @@ function Exit-ClearraBuildArtifactCacheUsage {
     try {
         $verified = Read-ClearraBuildTransactionRecord $record.transaction_root
         $lease = Read-ClearraBuildLease $script:ClearraArtifactCacheUsageLock.Path
+        Assert-ClearraBuildCapacityLeaseIdentity $record
         if ($record.purpose -eq 'product') { Assert-ClearraProductCatalogLeaseIdentity $record }
         if ($verified.session_id -ne $record.session_id -or $lease.session_id -ne $record.session_id -or
             $verified.source_id -ne $record.source_id -or $verified.purpose -ne $record.purpose -or
@@ -323,9 +336,9 @@ function Exit-ClearraBuildArtifactCacheUsage {
         }
         Exit-ClearraBuildLease $script:ClearraArtifactCacheUsageLock
         if ($record.purpose -eq 'product') {
-            Invoke-ClearraBuildArtifactCacheRetention -RepositoryRoot $record.source_root | Out-Null
             Exit-ClearraBuildLease $script:ClearraProductCatalogLease
         }
+        Exit-ClearraBuildLease $script:ClearraBuildCapacityCatalogLease
         $released = $true
     } finally {
         foreach ($name in $script:ClearraBuildTransactionEnvironmentNames) {
@@ -337,6 +350,7 @@ function Exit-ClearraBuildArtifactCacheUsage {
         $script:ClearraBuildPreviousEnvironment = $null
         $script:ClearraBuildTransactionOwned = $false
         $script:ClearraProductCatalogLease = $null
+        $script:ClearraBuildCapacityCatalogLease = $null
         if (-not $released) { Write-Warning 'Build lease preserved because verified owner cleanup did not finish.' }
     }
 }

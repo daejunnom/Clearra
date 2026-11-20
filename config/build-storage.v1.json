@@ -1,0 +1,9 @@
+{
+  "slotBytes": 8589934592,
+  "catalogBytes": 12884901888,
+  "completedSlots": 4,
+  "activeSlots": 1,
+  "sampleMs": 5000,
+  "maxEntries": 100000,
+  "maxDepth": 64
+}

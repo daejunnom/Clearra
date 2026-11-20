@@ -146,9 +146,23 @@ function Write-ClearraBuildTransactionRecord($Record) {
     Move-Item -LiteralPath $temporary -Destination $path -Force
 }
 
-function Enter-ClearraBuildLease($Record, [switch]$ProductCatalog) {
+function Get-ClearraBuildCapacityLeasePath($Record) {
+    return (Assert-ClearraCanonicalBuildPath (Join-Path (Get-ClearraCanonicalBuildRoot) '.leases/build-storage-catalog.lock') (Get-ClearraBuildRecordLocalSafetyRoot $Record))
+}
+
+function Assert-ClearraBuildCapacityLeaseIdentity($Record) {
+    $lease = Read-ClearraBuildLease (Get-ClearraBuildCapacityLeasePath $Record)
+    if ($lease.session_id -ne $Record.session_id -or $lease.source_id -ne $Record.source_id -or
+        $lease.purpose -ne $Record.purpose -or $lease.owner_pid -ne $Record.owner_pid) {
+        throw 'Build storage catalog owner/session binding mismatch; explicit recovery is required.'
+    }
+}
+
+function Enter-ClearraBuildLease($Record, [switch]$ProductCatalog, [switch]$CapacityCatalog) {
+    if ($ProductCatalog -and $CapacityCatalog) { throw 'Select exactly one build lease role.' }
     if ($ProductCatalog -and $Record.purpose -ne 'product') { throw 'Only product owners may hold the product catalog.' }
-    $path = if ($ProductCatalog) {
+    $path = if ($CapacityCatalog) { Get-ClearraBuildCapacityLeasePath $Record }
+    elseif ($ProductCatalog) {
         Assert-ClearraCanonicalBuildPath (Join-Path (Get-ClearraCanonicalBuildRoot) '.leases/products-catalog.lock') (Get-ClearraBuildRecordLocalSafetyRoot $Record)
     } else { Get-ClearraBuildLeasePath $Record }
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
@@ -164,7 +178,9 @@ function Enter-ClearraBuildLease($Record, [switch]$ProductCatalog) {
         $claim.Write($bytes, 0, $bytes.Length)
         $claim.Flush()
     } finally { $claim.Dispose() }
-    return [pscustomobject]@{ Path = $path; Record = $lease; ProductCatalog = [bool]$ProductCatalog }
+    return [pscustomobject]@{
+        Path = $path; Record = $lease; ProductCatalog = [bool]$ProductCatalog; CapacityCatalog = [bool]$CapacityCatalog
+    }
 }
 
 function Read-ClearraBuildLease([string]$Path) {
@@ -181,8 +197,11 @@ function Exit-ClearraBuildLease($Lease) {
     $key = if ($Lease.Record.purpose -eq 'experiment') { "experiment-$($Lease.Record.source_id)" }
            else { "product-$($Lease.Record.session_id)" }
     $catalog = $Lease.PSObject.Properties.Name -contains 'ProductCatalog' -and $Lease.ProductCatalog
+    $capacity = $Lease.PSObject.Properties.Name -contains 'CapacityCatalog' -and $Lease.CapacityCatalog
+    if ($catalog -and $capacity) { throw 'Invalid build lease release role.' }
     if ($catalog -and $Lease.Record.purpose -ne 'product') { throw 'Invalid product catalog lease.' }
-    $expected = if ($catalog) { Join-Path (Get-ClearraCanonicalBuildRoot) '.leases/products-catalog.lock' }
+    $expected = if ($capacity) { Join-Path (Get-ClearraCanonicalBuildRoot) '.leases/build-storage-catalog.lock' }
+                elseif ($catalog) { Join-Path (Get-ClearraCanonicalBuildRoot) '.leases/products-catalog.lock' }
                 else { Join-Path (Get-ClearraCanonicalBuildRoot) ".leases/$key.lock" }
     if (-not ([IO.Path]::GetFullPath($Lease.Path)).Equals($expected, (Get-ClearraBuildPathComparison))) {
         throw 'Build lease release path binding mismatch.'
@@ -229,6 +248,7 @@ function Get-ClearraInheritedBuildTransaction([string]$RepositoryRoot, [string]$
         $lease.purpose -ne $record.purpose -or $lease.owner_pid -ne $record.owner_pid) {
         throw 'Inherited build owner does not hold its bound active lease.'
     }
+    Assert-ClearraBuildCapacityLeaseIdentity $record
     if ($record.purpose -eq 'product') { Assert-ClearraProductCatalogLeaseIdentity $record }
     return $record
 }

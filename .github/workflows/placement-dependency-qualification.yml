@@ -54,6 +54,7 @@ jobs:
           status=0
           cargo test --locked -p clearra-manage --bin clearra-manage wsl || status=1
           node --test scripts/runtime/clearra-wsl-session.test.mjs scripts/runtime/clearra-wsl-guest-paths.test.mjs scripts/runtime/clearra-wsl-source-slot.test.mjs scripts/tools/clearra-build-paths.test.mjs || status=1
+          node --test scripts/tools/clearra-build-capacity.test.mjs || status=1
           node --test --test-name-pattern 'product retirement preflights|experiment cache retirement preserves' scripts/tools/clearra-build-policy.test.mjs || status=1
           exit "$status"
       - name: Compare CEGIS, ILC, APDP and coverage capture with focused references
