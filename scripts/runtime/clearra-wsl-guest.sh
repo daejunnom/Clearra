@@ -100,34 +100,80 @@ copy_verified_source_archive() {
     fi
 }
 
+count_source_archive_files() {
+    python3 - "$1" <<'PY'
+from pathlib import PurePosixPath
+import sys
+import tarfile
+
+
+def count_files(source):
+    names = set()
+    with tarfile.open(fileobj=source, mode="r|gz") as archive:
+        for member in archive:
+            path = PurePosixPath(member.name)
+            # The input is a list of tracked files, not a directory tree.
+            # Do not let a directory, link, or duplicate inflate a receipt.
+            if (not member.isfile() or member.issparse() or not path.parts
+                    or path.is_absolute() or ".." in path.parts or path in names):
+                raise ValueError("not a unique regular-file source archive")
+            names.add(path)
+    if not (0 < len(names) <= 2147483647):
+        raise ValueError("source archive file count is outside the receipt range")
+    return len(names)
+
+
+if __name__ == "__main__":
+    try:
+        with open(sys.argv[1], "rb") as source:
+            print(count_files(source))
+    except (ValueError, OSError, tarfile.TarError):
+        sys.exit("Clearra WSL source archive has invalid tracked-file metadata")
+PY
+}
+
 sync_source() (
     # A command substitution normally clears errexit. Keep digest/copy/tar
     # failures terminal inside this private extraction transaction too.
     set -euo pipefail
     local archive="$1"
     local digest="$2"
+    local mode="$3"
     [[ "$archive" == /mnt/?/* && -f "$archive" && ! -L "$archive" ]] || exit 2
     [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || exit 2
     local base="$HOME/.local/share/Clearra/workspaces/$digest"
     local source="$base/source"
     [[ "$(realpath -m -- "$base")" == "$base" && ! -L "$source" ]] || exit 2
     mkdir -p -- "$base"
-    local scratch
+    local scratch file_count
     scratch="$(mktemp -d -- "$base/.incoming.XXXXXXXX")"
     trap 'rm -rf --one-file-system -- "$scratch"' EXIT
     copy_verified_source_archive "$archive" "$scratch/source.tar.gz" "$digest"
+    if [[ "$mode" == receipt ]]; then
+        # GNU stat reports the ext filesystem family using this spelling.
+        [[ "$(stat -f -c %T -- "$base")" == ext2/ext3 ]] || exit 2
+        file_count="$(count_source_archive_files "$scratch/source.tar.gz")"
+    fi
     mkdir -- "$scratch/source"
     tar -xzf "$scratch/source.tar.gz" -C "$scratch/source"
     # The Rust manager holds the dedicated lease throughout extraction and
     # this run. Replace only this same-digest source after successful tar.
     rm -rf --one-file-system -- "$source"
     mv -T -- "$scratch/source" "$source"
-    printf '%s' "$source"
+    if [[ "$mode" == receipt ]]; then
+        printf 'clearra_wsl_source_receipt_v1=Clearra-Build\t%s\t%s\t%s\n' "$source" "$digest" "$file_count"
+    else
+        printf '%s' "$source"
+    fi
 )
 
+validate_source_arguments() {
+    [[ $# -ge 4 && "$1" == "--source-archive" && "$3" == "--source-digest" ]] || exit 2
+}
+
 parse_source() {
-    [[ "${1:-}" == "--source-archive" && "${3:-}" == "--source-digest" ]] || exit 2
-    SOURCE_ROOT="$(sync_source "$2" "$4")"
+    validate_source_arguments "$@"
+    SOURCE_ROOT="$(sync_source "$2" "$4" path)"
     shift 4
     SOURCE_ARGS=("$@")
 }
@@ -179,9 +225,9 @@ case "$ENTRY" in
         verify_toolchains
         ;;
     sync-workspace)
-        parse_source "$@"
-        [[ "${#SOURCE_ARGS[@]}" -eq 0 ]]
-        printf 'clearra_wsl_source=%s\n' "$SOURCE_ROOT"
+        validate_source_arguments "$@"
+        [[ $# -eq 4 ]]
+        sync_source "$2" "$4" receipt
         ;;
     wasm-build)
         parse_source "$@"

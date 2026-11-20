@@ -57,6 +57,33 @@ function Assert-ClearraRuntimeEnvironmentAvailable(
     return $resolved
 }
 
+function ConvertFrom-ClearraWslSourceReceipt([string]$Text) {
+    # Accept only one complete record on its own line. Runtime/log output
+    # is not authority for any subset of these fields.
+    $lines = @([regex]::Split($Text, '\r\n|\n|\r') | Where-Object {
+        $_ -match '^\s*clearra_wsl_source_receipt'
+    })
+    if ($lines.Count -ne 1) {
+        throw 'Managed WSL synchronization did not emit exactly one bounded source receipt.'
+    }
+    $pattern = '\Aclearra_wsl_source_receipt_v1=Clearra-Build\t(?<workspace>/home/clearra/\.local/share/Clearra/workspaces/(?<key>[0-9a-f]{64})/source)\t(?<digest>[0-9a-f]{64})\t(?<count>[1-9][0-9]{0,9})\z'
+    $receipt = [regex]::Match($lines[0], $pattern)
+    $count = 0
+    if (-not $receipt.Success -or
+        $receipt.Groups['key'].Value -cne $receipt.Groups['digest'].Value -or
+        -not [int]::TryParse($receipt.Groups['count'].Value, [ref]$count)) {
+        throw 'Managed WSL synchronization emitted an invalid source receipt.'
+    }
+    return [pscustomobject]@{
+        distribution = 'Clearra-Build'
+        workspace = $receipt.Groups['workspace'].Value
+        source_digest = $receipt.Groups['digest'].Value
+        source_file_count = $count
+        sync_performed = $true
+        filesystem = 'wsl-ext4'
+    }
+}
+
 function Sync-ClearraWslExt4Workspace(
     [string]$RepositoryRoot,
     [string]$WslDistribution = 'Clearra-Build'
@@ -72,18 +99,5 @@ function Sync-ClearraWslExt4Workspace(
     $exitCode = $LASTEXITCODE
     $text = ($output | ForEach-Object { $_.ToString() }) -join "`n"
     if ($exitCode -ne 0) { throw "Managed WSL source synchronization failed ($exitCode).`n$text" }
-    $workspaceMatch = [regex]::Match($text, '(?m)^clearra_wsl_source=(?<path>/home/clearra/\.local/share/Clearra/workspaces/[0-9a-f]{64}/source)\s*$')
-    $digestMatch = [regex]::Match($text, '"source_digest"\s*:\s*"(?<digest>[0-9a-f]{64})"')
-    $countMatch = [regex]::Match($text, '"source_file_count"\s*:\s*(?<count>[0-9]+)')
-    if (-not $workspaceMatch.Success -or -not $digestMatch.Success -or -not $countMatch.Success) {
-        throw 'Managed WSL synchronization did not emit its bounded source receipt.'
-    }
-    return [pscustomobject]@{
-        distribution = 'Clearra-Build'
-        workspace = $workspaceMatch.Groups['path'].Value
-        source_digest = $digestMatch.Groups['digest'].Value
-        source_file_count = [int]$countMatch.Groups['count'].Value
-        sync_performed = $true
-        filesystem = 'wsl-ext4'
-    }
+    return ConvertFrom-ClearraWslSourceReceipt $text
 }

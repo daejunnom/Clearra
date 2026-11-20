@@ -67,3 +67,51 @@ if require_empty_benchmark_output /mnt/c/../c/unexpected; then exit 45; fi
 require_empty_benchmark_output /mnt/z/clearra-test-missing-directory-98df0aa8
 `);
 });
+
+test('sync receipt counts archive members, not the lines or bytes in their paths', t => {
+  const countProgram = helper('count_source_archive_files').split('\n').slice(2, -2).join('\n');
+  const result = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['-'], {
+    encoding: 'utf8',
+    input: `
+__name__ = "source_receipt_fixture"
+${countProgram}
+
+from io import BytesIO
+
+def archived(members):
+    result = BytesIO()
+    with tarfile.open(fileobj=result, mode="w:gz") as archive:
+        for name, kind in members:
+            entry = tarfile.TarInfo(name)
+            entry.type = kind
+            archive.addfile(entry)
+    result.seek(0)
+    return result
+
+files = ["space in.c", "line\\nbreak.rs", "x" * 120 + ".c"]
+assert count_files(archived((path, tarfile.REGTYPE) for path in files)) == 3
+invalid_members = [
+    [],
+    [("same.c", tarfile.REGTYPE), ("./same.c", tarfile.REGTYPE)],
+    [("/outside.c", tarfile.REGTYPE)],
+    [("path/../outside.c", tarfile.REGTYPE)],
+    [("directory", tarfile.DIRTYPE)],
+    [("link.c", tarfile.SYMTYPE)],
+]
+for members in invalid_members:
+    try:
+        count_files(archived(members))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid archive was counted")
+`,
+    windowsHide: true,
+  });
+  if (result.error?.code === 'ENOENT') {
+    t.skip('Python is needed to run the guest archive metadata parser');
+    return;
+  }
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
