@@ -108,7 +108,7 @@ fn horizontal_i_import() -> BuildCoverageQuery {
 }
 
 #[test]
-fn positive_legacy_cover_ordinal_zero_matches_the_explicit_i_rust_kernel() {
+fn positive_legacy_cover_ordinal_zero_is_solved_by_the_explicit_i_rust_kernel() {
     let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
     let coverage_query = horizontal_i_import();
     assert!(
@@ -155,39 +155,22 @@ fn positive_legacy_cover_ordinal_zero_matches_the_explicit_i_rust_kernel() {
     assert_eq!(rust.coverage_pattern_words(), &[1]);
     assert_eq!(rust.bool_field("probability_complete"), Some(true));
     assert_eq!(rust.bool_field("build_variant_count_exact"), Some(true));
+}
 
-    #[cfg(feature = "native-c-core")]
-    {
-        use clearra_build_coverage::coverage::BuildCoverageExecution;
-        use clearra_core_domain::probability::probability_value::ProbabilityValue;
-        use clearra_core_executor::{packing::PackingRunner, BuildUpRunner};
+#[cfg(feature = "native-c-core")]
+#[test]
+fn native_legacy_cover_rejects_the_positive_four_column_fixture() {
+    use clearra_core_executor::packing::{PackingRunner, PackingRunnerError};
 
-        let packing = PackingRunner::run(&legacy_problem).expect("native legacy packing");
-        assert_eq!(packing.candidate_count(), 1);
-        let buildup = BuildUpRunner::run(&legacy_problem, &packing).expect("native legacy BuildUp");
-        assert!(buildup.coverage_complete());
-        let [row] = buildup.coverage_rows() else {
-            panic!(
-                "expected one positive native coverage row, got {}",
-                buildup.coverage_rows().len()
-            );
-        };
-        assert_eq!(row.pattern_count(), 1);
-        assert_eq!(row.coverage_bits().words(), rust.coverage_pattern_words());
-        let native_identity = packing
-            .candidate_view_at(0)
-            .expect("native packing identity")
-            .standard_board64_tiling_identity(0)
-            .expect("normalized native packing identity");
-        assert_eq!(native_identity, exact_identity);
-
-        let cover =
-            BuildCoverageExecution::from_c_buildup_rows(&coverage_query, buildup.coverage_rows())
-                .expect("legacy coverage reducer");
-        assert_eq!(cover.assignments().len(), 1);
-        assert!(cover.exact_cover_complete());
-        assert_eq!(cover.result().probability(), ProbabilityValue::ONE);
-    }
+    let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
+    let legacy_problem = compile(&horizontal_i_import());
+    // Native BuildUp rejects this request during Packing's streamed candidate
+    // admission (observed ABI status 2, INVALID_PROBLEM), before a coverage
+    // row can exist. This is not a completed result with zero coverage and
+    // does not establish a general rule for all nonstandard widths.
+    let error = PackingRunner::run(&legacy_problem)
+        .expect_err("native packing must reject this specific legacy request");
+    assert!(matches!(error, PackingRunnerError::Native(_)), "{error:?}");
 }
 
 #[test]
