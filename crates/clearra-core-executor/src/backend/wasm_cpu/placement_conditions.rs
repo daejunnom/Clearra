@@ -512,6 +512,29 @@ impl GroupedClearConditions {
         })
     }
 
+    /// Current original-row frame and its exact single-operation changes.
+    /// Each slot describes only that concrete operation, not a kind or a
+    /// reachable child. Indices outside the caller's bounded slots are not
+    /// represented; the ordinary subset predicate remains available.
+    pub(super) fn deleted_rows_with_child_deltas<const N: usize>(
+        &self,
+        executed: u16,
+    ) -> (u16, [u16; N]) {
+        let mut deleted = 0;
+        let mut deltas = [0; N];
+        for group in self.active_groups() {
+            let missing = group.contributors & !executed;
+            if missing == 0 {
+                deleted |= group.rows;
+            } else if missing.is_power_of_two() {
+                if let Some(slot) = deltas.get_mut(missing.trailing_zeros() as usize) {
+                    *slot |= group.rows;
+                }
+            }
+        }
+        (deleted, deltas)
+    }
+
     /// Minimal executed set in this geometric frame, or no consistent set.
     /// The minimum may include contributors to several atomic row groups.
     pub(super) fn required_for_frame(&self, deleted: u16) -> Option<u16> {

@@ -28,11 +28,12 @@ use super::{
 
 const MAX_HEIGHT: usize = 6;
 const MAX_CLEAR_FRAMES: usize = 1 << MAX_HEIGHT;
+const MAX_CONDITIONAL_OPERATIONS: usize = 8;
 
 #[cfg(test)]
 thread_local! {
     static JOINT_CLEAR_ADMISSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static PROJECTION_COMPARISON: std::cell::Cell<Option<(bool, ConditionalProjectionWork)>> =
+    static PROJECTION_COMPARISON: std::cell::Cell<Option<(bool, bool, ConditionalProjectionWork)>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -42,30 +43,41 @@ pub(super) struct ConditionalProjectionWork {
     pub lock_projections: usize,
     pub reused_same_frame: usize,
     pub clear_reprojections: usize,
+    pub parent_group_visits: usize,
+    pub child_group_visits: usize,
+    pub direct_child_scans: usize,
+    pub prepared_parents: usize,
+    pub delta_reads: usize,
+    pub nonempty_delta_reads: usize,
 }
 
 #[cfg(test)]
 fn record_projection_work(update: impl FnOnce(&mut ConditionalProjectionWork)) {
-    if let Some((reuse, mut counts)) = PROJECTION_COMPARISON.get() {
+    if let Some((reuse_lock, reuse_deltas, mut counts)) = PROJECTION_COMPARISON.get() {
         update(&mut counts);
-        PROJECTION_COMPARISON.set(Some((reuse, counts)));
+        PROJECTION_COMPARISON.set(Some((reuse_lock, reuse_deltas, counts)));
     }
 }
 
 #[cfg(test)]
-pub(super) fn with_conditional_projection_reuse<T>(
-    reuse: bool,
+pub(super) fn with_conditional_work_comparison<T>(
+    reuse_lock: bool,
+    reuse_deltas: bool,
     action: impl FnOnce() -> T,
 ) -> (T, ConditionalProjectionWork) {
-    struct Restore(Option<(bool, ConditionalProjectionWork)>);
+    struct Restore(Option<(bool, bool, ConditionalProjectionWork)>);
     impl Drop for Restore {
         fn drop(&mut self) {
             PROJECTION_COMPARISON.set(self.0);
         }
     }
-    let _restore = Restore(PROJECTION_COMPARISON.replace(Some((reuse, Default::default()))));
+    let _restore = Restore(PROJECTION_COMPARISON.replace(Some((
+        reuse_lock,
+        reuse_deltas,
+        Default::default(),
+    ))));
     let output = action();
-    (output, PROJECTION_COMPARISON.get().unwrap().1)
+    (output, PROJECTION_COMPARISON.get().unwrap().2)
 }
 
 #[cfg(test)]
@@ -123,6 +135,8 @@ pub(super) struct ConditionalState {
     pub(super) board: u64,
     pub(super) deleted: u16,
     projection: AtomicRowProjection,
+    executed: u16,
+    child_deltas: Option<[u16; MAX_CONDITIONAL_OPERATIONS]>,
 }
 
 /// Try to certify an entire clear-to-empty candidate using only bounded
@@ -418,7 +432,7 @@ impl CandidateGeometry {
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
     ) -> Option<Self> {
-        if !(3..=8).contains(&candidate.row_ids().len()) {
+        if !(3..=MAX_CONDITIONAL_OPERATIONS).contains(&candidate.row_ids().len()) {
             return None;
         }
         let geometry = Self::compile(catalog, candidate)?;
@@ -445,13 +459,38 @@ impl CandidateGeometry {
     /// removed together in the original-row frame.
     pub(super) fn conditional_state(&self, executed: u16) -> ConditionalState {
         debug_assert_eq!(executed & !self.all_operations, 0);
-        let deleted = self.clear_conditions.deleted_rows(executed);
+        let pending = self.all_operations & !executed;
+        // A lone remaining operation or row group rarely amortizes setup.
+        // Otherwise prepare siblings while doing the parent's existing scan.
+        let prepare = self.operation_count <= MAX_CONDITIONAL_OPERATIONS
+            && pending.count_ones() >= 2
+            && self.clear_conditions.group_count() >= 2;
+        #[cfg(test)]
+        let prepare = prepare
+            && !PROJECTION_COMPARISON
+                .get()
+                .is_some_and(|(_, deltas, _)| !deltas);
+        let (deleted, child_deltas) = if prepare {
+            let (deleted, deltas) = self
+                .clear_conditions
+                .deleted_rows_with_child_deltas(executed);
+            (deleted, Some(deltas))
+        } else {
+            (self.clear_conditions.deleted_rows(executed), None)
+        };
+        #[cfg(test)]
+        record_projection_work(|work| {
+            work.parent_group_visits += self.clear_conditions.group_count();
+            work.prepared_parents += usize::from(prepare);
+        });
         let projection = self.row_projection(deleted);
         let board = board_for_operations(self.initial_board, &self.cells, executed);
         ConditionalState {
             board: projection.physical_board(board),
             deleted,
             projection,
+            executed,
+            child_deltas,
         }
     }
 
@@ -467,33 +506,51 @@ impl CandidateGeometry {
     pub(super) fn conditional_operation<'a>(
         &'a self,
         state: &'a ConditionalState,
-        executed: u16,
         operation: usize,
     ) -> (u64, impl FnOnce() -> (u64, u16) + 'a) {
         let mask = self.conditional_lock_mask(operation, state);
         (mask, move || {
-            self.conditional_after_operation(state, executed, operation, mask)
+            self.conditional_after_operation(state, operation, mask)
         })
     }
 
     fn conditional_after_operation(
         &self,
         state: &ConditionalState,
-        executed: u16,
         operation: usize,
         mask: u64,
     ) -> (u64, u16) {
         let bit = 1_u16 << operation;
-        debug_assert_eq!(executed & bit, 0);
-        debug_assert_eq!((executed | bit) & !self.all_operations, 0);
-        let next = executed | bit;
-        let deleted = self.clear_conditions.deleted_rows(next);
+        debug_assert_eq!(state.executed & bit, 0);
+        let next = state.executed | bit;
+        debug_assert_eq!(next & !self.all_operations, 0);
+        let deleted = if let Some(deltas) = &state.child_deltas {
+            // This state belongs to this executed set. Other groups either
+            // already contributed to D, or still lack some operation after q.
+            let delta = deltas[operation];
+            #[cfg(test)]
+            record_projection_work(|work| {
+                work.delta_reads += 1;
+                work.nonempty_delta_reads += usize::from(delta != 0);
+            });
+            state.deleted | delta
+        } else {
+            #[cfg(test)]
+            record_projection_work(|work| {
+                work.direct_child_scans += 1;
+                work.child_group_visits += self.clear_conditions.group_count();
+            });
+            self.clear_conditions.deleted_rows(next)
+        };
         if deleted == state.deleted {
             // Projection is a fixed permutation/truncation of disjoint cells.
             // The unchanged frame preserves the exact footprint already used
             // by the ILC/grounding checks of this same operation.
             #[cfg(test)]
-            if PROJECTION_COMPARISON.get().is_some_and(|(reuse, _)| !reuse) {
+            if PROJECTION_COMPARISON
+                .get()
+                .is_some_and(|(reuse, _, _)| !reuse)
+            {
                 return (
                     state.board | self.conditional_lock_mask(operation, state),
                     deleted,

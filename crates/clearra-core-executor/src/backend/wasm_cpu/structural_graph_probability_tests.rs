@@ -1547,6 +1547,7 @@ fn conditional_support_or_created_by_one_clear_preserves_four_line_coverage() {
         .expect("the earlier D=0-only admission missed this one-operation clear");
     let mut reused_frame = false;
     let mut projected_new_frame = false;
+    let mut simultaneous_delta = false;
     for executed in 0..(1_usize << pieces.len()) {
         let state = geometry.conditional_state(executed as u16);
         assert_eq!(
@@ -1559,13 +1560,16 @@ fn conditional_support_or_created_by_one_clear_preserves_four_line_coverage() {
                 continue;
             }
             let expected = subset_state(&catalog, &candidate, executed | bit);
-            let (_, child) = geometry.conditional_operation(&state, executed as u16, operation);
+            let (_, child) = geometry.conditional_operation(&state, operation);
             assert_eq!(child(), expected);
             reused_frame |= expected.1 == state.deleted;
             projected_new_frame |= expected.1 != state.deleted;
+            if executed.count_ones() as usize + 2 <= pieces.len() {
+                simultaneous_delta |= (expected.1 & !state.deleted).count_ones() >= 2;
+            }
         }
     }
-    assert!(reused_frame && projected_new_frame);
+    assert!(reused_frame && projected_new_frame && simultaneous_delta);
 
     let identity = StandardBoard64TilingIdentity::from_placements(
         initial,
@@ -1613,29 +1617,59 @@ fn conditional_support_or_created_by_one_clear_preserves_four_line_coverage() {
     };
     let (ordinary, off) = run(false);
     let ((reference, reference_order), reference_work) =
-        placement_poset::with_conditional_projection_reuse(false, || run(true));
+        placement_poset::with_conditional_work_comparison(false, false, || run(true));
+    let ((lock_only, lock_order), lock_work) =
+        placement_poset::with_conditional_work_comparison(true, false, || run(true));
     let ((conditional, on), reused_work) =
-        placement_poset::with_conditional_projection_reuse(true, || run(true));
+        placement_poset::with_conditional_work_comparison(true, true, || run(true));
     assert_parity(&ordinary, &reference);
-    assert_parity(&reference, &conditional);
-    assert_eq!(reference_order.conditional_order, on.conditional_order);
+    assert_parity(&reference, &lock_only);
+    assert_parity(&lock_only, &conditional);
+    assert_eq!(
+        reference_order.conditional_order,
+        lock_order.conditional_order
+    );
+    assert_eq!(lock_order.conditional_order, on.conditional_order);
     for name in ["total_build_order_nodes", "total_reachability_states"] {
-        assert_eq!(
-            reference.usize_field(name).unwrap(),
-            conditional.usize_field(name).unwrap()
-        );
+        let baseline = reference.usize_field(name).unwrap();
+        assert_eq!(baseline, lock_only.usize_field(name).unwrap());
+        assert_eq!(baseline, conditional.usize_field(name).unwrap());
     }
     assert_eq!(reference_work.reused_same_frame, 0);
-    assert!(reused_work.reused_same_frame > 0 && reused_work.clear_reprojections > 0);
+    assert!(lock_work.reused_same_frame > 0 && lock_work.clear_reprojections > 0);
     assert_eq!(
         reference_work.clear_reprojections,
-        reused_work.clear_reprojections
+        lock_work.clear_reprojections
     );
     assert_eq!(
         reference_work.lock_projections,
-        reused_work.lock_projections + reused_work.reused_same_frame,
+        lock_work.lock_projections + lock_work.reused_same_frame,
     );
-    eprintln!("conditional lock projections: reference={reference_work:?} reuse={reused_work:?}");
+    assert_eq!(lock_work.lock_projections, reused_work.lock_projections);
+    assert_eq!(
+        lock_work.clear_reprojections,
+        reused_work.clear_reprojections
+    );
+    assert_eq!(lock_work.reused_same_frame, reused_work.reused_same_frame);
+    assert_eq!(lock_work.prepared_parents, 0);
+    assert_eq!(lock_work.delta_reads, 0);
+    assert!(reused_work.prepared_parents > 0 && reused_work.nonempty_delta_reads > 0);
+    assert!(reused_work.direct_child_scans > 0);
+    assert_eq!(
+        lock_work.parent_group_visits,
+        reused_work.parent_group_visits
+    );
+    assert_eq!(
+        lock_work.direct_child_scans,
+        reused_work.direct_child_scans + reused_work.delta_reads,
+    );
+    // The six allowed words alone give eleven distinct sibling-state edges;
+    // each would rescan all four row groups before checking its realization.
+    assert!(reused_work.delta_reads >= 11);
+    assert!(lock_work.child_group_visits >= reused_work.child_group_visits + 44);
+    eprintln!(
+        "conditional geometry: reference={reference_work:?} lock={lock_work:?} lock+delta={reused_work:?}"
+    );
     assert_eq!(off.conditional_order, Default::default());
     let metrics = on.conditional_order;
     assert!(metrics.graph_bypasses > 0);

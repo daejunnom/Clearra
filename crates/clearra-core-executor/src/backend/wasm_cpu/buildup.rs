@@ -2459,7 +2459,6 @@ fn verify_conditional_order(
                 &geometry,
                 candidate.row_ids()[operation],
                 operation,
-                executed,
                 state,
                 profile,
                 &mut workspace.reachability,
@@ -2556,7 +2555,6 @@ fn prove_conditional_transition(
     geometry: &super::placement_poset::CandidateGeometry,
     row_id: u32,
     operation: usize,
-    executed: u16,
     state: &super::placement_poset::ConditionalState,
     profile: clearra_rules::kicks::KickTableProfileId,
     reachability: &mut ReachabilityWorkspace,
@@ -2570,7 +2568,7 @@ fn prove_conditional_transition(
 
     let board = state.board;
     let deleted = state.deleted;
-    let (lock_mask, expected_child) = geometry.conditional_operation(state, executed, operation);
+    let (lock_mask, expected_child) = geometry.conditional_operation(state, operation);
     let mut realizations = catalog.instantiations(row_id, deleted).peekable();
     if realizations.peek().is_none() {
         return Forbidden;
