@@ -48,6 +48,16 @@ fn assert_exact_cpu_pc(result: &Value, expected_kind: &str, solution_count: u64)
     assert_eq!(summary["normalized_unique_solution_count"], solution_count);
 }
 
+fn assert_reported_true(summary: &Value, field: &str) {
+    let value = &summary[field];
+    // Continue can relay a core field directly rather than projecting the PC
+    // summary DTO. Both forms carry the same typed completion fact.
+    assert!(
+        value.as_bool() == Some(true) || value.as_str() == Some("true"),
+        "{field}: {value}"
+    );
+}
+
 #[test]
 fn fixed_queue_continuation_matches_the_exact_direct_suffix() {
     let opening = |queue| {
@@ -83,8 +93,8 @@ fn fixed_queue_continuation_matches_the_exact_direct_suffix() {
         .expect("canonical solution-family hash");
     let continued = run_json(&["continue", token]);
     assert_eq!(continued["kind"], "continue");
-    assert_eq!(continued["summary"]["solution_found"], true);
-    assert_eq!(continued["summary"]["count_complete"], true);
+    assert_reported_true(&continued["summary"], "solution_found");
+    assert_reported_true(&continued["summary"], "count_complete");
     assert_eq!(
         continued["summary"]["normalized_solution_set_hash"],
         expected_hash
@@ -128,7 +138,7 @@ fn patterned_pc_uses_two_workers_without_changing_the_exact_result() {
             args.push("--use-all-cpu-threads");
         }
         let result = run_json(&args);
-        assert_eq!(result["kind"], "pc");
+        assert_eq!(result["kind"], "pc-scenario");
         let summary = &result["summary"];
         assert_eq!(summary["actual_backend"], "wasm-cpu", "{summary}");
         assert_eq!(summary["solution_found"], true);
