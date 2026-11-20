@@ -2008,6 +2008,7 @@ mod tests {
 
     use crate::{
         pc_chance_coverage_evidence::PcChanceCoverageEvidence,
+        solution_probability::SolutionAverageScoreReport,
         solution_set_audit::{
             SolutionAuditCheckpoint, SolutionPortfolioSelectionPolicy, SolutionProductFamily,
             SolutionSetAuditInput, SolutionSetAuditReport,
