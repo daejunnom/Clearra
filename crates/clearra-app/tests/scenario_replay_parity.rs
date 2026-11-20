@@ -186,10 +186,11 @@ fn assert_legacy_tall_visible_scenario(rust: &AppContext) {
         .with_retained_trace_limit(1)
     };
     let raw = query((0x3f0 << 10) | 0x3ff, false).with_count_policy(PcCountPolicy::CountUnique);
+    let raw_count_all = raw.clone().with_count_policy(PcCountPolicy::CountAll);
     // Matches the public scenario_simple_4l fixture: holding the only I
     // cannot substitute another current piece, so the legal lock is unchanged.
     let singleton_hold = query(0x3f0, true);
-    for input in [&raw, &singleton_hold] {
+    for input in [&raw, &raw_count_all, &singleton_hold] {
         let explicit = ProblemCompiler::compile_scenario_pc(input).unwrap();
         let legacy = ProblemCompiler::compile_legacy_scenario_pc(input).unwrap();
         assert_eq!(legacy.core_query(), explicit.core_query());
@@ -235,18 +236,39 @@ fn assert_legacy_tall_visible_scenario(rust: &AppContext) {
             "visible_height",
             "initial_board_mask",
             "normalized_solution_set_hash",
-            "covered_pattern_count",
+            "solution_found",
             "count_complete",
         ];
         for key in keys {
             assert_eq!(direct.field(key), cooperative.field(key), "{key}");
         }
+        assert_eq!(
+            direct.normalized_solution_keys(),
+            cooperative.normalized_solution_keys()
+        );
+        assert_eq!(direct.bool_field("probability_complete"), Some(true));
+        assert_eq!(cooperative.bool_field("probability_complete"), Some(true));
+        assert_eq!(direct.field("covered_pattern_count"), Some("1"));
+        assert_eq!(cooperative.field("covered_pattern_count"), Some("1"));
         #[cfg(feature = "native-c-core")]
         {
             let native = AppContext::default().run(request());
             let native = core(&native);
+            assert_eq!(
+                direct.normalized_solution_keys(),
+                native.normalized_solution_keys()
+            );
             for key in keys {
                 assert_eq!(direct.field(key), native.field(key), "{key}");
+            }
+            if input.count_policy() == PcCountPolicy::CountUnique {
+                // Native verifies existence per candidate without producing
+                // pattern coverage in this mode. Its placeholder count is
+                // not the cardinality of a completed coverage result.
+                assert_eq!(native.bool_field("probability_complete"), Some(false));
+            } else {
+                assert_eq!(native.bool_field("probability_complete"), Some(true));
+                assert_eq!(native.field("covered_pattern_count"), Some("1"));
             }
         }
         let replayed = rust.run(AppRequest::new(AppCommand::Continue(

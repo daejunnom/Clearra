@@ -4777,7 +4777,7 @@ pub(crate) mod scoped_compact_pc2 {
                                 && summary.candidate_count == self.next_ordinal as usize
                                 && matches!(
                                     summary.backend_execution,
-                                    WasmDistributedBackendExecution::Cpu
+                                    clearra_core_executor::WasmDistributedBackendExecution::Cpu
                                 )
                         }) {
                             return Err(ScopeError::Incomplete);

@@ -237,8 +237,16 @@ fn operation_mask_physical_traversal_preserves_840_queue_coverage_and_graph_repl
     .with_retained_trace_limit(1)
     .with_execution_policy(execution_policy());
     let problem = ProblemCompiler::compile_scenario_pc(&query).expect("mixed candidate fixture");
-    let ((baseline, _), graph) = with_operation_mask_comparison(false, || run(&problem, false));
-    let ((treatment, _), masks) = with_operation_mask_comparison(true, || run(&problem, false));
+    let run_arm = |enabled| {
+        with_operation_mask_comparison(enabled, || {
+            super::structural_order::with_mode(false, || {
+                super::structural_order::with_conditional_order_mode(false, || run(&problem, false))
+            })
+            .0
+        })
+    };
+    let ((baseline, _), graph) = run_arm(false);
+    let ((treatment, _), masks) = run_arm(true);
 
     assert_same_solution_queues(&baseline, &treatment);
     assert_eq!(treatment.usize_field("coverage_pattern_count"), Some(840));
