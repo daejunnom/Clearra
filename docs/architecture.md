@@ -1,5 +1,12 @@
 # Architecture
 
+> Planning update (2026-11-20): the prototype contains both the C path described
+> below and an existing Rust CPU path used by native and WASM hosts. The proposed
+> convergence on one Rust core, its dependency-relation algorithm, and phased
+> compatibility gates are documented in the
+> [Rust core and relation roadmap](research/rust-core-and-relation-roadmap-2026-11-20.md).
+> This is a target architecture plan, not a claim that the migration is complete.
+
 Clearra uses a Rust product shell with a C hot-path core. Rust owns product contracts,
 validation, diagnostics, probability invariants, objectives, replay, and output. The
 C core owns immutable geometry-catalog compilation, exact-cover graph search,
