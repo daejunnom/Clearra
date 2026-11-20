@@ -416,3 +416,44 @@ retained local evidence is
 Do not use this diagnostic run's wall time as a performance arm.
 Exact dependency precomputation can remove repeated proof construction;
 it is not itself evidence that the dominant private union memo shrank.
+
+### APDP and optional residual parity ablation
+
+The local-only harness at `f3d57a508159bc8b0ad80a7cd658b026ebc68aa1`
+kept APDP and the ordinary column feasibility check enabled in both arms.
+The treatment enabled the optional column residue and checkerboard filters.
+The counters count actual rejections after that ordinary check, in order:
+vertical mod 2, additional mod 4 (excluding mod 2), then checkerboard. The
+three counters do not overlap. They are not the difference in total visited
+states: memo hits, other cuts, and search order can change what is visited.
+
+| Input (actual workers) | Direct treatment rejections: mod 2 / additional mod 4 / checkerboard | Fresh Geometry states, off → on | Geometry row children, off → on | Packing candidates / BuildUp nodes / exact solutions (both arms) |
+| --- | ---: | ---: | ---: | ---: |
+| Nonempty 4L P7, mask `0x3c0f03c0` (1) | 61 / 23 / 0 | 1,086 → 795 | 1,600 → 1,202 | 288 / 2,158 / 21 |
+| Empty SRS+ 4L P7P4 (7 of 8 exposed logical CPUs; default reserve) | 3,881 / 1,349 / 0 | 161,701 → 161,198 | 356,266 → 354,925 | 29,856,840 / 637,208,005 / 456,923 |
+
+The ordered solution identity and coverage digests matched within each
+fixture. For nonempty P7, APDP certified and rechecked six parents in each
+arm and removed no extra rows from those parents. For empty P7P4, the
+active simplified domain prepared the APDP index but invoked no proof or
+parent recheck in either arm. These zeros describe the actual paths here,
+not all APDP domains or checkerboard constraints.
+
+| Input | Treatment residue check alone (estimate) | Treatment projection + residue check (estimate) | APDP index preparation, off → on |
+| --- | ---: | ---: | ---: |
+| Nonempty P7 | 0.055 ms | 0.112 ms | 40.677 → 35.409 µs |
+| Empty P7P4 | 13.57 ms | 22.83 ms | 142.607 → 178.048 µs |
+
+The stage estimates scale 1-in-64 timing samples to call counts. They
+include column projection work also needed by the ordinary predicate
+and are neither an incremental slowdown relative to the off arm nor
+a host-wall-time measurement. The index numbers are one observation per
+arm. The separate, uninstrumented nonempty ABBA was 5.827, 5.125, 5.223,
+5.929 ms (means 5.878 → 5.174 ms, two samples each). The full run was a
+diagnostic pair, not an uninstrumented ABBA; its elapsed times are not
+performance-adoption evidence. Large-input downstream work was unchanged.
+The optional filters remain outside the production search; a zero in these
+fixtures is not grounds to remove the existing exact refinement.
+
+Local generated receipts:
+`_local/artifacts/benchmarks/native-rust-family/parity-apdp-f3d57a50/`.
