@@ -54,7 +54,7 @@ jobs:
           cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib --no-run
           status=0
           filters=(structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves
-            frontier_certificate_reuses_incomparable_boards_but_rejects_rectangular_hull
+            frontier_certificate_
             ordered_kick_interval_requires ordered_kick_witness_guard_ ordered_negative_ candidate_kick_guard_
             reachability::reference_tests incremental_domain_ minimum_domain_cutoff_
             exact_clear_domain_tests placement_conditions::tests geometric_edge_reuse_
@@ -215,7 +215,11 @@ jobs:
         run: cargo test --locked -p clearra-rules -p clearra-finesse -p clearra-core-ffi -p clearra-pc-graph --lib --no-fail-fast
       - name: Compare physical clear and Perfect Clear facts across scoring and B2B
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p clearra-scoring --lib clear_fact_parity
+        run: |
+          status=0
+          cargo test --locked -p clearra-scoring --lib clear_fact_parity || status=1
+          cargo test --locked -p clearra-postprocess --lib full_height_score_reuses_one_candidate_shape_for_each_original_pattern || status=1
+          exit "$status"
       - name: Validate the exact Legacy assignment join independently of the C adapter
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-build-coverage --lib verified_assignment_rows_

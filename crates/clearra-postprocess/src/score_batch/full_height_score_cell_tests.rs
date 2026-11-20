@@ -22,6 +22,15 @@ fn edge(operation: u8, cleared: u8, x: i8) -> ScoringExecutionEdge {
 }
 
 fn batch(graph_ids: &[u64], bad_clear: bool, complete: bool) -> FullHeightExecutionBatch {
+    batch_with_patterns(graph_ids, bad_clear, complete, vec![vec![PieceKind::I; 2]])
+}
+
+fn batch_with_patterns(
+    graph_ids: &[u64],
+    bad_clear: bool,
+    complete: bool,
+    patterns: Vec<Vec<PieceKind>>,
+) -> FullHeightExecutionBatch {
     let mask = |start: u16, column: u16| {
         (start..start + 4).fold(Board256Mask::EMPTY, |mask, row| {
             mask.union(Board256Mask::singleton(row * 10 + column).unwrap())
@@ -62,16 +71,7 @@ fn batch(graph_ids: &[u64], bad_clear: bool, complete: bool) -> FullHeightExecut
         8,
         initial,
         SpinCoverageExecutionBatch::new(
-            vec![vec![PieceKind::I; 2]],
-            0,
-            None,
-            false,
-            false,
-            false,
-            101,
-            103,
-            graphs,
-            complete,
+            patterns, 0, None, false, false, false, 101, 103, graphs, complete,
         ),
     )
     .unwrap()
@@ -136,6 +136,36 @@ fn multiple_physical_graphs_for_one_colored_family_do_not_duplicate_score_cells(
     .unwrap();
     assert_eq!(projection.candidate_count, 1);
     assert_eq!(projection.cell_capacity, 1);
+}
+
+#[test]
+fn full_height_score_reuses_one_candidate_shape_for_each_original_pattern() {
+    let single = materialize(&batch(&[1], false, true)).unwrap();
+    let expected = &single.cells()[0];
+    let multiple = materialize(&batch_with_patterns(
+        &[1, 1],
+        false,
+        true,
+        vec![
+            vec![PieceKind::I; 2],
+            vec![PieceKind::O; 2],
+            vec![PieceKind::I; 2],
+        ],
+    ))
+    .unwrap();
+    assert!(multiple.complete());
+    assert_eq!(multiple.cells().len(), 2);
+    for (cell, ordinal) in multiple.cells().iter().zip([0, 2]) {
+        assert_eq!((cell.candidate_id(), cell.pattern_id()), (1, ordinal));
+        assert_eq!(
+            (cell.score(), cell.attack()),
+            (expected.score(), expected.attack())
+        );
+        assert_eq!(
+            cell.trace_identity(),
+            compact_score_cell_trace_identity(1, ordinal).unwrap()
+        );
+    }
 }
 
 #[test]

@@ -295,16 +295,19 @@ impl FullHeightScoreCellMaterializer {
                 id - 1,
                 Some(projection.candidate_count as u64),
             );
+            // validated_shape binds every graph of this candidate to the same canonical key.
+            let physical = {
+                let identity =
+                    ExtendedTilingSolutionKey::parse_canonical(graphs[start].candidate_key())
+                        .map_err(|_| FullHeightScoreCellError::InvalidEvidence)?;
+                PhysicalProjection {
+                    height: batch.height(),
+                    required_operations: (1_u64 << identity.placement_count()) - 1,
+                }
+            };
             for (pattern_id, sequence) in execution.patterns().iter().enumerate() {
                 let mut best: Option<BestExecution> = None;
                 for graph in &graphs[start..end] {
-                    let identity =
-                        ExtendedTilingSolutionKey::parse_canonical(graph.candidate_key())
-                            .map_err(|_| FullHeightScoreCellError::InvalidEvidence)?;
-                    let physical = PhysicalProjection {
-                        height: batch.height(),
-                        required_operations: (1_u64 << identity.placement_count()) - 1,
-                    };
                     path.clear();
                     holds.clear();
                     let mut terminal_error = None;

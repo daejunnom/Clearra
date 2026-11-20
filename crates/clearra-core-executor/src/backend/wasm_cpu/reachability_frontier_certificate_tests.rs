@@ -2,6 +2,7 @@
 //! forcing every occupied sample cell to remain occupied.
 
 use super::*;
+use crate::backend::wasm_cpu::geometry::GeometryCandidate;
 use crate::reachability_reference::reference_spawn_lock_anchors;
 
 const MAX_CLAUSES: usize = 32;
@@ -228,4 +229,156 @@ fn frontier_certificate_reuses_incomparable_boards_but_rejects_rectangular_hull(
     }
     assert!(excluded > 2);
     assert!(reachable > 0);
+}
+
+#[test]
+fn frontier_certificate_preserves_exact_same_candidate_4l_operation_graph() {
+    // One actual 10x4 exact-cover candidate, with the minimum three distinct
+    // operations needed to compare the target across two different prefixes.
+    // I and L can independently lock first without clearing. Either prefix
+    // obstructs T, but T can lock before either of them and complete the PC.
+    const WIDTH: u8 = 10;
+    const HEIGHT: u8 = 4;
+    const START: u64 = 0xe3_f9fe_3f87;
+    const OPERATIONS: [(PieceKind, u64); 3] = [
+        (PieceKind::T, 0x4038),
+        (PieceKind::I, 0x10_0401_0040),
+        (PieceKind::L, 0x0c_0200_8000),
+    ];
+    let mut full = START;
+    for (_, cells) in OPERATIONS {
+        assert_eq!(full & cells, 0);
+        full |= cells;
+    }
+    assert_eq!(full, (1 << (WIDTH * HEIGHT)) - 1);
+    let catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+        WIDTH,
+        HEIGHT,
+        START,
+        full ^ START,
+    )
+    .expect("four-row ILC catalog");
+    let rows =
+        OPERATIONS.map(|(piece, cells)| catalog.skeleton_id(piece, cells).expect("candidate row"));
+    let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).expect("one exact candidate");
+    assert_eq!(candidate.row_ids().len(), OPERATIONS.len());
+    assert!(rows.iter().all(|row| candidate.row_ids().contains(row)));
+
+    // Independently collapse the full logical rows, tracking their original
+    // identities. Do not derive the sample boards from the movement proof.
+    let states: [(u64, u16); 8] = core::array::from_fn(|subset| {
+        let logical = OPERATIONS
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| subset & (1 << i) != 0)
+            .fold(START, |board, (_, (_, cells))| board | cells);
+        let row_mask = (1 << WIDTH) - 1;
+        let mut board = 0;
+        let mut deleted = 0;
+        let mut compact_row = 0;
+        for y in 0..HEIGHT {
+            let row = (logical >> (WIDTH * y)) & row_mask;
+            if row == row_mask {
+                deleted |= 1 << y;
+            } else {
+                board |= row << (WIDTH * compact_row);
+                compact_row += 1;
+            }
+        }
+        (board, deleted)
+    });
+    const I_ONLY: usize = 0b010;
+    const L_ONLY: usize = 0b100;
+    assert_eq!(states[I_ONLY], (0xf3_fdff_3fc7, 0));
+    assert_eq!(states[L_ONLY], (0xef_fbfe_bf87, 0));
+    assert_eq!(states[I_ONLY].0 & states[L_ONLY].0, START);
+    assert_eq!(states[0b111], (0, 0b1111));
+
+    let profile = KickTableProfileId::Srs90;
+    let templates =
+        OPERATIONS.map(|(piece, _)| ReachabilityTemplate::compile(WIDTH, HEIGHT, piece, profile));
+    let t_target = state_index(
+        WIDTH,
+        templates[0].ceiling,
+        State {
+            rotation: RotationState::Zero,
+            x: 3,
+            y: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(templates[0].state_masks[t_target], OPERATIONS[0].1);
+    let no_clear = LocalRelationRowFrame::new(HEIGHT, 0).unwrap();
+    let certificate = FrontierCertificate::derive(
+        &templates[0],
+        no_clear,
+        t_target,
+        states[I_ONLY].0,
+        MAX_EDGE_VISITS,
+    )
+    .expect("closed on an independently reachable prefix");
+    assert!(certificate.excludes(no_clear, t_target, states[L_ONLY].0));
+    assert!(!certificate.excludes(no_clear, t_target, START));
+
+    // All twelve outgoing subset/operation questions, not just the two
+    // blocked edges. On a certificate miss use exact traversal; compare the
+    // admitted transitions and PC routes with the independent scalar BFS.
+    let mut oracle = [0_u8; 8];
+    let mut accelerated = [0_u8; 8];
+    let mut certified_prefixes = 0_u8;
+    let mut scratch = ReachabilityScratch::default();
+    for (subset, &(board, deleted)) in states[..7].iter().enumerate() {
+        let frame = LocalRelationRowFrame::new(HEIGHT, deleted).unwrap();
+        for (operation, (&row, &(piece, _))) in rows.iter().zip(&OPERATIONS).enumerate() {
+            if subset & (1 << operation) != 0 {
+                continue;
+            }
+            let template = &templates[operation];
+            let reference =
+                reference_spawn_lock_anchors(WIDTH, HEIGHT, board, piece, profile).unwrap();
+            let mut exact = None;
+            for lock in catalog.instantiations(row, deleted) {
+                let target = state_index(
+                    WIDTH,
+                    template.ceiling,
+                    State {
+                        rotation: lock.rotation,
+                        x: lock.x,
+                        y: lock.lock_y,
+                    },
+                )
+                .expect("catalog lock is a valid physical pose");
+                assert_eq!(template.state_masks[target], lock.lock_mask);
+                let anchor = lock.lock_y as usize * usize::from(WIDTH) + lock.x as usize;
+                let scalar = reference[lock.rotation.quarter_turns() as usize] & (1 << anchor) != 0;
+                if scalar {
+                    oracle[subset] |= 1 << operation;
+                }
+                if piece == PieceKind::T && certificate.excludes(frame, target, board) {
+                    assert!(!scalar, "false negative on subset {subset:b}");
+                    certified_prefixes |= 1 << subset;
+                    continue;
+                }
+                let exact = exact.get_or_insert_with(|| {
+                    search_reachable_locks(template, board, &mut scratch, None)
+                });
+                assert!(exact.exhaustive);
+                let reachable = exact
+                    .locks
+                    .contains(WIDTH, lock.rotation, lock.x, lock.lock_y);
+                assert_eq!(
+                    reachable, scalar,
+                    "subset {subset:b}, operation {operation}"
+                );
+                if reachable {
+                    accelerated[subset] |= 1 << operation;
+                }
+            }
+        }
+    }
+    // I and L are reachable first, but only T→I→L and T→L→I can
+    // reach the all-cleared subset. The guard never crosses the I+L frame.
+    assert_eq!(oracle, [0b111, 0b110, 0b100, 0b100, 0b010, 0b010, 0, 0]);
+    assert_eq!(accelerated, oracle);
+    assert_eq!(certified_prefixes, (1 << I_ONLY) | (1 << L_ONLY));
 }
