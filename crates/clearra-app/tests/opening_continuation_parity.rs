@@ -1,9 +1,10 @@
 //! Product-level parity for the smallest native/Rust next-PC handoff.
 use clearra_app::{
     AppCommand, AppContext, AppCoreExecutorService, AppRenderModel, AppRequest, AppResponse,
-    AppServices, AppStatus, ContinueAppCommand, PcAppCommand,
+    AppServices, AppStatus, ContinueAppCommand, CooperativeAppAdvance, PcAppCommand,
+    PcPathIngressOrigin, PcResultProjection, ProductCapabilityContract,
 };
-use clearra_core_domain::pc::pc_target::PcTarget;
+use clearra_core_domain::{execution_cancellation::ExecutionControl, pc::pc_target::PcTarget};
 use clearra_core_executor::CoreExecutionResult;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcContinuationToken, PcContinuationTokenCodec, PcCountPolicy,
@@ -16,6 +17,10 @@ fn rust_context() -> AppContext {
 }
 
 fn request(queue: &str, hold: PcHoldPolicy) -> AppRequest {
+    AppRequest::new(AppCommand::Pc(opening_command(queue, hold)))
+}
+
+fn opening_command(queue: &str, hold: PcHoldPolicy) -> PcAppCommand {
     let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
         .with_queue(PcQueueInput::fixed_sequence(
             parse_fixed_sequence(queue).unwrap(),
@@ -28,7 +33,7 @@ fn request(queue: &str, hold: PcHoldPolicy) -> AppRequest {
                 .with_workers(1)
                 .with_allow_backend_fallback(false),
         );
-    AppRequest::new(AppCommand::Pc(PcAppCommand::new(query)))
+    PcAppCommand::new(query)
 }
 
 fn pc_result(response: &AppResponse) -> &CoreExecutionResult {
@@ -146,4 +151,94 @@ fn fixed_no_hold_opening_continuation_omits_unproven_handoffs() {
 
     let hold = rust.run(request("IIOOOIIOOO", PcHoldPolicy::EnabledEmpty));
     assert_eq!(pc_result(&hold).field("continuation_token"), None);
+}
+
+fn complete_cooperatively(context: &AppContext, request: AppRequest) -> AppResponse {
+    let mut execution = context.start_cooperative_execution(request);
+    let control = ExecutionControl::default();
+    for _ in 0..4096 {
+        match execution.advance(64, &control) {
+            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+            CooperativeAppAdvance::Completed(response) => return response,
+            other => panic!("unexpected cooperative outcome: {other:?}"),
+        }
+    }
+    panic!("bounded cooperative Opening fixture did not finish")
+}
+
+#[test]
+fn fixed_no_hold_opening_continuation_matches_cooperative_pc2_only_for_ordinary_pc() {
+    let rust = rust_context();
+    let request = request("IIOOOIIOOO", PcHoldPolicy::Disabled);
+    let direct = rust.run(request.clone());
+    let cooperative = complete_cooperatively(&rust, request);
+    let direct = pc_result(&direct);
+    let cooperative = pc_result(&cooperative);
+    assert_eq!(
+        cooperative.bool_field("continuation_token_available"),
+        Some(true)
+    );
+    for field in [
+        "continuation_token",
+        "continuation_token_version",
+        "remaining_queue_len",
+        "remaining_queue_preview",
+        "normalized_solution_set_hash",
+        "covered_pattern_count",
+        "count_complete",
+    ] {
+        assert_eq!(cooperative.field(field), direct.field(field), "{field}");
+    }
+
+    let typed_path = AppRequest::new(AppCommand::Pc(
+        opening_command("IIOOOIIOOO", PcHoldPolicy::Disabled).with_result_projection(
+            PcResultProjection::PathFamilyV2(PcPathIngressOrigin::CanonicalPcPath),
+        ),
+    ))
+    .with_product_capability_contract(ProductCapabilityContract::PcPath)
+    .unwrap();
+    let path = complete_cooperatively(&rust, typed_path);
+    assert_eq!(pc_result(&path).field("continuation_token"), None);
+    assert!(path
+        .product_capability_result()
+        .unwrap()
+        .pc_path_family_v2()
+        .unwrap()
+        .completeness()
+        .complete());
+}
+
+#[test]
+fn fixed_no_hold_opening_continuation_is_not_published_after_cooperative_cancellation() {
+    use clearra_core_domain::execution_cancellation::{
+        ExecutionCancellationHandle, ExecutionCancellationToken, ExecutionProgress, ProgressSink,
+    };
+    use std::sync::Arc;
+
+    struct CancelBeforePublication(ExecutionCancellationHandle);
+    impl ProgressSink for CancelBeforePublication {
+        fn report(&self, progress: ExecutionProgress) {
+            if progress.stage == "postprocess" && progress.completed == 1 {
+                self.0.cancel();
+            }
+        }
+    }
+    let rust = rust_context();
+    let mut execution =
+        rust.start_cooperative_execution(request("IIOOOIIOOO", PcHoldPolicy::Disabled));
+    let token = ExecutionCancellationToken::new();
+    let handle = token.handle();
+    let control = ExecutionControl::new(token)
+        .with_progress_sink(Arc::new(CancelBeforePublication(handle.clone())));
+    for _ in 0..4096 {
+        match execution.advance(64, &control) {
+            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+            CooperativeAppAdvance::Cancelled => {
+                assert!(handle.is_cancelled());
+                return;
+            }
+            other => panic!("cancelled Opening must not publish a result: {other:?}"),
+        }
+    }
+    panic!("cooperative Opening did not reach the cancellation boundary")
 }

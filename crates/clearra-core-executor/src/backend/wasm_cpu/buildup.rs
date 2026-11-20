@@ -1092,7 +1092,7 @@ impl BuildUpWorkspace {
 
 pub(super) struct CandidateProjection {
     #[cfg(any(test, feature = "local-search-ab"))]
-    shared_row_conditions: Option<super::placement_conditions::RowConditions>,
+    shared_row_conditions: Option<super::placement_conditions::GroupedClearConditions>,
     operation_cells: [u64; super::MAX_BOARD64_PIECES],
     operation_count: u8,
     row_contributors: [u16; 16],
@@ -1168,8 +1168,7 @@ pub(super) fn checked_candidate_verification_peak_upper_bound(
         StandardBagCoverage::checked_cursor_transition_retained_bytes(universe)?;
     #[cfg(any(test, feature = "local-search-ab"))]
     let row_condition_bytes = if super::placement_dependency::enabled() {
-        core::mem::size_of::<super::placement_conditions::RowConditions>()
-            + core::mem::size_of_val(candidate.row_ids())
+        core::mem::size_of::<Option<super::placement_conditions::GroupedClearConditions>>()
     } else {
         0
     };
@@ -1235,7 +1234,16 @@ impl CandidateProjection {
         }
         let mut completed_target_rows = 0_u16;
         let mut final_board = catalog.initial_board();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let mut group_admitted =
+            super::placement_dependency::enabled() && catalog.placement_conditions().is_some();
         for &cells in operation_cells.iter().take(operation_count) {
+            #[cfg(any(test, feature = "local-search-ab"))]
+            if group_admitted && final_board & cells != 0 {
+                // Keep the old specialization gate: duplicate or
+                // overlapping operations cannot prove a row conjunction.
+                group_admitted = false;
+            }
             final_board |= cells;
         }
         for row in 0..catalog.height() as usize {
@@ -1257,23 +1265,23 @@ impl CandidateProjection {
             workspace.projection_generation = 1;
         }
         #[cfg(any(test, feature = "local-search-ab"))]
-        let shared_row_conditions = super::placement_dependency::enabled()
-            .then(|| {
-                catalog
-                    .placement_conditions()
-                    .and_then(|conditions| conditions.specialize(candidate.row_ids()))
-            })
-            .flatten()
-            .filter(|conditions| {
-                conditions.operation_count() == operation_count
-                    && conditions.selected_rows() == candidate.row_ids()
-            });
+        let shared_row_conditions = if group_admitted {
+            // These facts belong to this exact candidate and operation
+            // order. Group them directly instead of looking up every row
+            // again and retaining a second copy of the selected IDs.
+            super::placement_conditions::GroupedClearConditions::from_completed_rows(
+                &row_contributors[..usize::from(catalog.height())],
+                completed_target_rows,
+            )
+        } else {
+            None
+        };
         #[cfg(any(test, feature = "local-search-ab"))]
         if let Some(conditions) = &shared_row_conditions {
             super::placement_dependency::record(|m| {
                 m.row_conditions_specialized += 1;
                 m.row_condition_groups += conditions.group_count() as u64;
-                m.completed_row_events += u64::from(conditions.completed_row_count());
+                m.completed_row_events += u64::from(conditions.completed_rows().count_ones());
                 m.atomic_row_groups += conditions.atomic_group_count() as u64;
                 m.row_condition_peak_bytes = m
                     .row_condition_peak_bytes
@@ -1357,6 +1365,126 @@ impl CandidateProjection {
         self.physical_boards[subset] = board;
         self.state_generations[subset] = self.generation;
         true
+    }
+}
+
+#[cfg(test)]
+mod candidate_projection_clear_fact_reuse_tests {
+    use super::*;
+
+    #[test]
+    fn candidate_projection_clear_fact_reuse_matches_concrete_subsets_and_scalar_rows() {
+        let ((selected, owned_groups), metrics) =
+            super::super::placement_dependency::with_mode(true, || {
+                let initial = 0x0033;
+                let catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+                    4, 4, initial, 0xffcc,
+                )
+                .unwrap();
+                let rows = [0x3300, 0x00cc, 0xcc00]
+                    .map(|cells| catalog.skeleton_id(PieceKind::O, cells).unwrap());
+                let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+                let mut workspace = BuildUpWorkspace::default();
+                let mut projection = CandidateProjection::compile(
+                    &catalog,
+                    &candidate,
+                    &mut workspace,
+                    BuildCompletion::ClearToEmpty,
+                )
+                .unwrap();
+                let selected: Vec<_> = candidate
+                    .row_ids()
+                    .iter()
+                    .map(|&row_id| catalog.skeleton(row_id).cells)
+                    .collect();
+                let grouped = projection.shared_row_conditions.as_ref().unwrap();
+                let owned_groups = grouped.groups().collect::<Vec<_>>();
+                let independent = catalog
+                    .placement_conditions()
+                    .unwrap()
+                    .specialize(candidate.row_ids())
+                    .unwrap();
+                for subset in 0..(1 << selected.len()) {
+                    let logical =
+                        selected
+                            .iter()
+                            .enumerate()
+                            .fold(initial, |board, (i, &cells)| {
+                                if subset & (1 << i) == 0 {
+                                    board
+                                } else {
+                                    board | cells
+                                }
+                            });
+                    let mut deleted = 0_u16;
+                    let mut physical = 0_u64;
+                    let mut destination_row = 0;
+                    for row in 0..4 {
+                        let cells = (logical >> (row * 4)) & 0xf;
+                        if cells == 0xf {
+                            deleted |= 1 << row;
+                        } else {
+                            physical |= cells << (destination_row * 4);
+                            destination_row += 1;
+                        }
+                    }
+                    assert_eq!(independent.deleted_rows(subset as u16), deleted);
+                    assert_eq!(projection.state(subset), (physical, deleted));
+                }
+                (selected, owned_groups)
+            });
+        let bottom = 1_u16 << selected.iter().position(|&cells| cells == 0x00cc).unwrap();
+        assert_eq!(owned_groups, [(bottom, 0b0011), (0b111 ^ bottom, 0b1100)]);
+        assert_eq!(metrics.row_conditions_specialized, 1);
+        assert_eq!(metrics.atomic_row_groups, 2);
+        assert_eq!(metrics.row_condition_peak_bytes, 0);
+    }
+
+    #[test]
+    fn candidate_projection_clear_fact_reuse_still_rejects_initial_full_rows() {
+        for enabled in [false, true] {
+            super::super::placement_dependency::with_mode(enabled, || {
+                let catalog =
+                    GeometryCatalog::compile_for_required_cells_on_dimensions(4, 4, 0x000f, 0x0330)
+                        .unwrap();
+                let row = catalog.skeleton_id(PieceKind::O, 0x0330).unwrap();
+                let candidate = GeometryCandidate::from_rows(&catalog, 0, &[row]).unwrap();
+                let mut workspace = BuildUpWorkspace::default();
+                assert!(matches!(
+                    CandidateProjection::compile(
+                        &catalog,
+                        &candidate,
+                        &mut workspace,
+                        BuildCompletion::ClearToEmpty
+                    ),
+                    Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_initial_full_row_requires_preclear_normalization"
+                    ))
+                ));
+            });
+        }
+    }
+
+    #[test]
+    fn candidate_projection_clear_fact_reuse_respects_catalog_admission() {
+        let (catalog, _) = super::super::placement_dependency::with_mode(false, || {
+            GeometryCatalog::compile_for_required_cells_on_dimensions(4, 4, 0x0033, 0x00cc).unwrap()
+        });
+        let (_, metrics) = super::super::placement_dependency::with_mode(true, || {
+            let row = catalog.skeleton_id(PieceKind::O, 0x00cc).unwrap();
+            let candidate = GeometryCandidate::from_rows(&catalog, 0, &[row]).unwrap();
+            let mut workspace = BuildUpWorkspace::default();
+            let mut projection = CandidateProjection::compile(
+                &catalog,
+                &candidate,
+                &mut workspace,
+                BuildCompletion::ClearToEmpty,
+            )
+            .unwrap();
+            assert!(projection.shared_row_conditions.is_none());
+            assert_eq!(projection.state(1), (0, 0b11));
+        });
+        assert_eq!(metrics.row_conditions_specialized, 0);
     }
 }
 

@@ -9,6 +9,7 @@ use minimum_finalize::{
 };
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_core_executor::service::pc_continuation_fields::PreparedFixedNoHold2lOpeningContinuation;
 use clearra_core_executor::{
     CoreExecutionError, PcFailedQueueEvidence, WasmBuildProbabilityAdvance,
     WasmBuildProbabilitySession, WasmCpuSearchAdvance, WasmCpuSearchError, WasmCpuSearchSession,
@@ -258,6 +259,7 @@ impl CooperativePostprocessExecution {
                     result_projection: projection,
                     ..
                 } => projection.projection().is_standard(),
+                CooperativeSearchResponseKind::PcOpeningContinuation(_) => true,
                 _ => false,
             }
     }
@@ -725,6 +727,7 @@ impl CooperativePcScoreProduct {
 
 pub(crate) enum CooperativeSearchResponseKind {
     Pc(ValidatedPcResultProjection),
+    PcOpeningContinuation(Box<PreparedFixedNoHold2lOpeningContinuation>),
     PcFailedQueue {
         authority: PcFailedQueueCompiledAuthority,
     },
@@ -1443,6 +1446,23 @@ impl AppContext {
                     finite_caller_generation: None,
                 }
             }
+        };
+        // Only this local driver created the session that proves the result.
+        // Do not prepare continuation authority in compile_search_command:
+        // distributed compatibility completions also call that compiler.
+        let response_kind = match response_kind {
+            CooperativeSearchResponseKind::Pc(projection)
+                if projection.projection().is_standard()
+                    && product_capability_contract.is_none() =>
+            {
+                match PreparedFixedNoHold2lOpeningContinuation::prepare(&problem) {
+                    Some(prepared) => {
+                        CooperativeSearchResponseKind::PcOpeningContinuation(Box::new(prepared))
+                    }
+                    None => CooperativeSearchResponseKind::Pc(projection),
+                }
+            }
+            other => other,
         };
         let pc_score_external_retained_upper_bound_bytes =
             match checked_cooperative_pc_score_external_retained_upper_bound_bytes(
@@ -2734,6 +2754,13 @@ impl CooperativeAppExecution {
             .core_executor()
             .postprocess_search_result(result, control);
         control.report_progress("postprocess", 1, Some(1));
+        if matches!(
+            &postprocess.response_kind,
+            CooperativeSearchResponseKind::PcOpeningContinuation(_)
+        ) && control.is_cancelled()
+        {
+            return CooperativeAppAdvance::Cancelled;
+        }
         let response = match result {
             Ok(result) => response_from_search(postprocess.response_kind, result),
             Err(CoreExecutionError::Cancelled) => return CooperativeAppAdvance::Cancelled,
@@ -4265,6 +4292,9 @@ pub(crate) fn response_from_search_with_build_score_derivation(
         CooperativeSearchResponseKind::Pc(result_projection) => AppResponse::success(
             AppRenderModel::Pc(project_pc_allspin_result(result, result_projection)),
         ),
+        CooperativeSearchResponseKind::PcOpeningContinuation(prepared) => {
+            AppResponse::success(AppRenderModel::Pc(prepared.attach(result)))
+        }
         CooperativeSearchResponseKind::PcChance {
             authority,
             expected_problem,

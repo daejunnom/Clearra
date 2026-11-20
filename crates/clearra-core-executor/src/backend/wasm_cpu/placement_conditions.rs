@@ -341,6 +341,7 @@ impl PlacementConditionCatalog {
     /// Bind catalog variables to distinct, nonoverlapping selected operations.
     /// The returned formula uses execution bits in the input's order. Selection
     /// alone never marks a contributor as executed.
+    #[cfg(test)]
     pub(super) fn specialize(&self, row_ids: &[u32]) -> Option<RowConditions> {
         if row_ids.is_empty()
             || row_ids.len() > super::MAX_BOARD64_PIECES
@@ -463,6 +464,22 @@ impl GroupedClearConditions {
         &self.groups[..self.group_count as usize]
     }
 
+    pub(super) fn group_count(&self) -> usize {
+        self.active_groups().len()
+    }
+
+    pub(super) fn atomic_group_count(&self) -> usize {
+        self.active_groups()
+            .iter()
+            .filter(|group| group.rows.count_ones() > 1)
+            .count()
+    }
+
+    /// Inline groups have no additional retained heap payload.
+    pub(super) const fn retained_bytes(&self) -> usize {
+        0
+    }
+
     /// Yields `(concrete contributor mask, atomic original-row mask)`.
     pub(super) fn groups(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
         self.active_groups()
@@ -537,12 +554,14 @@ impl GroupedClearConditions {
 }
 
 /// Binds the grouped conjunctions to the selected canonical row identities.
+#[cfg(test)]
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct RowConditions {
     selected_rows: Vec<u32>,
     grouped: GroupedClearConditions,
 }
 
+#[cfg(test)]
 impl RowConditions {
     pub(super) fn operation_count(&self) -> usize {
         self.selected_rows.len()
@@ -553,15 +572,11 @@ impl RowConditions {
     }
 
     pub(super) fn group_count(&self) -> usize {
-        self.grouped.active_groups().len()
+        self.grouped.group_count()
     }
 
     pub(super) fn atomic_group_count(&self) -> usize {
-        self.grouped
-            .active_groups()
-            .iter()
-            .filter(|group| group.rows.count_ones() > 1)
-            .count()
+        self.grouped.atomic_group_count()
     }
 
     pub(super) fn completed_row_count(&self) -> u32 {
@@ -581,11 +596,6 @@ impl RowConditions {
     #[cfg(test)]
     pub(super) fn clear_delta(&self, before: u16, after: u16) -> u16 {
         self.deleted_rows(after) & !self.deleted_rows(before)
-    }
-
-    /// Additional heap payload only. The grouped rows are inline in `Self`.
-    pub(super) fn retained_bytes(&self) -> usize {
-        self.selected_rows.capacity() * core::mem::size_of::<u32>()
     }
 }
 
