@@ -355,3 +355,35 @@ expected peak resident-memory savings. Comparing exact
 use receipt-level evidence to report execution time, peak memory and
 ordered output identity. It does not attribute an end-to-end delta
 to any one change.
+
+The serial native-host comparison completed four clean slots for
+each fixture. All slots matched the actual worker width, complete
+count and ordered canonical key digest; direct receipt checks also
+found the same coverage digest in each fixture's four slots.
+
+| Fixture | Workers | Mean solver time A → B | Max sampled solver time A → B | Peak solver RSS A → B |
+| --- | ---: | ---: | ---: | ---: |
+| Existing 4L field, P7 | 2 | 18.156 → 16.375 ms | 18.430 → 18.583 ms | 17.62 → 9.75 MiB |
+| Existing 4L field, P7 | 8 | 18.428 → 11.859 ms | 19.662 → 12.015 ms | 48.38 → 17.88 MiB |
+| Empty SRS+ 4L, P7P4 | 8 | 103.262 → 99.251 s | 106.021 → 99.499 s | 4,477.79 → 4,631.34 MiB |
+
+A was `f6d3a800cbdc615da75b488f07a63da25ae9ab85` and B was
+`1f95ec89281a3c61a64ad3f65823addb8b0215f9`. Both pinned examples
+executed the same Rust CPU route on one host; the example's retained
+C comparison linkage was not a product dependency or measured solver.
+The ordered digests for the 246-key and 456,923-key fixtures were
+`b54515c71970a04fd3a159dcb1d5af4e2f21a069ba629405a5fe432fd641e118`
+and `8fda9566962e9235a4fa2a1497db2b7b88e94ec375e1bd9077382aee631afa6f`.
+The full receipts are local generated evidence under
+`_local/artifacts/benchmarks/native-rust-family/rust-reuse-abba-1f95ec89/`.
+
+Neither the 2-worker maximum nor the full-input memory peak supports
+a blanket non-regression claim. The latter rose by 3.43% even as the
+mean time fell by 3.88%. A saturated lazy reachability cache adds only
+the 6 KiB payload directory per initialized worker to its direct
+retention; that accounting neither explains the RSS delta nor rules
+out allocator or worker-lifetime effects. Continue by isolating the
+lazy cache, unchanged-node reuse and canonical string move with
+adjacent pinned revisions. Keep independent memory containment and
+work equality for each ablation. None of these measurements is
+published Pages, Apple/Windows hardware, or release acceptance evidence.
