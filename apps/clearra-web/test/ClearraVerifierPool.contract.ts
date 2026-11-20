@@ -1161,7 +1161,8 @@ class ControlledFinishVerifierWorker extends FakeVerifierWorker {
 }
 
 async function controlledFinishPool(owner: string) {
-  const authority = await DurableDelegationAuthority.recover(new MemoryDelegationJournal());
+  const journal = new MemoryDelegationJournal();
+  const authority = await DurableDelegationAuthority.recover(journal);
   const workers: ControlledFinishVerifierWorker[] = [];
   const pool = new ClearraVerifierPool(() => {
     const worker = new ControlledFinishVerifierWorker(workers.length + 1);
@@ -1169,7 +1170,7 @@ async function controlledFinishPool(owner: string) {
     return worker as unknown as Worker;
   }, { delegationAuthority: authority });
   await bounded(`${owner} initialize`, pool.initialize(new ArrayBuffer(0), 2, undefined, owner));
-  return { pool, workers, authority };
+  return { pool, workers, authority, journal };
 }
 
 {
@@ -1212,24 +1213,32 @@ async function controlledFinishPool(owner: string) {
   assert.deepEqual(applied, [1, 2], 'each sealed final result is applied exactly once');
 }
 
-for (const cancelPending of [false, true]) {
-  const { pool, workers, authority } = await controlledFinishPool(`serialized-finish-${cancelPending}`);
+for (const outcomeKind of ['complete', 'cancel', 'fail'] as const) {
+  const { pool, workers, authority, journal } = await controlledFinishPool(`serialized-finish-${outcomeKind}`);
   const applied: number[] = [];
   const commitStarted = signal();
   const releaseCommit = signal();
   const bothSealed = signal();
+  const secondClosed = signal();
   const originalResultApplied = authority.resultAppliedAndCompleted.bind(authority);
   const originalResultSealed = authority.resultSealed.bind(authority);
-  let sealedCount = 0;
+  const originalFailedClosed = authority.failedClosed.bind(authority);
+  const sealedTasks: string[] = [];
   let commitCount = 0;
   authority.resultSealed = async (...args) => {
     await originalResultSealed(...args);
-    if (++sealedCount === 2) bothSealed.resolve();
+    sealedTasks.push(args[0].taskId);
+    if (sealedTasks.length === 2) bothSealed.resolve();
+  };
+  authority.failedClosed = async (token, reason) => {
+    await originalFailedClosed(token, reason);
+    if (token.taskId === sealedTasks[1]) secondClosed.resolve();
   };
   authority.resultAppliedAndCompleted = async (token) => {
     if (++commitCount === 1) {
       commitStarted.resolve();
       await releaseCommit.promise;
+      if (outcomeKind === 'fail') throw new Error('synthetic first durable commit failure');
     }
     await originalResultApplied(token);
   };
@@ -1244,13 +1253,18 @@ for (const cancelPending of [false, true]) {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(applied, [1], 'the second immutable result waits for the first durable commit');
   assert.equal(commitCount, 1);
-  if (cancelPending) pool.cancel();
+  if (outcomeKind === 'cancel') pool.cancel();
   releaseCommit.resolve();
   const outcome = await bounded('serialized final commit settles', result);
-  if (cancelPending) {
+  if (outcomeKind !== 'complete') {
     assert.ok('error' in outcome && outcome.error instanceof Error);
-    assert.match(outcome.error.message, /cancelled/);
-    assert.deepEqual(applied, [1], 'a stale generation never applies queued final results');
+    assert.match(outcome.error.message,
+      outcomeKind === 'cancel' ? /cancelled/ : /synthetic first durable commit failure/);
+    assert.deepEqual(applied, [1], 'an abandoned final result is not applied');
+    await bounded('the abandoned sealed result fails closed', secondClosed.promise);
+    const secondEvents = (await journal.load()).filter((event) => event.taskId === sealedTasks[1]);
+    assert.equal(secondEvents.at(-1)?.phase, 'failed-closed');
+    assert.ok(!secondEvents.some((event) => ['result-applied', 'completed'].includes(event.phase)));
   } else {
     assert.deepEqual(outcome, { count: 2 });
     assert.deepEqual(applied, [1, 2]);

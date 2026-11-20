@@ -1301,7 +1301,7 @@ export class ClearraVerifierPool {
     const finished = await Promise.all(
       this.clients.map(async (client) => {
         try {
-          const value = await this.finishClient(client, generation);
+          const value = await client.finish();
           // A sealed worker result can be merged while siblings still finalize.
           // Keep coordinator mutation and durable receipts in one ordered queue;
           // a rejected commit poisons the queue instead of applying later results.
@@ -1498,7 +1498,6 @@ export class ClearraVerifierPool {
     let client = initialClient;
     try {
       const result = await client.consume(batch);
-      this.assertActive(generation);
       await this.commitResult(result.sealed, consumePartial, generation);
     } finally {
       if (generation === this.generation) {
@@ -1508,28 +1507,30 @@ export class ClearraVerifierPool {
     }
   }
 
-  private async finishClient(
-    initialClient: VerifierClient,
-    generation: number
-  ): Promise<DelegatedVerifierResponse> {
-    const result = await initialClient.finish();
-    this.assertActive(generation);
-    return result;
-  }
-
   private commitResult(
     result: DelegatedVerifierResponse,
     consumePartial: (partial: ArrayBuffer) => void,
     generation: number
   ): Promise<void> {
+    // Once the worker hands a sealed result to the pool, release() can no
+    // longer find it in the client's pending requests. Reject stale results
+    // before reading the current generation's mutation tail, but still close
+    // the old result's exact token.
+    try {
+      this.assertActive(generation);
+    } catch (error) {
+      return rejectSealedVerifierResult(result, error);
+    }
     const committed = this.resultCommitTail.then(async () => {
       this.assertActive(generation);
       await applySealedVerifierResult(result, consumePartial, () => this.assertActive(generation));
       this.assertActive(generation);
-    });
+    }).catch((error) => rejectSealedVerifierResult(result, error));
     // One coordinator mutation queue spans consume and finish. Host yielding
     // must not interleave two sealed results or turn a failed application into
-    // permission to apply a later result from the same generation.
+    // permission to apply a later result from the same generation. Close each
+    // result's own receipt even when a rejected predecessor prevents its
+    // callback from running.
     this.resultCommitTail = committed;
     return committed;
   }
@@ -1816,33 +1817,38 @@ async function applySealedVerifierResult(
   const { authority, token } = sealed.delegation;
   const decision = authority.resultApplicationDecision(token, sealed.resultSha256);
   if (decision === 'already-applied') return;
-  try {
-    const applying = sealed.delegation.profile.start('result_apply', sealed.delegation.operation);
-    let quantumStarted = performance.now();
-    for (let index = 0; index < sealed.partials.length; index += 1) {
-      requireCurrentOwner();
-      commitPartial(consumePartial, sealed.partials[index]);
-      if (index + 1 < sealed.partials.length && performance.now() - quantumStarted >= MERGE_HOST_QUANTUM_MS) {
-        // Durable result application remains exactly once. Only host message
-        // handling may interleave between bounded wire chunks, and the same
-        // generation must still own the next chunk and terminal journal ACK.
-        await yieldMergerToHost();
-        quantumStarted = performance.now();
-      }
-    }
+  const applying = sealed.delegation.profile.start('result_apply', sealed.delegation.operation);
+  let quantumStarted = performance.now();
+  for (let index = 0; index < sealed.partials.length; index += 1) {
     requireCurrentOwner();
-    applying();
-    // These two profiling intervals intentionally overlap: the two durable
-    // events now share one terminal commit, never two independent ACKs.
-    await sealed.delegation.profile.measure('completed', sealed.delegation.operation, () =>
-      sealed.delegation.profile.measure('result_applied', sealed.delegation.operation, () =>
-        authority.resultAppliedAndCompleted(token)));
-  } catch (error) {
-    try {
-      await authority.failedClosed(token, `immutable result application failed: ${asError(error).message}`);
-    } catch {
-      // The original merger or journal failure remains authoritative.
+    commitPartial(consumePartial, sealed.partials[index]);
+    if (index + 1 < sealed.partials.length && performance.now() - quantumStarted >= MERGE_HOST_QUANTUM_MS) {
+      // Durable result application remains exactly once. Only host message
+      // handling may interleave between bounded wire chunks, and the same
+      // generation must still own the next chunk and terminal journal ACK.
+      await yieldMergerToHost();
+      quantumStarted = performance.now();
     }
-    throw error;
   }
+  requireCurrentOwner();
+  applying();
+  // These two profiling intervals intentionally overlap: the two durable
+  // events now share one terminal commit, never two independent ACKs.
+  await sealed.delegation.profile.measure('completed', sealed.delegation.operation, () =>
+    sealed.delegation.profile.measure('result_applied', sealed.delegation.operation, () =>
+      authority.resultAppliedAndCompleted(token)));
+}
+
+async function rejectSealedVerifierResult(
+  sealed: DelegatedVerifierResponse,
+  error: unknown
+): Promise<never> {
+  const { authority, token } = sealed.delegation;
+  try {
+    await authority.failedClosed(token, `immutable result application failed: ${asError(error).message}`);
+  } catch {
+    // Preserve the original merger or journal failure; recovery owns any
+    // cleanup the journal itself could not persist.
+  }
+  throw error;
 }
