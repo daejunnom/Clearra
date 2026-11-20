@@ -141,11 +141,16 @@ jobs:
           status=0
           cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core \
             --test legacy_cover_native_witness --test pc_tiling_control_parity --no-fail-fast || status=1
-          cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_tests || status=1
-          cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_rust::tests:: || status=1
-          cargo test --locked -p clearra-app --features native-c-core --lib pc_tiling_candidate_budget_preserves_failure_without_publishing || status=1
-          cargo test --locked -p clearra-app --features native-c-core --lib setup_score_ordinals || status=1
-          cargo test --locked -p clearra-app --features native-c-core --lib setup_score_evaluation_identity_binds || status=1
+          # These selectors share one lib-test executable. A compile failure
+          # prevents all of them, but does not prevent the integration tests.
+          app_lib=(cargo test --locked -p clearra-app --features native-c-core --lib)
+          if "${app_lib[@]}" --no-run; then
+            for filter in legacy_cover_tests legacy_cover_rust::tests:: pc_tiling_candidate_budget_preserves_failure_without_publishing setup_score_ordinals setup_score_evaluation_identity_binds; do
+              "${app_lib[@]}" "$filter" || status=1
+            done
+          else
+            status=1
+          fi
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
           cargo test --locked -p clearra-app --features native-c-core --test exact_accelerator_product_execution setup_score_reuse || status=1
           exit "$status"

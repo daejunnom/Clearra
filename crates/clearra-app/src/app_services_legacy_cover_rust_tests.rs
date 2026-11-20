@@ -172,7 +172,7 @@ fn rust_legacy_cover_truncated_prefix_admission_preserves_scope_and_cancellation
     let query = exact_four_line_witness(1);
     let legacy = compile(&query);
     let token = ExecutionCancellationToken::new();
-    token.cancel();
+    token.handle().cancel();
     assert!(matches!(
         execute_truncated_source_exact_prefix(&legacy, &query, &ExecutionControl::new(token)),
         Err(RustLegacyCoverCandidateError::Cancelled)
@@ -199,7 +199,7 @@ fn rust_legacy_cover_does_not_expand_ordinal_scope_or_clear_cancellation() {
         Err(RustLegacyCoverCandidateError::UnsupportedAuthority)
     ));
     let token = ExecutionCancellationToken::new();
-    token.cancel();
+    token.handle().cancel();
     assert!(matches!(
         execute_single_ordinal_candidate(&problem, &query, &ExecutionControl::new(token)),
         Err(RustLegacyCoverCandidateError::Cancelled)
