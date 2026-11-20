@@ -831,12 +831,27 @@ mod run {
             {
                 errors.push("eight-I canonical identities differ from the rectangle oracle".into());
             }
-            if result.usize_field("coverage_pattern_count") != Some(1)
-                || result.usize_field("covered_pattern_count") != Some(1)
-                || result.bool_field("coverage_complete") != Some(true)
-                || result.coverage_pattern_words() != [1]
+            // This compact CPU result exposes coverage_calculated and
+            // probability_complete (checked above), not coverage_complete.
+            // Its exact universe and bitmap prove completion of coverage.
+            let calculated = result.bool_field("coverage_calculated");
+            let patterns = result.usize_field("coverage_pattern_count");
+            let covered = result.usize_field("covered_pattern_count");
+            let probability = result
+                .field("coverage_probability")
+                .and_then(|value| value.parse::<f64>().ok());
+            let words = result.coverage_pattern_words();
+            if calculated != Some(true)
+                || patterns != Some(1)
+                || covered != Some(1)
+                || probability != Some(1.0)
+                || words != [1]
             {
-                errors.push("eight-I must completely cover its only fixed queue".into());
+                errors.push(format!(
+                    "eight-I must completely cover its only fixed queue: calculated={calculated:?}, patterns={patterns:?}, covered={covered:?}, probability={probability:?}, words={}, first word={:?}",
+                    words.len(),
+                    words.first(),
+                ));
             }
             // The compact fixture permits automatic topology admission to
             // use fewer workers than P7P4. --compare checks actual topology.
