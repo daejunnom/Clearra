@@ -1514,6 +1514,8 @@ fn verify_candidate_for_completion_mode(
         proofs.enabled = eligible && super::structural_order::movement_clear_certificates_enabled();
         proofs.first_kick_enabled =
             eligible && super::structural_order::first_kick_intervals_enabled();
+        proofs.ordered_kick_enabled =
+            eligible && super::structural_order::ordered_kick_intervals_enabled();
         if eligible && super::structural_order::enabled() {
             if let Some(result) = verify_certified_poset(
                 problem,
@@ -1594,6 +1596,8 @@ struct CandidateMovementProofs {
     #[cfg(any(test, feature = "local-search-ab"))]
     first_kick_enabled: bool,
     #[cfg(any(test, feature = "local-search-ab"))]
+    ordered_kick_enabled: bool,
+    #[cfg(any(test, feature = "local-search-ab"))]
     intervals: [Option<(
         super::placement_poset::MovementProofQuery,
         MovementProofSource,
@@ -1607,6 +1611,13 @@ struct CandidateMovementProofs {
 enum MovementProofSource {
     Poset,
     ConditionalOrder,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+enum PositiveEdgeProof {
+    Reused,
+    FirstKick,
+    OrderedKick,
 }
 
 #[cfg(any(test, feature = "local-search-ab"))]
@@ -3672,7 +3683,9 @@ impl BuildOrderGraph {
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut movement_metrics = super::structural_order::MovementClearMetrics::default();
         #[cfg(any(test, feature = "local-search-ab"))]
-        let mut first_kick_metrics = super::structural_order::FirstKickIntervalMetrics::default();
+        let mut first_kick_metrics = super::structural_order::KickIntervalMetrics::default();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let mut ordered_kick_metrics = super::structural_order::KickIntervalMetrics::default();
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut conditional_metrics = super::structural_order::ConditionalOrderMetrics::default();
         let mut subset_cursor = 0usize;
@@ -3760,8 +3773,8 @@ impl BuildOrderGraph {
                     let scratch_start = edge_scratch.len();
                     let mut harddrop_edge = None;
                     #[cfg(any(test, feature = "local-search-ab"))]
-                    // True labels a freshly proved first-kick edge. Retain
-                    // the label until we know no later raw hard-drop wins.
+                    // Retain the source until all hard-drop alternatives have
+                    // been considered, so the experiments count actual use.
                     let mut certified_edge = None;
                     for realization in catalog.instantiations(row_id, deleted_rows) {
                         // A normal lock must touch the floor or an occupied
@@ -3807,6 +3820,7 @@ impl BuildOrderGraph {
                         #[cfg(any(test, feature = "local-search-ab"))]
                         if (_movement_proofs.enabled
                             || _movement_proofs.first_kick_enabled
+                            || _movement_proofs.ordered_kick_enabled
                             || _movement_proofs.len != 0)
                             && certified_edge.is_none()
                         {
@@ -3825,7 +3839,7 @@ impl BuildOrderGraph {
                                             conditional_metrics.reused_pose_proofs += 1;
                                         }
                                     }
-                                    certified_edge = Some((edge, false));
+                                    certified_edge = Some((edge, PositiveEdgeProof::Reused));
                                 }
                                 Some((false, source)) => {
                                     match source {
@@ -3857,7 +3871,28 @@ impl BuildOrderGraph {
                                             )
                                         {
                                             first_kick_metrics.proofs += 1;
-                                            certified_edge = Some((edge, true));
+                                            certified_edge =
+                                                Some((edge, PositiveEdgeProof::FirstKick));
+                                            continue;
+                                        }
+                                    }
+                                    if _movement_proofs.ordered_kick_enabled && frame.is_some() {
+                                        ordered_kick_metrics.attempts += 1;
+                                        if workspace
+                                            .reachability
+                                            .try_prove_ordered_kick_lock_interval(
+                                                catalog,
+                                                board,
+                                                board,
+                                                row.piece,
+                                                profile,
+                                                realization,
+                                                frame,
+                                            )
+                                        {
+                                            ordered_kick_metrics.proofs += 1;
+                                            certified_edge =
+                                                Some((edge, PositiveEdgeProof::OrderedKick));
                                             continue;
                                         }
                                     }
@@ -3886,8 +3921,16 @@ impl BuildOrderGraph {
                     // positive proof can supply this Boolean operation edge.
                     #[cfg(any(test, feature = "local-search-ab"))]
                     let harddrop_edge = harddrop_edge.or_else(|| {
-                        certified_edge.map(|(edge, first_kick)| {
-                            first_kick_metrics.selected_locks += u64::from(first_kick);
+                        certified_edge.map(|(edge, proof)| {
+                            match proof {
+                                PositiveEdgeProof::Reused => {}
+                                PositiveEdgeProof::FirstKick => {
+                                    first_kick_metrics.selected_locks += 1;
+                                }
+                                PositiveEdgeProof::OrderedKick => {
+                                    ordered_kick_metrics.selected_locks += 1;
+                                }
+                            }
                             edge
                         })
                     });
@@ -4039,6 +4082,8 @@ impl BuildOrderGraph {
         super::structural_order::record_movement_clear(movement_metrics);
         #[cfg(any(test, feature = "local-search-ab"))]
         super::structural_order::record_first_kick_interval(first_kick_metrics);
+        #[cfg(any(test, feature = "local-search-ab"))]
+        super::structural_order::record_ordered_kick_interval(ordered_kick_metrics);
         #[cfg(any(test, feature = "local-search-ab"))]
         super::structural_order::record_conditional_order(conditional_metrics);
         #[cfg(any(test, feature = "local-search-ab"))]

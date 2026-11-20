@@ -733,9 +733,11 @@ fn count_all_same_current_and_held_piece_keeps_the_operation_graph() {
     };
     let (baseline, _) = structural_order::with_mode(false, run);
     let (treatment, metrics) = structural_order::with_conditional_order_mode(true, || {
-        structural_order::with_first_kick_interval_mode(true, || {
-            structural_order::with_movement_clear_mode(true, || {
-                structural_order::with_mode(true, run)
+        structural_order::with_ordered_kick_interval_mode(true, || {
+            structural_order::with_first_kick_interval_mode(true, || {
+                structural_order::with_movement_clear_mode(true, || {
+                    structural_order::with_mode(true, run)
+                })
             })
         })
     });
@@ -743,6 +745,7 @@ fn count_all_same_current_and_held_piece_keeps_the_operation_graph() {
     assert_eq!(metrics.skipped_build_graphs, 0);
     assert_eq!(metrics.movement_clear, Default::default());
     assert_eq!(metrics.first_kick_interval, Default::default());
+    assert_eq!(metrics.ordered_kick_interval, Default::default());
     assert_eq!(metrics.conditional_order, Default::default());
     assert_eq!(treatment.coverage_pattern_words(), &[1]);
     assert!(
@@ -753,6 +756,125 @@ fn count_all_same_current_and_held_piece_keeps_the_operation_graph() {
             .unwrap()
             > 1
     );
+}
+
+#[test]
+fn ordered_kick_certificate_reduces_primitive_search_for_a_later_raw_kick() {
+    use clearra_core_domain::{
+        piece::rotation::RotationState,
+        solution::normalized_tiling_solution::{PiecePlacementMask, StandardBoard64TilingIdentity},
+    };
+    use clearra_coverage::pattern::pattern_id::PatternId;
+    use clearra_rules::profile::builtin_rules::srs;
+
+    let _guard = product_guard();
+    use PieceKind::{L, T};
+    // Preserve the exact later-kick roof at original row one. L leaves the
+    // T Right entry column open, then fills it after T clears the bottom row.
+    let placements = [(T, 0x201c), (L, 0x01c0_1000)];
+    let (catalog, candidate) = fixture(3, &placements);
+    let board = catalog.initial_board();
+    assert_eq!(board, 0x3e3f_cfe3);
+    let profile = KickTableProfileId::Srs90;
+    let pieces: Vec<_> = candidate
+        .row_ids()
+        .iter()
+        .map(|&id| catalog.skeleton(id).piece)
+        .collect();
+    let transitions = physical_transitions(&catalog, &candidate, profile);
+    let words = operation_words(&pieces, &transitions);
+    assert!(
+        words.contains(&vec![T, L]),
+        "the independent oracle can finish T then L"
+    );
+
+    let target = catalog
+        .instantiations(catalog.skeleton_id(T, 0x201c).unwrap(), 0)
+        .find(|pose| pose.rotation == RotationState::Zero && pose.x == 2 && pose.lock_y == 0)
+        .unwrap();
+    let mut workspace = ReachabilityWorkspace::default();
+    workspace.configure_kick_profile(profile, false);
+    let frame = LocalRelationRowFrame::new(3, 0);
+    assert!(!workspace.lock_harddrop_reachable_instantiated(10, board, target));
+    assert!(!workspace
+        .try_prove_first_kick_lock_interval(&catalog, board, board, T, profile, target, frame,));
+    assert!(workspace
+        .try_prove_ordered_kick_lock_interval(&catalog, board, board, T, profile, target, frame,));
+    assert_eq!(workspace.generated_state_count(), 0);
+
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(3, board),
+        PcQueueInput::standard_7_bag(),
+        PieceWindow::new(2),
+    )
+    .with_rule(srs())
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(2))
+    .with_supply_window_size(SupplyWindowSize::new(2))
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+    .with_retained_trace_limit(0)
+    .with_execution_policy(policy());
+    let problem = ProblemCompiler::compile_scenario_pc(&query)
+        .unwrap()
+        .with_output_policy(SearchOutputPolicy::CoverageSummary);
+    let run = |first, ordered| {
+        structural_order::with_ordered_kick_interval_mode(ordered, || {
+            structural_order::with_first_kick_interval_mode(first, || {
+                structural_order::with_conditional_order_mode(false, || {
+                    structural_order::with_movement_clear_mode(false, || {
+                        structural_order::with_mode(false, || {
+                            placement_dependency::with_mode(false, || {
+                                WasmCpuSearchBackend::execute_with_control(
+                                    &problem,
+                                    &ExecutionControl::default(),
+                                )
+                                .unwrap()
+                            })
+                            .0
+                        })
+                    })
+                })
+            })
+        })
+    };
+    let (baseline, disabled) = run(false, false);
+    let (first_only, first) = run(true, false);
+    let (treatment, enabled) = run(false, true);
+    assert_parity(&baseline, &first_only);
+    assert_parity(&baseline, &treatment);
+    assert_eq!(disabled.ordered_kick_interval, Default::default());
+    assert_eq!(first.ordered_kick_interval, Default::default());
+    assert_eq!(enabled.first_kick_interval, Default::default());
+    let later = enabled.ordered_kick_interval;
+    assert!(later.attempts >= later.proofs);
+    assert!(later.proofs >= later.selected_locks && later.selected_locks > 0);
+    assert!(
+        treatment.usize_field("total_reachability_states").unwrap()
+            < baseline.usize_field("total_reachability_states").unwrap(),
+        "ordered-kick selection must replace actual primitive search",
+    );
+
+    let intended = StandardBoard64TilingIdentity::from_placements(
+        board,
+        placements.map(|(piece, cells)| PiecePlacementMask::new(piece, cells)),
+    )
+    .unwrap();
+    let coverage = treatment
+        .solution_coverages()
+        .iter()
+        .find(|entry| entry.identity() == intended)
+        .unwrap()
+        .covered_patterns();
+    let universe = problem.piece_source().materialized_universe().unwrap();
+    assert_eq!(universe.pattern_count(), 42);
+    for ordinal in 0..universe.pattern_count() {
+        assert_eq!(
+            coverage.contains(PatternId::new(ordinal)),
+            words.contains::<[PieceKind]>(universe.sequence_at(ordinal).as_ref()),
+            "later-kick target queue {ordinal}",
+        );
+    }
 }
 
 #[test]

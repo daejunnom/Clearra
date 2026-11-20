@@ -126,6 +126,8 @@ mod run {
             experiment_mode("CLEARRA_MOVEMENT_CLEAR_CERTIFICATES")?;
         let incremental_domain_mode = experiment_mode("CLEARRA_INCREMENTAL_DOMAIN")?;
         let first_kick_interval_mode = experiment_mode("CLEARRA_FIRST_KICK_INTERVAL")?;
+        let ordered_kick_interval_mode = experiment_mode("CLEARRA_ORDERED_KICK_INTERVAL")?;
+        let ilc_lazy_frame_mode = experiment_mode("CLEARRA_ILC_LAZY_FRAME")?;
         let conditional_order_mode = experiment_mode("CLEARRA_CONDITIONAL_ORDER")?;
         let terminal_identity_move_mode = experiment_mode("CLEARRA_TERMINAL_IDENTITY_MOVE")?;
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
@@ -274,6 +276,7 @@ mod run {
             "schema": "clearra.placement-graph-benchmark.v1",
             "case": if small { "one-I-preflight" } else { "empty-4L-P7P4-jstris180" },
             "binary_sha256": binary_sha,
+            "compiled_source_commit": option_env!("CLEARRA_SOURCE_COMMIT"),
             "supervisor_run_id": std::env::var("CLEARRA_RUNTIME_RUN_ID").ok(),
             "output_mode": if coverage_slot.is_some() { "solution-coverage" } else { "global-only" },
             "solution_coverage": solution_coverage,
@@ -284,9 +287,11 @@ mod run {
             "movement_clear_certificates_mode": movement_clear_certificates_mode,
             "incremental_domain_mode": incremental_domain_mode,
             "first_kick_interval_mode": first_kick_interval_mode,
+            "ordered_kick_interval_mode": ordered_kick_interval_mode,
+            "ilc_lazy_frame_mode": ilc_lazy_frame_mode,
             "conditional_order_mode": conditional_order_mode,
             "terminal_identity_move_mode": terminal_identity_move_mode,
-            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode}",
+            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},ordered_kick={ordered_kick_interval_mode},ilc_lazy_frame={ilc_lazy_frame_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode}",
                 variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode)),
             "static_influence": {
                 "scope": "completed search, workspace counters aggregated after worker joins; null means metric not exposed",
@@ -324,6 +329,11 @@ mod run {
                 "attempts": structural_totals.first_kick_interval.attempts,
                 "proofs": structural_totals.first_kick_interval.proofs,
                 "selected_locks": structural_totals.first_kick_interval.selected_locks
+            },
+            "ordered_kick_interval": {
+                "attempts": structural_totals.ordered_kick_interval.attempts,
+                "proofs": structural_totals.ordered_kick_interval.proofs,
+                "selected_locks": structural_totals.ordered_kick_interval.selected_locks
             },
             "conditional_order": {
                 "attempted_candidates": structural_totals.conditional_order.attempted_candidates,
@@ -898,17 +908,21 @@ mod run {
             let movement = extra_mode("movement_clear_certificates_mode")?;
             let incremental = extra_mode("incremental_domain_mode")?;
             let first_kick = extra_mode("first_kick_interval_mode")?;
+            let ordered_kick = extra_mode("ordered_kick_interval_mode")?;
+            let ilc_lazy_frame = extra_mode("ilc_lazy_frame_mode")?;
             let conditional = extra_mode("conditional_order_mode")?;
             let terminal_move = extra_mode("terminal_identity_move_mode")?;
             all_axes_times
                 .entry(format!(
-                    "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},conditional_order={conditional},terminal_identity_move={terminal_move}"
+                    "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ilc_lazy_frame={ilc_lazy_frame},conditional_order={conditional},terminal_identity_move={terminal_move}"
                 ))
                 .or_default()
                 .push(ms);
             if movement == "0"
                 && incremental == "0"
                 && first_kick == "0"
+                && ordered_kick == "0"
+                && ilc_lazy_frame == "0"
                 && conditional == "0"
                 && terminal_move == "0"
             {

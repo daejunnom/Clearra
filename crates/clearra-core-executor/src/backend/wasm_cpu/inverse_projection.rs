@@ -35,6 +35,50 @@ fn set_inverse_projection_policy(policy: InverseProjectionPolicy) -> InverseProj
     INVERSE_PROJECTION_POLICY.with(|current| current.replace(policy))
 }
 
+/// The geometry target's available rows and column capacities, independent of
+/// the piece, rotation and horizontal offset. A compact catalog owns one of
+/// these on its compiler stack rather than rebuilding it for each shape.
+pub(super) struct ProjectionAvailability {
+    width: u8,
+    height: u8,
+    rows: [u64; 32],
+    column_capacity: [u8; 64],
+}
+
+impl ProjectionAvailability {
+    pub(super) fn compile(
+        policy: InverseProjectionPolicy,
+        width: u8,
+        height: u8,
+        mut available_row: impl FnMut(u8) -> u64,
+    ) -> Option<Self> {
+        if policy != InverseProjectionPolicy::Early
+            || width == 0
+            || width > 64
+            || height == 0
+            || height > 32
+        {
+            return None;
+        }
+        let mut result = Self {
+            width,
+            height,
+            rows: [0; 32],
+            column_capacity: [0; 64],
+        };
+        for y in 0..height {
+            let mut columns = available_row(y);
+            result.rows[usize::from(y)] = columns;
+            while columns != 0 {
+                let column = columns.trailing_zeros() as usize;
+                columns &= columns - 1;
+                result.column_capacity[column] += 1;
+            }
+        }
+        Some(result)
+    }
+}
+
 /// Compatibility of each occupied local shape row with each target row.
 ///
 /// Bit y records only whether the cells already fixed by `(shape, x)` fit in
@@ -53,18 +97,23 @@ impl ProjectionRowFilter {
         cells: [ShapeCell; 4],
         local_rows: &[u8],
         x: i8,
-        mut available_row: impl FnMut(u8) -> u64,
+        available_row: impl FnMut(u8) -> u64,
     ) -> Option<Self> {
-        if policy != InverseProjectionPolicy::Early {
-            return None;
-        }
-        // Current callers enforce narrower limits. A future unsupported domain
-        // falls back to the existing enumerator instead of gaining authority.
-        if width == 0
-            || width > 64
-            || height == 0
-            || height > 32
-            || local_rows.is_empty()
+        Self::compile_from_availability(
+            &ProjectionAvailability::compile(policy, width, height, available_row)?,
+            cells,
+            local_rows,
+            x,
+        )
+    }
+
+    pub(super) fn compile_from_availability(
+        availability: &ProjectionAvailability,
+        cells: [ShapeCell; 4],
+        local_rows: &[u8],
+        x: i8,
+    ) -> Option<Self> {
+        if local_rows.is_empty()
             || local_rows.len() > cells.len()
             || local_rows.windows(2).any(|rows| rows[0] >= rows[1])
         {
@@ -75,7 +124,7 @@ impl ProjectionRowFilter {
         let mut column_demand = [0_u8; 64];
         for cell in cells {
             let target_x = i16::from(x) + i16::from(cell.x());
-            if target_x < 0 || target_x >= i16::from(width) {
+            if target_x < 0 || target_x >= i16::from(availability.width) {
                 return Some(Self {
                     allowed_target_rows: [0; 4],
                     columns_possible: false,
@@ -87,25 +136,18 @@ impl ProjectionRowFilter {
             column_demand[target_x as usize] += 1;
         }
 
-        let mut column_capacity = [0_u8; 64];
         let mut allowed_target_rows = [0_u32; 4];
-        for target_y in 0..height {
-            let available = available_row(target_y);
+        for target_y in 0..availability.height {
+            let available = availability.rows[usize::from(target_y)];
             for local_index in 0..local_rows.len() {
                 if row_columns[local_index] & !available == 0 {
                     allowed_target_rows[local_index] |= 1_u32 << target_y;
                 }
             }
-            let mut columns = available;
-            while columns != 0 {
-                let column = columns.trailing_zeros() as usize;
-                columns &= columns - 1;
-                column_capacity[column] += 1;
-            }
         }
 
-        let columns_possible =
-            (0..usize::from(width)).all(|column| column_demand[column] <= column_capacity[column]);
+        let columns_possible = (0..usize::from(availability.width))
+            .all(|column| column_demand[column] <= availability.column_capacity[column]);
         Some(Self {
             allowed_target_rows,
             columns_possible,
@@ -130,7 +172,7 @@ mod tests {
 
     use super::{
         inverse_projection_policy, set_inverse_projection_policy, InverseProjectionPolicy,
-        ProjectionRowFilter,
+        ProjectionAvailability, ProjectionRowFilter,
     };
     use crate::backend::wasm_cpu::{
         catalog::GeometryCatalog, extended_board::ExtendedBoard,
@@ -143,6 +185,59 @@ mod tests {
         fn drop(&mut self) {
             set_inverse_projection_policy(self.0);
         }
+    }
+
+    #[test]
+    fn shared_availability_reads_target_rows_once_across_shape_filters() {
+        let registry = standard_tetromino_registry();
+        let mut reads = 0;
+        let rows = [0b1110_1001, 0b0101_1111, 0b1010_0001, 0b0011_0011];
+        let availability =
+            ProjectionAvailability::compile(InverseProjectionPolicy::Early, 8, 4, |row| {
+                reads += 1;
+                rows[usize::from(row)]
+            })
+            .unwrap();
+        for piece in PieceKind::STANDARD_TETROMINOES {
+            for rotation in RotationState::ALL {
+                let shape = registry.get(piece).unwrap().shape(rotation);
+                let mut local_rows = shape.cells().map(|cell| cell.y() as u8).to_vec();
+                local_rows.sort_unstable();
+                local_rows.dedup();
+                for x in 0..=8 - shape.width() {
+                    let filter = ProjectionRowFilter::compile_from_availability(
+                        &availability,
+                        shape.cells(),
+                        &local_rows,
+                        x as i8,
+                    )
+                    .unwrap();
+                    let mut demand = [0_u8; 8];
+                    for cell in shape.cells() {
+                        demand[usize::from(x) + cell.x() as usize] += 1;
+                    }
+                    assert_eq!(
+                        filter.columns_possible(),
+                        demand.iter().enumerate().all(|(x, &required)| {
+                            usize::from(required)
+                                <= rows.iter().filter(|&&row| row & (1 << x) != 0).count()
+                        })
+                    );
+                    for (i, &local_y) in local_rows.iter().enumerate() {
+                        for (y, &row) in rows.iter().enumerate() {
+                            assert_eq!(
+                                filter.row_allowed(i, y as u8),
+                                shape.cells().iter().all(|cell| {
+                                    cell.y() as u8 != local_y
+                                        || row & (1 << (i16::from(x) + i16::from(cell.x()))) != 0
+                                })
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(reads, rows.len());
     }
 
     #[test]

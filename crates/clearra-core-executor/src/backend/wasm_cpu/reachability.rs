@@ -765,10 +765,11 @@ impl ReachabilityWorkspace {
         )
     }
 
-    /// Research-only until a separately selected mode consumes the proof.
+    /// Prove Boolean reachability by a raw kick index strictly above zero.
     /// Earlier kicks must be geometrically inadmissible or blocked on the
-    /// minimum occupancy. The admitted conclusions remain Boolean only.
-    #[cfg(test)]
+    /// minimum occupancy. A miss is Unknown and this supplies no replay,
+    /// score, or rotation evidence.
+    #[cfg(any(test, feature = "local-search-ab"))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_prove_ordered_kick_lock_interval(
         &mut self,
@@ -793,7 +794,7 @@ impl ReachabilityWorkspace {
 
     #[cfg(any(test, feature = "local-search-ab"))]
     #[allow(clippy::too_many_arguments)]
-    fn try_prove_last_kick_lock_interval<const ALLOW_BLOCKED_PRIORS: bool>(
+    fn try_prove_last_kick_lock_interval<const LATER_ONLY: bool>(
         &mut self,
         catalog: &GeometryCatalog,
         minimum_board: u64,
@@ -829,7 +830,7 @@ impl ReachabilityWorkspace {
         if template.state_masks[target] != realization.lock_mask {
             return false;
         }
-        monotone_reachability::proves_last_kick_lock_interval::<ALLOW_BLOCKED_PRIORS>(
+        monotone_reachability::proves_last_kick_lock_interval::<LATER_ONLY>(
             template,
             minimum_board,
             maximum_board,

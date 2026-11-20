@@ -231,9 +231,9 @@ pub(super) fn proves_translation_lock_interval(
 
 /// The original narrow mode admits only raw kick index zero, even if the
 /// first geometrically retained edge has a later raw index. The ordered mode
-/// allows later kicks when every earlier geometrically valid candidate is
-/// blocked on minimum. All other earlier kicks were already removed by the
-/// exact template compiler's occupancy-independent geometry checks.
+/// admits only raw kick indices above zero, when every earlier geometrically
+/// valid candidate is blocked on minimum. All other earlier kicks were
+/// removed by the template's occupancy-independent geometry checks.
 ///
 /// The exact template provides the sky seeds and every movement edge. Follow
 /// only straight downward translations to the source, checking occupancy on
@@ -241,7 +241,7 @@ pub(super) fn proves_translation_lock_interval(
 /// remains first-success on every intermediate board. The final lock is
 /// grounded on minimum, and the precursor need not itself be grounded. No
 /// board, pose graph, or visited set is allocated or retained by this check.
-pub(super) fn proves_last_kick_lock_interval<const ALLOW_BLOCKED_PRIORS: bool>(
+pub(super) fn proves_last_kick_lock_interval<const LATER_ONLY: bool>(
     template: &ReachabilityTemplate,
     minimum: u64,
     maximum: u64,
@@ -262,9 +262,10 @@ pub(super) fn proves_last_kick_lock_interval<const ALLOW_BLOCKED_PRIORS: bool>(
         let source = usize::from(edge.source);
         let transition = source * 3 + usize::from(edge.slot);
         let first = template.rotation_target_offsets[transition] as usize;
-        if ALLOW_BLOCKED_PRIORS {
+        if LATER_ONLY {
             let chosen = first + usize::from(edge.prior_target_count);
             if usize::from(template.rotation_targets[chosen]) != target
+                || template.rotation_kick_indices[chosen] == 0
                 || !reverse_rotation_is_first_success(template, minimum, edge)
             {
                 continue;

@@ -2,6 +2,8 @@
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_problem::SearchProblem;
+#[cfg(any(test, feature = "local-search-ab"))]
+use std::sync::{Arc, OnceLock};
 
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::placement_conditions::{PlacementConditionCatalog, MAX_CONDITION_HEIGHT};
@@ -10,7 +12,7 @@ use super::{
     geometry_apdp::ExactArmPairIndex,
     geometry_projection::ProjectionCatalog,
     geometry_separator::SeparatorCatalog,
-    inverse_projection::{inverse_projection_policy, ProjectionRowFilter},
+    inverse_projection::{inverse_projection_policy, ProjectionAvailability, ProjectionRowFilter},
     mix_digest, piece_index, WasmExactSearchError,
 };
 
@@ -60,6 +62,8 @@ pub(super) struct GeometryCatalog {
     clear_state_count: usize,
     instantiation_offsets: Option<Vec<u32>>,
     instantiated_realizations: Vec<InstantiatedRealization>,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    lazy_instantiations: Option<Arc<LazyInstantiationCache>>,
     identity_digest: u64,
 }
 
@@ -69,6 +73,8 @@ pub(super) struct InstantiatedRealizationIter<'a> {
     deleted_rows: u16,
     precomputed: Option<core::slice::Iter<'a, InstantiatedRealization>>,
     raw: Option<core::slice::Iter<'a, Realization>>,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    last_sorted: Option<Option<InstantiatedRealization>>,
 }
 
 impl Iterator for InstantiatedRealizationIter<'_> {
@@ -77,6 +83,28 @@ impl Iterator for InstantiatedRealizationIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(precomputed) = self.precomputed.as_mut() {
             return precomputed.next().copied();
+        }
+        #[cfg(any(test, feature = "local-search-ab"))]
+        if let Some(last) = self.last_sorted.as_mut() {
+            // Fallback for a busy/occupied bounded memo slot. Raw domains
+            // have at most LAZY_VALUES_PER_SLOT alternatives in this mode.
+            // Repeatedly select the next distinct minimum without allocating.
+            let next = self
+                .raw
+                .as_ref()?
+                .as_slice()
+                .iter()
+                .filter_map(|&realization| {
+                    self.catalog.instantiate_realization(
+                        self.target_cells,
+                        realization,
+                        self.deleted_rows,
+                    )
+                })
+                .filter(|current| last.is_none_or(|previous| previous < *current))
+                .min()?;
+            *last = Some(next);
+            return Some(next);
         }
         let raw = self.raw.as_mut()?;
         for realization in raw {
@@ -89,6 +117,125 @@ impl Iterator for InstantiatedRealizationIter<'_> {
             }
         }
         None
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+const LAZY_FRAME_SLOTS: usize = 512;
+#[cfg(any(test, feature = "local-search-ab"))]
+const LAZY_VALUES_PER_SLOT: usize = 8;
+
+/// A request-owned, fixed-capacity exact memo. A published slot is immutable,
+/// so callers can borrow its values without extending the catalog's lifetime
+/// or copying a cache entry into every BuildUp worker.
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Debug)]
+struct LazyInstantiationCache {
+    slots: Vec<OnceLock<LazyInstantiationSlot>>,
+    dense_order: bool,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Debug)]
+struct LazyInstantiationSlot {
+    row_id: u32,
+    deleted_rows: u16,
+    len: usize,
+    values: [InstantiatedRealization; LAZY_VALUES_PER_SLOT],
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+impl LazyInstantiationCache {
+    fn try_new(dense_order: bool, capacity: usize) -> Option<Self> {
+        if capacity == 0 {
+            return None;
+        }
+        let mut slots = Vec::new();
+        slots.try_reserve_exact(capacity).ok()?;
+        slots.resize_with(capacity, OnceLock::new);
+        Some(Self { slots, dense_order })
+    }
+
+    fn supports_rows(skeletons: &[SkeletonRow]) -> bool {
+        skeletons
+            .iter()
+            .all(|row| usize::from(row.realization_count) <= LAZY_VALUES_PER_SLOT)
+    }
+
+    fn get_or_compile(
+        &self,
+        row_id: u32,
+        deleted_rows: u16,
+        project: impl FnOnce() -> LazyInstantiationSlot,
+    ) -> Option<&[InstantiatedRealization]> {
+        // Small keyed set, not an equality proof. The complete row/frame key
+        // must match after lookup; geometry authority is the cache owner.
+        let mixed =
+            row_id.wrapping_mul(0x9e37_79b1) ^ u32::from(deleted_rows).wrapping_mul(0x85eb_ca6b);
+        let slot = self.slots.get((mixed as usize) % self.slots.len())?;
+        let slot = slot.get_or_init(project);
+        if slot.row_id != row_id || slot.deleted_rows != deleted_rows {
+            return None;
+        }
+        Some(&slot.values[..slot.len])
+    }
+
+    fn compile_slot(
+        &self,
+        catalog: &GeometryCatalog,
+        row_id: u32,
+        deleted_rows: u16,
+    ) -> LazyInstantiationSlot {
+        const EMPTY: InstantiatedRealization = InstantiatedRealization {
+            lock_mask: 0,
+            rotation: RotationState::ALL[0],
+            x: 0,
+            lock_y: 0,
+        };
+        let mut values = [EMPTY; LAZY_VALUES_PER_SLOT];
+        let mut len = 0;
+        for value in catalog.unfiltered_instantiations(row_id, deleted_rows) {
+            // Admission checked the raw realization count, an upper bound on
+            // the number of results that projection can yield.
+            values[len] = value;
+            len += 1;
+        }
+        if self.dense_order {
+            len = sort_unique_realizations(&mut values, 0, len);
+        }
+        LazyInstantiationSlot {
+            row_id,
+            deleted_rows,
+            len,
+            values,
+        }
+    }
+
+    fn compile_payload_bound() -> u128 {
+        (core::mem::size_of::<Self>()
+            + 2 * core::mem::size_of::<usize>()
+            + LAZY_FRAME_SLOTS * core::mem::size_of::<OnceLock<LazyInstantiationSlot>>())
+            as u128
+    }
+
+    fn retained_bytes(&self) -> usize {
+        core::mem::size_of::<Self>()
+            + 2 * core::mem::size_of::<usize>()
+            + self.slots.capacity() * core::mem::size_of::<OnceLock<LazyInstantiationSlot>>()
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn lazy_frame_enabled() -> bool {
+    #[cfg(all(not(test), feature = "local-search-ab"))]
+    {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED
+            .get_or_init(|| std::env::var("CLEARRA_ILC_LAZY_FRAME").is_ok_and(|value| value == "1"))
+    }
+    #[cfg(any(test, not(feature = "local-search-ab")))]
+    {
+        false
     }
 }
 
@@ -117,6 +264,14 @@ impl GeometryCatalog {
             };
         #[cfg(not(any(test, feature = "local-search-ab")))]
         let prototype_peak = 0;
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let lazy_peak = if height <= MAX_CONDITION_HEIGHT && lazy_frame_enabled() {
+            LazyInstantiationCache::compile_payload_bound()
+        } else {
+            0
+        };
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let lazy_peak = 0;
         let clear_state_count = 1_u128.checked_shl(u32::from(height))?;
 
         let raw_and_ordered_realizations = realization_count
@@ -161,6 +316,7 @@ impl GeometryCatalog {
 
         raw_and_ordered_realizations
             .checked_add(prototype_peak)?
+            .checked_add(lazy_peak)?
             .checked_add(skeleton_bytes)?
             .checked_add(temporal_bytes)?
             .checked_add(support_bytes)?
@@ -323,6 +479,10 @@ impl GeometryCatalog {
         };
         let registry = standard_tetromino_registry();
         let inverse_policy = inverse_projection_policy();
+        let row_mask = u64::MAX >> (u64::BITS - u32::from(width));
+        let availability = ProjectionAvailability::compile(inverse_policy, width, height, |row| {
+            (required_cells >> (u32::from(row) * u32::from(width))) & row_mask
+        });
         let realization_capacity = checked_realization_count_upper_bound(width, height)
             .and_then(|count| usize::try_from(count).ok())
             .ok_or(WasmExactSearchError::InvalidProblem(
@@ -356,24 +516,14 @@ impl GeometryCatalog {
                 local_rows.sort_unstable();
                 local_rows.dedup();
                 for x in 0..=max_x {
-                    let row_filter = ProjectionRowFilter::compile(
-                        inverse_policy,
-                        width,
-                        height,
-                        shape.cells(),
-                        &local_rows,
-                        x as i8,
-                        |row| {
-                            let row_mask = if width == 64 {
-                                u64::MAX
-                            } else {
-                                (1_u64 << width) - 1
-                            };
-                            ((required_cells & !initial_board)
-                                >> (u32::from(row) * u32::from(width)))
-                                & row_mask
-                        },
-                    );
+                    let row_filter = availability.as_ref().and_then(|available| {
+                        ProjectionRowFilter::compile_from_availability(
+                            available,
+                            shape.cells(),
+                            &local_rows,
+                            x as i8,
+                        )
+                    });
                     if row_filter
                         .as_ref()
                         .is_some_and(|filter| !filter.columns_possible())
@@ -493,8 +643,29 @@ impl GeometryCatalog {
                     "wasm_geometry_temporal_metadata_storage_unavailable",
                 ))?;
 
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let lazy_instantiations = if height <= MAX_CONDITION_HEIGHT
+            && lazy_frame_enabled()
+            && LazyInstantiationCache::supports_rows(&skeletons)
+        {
+            let dense_order = ordered_realizations
+                .len()
+                .checked_mul(1_usize << height)
+                .is_some_and(|values| values <= MAX_INSTANTIATION_TABLE_VALUES);
+            LazyInstantiationCache::try_new(dense_order, LAZY_FRAME_SLOTS).map(Arc::new)
+        } else {
+            None
+        };
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let eager_instantiation = lazy_instantiations.is_none();
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let eager_instantiation = true;
         let (clear_state_count, instantiation_offsets, instantiated_realizations) =
-            compile_instantiation_table(width, height, &skeletons, &ordered_realizations);
+            if eager_instantiation {
+                compile_instantiation_table(width, height, &skeletons, &ordered_realizations)
+            } else {
+                (1_usize << height, None, Vec::new())
+            };
 
         let mut identity_digest = mix_digest(0, u64::from(width));
         identity_digest = mix_digest(identity_digest, u64::from(height));
@@ -536,6 +707,8 @@ impl GeometryCatalog {
             clear_state_count,
             instantiation_offsets,
             instantiated_realizations,
+            #[cfg(any(test, feature = "local-search-ab"))]
+            lazy_instantiations,
             identity_digest,
         };
         #[cfg(any(test, feature = "local-search-ab"))]
@@ -713,7 +886,23 @@ impl GeometryCatalog {
                 deleted_rows,
                 precomputed: None,
                 raw: None,
+                last_sorted: None,
             };
+        }
+        #[cfg(any(test, feature = "local-search-ab"))]
+        if let Some(cache) = &self.lazy_instantiations {
+            if usize::from(deleted_rows) < self.clear_state_count {
+                let mut iter = self.unfiltered_instantiations(row_id, deleted_rows);
+                if let Some(values) = cache.get_or_compile(row_id, deleted_rows, || {
+                    cache.compile_slot(self, row_id, deleted_rows)
+                }) {
+                    iter.precomputed = Some(values.iter());
+                    iter.raw = None;
+                } else if cache.dense_order {
+                    iter.last_sorted = Some(None);
+                }
+                return iter;
+            }
         }
         self.unfiltered_instantiations(row_id, deleted_rows)
     }
@@ -730,6 +919,8 @@ impl GeometryCatalog {
                 deleted_rows,
                 precomputed: Some(precomputed.iter()),
                 raw: None,
+                #[cfg(any(test, feature = "local-search-ab"))]
+                last_sorted: None,
             }
         } else {
             InstantiatedRealizationIter {
@@ -738,6 +929,8 @@ impl GeometryCatalog {
                 deleted_rows,
                 precomputed: None,
                 raw: Some(self.realizations(row_id).iter()),
+                #[cfg(any(test, feature = "local-search-ab"))]
+                last_sorted: None,
             }
         }
     }
@@ -807,8 +1000,16 @@ impl GeometryCatalog {
         });
         #[cfg(not(any(test, feature = "local-search-ab")))]
         let prototype_bytes = 0;
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let lazy_bytes = self
+            .lazy_instantiations
+            .as_ref()
+            .map_or(0, |cache| cache.retained_bytes());
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let lazy_bytes = 0;
         self.skeletons.capacity() * core::mem::size_of::<SkeletonRow>()
             + prototype_bytes
+            + lazy_bytes
             + self.realizations.capacity() * core::mem::size_of::<Realization>()
             + self.skeleton_occupied_rows.capacity() * core::mem::size_of::<u16>()
             + self
@@ -993,19 +1194,29 @@ fn compile_instantiation_table(
                     values.push(instantiated);
                 }
             }
-            values[value_start..].sort_unstable();
-            let mut write = value_start;
-            for read in value_start..values.len() {
-                if write == value_start || values[read] != values[write - 1] {
-                    values[write] = values[read];
-                    write += 1;
-                }
-            }
+            let end = values.len();
+            let write = sort_unique_realizations(&mut values, value_start, end);
             values.truncate(write);
             offsets.push(values.len() as u32);
         }
     }
     (clear_state_count, Some(offsets), values)
+}
+
+fn sort_unique_realizations(
+    values: &mut [InstantiatedRealization],
+    start: usize,
+    end: usize,
+) -> usize {
+    values[start..end].sort_unstable();
+    let mut write = start;
+    for read in start..end {
+        if write == start || values[read] != values[write - 1] {
+            values[write] = values[read];
+            write += 1;
+        }
+    }
+    write
 }
 
 fn instantiate_realization_raw(
@@ -1217,5 +1428,66 @@ mod exact_clear_domain_tests {
             table.exact_clear_domain_mask(table.skeleton_count() as u32),
             None
         );
+    }
+
+    #[test]
+    fn lazy_frame_queries_match_exact_dense_order_after_slot_collision() {
+        let eager =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(4, 4, 0, 0xffff).unwrap();
+        assert!(eager.has_instantiation_table());
+        assert!(LazyInstantiationCache::supports_rows(&eager.skeletons));
+
+        let mut lazy = eager.clone();
+        lazy.instantiation_offsets = None;
+        lazy.instantiated_realizations = Vec::new();
+        lazy.lazy_instantiations = LazyInstantiationCache::try_new(true, 1).map(Arc::new);
+        let cache = lazy.lazy_instantiations.as_ref().unwrap();
+        assert!(cache.slots[0].get().is_none());
+        let observed: Vec<_> = lazy.instantiations(0, 0).collect();
+        let observed_again: Vec<_> = lazy.instantiations(0, 0).collect();
+        assert_eq!(observed, observed_again);
+        let resident = cache.slots[0].get().unwrap();
+        assert_eq!((resident.row_id, resident.deleted_rows), (0, 0));
+        assert_eq!(&resident.values[..resident.len], observed.as_slice());
+
+        for row_id in 0..eager.skeleton_count() as u32 {
+            for deleted in 0..16 {
+                assert_eq!(
+                    eager.instantiations(row_id, deleted).collect::<Vec<_>>(),
+                    lazy.instantiations(row_id, deleted).collect::<Vec<_>>(),
+                    "row={row_id} deleted={deleted}"
+                );
+            }
+        }
+        assert!(core::ptr::eq(resident, cache.slots[0].get().unwrap()));
+        assert!(cache.retained_bytes() as u128 <= LazyInstantiationCache::compile_payload_bound());
+    }
+
+    #[test]
+    fn lazy_frame_raw_order_and_unsupported_queries_are_not_changed() {
+        let mut fallback =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(4, 4, 0, 0xffff).unwrap();
+        fallback.instantiation_offsets = None;
+        fallback.instantiated_realizations = Vec::new();
+        let mut lazy = fallback.clone();
+        lazy.lazy_instantiations = LazyInstantiationCache::try_new(false, 1).map(Arc::new);
+        // The out-of-frame query is passed through, not interpreted as a
+        // certificate of absence or admitted to a lazy slot.
+        assert_eq!(
+            fallback.instantiations(0, 1 << 4).collect::<Vec<_>>(),
+            lazy.instantiations(0, 1 << 4).collect::<Vec<_>>()
+        );
+        assert!(lazy.lazy_instantiations.as_ref().unwrap().slots[0]
+            .get()
+            .is_none());
+        for row_id in 0..fallback.skeleton_count() as u32 {
+            for deleted in [0, 1, 2, 4, 15] {
+                assert_eq!(
+                    fallback.instantiations(row_id, deleted).collect::<Vec<_>>(),
+                    lazy.instantiations(row_id, deleted).collect::<Vec<_>>(),
+                    "row={row_id} deleted={deleted}"
+                );
+            }
+        }
     }
 }
