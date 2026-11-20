@@ -386,14 +386,14 @@ fn traversal_error() -> WasmExactSearchError {
 // private to Core conformance. Native direct and distributed callers continue
 // to use take_parallel_plan without entering this cursor.
 #[cfg(test)]
-mod cooperative {
+pub(super) mod cooperative {
     use super::*;
     use crate::resource::SharedExecutionNodeBudget;
     use clearra_core_domain::execution_cancellation::ExecutionControl;
     use core::mem::size_of;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(super) enum PreparationStatus {
+    pub(in crate::backend::wasm_cpu) enum PreparationStatus {
         Pending,
         Ready,
         Cancelled,
@@ -411,7 +411,7 @@ mod cooperative {
         Stopped,
     }
 
-    pub(super) struct Preparation {
+    pub(in crate::backend::wasm_cpu) struct Preparation {
         geometry: ExtendedGeometrySearch,
         catalog: Arc<ExtendedInverseCatalog>,
         desired: usize,
@@ -427,7 +427,7 @@ mod cooperative {
     }
 
     impl Preparation {
-        pub(super) fn new(
+        pub(in crate::backend::wasm_cpu) fn new(
             geometry: ExtendedGeometrySearch,
             catalog: Arc<ExtendedInverseCatalog>,
             desired: usize,
@@ -449,7 +449,7 @@ mod cooperative {
             })
         }
 
-        pub(super) fn advance(
+        pub(in crate::backend::wasm_cpu) fn advance(
             &mut self,
             node_budget: Option<&SharedExecutionNodeBudget>,
             bound: ExecutionMemoryBound,
@@ -487,7 +487,7 @@ mod cooperative {
             }
         }
 
-        pub(super) fn into_result(
+        pub(in crate::backend::wasm_cpu) fn into_result(
             self,
         ) -> Result<
             (ExtendedGeometrySearch, Option<ExtendedParallelGeometryPlan>),
@@ -497,6 +497,14 @@ mod cooperative {
                 return Err(traversal_error());
             }
             Ok((self.geometry, self.ready))
+        }
+
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        pub(in crate::backend::wasm_cpu) fn ready_retained_upper_bound(&self) -> Option<u128> {
+            if !matches!(self.phase, Phase::Done) {
+                return None;
+            }
+            self.frozen_geometry_bytes.checked_add(self.scratch_credit)
         }
 
         fn step(

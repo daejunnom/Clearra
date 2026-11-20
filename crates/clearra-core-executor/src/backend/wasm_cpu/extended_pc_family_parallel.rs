@@ -550,7 +550,7 @@ impl ExtendedBuildProbabilitySession {
         }
     }
 
-    fn merge_pc_verifier(&mut self, mut worker: Self) -> Result<(), WasmExactSearchError> {
+    fn validate_pc_verifier(&self, worker: &Self) -> Result<(), WasmExactSearchError> {
         if worker.purpose != ExtendedFamilyPurpose::Pc
             || !worker.shared_immutable_owners
             || !Arc::ptr_eq(&self.problem, &worker.problem)
@@ -568,6 +568,11 @@ impl ExtendedBuildProbabilitySession {
         {
             return Err(contract_error());
         }
+        Ok(())
+    }
+
+    fn merge_pc_verifier(&mut self, mut worker: Self) -> Result<(), WasmExactSearchError> {
+        self.validate_pc_verifier(&worker)?;
         match (self.pc_observation.as_ref(), worker.pc_observation.as_ref()) {
             (Some(target), Some(source)) => {
                 let future = target
@@ -781,8 +786,14 @@ fn pool_error() -> WasmExactSearchError {
 #[cfg(test)]
 mod cooperative {
     use super::*;
-    use crate::resource::ExecutionAdmission;
+    use crate::backend::wasm_cpu::extended_geometry::{
+        ExtendedGeometrySearch, ExtendedParallelGeometryPlan, ExtendedParallelPreparation,
+        ExtendedPreparationStatus,
+    };
+    use crate::backend::wasm_cpu::extended_pc_search::checked_pc_family_problem_nested_retained_bytes;
+    use crate::resource::{admit_budget_bound_search_execution, ExecutionAdmission};
     use clearra_core_domain::resource::ResourceLeaseToken;
+    use clearra_problem::{BuildProbabilityField, SearchProblem};
 
     pub(super) struct WorkerCursor {
         result: WorkerResult,
@@ -1103,9 +1114,7 @@ mod cooperative {
             }
         }
 
-        pub(super) fn into_completed_slots(
-            self,
-        ) -> Result<impl Iterator<Item = WorkerResult>, WasmExactSearchError> {
+        pub(super) fn into_completed_slots(self) -> Result<CompletedSlots, WasmExactSearchError> {
             if self.failed
                 || self
                     .slots
@@ -1114,7 +1123,486 @@ mod cooperative {
             {
                 return Err(contract_error());
             }
-            Ok(self.slots.into_iter().flatten().map(|cursor| cursor.result))
+            Ok(CompletedSlots(self.slots.into_iter()))
+        }
+    }
+
+    pub(super) struct CompletedSlots(std::vec::IntoIter<Option<WorkerCursor>>);
+
+    impl Iterator for CompletedSlots {
+        type Item = WorkerResult;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.0.next().flatten().map(|cursor| cursor.result)
+        }
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum DryPhase {
+        Prepare,
+        AdmitPlan,
+        IndexRange,
+        AdmitWorkerBacking,
+        AdmitSlot,
+        StartWaves,
+        Wave,
+        CollectSlots,
+        Bind,
+        Fold,
+        Complete,
+        Failed,
+    }
+
+    struct Range {
+        first: u128,
+        count: u128,
+        returned: Option<DigestSegment>,
+    }
+
+    /// Silent exact conformance only. Workers and the complete ordinal proof
+    /// remain borrowed under this request's lease, not surfaced as a Core result.
+    pub(super) struct DryRunOwner {
+        // Move-out owners precede the admission in destruction order.
+        preparation: Option<ExtendedParallelPreparation>,
+        plan: Option<ExtendedParallelGeometryPlan>,
+        admitted_memory: Option<Arc<SharedExecutionMemoryBudget>>,
+        slots: Vec<Option<WorkerCursor>>,
+        waves: Option<WorkerWaves>,
+        completed_slots: Option<CompletedSlots>,
+        active_worker: Option<(WorkerResult, u128)>,
+        workers: Vec<WorkerResult>,
+        ranges: Vec<Range>,
+        phase: DryPhase,
+        width: usize,
+        candidate_count: u128,
+        queued_private: u128,
+        bound_candidates: u128,
+        folded_candidates: u128,
+        fold_range: usize,
+        fold_offset: usize,
+        digest: u64,
+        root: ExtendedBuildProbabilitySession,
+        admission: ExecutionAdmission,
+    }
+
+    impl DryRunOwner {
+        pub(super) fn new(
+            problem: &SearchProblem,
+            field: BuildProbabilityField,
+        ) -> Result<Self, WasmExactSearchError> {
+            let width = problem.backend_policy().workers();
+            if width < 2
+                || problem
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || problem.objective().score().requested()
+                || problem.objective().execution_constraints().requested()
+                || problem.solution_probability_policy().requested()
+                || problem.pc_chance_evidence_policy()
+                    != clearra_problem::PcChanceEvidencePolicy::Disabled
+                || problem
+                    .core_query()
+                    .remaining_queue()
+                    .as_fixed_sequence()
+                    .is_none()
+            {
+                return Err(contract_error());
+            }
+            let admission = admit_budget_bound_search_execution(problem, width)
+                .map_err(WasmExactSearchError::resource_admission)?;
+            if admission.lease_token().grant().compute_units as usize != width {
+                return Err(contract_error());
+            }
+            let external = checked_pc_family_problem_nested_retained_bytes(problem)
+                .and_then(|bytes| bytes.checked_add(size_of::<SearchProblem>() as u128))
+                .ok_or_else(projection_error)?;
+            let mut root = ExtendedBuildProbabilitySession::new_pc_family(
+                problem,
+                field,
+                admission.memory_bound(),
+                external,
+            )?;
+            let preparation = ExtendedParallelPreparation::new(
+                core::mem::replace(
+                    &mut root.geometry,
+                    ExtendedGeometrySearch::private_verifier_placeholder(),
+                ),
+                Arc::clone(&root.catalog),
+                width.saturating_mul(4),
+            )?;
+            Ok(Self {
+                preparation: Some(preparation),
+                plan: None,
+                admitted_memory: None,
+                slots: Vec::new(),
+                waves: None,
+                completed_slots: None,
+                active_worker: None,
+                workers: Vec::new(),
+                ranges: Vec::new(),
+                phase: DryPhase::Prepare,
+                width,
+                candidate_count: 0,
+                queued_private: 0,
+                bound_candidates: 0,
+                folded_candidates: 0,
+                fold_range: 0,
+                fold_offset: 0,
+                digest: 0,
+                root,
+                admission,
+            })
+        }
+
+        pub(super) fn advance(
+            &mut self,
+            budget: usize,
+            control: &ExecutionControl,
+        ) -> Result<(bool, usize), WasmExactSearchError> {
+            let result = self.advance_inner(budget, control);
+            if result.is_err() {
+                self.phase = DryPhase::Failed;
+            }
+            result
+        }
+
+        fn advance_inner(
+            &mut self,
+            budget: usize,
+            control: &ExecutionControl,
+        ) -> Result<(bool, usize), WasmExactSearchError> {
+            if self.phase == DryPhase::Failed || control.partition().count() != 1 {
+                return Err(contract_error());
+            }
+            let mut remaining = budget;
+            loop {
+                if control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                if self.phase == DryPhase::Complete || remaining == 0 {
+                    return Ok((self.phase == DryPhase::Complete, budget - remaining));
+                }
+                match self.phase {
+                    DryPhase::Prepare => {
+                        let outside = self
+                            .root
+                            .checked_retained_bytes_with_coexisting_owners()
+                            .and_then(|bytes| bytes.checked_add(size_of::<Self>() as u128))
+                            .ok_or_else(projection_error)?;
+                        let (status, used) = self
+                            .preparation
+                            .as_mut()
+                            .ok_or_else(contract_error)?
+                            .advance(
+                                self.root.request_node_budget.as_deref(),
+                                self.root.memory_bound,
+                                outside,
+                                remaining,
+                                control,
+                            )?;
+                        remaining = remaining.checked_sub(used).ok_or_else(contract_error)?;
+                        match status {
+                            ExtendedPreparationStatus::Pending => break,
+                            ExtendedPreparationStatus::Cancelled => {
+                                return Err(WasmExactSearchError::Cancelled)
+                            }
+                            ExtendedPreparationStatus::ResourceIncomplete(reason) => {
+                                return Err(self.root.pc_resource_stop_error(reason));
+                            }
+                            ExtendedPreparationStatus::Ready => self.phase = DryPhase::AdmitPlan,
+                        }
+                    }
+                    DryPhase::Wave => {
+                        let (done, used) = self
+                            .waves
+                            .as_mut()
+                            .ok_or_else(contract_error)?
+                            .advance(&self.admission, remaining, control)?;
+                        remaining = remaining.checked_sub(used).ok_or_else(contract_error)?;
+                        if !done {
+                            break;
+                        }
+                        self.phase = DryPhase::CollectSlots;
+                    }
+                    _ => {
+                        // Every carrier transfer, branch registration, worker
+                        // admission and terminal digest update spends a unit.
+                        remaining -= 1;
+                        self.advance_owner_step()?;
+                    }
+                }
+            }
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            Ok((false, budget - remaining))
+        }
+
+        fn advance_owner_step(&mut self) -> Result<(), WasmExactSearchError> {
+            match self.phase {
+                DryPhase::AdmitPlan => self.admit_plan(),
+                DryPhase::IndexRange => {
+                    let plan = self.plan.as_ref().ok_or_else(contract_error)?;
+                    if let Some(branch) = plan.branches.get(self.ranges.len()) {
+                        let first = self
+                            .ranges
+                            .last()
+                            .map_or(Some(0), |previous| {
+                                previous.first.checked_add(previous.count)
+                            })
+                            .ok_or_else(projection_error)?;
+                        if first != branch.first_ordinal || branch.candidate_count == 0 {
+                            return Err(contract_error());
+                        }
+                        self.ranges.push(Range {
+                            first,
+                            count: branch.candidate_count,
+                            returned: None,
+                        });
+                        self.queued_private = self
+                            .queued_private
+                            .checked_add(branch.private_retained_bytes() as u128)
+                            .ok_or_else(projection_error)?;
+                    } else {
+                        self.phase = DryPhase::AdmitWorkerBacking;
+                    }
+                    Ok(())
+                }
+                DryPhase::AdmitWorkerBacking => self.admit_worker_backing(),
+                DryPhase::AdmitSlot => {
+                    let aggregate = self.admitted_memory.as_ref().ok_or_else(contract_error)?;
+                    let worker = self.root.new_shared_pc_verifier_with_resources(
+                        self.root.memory_bound,
+                        Some(aggregate.owner(self.slots.len())),
+                    )?;
+                    let first = self
+                        .plan
+                        .as_mut()
+                        .ok_or_else(contract_error)?
+                        .branches
+                        .pop();
+                    if let Some(branch) = first.as_ref() {
+                        aggregate
+                            .owner(self.width)
+                            .transfer_retained_to(
+                                worker
+                                    .private_memory_owner
+                                    .as_ref()
+                                    .ok_or_else(contract_error)?,
+                                branch.private_retained_bytes() as u128,
+                            )
+                            .map_err(WasmExactSearchError::resource_admission)?;
+                    }
+                    self.slots.push(Some(WorkerCursor::new(worker, first)));
+                    if self.slots.len() == self.width {
+                        self.phase = DryPhase::StartWaves;
+                    }
+                    Ok(())
+                }
+                DryPhase::StartWaves => {
+                    let queued = self
+                        .admitted_memory
+                        .as_ref()
+                        .ok_or_else(contract_error)?
+                        .owner(self.width);
+                    let queue = core::mem::take(
+                        &mut self.plan.as_mut().ok_or_else(contract_error)?.branches,
+                    );
+                    self.waves = Some(WorkerWaves::new(
+                        &self.admission,
+                        core::mem::take(&mut self.slots),
+                        queue,
+                        queued,
+                    )?);
+                    self.phase = DryPhase::Wave;
+                    Ok(())
+                }
+                DryPhase::CollectSlots => {
+                    self.completed_slots = Some(
+                        self.waves
+                            .take()
+                            .ok_or_else(contract_error)?
+                            .into_completed_slots()?,
+                    );
+                    self.phase = DryPhase::Bind;
+                    Ok(())
+                }
+                DryPhase::Bind => self.bind_step(),
+                DryPhase::Fold => self.fold_step(),
+                _ => Err(contract_error()),
+            }
+        }
+
+        fn admit_plan(&mut self) -> Result<(), WasmExactSearchError> {
+            let preparation = self.preparation.take().ok_or_else(contract_error)?;
+            let ready_upper = preparation
+                .ready_retained_upper_bound()
+                .ok_or_else(contract_error)?;
+            let (geometry, plan) = preparation.into_result()?;
+            self.root.geometry = geometry;
+            let Some(plan) = plan else {
+                // Not part of this positive-family conformance scope. The
+                // unchanged product owner handles exact empty results.
+                return Err(contract_error());
+            };
+            let limit = self.root.problem.backend_request().max_candidates();
+            if limit != 0 && plan.candidate_count > limit as u128 {
+                return Err(self
+                    .root
+                    .pc_resource_stop_error("candidate_budget_exceeded"));
+            }
+            let ranges = plan.branches.len();
+            // Forward the preparation's already checked allocation envelope
+            // before walking the concrete branch-owner credits incrementally.
+            let observed = self
+                .root
+                .checked_retained_bytes_with_coexisting_owners()
+                .and_then(|n| n.checked_add(ready_upper))
+                .and_then(|n| n.checked_add(size_of::<Self>() as u128))
+                .ok_or_else(projection_error)?;
+            self.root
+                .memory_bound
+                .ensure(observed, (ranges as u128) * size_of::<Range>() as u128)
+                .map_err(WasmExactSearchError::resource_admission)?;
+            self.ranges
+                .try_reserve_exact(ranges)
+                .map_err(|_| storage_error())?;
+            self.candidate_count = plan.candidate_count;
+            self.plan = Some(plan);
+            self.phase = DryPhase::IndexRange;
+            Ok(())
+        }
+
+        fn admit_worker_backing(&mut self) -> Result<(), WasmExactSearchError> {
+            let plan = self.plan.as_ref().ok_or_else(contract_error)?;
+            // Count the retained immutable plan once. The count/split
+            // scratch is already dropped before granting worker backing.
+            let fixed = self
+                .root
+                .checked_retained_bytes_with_coexisting_owners()
+                .and_then(|n| n.checked_add(plan.shared_retained_bytes() as u128))
+                .and_then(|n| {
+                    n.checked_add(
+                        (plan.branches.capacity() as u128)
+                            * size_of::<ExtendedParallelGeometryBranch>() as u128,
+                    )
+                })
+                .and_then(|n| n.checked_add(WorkerWaves::checked_fixed_backing_bytes(self.width)?))
+                .and_then(|n| {
+                    n.checked_add((self.ranges.capacity() as u128) * size_of::<Range>() as u128)
+                })
+                .and_then(|n| {
+                    n.checked_add((self.width as u128) * size_of::<WorkerResult>() as u128)
+                })
+                .and_then(|n| n.checked_add(size_of::<Self>() as u128))
+                .ok_or_else(projection_error)?;
+            let admitted = SharedExecutionMemoryBudget::new(
+                self.root.memory_bound,
+                fixed,
+                self.width.checked_add(1).ok_or_else(projection_error)?,
+            )
+            .map_err(WasmExactSearchError::resource_admission)?;
+            admitted
+                .owner(self.width)
+                .ensure(self.queued_private)
+                .map_err(WasmExactSearchError::resource_admission)?;
+            self.slots
+                .try_reserve_exact(self.width)
+                .map_err(|_| storage_error())?;
+            self.workers
+                .try_reserve_exact(self.width)
+                .map_err(|_| storage_error())?;
+            self.admitted_memory = Some(admitted);
+            self.phase = DryPhase::AdmitSlot;
+            Ok(())
+        }
+
+        fn bind_step(&mut self) -> Result<(), WasmExactSearchError> {
+            if let Some((mut worker, mut count)) = self.active_worker.take() {
+                if let Some(segment) = worker.digests.pop() {
+                    let index = self
+                        .ranges
+                        .binary_search_by_key(&segment.first_ordinal, |range| range.first)
+                        .map_err(|_| contract_error())?;
+                    let range = &mut self.ranges[index];
+                    let n = segment.values.len() as u128;
+                    if range.returned.is_some() || range.count != n {
+                        return Err(contract_error());
+                    }
+                    count = count.checked_add(n).ok_or_else(projection_error)?;
+                    range.returned = Some(segment);
+                    self.active_worker = Some((worker, count));
+                } else {
+                    if count != worker.engine.processed_candidate_count as u128 {
+                        return Err(contract_error());
+                    }
+                    self.bound_candidates = self
+                        .bound_candidates
+                        .checked_add(count)
+                        .ok_or_else(projection_error)?;
+                    self.workers.push(worker);
+                }
+            } else if let Some(worker) = self
+                .completed_slots
+                .as_mut()
+                .ok_or_else(contract_error)?
+                .next()
+            {
+                self.root.validate_pc_verifier(&worker.engine)?;
+                self.active_worker = Some((worker, 0));
+            } else {
+                if self.workers.len() != self.width || self.bound_candidates != self.candidate_count
+                {
+                    return Err(contract_error());
+                }
+                self.phase = DryPhase::Fold;
+            }
+            // Segment backing moves, never clones. The original worker
+            // slot stays charged until this silent owner is dropped.
+            Ok(())
+        }
+
+        fn fold_step(&mut self) -> Result<(), WasmExactSearchError> {
+            if let Some(range) = self.ranges.get(self.fold_range) {
+                let segment = range.returned.as_ref().ok_or_else(contract_error)?;
+                if let Some(value) = segment.values.get(self.fold_offset) {
+                    if range.first.checked_add(self.fold_offset as u128)
+                        != Some(self.folded_candidates)
+                    {
+                        return Err(contract_error());
+                    }
+                    self.digest = mix_digest(self.digest, *value);
+                    self.folded_candidates = self
+                        .folded_candidates
+                        .checked_add(1)
+                        .ok_or_else(projection_error)?;
+                    self.fold_offset += 1;
+                } else {
+                    self.fold_range += 1;
+                    self.fold_offset = 0;
+                }
+            } else {
+                if self.folded_candidates != self.candidate_count {
+                    return Err(contract_error());
+                }
+                self.root.geometry.complete_parallel_enumeration(
+                    usize::try_from(self.candidate_count).map_err(|_| projection_error())?,
+                )?;
+                self.phase = DryPhase::Complete;
+            }
+            Ok(())
+        }
+
+        pub(super) fn completed(&self) -> Option<(u64, u128, &[WorkerResult])> {
+            (self.phase == DryPhase::Complete).then_some((
+                self.digest,
+                self.candidate_count,
+                self.workers.as_slice(),
+            ))
+        }
+
+        pub(super) fn catalog(&self) -> &Arc<super::super::ExtendedInverseCatalog> {
+            &self.root.catalog
         }
     }
 }

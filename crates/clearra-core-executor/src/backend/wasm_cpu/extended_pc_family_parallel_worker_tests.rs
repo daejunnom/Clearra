@@ -16,7 +16,7 @@ use clearra_problem::{BuildProbabilityField, ProblemCompiler, SearchProblem};
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 use super::{
-    cooperative::{WorkerCursor, WorkerWaves},
+    cooperative::{DryRunOwner, WorkerCursor, WorkerWaves},
     *,
 };
 
@@ -317,6 +317,90 @@ fn extended_pc_native_cooperative_worker_waves_preserve_exact_family_and_drain()
     assert!(wave.into_completed_slots().is_err());
     drop(root);
     drop(admission);
+    assert_exact_composed_dry_run(&problem, field, &expected);
     assert!(admit_budget_bound_search_execution(&problem, WORKERS).is_ok());
     println!("\nclearra_worker_wave_conformance=complete");
+}
+
+fn assert_exact_composed_dry_run(
+    problem: &SearchProblem,
+    field: BuildProbabilityField,
+    expected: &CoreExecutionResult,
+) {
+    let mut owner = DryRunOwner::new(problem, field).unwrap();
+    let control = ExecutionControl::default();
+    assert_eq!(owner.advance(0, &control).unwrap(), (false, 0));
+    assert!(owner.completed().is_none());
+
+    let mut pending = 0;
+    let mut multi_unit = false;
+    let done = (0..100_000).any(|index| {
+        let budget = [1, 3, 2, 1][index % 4];
+        let (terminal, used) = owner.advance(budget, &control).unwrap();
+        assert!(
+            (1..=budget).contains(&used),
+            "one shared creation/work/seal debit"
+        );
+        multi_unit |= used > 1;
+        if !terminal {
+            pending += 1;
+            assert!(owner.completed().is_none(), "no partial terminal authority");
+        }
+        terminal
+    });
+    assert!(done && pending > 10 && multi_unit);
+    let (digest, candidate_count, workers) = owner.completed().unwrap();
+    assert_eq!(workers.len(), WORKERS);
+    assert_eq!(
+        expected.field("packing_candidate_digest"),
+        Some(format!("{digest:016x}").as_str())
+    );
+    assert_eq!(
+        expected.usize_field("packing_candidate_count"),
+        Some(candidate_count as usize)
+    );
+
+    // Read the already completed exact worker-owned data for differential
+    // evidence. This does not render or mint a public cooperative result.
+    let mut keys = std::collections::BTreeSet::new();
+    let catalog = owner.catalog();
+    let mut covered = PatternBitSet::new(workers[0].engine.covered_patterns.pattern_count());
+    let mut variants = 0;
+    for worker in workers {
+        assert!(Arc::ptr_eq(catalog, &worker.engine.catalog));
+        assert!(worker.engine.pc_build_variant_count_complete);
+        variants += worker.engine.pc_build_variant_count;
+        covered.union_with(&worker.engine.covered_patterns).unwrap();
+        for key in &worker.engine.buildable_tilings {
+            keys.insert(key.canonical_key(catalog.initial_board(), HEIGHT));
+        }
+    }
+    assert_eq!(
+        keys.into_iter().collect::<Vec<_>>().as_slice(),
+        expected.normalized_solution_keys()
+    );
+    assert_eq!(
+        Some(variants.to_string().as_str()),
+        expected.field("build_variant_count")
+    );
+    assert_eq!(
+        Some(covered.count_ones() as usize),
+        expected.usize_field("covered_pattern_count")
+    );
+    assert!(
+        admit_budget_bound_search_execution(problem, WORKERS).is_err(),
+        "borrowed worker evidence retains the exact parent admission"
+    );
+    drop(owner);
+
+    let mut owner = DryRunOwner::new(problem, field).unwrap();
+    let token = ExecutionCancellationToken::new();
+    let control = ExecutionControl::new(token.clone());
+    assert_eq!(owner.advance(1, &control).unwrap(), (false, 1));
+    token.handle().cancel();
+    assert!(matches!(
+        owner.advance(2, &control),
+        Err(WasmExactSearchError::Cancelled)
+    ));
+    assert!(owner.completed().is_none());
 }
