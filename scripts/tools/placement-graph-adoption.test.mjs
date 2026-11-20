@@ -36,6 +36,8 @@ function run(index, arm, ms, bytes, outputMode = "global-only") {
     [AXIS]: arm === "A" ? "0" : "1", incremental_domain_mode: "0", first_kick_interval_mode: "0",
     conditional_order_mode: "0",
     terminal_identity_move_mode: "0",
+    ordered_kick_interval_mode: "0",
+    ilc_lazy_frame_mode: "0",
     other_process_configuration: {}, output_mode: outputMode,
     timing_ms: { search: ms }, valid: true, validation_errors: [],
     solution_coverage: outputMode === "global-only" ? null : {

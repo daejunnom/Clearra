@@ -2,13 +2,32 @@
 
 Clearra routes every product request through one typed boundary:
 
-`CLI / GUI / WASM Command Runtime -> AppRequest -> clearra-app -> validation -> SearchProblem compile -> clearra-core-executor -> C PackingProblem -> C Geometry Skeleton Exact Cover -> Host reducer -> C BuildUp BFS -> CoverageRow -> CoverageMatrix -> ObjectiveResult -> Replay / PostProcess / Scoring / Fumen / Render / Output -> AppResponse`.
+`CLI / GUI / WASM Command Runtime / Discord adapter -> AppRequest -> clearra-app -> validated SearchProblem -> clearra-core-executor -> backend evidence -> coverage and objective reducers -> replay / postprocess / output -> AppResponse`.
+
+The executor dispatches to the existing Rust CPU kernels or, with
+`native-c-core`, the typed FFI adapter for native C. These paths do not
+currently support every identical request. The
+[host contract](research/v090-rust-host-contract-2026-11-20.md) distinguishes
+product service coverage from kernel availability. Changing backend does not
+change requested result meaning, including exactness and resource outcomes.
 
 ## Owners
 
-Rust owns product contracts, validation, diagnostics, profiles, supply models, coverage probability, objective policy, replay models, score and postprocess orchestration, output, GUI, WASM contracts, fixtures, and golden tests.
+- `clearra-piece-registry` and `clearra-rules` own Rust shape and ordered kick
+  semantics; `clearra-supply` owns source, occurrence and hold transitions.
+- The executor owns active frame, catalog, physical state, temporary workspace
+  and evidence emission. Geometry membership, Boolean reachability and full
+  execution evidence are different claims, even when they use the same mask.
+- `clearra-coverage` and `clearra-objectives` own coverage and objective policy;
+  replay and postprocess own interpretation and presentation of physical evidence.
+- `clearra-core-ffi` owns native ABI representation, status mapping and lifetime
+  adapters, not the Rust rule or replay identity. The native C implementation
+  owns its current board/search/GPU and memory operations while the corresponding
+  native feature routes to it. Test-only references do not become product owners.
 
-C core owns board operations, piece operation tables, immutable realization/skeleton catalogs, geometry exact-cover, candidate generation, reachability, BuildUp BFS, coverage row generation, memory scopes, arenas, release queues, and portable/native GPU bridges.
+The [operation, equivalence and ABI contract](research/v090-ownership-and-abi-contract.md)
+indexes the actual owners, per-operation key and lifetime, and conditions for
+retiring a C implementation without changing the product or external ABI.
 
 ## Allowed Edges
 
@@ -18,6 +37,7 @@ C core owns board operations, piece operation tables, immutable realization/skel
 - `clearra-app -> clearra-core-executor`
 - `clearra-app -> clearra-postprocess`
 - `clearra-app -> clearra-output`
+- `clearra-core-executor -> clearra-geometry / clearra-piece-registry / clearra-rules / clearra-supply`
 - `clearra-core-executor -> clearra-core-ffi -> core-c`
 - `clearra-coverage -> clearra-core-domain`
 - `clearra-objectives -> clearra-coverage`

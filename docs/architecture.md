@@ -1,18 +1,20 @@
 # Architecture
 
-> Planning update (2026-11-20): the prototype contains both the C path described
-> below and an existing Rust CPU path used by native and WASM hosts. The proposed
-> convergence on one Rust core, its dependency-relation algorithm, and phased
-> compatibility gates are documented in the
-> [Rust core and relation roadmap](research/rust-core-and-relation-roadmap-2026-11-20.md).
-> This is a target architecture plan, not a claim that the migration is complete.
+Clearra has one Rust product boundary and two existing CPU implementation paths.
+The native C path requires `native-c-core` and uses the statically linked C
+geometry and BuildUp implementation through `clearra-core-ffi`. The Rust CPU
+path is compiled into native and WASM hosts and already implements geometry and
+verification; supported request contracts are not identical. The historical
+module milestones below describe the C path unless stated otherwise.
 
-Clearra uses a Rust product shell with a C hot-path core. Rust owns product contracts,
-validation, diagnostics, probability invariants, objectives, replay, and output. The
-C core owns immutable geometry-catalog compilation, exact-cover graph search,
-and build-up search work.
+The [Rust core and relation roadmap](research/rust-core-and-relation-roadmap-2026-11-20.md)
+targets convergence onto the existing Rust CPU service, not a second Rust
+solver. The [host contract](research/v090-rust-host-contract-2026-11-20.md)
+records the request-specific routes and capability gaps. Service parity and
+confirmed ABI compatibility must precede retirement of native C. Retaining C
+as a qualification reference is separate from keeping production C links.
 
-The request flow is:
+The native C request flow is:
 
 user input
 -> Rust CLI
@@ -30,12 +32,12 @@ user input
 -> Rust Coverage / Objectives
 -> Rust Replay / Output
 
-The product boundary is fixed by `docs/dependency-boundary.md`. The complete
-pipeline is `CLI / GUI / WASM Command Runtime -> AppRequest -> clearra-app ->
-validation -> SearchProblem compile -> clearra-core-executor -> C
-PackingProblem -> C Geometry Skeleton Exact Cover -> Host reducer -> C BuildUp BFS ->
-CoverageRow -> CoverageMatrix -> ObjectiveResult -> Replay / PostProcess /
-Scoring / Fumen / Render / Output -> AppResponse`.
+The [dependency boundary](dependency-boundary.md) applies to both paths:
+`CLI / GUI / WASM / Discord adapter -> AppRequest -> clearra-app ->
+validated SearchProblem -> clearra-core-executor -> requested backend's
+candidate and execution evidence -> shared reducers -> replay / postprocess /
+output -> AppResponse`. Neither host selection nor fallback can change the
+requested evidence level or turn an incomplete result into an exact one.
 
 Search and PostProcess are separate layers. Search proves PC/build feasibility.
 PostProcess consumes accepted search evidence for replay, scoring, fumen,
@@ -133,9 +135,42 @@ executable manifests or other packaging adapters. The Windows manifest is kept a
 CLI packaging asset, and `scripts/verify.ps1` injects the absolute Windows MSVC
 linker flag needed for test harnesses.
 
+## Rust implementation guidelines
+
+Use the workspace's pinned stable toolchain (`rust-toolchain.toml`) and existing
+`rustfmt` for touched first-party Rust. Adopt the [Google Rust Style Guide](https://google.github.io/styleguide/rustguide.html)
+where its general advice fits this Cargo workspace: give domain invariants
+typed owners and typed errors, prefer borrowing to unnecessary deep copies, and
+keep public interfaces narrow. Use a trait when a consumer actually needs
+generic or interchangeable behavior, not to put dynamic dispatch on every hot
+call. An immutable request-level `Arc` is appropriate for multiple workers
+sharing a catalog or template; mutable worker and candidate state remain
+independently owned.
+
+Do not apply rules specific to Chromium or Fuchsia (crate size and layout,
+platform imports, concurrency APIs) or enable formatting options unavailable
+on the pinned stable toolchain. Review local private representation separately
+from public Rust types, product wire/record formats and C ABI. The workspace
+`unsafe_code = "forbid"` remains in force; unavoidable boundary exceptions,
+such as `clearra-core-ffi`, must document layout, aliasing, ownership and lifetime
+obligations where calls cross the boundary. Do not add a lint gate, migrate
+edition, reformat unrelated modules, or churn vendored or generated code for
+this convergence.
+
+## Source inventory and artifact lifetime
+
+Use the [tracked-tree inventory contract](research/v090-ownership-and-abi-contract.md#tracked-tree-inventory-and-retention)
+to count and classify the exact Git revision. These are committed blob sizes
+and path counts, not Windows/WSL allocation measurements or lifecycle
+authority. Build output, experiment receipts and qualified evidence each
+follow their registered owner under `config/clearra-management.v1.json`; a
+source comparison never deletes artifacts. A vendor or generated input with a
+live build, packaging or reproducibility owner stays in source even if it can
+be regenerated.
+
 ## C Core Responsibilities
 
-The C core owns the hot path:
+The C implementation owns these operations on the native C path:
 
 - compact `PackingProblem` representation
 - packing candidate enumeration
@@ -144,8 +179,10 @@ The C core owns the hot path:
 - runtime compact rule/reachability data
 - hot-path board placement, line clear, reachability, and candidate generation
 
-Rust must call the C core through `clearra-core-executor`; it must not grow a second
-hot-path solver in parallel.
+Product calls into C must continue through `clearra-core-executor` and its
+typed FFI adapter until the corresponding Rust service is ready. Refactor and
+reuse the existing Rust CPU implementation; do not reconstruct otherwise
+equivalent catalog, reachability or supply solvers.
 
 ## M5 C Board64 Core
 

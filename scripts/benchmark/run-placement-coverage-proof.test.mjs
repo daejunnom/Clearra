@@ -36,6 +36,7 @@ function armReport(step, receipt, fixture) {
     first_kick_interval_mode: "0",
     conditional_order_mode: "0",
     terminal_identity_move_mode: "0",
+    ordered_kick_interval_mode: "0",
     input: {
       board: fixture.board, height: fixture.height, placed_pieces: fixture.placed, supplied_pieces: fixture.supplied,
       supply: fixture.supply, original_supply_count: fixture.queues, hold: fixture.hold,

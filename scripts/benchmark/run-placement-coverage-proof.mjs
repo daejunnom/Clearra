@@ -7,6 +7,7 @@ import {
   createReadStream, existsSync, lstatSync, mkdirSync, readFileSync,
   realpathSync, statfsSync, unlinkSync, writeFileSync,
 } from "node:fs";
+import { availableParallelism, cpus, hostname, totalmem, version } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -28,6 +29,8 @@ const MODES = Object.freeze({
   CLEARRA_FIRST_KICK_INTERVAL: "0",
   CLEARRA_CONDITIONAL_ORDER: "0",
   CLEARRA_TERMINAL_IDENTITY_MOVE: "0",
+  CLEARRA_ORDERED_KICK_INTERVAL: "0",
+  CLEARRA_ILC_LAZY_FRAME: "0",
 });
 const CASES = Object.freeze({
   small: Object.freeze({
@@ -117,17 +120,19 @@ function summaryEquals(value, expected) {
   return value === expected || value === String(expected);
 }
 
-export function validatedProofArm(report, receipt, step, options, binarySha) {
+export function validatedProofArm(report, receipt, step, options, binarySha, outputMode = "solution-coverage") {
   const fixture = options.fixture;
   requireThat(report?.schema === "clearra.placement-graph-benchmark.v1" &&
     report.case === fixture.name && report.valid === true &&
     Array.isArray(report.validation_errors) && report.validation_errors.length === 0 &&
     report.binary_sha256 === binarySha && report.supervisor_run_id === receipt.outcome.run_id &&
-    report.output_mode === "solution-coverage" && report[AXIS] === step.value &&
+    report.output_mode === outputMode && report[AXIS] === step.value &&
     report.mode === "1" && report.structural_mode === "1" &&
     report.static_influence_mode === "0" && report.translation_interval_mode === "0" &&
     report.incremental_domain_mode === "0" && report.first_kick_interval_mode === "0" &&
-    report.conditional_order_mode === "0" && report.terminal_identity_move_mode === "0",
+    report.conditional_order_mode === "0" && report.terminal_identity_move_mode === "0" &&
+    (report.ordered_kick_interval_mode ?? "0") === "0" &&
+    (report.ilc_lazy_frame_mode ?? "0") === "0",
   step.name + ": unexpected source, mode, or coverage output");
   const input = report.input;
   requireThat(input?.board === fixture.board && input.height === fixture.height &&
@@ -154,11 +159,13 @@ export function validatedProofArm(report, receipt, step, options, binarySha) {
     ids?.count === fixture.solutions && ids.reported_total_count === fixture.solutions &&
     ids.covers_reported_family === true && SHA.test(ids.sha256_ordered_ctk1_v1 ?? "") &&
     coverage?.set_bit_count === fixture.queues && SHA.test(coverage.sha256_le_v1 ?? "") &&
-    mapping?.complete === true && SHA.test(mapping.sha256 ?? "") &&
-    mapping.solution_count === fixture.solutions && mapping.total_weight === fixture.queues &&
-    mapping.covered_weight === fixture.queues && Number.isSafeInteger(mapping.covered_pairs) &&
-    mapping.covered_pairs >= Math.max(fixture.solutions, fixture.queues) &&
-    mapping.covered_pairs <= fixture.solutions * fixture.queues,
+    (outputMode === "global-only" ? mapping == null : (
+      outputMode === "solution-coverage" && mapping?.complete === true && SHA.test(mapping.sha256 ?? "") &&
+      mapping.solution_count === fixture.solutions && mapping.total_weight === fixture.queues &&
+      mapping.covered_weight === fixture.queues && Number.isSafeInteger(mapping.covered_pairs) &&
+      mapping.covered_pairs >= Math.max(fixture.solutions, fixture.queues) &&
+      mapping.covered_pairs <= fixture.solutions * fixture.queues
+    )),
   step.name + ": incomplete or incorrect full per-solution output");
   return {
     input, cpu, ids: ids.sha256_ordered_ctk1_v1, globalCoverage: coverage.sha256_le_v1,
@@ -189,6 +196,8 @@ export async function collectPlacementCoverageProof(options, binarySha, steps, i
     timing_adoption_authority: false,
     source_commit: options.sourceCommit,
     binary_sha256: binarySha,
+    manager_sha256: io.custody?.managerSha,
+    host_fingerprint: io.custody?.hostFingerprint,
     case: options.fixture.name,
     axis: AXIS,
     observations,
@@ -238,6 +247,9 @@ export async function collectPlacementCoverageProof(options, binarySha, steps, i
     }
     await io.checkInputs();
     evidence.state = options.key === "p7p4" ? "completed-exact-per-solution" : "completed-small-preflight";
+    evidence.source_binding = [reports.reference, reports.candidate].every(
+      (report) => report.compiled_source_commit === options.sourceCommit)
+      ? "compile-time-and-checkout" : "checkout-and-binary-custody-only";
     evidence.mapping = {
       comparison: "comparison.json",
       reference: { benchmark: "reference.json", supervisor: "reference-runtime.json" },
@@ -251,7 +263,7 @@ export async function collectPlacementCoverageProof(options, binarySha, steps, i
   return evidence;
 }
 
-function parseBoundBenchmarkOutput(receipt, execution) {
+export function parseBoundBenchmarkOutput(receipt, execution) {
   try {
     const reported = JSON.parse(receipt.stdout_tail);
     return isDeepStrictEqual(reported, JSON.parse(execution.stdout)) ? reported : null;
@@ -260,19 +272,19 @@ function parseBoundBenchmarkOutput(receipt, execution) {
   }
 }
 
-function benchmarkEnvironment(environment, step) {
+export function benchmarkEnvironment(environment, step) {
   const expected = { ...MODES, CLEARRA_MOVEMENT_CLEAR_CERTIFICATES: step.value };
   const allowed = Object.fromEntries(Object.entries(environment).filter(([key]) =>
     !Object.hasOwn(expected, key.toUpperCase())));
   return { ...allowed, ...expected };
 }
 
-function composeRuntimeArgs(root, step) {
+export function composeRuntimeArgs(root, step) {
   return ["--root", root, "runtime", "run", "--producer", "benchmark", "--profile", "benchmark-search",
     "--timeout", String(step.timeout), "--", ...step.command];
 }
 
-function captureChild(manager, args, cwd, env) {
+export function captureChild(manager, args, cwd, env) {
   return new Promise((resolvePromise, reject) => {
     // POSIX terminal cancellation belongs to the JS launcher, not the
     // manager. The manager alone owns and enforces the active solver lease.
@@ -295,7 +307,7 @@ function captureChild(manager, args, cwd, env) {
   });
 }
 
-function stateReceiptDirectory(environment) {
+export function stateReceiptDirectory(environment) {
   const root = process.platform === "win32"
     ? join(environment.LOCALAPPDATA ?? "", "Clearra", "state")
     : join(environment.XDG_STATE_HOME ?? join(environment.HOME ?? "", ".local", "state"), "Clearra");
@@ -303,7 +315,7 @@ function stateReceiptDirectory(environment) {
   return join(root, "receipts", "rust-v2");
 }
 
-function readSupervisorReceipt(execution, receiptDirectory) {
+export function readSupervisorReceipt(execution, receiptDirectory) {
   const slots = [...execution.stderr.matchAll(/^clearra_runtime_receipt=([^\r\n]+)\r?$/gmu)];
   if (slots.length === 0 && execution.stderr.includes("E_CLEARRA_RUNTIME_SLOT_BUSY")) {
     throw new Error("benchmark-search ownership already held; did not retry");
@@ -322,28 +334,28 @@ function readSupervisorReceipt(execution, receiptDirectory) {
   return receipt;
 }
 
-function requireOwnedFile(path, allowCargoHardlink = false) {
+export function requireOwnedFile(path, allowCargoHardlink = false) {
   const stat = lstatSync(path);
   requireThat(stat.isFile() && (allowCargoHardlink || stat.nlink === 1) && realpathSync(path) === path,
     "Expected an owned regular file with no link traversal: " + basename(path));
   return path;
 }
 
-function checkedCommand(command, args, cwd) {
+export function checkedCommand(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, windowsHide: true, encoding: "utf8",
     timeout: 30_000, maxBuffer: MAX_JSON_BYTES });
   requireThat(result.status === 0 && !result.error, "Bounded preflight command failed: " + basename(command));
   return result.stdout;
 }
 
-async function fileSha(path) {
+export async function fileSha(path, allowCargoHardlink = true) {
   const sha = createHash("sha256");
   // Cargo can hardlink the canonical output to its own fingerprinted file.
-  for await (const chunk of createReadStream(requireOwnedFile(path, true))) sha.update(chunk);
+  for await (const chunk of createReadStream(requireOwnedFile(path, allowCargoHardlink))) sha.update(chunk);
   return sha.digest("hex");
 }
 
-function acquireProofOwnership(path, id) {
+export function acquireProofOwnership(path, id) {
   const owner = JSON.stringify({ run: id, pid: process.pid, token: randomUUID() }) + "\n";
   try {
     writeFileSync(path, owner, { flag: "wx" });
@@ -362,6 +374,30 @@ function acquireProofOwnership(path, id) {
     unlinkSync(path);
   };
 }
+
+export function localPlacementHostFingerprint() {
+  // Bind to the same host, OS and CPU presentation without emitting the hostname.
+  return createHash("sha256").update(JSON.stringify({
+    host: hostname(), version: version(), platform: process.platform, arch: process.arch,
+    available: availableParallelism(), cpu: cpus().map(({ model }) => model), totalMemory: totalmem(),
+  })).digest("hex");
+}
+
+export function requirePlacementEvidenceSlot(manager, root, path) {
+  requireThat(!existsSync(path), "Coverage evidence slot is already owned: " + basename(path));
+  const verification = JSON.parse(checkedCommand(manager, ["--root", root, "storage", "verify", "--path", path], root));
+  requireThat(verification?.schema_id === "clearra.storage-verification.v2" &&
+    verification.root_id === "local-artifacts" && resolve(verification.path) === path,
+  "Coverage slot is not inside the declared local artifact root");
+}
+
+export function readOwnedPlacementJson(path) {
+  const file = requireOwnedFile(path);
+  requireThat(lstatSync(file).size <= MAX_JSON_BYTES, "Oversized placement suite evidence");
+  return JSON.parse(readFileSync(file, "utf8"));
+}
+
+export { AXIS, COVERAGE_ROOT };
 
 let interrupted = null;
 
@@ -382,6 +418,7 @@ async function main(argv) {
   const steps = proofSchedule(options, binary, artifactRoot);
   const binarySha = await fileSha(binary);
   const managerSha = await fileSha(manager);
+  const hostFingerprint = localPlacementHostFingerprint();
   const checkInputs = async () => {
     requireThat(!interrupted, "Interrupted; stopped before starting another phase");
     requireThat(checkedCommand("git", ["rev-parse", "HEAD"], root).trim() === options.sourceCommit &&
@@ -389,15 +426,12 @@ async function main(argv) {
     "The tracked and untracked source must match the exact clean checkout for this proof");
     requireThat(await fileSha(binary) === binarySha && await fileSha(manager) === managerSha,
       "Benchmark or supervisor binary changed during the proof");
+    requireThat(localPlacementHostFingerprint() === hostFingerprint, "The measured host changed during the proof");
   };
   await checkInputs();
   const owned = [lockPath, proofRoot, ...steps.slice(0, 2).map((step) => dirname(step.artifact))];
   for (const path of owned) {
-    requireThat(!existsSync(path), "Coverage proof/capture slot is already owned: " + basename(path));
-    const verification = JSON.parse(checkedCommand(manager, ["--root", root, "storage", "verify", "--path", path], root));
-    requireThat(verification?.schema_id === "clearra.storage-verification.v2" &&
-      verification.root_id === "local-artifacts" && resolve(verification.path) === path,
-    "Coverage slot is not inside the declared local artifact root");
+    requirePlacementEvidenceSlot(manager, root, path);
   }
   const supervisorDirectory = stateReceiptDirectory(process.env);
   mkdirSync(artifactRoot, { recursive: true });
@@ -412,6 +446,7 @@ async function main(argv) {
   try {
     mkdirSync(proofRoot); // Exclusive ownership; no reopen/resume of a failed proof.
     evidence = await collectPlacementCoverageProof(options, binarySha, steps, {
+      custody: { hostFingerprint, managerSha },
       checkInputs,
       execute: (step) => captureChild(manager, composeRuntimeArgs(root, step), root,
         benchmarkEnvironment(process.env, step)),

@@ -33,7 +33,7 @@ jobs:
           set -eu
           cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib --no-run
           status=0
-          for filter in structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves ordered_kick_interval_requires reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_ candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move nonempty_eight_i_advanced_domain_preserves_fixture_identities; do
+          for filter in structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves ordered_kick_interval_requires reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_ candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move nonempty_eight_i_advanced_domain_preserves_fixture_identities lazy_frame_; do
             cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib "$filter" || status=1
           done
           exit "$status"
@@ -41,11 +41,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
       - name: Verify supervised capture and comparison on the one-I fixture
+        if: ${{ !cancelled() }}
         run: |
           set -eu
           df --output=avail -B1 "$GITHUB_WORKSPACE"
           CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked -p clearra-manage
-          CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
+          CLEARRA_SOURCE_COMMIT="$GITHUB_SHA" CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
           node scripts/benchmark/run-placement-coverage-proof.mjs --case small --build-profile debug \
             --id "small-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source-sha "$GITHUB_SHA"
   receipts-and-adoption:
@@ -62,7 +63,7 @@ jobs:
         run: cargo test --locked -p clearra-manage --bin clearra-manage runtime::tests
       - name: Test the local adoption evaluator
         if: ${{ !cancelled() }}
-        run: node --test scripts/tools/placement-graph-adoption.test.mjs scripts/benchmark/run-placement-coverage-proof.test.mjs
+        run: node --test scripts/tools/placement-graph-adoption.test.mjs scripts/benchmark/run-placement-coverage-proof.test.mjs scripts/benchmark/run-placement-graph-adoption.test.mjs
   operation-reuse:
     if: github.ref == 'refs/heads/codex/v090-relation-rust-integration'
     runs-on: ubuntu-latest
@@ -74,7 +75,7 @@ jobs:
       - name: Check exact source
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Test normalized ordered kicks and stable replay identifiers
-        run: cargo test --locked -p clearra-rules -p clearra-finesse -p clearra-core-ffi --lib --no-fail-fast
+        run: cargo test --locked -p clearra-rules -p clearra-finesse -p clearra-core-ffi -p clearra-pc-graph --lib --no-fail-fast
       - name: Test the legacy Cover Rust service boundary
         if: ${{ !cancelled() }}
         shell: bash
@@ -83,7 +84,11 @@ jobs:
           out="$CLEARRA_BUILD_TRANSACTION_ROOT/legacy-cover-core-c"
           cmake -S core-c -B "$out" -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
           cmake --build "$out" --target clearra_core --parallel 2
-          RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-L native=$out" cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_tests
+          export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-L native=$out"
+          status=0
+          cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_tests || status=1
+          cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
+          exit "$status"
           SH
   p7p4-exact-handoff:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/v090-relation-rust-p7p4'
@@ -102,7 +107,7 @@ jobs:
       - name: Build native proof tools once
         run: |
           cargo build --locked --release -p clearra-manage
-          cargo build --locked --release -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
+          CLEARRA_SOURCE_COMMIT="$GITHUB_SHA" cargo build --locked --release -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
       - name: Compare all per-solution queues under separate supervised leases
         run: |
           node scripts/benchmark/run-placement-coverage-proof.mjs --case p7p4 \
