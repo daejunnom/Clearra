@@ -266,6 +266,19 @@ enum BuildPassOutput {
     },
 }
 
+enum BuildPassAttempt {
+    Complete(BuildPassOutput),
+    #[cfg(any(test, feature = "local-search-ab"))]
+    Conflict(BuildProofConflict),
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuildProofConflict {
+    RetainedInterval,
+    OrderedKickGuard,
+}
+
 impl BuildPassOutput {
     fn into_graph(self) -> BuildOrderGraph {
         match self {
@@ -2178,10 +2191,19 @@ struct CandidateMovementProofs {
 }
 
 #[cfg(any(test, feature = "local-search-ab"))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum MovementProofSource {
+    // Prefer the poset for attribution when both producers agree.
     Poset,
     ConditionalOrder,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MovementProofAnswer {
+    Miss,
+    Exact(bool, MovementProofSource),
+    Conflict,
 }
 
 #[cfg(any(test, feature = "local-search-ab"))]
@@ -2359,12 +2381,12 @@ impl CandidateMovementProofs {
     fn fallback_pose(
         &self,
         row_id: u32,
-        piece: PieceKind,
         profile: clearra_rules::kicks::KickTableProfileId,
         height: u8,
         deleted: u16,
         realization: super::catalog::InstantiatedRealization,
         board: u64,
+        proof_answer: MovementProofAnswer,
     ) -> Option<bool> {
         let ledger = self.conditional_fallback.as_ref()?;
         let key = ConditionalClosedWithinKey {
@@ -2376,12 +2398,10 @@ impl CandidateMovementProofs {
         if !ledger.excludes(key, board) {
             return None;
         }
-        let positive = self.intervals[..self.len].iter().flatten().any(|(query, _)| {
-            query.piece == piece && query.realization == realization && query.deleted == deleted
-                && query.minimum & !board == 0
-                && matches!(query.proof, super::placement_poset::MovementProof::Reachable { maximum } if board & !maximum == 0)
-        });
-        Some(!positive)
+        Some(matches!(
+            proof_answer,
+            MovementProofAnswer::Miss | MovementProofAnswer::Exact(false, _)
+        ))
     }
 
     fn remember(&mut self, query: super::placement_poset::MovementProofQuery) {
@@ -2407,28 +2427,35 @@ impl CandidateMovementProofs {
         realization: super::catalog::InstantiatedRealization,
         deleted: u16,
         board: u64,
-    ) -> Option<(bool, MovementProofSource)> {
+    ) -> MovementProofAnswer {
         use super::placement_poset::MovementProof;
 
-        self.intervals[..self.len]
-            .iter()
-            .flatten()
-            .find_map(|(query, source)| {
-                if query.piece != piece
-                    || query.realization != realization
-                    || query.deleted != deleted
-                    || query.minimum & !board != 0
-                {
-                    return None;
-                }
-                match query.proof {
-                    MovementProof::Reachable { maximum } if board & !maximum == 0 => {
-                        Some((true, *source))
-                    }
-                    MovementProof::Closed => Some((false, *source)),
-                    MovementProof::Reachable { .. } => None,
-                }
-            })
+        // Catalog/profile/capability remain fixed by this candidate owner.
+        // Join only applicable evidence in the bounded table. Conflicting
+        // polarity is not a miss: callers must discard provisional work.
+        let mut agreement: Option<(bool, MovementProofSource)> = None;
+        for (query, source) in self.intervals[..self.len].iter().flatten() {
+            if query.piece != piece
+                || query.realization != realization
+                || query.deleted != deleted
+                || query.minimum & !board != 0
+            {
+                continue;
+            }
+            let reachable = match query.proof {
+                MovementProof::Reachable { maximum } if board & !maximum == 0 => true,
+                MovementProof::Closed => false,
+                MovementProof::Reachable { .. } => continue,
+            };
+            match &mut agreement {
+                Some((prior, _)) if *prior != reachable => return MovementProofAnswer::Conflict,
+                Some((_, preferred)) => *preferred = (*preferred).min(*source),
+                None => agreement = Some((reachable, *source)),
+            }
+        }
+        agreement.map_or(MovementProofAnswer::Miss, |(reachable, source)| {
+            MovementProofAnswer::Exact(reachable, source)
+        })
     }
 }
 
@@ -2683,11 +2710,18 @@ fn prove_conditional_transition(
         if reachability.lock_harddrop_reachable_instantiated(catalog.width(), board, realization) {
             return Allowed;
         }
-        if let Some((reachable, _)) = movement_proofs.answer(piece, realization, deleted, board) {
-            if reachable {
-                return Allowed;
+        match movement_proofs.answer(piece, realization, deleted, board) {
+            MovementProofAnswer::Exact(true, _) => return Allowed,
+            MovementProofAnswer::Exact(false, _) => continue,
+            MovementProofAnswer::Conflict => {
+                // An earlier transition may already depend on either source.
+                // Neither the provisional language nor its proof table may
+                // be handed to the exact graph.
+                *movement_proofs = CandidateMovementProofs::default();
+                ordered.ledger = None;
+                return Unknown;
             }
-            continue;
+            MovementProofAnswer::Miss => {}
         }
         let closed_key =
             ordered
@@ -4693,8 +4727,7 @@ impl BuildOrderGraph {
         representation: BuildPassRepresentation,
     ) -> Result<BuildPassOutput, WasmExactSearchError> {
         #[cfg(any(test, feature = "local-search-ab"))]
-        let states_before = movement_proofs
-            .kick_guard_reuse_enabled
+        let states_before = (movement_proofs.kick_guard_reuse_enabled || movement_proofs.len != 0)
             .then(|| workspace.reachability.generated_state_count());
         let pass = Self::build_pass(
             problem,
@@ -4712,27 +4745,29 @@ impl BuildOrderGraph {
         )?;
         #[cfg(not(any(test, feature = "local-search-ab")))]
         {
-            pass.ok_or(WasmExactSearchError::InvalidProblem(
-                "wasm_exact_build_pass_witness_conflict",
-            ))
+            let BuildPassAttempt::Complete(pass) = pass;
+            Ok(pass)
         }
         #[cfg(any(test, feature = "local-search-ab"))]
         {
-            if let Some(pass) = pass {
-                return Ok(pass);
-            }
+            let conflict = match pass {
+                BuildPassAttempt::Complete(pass) => return Ok(pass),
+                BuildPassAttempt::Conflict(conflict) => conflict,
+            };
             let states_before = states_before.ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_exact_build_pass_witness_conflict",
             ))?;
             // A conflict may invalidate an earlier edge. Start one fresh
             // graph generation without any candidate proof shortcut.
-            super::structural_order::record_ordered_kick_guard_reuse(
-                super::structural_order::KickGuardReuseMetrics {
-                    exact_retries: 1,
-                    ..super::structural_order::KickGuardReuseMetrics::default()
-                },
-            );
-            let mut pass = Self::build_pass(
+            if conflict == BuildProofConflict::OrderedKickGuard {
+                super::structural_order::record_ordered_kick_guard_reuse(
+                    super::structural_order::KickGuardReuseMetrics {
+                        exact_retries: 1,
+                        ..super::structural_order::KickGuardReuseMetrics::default()
+                    },
+                );
+            }
+            let BuildPassAttempt::Complete(mut pass) = Self::build_pass(
                 problem,
                 catalog,
                 candidate,
@@ -4746,9 +4781,11 @@ impl BuildOrderGraph {
                 &CandidateMovementProofs::default(),
                 representation,
             )?
-            .ok_or(WasmExactSearchError::InvalidProblem(
-                "wasm_exact_build_pass_witness_conflict",
-            ))?;
+            else {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_exact_build_pass_witness_conflict",
+                ));
+            };
             pass.set_reachability_states(
                 workspace
                     .reachability
@@ -4773,7 +4810,7 @@ impl BuildOrderGraph {
         legal_board_eligible: bool,
         _movement_proofs: &CandidateMovementProofs,
         representation: BuildPassRepresentation,
-    ) -> Result<Option<BuildPassOutput>, WasmExactSearchError> {
+    ) -> Result<BuildPassAttempt, WasmExactSearchError> {
         if candidate.row_ids().len() > 15 {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_buildup_operation_count_exceeds_bitset",
@@ -4863,6 +4900,8 @@ impl BuildOrderGraph {
         let mut conditional_metrics = super::structural_order::ConditionalOrderMetrics::default();
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut kick_guards = CandidateKickGuardLedger::default();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let mut proof_conflict = None;
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut kick_guard_metrics = super::structural_order::KickGuardReuseMetrics::default();
         #[cfg(any(test, feature = "local-search-ab"))]
@@ -5030,15 +5069,23 @@ impl BuildOrderGraph {
                             harddrop_edge = Some(edge);
                             break;
                         }
+                        #[cfg(any(test, feature = "local-search-ab"))]
+                        let proof_answer =
+                            _movement_proofs.answer(row.piece, realization, deleted_rows, board);
+                        #[cfg(any(test, feature = "local-search-ab"))]
+                        if proof_answer == MovementProofAnswer::Conflict {
+                            proof_conflict = Some(BuildProofConflict::RetainedInterval);
+                            break 'build_subsets;
+                        }
                         #[cfg(test)]
                         if let Some(exclude) = _movement_proofs.fallback_pose(
                             row_id,
-                            row.piece,
                             problem.kick_profile().profile_id(),
                             catalog.height(),
                             deleted_rows,
                             realization,
                             board,
+                            proof_answer,
                         ) {
                             if exclude {
                                 let _ = edge_scratch.pop();
@@ -5060,13 +5107,8 @@ impl BuildOrderGraph {
                             || _movement_proofs.len != 0)
                             && certified_edge.is_none()
                         {
-                            match _movement_proofs.answer(
-                                row.piece,
-                                realization,
-                                deleted_rows,
-                                board,
-                            ) {
-                                Some((true, source)) => {
+                            match proof_answer {
+                                MovementProofAnswer::Exact(true, source) => {
                                     match source {
                                         MovementProofSource::Poset => {
                                             movement_metrics.reused_positive_locks += 1;
@@ -5077,7 +5119,7 @@ impl BuildOrderGraph {
                                     }
                                     certified_edge = Some((edge, PositiveEdgeProof::Reused));
                                 }
-                                Some((false, source)) => {
+                                MovementProofAnswer::Exact(false, source) => {
                                     match source {
                                         MovementProofSource::Poset => {
                                             movement_metrics.reused_closed_locks += 1;
@@ -5088,7 +5130,8 @@ impl BuildOrderGraph {
                                     }
                                     let _ = edge_scratch.pop();
                                 }
-                                None => {
+                                MovementProofAnswer::Conflict => unreachable!("handled above"),
+                                MovementProofAnswer::Miss => {
                                     let frame =
                                         LocalRelationRowFrame::new(catalog.height(), deleted_rows);
                                     let profile = problem.kick_profile().profile_id();
@@ -5124,6 +5167,8 @@ impl BuildOrderGraph {
                                                 &mut kick_guard_metrics,
                                             );
                                             if kick_guards.conflicted {
+                                                proof_conflict =
+                                                    Some(BuildProofConflict::OrderedKickGuard);
                                                 break 'build_subsets;
                                             }
                                             if let Some(proof) = proof {
@@ -5351,7 +5396,7 @@ impl BuildOrderGraph {
         geometric_edge_reuse::record(geometric_reuse_metrics);
         #[cfg(any(test, feature = "local-search-ab"))]
         {
-            if kick_guards.conflicted {
+            if let Some(conflict) = proof_conflict {
                 // Recycle un-published graph scratch, but keep only exact
                 // template/reachability caches and exact physical projection.
                 if materialize_graph {
@@ -5366,11 +5411,13 @@ impl BuildOrderGraph {
                 }
                 workspace.graph_subset_queue = subset_queue;
                 workspace.graph_edge_scratch = edge_scratch;
-                kick_guard_metrics.conflicts += 1;
+                if conflict == BuildProofConflict::OrderedKickGuard {
+                    kick_guard_metrics.conflicts += 1;
+                }
                 // Reuses in an aborted pass are not selected output edges.
                 kick_guard_metrics.reused_selected = 0;
                 super::structural_order::record_ordered_kick_guard_reuse(kick_guard_metrics);
-                return Ok(None);
+                return Ok(BuildPassAttempt::Conflict(conflict));
             }
             super::structural_order::record_ordered_kick_guard_reuse(kick_guard_metrics);
         }
@@ -5417,11 +5464,13 @@ impl BuildOrderGraph {
             workspace.graph_subset_queue = subset_queue;
             edge_scratch.clear();
             workspace.graph_edge_scratch = edge_scratch;
-            return Ok(Some(BuildPassOutput::OperationMasks {
-                language_root: language_root?,
-                visited_subsets,
-                reachability_states,
-            }));
+            return Ok(BuildPassAttempt::Complete(
+                BuildPassOutput::OperationMasks {
+                    language_root: language_root?,
+                    visited_subsets,
+                    reachability_states,
+                },
+            ));
         }
         #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
         workspace.record_operation_mask_pass(|metrics| {
@@ -5508,7 +5557,7 @@ impl BuildOrderGraph {
             }
             graph
         };
-        Ok(Some(BuildPassOutput::Graph(graph)))
+        Ok(BuildPassAttempt::Complete(BuildPassOutput::Graph(graph)))
     }
 
     pub fn max_depth(&self) -> usize {
@@ -6842,6 +6891,85 @@ mod kick_guard_reuse_tests {
     }
 
     #[test]
+    fn candidate_kick_guard_retained_interval_agreement_is_order_independent_and_scoped() {
+        use super::super::{
+            catalog::InstantiatedRealization,
+            placement_poset::{MovementProof, MovementProofQuery},
+        };
+
+        let pose = InstantiatedRealization {
+            lock_mask: 0x4038,
+            rotation: RotationState::Zero,
+            x: 3,
+            lock_y: 0,
+        };
+        let positive = MovementProofQuery {
+            piece: PieceKind::T,
+            realization: pose,
+            deleted: 0,
+            minimum: 0b0010,
+            proof: MovementProof::Reachable { maximum: 0b1010 },
+        };
+        let negative = MovementProofQuery {
+            minimum: 0b1000,
+            proof: MovementProof::Closed,
+            ..positive
+        };
+        use MovementProofAnswer::{Conflict, Exact, Miss};
+        use MovementProofSource::{ConditionalOrder, Poset};
+
+        for order in [
+            [(positive, Poset), (negative, ConditionalOrder)],
+            [(negative, ConditionalOrder), (positive, Poset)],
+        ] {
+            let mut proofs = CandidateMovementProofs::default();
+            for (query, source) in order {
+                proofs.insert(query, source);
+            }
+            assert_eq!(proofs.answer(PieceKind::T, pose, 0, 0b1010), Conflict);
+            assert_eq!(
+                proofs.answer(PieceKind::T, pose, 0, 0b0010),
+                Exact(true, Poset)
+            );
+            assert_eq!(
+                proofs.answer(PieceKind::T, pose, 0, 0b11010),
+                Exact(false, ConditionalOrder)
+            );
+            // Occupancy outside both guards and all numerically overlapping
+            // wrong operation/frame keys are misses, not contradictions.
+            assert_eq!(proofs.answer(PieceKind::T, pose, 0, 0b10000), Miss);
+            assert_eq!(proofs.answer(PieceKind::T, pose, 1, 0b1010), Miss);
+            assert_eq!(proofs.answer(PieceKind::L, pose, 0, 0b1010), Miss);
+            assert_eq!(
+                proofs.answer(
+                    PieceKind::T,
+                    InstantiatedRealization { x: 4, ..pose },
+                    0,
+                    0b1010,
+                ),
+                Miss
+            );
+        }
+        for order in [[Poset, ConditionalOrder], [ConditionalOrder, Poset]] {
+            let mut proofs = CandidateMovementProofs::default();
+            for source in order {
+                proofs.insert(positive, source);
+            }
+            proofs.insert(
+                MovementProofQuery {
+                    deleted: 1,
+                    ..negative
+                },
+                ConditionalOrder,
+            );
+            assert_eq!(
+                proofs.answer(PieceKind::T, pose, 0, 0b1010),
+                Exact(true, Poset)
+            );
+        }
+    }
+
+    #[test]
     fn candidate_kick_guard_conflict_discards_the_provisional_graph_and_retries_once() {
         use super::super::{
             placement_poset::{MovementProof, MovementProofQuery},
@@ -6962,19 +7090,58 @@ mod kick_guard_reuse_tests {
                     )
                     .unwrap();
                     assert!(graph.is_live());
-                    (graph.nodes.len(), graph.edges)
+                    (workspace.graph_generation, (graph.nodes.len(), graph.edges))
                 })
                 .0
             })
         };
         let baseline = CandidateMovementProofs::default();
-        let (expected, _) = run(&baseline);
-        let (actual, observed) = run(&disputed);
+        let ((expected_generation, expected), _) = run(&baseline);
+        let ((generation, actual), observed) = run(&disputed);
+        assert_eq!(expected_generation, 1);
+        assert_eq!(generation, expected_generation + 1);
         assert_eq!(actual, expected);
         let metrics = observed.ordered_kick_guard_reuse;
         assert_eq!(metrics.conflicts, 1);
         assert_eq!(metrics.exact_retries, 1);
         assert_eq!(metrics.reused_selected, 0);
+
+        // Inject both signs for the same exact realization, independent of
+        // the graph's choice of executed prefix. An interval contradiction
+        // also requires a fresh pass, but is not an ordered-kick conflict.
+        let negative = MovementProofQuery {
+            piece: PieceKind::T,
+            realization,
+            deleted: 0,
+            minimum: 0,
+            proof: MovementProof::Closed,
+        };
+        let positive = MovementProofQuery {
+            proof: MovementProof::Reachable {
+                maximum: (1 << 30) - 1,
+            },
+            ..negative
+        };
+        for queries in [
+            [
+                (positive, MovementProofSource::Poset),
+                (negative, MovementProofSource::ConditionalOrder),
+            ],
+            [
+                (negative, MovementProofSource::ConditionalOrder),
+                (positive, MovementProofSource::Poset),
+            ],
+        ] {
+            let mut disputed_intervals = CandidateMovementProofs::default();
+            for (query, source) in queries {
+                disputed_intervals.insert(query, source);
+            }
+            let ((generation, actual), observed) = run(&disputed_intervals);
+            assert_eq!(generation, expected_generation + 1);
+            assert_eq!(actual, expected);
+            assert_eq!(observed.ordered_kick_guard_reuse.conflicts, 0);
+            assert_eq!(observed.ordered_kick_guard_reuse.exact_retries, 0);
+        }
     }
 }
 
