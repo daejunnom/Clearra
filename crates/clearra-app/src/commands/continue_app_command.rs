@@ -1,3 +1,4 @@
+use clearra_core_executor::service::pc_continuation_fields::attach_exact_fixed_no_hold_2l_opening_continuation;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcContinuationToken, PcContinuationTokenCodec, PcScenarioQuery,
 };
@@ -93,10 +94,21 @@ fn run_opening_continue(
         .core_executor()
         .execute_with_control(&problem, context.execution_control())
     {
-        Ok(result) => AppResponse::success(AppRenderModel::Continue(AppMessage::new(
-            AppResultKind::Continue,
-            continue_fields(status, continuation_kind, token, result.summary_fields()),
-        ))),
+        Ok(result) => {
+            let result = if context
+                .services()
+                .core_executor()
+                .supports_cooperative_wasm_search()
+            {
+                attach_exact_fixed_no_hold_2l_opening_continuation(&problem, result)
+            } else {
+                result
+            };
+            AppResponse::success(AppRenderModel::Continue(AppMessage::new(
+                AppResultKind::Continue,
+                continue_fields(status, continuation_kind, token, result.summary_fields()),
+            )))
+        }
         Err(error) => core_execution_error_response(error),
     }
 }

@@ -58,16 +58,19 @@ mod run {
         },
     };
     use clearra_core_executor::{
-        backend::{CapturedSolutionCoverage, GeometryDomainExperimentTotals},
+        backend::{
+            CapturedSolutionCoverage, GeometricEdgeReuseMetrics, GeometryDomainExperimentTotals,
+        },
         CoreExecutionResult, WasmCpuSearchBackend,
     };
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
     use clearra_pc_graph::request::{
         OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
-        PcScenarioBoard, PcScenarioQuery, PieceWindow, RequestedSearchBackend, WorkerPolicy,
+        PcScenarioBoard, PcScenarioQuery, PcSolutionProbabilityPolicy, PieceWindow,
+        RequestedSearchBackend, WorkerPolicy,
     };
     use clearra_problem::{ProblemCompiler, SearchProblem};
-    use clearra_rules::profile::builtin_rules::jstris_180;
+    use clearra_rules::profile::builtin_rules::{jstris_180, srs};
     use clearra_supply::queue::fixed_sequence::FixedSequence;
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
@@ -75,16 +78,22 @@ mod run {
     const LARGE_COUNT: usize = 456_459;
     const LARGE_HASH: &str = "cts1:2fcbc950acdffa31";
     const EIGHT_I_INITIAL: u64 = 0xc030_0c03;
+    const GROUNDED_O_CELLS: u64 = 0x0c03;
+    const GROUNDED_O_INITIAL: u64 = 0x0f_ffff & !GROUNDED_O_CELLS;
     const EIGHT_I_CAPTURE_ERROR: &str =
         "--nonempty-eight-i supports global-only output; --coverage-slot is unavailable";
     const TEN_I_CAPTURE_ERROR: &str =
         "--empty-ten-i supports global-only output; --coverage-slot is unavailable";
+    const GROUNDED_O_CAPTURE_ERROR: &str =
+        "grounded two-line O fixtures use one fixed queue and support only global-only output";
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Fixture {
         OneI,
         NonemptyEightI,
         EmptyTenI,
+        GroundedOTwoLinesAll,
+        GroundedOTwoLinesUnique,
         P7P4,
     }
 
@@ -94,6 +103,8 @@ mod run {
                 Self::OneI => "one-I-preflight",
                 Self::NonemptyEightI => "nonempty-4L-eight-I-jstris180",
                 Self::EmptyTenI => "empty-4L-ten-I-jstris180",
+                Self::GroundedOTwoLinesAll => "grounded-o-two-lines-countall-srs90",
+                Self::GroundedOTwoLinesUnique => "grounded-o-two-lines-countunique-srs90",
                 Self::P7P4 => "empty-4L-P7P4-jstris180",
             }
         }
@@ -101,13 +112,14 @@ mod run {
         const fn height(self) -> u16 {
             match self {
                 Self::OneI => 1,
+                Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique => 2,
                 Self::NonemptyEightI | Self::EmptyTenI | Self::P7P4 => 4,
             }
         }
 
         const fn placed_pieces(self) -> usize {
             match self {
-                Self::OneI => 1,
+                Self::OneI | Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique => 1,
                 Self::NonemptyEightI => 8,
                 Self::EmptyTenI | Self::P7P4 => 10,
             }
@@ -117,6 +129,9 @@ mod run {
             match self {
                 Self::OneI => Some(0x3f0),
                 Self::NonemptyEightI => Some(EIGHT_I_INITIAL),
+                Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique => {
+                    Some(GROUNDED_O_INITIAL)
+                }
                 Self::EmptyTenI | Self::P7P4 => None,
             }
         }
@@ -126,13 +141,18 @@ mod run {
                 Self::OneI => ("0x3f0", "I", 1, 1, "disabled"),
                 Self::NonemptyEightI => ("0xc0300c03", "IIIIIIII", 8, 1, "disabled"),
                 Self::EmptyTenI => ("0", "IIIIIIIIII", 10, 1, "disabled"),
+                Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique => {
+                    ("0xff3fc", "O", 1, 1, "disabled")
+                }
                 Self::P7P4 => ("0", "P7P4", 11, 4_233_600, "enabled-empty"),
             };
             json!({
                 "board": board, "height": self.height(), "placed_pieces": self.placed_pieces(),
                 "supply": supply, "supplied_pieces": supplied_pieces,
                 "original_supply_count": original_supply_count, "hold": hold,
-                "rule": "jstris-180", "count": "unique", "queue_knowledge": "full-future-oracle"
+                "rule": if self.is_grounded_o() { "srs90" } else { "jstris-180" },
+                "count": if self.count_policy() == PcCountPolicy::CountAll { "all" } else { "unique" },
+                "queue_knowledge": "full-future-oracle"
             })
         }
 
@@ -142,6 +162,23 @@ mod run {
                 Self::P7P4 => Ok(CoverageUniverse::P7P4),
                 Self::NonemptyEightI => Err(EIGHT_I_CAPTURE_ERROR.into()),
                 Self::EmptyTenI => Err(TEN_I_CAPTURE_ERROR.into()),
+                Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique => {
+                    Err(GROUNDED_O_CAPTURE_ERROR.into())
+                }
+            }
+        }
+
+        const fn is_grounded_o(self) -> bool {
+            matches!(
+                self,
+                Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique
+            )
+        }
+
+        const fn count_policy(self) -> PcCountPolicy {
+            match self {
+                Self::GroundedOTwoLinesAll => PcCountPolicy::CountAll,
+                _ => PcCountPolicy::CountUnique,
             }
         }
     }
@@ -152,6 +189,10 @@ mod run {
             [flag] if flag == "--small" => Ok((Fixture::OneI, None)),
             [flag] if flag == "--nonempty-eight-i" => Ok((Fixture::NonemptyEightI, None)),
             [flag] if flag == "--empty-ten-i" => Ok((Fixture::EmptyTenI, None)),
+            [flag] if flag == "--grounded-o-two-lines" => Ok((Fixture::GroundedOTwoLinesAll, None)),
+            [flag] if flag == "--grounded-o-two-lines-unique" => {
+                Ok((Fixture::GroundedOTwoLinesUnique, None))
+            }
             [flag, slot] if flag == "--coverage-slot" => Ok((Fixture::P7P4, Some(slot.as_str()))),
             [small, flag, slot] if small == "--small" && flag == "--coverage-slot" => {
                 Ok((Fixture::OneI, Some(slot.as_str())))
@@ -162,8 +203,14 @@ mod run {
             [fixture, flag, _] if fixture == "--empty-ten-i" && flag == "--coverage-slot" => {
                 Err(TEN_I_CAPTURE_ERROR.into())
             }
+            [fixture, flag, _]
+                if matches!(fixture.as_str(), "--grounded-o-two-lines" | "--grounded-o-two-lines-unique")
+                    && flag == "--coverage-slot" =>
+            {
+                Err(GROUNDED_O_CAPTURE_ERROR.into())
+            }
             _ => Err(
-                "usage: placement_graph_bench [[--small] [--coverage-slot SLOT] | --nonempty-eight-i | --empty-ten-i | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
+                "usage: placement_graph_bench [[--small] [--coverage-slot SLOT] | --nonempty-eight-i | --empty-ten-i | --grounded-o-two-lines | --grounded-o-two-lines-unique | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
                     .into(),
             ),
         }
@@ -183,7 +230,7 @@ mod run {
             return scalar_demo();
         }
         let (fixture, coverage_slot) = parse_fixture(&args)?;
-        if (fixture != Fixture::OneI || coverage_slot.is_some())
+        if ((fixture != Fixture::OneI && !fixture.is_grounded_o()) || coverage_slot.is_some())
             && (std::env::var("CLEARRA_RUNTIME_SUPERVISED").as_deref() != Ok("1")
                 || std::env::var("CLEARRA_RUNTIME_PROFILE").as_deref() != Ok("benchmark-search"))
         {
@@ -224,6 +271,30 @@ mod run {
         let same_tile_parent_reuse_mode = experiment_mode("CLEARRA_SAME_TILE_PARENT_REUSE")?;
         let conditional_order_mode = experiment_mode("CLEARRA_CONDITIONAL_ORDER")?;
         let terminal_identity_move_mode = experiment_mode("CLEARRA_TERMINAL_IDENTITY_MOVE")?;
+        if fixture.is_grounded_o()
+            && [
+                &mode,
+                &structural_mode,
+                &static_influence_mode,
+                &translation_interval_mode,
+                &movement_clear_certificates_mode,
+                &incremental_domain_mode,
+                &minimum_domain_cutoff_mode,
+                &minimum_domain_work_mode,
+                &first_kick_interval_mode,
+                &ordered_kick_interval_mode,
+                &ordered_kick_guard_reuse_mode,
+                &ilc_lazy_frame_mode,
+                &no_entry_components_mode,
+                &same_tile_parent_reuse_mode,
+                &conditional_order_mode,
+                &terminal_identity_move_mode,
+            ]
+            .into_iter()
+            .any(|mode| mode != "0")
+        {
+            return Err("grounded two-line O fixtures isolate geometric edge reuse".into());
+        }
         if fixture == Fixture::EmptyTenI
             && [
                 &mode,
@@ -260,8 +331,8 @@ mod run {
             .with_tablebase_requested(false);
         let compile_started = Instant::now();
         let problem = compile_problem(fixture, policy)?;
-        if problem.count_policy() != PcCountPolicy::CountUnique {
-            return Err("fixture must retain CountUnique".into());
+        if problem.count_policy() != fixture.count_policy() {
+            return Err("compiled fixture changed the requested count policy".into());
         }
         let compile_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
@@ -348,7 +419,7 @@ mod run {
         let geometric_edges =
             clearra_core_executor::backend::geometric_edge_reuse_experiment_totals();
         let evidence_started = Instant::now();
-        let errors = validate(
+        let mut errors = validate(
             &result,
             fixture,
             capacity.hard_limit(),
@@ -360,6 +431,15 @@ mod run {
                 minimum_work: minimum_domain_work_mode == "1",
             },
         );
+        if fixture.is_grounded_o() {
+            validate_grounded_o(
+                &result,
+                fixture,
+                geometric_edges,
+                geometric_edge_reuse_mode == "1",
+                &mut errors,
+            );
+        }
         let solution_coverage = match (capture, spool) {
             (Some((dir, universe)), Some(spool)) if errors.is_empty() => {
                 finish_capture(dir, spool, universe, &result)?
@@ -818,16 +898,33 @@ mod run {
     ) -> Result<SearchProblem, String> {
         if let Some(board) = fixture.fixed_board() {
             let pieces = fixture.placed_pieces();
-            let query = PcScenarioQuery::new(
+            let piece = if fixture.is_grounded_o() {
+                PieceKind::O
+            } else {
+                PieceKind::I
+            };
+            let rule = if fixture.is_grounded_o() {
+                srs()
+            } else {
+                jstris_180()
+            };
+            let mut query = PcScenarioQuery::new(
                 PcScenarioBoard::standard_10(fixture.height(), board),
-                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; pieces])),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![piece; pieces])),
                 PieceWindow::new(pieces),
             )
-            .with_rule(jstris_180())
+            .with_rule(rule)
             .with_allow_hold(false)
             .with_exact_pieces(Some(pieces))
-            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_count_policy(fixture.count_policy())
             .with_execution_policy(policy);
+            if fixture.is_grounded_o() {
+                // Include prevents the unique negative control from taking
+                // the exact fixed-queue single-witness route, which has no
+                // BuildOrderGraph or per-realization geometry loop.
+                query =
+                    query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
+            }
             ProblemCompiler::compile_scenario_pc(&query)
                 .map_err(|e| format!("{} compile: {e:?}", fixture.name()))
         } else {
@@ -948,6 +1045,61 @@ mod run {
         }
     }
 
+    fn validate_grounded_o(
+        result: &CoreExecutionResult,
+        fixture: Fixture,
+        work: GeometricEdgeReuseMetrics,
+        reuse: bool,
+        errors: &mut Vec<String>,
+    ) {
+        let all = fixture == Fixture::GroundedOTwoLinesAll;
+        // The only four unoccupied cells form an O on the floor. In the
+        // SRS90 table each of its four spawn rotations descends in the
+        // unobstructed two columns and is already grounded on the floor.
+        // CountAll retains all four states; Unique takes the first harddrop
+        // without reaching the other three equal-footprint validations.
+        let identity = StandardBoard64TilingIdentity::from_placements(
+            GROUNDED_O_INITIAL,
+            [PiecePlacementMask::new(PieceKind::O, GROUNDED_O_CELLS)],
+        )
+        .expect("the literal one-O tiling forms a canonical identity");
+        if result.normalized_solution_identities() != [identity]
+            || result.coverage_pattern_words() != [1]
+            || result.usize_field("coverage_pattern_count") != Some(1)
+            || result.usize_field("covered_pattern_count") != Some(1)
+            || result.bool_field("solution_probability_complete") != Some(true)
+            || result
+                .field("coverage_probability")
+                .and_then(|value| value.parse::<f64>().ok())
+                != Some(1.0)
+        {
+            errors.push(
+                "grounded O must return the unique literal tiling and its fixed queue".into(),
+            );
+        }
+        if result.field("build_variant_count") != Some(if all { "4" } else { "0" })
+            || result.bool_field("build_variant_count_exact") != Some(all)
+            || result.usize_field("total_build_order_nodes") != Some(2)
+        {
+            errors.push("grounded O must build exactly two subset nodes and preserve concrete rotation count semantics".into());
+        }
+        let expected = if reuse {
+            GeometricEdgeReuseMetrics {
+                footprint_validations: 1,
+                reused_validations: if all { 3 } else { 0 },
+                line_clear_computations: 1,
+                projection_validations: 1,
+            }
+        } else {
+            GeometricEdgeReuseMetrics::default()
+        };
+        if work != expected {
+            errors.push(format!(
+                "grounded O geometry work differs from the per-pose oracle: expected={expected:?}, actual={work:?}"
+            ));
+        }
+    }
+
     fn validate(
         result: &CoreExecutionResult,
         fixture: Fixture,
@@ -965,7 +1117,7 @@ mod run {
             errors.push("resource_truncated must be false".into());
         }
         let expected_count = match fixture {
-            Fixture::OneI => 1,
+            Fixture::OneI | Fixture::GroundedOTwoLinesAll | Fixture::GroundedOTwoLinesUnique => 1,
             Fixture::NonemptyEightI => 7,
             Fixture::EmptyTenI => 14,
             Fixture::P7P4 => LARGE_COUNT,
@@ -1202,6 +1354,12 @@ mod run {
         let rectangle_fixture = [Fixture::NonemptyEightI, Fixture::EmptyTenI]
             .into_iter()
             .any(|fixture| first["case"] == fixture.name());
+        let grounded_o_fixture = [
+            Fixture::GroundedOTwoLinesAll,
+            Fixture::GroundedOTwoLinesUnique,
+        ]
+        .into_iter()
+        .any(|fixture| first["case"] == fixture.name());
         let mut differences = Vec::new();
         let summary_keys = [
             "normalized_unique_solution_count",
@@ -1243,9 +1401,9 @@ mod run {
                     differences.push(format!("{}: summary.{key} mismatch", paths[index]));
                 }
             }
-            if rectangle_fixture {
+            if rectangle_fixture || grounded_o_fixture {
                 if report["output_mode"] != "global-only" {
-                    differences.push(format!("{}: I rectangle must be global-only", paths[index]));
+                    differences.push(format!("{}: fixture must be global-only", paths[index]));
                 }
                 for key in ["workers_used", "cpu_parallel_execution"] {
                     if report["summary"][key].is_null()
@@ -1545,6 +1703,20 @@ mod run {
                 parse(&["--empty-ten-i"]).unwrap(),
                 (Fixture::EmptyTenI, None)
             );
+            for (flag, fixture) in [
+                ("--grounded-o-two-lines", Fixture::GroundedOTwoLinesAll),
+                (
+                    "--grounded-o-two-lines-unique",
+                    Fixture::GroundedOTwoLinesUnique,
+                ),
+            ] {
+                assert_eq!(parse(&[flag]).unwrap(), (fixture, None));
+                assert_eq!(
+                    parse(&[flag, "--coverage-slot", "sample"]).unwrap_err(),
+                    GROUNDED_O_CAPTURE_ERROR
+                );
+                assert!(fixture.capture_universe().is_err());
+            }
             assert_eq!(
                 parse(&["--small", "--coverage-slot", "sample"]).unwrap(),
                 (Fixture::OneI, Some("sample".to_owned()))
@@ -1559,6 +1731,25 @@ mod run {
                 TEN_I_CAPTURE_ERROR
             );
             assert!(Fixture::EmptyTenI.capture_universe().is_err());
+        }
+
+        #[test]
+        fn grounded_o_control_compiles_the_same_fixed_queue_with_distinct_count_policies() {
+            assert_eq!(GROUNDED_O_INITIAL, 0xff3fc);
+            assert_eq!(GROUNDED_O_CELLS & 0x3ff, 3);
+            assert_eq!(GROUNDED_O_CELLS >> 10, 3);
+            for (fixture, count) in [
+                (Fixture::GroundedOTwoLinesAll, PcCountPolicy::CountAll),
+                (Fixture::GroundedOTwoLinesUnique, PcCountPolicy::CountUnique),
+            ] {
+                let problem = compile_problem(fixture, PcExecutionPolicy::mvp_default()).unwrap();
+                assert_eq!(problem.count_policy(), count);
+                assert!(problem.solution_probability_policy().requested());
+                assert!(!problem.supply().hold_enabled());
+                let universe = problem.piece_source().materialized_universe().unwrap();
+                assert_eq!(universe.pattern_count(), 1);
+                assert_eq!(universe.sequence_at(0).as_ref(), &[PieceKind::O]);
+            }
         }
 
         #[test]

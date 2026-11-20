@@ -98,64 +98,44 @@ jobs:
               "$tools/examples/placement_graph_bench" --nonempty-eight-i || status=1
           done
           exit "$status"
-      - name: Compare minimum-domain scan work on the empty 4L ten-I fixture
+      - name: Compare minimum-domain and physical edge work on independent product fixtures
         if: ${{ !cancelled() && steps.focused-tools.outcome == 'success' }}
         shell: bash
         run: |
           set -eu
           tools="$GITHUB_WORKSPACE/build/cargo/default/debug"
-          receipts="$GITHUB_WORKSPACE/_local/artifacts/benchmarks/placement-graph-coverage/minimum-domain-work-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          "$tools/clearra-manage" --root "$GITHUB_WORKSPACE" storage verify --path "$receipts/reference.json"
-          mkdir -p -- "$(dirname -- "$receipts")"
-          mkdir -- "$receipts"
+          capture="$GITHUB_WORKSPACE/_local/artifacts/benchmarks/placement-graph-coverage/placement-work-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          "$tools/clearra-manage" --root "$GITHUB_WORKSPACE" storage verify --path "$capture/empty-ten-i/reference.json"
+          mkdir -p -- "$(dirname -- "$capture")"
+          mkdir -- "$capture"
           status=0
-          for arm in reference cutoff; do
-            case "$arm" in reference) cutoff=0 ;; cutoff) cutoff=1 ;; esac
-            CLEARRA_MINIMUM_DOMAIN_CUTOFF="$cutoff" CLEARRA_MINIMUM_DOMAIN_WORK=1 \
-              "$tools/clearra-manage" --root "$GITHUB_WORKSPACE" runtime run \
-              --producer benchmark --profile benchmark-search --timeout 120 -- \
-              "$tools/examples/placement_graph_bench" --empty-ten-i > "$receipts/$arm.json" || status=1
+          for fixture in empty-ten-i grounded-o-two-lines grounded-o-two-lines-unique; do
+            receipts="$capture/$fixture"
+            mkdir -- "$receipts"
+            case "$fixture" in
+              empty-ten-i) axis=CLEARRA_MINIMUM_DOMAIN_CUTOFF; work=1 ;;
+              *) axis=CLEARRA_GEOMETRIC_EDGE_REUSE; work=0 ;;
+            esac
+            ready=1
+            for arm in reference treatment; do
+              case "$arm" in reference) toggle=0 ;; treatment) toggle=1 ;; esac
+              env "$axis=$toggle" CLEARRA_MINIMUM_DOMAIN_WORK="$work" \
+                "$tools/clearra-manage" --root "$GITHUB_WORKSPACE" runtime run \
+                --producer benchmark --profile benchmark-search --timeout 120 -- \
+                "$tools/examples/placement_graph_bench" "--$fixture" > "$receipts/$arm.json" || ready=0
+            done
+            if [ "$ready" -eq 0 ]; then status=1; continue; fi
+            "$tools/examples/placement_graph_bench" --compare \
+              "$receipts/reference.json" "$receipts/treatment.json" > "$receipts/comparison.json" || status=1
+            node scripts/benchmark/verify-placement-work-pair.mjs "$fixture" "$GITHUB_SHA" "$receipts" || status=1
           done
-          test "$status" -eq 0
-          "$tools/examples/placement_graph_bench" --compare \
-            "$receipts/reference.json" "$receipts/cutoff.json" > "$receipts/comparison.json"
-          node --input-type=module - "$receipts" "$GITHUB_SHA" <<'NODE'
-          import assert from 'node:assert/strict';
-          import { readFileSync } from 'node:fs';
-          import { join } from 'node:path';
-          const [root, source] = process.argv.slice(2);
-          const read = name => JSON.parse(readFileSync(join(root, name + '.json'), 'utf8'));
-          const a = read('reference'), b = read('cutoff');
-          for (const [sample, cutoff] of [[a, '0'], [b, '1']]) {
-            assert.equal(sample.compiled_source_commit, source);
-            assert.equal(sample.case, 'empty-4L-ten-I-jstris180');
-            assert.equal(sample.valid, true);
-            assert.equal(sample.minimum_domain_work_mode, '1');
-            assert.equal(sample.minimum_domain_cutoff_mode, cutoff);
-            assert.match(sample.supervisor_run_id, /^\d{16,21}-[1-9]\d*$/u);
-          }
-          assert.equal(a.binary_sha256, b.binary_sha256);
-          assert.notEqual(a.supervisor_run_id, b.supervisor_run_id);
-          const ar = a.geometry_domain, br = b.geometry_domain;
-          for (const key of ['completed_families', 'minimum_compiles', 'minimum_empty_origin']) {
-            assert.ok(ar[key] > 0, key);
-            assert.equal(ar[key], br[key], key);
-          }
-          assert.equal(ar.minimum_incidence_rows_skipped, 0);
-          assert.ok(br.minimum_incidence_rows_skipped > 0);
-          assert.equal(ar.minimum_incidence_rows_scanned,
-            br.minimum_incidence_rows_scanned + br.minimum_incidence_rows_skipped);
-          console.log(JSON.stringify({ source, fixture: a.case,
-            examined_before: ar.minimum_incidence_rows_scanned,
-            examined_after: br.minimum_incidence_rows_scanned,
-            skipped: br.minimum_incidence_rows_skipped, timing_adoption_authority: false }));
-          NODE
-      - name: Retain bounded minimum-domain work reports
+          exit "$status"
+      - name: Retain bounded placement work reports
         if: ${{ !cancelled() && steps.focused-tools.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: minimum-domain-work-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: _local/artifacts/benchmarks/placement-graph-coverage/minimum-domain-work-${{ github.run_id }}-${{ github.run_attempt }}/*.json
+          name: placement-work-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _local/artifacts/benchmarks/placement-graph-coverage/placement-work-${{ github.run_id }}-${{ github.run_attempt }}/**/*.json
           if-no-files-found: ignore
           retention-days: 14
   receipts-and-adoption:
@@ -172,9 +152,9 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Test native exit and memory receipt classification
         run: cargo test --locked -p clearra-manage --bin clearra-manage runtime::tests
-      - name: Test the local adoption evaluator
+      - name: Test the work, receipt, and timing evidence boundaries
         if: ${{ !cancelled() }}
-        run: node --test scripts/tools/placement-graph-adoption.test.mjs scripts/benchmark/run-placement-coverage-proof.test.mjs scripts/benchmark/run-placement-graph-adoption.test.mjs
+        run: node --test scripts/tools/placement-graph-adoption.test.mjs scripts/benchmark/run-placement-coverage-proof.test.mjs scripts/benchmark/run-placement-graph-adoption.test.mjs scripts/benchmark/verify-placement-work-pair.test.mjs
       - uses: actions/setup-node@v4
         if: ${{ !cancelled() }}
         id: node
@@ -227,6 +207,7 @@ jobs:
           fi
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint || status=1
+          cargo test --locked -p clearra-app --features native-c-core --test opening_continuation_parity || status=1
           cargo test --locked -p clearra-app --features native-c-core --test exact_accelerator_product_execution setup_score_reuse || status=1
           exit "$status"
           SH
