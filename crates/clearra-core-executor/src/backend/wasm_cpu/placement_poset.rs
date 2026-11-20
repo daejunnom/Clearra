@@ -9,19 +9,23 @@
 //! are enumerated. Failure to obtain a certificate is always `None` (fallback),
 //! never an infeasibility claim.
 //!
-//! The owning module gates this prototype to tests / `local-search-ab`. Callers
+//! The owning module gates this prototype to tests / `local-search-ab`. The
+//! optional catalog guard table replaces repeated same-frame geometric tests,
+//! not movement proofs or the conditions on which they depend. Callers
 //! must additionally keep CountAll, finesse and non-clear-to-empty completion
 //! on their existing paths. A certificate belongs to the supplied candidate;
 //! its operation indices are concrete row IDs, not interchangeable kind IDs.
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
+use std::cell::OnceCell;
 
 use super::{
     buildup::{compact_target_board, placement_is_grounded},
     catalog::{GeometryCatalog, InstantiatedRealization},
     geometry::GeometryCandidate,
     placement_conditions::{
-        grounding_sources, AtomicRowProjection, GroundingSources, GroupedClearConditions,
+        grounding_sources, vertical_entry_mask, AtomicRowProjection, GroundingSources,
+        GroupedClearConditions, PlacementConditionCatalog, PrecomputedOrderGuard,
     },
     MAX_BOARD64_PIECES,
 };
@@ -92,7 +96,7 @@ pub(super) fn with_joint_clear_admission<T>(enabled: bool, action: impl FnOnce()
     action()
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CertifiedPlacementPoset {
     operation_count: usize,
     pieces: [PieceKind; MAX_BOARD64_PIECES],
@@ -127,6 +131,60 @@ pub(super) struct CandidateGeometry {
     pieces: [PieceKind; MAX_BOARD64_PIECES],
     cells: [u64; MAX_BOARD64_PIECES],
     clear_conditions: GroupedClearConditions,
+}
+
+struct CandidateOrderGuards<'a> {
+    conditions: &'a PlacementConditionCatalog,
+    // The candidate has disjoint validated original cells and at most 15
+    // operations, so each cell identifies one concrete execution bit.
+    owner_bits: [u16; u64::BITS as usize],
+}
+
+impl<'a> CandidateOrderGuards<'a> {
+    fn new(catalog: &'a GeometryCatalog, geometry: &CandidateGeometry) -> Option<Self> {
+        let conditions = catalog.placement_conditions()?.as_ref();
+        if !conditions.has_precomputed_order_guards() {
+            return None;
+        }
+        let mut owner_bits = [0; u64::BITS as usize];
+        for (operation, &cells) in geometry.cells[..geometry.operation_count]
+            .iter()
+            .enumerate()
+        {
+            let mut cells = cells;
+            while cells != 0 {
+                owner_bits[cells.trailing_zeros() as usize] = 1 << operation;
+                cells &= cells - 1;
+            }
+        }
+        Some(Self {
+            conditions,
+            owner_bits,
+        })
+    }
+
+    fn get(&self, row_id: u32, deleted: u16) -> Option<Option<PrecomputedOrderGuard>> {
+        self.conditions.precomputed_order_guard(row_id, deleted)
+    }
+
+    fn touched_operations(&self, mut footprint: u64) -> u16 {
+        let mut operations = 0;
+        while footprint != 0 {
+            operations |= self.owner_bits[footprint.trailing_zeros() as usize];
+            footprint &= footprint - 1;
+        }
+        operations
+    }
+
+    fn touches_executed(&self, mut footprint: u64, executed: u16) -> bool {
+        while footprint != 0 {
+            if self.owner_bits[footprint.trailing_zeros() as usize] & executed != 0 {
+                return true;
+            }
+            footprint &= footprint - 1;
+        }
+        false
+    }
 }
 
 /// One exact executed-board snapshot and its immutable original-row frame.
@@ -170,7 +228,7 @@ pub(super) fn compile_with_guard(
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MovementProof {
     /// Existence of an exact edge on every board in [minimum, maximum].
     Reachable { maximum: u64 },
@@ -179,7 +237,7 @@ pub(super) enum MovementProof {
     Closed,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MovementProofQuery {
     pub(super) piece: PieceKind,
     pub(super) realization: InstantiatedRealization,
@@ -199,7 +257,9 @@ pub(super) fn compile_with_movement_guard(
     mut movement_guard: impl FnMut(MovementProofQuery) -> bool,
 ) -> Option<CertifiedPlacementPoset> {
     let geometry = CandidateGeometry::compile(catalog, candidate)?;
-    if geometry.has_unprovable_initial_support_disjunction(catalog, candidate) {
+    let precomputed = CandidateOrderGuards::new(catalog, &geometry);
+    if geometry.has_unprovable_initial_support_disjunction(catalog, candidate, precomputed.as_ref())
+    {
         return None;
     }
 
@@ -217,11 +277,15 @@ pub(super) fn compile_with_movement_guard(
         };
         required_by_frame[usize::from(deleted)] = required;
         possible_frames |= 1_u64 << deleted;
-        let (initial, physical_cells) = geometry.project_frame(deleted);
-        let minimum_board = if infer_closed_frames && deleted != 0 {
-            board_for_operations(initial, &physical_cells, required)
-        } else {
-            initial
+        let frame = OnceCell::new();
+        let project = || frame.get_or_init(|| geometry.project_frame(deleted));
+        let closed_enabled = infer_closed_frames && deleted != 0;
+        let closed_board = OnceCell::new();
+        let minimum_closed_board = || {
+            *closed_board.get_or_init(|| {
+                let (initial, physical_cells) = project();
+                board_for_operations(*initial, physical_cells, required)
+            })
         };
         // A completed row's contributors are required. For an undeleted
         // row with one missing contributor, adding that contributor would
@@ -248,56 +312,91 @@ pub(super) fn compile_with_movement_guard(
                 // it cannot still be pending at this frame.
                 continue;
             }
-            let lock_mask = physical_cells[operation];
-            let mut has_instantiation = false;
-            let mut all_closed = infer_closed_frames && deleted != 0;
-            for realization in catalog.instantiations(candidate.row_ids()[operation], deleted) {
-                // ILC projects the physical lock back to precisely these
-                // original cells. Keep this as an explicit certificate gate
-                // if the catalog's representation changes in the future.
-                if realization.lock_mask != lock_mask || lock_mask.count_ones() != 4 {
-                    return None;
+            let row_id = candidate.row_ids()[operation];
+            let guard = precomputed
+                .as_ref()
+                .and_then(|data| data.get(row_id, deleted));
+            let mut is_closed = |realization| {
+                movement_guard(MovementProofQuery {
+                    piece: geometry.pieces[operation],
+                    realization,
+                    deleted,
+                    minimum: minimum_closed_board(),
+                    proof: MovementProof::Closed,
+                })
+            };
+            match guard {
+                Some(None) => continue, // Complete, empty instantiation domain.
+                Some(Some(_)) => {
+                    if closed_enabled && catalog.instantiations(row_id, deleted).all(&mut is_closed)
+                    {
+                        continue;
+                    }
                 }
-                has_instantiation = true;
-                if all_closed {
-                    all_closed = movement_guard(MovementProofQuery {
-                        piece: geometry.pieces[operation],
-                        realization,
-                        deleted,
-                        minimum: minimum_board,
-                        proof: MovementProof::Closed,
-                    });
+                None => {
+                    let lock_mask = project().1[operation];
+                    let mut has_instantiation = false;
+                    let mut all_closed = closed_enabled;
+                    for realization in catalog.instantiations(row_id, deleted) {
+                        // The optional catalog checks this identity once at
+                        // compilation; ordinary fallback checks it here.
+                        if realization.lock_mask != lock_mask || lock_mask.count_ones() != 4 {
+                            return None;
+                        }
+                        has_instantiation = true;
+                        if all_closed {
+                            all_closed = is_closed(realization);
+                        }
+                    }
+                    if !has_instantiation || all_closed {
+                        continue;
+                    }
                 }
-            }
-            if !has_instantiation || all_closed {
-                continue;
             }
             instantiation_domains[operation] |= 1_u64 << deleted;
 
-            if placement_is_grounded(geometry.width, initial, lock_mask) {
+            let grounded_at_initial = guard.flatten().map_or_else(
+                || {
+                    let (initial, physical_cells) = project();
+                    placement_is_grounded(geometry.width, *initial, physical_cells[operation])
+                },
+                PrecomputedOrderGuard::ground_at_initial,
+            );
+            if grounded_at_initial {
                 predecessors[operation] &= required;
                 saw_grounding_witness |= operation_bit;
                 possibly_before[operation] |= may_be_placed;
                 continue;
             }
-            if let GroundingSources::AnyOf(mut supporters) = grounding_sources(
-                geometry.width,
-                initial,
-                lock_mask,
-                &physical_cells[..geometry.operation_count],
-                operations_in_frame() & !operation_bit,
-            )? {
-                while supporters != 0 {
-                    let supporter_bit = 1_u16 << supporters.trailing_zeros();
-                    supporters &= supporters - 1;
-                    // Every actual lock has some ground witness. Intersecting
-                    // requirements over all possible witnesses keeps only facts
-                    // necessary for every physical order; unexecutable witnesses
-                    // can weaken this intersection but cannot make it unsound.
-                    predecessors[operation] &= required | supporter_bit;
-                    saw_grounding_witness |= operation_bit;
-                    possibly_before[operation] |= may_be_placed;
+            let eligible = operations_in_frame() & !operation_bit;
+            let mut supporters = if let (Some(data), Some(guard)) = (&precomputed, guard.flatten())
+            {
+                // Survivor contributions must not consult a supporter's
+                // pending ILC domain: it has *already* been executed.
+                data.touched_operations(guard.support_cells()) & eligible
+            } else {
+                let (initial, physical_cells) = project();
+                match grounding_sources(
+                    geometry.width,
+                    *initial,
+                    physical_cells[operation],
+                    &physical_cells[..geometry.operation_count],
+                    eligible,
+                )? {
+                    GroundingSources::AnyOf(supporters) => supporters,
+                    _ => 0,
                 }
+            };
+            while supporters != 0 {
+                let supporter_bit = 1_u16 << supporters.trailing_zeros();
+                supporters &= supporters - 1;
+                // Every actual lock has some ground witness. Intersecting
+                // requirements over all possible witnesses keeps only facts
+                // necessary for every physical order; unexecutable witnesses
+                // can weaken this intersection but cannot make it unsound.
+                predecessors[operation] &= required | supporter_bit;
+                saw_grounding_witness |= operation_bit;
+                possibly_before[operation] |= may_be_placed;
             }
         }
     }
@@ -347,9 +446,13 @@ pub(super) fn compile_with_movement_guard(
         let deleted = pending_frames.trailing_zeros() as u16;
         pending_frames &= pending_frames - 1;
         let required = required_by_frame[usize::from(deleted)];
-        let (initial, physical_cells) = geometry.project_frame(deleted);
+        // Closure distributes over a union; each predecessor mask is
+        // already transitive. Reuse this invariant for all operations at D.
+        let required_closed = predecessor_closure(required, &predecessors);
+        let frame = OnceCell::new();
+        let project = || frame.get_or_init(|| geometry.project_frame(deleted));
         for operation in 0..geometry.operation_count {
-            let minimum = predecessor_closure(predecessors[operation] | required, &predecessors);
+            let minimum = predecessors[operation] | required_closed;
             let mut maximum = maximum_without[operation];
             if minimum & !maximum != 0 || geometry.clear_conditions.deleted_rows(minimum) != deleted
             {
@@ -376,27 +479,55 @@ pub(super) fn compile_with_movement_guard(
             if instantiation_domains[operation] & (1_u64 << deleted) == 0 {
                 return None;
             }
-            let lock_mask = physical_cells[operation];
-            let minimum_board = board_for_operations(initial, &physical_cells, minimum);
-            let maximum_board = board_for_operations(initial, &physical_cells, maximum);
-            if !placement_is_grounded(geometry.width, minimum_board, lock_mask) {
+            let row_id = candidate.row_ids()[operation];
+            let guard = precomputed
+                .as_ref()
+                .and_then(|data| data.get(row_id, deleted))
+                .flatten();
+            let physical_boards = OnceCell::new();
+            let project_boards = || {
+                *physical_boards.get_or_init(|| {
+                    let (initial, physical_cells) = project();
+                    (
+                        board_for_operations(*initial, physical_cells, minimum),
+                        board_for_operations(*initial, physical_cells, maximum),
+                    )
+                })
+            };
+            let (grounded, corridor_blocked) = if let (Some(data), Some(guard)) =
+                (&precomputed, guard)
+            {
+                (
+                    guard.ground_at_initial()
+                        || data.touches_executed(guard.support_cells(), minimum),
+                    guard.corridor_hits_initial()
+                        || data.touches_executed(guard.corridor_cells(), maximum),
+                )
+            } else {
+                let lock_mask = project().1[operation];
+                let (minimum_board, maximum_board) = project_boards();
+                (
+                    placement_is_grounded(geometry.width, minimum_board, lock_mask),
+                    maximum_board & vertical_entry_mask(lock_mask, geometry.width, geometry.height)
+                        != 0,
+                )
+            };
+            if !grounded {
                 return None;
             }
-            if maximum_board & vertical_entry_mask(lock_mask, geometry.width, geometry.height) != 0
-            {
-                let guarded = catalog
-                    .instantiations(candidate.row_ids()[operation], deleted)
-                    .any(|realization| {
-                        movement_guard(MovementProofQuery {
-                            piece: geometry.pieces[operation],
-                            realization,
-                            deleted,
-                            minimum: minimum_board,
-                            proof: MovementProof::Reachable {
-                                maximum: maximum_board,
-                            },
-                        })
-                    });
+            if corridor_blocked {
+                let (minimum_board, maximum_board) = project_boards();
+                let guarded = catalog.instantiations(row_id, deleted).any(|realization| {
+                    movement_guard(MovementProofQuery {
+                        piece: geometry.pieces[operation],
+                        realization,
+                        deleted,
+                        minimum: minimum_board,
+                        proof: MovementProof::Reachable {
+                            maximum: maximum_board,
+                        },
+                    })
+                });
                 if !guarded {
                     return None;
                 }
@@ -436,7 +567,7 @@ impl CandidateGeometry {
             return None;
         }
         let geometry = Self::compile(catalog, candidate)?;
-        if geometry.has_unprovable_initial_support_disjunction(catalog, candidate)
+        if geometry.has_unprovable_initial_support_disjunction(catalog, candidate, None)
             || geometry.has_support_disjunction_after_group_clear::<false>(catalog, candidate)
         {
             return Some(geometry);
@@ -655,11 +786,28 @@ impl CandidateGeometry {
         &self,
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
+        precomputed: Option<&CandidateOrderGuards<'_>>,
     ) -> bool {
         let eligible =
             self.clear_conditions
                 .possible_operations_in_frame(0, 0, self.all_operations);
         for operation in 0..self.operation_count {
+            let row_id = candidate.row_ids()[operation];
+            if let Some(data) = precomputed {
+                match data.get(row_id, 0) {
+                    Some(Some(guard)) => {
+                        let supporters = data.touched_operations(guard.support_cells())
+                            & eligible
+                            & !(1_u16 << operation);
+                        if !guard.ground_at_initial() && supporters.count_ones() >= 2 {
+                            return true;
+                        }
+                        continue;
+                    }
+                    Some(None) => continue,
+                    None => (),
+                }
+            }
             let lock_mask = self.cells[operation];
             if let Some(GroundingSources::AnyOf(supporters)) = grounding_sources(
                 self.width,
@@ -669,10 +817,7 @@ impl CandidateGeometry {
                 eligible & !(1_u16 << operation),
             ) {
                 if supporters.count_ones() >= 2
-                    && catalog
-                        .instantiations(candidate.row_ids()[operation], 0)
-                        .next()
-                        .is_some()
+                    && catalog.instantiations(row_id, 0).next().is_some()
                 {
                     // At D=0 singleton support alternatives have no common
                     // prerequisite, so an AND certificate cannot prove all
@@ -826,12 +971,110 @@ fn board_for_operations(
     board
 }
 
-fn vertical_entry_mask(lock_mask: u64, width: u8, height: u8) -> u64 {
-    // Same collision corridor as the existing hard-drop fast path, bounded
-    // to all target rows. Above-target bits cannot intersect a valid board.
-    let mut path = lock_mask;
-    for _ in 1..height {
-        path |= path << width;
+#[cfg(test)]
+mod precomputed_order_guard_tests {
+    use super::*;
+    use crate::backend::wasm_cpu::{
+        placement_conditions::with_precomputed_order_guards, placement_dependency,
+    };
+
+    fn catalog_with_guards(width: u8, height: u8, required: u64, guarded: bool) -> GeometryCatalog {
+        let full = (1_u64 << (width * height)) - 1;
+        placement_dependency::with_mode(true, || {
+            with_precomputed_order_guards(guarded, || {
+                GeometryCatalog::compile_for_required_cells_on_dimensions(
+                    width,
+                    height,
+                    full & !required,
+                    required,
+                )
+                .unwrap()
+            })
+        })
+        .0
     }
-    path
+
+    fn visit_tilings(
+        catalog: &GeometryCatalog,
+        remaining: u64,
+        rows: &mut Vec<u32>,
+        visit: &mut impl FnMut(&[u32]),
+    ) {
+        if remaining == 0 {
+            visit(rows);
+            return;
+        }
+        for &row_id in catalog.support(remaining.trailing_zeros() as u8) {
+            let cells = catalog.skeleton(row_id).cells;
+            if cells & !remaining == 0 {
+                rows.push(row_id);
+                visit_tilings(catalog, remaining & !cells, rows, visit);
+                rows.pop();
+            }
+        }
+    }
+
+    #[test]
+    fn precomputed_guards_preserve_certificates_and_ordered_proof_queries() {
+        let mut candidates = 0;
+        let mut certified = 0;
+        let mut fallback = 0;
+        let mut closed_queries = 0;
+        let mut reachability_queries = 0;
+        let o = 3 | (3 << 10);
+        // Exhaust the complete small canonical tilings, then cover a late
+        // atomic clear with initial blockers and nontrivial roof queries.
+        for (width, height, required) in [
+            (4, 3, 0xfff),
+            (10, 2, o | 0x3c),
+            (10, 4, o | (o << 2) | (o << 20) | (o << 22)),
+        ] {
+            let plain = catalog_with_guards(width, height, required, false);
+            let fast = catalog_with_guards(width, height, required, true);
+            assert_eq!(plain.identity_digest(), fast.identity_digest());
+            assert!(fast
+                .placement_conditions()
+                .unwrap()
+                .has_precomputed_order_guards());
+            visit_tilings(&plain, required, &mut Vec::new(), &mut |rows| {
+                candidates += 1;
+                for infer_closed in [false, true] {
+                    for response in [false, true] {
+                        let run = |catalog| {
+                            let candidate = GeometryCandidate::from_rows(catalog, 0, rows).unwrap();
+                            let mut questions = Vec::new();
+                            let poset = compile_with_movement_guard(
+                                catalog,
+                                &candidate,
+                                infer_closed,
+                                |query| {
+                                    questions.push(query);
+                                    response
+                                },
+                            );
+                            (poset, questions)
+                        };
+                        let expected = run(&plain);
+                        let actual = run(&fast);
+                        assert_eq!(actual, expected, "rows={rows:?}");
+                        // Returning both possible answers is only a
+                        // differential test of callback scope/order; it is
+                        // not a physical oracle or a real movement proof.
+                        if !response {
+                            certified += usize::from(actual.0.is_some());
+                            fallback += usize::from(actual.0.is_none());
+                        }
+                        for query in &actual.1 {
+                            match query.proof {
+                                MovementProof::Closed => closed_queries += 1,
+                                MovementProof::Reachable { .. } => reachability_queries += 1,
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        assert!(candidates > 10 && certified > 0 && fallback > 0);
+        assert!(closed_queries > 0 && reachability_queries > 0);
+    }
 }

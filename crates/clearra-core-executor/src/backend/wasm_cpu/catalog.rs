@@ -258,7 +258,18 @@ impl GeometryCatalog {
         #[cfg(any(test, feature = "local-search-ab"))]
         let prototype_peak =
             if height <= MAX_CONDITION_HEIGHT && super::placement_dependency::enabled() {
-                PlacementConditionCatalog::checked_compile_peak_upper_bound(row_count_usize)?
+                let conditions =
+                    PlacementConditionCatalog::checked_compile_peak_upper_bound(row_count_usize)?;
+                let guards = if super::placement_conditions::precomputed_order_guards_enabled() {
+                    PlacementConditionCatalog::order_guard_compile_heap_bound(
+                        row_count_usize,
+                        width,
+                        height,
+                    )
+                } else {
+                    0
+                };
+                conditions.checked_add(guards)?
             } else {
                 0
             };
@@ -806,6 +817,22 @@ impl GeometryCatalog {
             }
         }
         Some(exact)
+    }
+
+    /// Check the concrete lock identity without warming a lazy runtime frame
+    /// cache or using the optional dependency table under construction.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub(super) fn all_instantiations_match_lock(
+        &self,
+        row_id: u32,
+        deleted_rows: u16,
+        lock_mask: u64,
+    ) -> bool {
+        let mut instantiations = self.unfiltered_instantiations(row_id, deleted_rows);
+        instantiations
+            .next()
+            .is_some_and(|first| first.lock_mask == lock_mask)
+            && instantiations.all(|other| other.lock_mask == lock_mask)
     }
 
     pub fn instantiations(

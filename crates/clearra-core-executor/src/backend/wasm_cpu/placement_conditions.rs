@@ -8,6 +8,41 @@ pub(super) const MAX_CONDITION_HEIGHT: u8 = 6;
 // smaller, but a future catalog extension must explicitly revisit this bound.
 const MAX_CONDITION_ROWS: usize = 128 * 1024;
 const MAX_SURVIVING_RUNS: usize = (MAX_CONDITION_HEIGHT as usize).div_ceil(2);
+const MAX_ORDER_GUARD_RECORDS: usize = 64 * 1024;
+// Order guards are restricted to at most ten columns and six rows. Neither
+// original footprint can own this bit; use it for the known initial term.
+const INITIAL_TERM: u64 = 1 << 63;
+
+#[cfg(test)]
+thread_local! {
+    static PRECOMPUTED_ORDER_GUARDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn with_precomputed_order_guards<T>(enabled: bool, run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PRECOMPUTED_ORDER_GUARDS.set(self.0);
+        }
+    }
+    let _restore = Restore(PRECOMPUTED_ORDER_GUARDS.replace(enabled));
+    run()
+}
+
+pub(super) fn precomputed_order_guards_enabled() -> bool {
+    #[cfg(test)]
+    {
+        PRECOMPUTED_ORDER_GUARDS.get()
+    }
+    #[cfg(not(test))]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("CLEARRA_STRUCTURAL_PRECOMPUTED_GUARDS").is_ok_and(|value| value == "1")
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct SurvivingRun {
@@ -146,6 +181,112 @@ struct CanonicalPlacement {
     domain_id: u32,
 }
 
+/// Static Boolean terms for a concrete, valid (row, deleted-frame) lock.
+/// The masks are lifted into the original frame so current executed
+/// operations need not be projected individually just to test intersection.
+/// Neither term certifies a kick, translation, or move on its own.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PrecomputedOrderGuard {
+    support: u64,
+    corridor: u64,
+}
+
+impl PrecomputedOrderGuard {
+    pub(super) const fn ground_at_initial(self) -> bool {
+        self.support & INITIAL_TERM != 0
+    }
+
+    pub(super) const fn support_cells(self) -> u64 {
+        self.support & !INITIAL_TERM
+    }
+
+    pub(super) const fn corridor_hits_initial(self) -> bool {
+        self.corridor & INITIAL_TERM != 0
+    }
+
+    pub(super) const fn corridor_cells(self) -> u64 {
+        self.corridor & !INITIAL_TERM
+    }
+}
+
+#[derive(Debug)]
+struct PrecomputedOrderGuards {
+    offsets: Vec<u32>,
+    guards: Vec<PrecomputedOrderGuard>,
+}
+
+impl PrecomputedOrderGuards {
+    fn compile(
+        catalog: &GeometryCatalog,
+        placements: &[CanonicalPlacement],
+        clear_domains: &[u64],
+    ) -> Option<Self> {
+        let width = catalog.width();
+        let height = catalog.height();
+        if !(1..=10).contains(&width) || !(1..=MAX_CONDITION_HEIGHT).contains(&height) {
+            return None;
+        }
+        let record_count = placements.iter().try_fold(0_usize, |count, row| {
+            count.checked_add(clear_domains[row.domain_id as usize].count_ones() as usize)
+        })?;
+        if record_count > MAX_ORDER_GUARD_RECORDS {
+            return None;
+        }
+        let mut offsets = Vec::new();
+        let mut guards = Vec::new();
+        offsets.try_reserve_exact(placements.len()).ok()?;
+        guards.try_reserve_exact(record_count).ok()?;
+        let mut projections = [None; 1_usize << MAX_CONDITION_HEIGHT];
+        for (row_id, row) in placements.iter().enumerate() {
+            offsets.push(u32::try_from(guards.len()).ok()?);
+            let mut frames = clear_domains[row.domain_id as usize];
+            while frames != 0 {
+                let deleted = frames.trailing_zeros() as u16;
+                frames &= frames - 1;
+                let projection = &mut projections[usize::from(deleted)];
+                if projection.is_none() {
+                    let frame = AtomicRowProjection::new(width, height, deleted)?;
+                    *projection = Some((frame, frame.physical_board(catalog.initial_board())));
+                }
+                let (frame, initial) = (*projection)?;
+                let lock = frame.physical_board(row.cells);
+                // Preserve the old certificate's check of every distinct
+                // realization, not just the fact that the domain is nonempty.
+                // A disagreement discards the *optional* table.
+                if lock.count_ones() != 4
+                    || !catalog.all_instantiations_match_lock(row_id as u32, deleted, lock)
+                {
+                    return None;
+                }
+                let physical_corridor = vertical_entry_mask(lock, width, height);
+                guards.push(PrecomputedOrderGuard {
+                    support: frame.surviving_original_cells(lock >> width)
+                        | (u64::from(super::buildup::placement_is_grounded(width, initial, lock))
+                            * INITIAL_TERM),
+                    corridor: frame.surviving_original_cells(physical_corridor)
+                        | (u64::from(initial & physical_corridor != 0) * INITIAL_TERM),
+                });
+            }
+        }
+        Some(Self { offsets, guards })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.offsets.capacity() * core::mem::size_of::<u32>()
+            + self.guards.capacity() * core::mem::size_of::<PrecomputedOrderGuard>()
+    }
+}
+
+pub(super) fn vertical_entry_mask(lock: u64, width: u8, height: u8) -> u64 {
+    // Same collision corridor as the existing hard-drop fast path.
+    // Above-target bits cannot intersect a valid board.
+    let mut corridor = lock;
+    for _ in 1..height {
+        corridor |= corridor << width;
+    }
+    corridor
+}
+
 /// Immutable conditions for the owning geometry catalog. A row ID always means
 /// one canonical `(piece, cells)` placement, never just a piece kind.
 ///
@@ -163,6 +304,7 @@ pub(super) struct PlacementConditionCatalog {
     initial_board: u64,
     placements: Vec<CanonicalPlacement>,
     clear_domains: Vec<u64>,
+    order_guards: Option<PrecomputedOrderGuards>,
 }
 
 impl PlacementConditionCatalog {
@@ -180,6 +322,18 @@ impl PlacementConditionCatalog {
         (row_count as u128)
             .checked_mul(per_row as u128)?
             .checked_add((core::mem::size_of::<Self>() + 2 * core::mem::size_of::<usize>()) as u128)
+    }
+
+    pub(super) fn order_guard_compile_heap_bound(row_count: usize, width: u8, height: u8) -> u128 {
+        if !(1..=10).contains(&width) || !(1..=MAX_CONDITION_HEIGHT).contains(&height) {
+            return 0;
+        }
+        let rows = row_count.min(MAX_CONDITION_ROWS);
+        let frames = rows
+            .saturating_mul(1_usize << height)
+            .min(MAX_ORDER_GUARD_RECORDS);
+        (rows * core::mem::size_of::<u32>()
+            + frames * core::mem::size_of::<PrecomputedOrderGuard>()) as u128
     }
 
     /// Unsupported dimensions or an unavailable bounded allocation leave the
@@ -241,12 +395,18 @@ impl PlacementConditionCatalog {
                 u32::try_from(clear_domains.len().checked_sub(1)?).ok()?;
         }
 
+        let order_guards = if precomputed_order_guards_enabled() {
+            PrecomputedOrderGuards::compile(catalog, &placements, &clear_domains)
+        } else {
+            None
+        };
         Some(Self {
             width,
             height,
             initial_board: catalog.initial_board(),
             placements,
             clear_domains,
+            order_guards,
         })
     }
 
@@ -283,6 +443,31 @@ impl PlacementConditionCatalog {
             return None;
         }
         Some(self.exact_clear_domain(row_id)? & (1_u64 << deleted_rows) != 0)
+    }
+
+    pub(super) const fn has_precomputed_order_guards(&self) -> bool {
+        self.order_guards.is_some()
+    }
+
+    /// `Some(None)` is exact domain absence. An unavailable table, invalid
+    /// row/frame, or failed lookup is `None` and retains the old calculation.
+    pub(super) fn precomputed_order_guard(
+        &self,
+        row_id: u32,
+        deleted: u16,
+    ) -> Option<Option<PrecomputedOrderGuard>> {
+        let owner = self.order_guards.as_ref()?;
+        if deleted >= 1_u16 << self.height {
+            return None;
+        }
+        let domain = self.exact_clear_domain(row_id)?;
+        let bit = 1_u64 << deleted;
+        if domain & bit == 0 {
+            return Some(None);
+        }
+        let offset = *owner.offsets.get(row_id as usize)? as usize;
+        let rank = (domain & (bit - 1)).count_ones() as usize;
+        owner.guards.get(offset + rank).copied().map(Some)
     }
 
     /// Return all canonical placements whose *already executed*, surviving
@@ -395,6 +580,10 @@ impl PlacementConditionCatalog {
     pub(super) fn retained_bytes(&self) -> usize {
         self.placements.capacity() * core::mem::size_of::<CanonicalPlacement>()
             + self.clear_domains.capacity() * core::mem::size_of::<u64>()
+            + self
+                .order_guards
+                .as_ref()
+                .map_or(0, PrecomputedOrderGuards::retained_bytes)
     }
 }
 
@@ -877,6 +1066,77 @@ mod tests {
                     Some(directly_projected),
                     "row={row_id} deleted={deleted}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn order_guards_match_original_to_physical_intersections_for_every_lifted_cell() {
+        for (width, height, initial) in [(4, 4, 0), (4, 4, 0x4310), (10, 4, 0xf0)] {
+            let size = width * height;
+            let full = low_bits(u32::from(size));
+            let catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+                width,
+                height,
+                initial,
+                full & !initial,
+            )
+            .unwrap();
+            let conditions = with_precomputed_order_guards(true, || {
+                PlacementConditionCatalog::compile(&catalog)
+            })
+            .unwrap();
+            let guards = conditions.order_guards.as_ref().expect("small guard table");
+            assert!(
+                guards.retained_bytes() as u128
+                    <= PlacementConditionCatalog::order_guard_compile_heap_bound(
+                        conditions.row_count(),
+                        width,
+                        height
+                    )
+            );
+            assert!(conditions.precomputed_order_guard(0, 1 << height).is_none());
+            for row_id in 0..catalog.skeleton_count() as u32 {
+                let original_lock = catalog.skeleton(row_id).cells;
+                for deleted in 0..1_u16 << height {
+                    let guard = conditions
+                        .precomputed_order_guard(row_id, deleted)
+                        .expect("lookup known within compiled domain");
+                    let instantiation = catalog.instantiations(row_id, deleted).next();
+                    assert_eq!(guard.is_some(), instantiation.is_some());
+                    let (Some(guard), Some(instantiation)) = (guard, instantiation) else {
+                        continue;
+                    };
+                    let lock = instantiation.lock_mask;
+                    // Intersection with a union equals the disjunction of the
+                    // intersections. Check each basis cell (and the empty
+                    // contribution) to cover arbitrary original-board subsets.
+                    for extra in std::iter::once(0).chain((0..size).map(|i| 1_u64 << i)) {
+                        if extra & original_lock != 0 {
+                            continue;
+                        }
+                        let physical = super::super::buildup::compact_target_board(
+                            width,
+                            height,
+                            initial | extra,
+                            deleted,
+                        );
+                        let expected_grounded =
+                            super::super::buildup::placement_is_grounded(width, physical, lock);
+                        let expected_blocked =
+                            (0..height).any(|dy| physical & (lock << (width * dy)) != 0);
+                        assert_eq!(
+                            guard.ground_at_initial() || guard.support_cells() & extra != 0,
+                            expected_grounded,
+                            "ground row={row_id} D={deleted} extra={extra:#x}",
+                        );
+                        assert_eq!(
+                            guard.corridor_hits_initial() || guard.corridor_cells() & extra != 0,
+                            expected_blocked,
+                            "corridor row={row_id} D={deleted} extra={extra:#x}",
+                        );
+                    }
+                }
             }
         }
     }
