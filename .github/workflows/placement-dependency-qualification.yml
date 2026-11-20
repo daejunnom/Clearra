@@ -237,13 +237,17 @@ jobs:
           # prevents all of them, but does not prevent the integration tests.
           app_lib=(cargo test --locked -p clearra-app --features native-c-core --lib)
           if "${app_lib[@]}" --no-run; then
-            for filter in legacy_cover_tests legacy_cover_rust::tests:: pc_tiling_candidate_budget_preserves_failure_without_publishing setup_score_ordinals setup_score_evaluation_identity_binds; do
+            for filter in legacy_cover_tests legacy_cover_rust::tests:: \
+              pc_tiling_candidate_budget_preserves_failure_without_publishing setup_score_ordinals \
+              setup_score_evaluation_identity_binds \
+              full_height_replay_shares_exact_graph_owner_across_staged_promotion; do
               "${app_lib[@]}" "$filter" || status=1
             done
           else
             status=1
           fi
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
+          cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_replay_direct_cooperative_and_lazy_pages_preserve_all_words || status=1
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_sr3_local_continue_is_cooperative_on_one_worker || status=1
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint || status=1
           cargo test --locked -p clearra-app --features native-c-core --test opening_continuation_parity || status=1

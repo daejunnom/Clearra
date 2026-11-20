@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 #[path = "pc_replay_source_batches.rs"]
 mod batches;
-use batches::{ReplayBatches, ReplayLanguage};
+use batches::{PreparedReplayBatches, ReplayBatches, ReplayLanguage};
 
 #[path = "pc_replay_page_store.rs"]
 mod store;
@@ -68,8 +68,9 @@ pub struct PcReplayPageSource {
     identity_sha256: String,
     first_members: Vec<PcPathWitnessV2>,
     maximum_bytes: u128,
-    // Original Core is live during manifest construction; retaining its
-    // reservation for later requests remains conservative, as before.
+    // Original Core is live during manifest construction. The same physical
+    // full-height graph is charged to batches, not duplicated in this reserve.
+    // Keeping the remaining reserve for later pages is conservative as before.
     original_source_bytes: u128,
     // Additional App response/context/query owners. Separate from the original
     // Core reservation so that moving Core into the response never counts its
@@ -165,7 +166,12 @@ impl PcReplaySourceBuildSession {
             return Err("pc replay empty pattern universe".into());
         }
         let projection = PcPathProjectionContext::from_problem(problem);
-        let (batches, retained_graph_bytes, graph_count) = ReplayBatches::copy_from_result(
+        let PreparedReplayBatches {
+            batches,
+            retained_graph_bytes,
+            graph_count,
+            shared_input_graph_bytes,
+        } = ReplayBatches::prepare_from_result(
             problem,
             result,
             projection,
@@ -173,8 +179,12 @@ impl PcReplaySourceBuildSession {
             original,
             maximum_bytes,
         )?;
-        let constructor_live = original
-            .checked_add(retained_graph_bytes)
+        let original_source_bytes = original_core
+            .checked_sub(shared_input_graph_bytes)
+            .ok_or(OVERFLOW)?;
+        let constructor_live = original_source_bytes
+            .checked_add(external_reserve_bytes)
+            .and_then(|n| n.checked_add(retained_graph_bytes))
             .and_then(|n| n.checked_add(core::mem::size_of::<Self>() as u128))
             .and_then(|n| n.checked_add(problem.problem_id().as_str().len() as u128))
             .ok_or(OVERFLOW)?;
@@ -263,7 +273,7 @@ impl PcReplaySourceBuildSession {
                 identity_sha256: String::new(),
                 first_members: Vec::new(),
                 maximum_bytes,
-                original_source_bytes: original_core,
+                original_source_bytes,
                 external_reserve_bytes,
             },
             pending,
@@ -816,6 +826,129 @@ mod memory_tests {
                 .unwrap()
                 .checked_add(extra)
         );
+    }
+
+    #[test]
+    fn full_height_replay_shares_exact_graph_owner_across_staged_promotion() {
+        use clearra_core_domain::{
+            board::standard_pc_board::Board256Mask, piece::piece_kind::PieceKind,
+        };
+        use clearra_core_executor::WasmCpuSearchBackend;
+        use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+        use clearra_pc_graph::request::{
+            PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+            PieceWindow,
+        };
+        use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let control = ExecutionControl::default();
+        let mut initial = Board256Mask::all_cells(70).unwrap();
+        for (column, start) in [(0_u16, 0_u16), (1, 3)] {
+            for row in start..start + 4 {
+                initial = initial.without(Board256Mask::singleton(row * 10 + column).unwrap());
+            }
+        }
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10_from_words(7, initial.words()).unwrap(),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 2])),
+            PieceWindow::new(2),
+        )
+        .with_rule(clearra_rules::profile::builtin_rules::srs_plus())
+        .with_exact_pieces(Some(2))
+        .with_min_remaining_queue(0)
+        .with_retained_trace_limit(1)
+        .with_allow_hold(false)
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_objective(ObjectivePolicy::all());
+        let problem = clearra_problem::ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_pc_path_v2_evidence();
+        let raw = WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap();
+        let evidence = raw.pc_full_height_replay_evidence().unwrap();
+        let raw_graph_bytes = evidence.checked_shared_batch_retained_bytes().unwrap();
+        let raw_retained = raw.checked_resource_retained_bytes().unwrap();
+        let graph_pointer = evidence.batch().execution().graphs().as_ptr();
+        let pattern_pointer = evidence.batch().execution().patterns().as_ptr();
+        let extra = 7919;
+        let mut session =
+            PcReplaySourceBuildSession::new_with_external_reserve(&problem, &raw, u128::MAX, extra)
+                .unwrap();
+        let ReplayBatches::FullHeight(shared) = &session.source.batches else {
+            panic!("expected full-height replay owner");
+        };
+        assert!(Arc::ptr_eq(shared, evidence.shared_batch_owner()));
+        assert_eq!(shared[0].execution().graphs().as_ptr(), graph_pointer);
+        assert_eq!(shared[0].execution().patterns().as_ptr(), pattern_pointer);
+        assert_eq!(session.source.retained_graph_bytes, raw_graph_bytes);
+        assert_eq!(
+            session
+                .source
+                .original_source_bytes
+                .checked_add(raw_graph_bytes),
+            Some(raw_retained),
+        );
+        assert_eq!(
+            session.source.retained_external_bytes().unwrap() + raw_graph_bytes,
+            raw_retained + extra,
+        );
+        assert!(session.source.matches_result(&raw.clone()));
+        assert!(!session.source.matches_result(
+            &raw.clone()
+                .with_normalized_solution_keys(vec!["unbound".to_owned()]),
+        ));
+        let independent = WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap();
+        assert_eq!(
+            raw.pc_full_height_replay_evidence(),
+            independent.pc_full_height_replay_evidence()
+        );
+        assert!(
+            !session.source.matches_result(&independent),
+            "equal content is not shared memory"
+        );
+        drop(independent);
+
+        let exact = session.checked_retained_capacity_bytes().unwrap()
+            + session.source.retained_external_bytes().unwrap();
+        session.source.maximum_bytes = exact;
+        assert_eq!(session.guard_additional(0), Ok(()));
+        session.source.maximum_bytes = exact - 1;
+        assert_eq!(
+            session.advance(1, &control),
+            Err(PcReplayPageError::MemoryLimit {
+                required: exact,
+                maximum: exact - 1,
+            }),
+        );
+        session.source.maximum_bytes = u128::MAX;
+        let mut done = false;
+        for _ in 0..1024 {
+            if session.advance(128, &control).unwrap() {
+                done = true;
+                break;
+            }
+        }
+        assert!(done, "small replay fixture must complete");
+        let source = session.complete().unwrap();
+        assert!(source.matches_result(&raw));
+        assert_eq!(
+            source.checked_retained_capacity_bytes(),
+            source.checked_full_capacity_recount()
+        );
+        drop(raw);
+        let ReplayBatches::FullHeight(shared) = &source.batches else {
+            panic!("pager lost its graph owner");
+        };
+        assert_eq!(Arc::strong_count(shared), 1);
+        assert_eq!(shared[0].execution().graphs().as_ptr(), graph_pointer);
+        let mut store = PcReplayPageStore::new(source);
+        let page = store.page(1, 1, &control).unwrap();
+        assert!(!page.witnesses.is_empty());
+        assert!(page.witnesses[0]
+            .normalized_trace_key()
+            .starts_with("trk2:"));
     }
 
     #[test]

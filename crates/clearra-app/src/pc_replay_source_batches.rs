@@ -13,6 +13,15 @@ pub(super) enum ReplayBatches {
     FullHeight(Arc<[FullHeightExecutionBatch]>),
 }
 
+pub(super) struct PreparedReplayBatches {
+    pub batches: ReplayBatches,
+    pub retained_graph_bytes: u128,
+    pub graph_count: usize,
+    /// Already counted in the exact source Core. No credit for the compact
+    /// batch clone or for separately retained request/host owners.
+    pub shared_input_graph_bytes: u128,
+}
+
 #[derive(Debug)]
 pub(super) enum ReplayLanguage {
     Compact(ExactReplayLanguageSession),
@@ -46,6 +55,7 @@ impl BatchStorage for ExactScoringExecutionBatch {
         self.graphs().len()
     }
 }
+#[cfg(test)]
 impl BatchStorage for FullHeightExecutionBatch {
     fn clone_nested_bytes(&self) -> Option<u128> {
         self.checked_clone_nested_bytes()
@@ -124,14 +134,14 @@ fn copy<B: BatchStorage>(
 }
 
 impl ReplayBatches {
-    pub(super) fn copy_from_result(
+    pub(super) fn prepare_from_result(
         problem: &SearchProblem,
         result: &CoreExecutionResult,
         projection: PcPathProjectionContext,
         patterns: usize,
         original: u128,
         maximum: u128,
-    ) -> ReplayResult<(Self, u128, usize)> {
+    ) -> ReplayResult<PreparedReplayBatches> {
         if problem.visible_height() > 6 {
             let evidence = result
                 .pc_full_height_replay_evidence()
@@ -141,13 +151,15 @@ impl ReplayBatches {
             {
                 return Err("pc replay full-height source is not bound to the query".into());
             }
-            let (copied, bytes, count) = copy(
-                core::slice::from_ref(evidence.batch()),
-                original,
-                maximum,
-                problem.problem_id().as_str().len(),
-            )?;
-            Ok((Self::FullHeight(copied), bytes, count))
+            let bytes = evidence
+                .checked_shared_batch_retained_bytes()
+                .ok_or(OVERFLOW)?;
+            Ok(PreparedReplayBatches {
+                batches: Self::FullHeight(Arc::clone(evidence.shared_batch_owner())),
+                retained_graph_bytes: bytes,
+                graph_count: evidence.batch().execution().graphs().len(),
+                shared_input_graph_bytes: bytes,
+            })
         } else {
             let input = result.exact_scoring_execution_batches();
             if result.pc_full_height_replay_evidence().is_some()
@@ -176,7 +188,12 @@ impl ReplayBatches {
                 maximum,
                 problem.problem_id().as_str().len(),
             )?;
-            Ok((Self::Compact(copied), bytes, count))
+            Ok(PreparedReplayBatches {
+                batches: Self::Compact(copied),
+                retained_graph_bytes: bytes,
+                graph_count: count,
+                shared_input_graph_bytes: 0,
+            })
         }
     }
 
@@ -226,7 +243,10 @@ impl ReplayBatches {
         match self {
             Self::Compact(b) => b.as_ref() == result.exact_scoring_execution_batches(),
             Self::FullHeight(b) => result.pc_full_height_replay_evidence().is_some_and(|e| {
-                b.as_ref() == core::slice::from_ref(e.batch())
+                // The staged pager's memory reservation credited this exact
+                // allocation. Equal content from a separately retained batch
+                // cannot inherit that overlap credit at promotion.
+                Arc::ptr_eq(b, e.shared_batch_owner())
                     && e.matches_source_keys(result.normalized_solution_keys())
             }),
         }

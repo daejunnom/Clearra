@@ -1,4 +1,6 @@
 //! Producer-owned complete physical PC-path source, never score or Build authority.
+use std::sync::Arc;
+
 use clearra_core_domain::{
     board::standard_pc_board::Board256Mask, objective::objective_kind::ObjectiveKind,
 };
@@ -16,18 +18,26 @@ use crate::pc_chance_coverage_evidence::{PcChanceCoverageEvidence, PcChanceProbl
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcFullHeightReplayEvidence {
     problem: PcChanceProblemEvidence,
-    batch: FullHeightExecutionBatch,
+    // One physical batch, already in the immutable owner the lazy pager can
+    // borrow. The slice form is also the replay language's native input.
+    batch: Arc<[FullHeightExecutionBatch]>,
     source_keys_sha256: [u8; 32],
     source_key_count: usize,
 }
 
 impl PcFullHeightReplayEvidence {
+    // One inline batch in a length-one Arc slice, plus the reference counts.
+    // Its nested graph and pattern allocations are accounted separately.
+    const SHARED_BATCH_FIXED_BYTES: u128 = (core::mem::size_of::<FullHeightExecutionBatch>()
+        + 2 * core::mem::size_of::<usize>()) as u128;
+
     pub(crate) fn checked_creation_future_bytes(problem: &SearchProblem) -> Option<u128> {
         // The physical batch moves from the producer (no second graph clone).
         // Admit the independently owned normalized problem snapshot before it
         // is constructed, using the same exhaustive owner inventory as chance.
         PcChanceCoverageEvidence::checked_pc_family_creation_future_bytes(problem, 0)?
-            .checked_add(core::mem::size_of::<Self>() as u128)
+            .checked_add(core::mem::size_of::<Self>() as u128)?
+            .checked_add(Self::SHARED_BATCH_FIXED_BYTES)
     }
 
     pub(crate) fn from_executed_problem(
@@ -102,7 +112,7 @@ impl PcFullHeightReplayEvidence {
             .map_err(|_| "extended_pc_replay_source_problem_mismatch")?;
         Ok(Self {
             problem: snapshot,
-            batch,
+            batch: Arc::from([batch]),
             source_keys_sha256: source_keys_sha256(keys),
             source_key_count: keys.len(),
         })
@@ -113,7 +123,7 @@ impl PcFullHeightReplayEvidence {
     pub fn matches_result_source(&self, problem: &SearchProblem, keys: &[String]) -> bool {
         path_contract(problem)
             && self.problem.matches_search_problem(problem)
-            && self.batch.execution().complete()
+            && self.batch().execution().complete()
             && self.matches_source_keys(keys)
     }
 
@@ -124,7 +134,19 @@ impl PcFullHeightReplayEvidence {
     }
 
     pub fn batch(&self) -> &FullHeightExecutionBatch {
+        &self.batch[0]
+    }
+
+    /// The already validated physical replay owner. Cloning this Arc does
+    /// not clone graphs, traces, or supplied patterns.
+    pub fn shared_batch_owner(&self) -> &Arc<[FullHeightExecutionBatch]> {
         &self.batch
+    }
+
+    /// Graph owner storage is part of Core's retained projection. A second
+    /// Arc to this exact owner may credit these bytes once when coexisting.
+    pub fn checked_shared_batch_retained_bytes(&self) -> Option<u128> {
+        Self::SHARED_BATCH_FIXED_BYTES.checked_add(self.batch().checked_nested_retained_bytes()?)
     }
 
     pub const fn source_key_count(&self) -> usize {
@@ -134,7 +156,7 @@ impl PcFullHeightReplayEvidence {
     pub(crate) fn checked_nested_retained_bytes(&self) -> Option<u128> {
         self.problem
             .checked_storage_retained_bytes()?
-            .checked_add(self.batch.checked_nested_retained_bytes()?)
+            .checked_add(self.checked_shared_batch_retained_bytes()?)
     }
 }
 
