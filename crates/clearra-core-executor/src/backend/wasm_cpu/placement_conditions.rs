@@ -177,6 +177,7 @@ pub(super) fn grounding_sources(
 #[derive(Clone, Copy, Debug)]
 struct CanonicalPlacement {
     cells: u64,
+    #[cfg(test)]
     occupied_rows: u16,
     domain_id: u32,
 }
@@ -301,6 +302,7 @@ pub(super) fn vertical_entry_mask(lock: u64, width: u8, height: u8) -> u64 {
 pub(super) struct PlacementConditionCatalog {
     width: u8,
     height: u8,
+    #[cfg(test)]
     initial_board: u64,
     placements: Vec<CanonicalPlacement>,
     clear_domains: Vec<u64>,
@@ -372,6 +374,7 @@ impl PlacementConditionCatalog {
             domains_by_row.push((domain, row_id));
             placements.push(CanonicalPlacement {
                 cells: row.cells,
+                #[cfg(test)]
                 occupied_rows: catalog.skeleton_occupied_rows(row_id),
                 domain_id: 0,
             });
@@ -403,6 +406,7 @@ impl PlacementConditionCatalog {
         Some(Self {
             width,
             height,
+            #[cfg(test)]
             initial_board: catalog.initial_board(),
             placements,
             clear_domains,
