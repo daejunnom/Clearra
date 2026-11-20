@@ -1,4 +1,6 @@
 //! Product-level parity for the smallest native/Rust next-PC handoff.
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 use clearra_app::{
     AppCommand, AppContext, AppCoreExecutorService, AppRenderModel, AppRequest, AppResponse,
     AppServices, AppStatus, ContinueAppCommand, CooperativeAppAdvance, PcAppCommand,
@@ -11,6 +13,17 @@ use clearra_pc_graph::request::{
     PcExecutionPolicy, PcHoldPolicy, PcQueueInput, RequestedSearchBackend,
 };
 use clearra_supply::queue::queue_parser::parse_fixed_sequence;
+
+fn lock_fixture_execution() -> MutexGuard<'static, ()> {
+    // Each search in this test binary uses the real process-wide resource
+    // lease; unbounded Native packing reserves the complete memory slice.
+    // Serialize this small fixture family rather than retrying admission,
+    // changing the requested resources, or serializing the entire test suite.
+    static FIXTURE_EXECUTION: Mutex<()> = Mutex::new(());
+    FIXTURE_EXECUTION
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 fn rust_context() -> AppContext {
     AppContext::new(AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()))
@@ -43,6 +56,7 @@ fn pc_result(response: &AppResponse) -> &CoreExecutionResult {
 
 #[test]
 fn fixed_no_hold_opening_continuation_matches_native_pc2_and_solves_the_suffix() {
+    let _execution = lock_fixture_execution();
     let rust = rust_context();
     let result = rust.run(request("IIOOOIIOOO", PcHoldPolicy::Disabled));
     let first = pc_result(&result);
@@ -136,6 +150,7 @@ fn fixed_no_hold_opening_continuation_matches_native_pc2_and_solves_the_suffix()
 
 #[test]
 fn fixed_no_hold_opening_continuation_omits_unproven_handoffs() {
+    let _execution = lock_fixture_execution();
     let rust = rust_context();
     let short = rust.run(request("IIOOOIIOO", PcHoldPolicy::Disabled));
     let short = pc_result(&short);
@@ -168,6 +183,7 @@ fn complete_cooperatively(context: &AppContext, request: AppRequest) -> AppRespo
 
 #[test]
 fn fixed_no_hold_opening_continuation_matches_cooperative_pc2_only_for_ordinary_pc() {
+    let _execution = lock_fixture_execution();
     let rust = rust_context();
     let request = request("IIOOOIIOOO", PcHoldPolicy::Disabled);
     let direct = rust.run(request.clone());
@@ -223,6 +239,7 @@ fn fixed_no_hold_opening_continuation_is_not_published_after_cooperative_cancell
             }
         }
     }
+    let _execution = lock_fixture_execution();
     let rust = rust_context();
     let mut execution =
         rust.start_cooperative_execution(request("IIOOOIIOOO", PcHoldPolicy::Disabled));
