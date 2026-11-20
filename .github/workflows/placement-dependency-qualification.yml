@@ -298,7 +298,9 @@ jobs:
       github.event.before == '0000000000000000000000000000000000000000' &&
       github.event.after == github.sha &&
       github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha)
-    runs-on: ubuntu-latest
+    # Keep the browser host compatible with the pinned Playwright release.
+    # In particular ubuntu-latest can move ahead of its Chromium registry.
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
       CLEARRA_BUILD_PURPOSE: experiment
