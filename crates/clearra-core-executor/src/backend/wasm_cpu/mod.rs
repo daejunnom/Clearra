@@ -216,13 +216,34 @@ fn packing_hold_projection(
 fn ensure_connected_kick_profile(
     problem: &clearra_problem::SearchProblem,
 ) -> Result<(), WasmExactSearchError> {
-    if kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id()).is_some() {
-        Ok(())
-    } else {
-        Err(WasmExactSearchError::InvalidProblem(
+    let Some(builtin) = kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id())
+    else {
+        return Err(WasmExactSearchError::InvalidProblem(
             "wasm_exact_backend_requires_connected_kick_profile",
-        ))
+        ));
+    };
+    let rule_selection = problem.rule_profile();
+    if let Some(verified) = rule_selection.verified_kick_profile() {
+        let supplied = verified.profile();
+        // Rust currently uses request-independent tables keyed by profile ID.
+        // An import may retain that ID while changing the first successful
+        // rotation. Admit it only if the actual table is already connected.
+        // Verification excludes duplicate transition keys, so record order
+        // is irrelevant here, but the candidate order within each key is not.
+        if supplied.source_rule() != builtin.source_rule()
+            || supplied.source_rule() != rule_selection.rule().id()
+            || supplied.transition_count() != builtin.transition_count()
+            || !supplied
+                .entries()
+                .iter()
+                .all(|entry| builtin.sequence_for(entry.transition()) == Some(entry.sequence()))
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_exact_backend_requires_canonical_ordered_kick_profile",
+            ));
+        }
     }
+    Ok(())
 }
 
 const fn piece_index(piece: clearra_core_domain::piece::piece_kind::PieceKind) -> usize {
