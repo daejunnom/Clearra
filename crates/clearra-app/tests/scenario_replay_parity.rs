@@ -4,7 +4,10 @@ use clearra_app::{
     AppServices, AppStatus, ContinueAppCommand, CooperativeAppAdvance, ScenarioAppCommand,
     ScenarioAppExpected, ScenarioAppRenderContract,
 };
-use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
+use clearra_core_domain::{
+    execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
+    piece::piece_kind::PieceKind,
+};
 use clearra_core_executor::CoreExecutionResult;
 use clearra_pc_graph::request::{
     PcContinuationToken, PcContinuationTokenCodec, PcCountPolicy, PcExecutionPolicy, PcQueueInput,
@@ -308,24 +311,71 @@ fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
         .with_retained_trace_limit(1)
     };
     let raw = (0x3f0 << 10) | 0x3ff;
-    for (queue, resolves) in [
-        ([PieceKind::I, PieceKind::O], true),
-        ([PieceKind::O, PieceKind::I], false),
+    let cap_queue = [
+        PieceKind::I,
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::O,
+        PieceKind::O,
+        PieceKind::I,
+    ];
+    for (input, active_rows, empty_family_depth, resolves) in [
+        // Only the first I can fill the one-row hole. OI cannot use the I
+        // suffix beyond its admitted one-piece family.
+        (
+            query(4, raw, &[PieceKind::I, PieceKind::O], 1),
+            1,
+            None,
+            true,
+        ),
+        (
+            query(4, raw, &[PieceKind::O, PieceKind::I], 1),
+            1,
+            None,
+            false,
+        ),
+        // Five pieces could fill this clipped extent, but Native admits
+        // only the six-piece family; a shallower prefix is not a result.
+        (query(2, 0, &cap_queue, 6), 2, Some(6), false),
+        // max=2 rounds the active frame to two rows. Fourteen missing
+        // cells cannot be covered by any integral number of tetrominoes.
+        (
+            query(4, 0x3f0, &[PieceKind::I, PieceKind::I], 2),
+            2,
+            Some(2),
+            false,
+        ),
     ] {
-        // A one-row clear has room for only the first I. In the second
-        // request O cannot fit, and the legal I is outside the max window.
-        let input = query(4, raw, &queue, 1);
         let legacy = ProblemCompiler::compile_legacy_scenario_pc(&input).unwrap();
         assert_eq!(legacy.exact_pieces(), None);
-        assert_eq!(legacy.compact_pc_geometry_height(), 1);
+        assert_eq!(legacy.compact_pc_geometry_height(), active_rows);
+        assert_eq!(
+            legacy.compact_pc_proven_empty_family_depth(),
+            empty_family_depth
+        );
         let request = || legacy_scenario(input.clone());
+        if empty_family_depth.is_some() {
+            let cancellation = ExecutionCancellationToken::new();
+            cancellation.handle().cancel();
+            let control = ExecutionControl::new(cancellation);
+            let mut cancelled = rust.start_cooperative_execution(request());
+            assert_eq!(
+                cancelled.advance(1, &control),
+                CooperativeAppAdvance::Cancelled
+            );
+        }
         let direct = rust.run(request());
         let cooperative = complete_cooperatively(rust, request());
         let direct = core(&direct);
         let cooperative = core(&cooperative);
         assert_eq!(direct.bool_field("solution_found"), Some(resolves));
         assert_eq!(direct.bool_field("count_complete"), Some(true));
+        assert_eq!(direct.bool_field("probability_complete"), Some(true));
         assert_eq!(direct.bool_field("resource_truncated"), Some(false));
+        assert_eq!(
+            direct.field("covered_pattern_count"),
+            Some(if resolves { "1" } else { "0" })
+        );
         assert_eq!(
             direct.normalized_solution_keys().len(),
             usize::from(resolves)
@@ -337,7 +387,8 @@ fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
             );
         }
         let token = direct.field("scenario_replay_token").unwrap();
-        assert!(token.starts_with("sr2:w10:v4:"));
+        let prefix = format!("sr2:w10:v{}:", input.initial_board().visible_height());
+        assert!(token.starts_with(&prefix));
         let PcContinuationToken::ScenarioReplay(decoded) =
             PcContinuationTokenCodec::parse(token).unwrap()
         else {
@@ -345,21 +396,15 @@ fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
         };
         assert!(token.split(':').any(|segment| segment == "xnone"));
         assert_eq!(decoded.exact_pieces(), None);
-        assert_eq!(decoded.piece_window().max_pieces(), 1);
-        assert_eq!(
-            decoded
-                .remaining_queue()
-                .as_fixed_sequence()
-                .unwrap()
-                .pieces(),
-            &queue
-        );
+        assert_eq!(decoded.piece_window(), input.piece_window());
+        assert_eq!(decoded.remaining_queue(), input.remaining_queue());
         assert_eq!(decoded.initial_board(), legacy.initial_board());
         let fields = [
             "scenario_replay_token",
             "normalized_solution_set_hash",
             "covered_pattern_count",
             "solution_found",
+            "probability_complete",
             "count_complete",
         ];
         for key in fields {
@@ -388,6 +433,7 @@ fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
         for key in [
             "normalized_solution_set_hash",
             "solution_found",
+            "probability_complete",
             "count_complete",
         ] {
             let replay_value = message.fields().iter().find(|field| field.key() == key);
@@ -398,25 +444,25 @@ fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
         }
     }
 
-    // Unsupported families preserve their original extent; none is turned
+    // Independently witness that the capped input's five-piece prefix really
+    // solves the board when that is the admitted family size.
+    let prefix = query(2, 0, &cap_queue, 5);
+    assert_eq!(
+        core(&rust.run(legacy_scenario(prefix.clone()))).bool_field("solution_found"),
+        Some(true)
+    );
+    #[cfg(feature = "native-c-core")]
+    assert_eq!(
+        core(&AppContext::default().run(legacy_scenario(prefix))).bool_field("solution_found"),
+        Some(true)
+    );
+
+    // Other families preserve their original extent; none is turned
     // into a cropped target, shorter-prefix solution or artificial empty.
     let unchanged = [
-        query(4, 0x3f0, &[PieceKind::I, PieceKind::I], 2), // nonintegral area
-        query(4, 0x3f0 << 20, &[PieceKind::I], 1),         // occupied above area
+        query(4, 0x3f0 << 20, &[PieceKind::I], 1), // occupied above area
         query(4, 0x3f0, &[PieceKind::I, PieceKind::O], 1).with_allow_hold(true),
-        query(
-            2,
-            0,
-            &[
-                PieceKind::I,
-                PieceKind::I,
-                PieceKind::O,
-                PieceKind::O,
-                PieceKind::O,
-                PieceKind::I,
-            ],
-            6,
-        ), // would require a 5-piece prefix after clamping
+        query(2, 0, &[PieceKind::I; 16], 16), // Native compact family limit
     ];
     for input in unchanged {
         let legacy = ProblemCompiler::compile_legacy_scenario_pc(&input).unwrap();

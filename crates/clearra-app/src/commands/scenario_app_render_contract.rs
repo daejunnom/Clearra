@@ -66,7 +66,8 @@ impl ScenarioAppRenderContract {
             || !(2..=6).contains(&board.visible_height())
             || board.has_extended_occupancy()
             || (query.exact_pieces().is_none()
-                && problem.compact_pc_geometry_height() >= board.visible_height())
+                && problem.compact_pc_geometry_height() >= board.visible_height()
+                && problem.compact_pc_proven_empty_family_depth().is_none())
             || query.objective() != objective_from_count
             || query.supply_window_size().is_some()
             || query.allowed_colored_solution_identities().is_some()

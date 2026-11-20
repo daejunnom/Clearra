@@ -8,8 +8,8 @@ mod board_accessors {
     use crate::goal::SearchGoal;
 
     use super::{
-        OccupancyField, PcChanceEvidencePolicy, SearchOutputPolicy, SearchProblem,
-        SearchProblemBoard,
+        legacy_scenario_pc_extent::LegacyScenarioPcExtent, OccupancyField, PcChanceEvidencePolicy,
+        SearchOutputPolicy, SearchProblem, SearchProblemBoard,
     };
 
     impl SearchProblem {
@@ -35,16 +35,28 @@ mod board_accessors {
     impl SearchProblem {
         /// The Board64 PC catalog's target, not the caller's display frame.
         pub fn compact_pc_geometry_height(&self) -> u16 {
+            self.ordinary_legacy_scenario_pc_extent()
+                .map_or_else(|| self.visible_height(), |extent| extent.rows.get())
+        }
+
+        /// The original Native supply-family depth for an admitted target
+        /// whose required area provably cannot match that family.
+        pub fn compact_pc_proven_empty_family_depth(&self) -> Option<usize> {
+            self.ordinary_legacy_scenario_pc_extent()?
+                .empty_family_depth
+                .map(|depth| usize::from(depth.get()))
+        }
+
+        fn ordinary_legacy_scenario_pc_extent(&self) -> Option<LegacyScenarioPcExtent> {
             // A transformed problem cannot carry the ordinary legacy frame
             // into path/score/coverage authority or a different search goal.
             if self.pc_chance_evidence_policy() != PcChanceEvidencePolicy::Disabled
                 || self.output_policy() != SearchOutputPolicy::Trace
                 || !matches!(self.search_goal(), SearchGoal::ClearToEmpty)
             {
-                return self.visible_height();
+                return None;
             }
-            self.legacy_scenario_pc_active_height
-                .map_or_else(|| self.visible_height(), core::num::NonZeroU16::get)
+            self.legacy_scenario_pc_extent
         }
     }
     impl SearchProblem {
@@ -182,7 +194,7 @@ mod constructor {
                 preset,
                 initial_occupancy,
                 board,
-                legacy_scenario_pc_active_height: None,
+                legacy_scenario_pc_extent: None,
                 board_profile:
                     clearra_profiles::bundle::standard_profile_bundle::standard_profile_bundle()
                         .board(),
@@ -290,7 +302,7 @@ mod constructor {
                 scenario,
                 initial_occupancy,
                 board,
-                legacy_scenario_pc_active_height: None,
+                legacy_scenario_pc_extent: None,
                 board_profile:
                     clearra_profiles::bundle::standard_profile_bundle::standard_profile_bundle()
                         .board(),
@@ -628,7 +640,8 @@ mod model {
         pub(super) scenario: ScenarioQuery,
         pub(super) initial_occupancy: Option<OccupancyField>,
         pub(super) board: SearchProblemBoard,
-        pub(super) legacy_scenario_pc_active_height: Option<core::num::NonZeroU16>,
+        pub(super) legacy_scenario_pc_extent:
+            Option<super::legacy_scenario_pc_extent::LegacyScenarioPcExtent>,
         pub(super) board_profile: BoardProfile,
         pub(super) piece_source: PieceSource,
         pub(super) initial_hold: HoldAutomatonState,
@@ -1761,23 +1774,34 @@ mod legacy_scenario_pc_extent {
 
     use super::{SearchProblem, SearchProblemId, SearchProblemPreset};
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) struct LegacyScenarioPcExtent {
+        pub(super) rows: NonZeroU16,
+        pub(super) empty_family_depth: Option<NonZeroU16>,
+    }
+
     impl SearchProblem {
-        /// Select only exact area that the legacy ScenarioPc extent would
-        /// admit. The canonical input and scenario layout remain unchanged.
+        /// Preserve the proved legacy ScenarioPc frame without rewriting the
+        /// canonical input or public display layout.
         pub(crate) fn with_legacy_scenario_extent(mut self) -> Self {
-            if let Some(rows) = active_height(&self) {
-                self.problem_id = SearchProblemId::new(format!(
+            if let Some(extent) = active_extent(&self) {
+                let mut id = format!(
                     "{}:legacy-pc-active-rows:{}",
                     self.problem_id.as_str(),
-                    rows.get()
-                ));
-                self.legacy_scenario_pc_active_height = Some(rows);
+                    extent.rows.get()
+                );
+                if let Some(depth) = extent.empty_family_depth {
+                    use core::fmt::Write;
+                    let _ = write!(&mut id, ":empty-family-depth:{depth}");
+                }
+                self.problem_id = SearchProblemId::new(id);
+                self.legacy_scenario_pc_extent = Some(extent);
             }
             self
         }
     }
 
-    fn active_height(problem: &SearchProblem) -> Option<NonZeroU16> {
+    fn active_extent(problem: &SearchProblem) -> Option<LegacyScenarioPcExtent> {
         let query = problem.core_query();
         let board = problem.initial_board();
         let policy = query.execution_policy();
@@ -1815,24 +1839,46 @@ mod legacy_scenario_pc_extent {
             _ => return None,
         };
         let queue = query.remaining_queue().as_fixed_sequence()?;
-        if n == 0
+        if !(1..=15).contains(&n)
             || !(n..=64).contains(&queue.len())
             || (query.allow_hold() && (n != 1 || queue.len() != 1))
         {
             return None;
         }
-        // Accept only this family depth, never a shorter prefix after
-        // clamping the frame and never a rounded non-integral fill area.
+        // Native picks a single area-rounded, visibility-clamped rectangle.
+        // The proof is intentionally unavailable if the highest occupied row
+        // would enlarge that rectangle; never crop the original occupancy.
         let occupied = board.occupied_mask();
-        let area = (occupied.count_ones() as usize).checked_add(n.checked_mul(4)?)?;
-        if !area.is_multiple_of(10) {
+        let occupied_count = occupied.count_ones() as u16;
+        let family_area = u16::try_from(n).ok()?.checked_mul(4)?;
+        let rows = occupied_count
+            .checked_add(family_area)?
+            .div_ceil(10)
+            .min(board.visible_height());
+        let rows = NonZeroU16::new(rows)?;
+        if occupied >> (rows.get() * 10) != 0 {
             return None;
         }
-        let rows = u16::try_from(area / 10).ok().and_then(NonZeroU16::new)?;
-        if rows.get() >= board.visible_height() || occupied >> (rows.get() * 10) != 0 {
-            return None;
+        let required_cells = (rows.get() * 10).checked_sub(occupied_count)?;
+        if required_cells == family_area && rows.get() < board.visible_height() {
+            return Some(LegacyScenarioPcExtent {
+                rows,
+                empty_family_depth: None,
+            });
         }
-        Some(rows)
+        // On max-only input Native still requires an exact m-piece family.
+        // Its geometry publishes no candidates for a non-integral depth or
+        // a shallower capped target. These are not shorter-prefix requests.
+        if query.exact_pieces().is_none()
+            && required_cells != 0
+            && (!required_cells.is_multiple_of(4) || required_cells < family_area)
+        {
+            return Some(LegacyScenarioPcExtent {
+                rows,
+                empty_family_depth: NonZeroU16::new(u16::try_from(n).ok()?),
+            });
+        }
+        None
     }
 }
 mod supply_accessors {

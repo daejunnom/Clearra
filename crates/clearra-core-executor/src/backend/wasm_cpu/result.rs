@@ -1505,7 +1505,20 @@ impl WasmExactSearchSession {
         let tablebase_artifact_bytes = 0;
         let tablebase_retained_bytes = 0;
         let tablebase_payload_sha256 = None;
-        let target_piece_count = catalog.required_cells().count_ones() as usize / 4;
+        let required_cells = catalog.required_cells().count_ones() as usize;
+        let target_piece_count =
+            if let Some(family_depth) = problem.compact_pc_proven_empty_family_depth() {
+                if external_geometry || required_cells == 0 || required_cells == family_depth * 4 {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_legacy_empty_geometry_scope_mismatch",
+                    ));
+                }
+                // Keep the real Native family size, not floor(required / 4).
+                // The root exact-cover check compares its area to the true mask.
+                family_depth
+            } else {
+                required_cells / 4
+            };
         if target_piece_count > MAX_BOARD64_PIECES {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_board64_piece_count_exceeds_exact_limit",
@@ -1938,6 +1951,14 @@ impl WasmExactSearchSession {
         }
         if self
             .problem
+            .compact_pc_proven_empty_family_depth()
+            .is_some()
+        {
+            self.parallel_decision_reason = "legacy-target-family-area-mismatch";
+            return Ok(None);
+        }
+        if self
+            .problem
             .queue_observation_policy()
             .requires_observation_policy()
         {
@@ -2222,6 +2243,16 @@ impl WasmExactSearchSession {
         self.execution_control = control.clone();
         if control.is_cancelled() {
             return Ok(ExactSearchAdvance::Cancelled);
+        }
+        if control.partition().count() != 1
+            && self
+                .problem
+                .compact_pc_proven_empty_family_depth()
+                .is_some()
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_legacy_empty_geometry_scope_mismatch",
+            ));
         }
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(

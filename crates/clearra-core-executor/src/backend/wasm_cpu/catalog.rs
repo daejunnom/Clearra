@@ -354,13 +354,21 @@ impl GeometryCatalog {
             ));
         }
         let required_cells = all_cells & !initial_board;
-        if !required_cells.count_ones().is_multiple_of(4) {
+        let proven_empty = problem.compact_pc_proven_empty_family_depth().is_some();
+        if !required_cells.count_ones().is_multiple_of(4) && !proven_empty {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_required_fill_area_not_tetromino_aligned",
             ));
         }
 
-        Self::compile_for_required_cells_on_dimensions(width, height, initial_board, required_cells)
+        Self::compile_with_clear_row_domain(
+            width,
+            height,
+            initial_board,
+            required_cells,
+            false,
+            proven_empty,
+        )
     }
 
     pub fn compile_for_required_cells_on_board(
@@ -386,7 +394,14 @@ impl GeometryCatalog {
         let height = u8::try_from(problem.visible_height()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_target_frame_height_overflow")
         })?;
-        Self::compile_with_clear_row_domain(width, height, initial_board, required_cells, true)
+        Self::compile_with_clear_row_domain(
+            width,
+            height,
+            initial_board,
+            required_cells,
+            true,
+            false,
+        )
     }
 
     /// Compile the same inverse lock-clear catalog for an already qualified
@@ -400,7 +415,14 @@ impl GeometryCatalog {
         initial_board: u64,
         required_cells: u64,
     ) -> Result<Self, WasmExactSearchError> {
-        Self::compile_with_clear_row_domain(width, height, initial_board, required_cells, false)
+        Self::compile_with_clear_row_domain(
+            width,
+            height,
+            initial_board,
+            required_cells,
+            false,
+            false,
+        )
     }
 
     pub(super) fn compile_build_stage(
@@ -408,7 +430,7 @@ impl GeometryCatalog {
         base: u64,
         target: u64,
     ) -> Result<Self, WasmExactSearchError> {
-        Self::compile_with_clear_row_domain(10, height, base, target, true)
+        Self::compile_with_clear_row_domain(10, height, base, target, true, false)
     }
 
     fn compile_with_clear_row_domain(
@@ -417,6 +439,7 @@ impl GeometryCatalog {
         initial_board: u64,
         required_cells: u64,
         build_target: bool,
+        legacy_proven_empty: bool,
     ) -> Result<Self, WasmExactSearchError> {
         let cell_count = usize::from(width) * usize::from(height);
         if width == 0 || height == 0 || cell_count > u64::BITS as usize || height > 16 {
@@ -444,7 +467,7 @@ impl GeometryCatalog {
                 "wasm_build_target_overlaps_initial_board",
             ));
         }
-        if !required_cells.count_ones().is_multiple_of(4) {
+        if !required_cells.count_ones().is_multiple_of(4) && !legacy_proven_empty {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_required_fill_area_not_tetromino_aligned",
             ));

@@ -454,6 +454,9 @@ impl WasmCpuSearchBackend {
     }
 
     pub fn distributed_execution_is_worthwhile(problem: &SearchProblem) -> bool {
+        if problem.compact_pc_proven_empty_family_depth().is_some() {
+            return false;
+        }
         // The compact packed-row worker protocol must not receive four-word
         // identities. Extended direct typed tiling has its own exact owner.
         if problem.visible_height() > 6 {
