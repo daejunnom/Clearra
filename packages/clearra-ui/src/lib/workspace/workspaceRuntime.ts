@@ -109,7 +109,7 @@ export function workspaceViewFromDesktop(state: DesktopJobState): WorkspaceRunti
     progressTotal: state.progressTotal,
     forwardPatternDone: 0,
     forwardPatternTotal: 0,
-    progressTelemetry: null,
+    progressTelemetry: state.progressTelemetry ?? null,
     publicFailures: failure.publicFailures,
     developerDiagnostics: failure.developerEvidence.diagnostics,
     response: state.result,

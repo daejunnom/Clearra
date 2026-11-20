@@ -253,7 +253,8 @@ jobs:
           export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-L native=$out"
           status=0
           cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core \
-            --test legacy_cover_native_witness --test pc_tiling_control_parity --no-fail-fast || status=1
+            --test legacy_cover_native_witness --test pc_tiling_control_parity --no-fail-fast \
+            -- --nocapture || status=1
           # Measure the opt-in bounded prefix with the same C build and test binary.
           cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core \
             --test legacy_cover_native_witness -- --ignored --exact \

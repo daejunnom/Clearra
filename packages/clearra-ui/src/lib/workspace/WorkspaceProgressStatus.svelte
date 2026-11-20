@@ -55,43 +55,40 @@
             : 'progressPending'
       );
 
-  const formatters: Record<WorkspaceLocale, Intl.NumberFormat> = {
-    en: new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }),
-    ko: new Intl.NumberFormat('ko', { notation: 'compact', maximumFractionDigits: 1 }),
-    ja: new Intl.NumberFormat('ja', { notation: 'compact', maximumFractionDigits: 1 })
-  };
+  const formatters: Partial<Record<WorkspaceLocale, Intl.NumberFormat>> = {};
 
-  function count(value: string | null): string {
+  function count(value: string | null, locale: WorkspaceLanguage): string {
     if (value === null) return '—';
+    const prefix = value.startsWith('≈') ? '≈' : '';
     try {
-      return new Intl.NumberFormat(language).format(BigInt(value));
+      const formatter = formatters[locale] ??= new Intl.NumberFormat(locale);
+      return prefix + formatter.format(BigInt(prefix ? value.slice(1) : value));
     } catch {
-      const parsed = Number(value);
-      return Number.isFinite(parsed) ? formatters[language].format(parsed) : value;
+      return value;
     }
   }
 
-  function metric(stage: WorkspaceProgressStage): string {
-    if (stage.status === 'complete') return workspaceMessage(language, 'progressComplete');
-    if (stage.status === 'pending') return workspaceMessage(language, 'progressPending');
-    if (stage.status === 'stopped') return workspaceMessage(language, 'progressStopped');
-    if (stage.done === null) return workspaceMessage(language, 'progressActive');
+  function metric(stage: WorkspaceProgressStage, locale: WorkspaceLanguage): string {
+    if (stage.status === 'complete') return workspaceMessage(locale, 'progressComplete');
+    if (stage.status === 'pending') return workspaceMessage(locale, 'progressPending');
+    if (stage.status === 'stopped') return workspaceMessage(locale, 'progressStopped');
+    if (stage.done === null) return workspaceMessage(locale, 'progressActive');
     if (stage.total === null) {
-      return workspaceMessage(language, 'progressCountOnly', { count: count(stage.done) });
+      return workspaceMessage(locale, 'progressCountOnly', { count: count(stage.done, locale) });
     }
-    return `${count(stage.done)} / ${count(stage.total)}`;
+    return `${count(stage.done, locale)} / ${count(stage.total, locale)}`;
   }
 
-  function secondaryMetric(value: WorkspaceProgressMetric): string {
+  function secondaryMetric(value: WorkspaceProgressMetric, locale: WorkspaceLanguage): string {
     return value.total === null
-      ? count(value.value)
-      : `${count(value.value)} / ${count(value.total)}`;
+      ? count(value.value, locale)
+      : `${count(value.value, locale)} / ${count(value.total, locale)}`;
   }
 
 </script>
 
-<section class="progress-status" aria-live="polite" aria-label={workspaceMessage(language, 'progress')}>
-  <div class="overall">
+<section class="progress-status" aria-label={workspaceMessage(language, 'progress')}>
+  <div class="overall" aria-live="polite">
     <div>
       <span>{workspaceMessage(language, 'progressCurrentStage')}</span>
       <strong>{currentSummary}</strong>
@@ -102,10 +99,10 @@
     class="overall-track"
     role="progressbar"
     aria-valuemin="0"
-    aria-valuemax="100"
-    aria-valuenow={Math.round(model.overallPercent)}
+    aria-valuemax={model.totalStages}
+    aria-valuenow={model.completedStages}
     aria-valuetext={stageSummary}
-  ><span style={`width:${model.overallPercent}%`}></span></div>
+  ><span style={`width:${100 * model.completedStages / model.totalStages}%`}></span></div>
 
   <ol class="stage-list" style={`--stage-count:${model.totalStages}`}>
     {#each model.stages as stage}
@@ -121,13 +118,13 @@
             <Circle size={12} strokeWidth={1.5} />
           {/if}
           <strong>{workspaceMessage(language, stage.labelKey)}</strong>
-          <span>{metric(stage)}</span>
+          <span>{metric(stage, language)}</span>
         </div>
         <div class="stage-metrics" aria-hidden={stage.metrics.length === 0}>
           {#each stage.metrics as stageMetric}
             <span>
               {workspaceMessage(language, stageMetric.labelKey)}
-              <b>{secondaryMetric(stageMetric)}</b>
+              <b>{secondaryMetric(stageMetric, language)}</b>
             </span>
           {/each}
         </div>

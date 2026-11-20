@@ -3,6 +3,10 @@ import type {
   ClearraSearchProgressTelemetry
 } from '../wasm/wasmCommandClient';
 import type { WorkspaceMessageKey } from './workspaceI18n';
+import {
+  isSearchPostprocessLabel,
+  nativeSearchProgressCounter
+} from './workspaceNativeSearchProgress.ts';
 import type { WorkspaceRuntimeStatus } from './workspaceRuntime';
 
 export type WorkspaceProgressProfile = 'pc' | 'tiling' | 'setup' | 'build' | 'damage' | 'spin' | 'ren' | 'recovery-build';
@@ -43,7 +47,6 @@ export type WorkspaceProgressModel = {
   stages: WorkspaceProgressStage[];
   completedStages: number;
   totalStages: number;
-  overallPercent: number;
 };
 
 export type WorkspaceProgressInput = {
@@ -247,12 +250,16 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
   // Verification consumes streamed candidates concurrently. Its counters do not
   // prove that the Geometry producer has finished enumerating candidates.
   const producerDone =
-    telemetry.producer_complete || isFinalizingPhase(phase) || phase === 'draining';
+    telemetry.producer_complete || isFinalizingPhase(phase);
+  const localBuildStarted = telemetryPositive(telemetry, 'producer_build_nodes', telemetry.producer_build_nodes);
+  const workerBuildStarted = telemetryPositive(telemetry, 'build_nodes', telemetry.build_nodes);
+  const buildNodes = localBuildStarted && !workerBuildStarted
+    ? telemetryCount(telemetry, 'producer_build_nodes', telemetry.producer_build_nodes)
+    : telemetryCount(telemetry, 'build_nodes', telemetry.build_nodes);
   const predictedCandidates = predictedCandidateTotal(telemetry);
-  const candidateGenerationStarted =
-    telemetryPositive(telemetry, 'candidates_emitted', telemetry.candidates_emitted) ||
-    (telemetry.availability.geometry_family_count &&
-      telemetry.geometry_family_count !== null);
+  const candidateGenerationStarted = telemetry.availability.candidates_emitted &&
+    (telemetryPositive(telemetry, 'candidates_emitted', telemetry.candidates_emitted) ||
+      (telemetry.availability.geometry_family_count && telemetry.geometry_family_count !== null));
   const verificationStarted =
     verify !== undefined &&
     (telemetryPositive(
@@ -261,13 +268,15 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
       telemetry.candidates_verified
     ) ||
       telemetryPositive(telemetry, 'coverage_checks', telemetry.coverage_checks) ||
+      localBuildStarted ||
+      workerBuildStarted ||
       producerDone);
 
   if (geometry) {
     geometry.status =
       producerDone
         ? 'complete'
-        : phase === 'searching'
+        : phase === 'searching' || phase === 'draining'
           ? 'running'
           : 'pending';
     if (candidateGenerationStarted) {
@@ -324,20 +333,16 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
         : verificationStarted
           ? 'running'
           : 'pending';
-    applyMetric(
-      verify,
-      telemetryCount(
-        telemetry,
-        'candidates_verified',
-        telemetry.candidates_verified
-      ),
-      predictedCandidates
-    );
-    addMetric(
-      verify,
-      'progressMetricBuildNodes',
-      telemetryCount(telemetry, 'build_nodes', telemetry.build_nodes)
-    );
+    if (telemetry.availability.candidates_verified) {
+      applyMetric(
+        verify,
+        telemetryCount(telemetry, 'candidates_verified', telemetry.candidates_verified),
+        predictedCandidates
+      );
+    } else {
+      applyMetric(verify, buildNodes, null);
+    }
+    addMetric(verify, 'progressMetricBuildNodes', buildNodes);
     addMetric(
       verify,
       'progressMetricChecks',
@@ -711,39 +716,52 @@ function applyCoarseProgress(
     return;
   }
 
-  if (
-    input.progressLabel === 'postprocess' ||
-    input.progressLabel === 'pc-minimals-finalize' ||
-    input.progressLabel?.startsWith('complete-replay-') === true
-  ) {
-    const finalStageIndex = Math.max(
-      0,
-      stages.findIndex((candidate) =>
-        candidate.id === 'finalize' || candidate.id === 'classify'
-      )
-    );
-    for (let index = 0; index < finalStageIndex; index += 1) {
-      stages[index].status = 'complete';
-    }
-    stages[finalStageIndex].status = 'running';
-    applyMetric(
-      stages[finalStageIndex],
-      input.progressDone,
-      input.progressTotal > 0 ? input.progressTotal : null
-    );
+  const label = input.progressLabel;
+  if (isSearchPostprocessLabel(label)) {
+    markOrderedStage(stages, 'finalize');
+    const finalize = stage(stages, 'finalize');
+    if (finalize) applyMetric(finalize, input.progressDone, input.progressTotal > 0 ? input.progressTotal : null);
     return;
   }
 
-  const activeIndex = Math.min(
-    stages.length - 1,
-    Math.max(1, Math.trunc(input.progressDone))
-  );
-  for (let index = 0; index < activeIndex; index += 1) {
-    stages[index].status = 'complete';
+  if (input.profile === 'setup') {
+    if (label === 'setup-geometry') markOrderedStage(stages, 'geometry');
+    else if (label === 'setup-graph') markOrderedStage(stages, 'graph');
+    else if (label === 'setup-coverage') markOrderedStage(stages, 'tasks');
+    else if (label === 'setup-finalize') markOrderedStage(stages, 'finalize');
+    else stages[0].status = 'running';
+    return;
   }
-  const active = stages[activeIndex];
-  active.status = 'running';
-  applyMetric(active, input.progressDone, input.progressTotal > 0 ? input.progressTotal : null);
+
+  const counter = nativeSearchProgressCounter(label, input.progressTotal);
+  const geometry = stage(stages, 'geometry');
+  const verify = stage(stages, 'verify');
+  if (counter === null) {
+    stages[0].status = 'running';
+    return;
+  }
+  stages[0].status = 'complete';
+  if (geometry) geometry.status = 'running';
+  if (counter === 'build_nodes' || counter === 'candidates_verified') {
+    if (verify) {
+      verify.status = 'running';
+      const total = counter === 'candidates_verified' && input.progressTotal > 0
+        ? input.progressTotal
+        : null;
+      applyMetric(verify, input.progressDone, total);
+    }
+  } else if (geometry) {
+    applyMetric(geometry, input.progressDone, null);
+  }
+}
+
+function markOrderedStage(stages: WorkspaceProgressStage[], id: string) {
+  const index = stages.findIndex((candidate) => candidate.id === id);
+  if (index < 0) return;
+  for (let previous = 0; previous < index; previous += 1) {
+    stages[previous].status = 'complete';
+  }
+  stages[index].status = 'running';
 }
 
 function isFinalizingPhase(
@@ -877,20 +895,9 @@ function exactPercent(done: string, total: string): number | null {
 
 function summarize(stages: WorkspaceProgressStage[]): WorkspaceProgressModel {
   const completedStages = stages.filter((stageValue) => stageValue.status === 'complete').length;
-  const partial = stages.reduce((sum, stageValue) => {
-    if (stageValue.status === 'complete') return sum + 1;
-    if (
-      (stageValue.status === 'running' || stageValue.status === 'stopped') &&
-      stageValue.percent !== null
-    ) {
-      return sum + stageValue.percent / 100;
-    }
-    return sum;
-  }, 0);
   return {
     stages,
     completedStages,
-    totalStages: stages.length,
-    overallPercent: Math.min(100, (partial / Math.max(1, stages.length)) * 100)
+    totalStages: stages.length
   };
 }

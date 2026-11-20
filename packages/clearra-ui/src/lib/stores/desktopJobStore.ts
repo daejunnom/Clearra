@@ -13,8 +13,9 @@ import {
   type ClearraDesktopRequest,
   type ClearraDesktopResourceStatus
 } from '../host';
-import type { ClearraWasmSearchReport } from '../wasm';
+import type { ClearraSearchProgressTelemetry, ClearraWasmSearchReport } from '../wasm';
 import { isReleasedWorkspaceLanguage } from '../i18n/languageManifest.ts';
+import { mergeNativeSearchProgress } from '../workspace/workspaceNativeSearchProgress';
 import { DesktopJobStartGeneration } from './desktopJobStartGeneration';
 
 export type DesktopJobState = {
@@ -24,6 +25,7 @@ export type DesktopJobState = {
   progressLabel: string;
   progressDone: number;
   progressTotal: number;
+  progressTelemetry: ClearraSearchProgressTelemetry | null;
   result: ClearraDesktopAppResponse | null;
   searchReport: ClearraWasmSearchReport | null;
   validation: unknown | null;
@@ -46,6 +48,7 @@ const desktopJobInitialState: DesktopJobState = {
   progressLabel: '',
   progressDone: 0,
   progressTotal: 0,
+  progressTelemetry: null,
   result: null,
   searchReport: null,
   validation: null,
@@ -79,6 +82,7 @@ export function clearDesktopTerminalResult() {
       progressLabel: '',
       progressDone: 0,
       progressTotal: 0,
+      progressTelemetry: null,
       result: null,
       searchReport: null,
       validation: null,
@@ -105,6 +109,7 @@ export function updateDesktopRequest(nextRequest: ClearraDesktopRequest) {
       progressLabel: '',
       progressDone: 0,
       progressTotal: 0,
+      progressTelemetry: null,
       result: null,
       searchReport: null,
       diagnostics: [],
@@ -191,6 +196,7 @@ export async function startDesktopJob() {
     progressLabel: '',
     progressDone: 0,
     progressTotal: 0,
+    progressTelemetry: null,
     result: null,
     searchReport: null,
     diagnostics: [],
@@ -316,13 +322,13 @@ async function pollDesktopJob(jobId: number, epoch: number) {
   try {
     const events = await getJobEvents(jobId);
     if (epoch !== pollEpoch) return;
-    desktopJobState.update((state) =>
-      events.reduce(
-        (nextState, event) => applyDesktopJobEvent(nextState, event, jobId),
-        state
-      )
+    const current = get(desktopJobState);
+    const next = events.reduce(
+      (state, event) => applyDesktopJobEvent(state, event, jobId),
+      current
     );
-    if (events.some(isTerminalEvent)) {
+    if (next !== current) desktopJobState.set(next);
+    if (events.some((event) => event.job_id === jobId && isTerminalEvent(event))) {
       stopDesktopJobPolling();
       return;
     }
@@ -344,20 +350,35 @@ function applyDesktopJobEvent(
   event: ClearraDesktopJobEvent,
   expectedJobId: number
 ): DesktopJobState {
-  if (event.job_id !== expectedJobId) return state;
+  if (event.job_id !== expectedJobId || state.jobId !== expectedJobId) return state;
   switch (event.event) {
     case 'started':
       return state.status === 'cancelling' ? state : { ...state, status: 'running' };
-    case 'progress':
+    case 'progress': {
+      const label = event.label ?? state.progressLabel;
+      const sameLabel = label === state.progressLabel;
+      const done = event.done ?? (sameLabel ? state.progressDone : 0);
+      const total = event.total ?? (sameLabel ? state.progressTotal : 0);
+      const telemetry = mergeNativeSearchProgress(state.progressTelemetry, event.label, event.done, event.total);
+      const backendStatus = event.backend_status ?? state.backendStatus;
+      const memoryStatus = event.memory_status ?? state.memoryStatus;
+      const resourceStatus = event.resource_status ?? state.resourceStatus;
+      if (
+        sameLabel && done === state.progressDone && total === state.progressTotal
+        && telemetry === state.progressTelemetry && backendStatus === state.backendStatus
+        && memoryStatus === state.memoryStatus && resourceStatus === state.resourceStatus
+      ) return state;
       return {
         ...state,
-        progressLabel: event.label ?? state.progressLabel,
-        progressDone: event.done ?? state.progressDone,
-        progressTotal: event.total ?? state.progressTotal,
-        backendStatus: event.backend_status ?? state.backendStatus,
-        memoryStatus: event.memory_status ?? state.memoryStatus,
-        resourceStatus: event.resource_status ?? state.resourceStatus
+        progressLabel: label,
+        progressDone: done,
+        progressTotal: total,
+        progressTelemetry: telemetry,
+        backendStatus,
+        memoryStatus,
+        resourceStatus
       };
+    }
     case 'diagnostic':
       return {
         ...state,

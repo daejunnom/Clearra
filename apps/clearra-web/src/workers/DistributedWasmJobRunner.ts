@@ -325,6 +325,7 @@ export class DistributedWasmJobRunner {
     let lastHostYield = performance.now();
     let progressPhase: ClearraSearchProgressTelemetry['phase'] = 'initializing';
     let producerComplete = false;
+    let rootGeometryDrained = false;
     let finalizingProducer: ClearraDistributedCoreProgress | null = null;
     let parallelCompletionActive = false;
     let parallelCoordinatorActive = false;
@@ -378,12 +379,17 @@ export class DistributedWasmJobRunner {
           {
             execution_mode: 'distributed',
             phase: progressPhase,
-            producer_complete: producerComplete,
+            // For natural roots, producer EOF only means every root was
+            // submitted. Geometry is still running in verification workers.
+            producer_complete: producerComplete &&
+              (plan.rootTaskParallel !== true || rootGeometryDrained),
             geometry_nodes: plan.rootTaskParallel === true
               ? verifier.geometryNodes
               : producer.geometryNodes,
             candidates_emitted: producer.candidateCount,
-            geometry_family_count: producer.candidateFamilyCount,
+            // Root scheduling uses a root count in this ABI slot, not a
+            // denominator for concrete candidates emitted or verified.
+            geometry_family_count: plan.rootTaskParallel === true ? null : producer.candidateFamilyCount,
             candidates_verified: verifier.candidatesVerified,
             producer_build_nodes: producer.buildNodes,
             producer_coverage_checks: producer.coverageChecks,
@@ -561,6 +567,7 @@ export class DistributedWasmJobRunner {
         await this.pool.waitForIdle();
         this.requireActive();
       }
+      rootGeometryDrained = true;
       if (captureSchedulingProfile) {
         const now = performance.now();
         hostTiming.drain_ms = now - stageStarted;
@@ -949,12 +956,13 @@ function telemetryFlags(
       ? verifierFlags.geometryNodes
       : producerFlags.geometryNodes,
     candidates_emitted: producerFlags.candidateCount,
-    geometry_family_count: producerFlags.candidateFamilyCount,
+    geometry_family_count: !rootTaskParallel && producerFlags.candidateFamilyCount,
     candidates_verified: verifierFlags.candidatesVerified,
     producer_build_nodes: producerFlags.buildNodes,
     producer_coverage_checks: producerFlags.coverageChecks,
     build_nodes: verifierFlags.buildNodes,
-    coverage_checks: verifierFlags.coverageChecks,
+    // Natural-root workers report completed roots in this slot.
+    coverage_checks: !rootTaskParallel && verifierFlags.coverageChecks,
     ready_workers: true,
     active_workers: true,
     worker_count: true,

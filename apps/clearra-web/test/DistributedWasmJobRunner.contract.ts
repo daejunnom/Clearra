@@ -228,10 +228,20 @@ assert.deepEqual(
   const rootSearching = rootEvents.find((event) => event.event === 'progress' &&
     event.progress.telemetry?.phase === 'searching' &&
     event.progress.telemetry.active_workers === 2);
-  assert.ok(rootSearching, 'root-task telemetry reports both compute workers');
+  assert.ok(rootSearching && rootSearching.event === 'progress', 'root-task telemetry reports both compute workers');
+  assert.equal(rootSearching.progress.telemetry?.geometry_family_count, null,
+    'the known count of roots is not a concrete candidate denominator');
+  assert.equal(rootSearching.progress.telemetry?.availability.coverage_checks, false,
+    'completed roots are not candidate coverage checks');
+  const rootDraining = rootEvents.find((event) => event.event === 'progress' &&
+    event.progress.telemetry?.phase === 'draining');
+  assert.ok(rootDraining && rootDraining.event === 'progress');
+  assert.equal(rootDraining.progress.telemetry?.producer_complete, false,
+    'issuing every root does not complete the Geometry still running in those roots');
   const rootMerging = rootEvents.find((event) => event.event === 'progress' &&
     event.progress.telemetry?.phase === 'merging');
   assert.ok(rootMerging && rootMerging.event === 'progress');
+  assert.equal(rootMerging.progress.telemetry?.producer_complete, true);
   assert.equal(rootMerging.progress.telemetry?.active_workers, 0,
     'the control-only source is never counted as active compute');
 }

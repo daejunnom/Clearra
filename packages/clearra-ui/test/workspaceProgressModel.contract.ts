@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 
+import { mergeNativeSearchProgress } from '../src/lib/workspace/workspaceNativeSearchProgress.ts';
 import {
   buildWorkspaceProgressModel,
   workspaceActiveWorkerCount,
@@ -155,8 +156,55 @@ const producerDraining = buildWorkspaceProgressModel(
     })
   )
 );
-assert.equal(producerDraining.stages.find((stage) => stage.id === 'geometry')?.status, 'complete');
+assert.equal(producerDraining.stages.find((stage) => stage.id === 'geometry')?.status, 'running');
 assert.equal(producerDraining.stages.find((stage) => stage.id === 'verify')?.status, 'running');
+
+const buildNodeOnly = buildWorkspaceProgressModel(input('build', telemetry({ producer_build_nodes: 42 })));
+assert.equal(buildNodeOnly.stages.find((stage) => stage.id === 'geometry')?.status, 'running');
+assert.equal(buildNodeOnly.stages.find((stage) => stage.id === 'verify')?.status, 'running');
+assert.equal(buildNodeOnly.completedStages, 1);
+
+// The Desktop bridge delivers each counter as a separate, bounded scalar
+// event. A published snapshot must keep the earlier active stage's evidence.
+let native = mergeNativeSearchProgress(null, 'build-geometry', 1_024, 0);
+native = mergeNativeSearchProgress(native, 'build-candidates', 12, 0);
+native = mergeNativeSearchProgress(native, 'build-verification', 31, 0);
+assert.ok(native);
+assert.equal(mergeNativeSearchProgress(native, 'build-geometry', 1_024, 0), native);
+assert.equal(mergeNativeSearchProgress(native, 'build-verification', 31, 0), native);
+const nativeInput = input('build', native);
+const nativeBuild = buildWorkspaceProgressModel(nativeInput);
+assert.deepEqual(nativeBuild.stages.map((stage) => stage.status), ['complete', 'running', 'running', 'pending']);
+assert.equal(nativeBuild.stages[1].metrics.find((metric) => metric.labelKey === 'progressMetricNodes')?.value, '1024');
+assert.equal(nativeBuild.stages[1].done, '12');
+assert.equal(nativeBuild.stages[2].done, '31');
+assert.equal(nativeBuild.stages[2].total, null);
+assert.equal(workspaceActiveWorkerCount(native, 'running'), null);
+assert.deepEqual(buildWorkspaceProgressModel({ ...nativeInput, status: 'cancelled' }).stages.map((stage) => stage.status),
+  ['complete', 'stopped', 'stopped', 'pending']);
+const postprocessing = mergeNativeSearchProgress(native, 'postprocess', 0, 1);
+assert.ok(postprocessing);
+assert.equal(mergeNativeSearchProgress(postprocessing, 'build-verification', 41, 0), postprocessing);
+assert.deepEqual(buildWorkspaceProgressModel(input('build', postprocessing)).stages.map((stage) => stage.status),
+  ['complete', 'complete', 'complete', 'running']);
+
+const nextJob = mergeNativeSearchProgress(null, 'geometry', 0xffff_ffff, 0);
+assert.ok(nextJob);
+assert.equal(nextJob.availability.build_nodes, false);
+assert.equal(buildWorkspaceProgressModel(input('pc', nextJob)).stages[1].done, '≈4294967295');
+const materializedBuildUp = mergeNativeSearchProgress(null, 'buildup', 8, 16);
+assert.ok(materializedBuildUp);
+const knownVerification = buildWorkspaceProgressModel(input('pc', materializedBuildUp));
+assert.equal(knownVerification.stages[2].done, '8');
+assert.equal(knownVerification.stages[2].total, '16');
+assert.equal(knownVerification.completedStages, 1);
+const scalarInput: WorkspaceProgressInput = { ...nativeInput, telemetry: null,
+  progressLabel: 'build-geometry', progressDone: 1_024, progressTotal: 0 };
+const coarseGeometry = buildWorkspaceProgressModel(scalarInput);
+assert.deepEqual(coarseGeometry.stages.map((stage) => stage.status), ['complete', 'running', 'pending', 'pending']);
+assert.equal(coarseGeometry.stages[1].total, null);
+const coarseSetup = buildWorkspaceProgressModel({ ...scalarInput, profile: 'setup', progressLabel: 'setup-coverage' });
+assert.deepEqual(coarseSetup.stages.map((stage) => stage.status), ['complete', 'complete', 'complete', 'running', 'pending']);
 
 const tiling = buildWorkspaceProgressModel(
   input('tiling', telemetry({ candidates_emitted: 20 }))
