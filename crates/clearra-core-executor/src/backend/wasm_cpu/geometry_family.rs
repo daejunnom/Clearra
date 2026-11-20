@@ -403,7 +403,25 @@ fn node_hash(node: FamilyNode) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{GeometrySolutionFamily, FAMILY_EMPTY};
+    use super::{GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID};
+
+    #[test]
+    fn family_root_count_preserves_append_union_and_product_multiplicity() {
+        let mut family = GeometrySolutionFamily::new();
+        let a = family.append(4, FAMILY_EMPTY).unwrap();
+        let b = family.append(5, FAMILY_EMPTY).unwrap();
+        let c = family.append(6, FAMILY_EMPTY).unwrap();
+        let two = family.union(a, b).unwrap();
+        let three = family.union(two, c).unwrap();
+        let six = family.product(two, three).unwrap();
+        let root = family.append(7, six).unwrap();
+
+        assert_eq!(family.path_count(FAMILY_INVALID), Some(0));
+        assert_eq!(family.path_count(FAMILY_EMPTY), Some(1));
+        assert_eq!(family.path_count(two), Some(2));
+        assert_eq!(family.path_count(three), Some(3));
+        assert_eq!(family.path_count(root), Some(6));
+    }
 
     #[test]
     fn capped_family_refuses_outer_chunk_backing_before_allocation() {

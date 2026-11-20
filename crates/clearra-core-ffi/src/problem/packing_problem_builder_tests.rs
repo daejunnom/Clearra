@@ -232,6 +232,38 @@ fn packing_problem_builder_rejects_unsupported_board() {
 }
 
 #[test]
+fn packing_problem_builder_rejects_sparse_high_words_before_board64_projection() {
+    use crate::problem::CBuildUpProblemTemplate;
+
+    for (height, words, backend_kind) in [
+        (7, [0, 1, 0, 0], "board128"),
+        (13, [0x3f0, 0, 1, 0], "board256"),
+        (20, [0, 0, 0, 1], "board256"),
+    ] {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10_from_words(height, words).expect("sparse tall field"),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("problem");
+        assert_eq!(problem.initial_board().occupied_words(), words);
+        let expected = FfiProblemError::UnsupportedBoardBackend {
+            backend_kind,
+            cell_count: 10 * u32::from(height),
+        };
+        // The small piece window and low occupancy alone would select a
+        // 1-row Board64: the 13L case would look just like a one-I puzzle.
+        assert_eq!(
+            CPackingProblemBuilder::from_search_problem(&problem),
+            Err(expected)
+        );
+        assert_eq!(CBuildUpProblemTemplate::compile(&problem), Err(expected));
+    }
+}
+
+#[test]
 fn packing_problem_builder_projects_builtin_srs_x_as_verified_kick_profile() {
     let query = OpeningPcSearchQuery::new(PcTarget::two_lines()).with_rule(srs_x());
     let problem = ProblemCompiler::compile_opening_pc(&query).expect("problem");
@@ -286,5 +318,8 @@ fn board_descriptor_uses_active_packing_height_for_backend_selection() {
     assert_eq!(tall_visible.board.search_height, 1);
     assert_eq!(tall_visible.board.backend_kind, C_BOARD_BACKEND_BOARD64);
     assert_eq!(tall_visible.board.cell_count, 10);
+    assert_eq!(tall_visible.board.initial_mask, 0x3f0);
     assert_eq!(tall_visible.board.initial_mask_hi, 0);
+    assert_eq!(tall_visible.goal_region_mask, 0x3ff);
+    assert_eq!(tall_visible.required_fill_mask, 0x00f);
 }

@@ -1546,8 +1546,8 @@ impl FamilyCompiler {
         self.retained_bytes() as u128 <= limit
     }
 
-    fn into_enumerator(self) -> FamilyEnumerator {
-        FamilyEnumerator::new(
+    fn into_enumerator(self) -> (FamilyEnumerator, Option<u128>) {
+        FamilyEnumerator::from_completed_family(
             self.targets,
             self.family,
             self.root_family,
@@ -1825,7 +1825,7 @@ mod precomputed_geometry_tests {
                 }
             }
             let metrics = compiler.domain_metrics;
-            let mut enumerator = compiler.into_enumerator();
+            let (mut enumerator, _) = compiler.into_enumerator();
             let mut identities = BTreeSet::new();
             while let Some(candidate) = enumerator.next_candidate(&catalog).expect("enumeration") {
                 identities.insert(candidate.identity);
@@ -2205,13 +2205,16 @@ struct FamilyEnumerator {
 }
 
 impl FamilyEnumerator {
-    fn new(
+    /// The unbounded handoff queries the root once. Its value is returned to
+    /// the search for reporting/admission, including an already-observed
+    /// None (overflow/allocation failure). The bounded constructor does not
+    /// query at all, and partition weights have a later, transient lifetime.
+    fn from_completed_family(
         targets: Arc<[TargetGroup]>,
         family: GeometrySolutionFamily,
         root_family: u32,
         target_depth: u8,
-    ) -> Self {
-        #[cfg(feature = "parallel")]
+    ) -> (Self, Option<u128>) {
         let candidate_count = family.path_count(root_family);
         let mut tasks = Vec::new();
         if root_family != FAMILY_INVALID {
@@ -2222,16 +2225,19 @@ impl FamilyEnumerator {
                 continuation_count: 0,
             });
         }
-        Self {
-            targets,
-            family: Arc::new(family),
-            tasks,
-            rows: [0; MAX_BOARD64_PIECES],
-            target_depth,
-            retained_limit_bytes: None,
-            #[cfg(feature = "parallel")]
+        (
+            Self {
+                targets,
+                family: Arc::new(family),
+                tasks,
+                rows: [0; MAX_BOARD64_PIECES],
+                target_depth,
+                retained_limit_bytes: None,
+                #[cfg(feature = "parallel")]
+                candidate_count,
+            },
             candidate_count,
-        }
+        )
     }
 
     fn try_new_bounded(
@@ -2442,12 +2448,67 @@ mod family_enumerator_stack_tests {
     use super::*;
 
     fn enumerator() -> FamilyEnumerator {
-        FamilyEnumerator::new(
+        FamilyEnumerator::from_completed_family(
             Arc::from([]),
             GeometrySolutionFamily::new(),
             FAMILY_EMPTY,
             0,
         )
+        .0
+    }
+
+    #[test]
+    fn completed_family_handoff_returns_exact_root_count_with_enumerator() {
+        let mut family = GeometrySolutionFamily::new();
+        let a = family.append(4, FAMILY_EMPTY).unwrap();
+        let b = family.append(5, FAMILY_EMPTY).unwrap();
+        let root = family.union(a, b).unwrap();
+        let (enumerator, count) =
+            FamilyEnumerator::from_completed_family(Arc::from([]), family, root, 1);
+
+        assert_eq!(count, Some(2));
+        assert_eq!(enumerator.tasks[0].family, root);
+        #[cfg(feature = "parallel")]
+        assert_eq!(enumerator.candidate_count, count);
+    }
+
+    #[test]
+    fn completed_family_handoff_preserves_unavailable_count_and_fallback() {
+        let mut family = GeometrySolutionFamily::new();
+        let a = family.append(4, FAMILY_EMPTY).unwrap();
+        let b = family.append(5, FAMILY_EMPTY).unwrap();
+        let mut overflow = family.union(a, b).unwrap();
+        for _ in 0..7 {
+            overflow = family.product(overflow, overflow).unwrap();
+        }
+        assert!(family.node(overflow).is_some());
+        // Keep a small root plus an overflowing node elsewhere in the same
+        // immutable family. Even here the existing whole-table count is
+        // unavailable, not a successful count of the root alone.
+        let (enumerator, count) =
+            FamilyEnumerator::from_completed_family(Arc::from([]), family, a, 1);
+        assert_eq!(count, None);
+        assert_eq!(enumerator.tasks[0].family, a);
+        #[cfg(feature = "parallel")]
+        {
+            let fallback = enumerator
+                .into_parallel_enumerators(2)
+                .expect_err("overflowing partition weights are unavailable");
+            assert_eq!(fallback.candidate_count, None);
+            assert_eq!(fallback.tasks[0].family, a);
+        }
+    }
+
+    #[test]
+    fn bounded_family_handoff_remains_unqueried() {
+        let mut family = GeometrySolutionFamily::new();
+        let root = family.append(4, FAMILY_EMPTY).unwrap();
+        let enumerator =
+            FamilyEnumerator::try_new_bounded(Arc::from([]), family, root, 1, u128::MAX)
+                .expect("bounded admission of a one-node family");
+        assert_eq!(enumerator.tasks[0].family, root);
+        #[cfg(feature = "parallel")]
+        assert_eq!(enumerator.candidate_count, None);
     }
 
     #[test]
@@ -3724,8 +3785,9 @@ impl GeometrySearch {
                         };
                         self.enumerator = Some(enumerator);
                     } else {
-                        self.candidate_family_count = compiler.candidate_family_count();
-                        self.enumerator = Some(compiler.into_enumerator());
+                        let (enumerator, root_count) = compiler.into_enumerator();
+                        self.candidate_family_count = root_count;
+                        self.enumerator = Some(enumerator);
                     }
                     if retained_limit_bytes
                         .is_some_and(|limit| self.retained_bytes() as u128 > limit)

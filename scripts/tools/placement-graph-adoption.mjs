@@ -25,7 +25,7 @@ const FIXED_P7P4_AXES = [
 // New axes are forbidden in this existing single-axis handoff; an older
 // receipt that predates them has the neutral behavior by construction.
 const NEUTRAL_FOLLOW_ON_AXES = [
-  "minimum_domain_cutoff_mode", "minimum_domain_work_mode", "ordered_kick_guard_reuse_mode",
+  "minimum_domain_cutoff_mode", "minimum_domain_work_mode", "ordered_kick_guard_reuse_mode", "geometric_edge_reuse_mode",
 ];
 const SOLUTIONS = 456_459;
 const QUEUES = 4_233_600;

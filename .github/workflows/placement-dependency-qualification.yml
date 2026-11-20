@@ -23,7 +23,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: placement-dependency-qualification-${{ github.sha }}
+  # Host machines and the isolated adoption runner do not share state.
+  # Duplicate runs for one ref/commit are still serialized; distinct
+  # exact-SHA lanes must not queue behind the several-hour adoption job.
+  group: placement-dependency-qualification-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 env:
@@ -52,7 +55,8 @@ jobs:
           filters=(structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves
             ordered_kick_interval_requires ordered_kick_witness_guard_ candidate_kick_guard_
             reachability::reference_tests incremental_domain_ minimum_domain_cutoff_
-            exact_clear_domain_tests placement_conditions::tests
+            exact_clear_domain_tests placement_conditions::tests geometric_edge_reuse_
+            family_root_count_ family_handoff_
             capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_
             candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move
             v081_worker_component_accounting terminal_hold_projection::
@@ -162,6 +166,7 @@ jobs:
             status=1
           fi
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
+          cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint || status=1
           cargo test --locked -p clearra-app --features native-c-core --test exact_accelerator_product_execution setup_score_reuse || status=1
           exit "$status"
           SH
@@ -176,7 +181,11 @@ jobs:
       github.event.before == '0000000000000000000000000000000000000000' &&
       github.event.after == github.sha &&
       github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha)
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     timeout-minutes: 45
     env:
       CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
@@ -187,29 +196,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Compare actual Desktop bridge requests with CLI results at 7–24L
-        shell: bash
+      - name: Compare actual Desktop bridge requests with the native CLI at 7–24L
+        shell: pwsh
         run: |
-          set -eu
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          mkdir -p "$GITHUB_WORKSPACE/_local/artifacts/v081-desktop-native-smoke"
-          cargo test --locked -p clearra-cli --test desktop_full_height_products --no-default-features \
-            --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1
+          $source = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:GITHUB_SHA) { throw 'Unexpected checkout SHA' }
+          $output = Join-Path $env:GITHUB_WORKSPACE '_local/artifacts/v081-desktop-native-smoke'
+          New-Item -Path $output -ItemType Directory -Force | Out-Null
+          cargo test --locked -p clearra-cli --test desktop_full_height_products --no-default-features `
+            --features 'wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime' -- --ignored --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/setup-node@v4
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
         id: node
         with:
           node-version: 22.23.2
       - name: Prepare the locked Discord render dependencies
-        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.node.outcome == 'success' }}
         id: ctk3
         run: |
           corepack enable
           pnpm install --frozen-lockfile --ignore-scripts
           node packages/clearra-ui/scripts/prepare-test-dependencies.mjs
       - name: Read back the Desktop test build's same CLI through the Discord adapter
-        if: ${{ !cancelled() && steps.ctk3.outcome == 'success' }}
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.ctk3.outcome == 'success' }}
         run: |
           test -x "$CLEARRA_REAL_PC24_CLI"
           node --test apps/clearra-discord-bot/test/realCliFullHeightProducts.test.mjs

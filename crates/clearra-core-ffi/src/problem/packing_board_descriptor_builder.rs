@@ -12,8 +12,18 @@ use super::{CBoardDescriptor, FfiProblemError};
 pub(crate) fn board_descriptor(
     problem: &SearchProblem,
 ) -> Result<CBoardDescriptor, FfiProblemError> {
-    let width = problem.initial_board().width();
-    let packing_height = packing_board_height(problem);
+    let initial = problem.initial_board();
+    let width = initial.width();
+    // The native packing descriptor and all of its goal masks are Board64
+    // only. Do not use a low-word-only active height if the field actually
+    // contains higher cells. A tall visible frame with only low occupancy
+    // still uses the existing compact active-height calculation.
+    let extended_occupancy = initial.has_extended_occupancy();
+    let packing_height = if extended_occupancy {
+        initial.visible_height()
+    } else {
+        packing_board_height(problem)
+    };
     let size =
         BoardSize::new(width, packing_height).map_err(|_| FfiProblemError::InvalidBoardLayout {
             width,
@@ -21,7 +31,7 @@ pub(crate) fn board_descriptor(
         })?;
     let cell_count = size.area();
     let backend_kind = backend_kind_for_size(size);
-    if backend_kind != BoardBackendKind::Board64 {
+    if extended_occupancy || backend_kind != BoardBackendKind::Board64 {
         return Err(FfiProblemError::UnsupportedBoardBackend {
             backend_kind: board_backend_name(backend_kind),
             cell_count,
@@ -33,14 +43,14 @@ pub(crate) fn board_descriptor(
         visible_height: packing_height,
         search_height: packing_height,
         reserved: 0,
-        initial_mask: problem.initial_board().occupied_mask(),
+        initial_mask: initial.occupied_mask(),
         initial_mask_hi: 0,
         backend_kind: board_backend_code(backend_kind),
         cell_count,
     })
 }
 
-pub(crate) fn packing_board_height(problem: &SearchProblem) -> u16 {
+fn packing_board_height(problem: &SearchProblem) -> u16 {
     let width = usize::from(problem.initial_board().width()).max(1);
     let visible_height = usize::from(problem.visible_height()).max(1);
     let rows = active_packing_rows(
@@ -52,7 +62,7 @@ pub(crate) fn packing_board_height(problem: &SearchProblem) -> u16 {
     u16::try_from(rows).unwrap_or(problem.visible_height())
 }
 
-pub(crate) fn active_packing_rows(
+fn active_packing_rows(
     problem: &SearchProblem,
     width: usize,
     visible_height: usize,

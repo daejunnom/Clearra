@@ -1,12 +1,10 @@
+use super::{
+    packing_board_descriptor_builder::low_mask, CBoardDescriptor, FfiProblemError, C_COUNT_ALL,
+    C_COUNT_FIRST_SOLUTION, C_COUNT_UNIQUE, C_GOAL_CLEAR_TO_EMPTY, C_OBJECTIVE_ALL,
+    C_OBJECTIVE_MIN_COVER, C_OBJECTIVE_UNIQUE,
+};
 use clearra_core_domain::objective::objective_kind::ObjectiveKind;
 use clearra_pc_graph::request::{PcCompletionGoal, PcCountPolicy};
-use clearra_problem::SearchProblem;
-
-use super::{
-    packing_board_descriptor_builder::{active_packing_rows, low_mask},
-    FfiProblemError, C_COUNT_ALL, C_COUNT_FIRST_SOLUTION, C_COUNT_UNIQUE, C_GOAL_CLEAR_TO_EMPTY,
-    C_OBJECTIVE_ALL, C_OBJECTIVE_MIN_COVER, C_OBJECTIVE_UNIQUE,
-};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PackingGoalMasks {
@@ -16,22 +14,11 @@ pub(crate) struct PackingGoalMasks {
 }
 
 pub(crate) fn packing_goal_masks(
-    problem: &SearchProblem,
+    board: &CBoardDescriptor,
 ) -> Result<PackingGoalMasks, FfiProblemError> {
-    let width = usize::from(problem.initial_board().width());
-    let visible_height = usize::from(problem.visible_height());
-    let visible_cells = width.saturating_mul(visible_height);
-    if visible_cells == 0 {
-        return Err(FfiProblemError::BudgetTooLarge {
-            field: "goal_region_cells",
-            value: visible_cells,
-        });
-    }
-
-    let initial_mask = problem.initial_board().occupied_mask();
-    let rows = active_packing_rows(problem, width, visible_height, initial_mask);
-
-    let goal_cells = width.saturating_mul(rows);
+    // Use the admitted Board64 extent and occupancy; do not independently
+    // lower the original query for the required-fill mask.
+    let goal_cells = board.cell_count as usize;
     if goal_cells == 0 || goal_cells > 64 {
         return Err(FfiProblemError::BudgetTooLarge {
             field: "goal_region_cells",
@@ -39,12 +26,11 @@ pub(crate) fn packing_goal_masks(
         });
     }
 
-    let active_mask = low_mask(goal_cells);
     let goal_region_mask = low_mask(goal_cells);
     Ok(PackingGoalMasks {
         goal_region_mask,
-        required_fill_mask: goal_region_mask & !initial_mask,
-        forbidden_mask: active_mask & !goal_region_mask,
+        required_fill_mask: goal_region_mask & !board.initial_mask,
+        forbidden_mask: 0,
     })
 }
 

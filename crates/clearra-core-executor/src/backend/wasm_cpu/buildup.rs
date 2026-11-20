@@ -72,6 +72,117 @@ const SYMBOLIC_CACHE_LIVE_LIMIT: usize = 256 * 1024 * 1024;
 const LEGAL_BOARD_PENDING_NODE: u32 = u32::MAX - 1;
 const LEGAL_BOARD_REJECTED_NODE: u32 = u32::MAX;
 
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GeometricEdgeReuseMetrics {
+    /// Fresh grounding/collision and geometry checks when reuse is enabled.
+    pub footprint_validations: u64,
+    /// Subsequent equal masks for which no geometry check was performed.
+    pub reused_validations: u64,
+    pub line_clear_computations: u64,
+    pub projection_validations: u64,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+mod geometric_edge_reuse {
+    use super::GeometricEdgeReuseMetrics;
+
+    #[cfg(feature = "local-search-ab")]
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[cfg(test)]
+    thread_local! {
+        static MODE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+        static METRICS: std::cell::Cell<GeometricEdgeReuseMetrics> =
+            std::cell::Cell::new(GeometricEdgeReuseMetrics::default());
+    }
+
+    #[cfg(feature = "local-search-ab")]
+    static VALIDATIONS: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "local-search-ab")]
+    static REUSED: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "local-search-ab")]
+    static LINE_CLEARS: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "local-search-ab")]
+    static PROJECTIONS: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn enabled() -> bool {
+        #[cfg(test)]
+        if let Some(enabled) = MODE.with(std::cell::Cell::get) {
+            return enabled;
+        }
+        #[cfg(feature = "local-search-ab")]
+        {
+            static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *MODE.get_or_init(|| {
+                std::env::var("CLEARRA_GEOMETRIC_EDGE_REUSE").is_ok_and(|value| value == "1")
+            })
+        }
+        #[cfg(not(feature = "local-search-ab"))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn record(delta: GeometricEdgeReuseMetrics) {
+        if delta.footprint_validations == 0 {
+            return;
+        }
+        #[cfg(test)]
+        METRICS.with(|slot| {
+            let mut value = slot.get();
+            value.footprint_validations += delta.footprint_validations;
+            value.reused_validations += delta.reused_validations;
+            value.line_clear_computations += delta.line_clear_computations;
+            value.projection_validations += delta.projection_validations;
+            slot.set(value);
+        });
+        #[cfg(feature = "local-search-ab")]
+        {
+            VALIDATIONS.fetch_add(delta.footprint_validations, Ordering::Relaxed);
+            REUSED.fetch_add(delta.reused_validations, Ordering::Relaxed);
+            LINE_CLEARS.fetch_add(delta.line_clear_computations, Ordering::Relaxed);
+            PROJECTIONS.fetch_add(delta.projection_validations, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "local-search-ab")]
+    pub(super) fn totals() -> GeometricEdgeReuseMetrics {
+        GeometricEdgeReuseMetrics {
+            footprint_validations: VALIDATIONS.load(Ordering::Relaxed),
+            reused_validations: REUSED.load(Ordering::Relaxed),
+            line_clear_computations: LINE_CLEARS.load(Ordering::Relaxed),
+            projection_validations: PROJECTIONS.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_mode<T>(
+        enabled: bool,
+        action: impl FnOnce() -> T,
+    ) -> (T, GeometricEdgeReuseMetrics) {
+        struct Restore(Option<bool>, GeometricEdgeReuseMetrics);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                MODE.with(|slot| slot.set(self.0));
+                METRICS.with(|slot| slot.set(self.1));
+            }
+        }
+        let _restore = Restore(
+            MODE.with(|slot| slot.replace(Some(enabled))),
+            METRICS.with(|slot| slot.replace(GeometricEdgeReuseMetrics::default())),
+        );
+        let output = action();
+        (output, METRICS.with(std::cell::Cell::get))
+    }
+}
+
+/// Process-local totals for one opt-in, joined benchmark run.
+#[cfg(feature = "local-search-ab")]
+pub fn geometric_edge_reuse_experiment_totals() -> GeometricEdgeReuseMetrics {
+    geometric_edge_reuse::totals()
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct BuildEdge {
     pub to: u32,
@@ -3931,6 +4042,10 @@ impl BuildOrderGraph {
         let mut kick_guards = CandidateKickGuardLedger::default();
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut kick_guard_metrics = super::structural_order::KickGuardReuseMetrics::default();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let reuse_geometric_edges = geometric_edge_reuse::enabled();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let mut geometric_reuse_metrics = GeometricEdgeReuseMetrics::default();
         let mut subset_cursor = 0usize;
         #[allow(unused_labels)]
         'build_subsets: while subset_cursor < subset_queue.len() {
@@ -3986,9 +4101,38 @@ impl BuildOrderGraph {
                     || workspace.graph_reachable_generations[child] == graph_generation;
                 let row_id = candidate.row_ids()[operation_index];
                 let row = catalog.skeleton(row_id);
-                if reachability_mode == BuildReachabilityMode::GeometryOnly {
-                    for realization in catalog.instantiations(row_id, deleted_rows) {
-                        if let Some(edge) = geometric_build_edge(
+                // This memo owns only this candidate, subset, operation and
+                // original deleted-row frame. It never stores an edge pose or
+                // substitutes one realization for another.
+                #[cfg(any(test, feature = "local-search-ab"))]
+                let mut prepared_footprint = None;
+                #[allow(unused_mut)]
+                let mut prepare_edge =
+                    |projection: &mut CandidateProjection,
+                     realization: super::catalog::InstantiatedRealization,
+                     needs_grounding: bool| {
+                        #[cfg(any(test, feature = "local-search-ab"))]
+                        if reuse_geometric_edges {
+                            return geometric_build_edge_with_reuse(
+                                catalog,
+                                projection,
+                                child,
+                                operation_index,
+                                row.piece,
+                                board,
+                                deleted_rows,
+                                realization,
+                                needs_grounding,
+                                &mut prepared_footprint,
+                                &mut geometric_reuse_metrics,
+                            );
+                        }
+                        if needs_grounding
+                            && !placement_is_grounded(catalog.width(), board, realization.lock_mask)
+                        {
+                            return None;
+                        }
+                        geometric_build_edge(
                             catalog,
                             projection,
                             child,
@@ -3997,7 +4141,11 @@ impl BuildOrderGraph {
                             board,
                             deleted_rows,
                             realization,
-                        ) {
+                        )
+                    };
+                if reachability_mode == BuildReachabilityMode::GeometryOnly {
+                    for realization in catalog.instantiations(row_id, deleted_rows) {
+                        if let Some(edge) = prepare_edge(projection, realization, false) {
                             if !legal_admission_checked {
                                 if !workspace.legal_board_child_allows(
                                     catalog,
@@ -4025,19 +4173,7 @@ impl BuildOrderGraph {
                         // cell directly below it. This is the same necessary
                         // physical predicate used by exact reachability; it
                         // does not apply to GeometryOnly/finesse candidates.
-                        if !placement_is_grounded(catalog.width(), board, realization.lock_mask) {
-                            continue;
-                        }
-                        let Some(edge) = geometric_build_edge(
-                            catalog,
-                            projection,
-                            child,
-                            operation_index,
-                            row.piece,
-                            board,
-                            deleted_rows,
-                            realization,
-                        ) else {
+                        let Some(edge) = prepare_edge(projection, realization, true) else {
                             continue;
                         };
                         if !legal_admission_checked {
@@ -4218,19 +4354,7 @@ impl BuildOrderGraph {
                     }
                 } else {
                     for realization in catalog.instantiations(row_id, deleted_rows) {
-                        if !placement_is_grounded(catalog.width(), board, realization.lock_mask) {
-                            continue;
-                        }
-                        let Some(edge) = geometric_build_edge(
-                            catalog,
-                            projection,
-                            child,
-                            operation_index,
-                            row.piece,
-                            board,
-                            deleted_rows,
-                            realization,
-                        ) else {
+                        let Some(edge) = prepare_edge(projection, realization, true) else {
                             continue;
                         };
                         if !legal_admission_checked {
@@ -4336,6 +4460,8 @@ impl BuildOrderGraph {
         super::structural_order::record_ordered_kick_interval(ordered_kick_metrics);
         #[cfg(any(test, feature = "local-search-ab"))]
         super::structural_order::record_conditional_order(conditional_metrics);
+        #[cfg(any(test, feature = "local-search-ab"))]
+        geometric_edge_reuse::record(geometric_reuse_metrics);
         #[cfg(any(test, feature = "local-search-ab"))]
         {
             if kick_guards.conflicted {
@@ -5144,14 +5270,119 @@ fn geometric_build_edge(
     if board & lock_mask != 0 {
         return None;
     }
+    let (cleared_lines, _) =
+        projected_line_clear(catalog, projection, child, board | lock_mask, deleted_rows);
+    Some(instantiated_geometric_edge(
+        child,
+        operation_index,
+        piece,
+        realization,
+        cleared_lines?,
+    ))
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy)]
+struct PreparedGeometricFootprint {
+    lock_mask: u64,
+    needs_grounding: bool,
+    // None is the same failed geometry check as for the uncached pose.
+    cleared_lines: Option<u8>,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[allow(clippy::too_many_arguments)]
+fn geometric_build_edge_with_reuse(
+    catalog: &GeometryCatalog,
+    projection: &mut CandidateProjection,
+    child: usize,
+    operation_index: usize,
+    piece: PieceKind,
+    board: u64,
+    deleted_rows: u16,
+    realization: super::catalog::InstantiatedRealization,
+    needs_grounding: bool,
+    prepared: &mut Option<PreparedGeometricFootprint>,
+    metrics: &mut GeometricEdgeReuseMetrics,
+) -> Option<BuildEdge> {
+    let lock_mask = realization.lock_mask;
+    let cleared_lines = match prepared {
+        Some(previous)
+            if previous.lock_mask == lock_mask && previous.needs_grounding == needs_grounding =>
+        {
+            metrics.reused_validations += 1;
+            previous.cleared_lines
+        }
+        _ => {
+            metrics.footprint_validations += 1;
+            let cleared_lines = if (!needs_grounding
+                || placement_is_grounded(catalog.width(), board, lock_mask))
+                && board & lock_mask == 0
+            {
+                metrics.line_clear_computations += 1;
+                let (lines, projection_checked) = projected_line_clear(
+                    catalog,
+                    projection,
+                    child,
+                    board | lock_mask,
+                    deleted_rows,
+                );
+                metrics.projection_validations += u64::from(projection_checked);
+                lines
+            } else {
+                None
+            };
+            // A different footprint, even for the same row, is not a hit.
+            // Validate it exactly without replacing the one common fact.
+            if prepared.is_none() {
+                *prepared = Some(PreparedGeometricFootprint {
+                    lock_mask,
+                    needs_grounding,
+                    cleared_lines,
+                });
+            }
+            cleared_lines
+        }
+    }?;
+    Some(instantiated_geometric_edge(
+        child,
+        operation_index,
+        piece,
+        realization,
+        cleared_lines,
+    ))
+}
+
+fn projected_line_clear(
+    catalog: &GeometryCatalog,
+    projection: &mut CandidateProjection,
+    child: usize,
+    placed_board: u64,
+    deleted_rows: u16,
+) -> (Option<u8>, bool) {
     let (next_board, cleared_current, cleared_lines) =
-        place_and_clear(catalog.width(), catalog.height(), board | lock_mask);
-    let next_deleted_rows = merge_deleted_rows(catalog.height(), deleted_rows, cleared_current)?;
+        place_and_clear(catalog.width(), catalog.height(), placed_board);
+    let Some(next_deleted_rows) =
+        merge_deleted_rows(catalog.height(), deleted_rows, cleared_current)
+    else {
+        return (None, false);
+    };
     let (expected_board, expected_deleted_rows) = projection.state(child);
-    if next_deleted_rows != expected_deleted_rows || next_board != expected_board {
-        return None;
-    }
-    Some(BuildEdge {
+    (
+        (next_deleted_rows == expected_deleted_rows && next_board == expected_board)
+            .then_some(cleared_lines),
+        true,
+    )
+}
+
+fn instantiated_geometric_edge(
+    child: usize,
+    operation_index: usize,
+    piece: PieceKind,
+    realization: super::catalog::InstantiatedRealization,
+    cleared_lines: u8,
+) -> BuildEdge {
+    BuildEdge {
         to: child as u32,
         operation_index: operation_index as u8,
         piece,
@@ -5159,7 +5390,7 @@ fn geometric_build_edge(
         x: realization.x,
         y: realization.lock_y,
         cleared_lines,
-    })
+    }
 }
 
 // Path reconstruction consumes the same explicit supply-policy dimensions as search.
@@ -5873,6 +6104,243 @@ mod v081_legal_child_admission_tests {
             && (1..=height).all(|distance| {
                 board & (placement << (u32::from(distance) * u32::from(width))) == 0
             })
+    }
+
+    #[test]
+    fn geometric_edge_reuse_matches_exhaustive_2l_and_4l_scalar_row_facts() {
+        for height in [2_u8, 4] {
+            let (catalog, candidate) = o_fixture(4, height);
+            let operation_cells: Vec<_> = candidate
+                .row_ids()
+                .iter()
+                .map(|&id| catalog.skeleton(id).cells)
+                .collect();
+            let occupied = |subset: usize| {
+                operation_cells
+                    .iter()
+                    .enumerate()
+                    .fold(0_u64, |board, (i, &cells)| {
+                        if subset & (1 << i) != 0 {
+                            board | cells
+                        } else {
+                            board
+                        }
+                    })
+            };
+            let complete = |board: u64| {
+                (0..height).fold(0_u16, |deleted, row| {
+                    deleted | (u16::from((board >> (row * 4)) & 15 == 15) << row)
+                })
+            };
+            let compact = |board: u64, removed: u16| {
+                let mut compacted = 0;
+                let mut destination = 0;
+                for row in 0..height {
+                    if removed & (1 << row) == 0 {
+                        compacted |= ((board >> (row * 4)) & 15) << destination;
+                        destination += 4;
+                    }
+                }
+                compacted
+            };
+            let mut workspace = BuildUpWorkspace::default();
+            let mut projection = CandidateProjection::compile(
+                &catalog,
+                &candidate,
+                &mut workspace,
+                BuildCompletion::ClearToEmpty,
+            )
+            .unwrap();
+            let mut total_reused = 0;
+            let mut checked_two_line_clears = 0;
+            let mut rejected_floating = 0;
+            for subset in 0..(1 << operation_cells.len()) {
+                let deleted_rows = complete(occupied(subset));
+                let board = compact(occupied(subset), deleted_rows);
+                assert_eq!(projection.state(subset), (board, deleted_rows));
+                for (operation, &row_id) in candidate.row_ids().iter().enumerate() {
+                    let op_bit = 1 << operation;
+                    if subset & op_bit != 0 {
+                        continue;
+                    }
+                    let child = subset | op_bit;
+                    let child_deleted = complete(occupied(child));
+                    assert_eq!(
+                        projection.state(child),
+                        (compact(occupied(child), child_deleted), child_deleted),
+                    );
+                    let differing = (child_deleted & !deleted_rows).count_ones() as u8;
+                    let physical = compact(operation_cells[operation], deleted_rows);
+                    let grounded = primitive_grounded(4, board, physical);
+                    for needs_grounding in [false, true] {
+                        let mut prepared = None;
+                        let mut metrics = GeometricEdgeReuseMetrics::default();
+                        let mut poses = 0;
+                        for realization in catalog.instantiations(row_id, deleted_rows) {
+                            assert_eq!(realization.lock_mask, physical);
+                            let edge = geometric_build_edge_with_reuse(
+                                &catalog,
+                                &mut projection,
+                                child,
+                                operation,
+                                PieceKind::O,
+                                board,
+                                deleted_rows,
+                                realization,
+                                needs_grounding,
+                                &mut prepared,
+                                &mut metrics,
+                            );
+                            let expected = if needs_grounding && !grounded {
+                                None
+                            } else {
+                                Some(differing)
+                            };
+                            assert_eq!(edge.as_ref().map(|edge| edge.cleared_lines), expected);
+                            if let Some(edge) = edge {
+                                assert_eq!(edge.rotation, realization.rotation);
+                                assert_eq!((edge.x, edge.y), (realization.x, realization.lock_y));
+                            }
+                            poses += 1;
+                        }
+                        if poses != 0 {
+                            assert_eq!(metrics.footprint_validations, 1);
+                            assert_eq!(metrics.reused_validations, poses - 1);
+                            let checked = u64::from(!needs_grounding || grounded);
+                            assert_eq!(metrics.line_clear_computations, checked);
+                            assert_eq!(metrics.projection_validations, checked);
+                            total_reused += metrics.reused_validations;
+                            checked_two_line_clears += u64::from(differing == 2) * checked;
+                            rejected_floating += u64::from(needs_grounding && !grounded);
+                        }
+                    }
+                }
+            }
+            assert!(
+                total_reused > 0,
+                "{height}L must visit several poses per footprint"
+            );
+            assert!(
+                checked_two_line_clears > 0,
+                "{height}L must clear two rows atomically"
+            );
+            if height == 4 {
+                assert!(rejected_floating > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_edge_reuse_preserves_all_pose_edges_and_rejects_mask_mismatch() {
+        let profile = KickTableProfileId::Srs90;
+        let problem = problem_for(profile);
+        for height in [2, 4] {
+            let (catalog, candidate) = o_fixture(4, height);
+            for (mode, unique) in [
+                (BuildReachabilityMode::Existing, true),
+                (BuildReachabilityMode::Existing, false),
+                (BuildReachabilityMode::GeometryOnly, false),
+            ] {
+                let run = |enabled| {
+                    geometric_edge_reuse::with_mode(enabled, || {
+                        let mut workspace = BuildUpWorkspace::default();
+                        workspace
+                            .reachability
+                            .configure_kick_profile(profile, false);
+                        let mut projection = CandidateProjection::compile(
+                            &catalog,
+                            &candidate,
+                            &mut workspace,
+                            BuildCompletion::ClearToEmpty,
+                        )
+                        .unwrap();
+                        let graph = BuildOrderGraph::build_with_legal_board_admission(
+                            &problem,
+                            &catalog,
+                            &candidate,
+                            &mut projection,
+                            &mut workspace,
+                            unique,
+                            BuildCompletion::ClearToEmpty,
+                            None,
+                            mode,
+                            false,
+                            &CandidateMovementProofs::default(),
+                        )
+                        .unwrap();
+                        assert!(graph.is_live());
+                        let nodes: Vec<_> = graph
+                            .nodes
+                            .iter()
+                            .map(|node| {
+                                (
+                                    node.depth,
+                                    node.live,
+                                    node.accepting,
+                                    node.edge_count,
+                                    node.piece_edge_count,
+                                )
+                            })
+                            .collect();
+                        (
+                            nodes,
+                            graph.edges,
+                            graph.piece_edges,
+                            graph.reachability_states,
+                        )
+                    })
+                };
+                let (baseline, off) = run(false);
+                let (actual, on) = run(true);
+                assert_eq!(actual, baseline, "height={height} {mode:?} unique={unique}");
+                assert_eq!(off, GeometricEdgeReuseMetrics::default());
+                assert!(on.footprint_validations > 0);
+                if !unique {
+                    assert!(on.reused_validations > 0);
+                }
+            }
+            let mut workspace = BuildUpWorkspace::default();
+            let mut projection = CandidateProjection::compile(
+                &catalog,
+                &candidate,
+                &mut workspace,
+                BuildCompletion::ClearToEmpty,
+            )
+            .unwrap();
+            let realization = catalog
+                .instantiations(candidate.row_ids()[0], 0)
+                .next()
+                .unwrap();
+            let unrelated = catalog
+                .instantiations(candidate.row_ids()[1], 0)
+                .next()
+                .unwrap();
+            let mut facts = None;
+            let mut metrics = GeometricEdgeReuseMetrics::default();
+            let mut prepare = |pose| {
+                geometric_build_edge_with_reuse(
+                    &catalog,
+                    &mut projection,
+                    1,
+                    0,
+                    PieceKind::O,
+                    0,
+                    0,
+                    pose,
+                    false,
+                    &mut facts,
+                    &mut metrics,
+                )
+            };
+            assert!(prepare(realization).is_some());
+            assert!(
+                prepare(unrelated).is_none(),
+                "another footprint cannot validate this child"
+            );
+            assert!(prepare(realization).is_some());
+            assert_eq!(metrics.footprint_validations, 2);
+            assert_eq!(metrics.reused_validations, 1);
+        }
     }
 
     #[test]

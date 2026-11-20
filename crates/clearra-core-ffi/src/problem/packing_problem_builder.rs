@@ -73,7 +73,7 @@ impl CPackingProblemBuilder {
             None => 0,
         };
         let board = board_descriptor(problem)?;
-        let goal_masks = packing_goal_masks(problem)?;
+        let goal_masks = packing_goal_masks(&board)?;
         let pattern = materialized_pattern(problem, 0)?;
         let piece_multiset_window = piece_multiset
             .map(|key| piece_multiset_window(problem, key))

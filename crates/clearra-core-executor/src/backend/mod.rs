@@ -38,6 +38,8 @@ pub(crate) use wasm_cpu::exact_spawn_lock_anchors;
 #[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{count_distinct_no_hold_one_bag_poset, DistinctNoHoldOneBagCount};
 #[cfg(feature = "local-search-ab")]
+pub use wasm_cpu::{geometric_edge_reuse_experiment_totals, GeometricEdgeReuseMetrics};
+#[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{geometry_domain_experiment_totals, GeometryDomainExperimentTotals};
 #[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{structural_order_experiment_totals, StructuralOrderMetrics};

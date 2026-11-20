@@ -208,6 +208,7 @@ mod run {
         let first_kick_interval_mode = experiment_mode("CLEARRA_FIRST_KICK_INTERVAL")?;
         let ordered_kick_interval_mode = experiment_mode("CLEARRA_ORDERED_KICK_INTERVAL")?;
         let ordered_kick_guard_reuse_mode = experiment_mode("CLEARRA_ORDERED_KICK_GUARD_REUSE")?;
+        let geometric_edge_reuse_mode = experiment_mode("CLEARRA_GEOMETRIC_EDGE_REUSE")?;
         let ilc_lazy_frame_mode = experiment_mode("CLEARRA_ILC_LAZY_FRAME")?;
         let no_entry_components_mode = experiment_mode("CLEARRA_NO_ENTRY_COMPONENTS")?;
         let same_tile_parent_reuse_mode = experiment_mode("CLEARRA_SAME_TILE_PARENT_REUSE")?;
@@ -311,6 +312,8 @@ mod run {
         let structural_totals =
             clearra_core_executor::backend::structural_order_experiment_totals();
         let geometry_domains = clearra_core_executor::backend::geometry_domain_experiment_totals();
+        let geometric_edges =
+            clearra_core_executor::backend::geometric_edge_reuse_experiment_totals();
         let evidence_started = Instant::now();
         let errors = validate(
             &result,
@@ -373,6 +376,10 @@ mod run {
             "structural_mode": structural_mode,
             "static_influence_mode": static_influence_mode,
             "translation_interval_mode": translation_interval_mode,
+            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},ordered_kick={ordered_kick_interval_mode},ordered_kick_guard_reuse={ordered_kick_guard_reuse_mode},geometric_edge_reuse={geometric_edge_reuse_mode},ilc_lazy_frame={ilc_lazy_frame_mode},no_entry_components={no_entry_components_mode},same_tile_parent_reuse={same_tile_parent_reuse_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode},minimum_domain_cutoff={minimum_domain_cutoff_mode},minimum_domain_work={minimum_domain_work_mode}",
+                variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode)),
+        });
+        let follow_on_axes = json!({
             "movement_clear_certificates_mode": movement_clear_certificates_mode,
             "incremental_domain_mode": incremental_domain_mode,
             "minimum_domain_cutoff_mode": minimum_domain_cutoff_mode,
@@ -380,13 +387,12 @@ mod run {
             "first_kick_interval_mode": first_kick_interval_mode,
             "ordered_kick_interval_mode": ordered_kick_interval_mode,
             "ordered_kick_guard_reuse_mode": ordered_kick_guard_reuse_mode,
+            "geometric_edge_reuse_mode": geometric_edge_reuse_mode,
             "ilc_lazy_frame_mode": ilc_lazy_frame_mode,
             "no_entry_components_mode": no_entry_components_mode,
             "same_tile_parent_reuse_mode": same_tile_parent_reuse_mode,
             "conditional_order_mode": conditional_order_mode,
             "terminal_identity_move_mode": terminal_identity_move_mode,
-            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},ordered_kick={ordered_kick_interval_mode},ordered_kick_guard_reuse={ordered_kick_guard_reuse_mode},ilc_lazy_frame={ilc_lazy_frame_mode},no_entry_components={no_entry_components_mode},same_tile_parent_reuse={same_tile_parent_reuse_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode},minimum_domain_cutoff={minimum_domain_cutoff_mode},minimum_domain_work={minimum_domain_work_mode}",
-                variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode)),
         });
         let structural_metrics = json!({
             "static_influence": {
@@ -443,13 +449,20 @@ mod run {
                 "reused_pose_proofs": structural_totals.conditional_order.reused_pose_proofs
             },
         });
-        let ordered_guard_metrics = json!({
+        let edge_validation_metrics = json!({
             "ordered_kick_guard_reuse": {
                 "constructed": structural_totals.ordered_kick_guard_reuse.constructed,
                 "stored": structural_totals.ordered_kick_guard_reuse.stored,
                 "reused_selected": structural_totals.ordered_kick_guard_reuse.reused_selected,
                 "conflicts": structural_totals.ordered_kick_guard_reuse.conflicts,
                 "exact_retries": structural_totals.ordered_kick_guard_reuse.exact_retries
+            },
+            "geometric_edges": {
+                "scope": "completed compact BuildOrderGraph passes; pose feasibility is not reused",
+                "footprint_validations": geometric_edges.footprint_validations,
+                "reused_validations": geometric_edges.reused_validations,
+                "line_clear_computations": geometric_edges.line_clear_computations,
+                "projection_validations": geometric_edges.projection_validations,
             },
         });
         let domains = json!({
@@ -529,8 +542,9 @@ mod run {
         });
         let output = join_report_sections([
             metadata,
+            follow_on_axes,
             structural_metrics,
-            ordered_guard_metrics,
+            edge_validation_metrics,
             domains,
             memory_lifetimes,
             evidence,
@@ -1208,13 +1222,14 @@ mod run {
             let first_kick = extra_mode("first_kick_interval_mode")?;
             let ordered_kick = extra_mode("ordered_kick_interval_mode")?;
             let ordered_kick_guard_reuse = extra_mode("ordered_kick_guard_reuse_mode")?;
+            let geometric_edge_reuse = extra_mode("geometric_edge_reuse_mode")?;
             let ilc_lazy_frame = extra_mode("ilc_lazy_frame_mode")?;
             let no_entry_components = extra_mode("no_entry_components_mode")?;
             let same_tile_parent_reuse = extra_mode("same_tile_parent_reuse_mode")?;
             let conditional = extra_mode("conditional_order_mode")?;
             let terminal_move = extra_mode("terminal_identity_move_mode")?;
             let all_axes = format!(
-                "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ordered_kick_guard_reuse={ordered_kick_guard_reuse},ilc_lazy_frame={ilc_lazy_frame},no_entry_components={no_entry_components},same_tile_parent_reuse={same_tile_parent_reuse},conditional_order={conditional},terminal_identity_move={terminal_move},minimum_domain_cutoff={minimum_domain_cutoff},minimum_domain_work={minimum_domain_work}"
+                "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ordered_kick_guard_reuse={ordered_kick_guard_reuse},geometric_edge_reuse={geometric_edge_reuse},ilc_lazy_frame={ilc_lazy_frame},no_entry_components={no_entry_components},same_tile_parent_reuse={same_tile_parent_reuse},conditional_order={conditional},terminal_identity_move={terminal_move},minimum_domain_cutoff={minimum_domain_cutoff},minimum_domain_work={minimum_domain_work}"
             );
             if eight_i {
                 let work = report
@@ -1231,6 +1246,7 @@ mod run {
                 && first_kick == "0"
                 && ordered_kick == "0"
                 && ordered_kick_guard_reuse == "0"
+                && geometric_edge_reuse == "0"
                 && ilc_lazy_frame == "0"
                 && no_entry_components == "0"
                 && same_tile_parent_reuse == "0"

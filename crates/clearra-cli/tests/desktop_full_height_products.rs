@@ -5,6 +5,7 @@
 
 use std::{
     path::PathBuf,
+    process::Command,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -13,7 +14,7 @@ use clearra_app::{
     register_native_build_probability_host, NativeBuildProbabilityHostRegistration,
     SystemNativeBuildProbabilityAdmissionProvider,
 };
-use clearra_cli::{activate_native_accelerators_for_request, exit::ExitCode, run_with_args};
+use clearra_cli::activate_native_accelerators_for_request;
 use clearra_gui_host::DesktopTauriCommandBridge;
 use serde_json::{json, Value};
 
@@ -137,13 +138,18 @@ fn runtime(value: &Value, source: &str) {
 }
 
 fn cli(args: &[String], source: &str, kind: &str) -> Value {
-    let native = ["clearra", "--format", "json", "--include-solution-data"]
-        .into_iter()
-        .map(str::to_owned)
-        .chain(args.iter().skip(1).cloned());
-    let output = run_with_args(native);
-    assert_eq!(output.exit_code(), ExitCode::Success, "{}", output.stderr());
-    let value: Value = serde_json::from_str(output.stdout()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_clearra"))
+        .args(["--format", "json", "--include-solution-data"])
+        .args(args.iter().skip(1))
+        .output()
+        .expect("launch the current-source native CLI executable");
+    assert!(
+        output.status.success(),
+        "{}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     runtime(&value, source);
     assert_eq!(value["kind"], kind);
     value

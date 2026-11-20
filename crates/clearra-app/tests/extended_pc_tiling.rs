@@ -463,6 +463,133 @@ fn full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family() {
 }
 
 #[test]
+fn full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint() {
+    use clearra_app::{AppRenderModel, ContinueAppCommand, PcPathIngressOrigin};
+    use clearra_pc_graph::request::{PcContinuationToken, PcContinuationTokenCodec};
+
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let (base, initial, pieces) = forced_request(24, srs_plus());
+    let AppCommand::Scenario(source) = base.command() else {
+        panic!("scenario fixture");
+    };
+    // The geometry has room only for vertical Is. Store the first O to
+    // force the first successful lock to consume the I from the hold slot.
+    let mut queue = vec![PieceKind::I; pieces];
+    queue[0] = PieceKind::O;
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10_from_words(24, initial.words()).unwrap(),
+        PcQueueInput::fixed_sequence(FixedSequence::new(queue.clone())),
+        PieceWindow::new(pieces),
+    )
+    .with_rule(srs_plus())
+    .with_exact_pieces(Some(pieces))
+    .with_hold_piece(Some(PieceKind::I))
+    .with_allow_hold(true)
+    .with_count_policy(PcCountPolicy::CountAll)
+    .with_retained_trace_limit(1)
+    .with_execution_policy(source.query().execution_policy().clone());
+    let request = AppRequest::new(AppCommand::Scenario(
+        ScenarioAppCommand::new(query).with_result_projection(PcResultProjection::PathFamilyV2(
+            PcPathIngressOrigin::CanonicalPcPath,
+        )),
+    ))
+    .with_product_capability_contract(ProductCapabilityContract::PcPath)
+    .unwrap();
+    let path = context.run(request);
+    assert_eq!(path.status(), AppStatus::Success, "{path:?}");
+    let report = path
+        .product_capability_result()
+        .unwrap()
+        .pc_path_family_v2()
+        .unwrap();
+    assert!(report.completeness().complete());
+    let witness = report.canonical_witness().expect("exact reference path");
+    let checkpoint = &witness.steps()[0];
+    assert_eq!(checkpoint.board_before_mask().words(), initial.words());
+    assert_eq!(checkpoint.cleared_lines(), 4);
+    assert_eq!(checkpoint.active_piece(), PieceKind::I);
+    assert_eq!(checkpoint.input_hold_piece(), Some(PieceKind::I));
+    assert_eq!(checkpoint.output_hold_piece(), Some(PieceKind::O));
+    assert_eq!(checkpoint.output_cursor(), 1);
+
+    let after = checkpoint.board_after_line_clear_mask().words();
+    assert_ne!(after[3], 0, "checkpoint still needs the fourth word");
+    let remaining_pieces = witness.steps().len() - 1;
+    let suffix = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10_from_words(20, after).unwrap(),
+        PcQueueInput::fixed_sequence(FixedSequence::new(
+            queue[checkpoint.output_cursor()..].to_vec(),
+        )),
+        PieceWindow::new(remaining_pieces),
+    )
+    .with_rule(srs_plus())
+    .with_exact_pieces(Some(remaining_pieces))
+    .with_hold_piece(checkpoint.output_hold_piece())
+    .with_allow_hold(true)
+    .with_count_policy(PcCountPolicy::CountAll)
+    .with_retained_trace_limit(1)
+    .with_execution_policy(source.query().execution_policy().clone());
+    let token = PcContinuationTokenCodec::encode_scenario_continuation(&suffix).unwrap();
+    assert!(token.starts_with("sc3:"));
+    let PcContinuationToken::Scenario(decoded) = PcContinuationTokenCodec::parse(&token).unwrap()
+    else {
+        panic!("checkpoint must stay distinct from an input replay");
+    };
+    assert_eq!(decoded.initial_board().occupied_words(), after);
+    assert_eq!(decoded.hold_state().piece(), Some(PieceKind::O));
+    assert_eq!(decoded.remaining_queue(), suffix.remaining_queue());
+
+    let direct = context.run(AppRequest::new(AppCommand::Scenario(
+        ScenarioAppCommand::new(suffix),
+    )));
+    assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
+    let expected = direct.render_model().unwrap().core_result().unwrap();
+    assert_eq!(expected.normalized_solution_keys().len(), 1);
+    assert_eq!(expected.field("coverage_probability"), Some("1"));
+    let identity =
+        ExtendedTilingSolutionKey::parse_canonical(&expected.normalized_solution_keys()[0])
+            .unwrap();
+    assert_eq!(identity.initial_board().words(), after);
+    assert_eq!(identity.height(), 20);
+    let request = AppRequest::new(AppCommand::Continue(ContinueAppCommand::new(Some(token))));
+    let continued = context.run(request.clone());
+    assert_eq!(continued.status(), AppStatus::Success, "{continued:?}");
+    let Some(AppRenderModel::Continue(message)) = continued.render_model() else {
+        panic!("expected checkpoint result");
+    };
+    let field = |key: &str| {
+        message
+            .fields()
+            .iter()
+            .find(|field| field.key() == key)
+            .unwrap()
+            .value()
+            .as_text()
+    };
+    assert_eq!(field("continuation_kind"), "scenario");
+    assert_eq!(field("actual_backend"), "wasm-cpu-pc-extended");
+    for key in [
+        "normalized_solution_set_hash",
+        "unique_solution_count",
+        "coverage_pattern_count",
+        "covered_pattern_count",
+        "coverage_probability",
+        "build_variant_count",
+        "count_complete",
+    ] {
+        assert_eq!(field(key), expected.field(key).unwrap(), "{key}");
+    }
+    #[cfg(feature = "native-c-core")]
+    {
+        let native = AppContext::default().run(request);
+        assert_ne!(native.status(), AppStatus::Success, "{native:?}");
+        assert!(native.render_model().is_none());
+    }
+}
+
+#[test]
 fn full_height_replay_direct_cooperative_and_lazy_pages_preserve_all_words() {
     use clearra_app::{PcPathIngressOrigin, PcReplayPageStore};
     use std::collections::BTreeSet;
