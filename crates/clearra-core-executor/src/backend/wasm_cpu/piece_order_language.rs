@@ -531,6 +531,112 @@ impl PieceOrderLanguageCache {
         Ok(Certified(result(Some(references[0]))))
     }
 
+    /// Consume an exact BFS operation-mask traversal, without repeating any
+    /// physical query. The owner performed terminal acceptance and emitted a
+    /// bit only for an already verified operation. Unvisited entries in the
+    /// dense subset lookup may still contain data from an earlier traversal.
+    #[cfg(test)]
+    fn compile_traversed_subset_masks(
+        &mut self,
+        pieces: &[PieceKind],
+        subsets: &[u16],
+        allowed_operations: &[u16],
+        node_id_by_subset: &[u32],
+        terminal_accepted: bool,
+    ) -> Result<Option<u32>, WasmExactSearchError> {
+        let invalid_traversal =
+            || WasmExactSearchError::InvalidProblem("wasm_piece_language_invalid_subset_traversal");
+        if pieces.is_empty() || pieces.len() > MAX_POSET_OPERATIONS {
+            return Err(invalid_traversal());
+        }
+        let subset_count = 1_usize << pieces.len();
+        if node_id_by_subset.len() != subset_count
+            || subsets.len() != allowed_operations.len()
+            || subsets.len() > subset_count
+            || subsets.first() != Some(&0)
+        {
+            return Err(invalid_traversal());
+        }
+        let full_subset = (subset_count - 1) as u16;
+        // Validate shape before authoring any language nodes. Use the
+        // existing class buffer as a reachability mark, not an extra graph.
+        // Each mark is overwritten below before it can be used as a node ID.
+        self.prepare_graph_classes(subsets.len())?;
+        self.graph_classes[0] = 0;
+        let mut terminal_seen = false;
+        for (index, (&subset, &allowed)) in subsets.iter().zip(allowed_operations).enumerate() {
+            if self.graph_classes[index] == EMPTY_REFERENCE
+                || node_id_by_subset.get(subset as usize).copied() != Some(index as u32)
+                || allowed & !(full_subset & !subset) != 0
+            {
+                return Err(invalid_traversal());
+            }
+            terminal_seen |= subset == full_subset;
+            let mut outgoing = allowed;
+            while outgoing != 0 {
+                let bit = 1_u16 << outgoing.trailing_zeros();
+                outgoing ^= bit;
+                let child = subset | bit;
+                let child_index = node_id_by_subset[child as usize] as usize;
+                if child_index <= index || subsets.get(child_index).copied() != Some(child) {
+                    return Err(invalid_traversal());
+                }
+                self.graph_classes[child_index] = 0;
+            }
+        }
+        if !terminal_accepted {
+            return Ok(None);
+        }
+        if !terminal_seen {
+            return Err(invalid_traversal());
+        }
+
+        // Child indices are strictly later in traversal order; reverse BFS,
+        // not numeric subset order, supplies their already-computed classes.
+        for index in (0..subsets.len()).rev() {
+            let subset = subsets[index];
+            let accepting = subset == full_subset;
+            let mut outgoing = allowed_operations[index];
+            self.edge_scratch.clear();
+            self.edge_scratch
+                .try_reserve(outgoing.count_ones() as usize)
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_piece_language_edge_scratch_unavailable",
+                    )
+                })?;
+            while outgoing != 0 {
+                let operation = outgoing.trailing_zeros() as usize;
+                let bit = 1_u16 << operation;
+                outgoing ^= bit;
+                let child_index = node_id_by_subset[(subset | bit) as usize] as usize;
+                let child = self.graph_classes[child_index];
+                if child != EMPTY_REFERENCE {
+                    self.edge_scratch.push(
+                        CanonicalPieceEdge::new(child, piece_code(pieces[operation])).ok_or(
+                            WasmExactSearchError::InvalidProblem(
+                                "wasm_piece_language_child_index_overflow",
+                            ),
+                        )?,
+                    );
+                }
+            }
+            self.graph_classes[index] = if !accepting && self.edge_scratch.is_empty() {
+                EMPTY_REFERENCE
+            } else {
+                self.edge_scratch.sort_unstable();
+                self.edge_scratch.dedup();
+                let remaining_depth = self.remaining_depth(accepting)?;
+                self.intern_node(accepting, remaining_depth)?
+            };
+        }
+        let root = self.graph_classes[0];
+        if root == EMPTY_REFERENCE {
+            return Err(invalid_traversal());
+        }
+        Ok(Some(root))
+    }
+
     /// Solve Boolean completion and the exact piece suffix language in one
     /// backward pass. Graph edges already contain qualified physical moves;
     /// this step performs no field or reachability query. Multiple same-kind
@@ -1845,6 +1951,105 @@ mod tests {
         assert!(PieceOrderLanguageCache::default()
             .canonicalize_and_mark_live(&mut graph)
             .is_err());
+    }
+
+    #[test]
+    fn traversed_subset_masks_preserve_exact_same_kind_edge_languages() {
+        use PieceKind::{I, O};
+
+        // Independently spell the old concrete graph and the corresponding
+        // BFS masks. Distinct I operations leave different exact suffixes;
+        // the O prefix is dead. The BFS order is not numeric subset order.
+        let specs = [
+            (0, 3, 0, false),
+            (3, 1, 1, false),
+            (4, 1, 1, false),
+            (5, 1, 1, false),
+            (6, 1, 2, false),
+            (7, 0, 2, false),
+            (7, 1, 2, false),
+            (8, 0, 3, true),
+        ]
+        .map(
+            |(edge_start, edge_count, depth, accepting)| BuildOrderNodeSpec {
+                edge_start,
+                edge_count,
+                depth,
+                accepting,
+            },
+        );
+        let edges = [
+            (1, 0, I),
+            (2, 1, O),
+            (3, 2, I),
+            (4, 1, O),
+            (5, 2, I),
+            (6, 0, I),
+            (7, 2, I),
+            (7, 1, O),
+        ]
+        .map(|(to, operation, piece)| {
+            BuildOrderGraph::edge(to, operation, piece, RotationState::Zero, 0, 0, 0)
+        });
+        let graph =
+            BuildOrderGraph::from_topological_parts(specs.into(), edges.into(), 0, 0, false)
+                .unwrap();
+        let mut cache = PieceOrderLanguageCache::default();
+        let baseline = cache.canonicalize(&graph).unwrap();
+        let expected = BTreeSet::from([vec![1, 2, 1], vec![1, 1, 2]]);
+        assert_eq!(words(&cache, baseline), expected);
+
+        let subsets = [0, 1, 2, 4, 3, 6, 5, 7];
+        let allowed = [7, 2, 4, 1, 4, 0, 2, 0];
+        let lookup = [0, 1, 2, 4, 3, 6, 5, 7];
+        let before = (cache.node_count(), cache.edge_count());
+        let masked = cache
+            .compile_traversed_subset_masks(&[I, O, I], &subsets, &allowed, &lookup, true)
+            .unwrap();
+        assert_eq!(
+            masked,
+            Some(baseline),
+            "reuse the exact existing suffix nodes"
+        );
+        assert_eq!(words(&cache, masked.unwrap()), expected);
+        assert_eq!((cache.node_count(), cache.edge_count()), before);
+        assert_eq!(
+            cache
+                .compile_traversed_subset_masks(&[I, O, I], &subsets, &allowed, &lookup, false)
+                .unwrap(),
+            None,
+            "a reached full subset is not acceptance"
+        );
+        assert_eq!((cache.node_count(), cache.edge_count()), before);
+        assert_eq!(words(&cache, baseline), expected);
+    }
+
+    #[test]
+    fn traversed_subset_masks_reject_invalid_traversals_before_interning() {
+        use PieceKind::{I, O};
+
+        let mut cache = PieceOrderLanguageCache::default();
+        let before = (cache.node_count(), cache.edge_count());
+        for (subsets, allowed, lookup, accepted) in [
+            (&[0, 1, 3][..], &[1, 2, 0][..], [0, 0, 7, 2], true), // stale child ID
+            (&[0, 1, 1, 3], &[1, 2, 2, 0], [0, 1, 7, 3], true),   // duplicated subset
+            (&[0, 3, 1], &[1, 0, 2], [0, 2, 7, 1], true),         // backward child
+            (&[0, 1, 2, 3], &[1, 2, 1, 0], [0, 1, 2, 3], true),   // orphan
+            (&[0, 1], &[1, 1], [0, 1, 7, 7], false),              // reused operation
+            (&[0], &[0], [0, 0, 0, 0], true),                     // invalid terminal claim
+        ] {
+            assert!(cache
+                .compile_traversed_subset_masks(&[I, O], subsets, allowed, &lookup, accepted)
+                .is_err());
+            assert_eq!((cache.node_count(), cache.edge_count()), before);
+        }
+        assert_eq!(
+            cache
+                .compile_traversed_subset_masks(&[I, O], &[0], &[0], &[0, 0, 0, 0], false)
+                .unwrap(),
+            None,
+            "an exact dead traversal ignores unrelated stale lookup slots"
+        );
     }
 
     #[test]
