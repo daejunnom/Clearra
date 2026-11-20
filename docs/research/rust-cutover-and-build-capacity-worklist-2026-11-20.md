@@ -323,3 +323,35 @@ keys before comparing time or kernel RSS. The first tests of the
 runner and the release/process boundaries are local; they do not
 qualify peak-memory or end-to-end product improvement. Distinguish
 the old C baseline from this independent Rust-only measurement.
+
+### Published Web reference and native cutover verification
+
+The public Pages WASM manifest identified source `fb795810535e6b85dcb201c0f5c5ea8d6a3fad8d`
+on the 2026-11-21 readback. This is a source and artifact identity,
+not a browser performance measurement. The published Web worker
+already called the Rust distributed WASM ABI; its worker coordinator
+is not the C Geometry producer used for the historical native
+comparison. The Rust cutover changes native CLI/Discord, Desktop's
+host feature boundary, and which executable satisfies RustProduct.
+It does not replace C with Rust inside the already-Rust public Web
+worker.
+
+The first actual C-free Linux CLI run at `95bcb66f` found both stale
+projection assertions and a real compatibility failure. The old
+explicit-count `sc2` checkpoint carried a two-row visible board but
+only one row of packing work; Rust's ordinary frame then rejected the
+area as non-tetromino-aligned. Reuse the legacy exact-frame proof for
+that checkpoint version without shrinking the displayed field or
+dropping higher occupied cells. Keep the old token itself in executable
+coverage; do not take a fresh-format substitution as compatibility
+evidence. No post-fix acceptance is implied by the original run.
+
+For the Rust-only comparison, a third reuse change moves the existing
+fixed-format Board64 canonical string into the result rather than
+allocating and copying it again. The estimate of about 100.2 MiB
+avoided at 456,923 ten-placement keys is aggregate copy traffic, not
+expected peak resident-memory savings. Comparing exact
+`f6d3a800` with `1f95ec89` covers the three reuse changes together;
+use receipt-level evidence to report execution time, peak memory and
+ordered output identity. It does not attribute an end-to-end delta
+to any one change.

@@ -59,15 +59,16 @@ fn process_e2e_m18_cli_commands_use_search_problem_executor_route() {
     assert_eq!(summary["probability_complete"], true);
 }
 
+const SETUP_REMAINING: &str = "IOT";
+const SETUP_QB: &str = "[SZJL]!";
+
 #[test]
-fn process_e2e_setup_uses_redesigned_ranked_family_and_preserves_legacy_alias() {
+fn cycle_seven_setup_condition_keeps_its_canonical_universe_and_qb_denominator() {
     // Cycle-seven QB fixture: the canonical [IOT]!P7 universe is intersected
     // with the explicit unordered QB expression [SZJL]!, leaving 864
     // conditioned queue words and one ten-piece multiset. Plain `SZJL` now
     // means that exact order; spelling the group preserves this routing
     // fixture's historical unordered domain without reviving ambiguity.
-    const REMAINING: &str = "IOT";
-    const OBSERVED: &str = "[SZJL]!";
     let pieces = |text: &str| {
         text.chars()
             .map(|piece| {
@@ -77,11 +78,11 @@ fn process_e2e_setup_uses_redesigned_ranked_family_and_preserves_legacy_alias() 
             .collect()
     };
     let qb = clearra_supply::queue::queue_pattern_expression::QueuePatternExpression::parse(
-        OBSERVED, 24,
+        SETUP_QB, 24,
     )
     .expect("fixture QB expression");
     let fixture = clearra_problem::SetupSearchQuery::default()
-        .with_remaining_pieces(pieces(REMAINING))
+        .with_remaining_pieces(pieces(SETUP_REMAINING))
         .with_queue_based_pattern_expression(qb)
         .with_max_setup_pieces(1);
     let conditions = clearra_problem::compile_setup_search_conditions(&fixture)
@@ -98,6 +99,11 @@ fn process_e2e_setup_uses_redesigned_ranked_family_and_preserves_legacy_alias() 
             .pattern_count(),
         30_240
     );
+}
+
+#[test]
+fn process_e2e_setup_alias_uses_the_same_inventory_validation() {
+    let mut reference = None;
     for command in ["setup-finder", "setup"] {
         let output = clearra()
             .args([
@@ -105,34 +111,29 @@ fn process_e2e_setup_uses_redesigned_ranked_family_and_preserves_legacy_alias() 
                 "json",
                 command,
                 "--remaining",
-                REMAINING,
+                "OOII",
                 "--mode",
                 "qb",
                 "--qb",
-                OBSERVED,
-                "--max-setup-pieces",
-                "1",
-                "--workers",
-                "1",
+                "JLS",
             ])
             .output()
             .expect("setup process");
-        assert!(
-            output.status.success(),
-            "{command}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_eq!(output.status.code(), Some(2), "{command}: {output:?}");
         assert!(output.stderr.is_empty());
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        for marker in [
-            "\"capability_id\":\"setup.joint\"",
-            "\"result_contract\":\"setup-joint-ranking.v2\"",
-            "\"payload_kind\":\"setup-ranked-family\"",
-        ] {
-            assert!(
-                stdout.contains(marker),
-                "{command}: missing {marker}: {stdout}"
-            );
+        let json: Value = serde_json::from_slice(&output.stdout).expect("diagnostic JSON");
+        assert_eq!(json["kind"], "diagnostic");
+        let diagnostics = json["summary"]["diagnostics"]
+            .as_array()
+            .expect("Setup diagnostics");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic["code"] == "E_SETUP_QUERY_INVALID"
+                && diagnostic["evidence"]["reason"] == "remaining_piece_duplicate_inventory_invalid"
+        }));
+        if let Some(reference) = &reference {
+            assert_eq!(diagnostics, reference, "{command}");
+        } else {
+            reference = Some(diagnostics.clone());
         }
     }
     let obsolete = clearra()
@@ -142,4 +143,67 @@ fn process_e2e_setup_uses_redesigned_ranked_family_and_preserves_legacy_alias() 
     assert_eq!(obsolete.status.code(), Some(2));
     assert!(obsolete.stdout.is_empty());
     assert!(String::from_utf8_lossy(&obsolete.stderr).contains("E_CLI_UNKNOWN_OPTION"));
+}
+
+#[test]
+#[ignore = "full empty-4L exact Setup acceptance; run outside the fast process smoke"]
+fn process_e2e_setup_uses_redesigned_ranked_family_and_preserves_legacy_alias() {
+    let run_setup = |command| {
+        run_json(&[
+            command,
+            "--remaining",
+            SETUP_REMAINING,
+            "--mode",
+            "qb",
+            "--qb",
+            SETUP_QB,
+            "--max-setup-pieces",
+            "1",
+            "--workers",
+            "1",
+        ])
+    };
+    let canonical = run_setup("setup-finder");
+    let legacy = run_setup("setup");
+    assert_eq!(canonical["kind"], "setup-joint-ranking.v2");
+    assert_eq!(canonical["kind"], legacy["kind"]);
+    let summary = &canonical["summary"];
+    assert_eq!(summary, &legacy["summary"]);
+    assert_eq!(summary["capability_id"], "setup.joint");
+    assert_eq!(summary["result_contract"], "setup-joint-ranking.v2");
+    assert_eq!(summary["payload_kind"], "setup-ranked-family");
+    assert_eq!(summary["ordering"], "joint-probability-descending");
+    assert_eq!(summary["resolved_length_preference"], "longer");
+    for identity in [
+        "query_identity_sha256",
+        "supply_identity_sha256",
+        "universe_identity_sha256",
+    ] {
+        let digest = summary[identity].as_str().expect("Setup SHA-256 identity");
+        assert_eq!(digest.len(), 64, "{identity}");
+        assert!(
+            digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{identity}"
+        );
+    }
+    let candidates = summary["candidates"].as_array().expect("ranked candidates");
+    let candidate_count = summary["candidate_count"]
+        .as_str()
+        .expect("Setup decimal candidate count")
+        .parse::<usize>()
+        .expect("valid Setup candidate count");
+    assert!(
+        !candidates.is_empty(),
+        "cycle seven fixture has 4L finishes"
+    );
+    assert_eq!(candidate_count, candidates.len());
+    for candidate in candidates {
+        assert_eq!(candidate["condition_id"], "hold-empty");
+        assert!(candidate["candidate_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        assert!(candidate["setup_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+    }
 }
