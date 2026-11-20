@@ -19,7 +19,9 @@ use clearra_core_domain::{
         StandardBoard64TilingIdentity,
     },
 };
-use clearra_core_executor::WasmCpuSearchBackend;
+use clearra_core_executor::{
+    packing::PackingRunner, BuildUpRunner, CoreExecutor, WasmCpuSearchBackend,
+};
 use clearra_core_ffi::{
     problem::{C_PIECE_I, C_PIECE_J, C_PIECE_L, C_PIECE_O, C_PIECE_S, C_PIECE_T, C_PIECE_Z},
     CBuildUpProblemTemplate, CNativeBuildUpEnumerationLimits, CPackingProblemBuilder, CoreCNative,
@@ -39,10 +41,264 @@ use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
     PcSolutionProbabilityPolicy, PieceWindow,
 };
-use clearra_problem::{BuildProblemLimits, BuildQuery, BuildTemplateBridge, ProblemCompiler};
-use clearra_supply::{queue::fixed_sequence::FixedSequence, PieceMultisetKey};
+use clearra_problem::{
+    BuildProblemLimits, BuildQuery, BuildTemplateBridge, ProblemCompiler, ScenarioQuery,
+    SearchProblem, SearchProblemPreset,
+};
+use clearra_supply::{
+    piece_source::PieceSourceKind,
+    queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
+    PieceMultisetKey,
+};
 
 const LEGACY_PATTERN_ID: u32 = 0;
+
+fn exact_o_cover_query(board: BoardSize, pattern_count: usize) -> BuildCoverageQuery {
+    let (slots, domains) = (0_u16..5)
+        .map(|index| {
+            let id = BuildSlotId::new(u32::from(index));
+            let x = index * 2;
+            let cells = [(x, 0), (x + 1, 0), (x, 1), (x + 1, 1)]
+                .into_iter()
+                .map(|(x, y)| CellCoord::new_unchecked(x, y))
+                .collect();
+            (
+                BuildSlot::new(id, cells).with_allowed_pieces(vec![PieceKind::O]),
+                SlotDomain::new(id, vec![PieceKind::O]),
+            )
+        })
+        .unzip();
+    BuildCoverageQuery::new(
+        BuildTemplate::new("legacy-complete-two-line-o-cover", slots).with_board_size(board),
+        domains,
+        Vec::new(),
+        pattern_count,
+        BuildCoverageLimits::new(64, 8),
+    )
+}
+
+#[test]
+fn native_and_rust_agree_on_complete_bounded_legacy_fixed_and_finite_sources() {
+    let control = ExecutionControl::default();
+    let board = BoardSize::new(10, 2).expect("two-line standard field");
+    let all_o = [PieceKind::O; 5];
+    let mut last_t = all_o;
+    last_t[4] = PieceKind::T;
+    // Five O pieces force one exact tiling. One T and four O cannot tile the
+    // two rows: the only odd-color-imbalance piece is T. A clear before T
+    // cannot help, because T would have only one original row left.
+    let expected_assignment = StandardBoard64TilingIdentity::from_placements(
+        0,
+        (0..5).map(|index| PiecePlacementMask::new(PieceKind::O, 0xc03_u64 << (2 * index))),
+    )
+    .expect("unique exact O placement family");
+    let cases = [
+        (
+            "fixed positive",
+            PcQueueInput::fixed_sequence(FixedSequence::new(all_o.to_vec())),
+            1,
+            1,
+        ),
+        (
+            "fixed negative",
+            PcQueueInput::fixed_sequence(FixedSequence::new(last_t.to_vec())),
+            1,
+            0,
+        ),
+        (
+            "finite positive and negative ordinals",
+            PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("OOOO[OT]", 8).expect("two explicit queues"),
+            ),
+            2,
+            1,
+        ),
+    ];
+    for (case, queue, pattern_count, expected_hits) in cases {
+        let query = exact_o_cover_query(board, pattern_count);
+        let build = BuildQuery::coverage_bridge(
+            BuildTemplateBridge::new(query.template().id(), board, 5),
+            pattern_count,
+            BuildProblemLimits::new(
+                query.limits().max_assignments(),
+                query.limits().max_patterns(),
+            ),
+        );
+        // Exercise the public typed Core Build entry with its real complete
+        // fixed/finite queue. The CLI/App Legacy default still supplies an
+        // Observed queue; this is not a claim about that default route.
+        let source_query =
+            PcScenarioQuery::new(PcScenarioBoard::standard_10(2, 0), queue, PieceWindow::new(5))
+                .with_allow_hold(false)
+                .with_exact_pieces(Some(5))
+                .with_count_policy(PcCountPolicy::CountAll)
+                .with_retained_trace_limit(1)
+                .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1));
+        let legacy = SearchProblem::new(
+            SearchProblemPreset::Build,
+            ScenarioQuery::build_preset(source_query, build),
+        )
+        .expect("typed Legacy Core request");
+        let source = legacy.piece_source();
+        let universe = source
+            .materialized_universe()
+            .expect("original ordinal authority");
+        assert_eq!(
+            source.kind(),
+            if pattern_count == 1 {
+                PieceSourceKind::FixedQueue
+            } else {
+                PieceSourceKind::MaterializedPatternUniverse
+            },
+            "{case}",
+        );
+        assert!(source.complete() && universe.complete(), "{case}");
+        assert_eq!(universe.truncation_reason(), None, "{case}");
+        assert_eq!(universe.pattern_count(), pattern_count, "{case}");
+        assert_eq!(
+            universe.total_possible_pattern_count(),
+            pattern_count as u128,
+            "{case}"
+        );
+
+        // Keep only the scalar witness. In particular, PackingRunResult's
+        // admission and retained graph must be gone before either backend
+        // opens its next request under the same process authority.
+        let native_word = {
+            let packing = PackingRunner::run_with_control(&legacy, &control)
+                .expect("existing native Legacy packing must admit the whole complete source");
+            assert!(packing.count_complete(), "{case}");
+            assert_eq!(packing.candidate_count(), expected_hits, "{case}");
+            let build = BuildUpRunner::run_with_control(&legacy, &packing, &control)
+                .expect("existing native Legacy BuildUp must finish");
+            assert!(build.count_complete(), "{case}");
+            assert!(build.materialized_coverage_complete(), "{case}");
+            assert_eq!(build.coverage_rows().len(), expected_hits, "{case}");
+            if expected_hits == 0 {
+                0
+            } else {
+                let row = &build.coverage_rows()[0];
+                let candidate = packing.candidate_view_at(0).expect("the one physical candidate");
+                assert_eq!(
+                    candidate.standard_board64_tiling_identity(0).unwrap(),
+                    expected_assignment
+                );
+                assert_eq!(row.candidate_id(), candidate.candidate_id());
+                assert_eq!(row.piece_source_id(), source.id().get());
+                assert_eq!(row.pattern_count(), pattern_count);
+                row.coverage_bits().word_at(0)
+            }
+        };
+
+        let mut oracle_word = 0_u64;
+        let mut rust_word = 0_u64;
+        for ordinal in 0..pattern_count {
+            let actual_source = universe.sequence_at(ordinal);
+            let expected_hit = actual_source.as_ref() == &all_o;
+            assert!(
+                expected_hit || actual_source.as_ref() == &last_t,
+                "{case}: foreign ordinal",
+            );
+            if expected_hit {
+                oracle_word |= 1 << ordinal;
+            }
+            let rust = ProblemCompiler::compile_scenario_pc(
+                &PcScenarioQuery::new(
+                    PcScenarioBoard::standard_10(2, 0),
+                    PcQueueInput::fixed_sequence(FixedSequence::new(actual_source.into_owned())),
+                    PieceWindow::new(5),
+                )
+                .with_rule(legacy.rule_profile_value())
+                .with_allow_hold(false)
+                .with_exact_pieces(Some(5))
+                .with_count_policy(PcCountPolicy::CountAll)
+                .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+                .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1)),
+            )
+            .expect("one original ordinal, independently executed by Rust");
+            let result = WasmCpuSearchBackend::execute_with_control(&rust, &control)
+                .expect("Rust physical execution must finish");
+            for field in [
+                "count_complete",
+                "build_variant_count_exact",
+                "probability_complete",
+                "solution_probability_complete",
+            ] {
+                assert_eq!(
+                    result.bool_field(field), Some(true),
+                    "{case}: {ordinal}, {field}",
+                );
+            }
+            assert_eq!(result.bool_field("resource_truncated"), Some(false));
+            assert_eq!(result.usize_field("coverage_pattern_count"), Some(1));
+            assert_eq!(
+                result.solution_coverages().len(),
+                usize::from(expected_hit),
+                "{case}: ordinal {ordinal}",
+            );
+            if let Some(row) = result.solution_coverages().first() {
+                assert_eq!(row.identity(), expected_assignment);
+                assert_eq!(row.covered_patterns().pattern_count(), 1);
+                assert_eq!(row.covered_patterns().word_at(0), 1);
+                rust_word |= 1 << ordinal;
+            }
+        }
+        assert_eq!(oracle_word.count_ones() as usize, expected_hits, "{case}");
+        assert_eq!(native_word, oracle_word, "{case}: original Native ordinals");
+        assert_eq!(rust_word, oracle_word, "{case}: original Rust ordinals");
+
+        let scope = ConcreteCoverageScope::new_uniform(
+            board,
+            source.id().get(),
+            universe.pattern_universe_id(),
+            universe.pattern_weight_model_id(),
+            0x4c45_4741_4359_0002,
+        );
+        let bits = PatternBitSet::from_words(pattern_count, vec![rust_word]).unwrap();
+        let covered = BuildCoverageExecution::from_verified_concrete_assignment_rows(
+            &query,
+            scope,
+            vec![ConcreteAssignmentCoverageRow::new(
+                expected_assignment,
+                scope,
+                bits.clone(),
+                ConcreteCoverageCompleteness::Complete,
+            )],
+        )
+        .expect("exact concrete Rust row, including an explicit zero");
+        assert!(covered.exact_cover_complete(), "{case}");
+        assert_eq!(covered.union().covered_patterns(), &bits, "{case}");
+        let product = CoreExecutor::execute_build_coverage_with_control(&legacy, &query, &control)
+            .expect("real Legacy Core projection on the admitted request");
+        assert_eq!(product.bool_field("count_complete"), Some(true), "{case}");
+        assert_eq!(
+            product.bool_field("probability_complete"), Some(true),
+            "{case}"
+        );
+        assert_eq!(
+            product.bool_field("resource_truncated"), Some(false),
+            "{case}"
+        );
+        assert_eq!(
+            product.usize_field("pattern_count"), Some(pattern_count),
+            "{case}"
+        );
+        assert_eq!(
+            product.usize_field("union_covered_patterns"), Some(expected_hits),
+            "{case}"
+        );
+        assert_eq!(
+            product
+                .field("build_coverage_probability")
+                .expect("Legacy union probability")
+                .parse::<f64>()
+                .expect("numeric probability"),
+            covered.result().probability().get(),
+            "{case}: complete uniform requested denominator",
+        );
+    }
+}
+
 const PIECES: [PieceKind; 10] = [
     PieceKind::I,
     PieceKind::O,
