@@ -33,6 +33,21 @@ function check(t, code) {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
 
+test('WSL guest leases are direct children of the declared temporary root', t => {
+  check(t, `
+set -euo pipefail
+${helper('clearra_wsl_lease_root', storage)}
+${helper('clearra_wsl_lease_matches', storage)}
+root="$(clearra_wsl_lease_root)"
+[[ "$root" == "/run/user/$EUID/Clearra" ]]
+clearra_wsl_lease_matches "$root/clearra-lease.Aa123456"
+if clearra_wsl_lease_matches "/run/user/$EUID/clearra-lease.Aa123456"; then exit 41; fi
+if clearra_wsl_lease_matches "$root/nested/clearra-lease.Aa123456"; then exit 42; fi
+if clearra_wsl_lease_matches "$root/../Clearra/clearra-lease.Aa123456"; then exit 43; fi
+if clearra_wsl_lease_matches "$root/clearra-lease.invalid!"; then exit 44; fi
+`);
+});
+
 test('guest archive digest must describe the copied bytes, including on mismatch', t => {
   check(t, `
 set -euo pipefail

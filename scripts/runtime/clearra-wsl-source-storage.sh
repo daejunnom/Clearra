@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
 
+# Use the temporary root declared by the policy, beneath the current user's
+# systemd runtime directory. Host and guest must agree on the same lease role.
+clearra_wsl_lease_root() {
+    printf '%s' "/run/user/$EUID/Clearra"
+}
+
+clearra_wsl_lease_matches() {
+    local lease="$1"
+    [[ "${lease%/*}" == "$(clearra_wsl_lease_root)" &&
+       "${lease##*/}" =~ ^clearra-lease\.[a-zA-Z0-9]{8}$ ]]
+}
+
 # Source copies are separate from the host compiler catalog and from results.
 # Use the WSL external root declared by config/clearra-management.v1.json.
 clearra_wsl_source_root() {

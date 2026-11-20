@@ -70,12 +70,12 @@ function ConvertFrom-ClearraWslSourceReceipt(
     if ($lines.Count -ne 1) {
         throw 'Managed WSL synchronization did not emit exactly one bounded source receipt.'
     }
-    $pattern = '\Aclearra_wsl_source_receipt_v2=(?<distribution>[^\p{Cc}]{1,255})\t(?<workspace>/[^\p{Cc}]{1,4096}/workspaces/(?<key>[0-9a-f]{64})/source)\t(?<digest>[0-9a-f]{64})\t(?<count>[1-9][0-9]{0,9})\z'
+    $pattern = '\Aclearra_wsl_source_receipt_v2=(?<distribution>[^\p{Cc}]{1,255})\t(?<workspace>/[^\p{Cc}]{1,4096}/Clearra/wsl/workspaces/(?<key>[0-9a-f]{64})/source)\t(?<digest>[0-9a-f]{64})\t(?<count>[1-9][0-9]{0,9})\z'
     $receipt = [regex]::Match($lines[0], $pattern)
     $count = 0
     if (-not $receipt.Success -or
         $receipt.Groups['key'].Value -cne $receipt.Groups['digest'].Value -or
-        $receipt.Groups['workspace'].Value -match '//|/(?:\.{1,2})(?:/|$)|\\' -or
+        $receipt.Groups['workspace'].Value -cmatch '\A/mnt(?:/|$)|//|/(?:\.{1,2})(?:/|$)|\\' -or
         -not [int]::TryParse($receipt.Groups['count'].Value, [ref]$count)) {
         throw 'Managed WSL synchronization emitted an invalid source receipt.'
     }

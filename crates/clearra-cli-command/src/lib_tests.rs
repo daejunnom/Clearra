@@ -30,6 +30,41 @@ use super::*;
 use crate::web_command_parser::{PC_SCORE_MAX_ARGUMENT_BYTES, PC_SCORE_MAX_ARGUMENT_TOKENS};
 
 #[test]
+fn browser_continue_lowers_to_the_existing_token_only_command() {
+    use clearra_app::ContinueAppCommand;
+
+    for command in [
+        "clearra continue --token sr3:example",
+        "continue -t sr3:example",
+        "continue sr3:example",
+    ] {
+        let request = CliCommandParser::parse_with_worker_limit(command, 8).unwrap();
+        assert_eq!(request.command_kind(), "continue");
+        assert!(!request.requests_webgpu());
+        let app = request.to_app_request().unwrap();
+        let AppCommand::Continue(continue_command) = app.command() else {
+            panic!("expected Continue App command");
+        };
+        assert_eq!(
+            continue_command,
+            &ContinueAppCommand::new(Some("sr3:example".to_owned()))
+        );
+        assert!(app.product_capability_contract().is_none());
+    }
+    for command in [
+        "clearra continue",
+        "clearra continue --token",
+        "clearra continue --token \"\"",
+        "clearra continue --token sr3:example --token sr3:other",
+        "clearra continue --token sr3:example --workers 2",
+        "clearra continue --token sr3:example --board-profile standard-10",
+        "clearra continue --token sr3:example | clearra verify",
+    ] {
+        assert!(CliCommandParser::parse(command).is_err(), "{command}");
+    }
+}
+
+#[test]
 fn canonical_cli_uses_the_shared_one_through_six_line_target_frame_corpus() {
     const FIXTURE: &str =
         include_str!("../../../tests/fixtures/contracts/pc_target_frame_parity.v1.tsv");

@@ -71,6 +71,27 @@ clearra-manage storage verify --path <path>
 clearra-manage storage audit
 ```
 
+The external inventory in `storage audit` is read-only and limited to
+declared Clearra directories and their immediate children. A protected Git
+worktree, a legacy directory and an unmanaged output destination do not
+become writable because the inventory reports them. Investigate an
+unmanaged entry before removal; do not treat the inventory as a global
+build, CI, or release gate.
+
+Persistent diagnostic reports use `%LOCALAPPDATA%/Clearra/state/reports` on
+Windows and `${XDG_STATE_HOME:-$HOME/.local/state}/Clearra/reports` on Linux.
+WSL source copies are under the declared WSL state root; the runtime slot
+is retired only after its owner drains, while explicit sync copies are
+bounded and retain their receipts. The matching per-invocation lease lives
+under the Clearra subdirectory of the OS runtime root. Old
+`~/.local/share/Clearra` trees are inventory-only: preserve unique
+qualification evidence and unverified source copies until a reviewed move.
+
+The three CLI data stores (`legal-board`, `accelerators`, `tablebase`) retain
+independently verified installed profiles. They are not compiler caches
+or temporary reports and are removed through their explicit product
+operations only.
+
 The build catalog follows the shared MMMM/RoveZero lifecycle instead of
 Clearra's old count-only retention. Managed compiler outputs use
 `config/build-storage.v1.json` and one catalog owner: 8 GiB per slot,

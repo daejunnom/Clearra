@@ -48,12 +48,12 @@ jobs:
           persist-credentials: false
       - name: Check exact source
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-      - name: Test owned WSL staging, retention and interruption without a distro
+      - name: Test Clearra storage policy and owned WSL lifecycle without a distro
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           status=0
-          cargo test --locked -p clearra-manage --bin clearra-manage wsl || status=1
+          cargo test --locked -p clearra-manage --bin clearra-manage -- --skip runtime::tests || status=1
           node --test scripts/runtime/clearra-wsl-session.test.mjs scripts/runtime/clearra-wsl-guest-paths.test.mjs scripts/runtime/clearra-wsl-source-slot.test.mjs scripts/tools/clearra-build-paths.test.mjs || status=1
           node --test scripts/tools/clearra-build-capacity.test.mjs || status=1
           node --test --test-name-pattern 'product retirement preflights|experiment cache retirement preserves' scripts/tools/clearra-build-policy.test.mjs || status=1

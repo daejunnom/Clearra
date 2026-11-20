@@ -110,7 +110,12 @@ cgroup_path="/sys/fs/cgroup$control_group"
 
 # If EOF arrives before a queued service starts, the guest sees cancellation
 # or no lease directory, and declines to start any work.
-lease_dir="$(mktemp -d -- "$runtime_dir/clearra-lease.XXXXXXXX")"
+lease_root="$(clearra_wsl_lease_root)"
+[[ "$(realpath -m -- "$lease_root")" == "$lease_root" ]] || exit 2
+mkdir -p -m 700 -- "$lease_root"
+[[ -d "$lease_root" && -O "$lease_root" &&
+   "$(realpath -e -- "$lease_root")" == "$lease_root" ]] || exit 2
+lease_dir="$(mktemp -d -- "$lease_root/clearra-lease.XXXXXXXX")"
 parent_lost_marker="$lease_dir/parent-lost"
 trap 'rm -f -- "$parent_lost_marker"; rmdir -- "$lease_dir"' EXIT
 source_slot= source_identity=

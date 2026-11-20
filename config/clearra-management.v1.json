@@ -288,7 +288,58 @@
       "id": "wsl-runtime",
       "windows": "${LOCALAPPDATA}/Clearra/wsl",
       "linux": "${XDG_STATE_HOME:-${HOME}/.local/state}/Clearra/wsl",
-      "lifecycle": "dedicated-runtime-explicit-lifecycle"
+      "lifecycle": "drained-runtime-source-or-bounded-explicit-sync"
+    },
+    {
+      "id": "legal-board-install",
+      "windows": "${LOCALAPPDATA}/Clearra/legal-board",
+      "linux": "${XDG_DATA_HOME:-${HOME}/.local/share}/clearra/legal-board",
+      "lifecycle": "verified-profile-generations-explicit-remove"
+    },
+    {
+      "id": "accelerator-install",
+      "windows": "${LOCALAPPDATA}/Clearra/accelerators",
+      "linux": "${XDG_DATA_HOME:-${HOME}/.local/share}/clearra/accelerators",
+      "lifecycle": "verified-profile-generations-explicit-remove"
+    },
+    {
+      "id": "tablebase-install",
+      "windows": "${LOCALAPPDATA}/Clearra/tablebase",
+      "linux": "${XDG_DATA_HOME:-${HOME}/.local/share}/clearra/tablebase",
+      "lifecycle": "verified-profile-generations-explicit-remove"
+    }
+  ],
+  "external_inventory_roots": [
+    {
+      "id": "windows-clearra",
+      "platform": "windows",
+      "path": "${LOCALAPPDATA}/Clearra",
+      "protected_children": ["worktrees"]
+    },
+    {
+      "id": "linux-clearra-state",
+      "platform": "linux",
+      "path": "${XDG_STATE_HOME:-${HOME}/.local/state}/Clearra"
+    },
+    {
+      "id": "linux-clearra-cache",
+      "platform": "linux",
+      "path": "${XDG_CACHE_HOME:-${HOME}/.cache}/Clearra"
+    },
+    {
+      "id": "linux-clearra-legacy-data",
+      "platform": "linux",
+      "path": "${HOME}/.local/share/Clearra"
+    },
+    {
+      "id": "linux-clearra-installed-data",
+      "platform": "linux",
+      "path": "${XDG_DATA_HOME:-${HOME}/.local/share}/clearra"
+    },
+    {
+      "id": "linux-clearra-runtime",
+      "platform": "linux",
+      "path": "${XDG_RUNTIME_DIR:-/tmp}/Clearra"
     }
   ],
   "forbidden_repository_roots": [

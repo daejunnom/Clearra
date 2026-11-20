@@ -215,6 +215,15 @@ impl WebCommandParser {
         compatibility_authority: WebCompatibilityAuthority,
     ) -> Result<WebCommandRequest, WebCommandError> {
         reject_nul_tokens(tokens)?;
+        // Continue restores a complete replay input from the token. Do not
+        // extract profile overrides or apply compatibility translations here.
+        let command_index = usize::from(tokens.first().is_some_and(|token| token == "clearra"));
+        if tokens
+            .get(command_index)
+            .is_some_and(|token| token == "continue")
+        {
+            return parse_continue_command(&tokens[command_index + 1..]);
+        }
         validate_pretranslation_pc_score_tokens(tokens, compatibility_authority)?;
         let translated =
             crate::sfinder_compat::translate_command_with_origin(tokens, compatibility_authority)?;
@@ -394,6 +403,30 @@ impl WebCommandParser {
         }?;
         Ok(request.with_request_structural_profiles(request_structural_profiles))
     }
+}
+
+fn parse_continue_command(tokens: &[String]) -> Result<WebCommandRequest, WebCommandError> {
+    let token = match tokens {
+        [] => None,
+        [option] if matches!(option.as_str(), "--token" | "-t") => None,
+        [option, token] if matches!(option.as_str(), "--token" | "-t") => Some(token),
+        [token] => Some(token),
+        _ => {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "continue accepts only a token",
+            ));
+        }
+    };
+    let token = token
+        .filter(|token| !token.trim().is_empty() && !token.starts_with('-'))
+        .ok_or_else(|| {
+            WebCommandError::new(
+                WebCommandErrorCode::MissingValue,
+                "continue requires a token",
+            )
+        })?;
+    Ok(WebCommandRequest::continue_search(token.clone()))
 }
 
 fn extract_request_structural_profile_options(

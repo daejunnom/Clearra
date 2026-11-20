@@ -19,6 +19,8 @@ pub struct Policy {
     pub repository_roots: Vec<RepositoryRoot>,
     pub external_roots: Vec<ExternalRoot>,
     #[serde(default)]
+    pub external_inventory_roots: Vec<ExternalInventoryRoot>,
+    #[serde(default)]
     pub forbidden_repository_roots: Vec<String>,
     #[serde(default)]
     pub secret_path_patterns: Vec<String>,
@@ -41,6 +43,29 @@ pub struct ExternalRoot {
     pub windows: String,
     pub linux: String,
     pub lifecycle: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalInventoryRoot {
+    pub id: String,
+    pub platform: String,
+    pub path: String,
+    #[serde(default)]
+    pub protected_children: Vec<String>,
+}
+
+impl ExternalInventoryRoot {
+    pub fn applies_here(&self) -> bool {
+        matches!(
+            (self.platform.as_str(), std::env::consts::OS),
+            ("windows", "windows") | ("linux", "linux")
+        )
+    }
+
+    pub fn expanded_path(&self) -> Result<PathBuf> {
+        expand_template(&self.path)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -211,6 +236,28 @@ impl Policy {
                     "external root {} is incomplete",
                     root.id
                 )));
+            }
+        }
+        for root in &self.external_inventory_roots {
+            if root.id.is_empty()
+                || !root
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                || !ids.insert(format!("inventory:{}", root.id))
+                || !matches!(root.platform.as_str(), "windows" | "linux")
+                || !(root.path.rsplit('/').next() == Some("Clearra")
+                    || (root.platform == "linux"
+                        && root.path.rsplit('/').next() == Some("clearra")))
+                || root.path.split('/').any(|part| matches!(part, "." | ".."))
+                || root.path.contains('\\')
+                || root.path.chars().any(char::is_control)
+                || !root
+                    .protected_children
+                    .iter()
+                    .all(|name| valid_inventory_child(name))
+            {
+                return Err(Error::policy("invalid external inventory root"));
             }
         }
         for (name, profile) in &self.resource_profiles {
@@ -391,6 +438,14 @@ fn validate_relative_root(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn valid_inventory_child(name: &str) -> bool {
+    !name.is_empty()
+        && name == name.trim()
+        && !name.ends_with('.')
+        && !name.contains(['/', '\\', ':'])
+        && !name.chars().any(char::is_control)
+}
+
 fn expand_template(template: &str) -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
@@ -411,6 +466,11 @@ fn expand_template(template: &str) -> Result<PathBuf> {
         .unwrap_or_else(|| PathBuf::from(&home).join(".local/state"))
         .to_string_lossy()
         .replace('\\', "/");
+    let data = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&home).join(".local/share"))
+        .to_string_lossy()
+        .replace('\\', "/");
     let runtime = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -419,6 +479,7 @@ fn expand_template(template: &str) -> Result<PathBuf> {
     let expanded = template
         .replace("${XDG_CACHE_HOME:-${HOME}/.cache}", &cache)
         .replace("${XDG_STATE_HOME:-${HOME}/.local/state}", &state)
+        .replace("${XDG_DATA_HOME:-${HOME}/.local/share}", &data)
         .replace("${XDG_RUNTIME_DIR:-/tmp}", &runtime)
         .replace("${LOCALAPPDATA}", &local_app_data)
         .replace("${HOME}", &home);
@@ -444,6 +505,49 @@ mod tests {
         assert!(validate_relative_root("../target").is_err());
         assert!(validate_relative_root("build/../target").is_err());
         assert!(validate_relative_root("build/cargo").is_ok());
+    }
+
+    #[test]
+    fn external_inventory_accepts_clearra_data_and_rejects_protected_path_escapes() {
+        let mut policy = checked_in_policy();
+        let element = ExternalInventoryRoot {
+            id: "test-inventory".to_owned(),
+            platform: "linux".to_owned(),
+            path: "${XDG_DATA_HOME:-${HOME}/.local/share}/clearra".to_owned(),
+            protected_children: vec!["worktrees".to_owned()],
+        };
+        assert_eq!(
+            element.expanded_path().unwrap().file_name().unwrap(),
+            "clearra"
+        );
+        policy.external_inventory_roots.push(element);
+        assert!(policy.validate().is_ok());
+        for path in [
+            ".",
+            "..",
+            "../other",
+            "another/child",
+            r"another\child",
+            "drive:name",
+        ] {
+            let mut changed = policy.clone();
+            changed
+                .external_inventory_roots
+                .last_mut()
+                .unwrap()
+                .protected_children = vec![path.to_owned()];
+            assert!(changed.validate().is_err(), "{path}");
+        }
+        let mut changed = policy.clone();
+        changed.external_inventory_roots.last_mut().unwrap().path = "${HOME}".to_owned();
+        assert!(changed.validate().is_err());
+        let mut changed = policy;
+        changed
+            .external_inventory_roots
+            .last_mut()
+            .unwrap()
+            .platform = "other".to_owned();
+        assert!(changed.validate().is_err());
     }
 
     #[test]

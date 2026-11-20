@@ -37,6 +37,13 @@ removed; a running legacy task is only disabled for future triggers. Listener
 PIDs already bound to ports `4194` and `8790` are checked before and after the
 migration and must remain unchanged.
 
+An installed task that still points at `Clearra/startup-v2` is using the
+legacy launcher, even if this checkout already has the new installer.
+Confirm its action points at `state/local-services-v2` and its original
+listeners are still live before archiving the old launcher or its
+`Clearra/startup` logs. Do not widen the output allowlist for the old roots
+or delete them while a scheduled or running owner still references them.
+
 ## Finite A/B benchmark GUI: 4195 only
 
 Keep the installed watchdog, the product-test GUI on 4194, and the Discord bot

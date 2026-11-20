@@ -8,7 +8,7 @@ import { validateWslBuildBinding } from './clearra-build-paths.mjs';
 const digest = path => createHash('sha256').update(path).digest('hex').slice(0, 24);
 const checkoutId = digest('d:/projects/clearra');
 const guestHome = '/home/example person';
-const guestSource = `${guestHome}/.local/share/Clearra/workspaces/${checkoutId}/source`;
+const guestSource = `${guestHome}/.local/state/Clearra/wsl/runtime-source/source`;
 const sourceId = digest(guestSource);
 const guestBuild = '/mnt/c/Users/example/AppData/Local/Clearra/build';
 const sessionId = '0123456789abcdef0123456789abcdef';
@@ -22,6 +22,7 @@ test('explicit local WSL anchors use the existing LOCALAPPDATA role, not the che
   const expected = { checkoutId, sourceId, root: guestBuild, sourceRoot: guestSource };
   assert.notEqual(checkoutId, sourceId, 'host transport and guest compiler-cache identity are different');
   assert.deepEqual(validateWslBuildBinding(local), expected);
+  assert.deepEqual(validateWslBuildBinding({ ...local, guestStateHome: '' }), expected);
   assert.deepEqual(validateWslBuildBinding({ ...local,
     hostCheckoutRoot: 'd:/PROJECTS/CLEARRA', hostBuildRoot: 'c:/users/example/appdata/local/clearra/BUILD',
   }), expected);
@@ -37,6 +38,17 @@ test('explicit hosted WSL anchors require the checkout volume before mapping to 
     /exact Windows mount/u);
 });
 
+test('custom WSL XDG state still uses exactly the declared runtime source slot', () => {
+  const guestStateHome = '/var/owned-state/example';
+  const guestSourceRoot = `${guestStateHome}/Clearra/wsl/runtime-source/source`;
+  const custom = { ...local, guestStateHome, guestSourceRoot };
+  assert.equal(validateWslBuildBinding(custom).sourceId, digest(guestSourceRoot));
+  assert.throws(() => validateWslBuildBinding({ ...custom, guestSourceRoot: guestSource }),
+    /exact runtime source slot/u);
+  assert.throws(() => validateWslBuildBinding({ ...custom, guestStateHome: '/mnt/c/not-ext4' }),
+    /Invalid canonical current-user WSL XDG state/u);
+});
+
 test('explicit WSL root and checkout bindings cannot be relocated under a different role or alias', () => {
   for (const proposed of [
     'C:\\other\\Clearra\\build',
@@ -50,10 +62,13 @@ test('explicit WSL root and checkout bindings cannot be relocated under a differ
   assert.throws(() => validateWslBuildBinding({ ...local, guestBuildRoot: `${guestBuild}/experiments` }),
     /exact Windows mount/u);
   assert.throws(() => validateWslBuildBinding({ ...local, guestSourceRoot: `${guestSource}/nested` }),
-    /exact checkout slot/u);
+    /exact runtime source slot/u);
   assert.throws(() => validateWslBuildBinding({ ...local, guestSourceRoot: `${guestSource}/../source` }),
-    /exact checkout slot/u);
-  assert.throws(() => validateWslBuildBinding({ ...local, guestHome: '/home/other' }), /exact checkout slot/u);
+    /exact runtime source slot/u);
+  assert.throws(() => validateWslBuildBinding({ ...local,
+    guestSourceRoot: `${guestHome}/.local/share/Clearra/workspaces/${checkoutId}/source`,
+  }), /exact runtime source slot/u);
+  assert.throws(() => validateWslBuildBinding({ ...local, guestHome: '/home/other' }), /exact runtime source slot/u);
   for (const home of ['/mnt/c/Users/example', '/home/other/../example', '/root', '/home/alias/']) {
     assert.throws(() => validateWslBuildBinding({ ...local, guestHome: home }), /Invalid canonical current-user/u);
   }

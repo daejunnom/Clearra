@@ -11,14 +11,14 @@ function normalizeWindowsHostPath(value, label) {
   return win32.normalize(value);
 }
 
-function normalizeGuestHome(value) {
+function normalizeGuestRoot(value, role) {
   if (typeof value !== 'string' || !value.startsWith('/') || value === '/' ||
       value === '/root' || value.startsWith('/root/') ||
       value === '/mnt' || value.startsWith('/mnt/') ||
       value !== posix.normalize(value) ||
       value.slice(1).split('/').some(segment =>
         !segment || segment === '.' || segment === '..' || /[\\\x00-\x1f\x7f]/u.test(segment))) {
-    throw new Error('Invalid canonical current-user WSL home path');
+    throw new Error(`Invalid canonical current-user WSL ${role} path`);
   }
   return value;
 }
@@ -26,14 +26,15 @@ function normalizeGuestHome(value) {
 /**
  * Prospective host-delivered bindings only. hostAnchorRoot is the supervisor's
  * verified LOCALAPPDATA (local) or RUNNER_TEMP (hosted), not a guest override
- * or a directory inferred from the requested build root. guestHome is the
- * separately established current user's ext4 home. This pure check
- * constrains the path roles, not filesystem ownership or host authentication.
+ * or a directory inferred from the requested build root. guestHome and the
+ * optional XDG state path belong to the current user's ext4 distribution.
+ * This pure check constrains path roles, not filesystem ownership or host
+ * authentication.
  * The live path CLI still reads only the existing managed build owner.
  */
 export function validateWslBuildBinding({
   hostMode, hostAnchorRoot, hostCheckoutRoot, hostBuildRoot,
-  checkoutId, guestBuildRoot, guestHome, guestSourceRoot, owner,
+  checkoutId, guestBuildRoot, guestHome, guestStateHome, guestSourceRoot, owner,
 }) {
   if (hostMode !== 'local' && hostMode !== 'github-actions') throw new Error('Unknown Windows build host mode');
   const anchor = normalizeWindowsHostPath(hostAnchorRoot, 'build anchor');
@@ -49,11 +50,15 @@ export function validateWslBuildBinding({
   const expectedGuestBuild = nativeBuildPath(expectedHostBuild, 'linux');
   if (guestBuildRoot !== expectedGuestBuild) throw new Error('WSL build root does not match the exact Windows mount');
   if (checkoutId !== buildSourceId(checkout)) throw new Error('WSL build checkout identity mismatch');
-  const expectedGuestSource = `${normalizeGuestHome(guestHome)}/.local/share/Clearra/workspaces/${checkoutId}/source`;
-  if (guestSourceRoot !== expectedGuestSource) throw new Error('WSL build source does not match the exact checkout slot');
+  const home = normalizeGuestRoot(guestHome, 'home');
+  const state = guestStateHome === undefined || guestStateHome === ''
+    ? `${home}/.local/state`
+    : normalizeGuestRoot(guestStateHome, 'XDG state');
+  const expectedGuestSource = `${state}/Clearra/wsl/runtime-source/source`;
+  if (guestSourceRoot !== expectedGuestSource) throw new Error('WSL build source does not match the exact runtime source slot');
 
-  // The stable host checkout slot is a transport identity. The existing
-  // build owner still hashes the ext4 source path, preventing cross-seeding.
+  // The checkout identity binds the host transport. Compiler slots remain
+  // bound to the guest runtime source path and its verified build inputs.
   const sourceId = buildSourceId(expectedGuestSource);
   const paths = { checkoutId, sourceId, root: expectedGuestBuild, sourceRoot: expectedGuestSource };
   if (owner === undefined) return paths;

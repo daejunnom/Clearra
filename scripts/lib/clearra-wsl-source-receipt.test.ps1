@@ -6,7 +6,7 @@ Set-StrictMode -Version Latest
 $sha = 'a' * 64
 $otherSha = 'b' * 64
 $distribution = 'Ubuntu 24.04'
-$workspace = "/home/worker/.local/share/Clearra/workspaces/$sha/source"
+$workspace = "/home/worker/.local/state/Clearra/wsl/workspaces/$sha/source"
 $prefix = "clearra_wsl_source_receipt_v2=$distribution"
 $receipt = "$prefix`t$workspace`t$sha`t317"
 $body = ConvertFrom-ClearraWslSourceReceipt "notice`r`n$receipt`r`nCLEARRA_WSL_RESULT=success`n"
@@ -16,6 +16,11 @@ if ($body.distribution -cne $distribution -or $body.workspace -cne $workspace -o
     throw 'The WSL receipt did not retain the public sync fields.'
 }
 [void](ConvertFrom-ClearraWslSourceReceipt $receipt 'ubuntu 24.04')
+$xdgWorkspace = "/run/user-data/worker/Clearra/wsl/workspaces/$sha/source"
+$xdgReceipt = $receipt.Replace($workspace, $xdgWorkspace)
+if ((ConvertFrom-ClearraWslSourceReceipt $xdgReceipt $distribution).workspace -cne $xdgWorkspace) {
+    throw 'A canonical custom XDG state location must be preserved.'
+}
 
 $badReceipts = @(
     'no receipt',
@@ -30,6 +35,9 @@ $badReceipts = @(
     $receipt.Replace('/home/worker/', '/home/../worker/'),
     $receipt.Replace('/home/worker/', '/home//worker/'),
     $receipt.Replace('/home/worker/', 'home/worker/'),
+    $receipt.Replace('/.local/state/Clearra/wsl/', '/.local/share/Clearra/'),
+    $receipt.Replace('/Clearra/wsl/', '/Other/wsl/'),
+    $receipt.Replace('/home/worker/.local/state/', '/mnt/c/worker/state/'),
     "$prefix`t$workspace`t$otherSha`t317",
     "$prefix`t$workspace`t$sha`t0",
     "$prefix`t$workspace`t$sha`t2147483648",
@@ -44,4 +52,4 @@ foreach ($bad in $badReceipts) {
     }
     if (-not $rejected) { throw 'An invalid or duplicate WSL receipt was accepted.' }
 }
-Write-Output "source receipt parser: 2 valid and $($badReceipts.Count) rejected cases"
+Write-Output "source receipt parser: 3 valid and $($badReceipts.Count) rejected cases"

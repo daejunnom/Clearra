@@ -18,7 +18,7 @@ function Test-ArtifactPathThrows([scriptblock]$Body) {
 $testTempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\','/')
 $fixtureRoot = Join-Path $testTempParent ('clearra-build-policy-' + [Guid]::NewGuid().ToString('N'))
 $fixtureEnvironmentNames = @($script:ClearraBuildTransactionEnvironmentNames) + @(
-    'LOCALAPPDATA','XDG_CACHE_HOME','WSL_DISTRO_NAME','WSL_INTEROP',
+    'LOCALAPPDATA','XDG_CACHE_HOME','XDG_STATE_HOME','WSL_DISTRO_NAME','WSL_INTEROP',
     'GITHUB_ACTIONS','RUNNER_TEMP','GITHUB_WORKSPACE',
     'CARGO_BUILD_TARGET_DIR','CARGO_BUILD_BUILD_DIR','CARGO_BUILD_RUSTC_WRAPPER',
     'CLEARRA_WSL_CARGO_TARGET_DIR','CLEARRA_RELEASE_BUILD_ROOT','CLEARRA_WSL_NATIVE_BUILD_ROOT',
@@ -54,10 +54,23 @@ try {
     }
 
     $repository = [IO.Path]::GetFullPath($RepositoryRoot)
+    if (Test-StartTestsWindows) {
+        $expectedReportRoot = Join-Path $fixtureBase 'Clearra/state/reports'
+    } else {
+        Assert-ArtifactPathCondition ((Get-ClearraReportRoot) -eq
+            (Join-Path $env:HOME '.local/state/Clearra/reports')) 'default_linux_reports_use_state_not_temp'
+        $env:XDG_STATE_HOME = Join-Path $fixtureBase 'state'
+        $expectedReportRoot = Join-Path $env:XDG_STATE_HOME 'Clearra/reports'
+    }
     $reportRoot = [IO.Path]::GetFullPath((Get-ClearraReportRoot))
+    Assert-ArtifactPathCondition ($reportRoot -eq $expectedReportRoot) 'canonical_report_root_is_declared_state'
     $relativeReport = Resolve-ClearraReportPath 'policy/relative-report.json' $repository
     Assert-ArtifactPathCondition ($relativeReport.StartsWith($reportRoot, (Get-ClearraBuildPathComparison))) 'relative_report_uses_report_root'
     Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Resolve-ClearraReportPath (Join-Path $repository 'reports/forbidden.json') $repository }) 'repository_report_rejected'
+    Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Resolve-ClearraReportPath (Join-Path $fixtureBase 'arbitrary.json') $repository }) 'arbitrary_external_report_rejected'
+    Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Resolve-ClearraReportPath "$reportRoot-sibling/report.json" $repository }) 'report_prefix_lookalike_rejected'
+    Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Resolve-ClearraReportPath 'policy/../report.json' $repository }) 'report_traversal_rejected'
+    Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Resolve-ClearraReportPath 'policy/.env' $repository }) 'report_credential_path_rejected'
     Assert-ClearraRepositoryArtifactPolicy $repository
     Assert-ArtifactPathCondition ((Get-Content -LiteralPath (Join-Path $repository '.dockerignore') -Raw) -match '(?m)^/?_local/?\s*$') 'docker_excludes_diagnostics'
 

@@ -2,15 +2,15 @@
 use clearra_app::PcPinnedDrawing;
 use clearra_app::{
     AppCommand, AppRequest, BoundaryRecoveryAppCommand, BuildProbabilityAppCommand,
-    DamageAppCommand, FieldDocumentTransformAppCommand, FieldDocumentTransformKind,
-    FumenAppCommand, OperationDocumentProblem, OperationSequenceAppCommand, ParityAppCommand,
-    PcAppCommand, PcChanceIngressOrigin, PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin,
-    PcPathIngressOrigin, PcResultProjection, PcSaveIngressOrigin, PcScoreIngressOrigin,
-    PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin, PercentAppCommand,
-    ProductCapabilityContract, RecoveryBuildAppCommand, RenAppCommand, RenderAppCommand,
-    RequestStructuralProfiles, ResourceBudget, ScenarioAppCommand, SequenceDependenciesAppCommand,
-    SetupAppCommand, SpinFinderAppCommand, SpinStructureAppCommand, SpinStructureProductMode,
-    VerifyAppCommand, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
+    ContinueAppCommand, DamageAppCommand, FieldDocumentTransformAppCommand,
+    FieldDocumentTransformKind, FumenAppCommand, OperationDocumentProblem,
+    OperationSequenceAppCommand, ParityAppCommand, PcAppCommand, PcChanceIngressOrigin,
+    PcFailedQueueIngressOrigin, PcMinimalsIngressOrigin, PcPathIngressOrigin, PcResultProjection,
+    PcSaveIngressOrigin, PcScoreIngressOrigin, PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin,
+    PercentAppCommand, ProductCapabilityContract, RecoveryBuildAppCommand, RenAppCommand,
+    RenderAppCommand, RequestStructuralProfiles, ResourceBudget, ScenarioAppCommand,
+    SequenceDependenciesAppCommand, SetupAppCommand, SpinFinderAppCommand, SpinStructureAppCommand,
+    SpinStructureProductMode, VerifyAppCommand, PC_SCORE_MAX_PATTERNS, PC_SCORE_MAX_PATTERN_BYTES,
 };
 use clearra_core_domain::pc::pc_target::PcTarget;
 use clearra_core_domain::piece::piece_kind::PieceKind;
@@ -98,6 +98,7 @@ pub struct WebCommandRequest {
     conditioned_reachability_enabled: bool,
     solution_probabilities: bool,
     verify_scope: Option<String>,
+    continue_token: Option<String>,
     operation_sequence: Option<OperationDocumentProblem>,
     sequence_dependencies: Option<OperationDocumentProblem>,
     parity: Option<ParityAppCommand>,
@@ -169,6 +170,7 @@ impl WebCommandRequest {
             conditioned_reachability_enabled: true,
             solution_probabilities: false,
             verify_scope: None,
+            continue_token: None,
             operation_sequence: None,
             sequence_dependencies: None,
             parity: None,
@@ -241,6 +243,7 @@ impl WebCommandRequest {
             conditioned_reachability_enabled: true,
             solution_probabilities: false,
             verify_scope: scope,
+            continue_token: None,
             operation_sequence: None,
             sequence_dependencies: None,
             parity: None,
@@ -253,6 +256,13 @@ impl WebCommandRequest {
     }
 }
 impl WebCommandRequest {
+    pub(crate) fn continue_search(token: String) -> Self {
+        let mut request = Self::verify(None);
+        request.command_kind = "continue".to_owned();
+        request.continue_token = Some(token);
+        request
+    }
+
     pub fn operation_sequence(problem: OperationDocumentProblem) -> Self {
         let mut request = Self::pc(0, RequestedSearchBackend::Cpu);
         request.command_kind = "utility-sequence".to_owned();
@@ -1439,6 +1449,11 @@ impl WebCommandRequest {
     }
 
     fn to_app_request_without_structural_profiles(&self) -> Result<AppRequest, WebCommandError> {
+        if self.command_kind == "continue" {
+            return Ok(AppRequest::new(AppCommand::Continue(
+                ContinueAppCommand::new(self.continue_token.clone()),
+            )));
+        }
         if self.command_kind == "utility-sequence" {
             let problem = self.operation_sequence.clone().ok_or_else(|| {
                 WebCommandError::new(

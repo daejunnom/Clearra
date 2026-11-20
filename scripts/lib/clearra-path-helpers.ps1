@@ -18,21 +18,24 @@ function Get-ClearraArtifactRoot {
     return (Get-ClearraCanonicalBuildRoot)
 }
 function Get-ClearraReportRoot {
-    $base = $null
     if (Test-StartTestsWindows) {
         $base = $env:LOCALAPPDATA
         if ([string]::IsNullOrWhiteSpace($base)) {
             $base = [System.Environment]::GetFolderPath("LocalApplicationData")
         }
+        $suffix = 'Clearra/state/reports'
     } else {
         $base = $env:XDG_STATE_HOME
+        if ([string]::IsNullOrWhiteSpace($base) -and -not [string]::IsNullOrWhiteSpace($env:HOME)) {
+            $base = Join-Path $env:HOME '.local/state'
+        }
+        $suffix = 'Clearra/reports'
     }
-    if ([string]::IsNullOrWhiteSpace($base)) {
-        $base = [System.IO.Path]::GetTempPath()
+    if ([string]::IsNullOrWhiteSpace($base) -or -not [IO.Path]::IsPathRooted($base)) {
+        throw 'A rooted Clearra report state directory is required.'
     }
-    $path = [System.IO.Path]::GetFullPath((Join-Path $base "Clearra/reports"))
-    Assert-ClearraPathOutsideRepository $path | Out-Null
-    return $path
+    $path = Assert-ClearraNoReparseBuildPath (Join-Path $base $suffix)
+    return (Assert-ClearraPathOutsideRepository $path)
 }
 function Test-ClearraPathInsideRepository(
     [string]$Path,
@@ -77,12 +80,30 @@ function Resolve-ClearraReportPath(
     if ([string]::IsNullOrWhiteSpace($ReportPath)) {
         return $null
     }
+    $root = Get-ClearraReportRoot
+    if (($ReportPath -split '[\x2f\x5c]') -contains '..') {
+        throw 'Parent traversal is not allowed in a Clearra report path.'
+    }
     $candidate = if ([System.IO.Path]::IsPathRooted($ReportPath)) {
         $ReportPath
     } else {
-        Join-Path (Get-ClearraReportRoot) $ReportPath
+        Join-Path $root $ReportPath
     }
-    return (Assert-ClearraPathOutsideRepository $candidate $RepositoryRoot)
+    $candidate = Assert-ClearraPathOutsideRepository $candidate $RepositoryRoot
+    $comparison = Get-ClearraBuildPathComparison
+    if (-not $candidate.Equals($root, $comparison) -and
+        -not $candidate.StartsWith($root + [IO.Path]::DirectorySeparatorChar, $comparison)) {
+        throw "Reports must stay under the managed Clearra state report root: $root"
+    }
+    $policy = Get-Content -LiteralPath (Join-Path (Resolve-ClearraRoot) 'config/clearra-management.v1.json') -Raw | ConvertFrom-Json
+    foreach ($component in ($candidate -split '[\x2f\x5c]')) {
+        foreach ($pattern in $policy.secret_path_patterns) {
+            if ($component -like $pattern) {
+                throw 'Credential paths cannot be used as report destinations.'
+            }
+        }
+    }
+    return (Assert-ClearraNoReparseBuildPath $candidate)
 }
 function Resolve-ClearraArtifactPath(
     [string]$ArtifactPath,

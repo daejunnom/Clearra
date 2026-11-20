@@ -1967,6 +1967,54 @@ fn all_mini_plus_b2b_pc_preserves_asymmetric_srs_plus_hold_paths() {
 }
 
 #[test]
+fn wasm_worker_replays_an_extended_visible_seven_token_without_distribution() {
+    let runtime = WasmCommandRuntime::default();
+    let seed = runtime
+        .run_command_text(concat!(
+            "clearra pc --lines 7 --height 7 --board-mask 0x3fdff7fdff3feffbfe ",
+            "--pieces 2 --queue II --no-hold --rule srs-plus --backend cpu ",
+            "--no-tablebase --no-legal-board --no-conditioned-reachability ",
+            "--objective all --count all --queue-knowledge visible-7 --workers 1",
+        ))
+        .expect("generate a 7L replay token");
+    let token = seed
+        .search_report()
+        .and_then(|report| {
+            report
+                .summary_fields
+                .iter()
+                .find_map(|(name, value)| (name == "scenario_replay_token").then_some(value))
+        })
+        .expect("scenario replay token from a completed PC search");
+    assert!(token.starts_with("sr3:w10:v7:"));
+
+    let command = format!("clearra continue --token {token}");
+    assert!(matches!(
+        WasmDistributedCoordinator::prepare(&runtime, &command).expect("replay ingress"),
+        WasmDistributedPreparation::Serial
+    ));
+    let mut worker = WasmWorkerJobRuntime::new(runtime);
+    let job = worker.start_job(&command).expect("queued replay");
+    let terminal = (0..4096)
+        .find_map(|_| {
+            let status = worker.advance_job(job, 64).expect("advance replay");
+            status.is_terminal().then_some(status)
+        })
+        .expect("tiny 7L replay reaches a terminal state");
+    let events = worker.drain_events(job);
+    assert_eq!(terminal, WasmWorkerAdvanceStatus::Completed, "{events:?}");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        WasmWorkerJobEvent::FinalResponse {
+            response,
+            search_report: None,
+            ..
+        } if response.status() == AppStatus::Success
+            && matches!(response.render_model(), Some(AppRenderModel::Continue(_)))
+    )));
+}
+
+#[test]
 fn wasm_runtime_does_not_use_native_path_semantics() {
     let error = WasmCommandRuntime::default()
         .compile_command_text("clearra pc --fixture C:\\field.json")

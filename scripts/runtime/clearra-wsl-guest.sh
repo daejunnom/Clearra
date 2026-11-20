@@ -28,8 +28,8 @@ ENTRY="${1:?Missing Clearra WSL entry}"
 shift
 (( EUID != 0 )) || exit 2
 lease_dir="${CLEARRA_WSL_LEASE_DIR:?Missing WSL owner lease}"
-[[ "$lease_dir" == "/run/user/$EUID/clearra-lease."* &&
-   "$(realpath -e -- "$lease_dir")" == "$lease_dir" &&
+clearra_wsl_lease_matches "$lease_dir" &&
+[[ "$(realpath -e -- "$lease_dir")" == "$lease_dir" &&
    -d "$lease_dir" && -O "$lease_dir" && ! -e "$lease_dir/parent-lost" ]] || exit 125
 
 # Merely starting a systemd unit is not proof of delegated cgroup controls.
