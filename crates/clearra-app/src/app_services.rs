@@ -1812,6 +1812,10 @@ fn execute_rust_legacy_cover(
 #[path = "app_services_legacy_cover_tests.rs"]
 mod legacy_cover_tests;
 
+#[cfg(test)]
+#[path = "app_services_legacy_cover_rust.rs"]
+mod legacy_cover_rust;
+
 impl Default for AppCoreExecutorService {
     fn default() -> Self {
         Self {
