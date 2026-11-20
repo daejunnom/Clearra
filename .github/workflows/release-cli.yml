@@ -181,6 +181,15 @@ jobs:
         with:
           entrypoint: node
           args: scripts/tools/verify-linux-cli-runtime.mjs --version ${{ needs.metadata.outputs.version }} --source-commit ${{ github.sha }}
+      - name: Verify the same packaged CLI through the production Discord adapter
+        shell: bash
+        env:
+          CLEARRA_REAL_PC24_RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          CLEARRA_REAL_PC24_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          export CLEARRA_REAL_PC24_CLI="$GITHUB_WORKSPACE/dist/Clearra-CLI-v${CLEARRA_REAL_PC24_RELEASE_VERSION}-linux-x86_64"
+          test -x "$CLEARRA_REAL_PC24_CLI"
+          node --test apps/clearra-discord-bot/test/realCliFullHeightProducts.test.mjs
       - name: Upload Linux CLI artifact
         uses: actions/upload-artifact@v4
         with:

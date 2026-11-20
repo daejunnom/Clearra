@@ -5,10 +5,10 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { decodeCtk3 } from 'ctk3';
+import { readCurrentProductRelease } from '../../../scripts/release/current-product-release.mjs';
 import { assertDiscordCanonicalOnlyResult, prepareClearraArguments } from '../src/clearra/command.mjs';
 import { buildCtk3Result } from '../src/clearra/ctk3-result.mjs';
 import { ClearraDirectExecutor } from '../src/clearra/direct-executor.mjs';
@@ -18,12 +18,14 @@ import { buildCanonicalPcPathReplayDocument, PC_PATH_REPLAY_FRAME_DELAY_MS }
 import { realCliProjectionProfiles } from './support/realCliProductProjectionRequests.mjs';
 import { realCliFullHeightProductRequests } from './support/realCliFullHeightProductRequests.mjs';
 import { assertFixtureCoverage } from './support/fixtureCoverage.mjs';
+import { checkedCliPath } from './support/realCliFullHeightArtifact.mjs';
 
 const executable = process.env.CLEARRA_REAL_PC24_CLI;
 const sourceCommit = process.env.CLEARRA_REAL_PC24_SOURCE_COMMIT;
+const packagedVersion = process.env.CLEARRA_REAL_PC24_RELEASE_VERSION;
 
-function invoke(arguments_) {
-  return execFileSync(executable, arguments_, { encoding: 'utf8', timeout: 120_000,
+function invoke(cliPath, arguments_) {
+  return execFileSync(cliPath, arguments_, { encoding: 'utf8', timeout: 120_000,
     maxBuffer: 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
@@ -144,17 +146,16 @@ function verifyProduct(raw, projected, input) {
 }
 
 test('real full-height CLI families survive Discord runner and render all physical rows', {
-  skip: !executable && !sourceCommit, timeout: 1_200_000,
+  skip: !executable && !sourceCommit && packagedVersion === undefined, timeout: 1_200_000,
 }, async t => {
-  assert.ok(isAbsolute(executable ?? ''), 'an explicit already-built CLI path is required');
   assert.match(sourceCommit ?? '', /^[0-9a-f]{40}$/u);
   const repository = await realpath(fileURLToPath(new URL('../../..', import.meta.url)));
-  const binary = process.platform === 'win32' ? 'clearra.exe' : 'clearra';
-  assert.ok(['debug', 'release'].some(profile =>
-    join(repository, 'build', 'cargo', 'default', profile, binary) === resolve(executable)));
-  assert.equal(await realpath(executable), resolve(executable));
-  const digest = createHash('sha256').update(await readFile(executable)).digest('hex');
-  const executor = new ClearraDirectExecutor({ executable, processLogicalProcessors: 1,
+  const cliPath = checkedCliPath({ repository, path: executable, version: packagedVersion,
+    release: packagedVersion === undefined ? undefined : readCurrentProductRelease(repository),
+    platform: process.platform, arch: process.arch });
+  assert.equal(await realpath(executable), cliPath);
+  const digest = createHash('sha256').update(await readFile(cliPath)).digest('hex');
+  const executor = new ClearraDirectExecutor({ executable: cliPath, processLogicalProcessors: 1,
     searchWorkersPerSession: 1, useAllLogicalProcessors: false, searchTimeoutMs: 120_000,
     interactionDeadlineMs: 150_000, maxOutputBytes: 1024 * 1024,
     maxArtifactBytes: 1024 * 1024, terminationGraceMs: 1_000 });
@@ -163,7 +164,7 @@ test('real full-height CLI families survive Discord runner and render all physic
   const completed = [];
   for (const profile of realCliProjectionProfiles) {
     for (const input of planned.get(profile)) {
-      const stdout = invoke(prepareClearraArguments(input.arguments, { workers: 1,
+      const stdout = invoke(cliPath, prepareClearraArguments(input.arguments, { workers: 1,
         logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true }));
       const raw = JSON.parse(stdout);
       const direct = assertDiscordCanonicalOnlyResult({ exitCode: 0, signal: null, stderr: '', stdout });
@@ -182,7 +183,8 @@ test('real full-height CLI families survive Discord runner and render all physic
   }
   assertFixtureCoverage(completed, [...planned].flatMap(([profile, inputs]) => inputs.map(input =>
     [profile, input.name, input.product, input.kind, input.preserveB2b])), 'real full-height CLI/Discord products');
-  assert.equal(createHash('sha256').update(await readFile(executable)).digest('hex'), digest,
+  assert.equal(await realpath(cliPath), cliPath);
+  assert.equal(createHash('sha256').update(await readFile(cliPath)).digest('hex'), digest,
     'the built binary must not change during exact-source readback');
   t.diagnostic(`source=${sourceCommit} cli_sha256=${digest} cases=${completed.length} release_authority=false`);
 });
