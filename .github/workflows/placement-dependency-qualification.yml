@@ -144,6 +144,8 @@ jobs:
           cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_tests || status=1
           cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_rust::tests:: || status=1
           cargo test --locked -p clearra-app --features native-c-core --lib pc_tiling_candidate_budget_preserves_failure_without_publishing || status=1
+          cargo test --locked -p clearra-app --features native-c-core --lib setup_score_ordinals || status=1
+          cargo test --locked -p clearra-app --features native-c-core --lib setup_score_evaluation_identity_binds || status=1
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
           cargo test --locked -p clearra-app --features native-c-core --test exact_accelerator_product_execution setup_score_reuse || status=1
           exit "$status"
@@ -243,9 +245,28 @@ jobs:
           & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build the ordinary exact-source product WASM once
+        id: product-wasm
         run: node scripts/tools/build-clearra-wasm.mjs --destination "$CLEARRA_REAL_ACCELERATOR_WASM_DIR"
       - name: Compare the actual Web verifier Worker with serial WASM
         run: node scripts/tools/run-real-web-verifier-pool-smoke.mjs --without-accelerators
+      - name: Install pinned Chromium tooling for the same WASM
+        if: ${{ !cancelled() && steps.product-wasm.outcome == 'success' }}
+        id: browser-tools
+        shell: bash
+        run: |
+          browser_tools="$RUNNER_TEMP/clearra-browser-tools"
+          export PLAYWRIGHT_BROWSERS_PATH="$browser_tools/browsers"
+          npm install --prefix "$browser_tools" --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          "$browser_tools/node_modules/.bin/playwright" install --with-deps chromium
+          printf 'CLEARRA_BROWSER_TOOLS_ROOT=%s\nPLAYWRIGHT_BROWSERS_PATH=%s\n' \
+            "$browser_tools" "$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
+      - name: Compare real Chromium product Workers at 4194
+        if: ${{ !cancelled() && steps.product-wasm.outcome == 'success' && steps.browser-tools.outcome == 'success' }}
+        shell: bash
+        run: |
+          "$CLEARRA_MANAGE_BIN" --root "$GITHUB_WORKSPACE" runtime run \
+            --producer web-cpu-chromium --profile local-service --timeout 360 -- \
+            node scripts/tools/run-real-chromium-cpu-worker-smoke.mjs
   p7p4-exact-handoff:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/v090-relation-rust-p7p4'
     runs-on: ubuntu-latest
