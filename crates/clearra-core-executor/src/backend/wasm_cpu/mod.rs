@@ -80,6 +80,8 @@ mod structural_graph_probability_tests;
 #[cfg(any(test, feature = "local-search-ab"))]
 mod structural_order;
 #[cfg(feature = "local-search-ab")]
+pub use geometry::{geometry_domain_experiment_totals, GeometryDomainExperimentTotals};
+#[cfg(feature = "local-search-ab")]
 pub use structural_order::{structural_order_experiment_totals, StructuralOrderMetrics};
 mod terminal_hold_projection;
 mod tiling_parallel;

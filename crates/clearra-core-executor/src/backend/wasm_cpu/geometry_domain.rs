@@ -21,6 +21,17 @@ pub(super) struct DomainCompilation {
     pub status: DomainStatus,
     pub propagation: DomainPropagation,
     pub cell_piece_masks: [u8; 64],
+    #[cfg(any(feature = "local-search-ab", test))]
+    pub observation: DomainCompileObservation,
+}
+
+#[cfg(any(feature = "local-search-ab", test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct DomainCompileObservation {
+    pub support_cells_examined: u64,
+    pub apdp_static_check: bool,
+    pub apdp_static_complete: bool,
+    pub apdp_pivot_tightened: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,6 +123,8 @@ impl DomainSupportSnapshot {
 #[derive(Debug, Default)]
 pub(super) struct DomainSupportCache {
     ancestors: Vec<DomainSupportSnapshot>,
+    #[cfg(any(feature = "local-search-ab", test))]
+    reused_support_cells: u32,
 }
 
 impl DomainSupportCache {
@@ -143,6 +156,11 @@ impl DomainSupportCache {
                 cells[cell as usize] = support;
                 support
             });
+        #[cfg(any(feature = "local-search-ab", test))]
+        {
+            self.reused_support_cells =
+                (result.observation.support_cells_examined & !dirty).count_ones();
+        }
         if result.status == DomainStatus::Supported && self.ancestors.try_reserve(1).is_ok() {
             self.ancestors.push(DomainSupportSnapshot {
                 depth,
@@ -156,6 +174,11 @@ impl DomainSupportCache {
 
     pub fn retained_bytes(&self) -> usize {
         self.ancestors.capacity() * core::mem::size_of::<DomainSupportSnapshot>()
+    }
+
+    #[cfg(any(feature = "local-search-ab", test))]
+    pub fn reused_support_cells(&self) -> u32 {
+        self.reused_support_cells
     }
 }
 
@@ -198,6 +221,8 @@ impl DomainPropagation {
         let mut cell_piece_masks = [0_u8; 64];
         let mut common_owner_cells = [0_u64; 64];
         let mut parents = core::array::from_fn(|index| index as u8);
+        #[cfg(any(feature = "local-search-ab", test))]
+        let mut observation = DomainCompileObservation::default();
 
         let mut cells = remaining;
         while cells != 0 {
@@ -208,6 +233,10 @@ impl DomainPropagation {
             cell_piece_masks[cell as usize] = support.pieces;
             common_owner_cells[cell as usize] = support.common_owner_cells;
             if support_count == 0 {
+                #[cfg(any(feature = "local-search-ab", test))]
+                {
+                    observation.support_cells_examined = remaining ^ cells;
+                }
                 result.pivot_cell = cell;
                 result.pivot_required_cells = 1_u64 << cell;
                 result.pivot_support_count = 0;
@@ -215,6 +244,8 @@ impl DomainPropagation {
                     status: DomainStatus::Empty,
                     propagation: result,
                     cell_piece_masks,
+                    #[cfg(any(feature = "local-search-ab", test))]
+                    observation,
                 };
             }
             if support_count < result.pivot_support_count {
@@ -223,6 +254,10 @@ impl DomainPropagation {
                 result.pivot_support_count = support_count;
                 result.pivot_piece_mask = support.pieces;
             }
+        }
+        #[cfg(any(feature = "local-search-ab", test))]
+        {
+            observation.support_cells_examined = remaining;
         }
 
         // Every feasible full placement covering a cell also covers the
@@ -257,6 +292,8 @@ impl DomainPropagation {
                     status: DomainStatus::Empty,
                     propagation: result,
                     cell_piece_masks,
+                    #[cfg(any(feature = "local-search-ab", test))]
+                    observation,
                 };
             }
             let (count, piece_mask) =
@@ -269,6 +306,8 @@ impl DomainPropagation {
                     status: DomainStatus::Empty,
                     propagation: result,
                     cell_piece_masks,
+                    #[cfg(any(feature = "local-search-ab", test))]
+                    observation,
                 };
             }
             if count < result.pivot_support_count {
@@ -293,6 +332,8 @@ impl DomainPropagation {
                     status: DomainStatus::Empty,
                     propagation: result,
                     cell_piece_masks,
+                    #[cfg(any(feature = "local-search-ab", test))]
+                    observation,
                 };
             }
             result.pivot_cell = cell;
@@ -302,9 +343,14 @@ impl DomainPropagation {
             result.bumper_cell = cell;
         }
 
-        if crate::search_prune_policy::apdp_enabled()
+        let apdp_candidate = crate::search_prune_policy::apdp_enabled()
             && result.pivot_required_cells.count_ones() == 3
-            && partial_shape_kind(catalog.width(), result.pivot_required_cells) != 0
+            && partial_shape_kind(catalog.width(), result.pivot_required_cells) != 0;
+        #[cfg(any(feature = "local-search-ab", test))]
+        {
+            observation.apdp_static_check = apdp_candidate;
+        }
+        if apdp_candidate
             && apdp_domain_is_complete(
                 catalog,
                 remaining,
@@ -312,6 +358,10 @@ impl DomainPropagation {
                 result.pivot_required_cells,
             )
         {
+            #[cfg(any(feature = "local-search-ab", test))]
+            {
+                observation.apdp_static_complete = true;
+            }
             let (count, piece_mask) = exact_parent_rows(
                 catalog,
                 remaining,
@@ -325,12 +375,18 @@ impl DomainPropagation {
                     status: DomainStatus::Empty,
                     propagation: result,
                     cell_piece_masks,
+                    #[cfg(any(feature = "local-search-ab", test))]
+                    observation,
                 };
             }
             if count < result.pivot_support_count {
                 result.pivot_support_count = count;
                 result.pivot_piece_mask = piece_mask;
                 result.apdp_required_cells = result.pivot_required_cells;
+                #[cfg(any(feature = "local-search-ab", test))]
+                {
+                    observation.apdp_pivot_tightened = true;
+                }
             }
         }
 
@@ -338,6 +394,8 @@ impl DomainPropagation {
             status: DomainStatus::Supported,
             propagation: result,
             cell_piece_masks,
+            #[cfg(any(feature = "local-search-ab", test))]
+            observation,
         }
     }
 

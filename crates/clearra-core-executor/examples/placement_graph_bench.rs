@@ -228,6 +228,7 @@ mod run {
         let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
         let structural_totals =
             clearra_core_executor::backend::structural_order_experiment_totals();
+        let geometry_domains = clearra_core_executor::backend::geometry_domain_experiment_totals();
         let evidence_started = Instant::now();
         let errors = validate(&result, small, capacity.hard_limit());
         let solution_coverage = match (capture_path, spool) {
@@ -334,6 +335,21 @@ mod run {
                 "residual_states": structural_totals.conditional_order.residual_states,
                 "graph_bypasses": structural_totals.conditional_order.graph_bypasses,
                 "reused_pose_proofs": structural_totals.conditional_order.reused_pose_proofs
+            },
+            "geometry_domain": {
+                "scope": "completed compact family roots; not memo/column exits, partial roots or extended",
+                "completed_families": geometry_domains.completed_families,
+                "minimum_compiles": geometry_domains.minimum_compiles,
+                "minimum_resource_authoritative": geometry_domains.minimum_resource_authoritative,
+                "minimum_below_seven_pieces": geometry_domains.minimum_below_seven_pieces,
+                "minimum_empty_origin": geometry_domains.minimum_empty_origin,
+                "advanced_full_compiles": geometry_domains.advanced_full_compiles,
+                "advanced_incremental_compiles": geometry_domains.advanced_incremental_compiles,
+                "support_cells_reused": geometry_domains.support_cells_reused,
+                "support_cells_recomputed": geometry_domains.support_cells_recomputed,
+                "apdp_static_checks": geometry_domains.apdp_static_checks,
+                "apdp_static_complete": geometry_domains.apdp_static_complete,
+                "apdp_pivot_tightenings": geometry_domains.apdp_pivot_tightenings
             },
             "other_process_configuration": {
                 "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),

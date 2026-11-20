@@ -27,14 +27,123 @@ const UNION_LEVEL_COUNT: usize = 32;
 const AVAILABLE_ROW_CACHE_MAX_ROWS: usize = 8 * 1024 * 1024;
 const TARGET_PATTERN_SCAN_WORK_BUDGET: usize = 8_192;
 
+#[cfg(any(feature = "local-search-ab", test))]
 fn incremental_domain_enabled() -> bool {
-    #[cfg(any(feature = "local-search-ab", test))]
-    {
-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ENABLED.get_or_init(|| std::env::var("CLEARRA_INCREMENTAL_DOMAIN").as_deref() == Ok("1"))
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("CLEARRA_INCREMENTAL_DOMAIN").as_deref() == Ok("1"))
+}
+
+/// Exact compact-domain activity of completed family compilers only. This
+/// excludes early projection/cache exits, extended domains and incomplete
+/// families. A zero means none in the recorded families.
+#[cfg(any(feature = "local-search-ab", test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GeometryDomainExperimentTotals {
+    pub completed_families: u64,
+    pub minimum_compiles: u64,
+    pub minimum_resource_authoritative: u64,
+    pub minimum_below_seven_pieces: u64,
+    pub minimum_empty_origin: u64,
+    /// Reference route only. A full recompute inside the incremental route
+    /// is still an incremental compile, with zero reused cells.
+    pub advanced_full_compiles: u64,
+    pub advanced_incremental_compiles: u64,
+    /// Counts advanced-route cell support work, not minimum-route scans.
+    pub support_cells_reused: u64,
+    pub support_cells_recomputed: u64,
+    pub apdp_static_checks: u64,
+    pub apdp_static_complete: u64,
+    pub apdp_pivot_tightenings: u64,
+}
+
+#[cfg(any(feature = "local-search-ab", test))]
+impl GeometryDomainExperimentTotals {
+    fn record_minimum(&mut self, resource_authoritative: bool, target_depth: u8) {
+        self.minimum_compiles += 1;
+        // Reasons are disjoint, in the order used by the routing decision.
+        if resource_authoritative {
+            self.minimum_resource_authoritative += 1;
+        } else if target_depth < 7 {
+            self.minimum_below_seven_pieces += 1;
+        } else {
+            self.minimum_empty_origin += 1;
+        }
     }
-    #[cfg(not(any(feature = "local-search-ab", test)))]
-    false
+
+    fn record_advanced(
+        &mut self,
+        incremental: bool,
+        observation: super::geometry_domain::DomainCompileObservation,
+        reused: u32,
+    ) {
+        if incremental {
+            self.advanced_incremental_compiles += 1;
+        } else {
+            self.advanced_full_compiles += 1;
+        }
+        self.support_cells_reused += u64::from(reused);
+        self.support_cells_recomputed +=
+            u64::from(observation.support_cells_examined.count_ones() - reused);
+        self.apdp_static_checks += u64::from(observation.apdp_static_check);
+        self.apdp_static_complete += u64::from(observation.apdp_static_complete);
+        self.apdp_pivot_tightenings += u64::from(observation.apdp_pivot_tightened);
+    }
+
+    #[cfg(feature = "local-search-ab")]
+    fn merge_completed_family(&mut self, family: Self) {
+        let counters = [
+            (&mut self.completed_families, family.completed_families),
+            (&mut self.minimum_compiles, family.minimum_compiles),
+            (
+                &mut self.minimum_resource_authoritative,
+                family.minimum_resource_authoritative,
+            ),
+            (
+                &mut self.minimum_below_seven_pieces,
+                family.minimum_below_seven_pieces,
+            ),
+            (&mut self.minimum_empty_origin, family.minimum_empty_origin),
+            (
+                &mut self.advanced_full_compiles,
+                family.advanced_full_compiles,
+            ),
+            (
+                &mut self.advanced_incremental_compiles,
+                family.advanced_incremental_compiles,
+            ),
+            (&mut self.support_cells_reused, family.support_cells_reused),
+            (
+                &mut self.support_cells_recomputed,
+                family.support_cells_recomputed,
+            ),
+            (&mut self.apdp_static_checks, family.apdp_static_checks),
+            (&mut self.apdp_static_complete, family.apdp_static_complete),
+            (
+                &mut self.apdp_pivot_tightenings,
+                family.apdp_pivot_tightenings,
+            ),
+        ];
+        for (total, delta) in counters {
+            *total = total.saturating_add(delta);
+        }
+    }
+}
+
+#[cfg(feature = "local-search-ab")]
+fn completed_domain_totals() -> std::sync::MutexGuard<'static, GeometryDomainExperimentTotals> {
+    static TOTALS: std::sync::OnceLock<std::sync::Mutex<GeometryDomainExperimentTotals>> =
+        std::sync::OnceLock::new();
+    TOTALS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Process diagnostic totals; read after joining the search workers. Not a
+/// per-session receipt when multiple experiments share a process.
+#[cfg(feature = "local-search-ab")]
+pub fn geometry_domain_experiment_totals() -> GeometryDomainExperimentTotals {
+    *completed_domain_totals()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -855,6 +964,10 @@ struct FamilyCompiler {
     stack: Vec<CompileFrame>,
     residual_memo: ResidualMemo,
     domain_support_cache: DomainSupportCache,
+    #[cfg(any(feature = "local-search-ab", test))]
+    incremental_domain: bool,
+    #[cfg(any(feature = "local-search-ab", test))]
+    domain_metrics: GeometryDomainExperimentTotals,
     projection_cache: ProjectionReachabilityCache,
     family: GeometrySolutionFamily,
     component_entries: Vec<ComponentFamilyEntry>,
@@ -899,6 +1012,10 @@ impl FamilyCompiler {
             stack,
             residual_memo: ResidualMemo::disabled(),
             domain_support_cache: DomainSupportCache::default(),
+            #[cfg(any(feature = "local-search-ab", test))]
+            incremental_domain: incremental_domain_enabled(),
+            #[cfg(any(feature = "local-search-ab", test))]
+            domain_metrics: GeometryDomainExperimentTotals::default(),
             projection_cache: ProjectionReachabilityCache::default(),
             family: GeometrySolutionFamily::new(),
             component_entries: Vec::new(),
@@ -929,6 +1046,10 @@ impl FamilyCompiler {
             stack: vec![CompileFrame::root(required_cells)],
             residual_memo: ResidualMemo::new(target_depth),
             domain_support_cache: DomainSupportCache::default(),
+            #[cfg(any(feature = "local-search-ab", test))]
+            incremental_domain: incremental_domain_enabled(),
+            #[cfg(any(feature = "local-search-ab", test))]
+            domain_metrics: GeometryDomainExperimentTotals::default(),
             projection_cache: ProjectionReachabilityCache::default(),
             family: GeometrySolutionFamily::new(),
             component_entries: Vec::new(),
@@ -961,6 +1082,10 @@ impl FamilyCompiler {
             stack: vec![CompileFrame::child(remaining, depth, NO_ROW, 0)],
             residual_memo: state.residual_memo,
             domain_support_cache: DomainSupportCache::default(),
+            #[cfg(any(feature = "local-search-ab", test))]
+            incremental_domain: incremental_domain_enabled(),
+            #[cfg(any(feature = "local-search-ab", test))]
+            domain_metrics: GeometryDomainExperimentTotals::default(),
             projection_cache: state.projection_cache,
             family: state.family,
             component_entries: Vec::new(),
@@ -1034,7 +1159,11 @@ impl FamilyCompiler {
                 advanced_analysis_enabled && self.compile_domain.allows_component_composition();
             let advanced_domain = advanced_analysis_enabled && catalog.initial_board() != 0;
             let (domain_status, domain, cell_piece_masks) = if advanced_domain {
-                let compilation = if incremental_domain_enabled() {
+                #[cfg(any(feature = "local-search-ab", test))]
+                let incremental_domain = self.incremental_domain;
+                #[cfg(not(any(feature = "local-search-ab", test)))]
+                let incremental_domain = false;
+                let compilation = if incremental_domain {
                     self.domain_support_cache.compile(
                         catalog,
                         depth,
@@ -1044,12 +1173,25 @@ impl FamilyCompiler {
                 } else {
                     DomainPropagation::compile(catalog, remaining, feasible_piece_mask)
                 };
+                #[cfg(any(feature = "local-search-ab", test))]
+                self.domain_metrics.record_advanced(
+                    incremental_domain,
+                    compilation.observation,
+                    if incremental_domain {
+                        self.domain_support_cache.reused_support_cells()
+                    } else {
+                        0
+                    },
+                );
                 (
                     compilation.status,
                     compilation.propagation,
                     compilation.cell_piece_masks,
                 )
             } else {
+                #[cfg(any(feature = "local-search-ab", test))]
+                self.domain_metrics
+                    .record_minimum(self.resource_authoritative, self.target_depth);
                 let (status, propagation) =
                     DomainPropagation::compile_minimum(catalog, remaining, feasible_piece_mask);
                 (status, propagation, [0; 64])
@@ -1212,6 +1354,12 @@ impl FamilyCompiler {
         }
         if frame.chosen_row == NO_ROW && frame.chosen_component_family == FAMILY_INVALID {
             self.root_family = suffix_family;
+            #[cfg(any(feature = "local-search-ab", test))]
+            {
+                self.domain_metrics.completed_families = 1;
+                #[cfg(feature = "local-search-ab")]
+                completed_domain_totals().merge_completed_family(self.domain_metrics);
+            }
             return CompileAdvance::Complete;
         }
 
@@ -1543,6 +1691,88 @@ mod precomputed_geometry_tests {
     use clearra_problem::ProblemCompiler;
 
     use super::*;
+
+    #[test]
+    fn nonempty_eight_i_advanced_domain_preserves_fixture_identities() {
+        use clearra_core_domain::piece::piece_kind::PieceKind;
+        use clearra_pc_graph::request::{
+            PcCountPolicy, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+        };
+        use clearra_rules::profile::builtin_rules::jstris_180;
+        use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0xc030_0c03),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 8])),
+            PieceWindow::new(8),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(8))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_rule(jstris_180());
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("four-line problem");
+        let catalog = GeometryCatalog::compile(&problem).expect("nonempty geometry catalog");
+        assert_eq!(catalog.height(), 4);
+        assert_eq!(catalog.required_cells().count_ones(), 32);
+        let universe = problem
+            .piece_source()
+            .materialized_universe()
+            .expect("one fixed queue");
+        let family = universe.packing_multiset_family_for_execution(
+            8,
+            problem.initial_hold(),
+            false,
+            super::super::packing_hold_projection(&problem),
+        );
+        let compile = |incremental| {
+            let mut search =
+                GeometrySearch::new(universe, &family, catalog.required_cells(), false)
+                    .expect("geometry search");
+            let mut compiler = search.compiler.take().expect("exact family compiler");
+            assert_eq!(compiler.target_depth, 8);
+            assert!(!compiler.resource_authoritative);
+            compiler.incremental_domain = incremental;
+            loop {
+                match compiler.advance(&catalog) {
+                    CompileAdvance::Pending => {}
+                    CompileAdvance::Complete => break,
+                    CompileAdvance::ResourceIncomplete => panic!("eight-I geometry incomplete"),
+                }
+            }
+            let metrics = compiler.domain_metrics;
+            let mut enumerator = compiler.into_enumerator();
+            let mut identities = BTreeSet::new();
+            while let Some(candidate) = enumerator.next_candidate(&catalog).expect("enumeration") {
+                identities.insert(candidate.identity);
+            }
+            (identities, metrics)
+        };
+
+        let (full, a) = compile(false);
+        let (incremental, b) = compile(true);
+        assert!(
+            !full.is_empty(),
+            "eight vertical I pieces tile this residual"
+        );
+        assert_eq!(incremental, full);
+        assert_eq!(a.completed_families, 1);
+        assert_eq!(b.completed_families, 1);
+        assert_eq!(a.minimum_compiles, 0);
+        assert_eq!(b.minimum_compiles, 0);
+        assert!(a.advanced_full_compiles > 1);
+        assert_eq!(a.advanced_full_compiles, b.advanced_incremental_compiles);
+        assert_eq!(a.advanced_incremental_compiles, 0);
+        assert_eq!(b.advanced_full_compiles, 0);
+        assert_eq!(a.support_cells_reused, 0);
+        assert!(b.support_cells_reused > 0);
+        assert_eq!(
+            a.support_cells_recomputed,
+            b.support_cells_recomputed + b.support_cells_reused
+        );
+        assert_eq!(a.apdp_static_checks, b.apdp_static_checks);
+        assert_eq!(a.apdp_static_complete, b.apdp_static_complete);
+        assert_eq!(a.apdp_pivot_tightenings, b.apdp_pivot_tightenings);
+    }
 
     #[test]
     fn sealed_candidates_seed_the_same_root_rows_as_exact_geometry() {
