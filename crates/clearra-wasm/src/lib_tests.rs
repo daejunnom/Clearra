@@ -3975,12 +3975,26 @@ fn fixed_no_hold_opening_scoped_worker_finals_require_the_issued_and_merged_fami
     use crate::distributed_runtime::scoped_compact_pc2::{
         ScopeError, ScopedCoordinator, WorkTicket, WorkerFinal,
     };
-    use crate::distributed_wire::scoped_compact_terminal;
+    use crate::distributed_wire::{decode_candidate_batch, scoped_compact_terminal};
     use clearra_cli_command::{CliCommandErrorCode, CliCommandParser};
+    use sha2::{Digest, Sha256};
 
     const JOB_ID: u32 = 67;
     const COMMAND: &str =
         "clearra pc --lines 2 --queue IIOOOIIOOO --no-hold --count all --backend cpu --workers 3";
+
+    fn expected_issued(work: &[WorkTicket]) -> (u64, [u8; 32]) {
+        let mut mask = 0_u64;
+        let mut stream = Sha256::new_with_prefix(b"clearra.compact-pc2.ordered-packet-bytes.v1\0");
+        for ticket in work {
+            let (ordinal, packet) = ticket.issued_packet();
+            assert_eq!(mask & (1 << ordinal), 0);
+            mask |= 1 << ordinal;
+            stream.update(ordinal.to_le_bytes());
+            stream.update(Sha256::digest(packet));
+        }
+        (mask, stream.finalize().into())
+    }
 
     fn issue(runtime: &WasmCommandRuntime) -> (ScopedCoordinator, [Vec<WorkTicket>; 2]) {
         let mut source = ScopedCoordinator::prepare(runtime, JOB_ID, COMMAND)
@@ -4029,15 +4043,36 @@ fn fixed_no_hold_opening_scoped_worker_finals_require_the_issued_and_merged_fami
     ));
 
     let (mut source, [first, second]) = issue(&runtime);
+    let issued = [expected_issued(&first), expected_issued(&second)];
     let first = finalize(&mut source, 0, first);
     let second = finalize(&mut source, 1, second);
+    let terminal_sha256: [[u8; 32]; 2] = [
+        Sha256::digest(first.sealed_bytes()).into(),
+        Sha256::digest(second.sealed_bytes()).into(),
+    ];
     source
         .apply_final(second)
         .expect("later branch result can merge first");
     source
         .apply_final(first)
         .expect("earlier branch result can merge last");
-    let result = source.finish().expect("all exact scoped finals applied");
+    let (result, provenance) = source.finish().expect("all exact scoped finals applied");
+    let (job_id, epoch, request_sha256) = provenance.binding();
+    assert_eq!(job_id, JOB_ID);
+    assert_ne!(epoch, 0);
+    let expected_request_sha256: [u8; 32] = Sha256::digest(COMMAND.as_bytes()).into();
+    assert_eq!(request_sha256, expected_request_sha256);
+    for (branch, receipt) in provenance.branches().iter().enumerate() {
+        let receipt = receipt.expect("both real final receipts were merged");
+        assert_eq!(receipt.applied_work, issued[branch].0);
+        assert_eq!(receipt.packet_stream_sha256, issued[branch].1);
+        assert_eq!(receipt.terminal_sha256, terminal_sha256[branch]);
+    }
+    assert_eq!(issued[0].0 & issued[1].0, 0);
+    assert_eq!(
+        provenance.candidate_count(),
+        (issued[0].0 | issued[1].0).count_ones()
+    );
     assert_eq!(result.app_response().status(), AppStatus::Success);
     let report = result.search_report().expect("complete report");
     assert!(report.count_complete && report.solution_keys_complete && report.probability_complete);
@@ -4129,19 +4164,46 @@ fn fixed_no_hold_opening_scoped_worker_finals_require_the_issued_and_merged_fami
     let (mut invalid_body, [first, _second]) = issue(&runtime);
     let mut final_frame = finalize(&mut invalid_body, 0, first);
     final_frame.corrupt_frame(|wire| {
-        // The fixed frame deliberately leaves validation of all inner fields
-        // to the existing guarded reducer ingress.
+        // Passing fixed framing does not authorize mutation of already
+        // sealed verifier bytes or an attempted merge.
         wire[96..100].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(scoped_compact_terminal::decode(wire).is_ok());
     });
-    assert!(matches!(
+    assert_eq!(
         invalid_body.apply_final(final_frame),
-        Err(ScopeError::Runtime(error)) if error.code() == "E_WASM_DISTRIBUTED_PARTIAL_INVALID"
-    ));
+        Err(ScopeError::MutatedTerminal),
+    );
     assert!(matches!(
         invalid_body.finish(),
         Err(ScopeError::InvalidPhase)
     ));
+
+    let (mut mutated, [first, _second]) = issue(&runtime);
+    let mut worker = mutated.install_worker(0).expect("scoped worker");
+    let mut ticket = first.into_iter().next().expect("issued work");
+    ticket.corrupt_packet(|bytes| {
+        let before = decode_candidate_batch(bytes).expect("original issued packet");
+        // Change the first row ID, not the packet order or syntactic width.
+        bytes[32] ^= 1;
+        let after = decode_candidate_batch(bytes).expect("still valid candidate framing");
+        assert_eq!(before[0].ordinal(), after[0].ordinal());
+        assert_ne!(before[0].row_ids(), after[0].row_ids());
+    });
+    assert_eq!(worker.consume(ticket), Err(ScopeError::MutatedWork));
+    assert!(matches!(worker.finish(), Err(ScopeError::Incomplete)));
+    assert!(matches!(mutated.finish(), Err(ScopeError::Incomplete)));
+
+    let (mut unordered, [first, _second]) = issue(&runtime);
+    let mut worker = unordered.install_worker(0).expect("scoped worker");
+    let mut work = first.into_iter();
+    let earlier = work.next().expect("earlier ordinal");
+    let later = work.next().expect("later ordinal");
+    worker
+        .consume(later)
+        .expect("later ordinal on an empty branch");
+    assert_eq!(worker.consume(earlier), Err(ScopeError::UnorderedWork));
+    assert!(matches!(worker.finish(), Err(ScopeError::Incomplete)));
+    assert!(matches!(unordered.finish(), Err(ScopeError::Incomplete)));
 
     let (mut foreign, [first, _unused]) = issue(&runtime);
     let foreign_final = finalize(&mut foreign, 0, first);

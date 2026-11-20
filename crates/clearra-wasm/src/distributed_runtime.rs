@@ -4620,6 +4620,15 @@ pub(crate) mod scoped_compact_pc2 {
     const MAX_WORK_BYTES: usize = 128;
     static NEXT_SCOPE_EPOCH: AtomicU64 = AtomicU64::new(1);
 
+    fn packet_stream_hasher() -> Sha256 {
+        Sha256::new_with_prefix(b"clearra.compact-pc2.ordered-packet-bytes.v1\0")
+    }
+
+    fn commit_packet(stream: &mut Sha256, ordinal: u32, payload_sha256: &[u8; 32]) {
+        stream.update(ordinal.to_le_bytes());
+        stream.update(payload_sha256);
+    }
+
     #[derive(Debug, Eq, PartialEq)]
     pub(crate) enum ScopeError {
         Unsupported,
@@ -4627,6 +4636,9 @@ pub(crate) mod scoped_compact_pc2 {
         Capacity,
         Cancelled,
         ForeignScope,
+        MutatedWork,
+        UnorderedWork,
+        MutatedTerminal,
         Duplicate,
         Incomplete,
         MalformedTerminal,
@@ -4662,18 +4674,65 @@ pub(crate) mod scoped_compact_pc2 {
         scope: Arc<SourceScope>,
         branch: usize,
         ordinal: u32,
+        payload_sha256: [u8; 32],
         producer_bytes: Vec<u8>,
+    }
+
+    impl WorkTicket {
+        pub(crate) fn issued_packet(&self) -> (u32, &[u8]) {
+            (self.ordinal, &self.producer_bytes)
+        }
+
+        pub(crate) fn corrupt_packet(&mut self, edit: impl FnOnce(&mut Vec<u8>)) {
+            edit(&mut self.producer_bytes);
+        }
     }
 
     pub(crate) struct WorkerFinal {
         scope: Arc<SourceScope>,
         branch: usize,
+        packet_stream_sha256: [u8; 32],
+        terminal_sha256: [u8; 32],
         worker_bytes: Vec<u8>,
     }
 
     impl WorkerFinal {
+        pub(crate) fn sealed_bytes(&self) -> &[u8] {
+            &self.worker_bytes
+        }
+
         pub(crate) fn corrupt_frame(&mut self, edit: impl FnOnce(&mut Vec<u8>)) {
             edit(&mut self.worker_bytes);
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct MergedBranchProvenance {
+        pub(crate) applied_work: u64,
+        pub(crate) packet_stream_sha256: [u8; 32],
+        pub(crate) terminal_sha256: [u8; 32],
+    }
+
+    /// A delivery-only report. Neither possession of this test model nor
+    /// equality of digests establishes a worker identity or the separate
+    /// physical five-lock continuation witness.
+    pub(crate) struct MergedPc2Provenance {
+        binding: (u32, u64, [u8; 32]),
+        candidate_count: u32,
+        branches: [Option<MergedBranchProvenance>; BRANCHES],
+    }
+
+    impl MergedPc2Provenance {
+        pub(crate) fn binding(&self) -> (u32, u64, [u8; 32]) {
+            self.binding
+        }
+
+        pub(crate) fn candidate_count(&self) -> u32 {
+            self.candidate_count
+        }
+
+        pub(crate) fn branches(&self) -> &[Option<MergedBranchProvenance>; BRANCHES] {
+            &self.branches
         }
     }
 
@@ -4682,8 +4741,9 @@ pub(crate) mod scoped_compact_pc2 {
         runtime: WasmCommandRuntime,
         source: WasmDistributedCoordinator,
         issued: [u64; BRANCHES],
+        issued_streams: [Sha256; BRANCHES],
         installed: [bool; BRANCHES],
-        merged: [bool; BRANCHES],
+        merged: [Option<MergedBranchProvenance>; BRANCHES],
         next_ordinal: u32,
         closed: bool,
         failed: bool,
@@ -4749,8 +4809,9 @@ pub(crate) mod scoped_compact_pc2 {
                 runtime: runtime.clone(),
                 source,
                 issued: [0; BRANCHES],
+                issued_streams: std::array::from_fn(|_| packet_stream_hasher()),
                 installed: [false; BRANCHES],
-                merged: [false; BRANCHES],
+                merged: [None; BRANCHES],
                 next_ordinal: 0,
                 closed: false,
                 failed: false,
@@ -4775,6 +4836,8 @@ pub(crate) mod scoped_compact_pc2 {
                         if ordinal >= MAX_WORK || producer_bytes.capacity() > MAX_WORK_BYTES {
                             return Err(ScopeError::Capacity);
                         }
+                        let payload_sha256 = Sha256::digest(&producer_bytes).into();
+                        commit_packet(&mut self.issued_streams[branch], ordinal, &payload_sha256);
                         self.issued[branch] |= 1 << ordinal;
                         self.next_ordinal += 1;
                         self.failed = false;
@@ -4782,6 +4845,7 @@ pub(crate) mod scoped_compact_pc2 {
                             scope: Arc::clone(&self.scope),
                             branch,
                             ordinal,
+                            payload_sha256,
                             producer_bytes,
                         }));
                     }
@@ -4880,6 +4944,8 @@ pub(crate) mod scoped_compact_pc2 {
                 branch,
                 worker,
                 applied_work: 0,
+                applied_stream: packet_stream_hasher(),
+                last_applied_ordinal: None,
                 failed: false,
             })
         }
@@ -4903,7 +4969,7 @@ pub(crate) mod scoped_compact_pc2 {
             {
                 return Err(ScopeError::ForeignScope);
             }
-            if self.merged[branch] {
+            if self.merged[branch].is_some() {
                 return Err(ScopeError::Duplicate);
             }
             if !self.closed
@@ -4912,6 +4978,13 @@ pub(crate) mod scoped_compact_pc2 {
                 || scope.applied_work != self.issued[branch]
             {
                 return Err(ScopeError::Incomplete);
+            }
+            let issued_commitment: [u8; 32] = self.issued_streams[branch].clone().finalize().into();
+            let received_terminal_sha256: [u8; 32] = Sha256::digest(&terminal.worker_bytes).into();
+            if terminal.packet_stream_sha256 != issued_commitment
+                || terminal.terminal_sha256 != received_terminal_sha256
+            {
+                return Err(ScopeError::MutatedTerminal);
             }
             self.source
                 .absorb_partial_with_external_retained(
@@ -4922,12 +4995,18 @@ pub(crate) mod scoped_compact_pc2 {
             if self.scope.cancellation.is_cancelled() {
                 return Err(ScopeError::Cancelled);
             }
-            self.merged[branch] = true;
+            self.merged[branch] = Some(MergedBranchProvenance {
+                applied_work: scope.applied_work,
+                packet_stream_sha256: terminal.packet_stream_sha256,
+                terminal_sha256: terminal.terminal_sha256,
+            });
             self.failed = false;
             Ok(())
         }
 
-        pub(crate) fn finish(self) -> Result<WasmExecutionResult, ScopeError> {
+        pub(crate) fn finish(
+            self,
+        ) -> Result<(WasmExecutionResult, MergedPc2Provenance), ScopeError> {
             self.check_active()?;
             if !self.closed
                 || self.next_ordinal == 0
@@ -4935,7 +5014,7 @@ pub(crate) mod scoped_compact_pc2 {
                     .issued
                     .iter()
                     .zip(self.merged)
-                    .any(|(work, merged)| *work != 0 && !merged)
+                    .any(|(work, merged)| *work != merged.map_or(0, |receipt| receipt.applied_work))
             {
                 return Err(ScopeError::Incomplete);
             }
@@ -4947,10 +5026,25 @@ pub(crate) mod scoped_compact_pc2 {
                 return Err(ScopeError::Cancelled);
             }
             let report = result.search_report().ok_or(ScopeError::Incomplete)?;
-            if !report.count_complete || !report.probability_complete || report.resource_truncated {
+            if !report.count_complete
+                || !report.solution_keys_complete
+                || !report.probability_complete
+                || report.resource_truncated
+            {
                 return Err(ScopeError::Incomplete);
             }
-            Ok(result)
+            Ok((
+                result,
+                MergedPc2Provenance {
+                    binding: (
+                        self.scope.source_job_id,
+                        self.scope.epoch,
+                        self.scope.request_sha256,
+                    ),
+                    candidate_count: self.next_ordinal,
+                    branches: self.merged,
+                },
+            ))
         }
 
         pub(crate) fn cancel(&self) {
@@ -4973,6 +5067,8 @@ pub(crate) mod scoped_compact_pc2 {
         branch: usize,
         worker: WasmDistributedVerifierRuntime,
         applied_work: u64,
+        applied_stream: Sha256,
+        last_applied_ordinal: Option<u32>,
         failed: bool,
     }
 
@@ -4991,6 +5087,16 @@ pub(crate) mod scoped_compact_pc2 {
             let key = 1_u64 << ticket.ordinal;
             if self.applied_work & key != 0 {
                 return Err(ScopeError::Duplicate);
+            }
+            if self
+                .last_applied_ordinal
+                .is_some_and(|last| ticket.ordinal < last)
+            {
+                return Err(ScopeError::UnorderedWork);
+            }
+            let received_payload_sha256: [u8; 32] = Sha256::digest(&ticket.producer_bytes).into();
+            if received_payload_sha256 != ticket.payload_sha256 {
+                return Err(ScopeError::MutatedWork);
             }
 
             // `consume_with_compact_commit_probe` sees only the actual decoded
@@ -5021,7 +5127,13 @@ pub(crate) mod scoped_compact_pc2 {
                     if self.scope.cancellation.is_cancelled() {
                         return Err(ScopeError::Cancelled);
                     }
+                    commit_packet(
+                        &mut self.applied_stream,
+                        ticket.ordinal,
+                        &received_payload_sha256,
+                    );
                     self.applied_work |= key;
+                    self.last_applied_ordinal = Some(ticket.ordinal);
                     self.failed = false;
                     return Ok(());
                 }
@@ -5063,9 +5175,12 @@ pub(crate) mod scoped_compact_pc2 {
             if self.scope.cancellation.is_cancelled() {
                 return Err(ScopeError::Cancelled);
             }
+            let terminal_sha256 = Sha256::digest(&worker_bytes).into();
             Ok(WorkerFinal {
                 scope: self.scope,
                 branch: self.branch,
+                packet_stream_sha256: self.applied_stream.finalize().into(),
+                terminal_sha256,
                 worker_bytes,
             })
         }
