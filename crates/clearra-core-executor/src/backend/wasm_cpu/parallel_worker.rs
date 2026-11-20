@@ -1,12 +1,10 @@
 // SRP rationale: the single change reason is executing one compact native branch
 // worker, including its private frontier, memory accounting and mergeable result evidence.
-use std::{
-    collections::{BTreeMap, VecDeque},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-};
+use std::collections::{BTreeMap, VecDeque};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use clearra_core_domain::{
     execution_cancellation::ExecutionControl, objective::objective_kind::ObjectiveKind,
@@ -40,7 +38,16 @@ pub(super) struct ParallelBranchTask {
 
 pub(super) struct ParallelBranchQueue {
     tasks: Mutex<VecDeque<ParallelBranchTask>>,
-    aborted: AtomicBool,
+    state: AtomicU8,
+    #[cfg(test)]
+    lock_attempts: AtomicUsize,
+}
+
+#[repr(u8)]
+enum BranchQueueState {
+    Available,
+    Exhausted,
+    Aborted,
 }
 
 impl ParallelBranchQueue {
@@ -51,28 +58,60 @@ impl ParallelBranchQueue {
                 .cmp(&left.priority)
                 .then_with(|| left.canonical_index.cmp(&right.canonical_index))
         });
+        let state = if tasks.is_empty() {
+            BranchQueueState::Exhausted
+        } else {
+            BranchQueueState::Available
+        };
         Self {
             tasks: Mutex::new(tasks.into()),
-            aborted: AtomicBool::new(false),
+            state: AtomicU8::new(state as u8),
+            #[cfg(test)]
+            lock_attempts: AtomicUsize::new(0),
         }
     }
 
-    pub fn pop(&self) -> Option<ParallelBranchTask> {
-        if self.is_aborted() {
-            return None;
+    pub fn pop(&self) -> Result<Option<ParallelBranchTask>, WasmExactSearchError> {
+        // This queue only hands out pre-partitioned branches; workers do not
+        // enqueue into it. Once exhausted, there is no work to steal later.
+        if self.state.load(Ordering::Acquire) != BranchQueueState::Available as u8 {
+            return Ok(None);
         }
-        self.tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pop_front()
+        #[cfg(test)]
+        self.lock_attempts.fetch_add(1, Ordering::Relaxed);
+        let mut tasks = self.tasks.lock().map_err(|_| {
+            self.abort();
+            WasmExactSearchError::InvalidProblem("wasm_parallel_branch_queue_poisoned")
+        })?;
+        let Some(task) = tasks.pop_front() else {
+            // This worker can have observed Available before another worker
+            // claimed the last branch under the same lock.
+            return Ok(None);
+        };
+        if tasks.is_empty() {
+            self.mark_exhausted();
+        }
+        Ok(Some(task))
+    }
+
+    fn mark_exhausted(&self) {
+        // The final claim and cancellation can race. Exhaustion must never
+        // replace Aborted, since it does not cancel an in-flight branch.
+        let _ = self.state.compare_exchange(
+            BranchQueueState::Available as u8,
+            BranchQueueState::Exhausted as u8,
+            Ordering::Release,
+            Ordering::Relaxed,
+        );
     }
 
     pub fn abort(&self) {
-        self.aborted.store(true, Ordering::Release);
+        self.state
+            .store(BranchQueueState::Aborted as u8, Ordering::Release);
     }
 
     pub fn is_aborted(&self) -> bool {
-        self.aborted.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) == BranchQueueState::Aborted as u8
     }
 }
 
@@ -582,7 +621,7 @@ pub(super) fn run_branch_worker(
     let mut outcomes = Vec::new();
     let mut worker_candidate_count = 0usize;
 
-    while let Some(task) = queue.pop() {
+    while let Some(task) = queue.pop()? {
         if control.is_cancelled() {
             queue.abort();
             return Err(WasmExactSearchError::Cancelled);
@@ -868,6 +907,10 @@ fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityM
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::thread;
+
     use clearra_core_domain::piece::piece_kind::PieceKind;
     use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
     use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
@@ -883,8 +926,141 @@ mod tests {
     use super::{
         retains_buildable_identity_evidence, retains_solution_coverage_evidence,
         CandidateBuildResult, CandidateDigestEvidence, GeometryCandidate, GeometryCatalog,
-        StandardBagMemoAccounting, WorkerAggregate,
+        GeometrySearch, ParallelBranchQueue, ParallelBranchTask, StandardBagMemoAccounting,
+        WasmExactSearchError, WorkerAggregate,
     };
+
+    fn branch_task(canonical_index: usize, priority: usize) -> ParallelBranchTask {
+        ParallelBranchTask {
+            canonical_index,
+            priority,
+            search: GeometrySearch::placeholder(),
+        }
+    }
+
+    #[test]
+    fn parallel_branch_queue_skips_the_lock_after_the_last_claim() {
+        let queue = ParallelBranchQueue::new(vec![
+            branch_task(0, 1),
+            branch_task(2, 10),
+            branch_task(1, 10),
+        ]);
+        for expected in [1, 2, 0] {
+            assert_eq!(
+                queue
+                    .pop()
+                    .expect("healthy queue")
+                    .expect("queued branch")
+                    .canonical_index,
+                expected,
+                "available branches retain priority and canonical tie order"
+            );
+        }
+        assert_eq!(queue.lock_attempts.load(Ordering::Relaxed), 3);
+        for _ in 0..11 {
+            assert!(queue.pop().expect("healthy queue").is_none());
+        }
+        assert_eq!(queue.lock_attempts.load(Ordering::Relaxed), 3);
+        assert!(!queue.is_aborted(), "in-flight final branch is still valid");
+
+        queue.abort();
+        assert!(queue.is_aborted(), "a later cancellation remains visible");
+        assert!(queue.pop().expect("aborted queue").is_none());
+        assert_eq!(queue.lock_attempts.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn parallel_branch_queue_final_claim_cannot_clear_an_abort() {
+        let queue = ParallelBranchQueue::new(vec![branch_task(0, 1)]);
+        queue.abort();
+        // The abort can be published after a worker's available check, but
+        // before it changes the state for the final claim.
+        queue.mark_exhausted();
+        assert!(queue.is_aborted());
+        assert!(queue.pop().expect("aborted queue").is_none());
+        assert_eq!(queue.lock_attempts.load(Ordering::Relaxed), 0);
+
+        let empty = ParallelBranchQueue::new(Vec::new());
+        assert!(!empty.is_aborted());
+        assert!(empty.pop().expect("initially empty queue").is_none());
+        assert_eq!(empty.lock_attempts.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn parallel_branch_queue_ready_worker_can_claim_while_early_branch_expands() {
+        let queue = ParallelBranchQueue::new(vec![
+            branch_task(0, 10),
+            branch_task(1, 1),
+            branch_task(2, 1),
+        ]);
+        thread::scope(|scope| {
+            let (claimed_sender, claimed_receiver) = mpsc::channel();
+            let (release_sender, release_receiver) = mpsc::channel();
+            let owner_queue = &queue;
+            let initial_worker = scope.spawn(move || {
+                let branch = owner_queue
+                    .pop()
+                    .expect("healthy queue")
+                    .expect("first branch");
+                claimed_sender
+                    .send(branch.canonical_index)
+                    .expect("notify ready worker");
+                // The branch remains owned while another worker drains the
+                // queue; its in-flight work is not cancelled by exhaustion.
+                release_receiver.recv().expect("release first branch");
+                (
+                    owner_queue.pop().expect("healthy queue").is_none(),
+                    owner_queue.is_aborted(),
+                )
+            });
+            let first = claimed_receiver
+                .recv()
+                .expect("initial claim was published");
+            let next = queue.pop();
+            let last = queue.pop();
+            let tail = queue.pop();
+            release_sender.send(()).expect("release initial worker");
+            let initial_worker_exit = initial_worker.join().expect("initial worker joined");
+
+            assert_eq!(first, 0);
+            assert_eq!(
+                next.expect("healthy queue")
+                    .expect("second branch")
+                    .canonical_index,
+                1
+            );
+            assert_eq!(
+                last.expect("healthy queue")
+                    .expect("third branch")
+                    .canonical_index,
+                2
+            );
+            assert!(tail.expect("healthy queue").is_none());
+            assert_eq!(initial_worker_exit, (true, false));
+            assert_eq!(queue.lock_attempts.load(Ordering::Relaxed), 3);
+        });
+    }
+
+    #[test]
+    fn parallel_branch_queue_poison_aborts_without_claiming_work() {
+        let queue = ParallelBranchQueue::new(vec![branch_task(0, 1)]);
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let _tasks = queue.tasks.lock().expect("initially healthy queue");
+                panic!("inject branch queue poison");
+            });
+            assert!(worker.join().is_err());
+        });
+        assert!(matches!(
+            queue.pop(),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_parallel_branch_queue_poisoned"
+            ))
+        ));
+        assert!(queue.is_aborted());
+        assert!(queue.pop().expect("skip poisoned aborted queue").is_none());
+        assert_eq!(queue.lock_attempts.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn scalar_multiset_digest_preserves_duplicates_overflow_and_worker_partitioning() {
