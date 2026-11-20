@@ -626,6 +626,74 @@ void geometry_apdp_marks_inverse_clear_skeleton_non_static(void) {
     EXPECT_TRUE(support_flags[1] != 0u);
 }
 
+void geometry_apdp_keeps_buildable_parent_after_an_interior_clear(void) {
+    static ClearraPackingCandidateBuffer buffer;
+    ClearraBoard64Layout layout;
+    const uint64_t vertical_i = UINT64_C(0x8020080200);
+    const uint64_t inverse_clear_t = UINT64_C(0x4018000100);
+    const uint64_t residual = vertical_i | inverse_clear_t;
+    const uint8_t witness[2] = {CLR_PIECE_I, CLR_PIECE_T};
+    const uint8_t supply_envelope[] = {
+        CLR_PIECE_I, CLR_PIECE_T, CLR_PIECE_T,
+        CLR_PIECE_S, CLR_PIECE_Z, CLR_PIECE_J,
+    };
+    /* The compatible suffix multisets after eight Geometry placements.
+       Restricting this to I+T would force I first and miss the three-cell
+       SameTile pivot that used to reject the inverse-clear T. */
+    const uint8_t suffixes[][2] = {
+        {CLR_PIECE_I, CLR_PIECE_J}, {CLR_PIECE_I, CLR_PIECE_S},
+        {CLR_PIECE_I, CLR_PIECE_T}, {CLR_PIECE_I, CLR_PIECE_Z},
+        {CLR_PIECE_S, CLR_PIECE_J}, {CLR_PIECE_S, CLR_PIECE_Z},
+        {CLR_PIECE_T, CLR_PIECE_J}, {CLR_PIECE_T, CLR_PIECE_S},
+        {CLR_PIECE_T, CLR_PIECE_T}, {CLR_PIECE_T, CLR_PIECE_Z},
+        {CLR_PIECE_Z, CLR_PIECE_J},
+    };
+    clr_resource_report report;
+    clr_pruning_proof_ledger ledger;
+
+    EXPECT_U64(clearra_board64_make_layout(10u, 4u, &layout), CLEARRA_BOARD64_OK);
+    clr_packing_problem problem = exact_cover_problem(layout, witness, 2u);
+    problem.problem_kind = CLR_PROBLEM_SCENARIO_PC;
+    problem.board.initial_mask = layout.all_cells_mask & ~residual;
+    problem.required_fill_mask = residual;
+    problem.rule.rule_profile_id = CLR_RULE_SRS_PLUS;
+    problem.rule.kick_profile_id = CLR_KICK_SRS_PLUS_180;
+    problem.piece_multiset_window = clearra_piece_multiset_window_from_pieces(
+        supply_envelope, (uint16_t)sizeof(supply_envelope));
+    problem.piece_multiset_window.exact_count = 2u;
+    problem.piece_multiset_family.complete = 1u;
+    problem.piece_multiset_family.count =
+        (uint16_t)(sizeof(suffixes) / sizeof(suffixes[0]));
+    for (uint16_t i = 0u; i < problem.piece_multiset_family.count; ++i) {
+        problem.piece_multiset_family.members[i] =
+            clearra_piece_multiset_window_from_pieces(suffixes[i], 2u);
+    }
+
+    ClearraGeometryCatalog *catalog = compile_catalog(&problem, &report, &ledger);
+    EXPECT_STATUS(
+        clearra_geometry_exact_cover_search_to_buffer(
+            catalog, &problem, &buffer, &report),
+        CLEARRA_PACKING_OK);
+    bool found = false;
+    for (uint16_t i = 0u; i < buffer.count; ++i) {
+        ClearraPackingCandidateView candidate;
+        EXPECT_STATUS(
+            clearra_packing_candidate_buffer_candidate_at(&buffer, i, &candidate),
+            CLEARRA_PACKING_OK);
+        bool found_i = false;
+        bool found_t = false;
+        for (uint8_t op = 0u; op < candidate.placed_count; ++op) {
+            found_i |= candidate.pieces[op] == CLR_PIECE_I &&
+                       candidate.operation_masks[op] == vertical_i;
+            found_t |= candidate.pieces[op] == CLR_PIECE_T &&
+                       candidate.operation_masks[op] == inverse_clear_t;
+        }
+        found |= found_i && found_t;
+    }
+    EXPECT_TRUE(found);
+    clearra_geometry_catalog_release(&catalog);
+}
+
 void frontier_hash_collision_does_not_merge_distinct_partial_states(void) {
     const uint64_t left_remaining_cells = UINT64_C(0x1234);
     const uint32_t left_packed_piece_counts = UINT32_C(0x001001);

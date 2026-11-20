@@ -34,6 +34,7 @@ void hash_collision_preserved_by_exact_confirm(void);
 void candidate_ids_stable_across_cpu_gpu_backend_order(void);
 void candidate_buffer_exports_canonical_identity(void);
 void geometry_apdp_marks_inverse_clear_skeleton_non_static(void);
+void geometry_apdp_keeps_buildable_parent_after_an_interior_clear(void);
 void geometry_catalog_collapses_skeletons_without_losing_realizations(void);
 void geometry_catalog_preserves_prefix_deleted_clear_state_realization(void);
 void full_placement_domain_rejects_overlapping_exact_owner_sets(void);
@@ -89,6 +90,7 @@ int main(void) {
     candidate_ids_stable_across_cpu_gpu_backend_order();
     candidate_buffer_exports_canonical_identity();
     geometry_apdp_marks_inverse_clear_skeleton_non_static();
+    geometry_apdp_keeps_buildable_parent_after_an_interior_clear();
     geometry_catalog_collapses_skeletons_without_losing_realizations();
     geometry_catalog_preserves_prefix_deleted_clear_state_realization();
     full_placement_domain_rejects_overlapping_exact_owner_sets();
