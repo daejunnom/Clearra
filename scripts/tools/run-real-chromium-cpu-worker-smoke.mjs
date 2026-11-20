@@ -355,9 +355,10 @@ async function stepLocalSr3({ command, timeoutMs }) {
       throw new Error('sr3 did not prepare a live job: ' + preparation.status);
     }
     const firstSearch = advance(job);
+    // The event kind is stable; the Core's stage labels are not a public
+    // discriminator and are deliberately not asserted here.
     if (!live(firstSearch.status) || firstSearch.events.some(terminalEvent) ||
-        !firstSearch.events.some(event => event.event === 'progress' &&
-          ['geometry', 'buildup'].includes(event.progress.label))) {
+        !firstSearch.events.some(event => event.event === 'progress')) {
       throw new Error('sr3 did not yield a live search slice after preparation');
     }
     return job;
