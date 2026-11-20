@@ -371,6 +371,7 @@ impl GeometryCatalog {
         )
     }
 
+    #[cfg(test)]
     pub fn compile_for_required_cells_on_board(
         problem: &SearchProblem,
         initial_board: u64,

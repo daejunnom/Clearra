@@ -4600,19 +4600,18 @@ pub(crate) mod scoped_compact_pc2 {
         Arc,
     };
 
+    use clearra_cli_command::{CliCommandError, CliCommandParser};
     use clearra_core_domain::{
         execution_cancellation::ExecutionCancellationToken,
-        objective::objective_kind::ObjectiveKind,
+        objective::objective_kind::ObjectiveKind, runtime_cpu_capacity::CpuCapacity,
     };
     use clearra_pc_graph::request::{PcCountPolicy, PcHoldPolicy};
     use sha2::{Digest, Sha256};
 
     use super::*;
-    use crate::{
-        distributed_wire::scoped_compact_terminal::{
-            self, TerminalScope, BRANCHES, MAX_FRAME_BYTES,
-        },
-        WasmHostCapabilities,
+    use crate::distributed_wire::{
+        scoped_compact_terminal::{self, TerminalScope, BRANCHES, MAX_FRAME_BYTES},
+        DistributedWireError,
     };
 
     const WORKERS_WITH_SOURCE: usize = BRANCHES + 1;
@@ -4631,7 +4630,20 @@ pub(crate) mod scoped_compact_pc2 {
         Duplicate,
         Incomplete,
         MalformedTerminal,
-        Runtime,
+        Runtime(WasmCommandRuntimeError),
+        WireEncode(DistributedWireError),
+        WorkerCommand(CliCommandError),
+        WorkerPreparation {
+            status: clearra_app::AppStatus,
+            error: Option<clearra_app::AppError>,
+        },
+        WorkerStart {
+            branch: usize,
+            producer_slots: usize,
+            verifier_slots: usize,
+            native_hard_limit: usize,
+            reason: &'static str,
+        },
     }
 
     struct SourceScope {
@@ -4639,6 +4651,7 @@ pub(crate) mod scoped_compact_pc2 {
         epoch: u64,
         request_sha256: [u8; 32],
         command_text: Box<str>,
+        source_worker_hardware_limit: usize,
         cancellation: ExecutionCancellationToken,
     }
 
@@ -4687,7 +4700,7 @@ pub(crate) mod scoped_compact_pc2 {
             }
             let (request, _) = runtime
                 .prepare_command_text(command_text)
-                .map_err(|_| ScopeError::Runtime)?
+                .map_err(ScopeError::Runtime)?
                 .into_parts();
             let AppCommand::Pc(command) = request.command() else {
                 return Err(ScopeError::Unsupported);
@@ -4710,7 +4723,7 @@ pub(crate) mod scoped_compact_pc2 {
             }
             let WasmDistributedPreparation::Coordinator(source) =
                 WasmDistributedCoordinator::prepare(runtime, command_text)
-                    .map_err(|_| ScopeError::Runtime)?
+                    .map_err(ScopeError::Runtime)?
             else {
                 return Err(ScopeError::Unsupported);
             };
@@ -4730,6 +4743,7 @@ pub(crate) mod scoped_compact_pc2 {
                         .map_err(|_| ScopeError::Capacity)?,
                     request_sha256: Sha256::digest(command_text.as_bytes()).into(),
                     command_text: command_text.into(),
+                    source_worker_hardware_limit: query.execution_policy().worker_hardware_limit(),
                     cancellation: source.control.cancellation.clone(),
                 }),
                 runtime: runtime.clone(),
@@ -4753,7 +4767,7 @@ pub(crate) mod scoped_compact_pc2 {
                 match self
                     .source
                     .advance_producer(64, 1)
-                    .map_err(|_| ScopeError::Runtime)?
+                    .map_err(ScopeError::Runtime)?
                 {
                     WasmDistributedProducerAdvance::Pending => {}
                     WasmDistributedProducerAdvance::Batch(producer_bytes) => {
@@ -4807,20 +4821,59 @@ pub(crate) mod scoped_compact_pc2 {
             if verified_hash != self.scope.request_sha256 {
                 return Err(ScopeError::ForeignScope);
             }
-            // Independent WASM worker realms reserve one local slot. The
-            // unit host shares one native admission pool, so model that same
-            // physical cap here without altering the canonical command text.
-            let runtime = self
+            // Validate the exact source command against its original host.
+            // Changing the parser's host cap before parsing --workers 3
+            // fails the public worker-limit guard, long before admission.
+            // Model an isolated WASM realm by lowering only the validated
+            // child execution policy; the original producer lease stays live.
+            let request = CliCommandParser::parse_with_worker_limit(
+                &self.scope.command_text,
+                self.scope.source_worker_hardware_limit,
+            )
+            .and_then(|parsed| {
+                parsed
+                    .with_workers(1)
+                    .with_worker_hardware_limit(1)
+                    .with_use_all_logical_processors(false)
+                    .to_app_request()
+            })
+            .map_err(ScopeError::WorkerCommand)?;
+            let prepared = match self
                 .runtime
-                .clone()
-                .with_host_capabilities(WasmHostCapabilities::new(1, false, false));
-            let mut worker =
-                WasmDistributedVerifierRuntime::prepare(&runtime, &self.scope.command_text)
-                    .map_err(|_| ScopeError::Runtime)?;
-            if !matches!(&worker.verifier, DistributedVerifier::Pc(_)) {
+                .app_context()
+                .prepare_distributed_search(request)
+            {
+                DistributedSearchPreparation::Search(prepared) => prepared,
+                DistributedSearchPreparation::Ready(response) => {
+                    return Err(ScopeError::WorkerPreparation {
+                        status: response.status(),
+                        error: response.error().cloned(),
+                    })
+                }
+            };
+            let problem = prepared.into_worker_problem();
+            let verifier_slots = problem.backend_policy().workers();
+            if verifier_slots != 1 {
                 return Err(ScopeError::Unsupported);
             }
-            worker.control.cancellation = self.scope.cancellation.clone();
+            let verifier = WasmDistributedVerifier::new(problem.as_ref()).map_err(|reason| {
+                ScopeError::WorkerStart {
+                    branch,
+                    producer_slots: self.source.worker_count(),
+                    verifier_slots,
+                    native_hard_limit: CpuCapacity::current().hard_limit(),
+                    reason,
+                }
+            })?;
+            let worker = WasmDistributedVerifierRuntime {
+                verifier: DistributedVerifier::Pc(verifier),
+                postprocessor: *self.runtime.app_context().services().core_executor(),
+                build_solution_probability_policy: None,
+                pending_candidates: Vec::new(),
+                pending_candidate_cursor: 0,
+                pending_external_retained_bytes: 0,
+                control: ExecutionControl::new(self.scope.cancellation.clone()),
+            };
             self.installed[branch] = true;
             Ok(ScopedWorker {
                 scope: Arc::clone(&self.scope),
@@ -4865,7 +4918,7 @@ pub(crate) mod scoped_compact_pc2 {
                     body,
                     terminal.worker_bytes.capacity() as u128,
                 )
-                .map_err(|_| ScopeError::Runtime)?;
+                .map_err(ScopeError::Runtime)?;
             if self.scope.cancellation.is_cancelled() {
                 return Err(ScopeError::Cancelled);
             }
@@ -4889,7 +4942,7 @@ pub(crate) mod scoped_compact_pc2 {
             let result = self
                 .source
                 .finish(WORKERS_WITH_SOURCE)
-                .map_err(|_| ScopeError::Runtime)?;
+                .map_err(ScopeError::Runtime)?;
             if self.scope.cancellation.is_cancelled() {
                 return Err(ScopeError::Cancelled);
             }
@@ -4956,7 +5009,7 @@ pub(crate) mod scoped_compact_pc2 {
                     ticket.producer_bytes.capacity() as u128,
                     &mut on_committed,
                 )
-                .map_err(|_| ScopeError::Runtime)?;
+                .map_err(ScopeError::Runtime)?;
             for _ in 0..4_096 {
                 if step.partial.is_some() {
                     return Err(ScopeError::Unsupported);
@@ -4975,7 +5028,7 @@ pub(crate) mod scoped_compact_pc2 {
                 step = self
                     .worker
                     .continue_with_compact_commit_probe(&mut on_committed)
-                    .map_err(|_| ScopeError::Runtime)?;
+                    .map_err(ScopeError::Runtime)?;
             }
             Err(ScopeError::Capacity)
         }
@@ -4995,7 +5048,7 @@ pub(crate) mod scoped_compact_pc2 {
             let results = self
                 .worker
                 .finish_generic_worker_results()
-                .map_err(|_| ScopeError::Runtime)?;
+                .map_err(ScopeError::Runtime)?;
             let worker_bytes = scoped_compact_terminal::encode(
                 &results,
                 TerminalScope {
@@ -5006,7 +5059,7 @@ pub(crate) mod scoped_compact_pc2 {
                     applied_work: self.applied_work,
                 },
             )
-            .map_err(|_| ScopeError::Runtime)?;
+            .map_err(ScopeError::WireEncode)?;
             if self.scope.cancellation.is_cancelled() {
                 return Err(ScopeError::Cancelled);
             }

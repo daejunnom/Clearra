@@ -3976,6 +3976,7 @@ fn fixed_no_hold_opening_scoped_worker_finals_require_the_issued_and_merged_fami
         ScopeError, ScopedCoordinator, WorkTicket, WorkerFinal,
     };
     use crate::distributed_wire::scoped_compact_terminal;
+    use clearra_cli_command::{CliCommandErrorCode, CliCommandParser};
 
     const JOB_ID: u32 = 67;
     const COMMAND: &str =
@@ -4019,6 +4020,13 @@ fn fixed_no_hold_opening_scoped_worker_finals_require_the_issued_and_merged_fami
     let _resource_guard = typed_pc_distributed_test_guard();
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    // The parent policy still fails ordinary public parsing on a one-slot
+    // host. The scoped worker validates the original request first and only
+    // then models the one-slot verifier realm as a typed child policy.
+    assert!(matches!(
+        CliCommandParser::parse_with_worker_limit(COMMAND, 1),
+        Err(error) if error.code() == CliCommandErrorCode::InvalidValue
+    ));
 
     let (mut source, [first, second]) = issue(&runtime);
     let first = finalize(&mut source, 0, first);
@@ -4126,10 +4134,10 @@ fn fixed_no_hold_opening_scoped_worker_finals_require_the_issued_and_merged_fami
         wire[96..100].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(scoped_compact_terminal::decode(wire).is_ok());
     });
-    assert_eq!(
+    assert!(matches!(
         invalid_body.apply_final(final_frame),
-        Err(ScopeError::Runtime)
-    );
+        Err(ScopeError::Runtime(error)) if error.code() == "E_WASM_DISTRIBUTED_PARTIAL_INVALID"
+    ));
     assert!(matches!(
         invalid_body.finish(),
         Err(ScopeError::InvalidPhase)

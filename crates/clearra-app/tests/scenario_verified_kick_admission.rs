@@ -1,4 +1,6 @@
 //! Product admission for a CLI pc-scenario supplying a verified kick table.
+use std::sync::Mutex;
+
 use clearra_app::{
     AppCommand, AppContext, AppCoreExecutorService, AppErrorCode, AppRequest, AppResponse,
     AppServices, AppStatus, CooperativeAppAdvance, ScenarioAppCommand, ScenarioAppRenderContract,
@@ -14,6 +16,10 @@ use clearra_rules::kicks::{
     VerifiedKickTableProfile,
 };
 use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+// Both tests exercise real product admission, including the C branch when
+// linked. Their executions must not compete for this process's solver lease.
+static PRODUCT_ADMISSION: Mutex<()> = Mutex::new(());
 
 fn scenario_request(profile: &KickTableProfile) -> AppRequest {
     // Use the same JSON/verification boundary as the legacy CLI assembler.
@@ -69,6 +75,9 @@ fn expect_single_i(response: &AppResponse) -> &CoreExecutionResult {
 
 #[test]
 fn imported_srs_plus_requires_the_same_ordered_transition_table_in_rust() {
+    let _admission = PRODUCT_ADMISSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let builtin = SrsKicks::srs_plus_profile();
     // A JSON importer can reorder transition records without changing lookup.
     let mut entries = builtin.entries().to_vec();
@@ -141,6 +150,9 @@ fn local_compact_rust_executes_the_submitted_srs90_order_only_in_its_authorized_
     const SOLUTION: &str =
         "ctk1|initial=00000000000f83c7|placements=I:0000000000003c00,T:0000000000004038";
 
+    let _admission = PRODUCT_ADMISSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let canonical = SrsKicks::profile();
     let mut entries = canonical.entries().to_vec();
     let transition = KickTransition::new(PieceKind::T, Right, Zero);
