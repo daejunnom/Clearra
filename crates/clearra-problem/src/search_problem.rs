@@ -8,7 +8,9 @@ mod board_accessors {
     use crate::goal::SearchGoal;
 
     use super::{
-        legacy_scenario_pc_extent::{LegacyScenarioPcExtent, LegacyScenarioPcFamily},
+        legacy_scenario_pc_extent::{
+            LegacyScenarioPcExtent, LegacyScenarioPcExtentAdmission, LegacyScenarioPcFamily,
+        },
         OccupancyField, PcChanceEvidencePolicy, SearchOutputPolicy, SearchProblem,
         SearchProblemBoard,
     };
@@ -58,6 +60,15 @@ mod board_accessors {
         }
 
         fn ordinary_legacy_scenario_pc_extent(&self) -> Option<LegacyScenarioPcExtent> {
+            match self.ordinary_legacy_scenario_pc_extent_admission()? {
+                LegacyScenarioPcExtentAdmission::Active(extent) => Some(extent),
+                LegacyScenarioPcExtentAdmission::DeferredToCpu(_) => None,
+            }
+        }
+
+        pub(super) fn ordinary_legacy_scenario_pc_extent_admission(
+            &self,
+        ) -> Option<LegacyScenarioPcExtentAdmission> {
             // A transformed problem cannot carry the ordinary legacy frame
             // into path/score/coverage authority or a different search goal.
             if self.pc_chance_evidence_policy() != PcChanceEvidencePolicy::Disabled
@@ -651,7 +662,7 @@ mod model {
         pub(super) initial_occupancy: Option<OccupancyField>,
         pub(super) board: SearchProblemBoard,
         pub(super) legacy_scenario_pc_extent:
-            Option<super::legacy_scenario_pc_extent::LegacyScenarioPcExtent>,
+            Option<super::legacy_scenario_pc_extent::LegacyScenarioPcExtentAdmission>,
         pub(super) board_profile: BoardProfile,
         pub(super) piece_source: PieceSource,
         pub(super) initial_hold: HoldAutomatonState,
@@ -1791,6 +1802,12 @@ mod legacy_scenario_pc_extent {
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum LegacyScenarioPcExtentAdmission {
+        Active(LegacyScenarioPcExtent),
+        DeferredToCpu(LegacyScenarioPcExtent),
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(super) enum LegacyScenarioPcFamily {
         ExactArea,
         ProvedEmpty(NonZeroU16),
@@ -1801,30 +1818,54 @@ mod legacy_scenario_pc_extent {
         /// Preserve the proved legacy ScenarioPc frame without rewriting the
         /// canonical input or public display layout.
         pub(crate) fn with_legacy_scenario_extent(mut self) -> Self {
-            if let Some(extent) = active_extent(&self) {
-                let mut id = format!(
-                    "{}:legacy-pc-active-rows:{}",
-                    self.problem_id.as_str(),
-                    extent.rows.get()
-                );
-                match extent.family {
-                    LegacyScenarioPcFamily::ExactArea => {}
-                    LegacyScenarioPcFamily::ProvedEmpty(depth) => {
-                        use core::fmt::Write;
-                        let _ = write!(&mut id, ":empty-family-depth:{depth}");
-                    }
-                    LegacyScenarioPcFamily::CappedUnqualified => {
-                        id.push_str(":unqualified-capped-family");
-                    }
+            if let Some(extent) = eligible_extent(&self) {
+                if self.backend_policy().requested_backend() == RequestedSearchBackend::Cpu {
+                    self.activate_legacy_scenario_extent(extent);
+                } else if extent.family == LegacyScenarioPcFamily::ExactArea {
+                    // A non-CPU request retains the exact-area proof but must
+                    // not use it before routing selects the CPU solver.
+                    self.legacy_scenario_pc_extent =
+                        Some(LegacyScenarioPcExtentAdmission::DeferredToCpu(extent));
                 }
-                self.problem_id = SearchProblemId::new(id);
-                self.legacy_scenario_pc_extent = Some(extent);
             }
             self
         }
+
+        /// Apply a deferred exact legacy frame after routing has selected
+        /// CPU execution. This does not change the requested backend, permit
+        /// fallback, or admit a modern explicit target to legacy projection.
+        #[must_use]
+        pub fn into_selected_cpu_execution(mut self) -> Self {
+            if let Some(LegacyScenarioPcExtentAdmission::DeferredToCpu(extent)) =
+                self.ordinary_legacy_scenario_pc_extent_admission()
+            {
+                self.activate_legacy_scenario_extent(extent);
+            }
+            self
+        }
+
+        fn activate_legacy_scenario_extent(&mut self, extent: LegacyScenarioPcExtent) {
+            let mut id = format!(
+                "{}:legacy-pc-active-rows:{}",
+                self.problem_id.as_str(),
+                extent.rows.get()
+            );
+            match extent.family {
+                LegacyScenarioPcFamily::ExactArea => {}
+                LegacyScenarioPcFamily::ProvedEmpty(depth) => {
+                    use core::fmt::Write;
+                    let _ = write!(&mut id, ":empty-family-depth:{depth}");
+                }
+                LegacyScenarioPcFamily::CappedUnqualified => {
+                    id.push_str(":unqualified-capped-family");
+                }
+            }
+            self.problem_id = SearchProblemId::new(id);
+            self.legacy_scenario_pc_extent = Some(LegacyScenarioPcExtentAdmission::Active(extent));
+        }
     }
 
-    fn active_extent(problem: &SearchProblem) -> Option<LegacyScenarioPcExtent> {
+    fn eligible_extent(problem: &SearchProblem) -> Option<LegacyScenarioPcExtent> {
         let query = problem.core_query();
         let board = problem.initial_board();
         let policy = query.execution_policy();
@@ -1847,7 +1888,6 @@ mod legacy_scenario_pc_extent {
                 .requires_observation_policy()
             || query.solution_probability_policy().requested()
             || query.verified_kick_profile().is_some()
-            || policy.requested_backend() != RequestedSearchBackend::Cpu
             || policy.tablebase_requested()
             || policy.precompute_build_dependencies()
         {

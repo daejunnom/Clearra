@@ -995,6 +995,17 @@ impl WasmExactSearchSession {
         Self::new_with_external_geometry(problem, false)
     }
 
+    /// Builds the exact session after product routing has selected the CPU.
+    pub(crate) fn new_for_selected_cpu(
+        problem: &SearchProblem,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_problem(
+            Arc::new(problem.clone().into_selected_cpu_execution()),
+            false,
+            SearchProblemRetention::SessionOwnedCloneUnaccounted,
+        )
+    }
+
     /// Native direct ordinary Scenario PC only. The general, cooperative,
     /// distributed and typed constructors retain their canonical admission.
     #[cfg(not(target_family = "wasm"))]

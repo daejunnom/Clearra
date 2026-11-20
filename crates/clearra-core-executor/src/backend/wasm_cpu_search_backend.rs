@@ -220,7 +220,8 @@ impl WasmCpuSearchSession {
                     reason: "webgpu_backend_unavailable",
                 });
             }
-            let mut cpu = WasmExactSearchSession::new(problem).map_err(map_error)?;
+            let mut cpu =
+                WasmExactSearchSession::new_for_selected_cpu(problem).map_err(map_error)?;
             cpu.mark_cpu_fallback(
                 unavailable_reason,
                 "unavailable",
@@ -242,7 +243,7 @@ impl WasmCpuSearchSession {
         }
         Ok(Self {
             inner: WasmSearchSessionInner::Cpu(
-                WasmExactSearchSession::new(problem).map_err(map_error)?,
+                WasmExactSearchSession::new_for_selected_cpu(problem).map_err(map_error)?,
             ),
         })
     }
@@ -1983,6 +1984,100 @@ mod coverage_summary_tests {
             Some("gpu_device_not_found")
         );
         assert_eq!(result.field("fallback_backend"), Some("wasm-cpu"));
+    }
+
+    #[test]
+    fn selected_cpu_keeps_the_exact_legacy_scenario_extent() {
+        let _resource_guard = score_resource_test_guard();
+        let control = ExecutionControl::default();
+        let query_for = |backend, allow_fallback| {
+            PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, 0x3f0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+                PieceWindow::new(1),
+            )
+            .with_rule(clearra_rules::profile::builtin_rules::srs())
+            .with_exact_pieces(Some(1))
+            .with_count_policy(PcCountPolicy::CountAll)
+            .with_retained_trace_limit(1)
+            .with_execution_policy(
+                PcExecutionPolicy::mvp_default()
+                    .with_requested_backend(backend)
+                    .with_allow_backend_fallback(allow_fallback)
+                    .with_runtime_webgpu_available(false)
+                    .with_workers(1),
+            )
+        };
+        let cpu = ProblemCompiler::compile_legacy_scenario_pc(&query_for(
+            RequestedSearchBackend::Cpu,
+            false,
+        ))
+        .expect("legacy CPU problem");
+        assert_eq!(cpu.compact_pc_geometry_height(), 1);
+        let expected = WasmCpuSearchBackend::execute_with_control(&cpu, &control)
+            .expect("legacy CPU baseline");
+        assert_eq!(
+            expected.field("normalized_unique_solution_count"),
+            Some("1")
+        );
+        let expected_hash = expected
+            .field("normalized_solution_set_hash")
+            .filter(|hash| hash.starts_with("cts1:"))
+            .expect("canonical solution family hash");
+        assert_eq!(expected.path_steps().len(), 1);
+
+        for backend in [RequestedSearchBackend::Gpu, RequestedSearchBackend::Hybrid] {
+            let uses_fallback = backend == RequestedSearchBackend::Gpu;
+            let query = query_for(backend, uses_fallback);
+            let problem =
+                ProblemCompiler::compile_legacy_scenario_pc(&query).expect("legacy problem");
+            assert_eq!(problem.compact_pc_geometry_height(), 4);
+            let modern = ProblemCompiler::compile_scenario_pc(&query)
+                .expect("modern problem")
+                .into_selected_cpu_execution();
+            assert_eq!(modern.compact_pc_geometry_height(), 4);
+
+            let result = WasmCpuSearchBackend::execute_with_control(&problem, &control)
+                .expect("legacy scenario selected the CPU solver");
+            assert_eq!(result.field("backend_requested"), Some(backend.as_str()));
+            assert_eq!(result.field("backend_selected"), Some("wasm-cpu"));
+            assert_eq!(
+                result.field("backend_fallback_used"),
+                Some(if uses_fallback { "true" } else { "false" })
+            );
+            assert_eq!(
+                result.field("backend_fallback_reason"),
+                Some(if uses_fallback {
+                    "gpu_device_not_found"
+                } else {
+                    "none"
+                })
+            );
+            assert_eq!(result.field("count_complete"), Some("true"));
+            assert_eq!(result.field("probability_complete"), Some("true"));
+            assert_eq!(result.field("coverage_probability"), Some("1"));
+            assert_eq!(
+                result.field("normalized_solution_set_hash"),
+                Some(expected_hash)
+            );
+            assert_eq!(
+                result.normalized_solution_identities(),
+                expected.normalized_solution_identities()
+            );
+            assert_eq!(result.path_steps(), expected.path_steps());
+        }
+
+        let denied = ProblemCompiler::compile_legacy_scenario_pc(&query_for(
+            RequestedSearchBackend::Gpu,
+            false,
+        ))
+        .expect("legacy problem with denied fallback");
+        assert!(matches!(
+            WasmCpuSearchSession::new(&denied),
+            Err(WasmCpuSearchError::Unsupported {
+                reason: "webgpu_backend_unavailable"
+            })
+        ));
     }
 
     #[test]

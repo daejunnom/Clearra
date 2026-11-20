@@ -217,7 +217,8 @@ impl WasmWebGpuSearchSession {
                             // replacement; otherwise the replacement can only
                             // observe self-inflicted shared-cap contention.
                             self.exact = None;
-                            let mut cpu = WasmExactSearchSession::new(&self.problem)?;
+                            let mut cpu =
+                                WasmExactSearchSession::new_for_selected_cpu(&self.problem)?;
                             cpu.mark_cpu_fallback(
                                 resolution
                                     .backend_fallback_reason()

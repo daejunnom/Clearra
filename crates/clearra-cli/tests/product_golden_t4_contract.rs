@@ -1,3 +1,5 @@
+use clearra_pc_graph::request::{PcContinuationToken, PcContinuationTokenCodec};
+
 use crate::product_contract_json_assert::{
     assert_exact_pc, fixture_json, fixture_json_with_flags, number,
 };
@@ -23,8 +25,16 @@ fn pc_4l_fixed_candidate_budget_golden_contract_is_stable() {
 fn scenario_clear_to_empty_golden_contract_is_stable() {
     let result = fixture_json("tests/fixtures/product/scenario_clear_to_empty.json");
     assert_exact_pc(&result, "pc-scenario", 1);
-    assert_eq!(result["summary"]["completion_goal"], "clear-to-empty");
     assert_eq!(result["summary"]["scenario_replay_token_version"], "sr2");
+    let token = result["summary"]["scenario_replay_token"]
+        .as_str()
+        .expect("the exact scenario can be replayed");
+    let PcContinuationToken::ScenarioReplay(query) =
+        PcContinuationTokenCodec::parse(token).expect("valid scenario replay")
+    else {
+        panic!("expected a replay token");
+    };
+    assert_eq!(query.completion_goal().as_str(), "clear-to-empty");
     assert_eq!(result["summary"]["retained_trace_count"], 1);
 }
 

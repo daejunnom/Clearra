@@ -2,8 +2,8 @@ use clearra_coverage::row::coverage_row_kind::CoverageRowKind;
 
 use crate::{
     product_contract_json_assert::{
-        assert_exact_pc, fixture, fixture_args, fixture_json, fixture_json_with_flags, number,
-        run_json, workspace_path,
+        assert_exact_pc, bool_value, fixture, fixture_args, fixture_json, fixture_json_with_flags,
+        number, run_json, workspace_path,
     },
     run_with_args,
 };
@@ -40,7 +40,10 @@ fn library_route_product_e2e_opening_2l_empty_matches_golden() {
     // Two horizontal Is share one aligned two-column strip, leaving three
     // O strips. The four possible placements are fields, not trace variants.
     assert_exact_pc(&result, "pc", 4);
-    assert_eq!(result["summary"]["packing_candidate_is_solution"], false);
+    assert!(!bool_value(
+        &result["contract"]["pc"]["execution_report"]["packing"],
+        "packing_candidate_is_solution",
+    ));
 }
 
 #[test]
@@ -80,10 +83,15 @@ mod without_webgpu {
     #[test]
     fn product_backend_cpu_gpu_hybrid_same_scenario_4l() {
         let cpu = scenario_4l("cpu", None);
-        for backend in ["gpu", "hybrid"] {
-            let actual = scenario_4l(backend, Some("--allow-backend-fallback"));
-            assert_same_pc(&cpu, &actual);
-        }
+        // This is deliberately the same padded legacy scenario as the
+        // verified CPU case. It must retain its one-line target when the
+        // unavailable GPU's request is executed by the Rust CPU.
+        let gpu = scenario_4l("gpu", Some("--allow-backend-fallback"));
+        let hybrid = scenario_4l("hybrid", Some("--allow-backend-fallback"));
+        assert_same_pc(&cpu, &gpu);
+        assert_same_pc(&cpu, &hybrid);
+        assert_unavailable_gpu_fallback(&gpu);
+        assert_cpu_selected_hybrid(&hybrid);
     }
 
     #[test]
@@ -242,7 +250,10 @@ fn pc_command_uses_search_problem_core_executor() {
         &["--backend", "cpu", "--workers", "1"],
     );
     assert_exact_pc(&result, "pc", 4);
-    assert_eq!(result["summary"]["packing_candidate_is_solution"], false);
+    assert!(!bool_value(
+        &result["contract"]["pc"]["execution_report"]["packing"],
+        "packing_candidate_is_solution",
+    ));
 }
 
 #[test]
