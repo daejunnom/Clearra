@@ -31,6 +31,8 @@ const MODES = Object.freeze({
   CLEARRA_TERMINAL_IDENTITY_MOVE: "0",
   CLEARRA_ORDERED_KICK_INTERVAL: "0",
   CLEARRA_ILC_LAZY_FRAME: "0",
+  CLEARRA_NO_ENTRY_COMPONENTS: "0",
+  CLEARRA_SAME_TILE_PARENT_REUSE: "0",
 });
 const CASES = Object.freeze({
   small: Object.freeze({
@@ -132,7 +134,9 @@ export function validatedProofArm(report, receipt, step, options, binarySha, out
     report.incremental_domain_mode === "0" && report.first_kick_interval_mode === "0" &&
     report.conditional_order_mode === "0" && report.terminal_identity_move_mode === "0" &&
     (report.ordered_kick_interval_mode ?? "0") === "0" &&
-    (report.ilc_lazy_frame_mode ?? "0") === "0",
+    (report.ilc_lazy_frame_mode ?? "0") === "0" &&
+    (report.no_entry_components_mode ?? "0") === "0" &&
+    (report.same_tile_parent_reuse_mode ?? "0") === "0",
   step.name + ": unexpected source, mode, or coverage output");
   const input = report.input;
   requireThat(input?.board === fixture.board && input.height === fixture.height &&

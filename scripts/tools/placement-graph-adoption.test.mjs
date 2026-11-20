@@ -38,6 +38,8 @@ function run(index, arm, ms, bytes, outputMode = "global-only") {
     terminal_identity_move_mode: "0",
     ordered_kick_interval_mode: "0",
     ilc_lazy_frame_mode: "0",
+    no_entry_components_mode: "0",
+    same_tile_parent_reuse_mode: "0",
     other_process_configuration: {}, output_mode: outputMode,
     timing_ms: { search: ms }, valid: true, validation_errors: [],
     solution_coverage: outputMode === "global-only" ? null : {

@@ -2,8 +2,21 @@ name: Placement Dependency Qualification
 
 on:
   push:
-    branches: [codex/v090-relation-rust-integration, codex/v090-relation-rust-p7p4]
+    branches:
+      - codex/v090-relation-rust-integration
+      - codex/v090-relation-rust-p7p4
+      # Pre-main opt-in: only an owner-created, SHA-addressed branch can
+      # request the entire proof and timing suite on one hosted runner.
+      - codex/v090-relation-rust-adoption-*
   workflow_dispatch:
+    inputs:
+      run_adoption:
+        description: Explicitly run P7P4 mapping qualification followed by same-job ABBA and BAAB
+        type: boolean
+        default: false
+      source_sha:
+        description: Full selected commit SHA (required only when run_adoption is true)
+        type: string
 
 permissions:
   contents: read
@@ -18,7 +31,9 @@ env:
 
 jobs:
   relation-and-mapping:
-    if: github.ref == 'refs/heads/codex/v090-relation-rust-integration'
+    if: >-
+      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -33,24 +48,45 @@ jobs:
           set -eu
           cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib --no-run
           status=0
-          for filter in structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves ordered_kick_interval_requires reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_ candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move nonempty_eight_i_advanced_domain_preserves_fixture_identities lazy_frame_; do
+          for filter in structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves ordered_kick_interval_requires reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows direct_p7p4_capture_ candidate_witness_only_reads conditional_language_ native_parallel_terminal_identity_move nonempty_eight_i_advanced_domain_preserves_fixture_identities same_tile_parent_reuse_requires lazy_frame_ occupied_same_kind_hold_visits; do
             cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib "$filter" || status=1
           done
           exit "$status"
       - name: Test the bounded solution stream and exact comparison
         if: ${{ !cancelled() }}
         run: cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
-      - name: Verify supervised capture and comparison on the one-I fixture
+      - name: Build the focused proof tools once
+        id: focused-tools
         if: ${{ !cancelled() }}
         run: |
           set -eu
           df --output=avail -B1 "$GITHUB_WORKSPACE"
           CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked -p clearra-manage
           CLEARRA_SOURCE_COMMIT="$GITHUB_SHA" CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
+      - name: Verify supervised capture and comparison on the one-I fixture
+        if: ${{ !cancelled() && steps.focused-tools.outcome == 'success' }}
+        run: |
           node scripts/benchmark/run-placement-coverage-proof.mjs --case small --build-profile debug \
             --id "small-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source-sha "$GITHUB_SHA"
+      - name: Check non-empty Geometry routes against the independent eight-I oracle
+        if: ${{ !cancelled() && steps.focused-tools.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -eu
+          tools="$GITHUB_WORKSPACE/build/cargo/default/debug"
+          status=0
+          for modes in '0 0' '1 0' '0 1'; do
+            read -r incremental reuse <<< "$modes"
+            CLEARRA_INCREMENTAL_DOMAIN="$incremental" CLEARRA_SAME_TILE_PARENT_REUSE="$reuse" \
+              "$tools/clearra-manage" --root "$GITHUB_WORKSPACE" runtime run \
+              --producer benchmark --profile benchmark-search --timeout 120 -- \
+              "$tools/examples/placement_graph_bench" --nonempty-eight-i || status=1
+          done
+          exit "$status"
   receipts-and-adoption:
-    if: github.ref == 'refs/heads/codex/v090-relation-rust-integration'
+    if: >-
+      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -64,8 +100,18 @@ jobs:
       - name: Test the local adoption evaluator
         if: ${{ !cancelled() }}
         run: node --test scripts/tools/placement-graph-adoption.test.mjs scripts/benchmark/run-placement-coverage-proof.test.mjs scripts/benchmark/run-placement-graph-adoption.test.mjs
+      - uses: actions/setup-node@v4
+        if: ${{ !cancelled() }}
+        id: node
+        with:
+          node-version: 22.23.2
+      - name: Test the Web transfer owner and Discord artifact projection
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        run: node --experimental-strip-types --test apps/clearra-web/test/verifierBatchOwnership.test.mjs apps/clearra-discord-bot/test/job-service.test.mjs
   operation-reuse:
-    if: github.ref == 'refs/heads/codex/v090-relation-rust-integration'
+    if: >-
+      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -76,20 +122,44 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Test normalized ordered kicks and stable replay identifiers
         run: cargo test --locked -p clearra-rules -p clearra-finesse -p clearra-core-ffi -p clearra-pc-graph --lib --no-fail-fast
-      - name: Test the legacy Cover Rust service boundary
+      - name: Test Legacy Cover, full-height replay and Setup continuation ownership
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           node scripts/tools/invoke-clearra-build.mjs --purpose experiment -- bash -e -u <<'SH'
           out="$CLEARRA_BUILD_TRANSACTION_ROOT/legacy-cover-core-c"
-          cmake -S core-c -B "$out" -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$out" --target clearra_core --parallel 2
+          cmake -S core-c -B "$out" -DBUILD_TESTING=OFF -DCLEARRA_BUILD_TEST_ORACLE=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$out" --target clearra_core clearra_core_test_oracle --parallel 2
           export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-L native=$out"
           status=0
+          cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core --test legacy_cover_native_witness || status=1
           cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_tests || status=1
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
+          cargo test --locked -p clearra-app --features native-c-core --test exact_accelerator_product_execution setup_score_reuse || status=1
           exit "$status"
           SH
+  desktop-cli-readback:
+    if: >-
+      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
+      CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
+      CLEARRA_REAL_DESKTOP_SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare actual Desktop bridge requests with CLI results at 7–24L
+        shell: bash
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p "$GITHUB_WORKSPACE/_local/artifacts/v081-desktop-native-smoke"
+          cargo test --locked -p clearra-cli --test desktop_full_height_products --no-default-features \
+            --features wasm-cpu-runtime,clearra-gui-host/wasm-cpu-runtime -- --ignored --test-threads=1
   p7p4-exact-handoff:
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/v090-relation-rust-p7p4'
     runs-on: ubuntu-latest
@@ -118,5 +188,131 @@ jobs:
         with:
           name: p7p4-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: _local/artifacts/benchmarks/placement-graph-coverage/large-${{ github.run_id }}-${{ github.run_attempt }}-proof/*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  p7p4-same-job-adoption:
+    if: >-
+      github.repository == 'daejunnom/Clearra' &&
+      github.ref_type == 'branch' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      github.run_attempt == '1' &&
+      (
+        (
+          github.event_name == 'push' &&
+          startsWith(github.ref, 'refs/heads/codex/v090-relation-rust-adoption-') &&
+          github.event.created && !github.event.deleted && !github.event.forced &&
+          github.event.before == '0000000000000000000000000000000000000000'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' && inputs.run_adoption &&
+          (github.ref == 'refs/heads/codex/v090-relation-rust-integration' ||
+           github.ref == 'refs/heads/codex/v090-relation-rust-p7p4')
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      # One runner, ten leases of at most 25 minutes plus the 15-minute
+      # comparator. Rust receipts use the same lease for proof and timing.
+      LEASE_SECONDS: '1500'
+      PROOF_ID: hosted-proof-${{ github.run_id }}-${{ github.run_attempt }}
+      ADOPTION_ID: hosted-ab-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Bind the explicit opt-in to the exact requested SHA
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.source_sha }}
+          PUSH_AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -eu
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              [[ "$GITHUB_REF" == "refs/heads/codex/v090-relation-rust-adoption-$GITHUB_SHA" ]]
+              [[ "$PUSH_AFTER_SHA" == "$GITHUB_SHA" ]]
+              ;;
+            workflow_dispatch)
+              [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ && "$REQUESTED_SHA" == "$GITHUB_SHA" ]]
+              ;;
+            *) exit 2 ;;
+          esac
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify exact checkout and managed workspace capacity
+        shell: bash
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          available="$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -1 | tr -d ' ')"
+          printf 'workspace_available_bytes=%s\n' "$available"
+          test "$available" -ge 35433480192 || { echo 'P7P4 capture requires 33 GiB free in its artifact volume'; exit 2; }
+      - name: Build the exact native tools once on this runner
+        timeout-minutes: 35
+        shell: bash
+        run: |
+          set -eu
+          cargo build --locked --release -p clearra-manage
+          CLEARRA_SOURCE_COMMIT="$GITHUB_SHA" cargo build --locked --release -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
+      - name: Qualify all per-solution mappings on this runner
+        timeout-minutes: 70
+        shell: bash
+        run: |
+          set -eu
+          node scripts/benchmark/run-placement-coverage-proof.mjs --case p7p4 \
+            --id "$PROOF_ID" --source-sha "$GITHUB_SHA" --timeout-seconds "$LEASE_SECONDS"
+      - name: Measure global-only ABBA and BAAB against the same-runner proof
+        timeout-minutes: 215
+        shell: bash
+        run: |
+          set -eu
+          status=0
+          node scripts/benchmark/run-placement-graph-adoption.mjs --id "$ADOPTION_ID" \
+            --proof-id "$PROOF_ID" --source-sha "$GITHUB_SHA" || status=$?
+          directory="_local/artifacts/benchmarks/placement-graph-coverage/$ADOPTION_ID-adoption"
+          outcome="$(node --input-type=module - "$directory" "$GITHUB_SHA" <<'NODE'
+          import { readFileSync } from "node:fs";
+          import { join } from "node:path";
+          const [directory, sha] = process.argv.slice(2);
+          const read = (name) => JSON.parse(readFileSync(join(directory, name), "utf8"));
+          const summary = read("summary.json");
+          if (summary.schema !== "clearra.placement-graph-adoption-run.v1" ||
+              summary.source_commit !== sha || summary.release_authority !== false) process.exit(2);
+          if (summary.decision !== "decision.json") {
+            if (!["failed", "censored", "confounded"].includes(summary.state)) process.exit(2);
+          } else {
+            const decision = read("decision.json");
+            if (decision.schema !== "clearra.placement-graph-adoption.v1" ||
+                decision.release_authority !== false ||
+                summary.binary_sha256 !== decision.binary_sha256 ||
+                !["adoptable", "not-adoptable"].includes(decision.status) ||
+                summary.state !== "completed-" + decision.status) process.exit(2);
+          }
+          process.stdout.write(summary.state);
+          NODE
+          )"
+          case "$status:$outcome" in
+            0:completed-adoptable)
+              echo 'Exact mapping proof and timing criteria passed on this runner. No product default was changed.' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            1:completed-not-adoptable)
+              echo 'Exact mapping proof verified; the completed timing comparison did not support adoption.' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "Timing comparison did not complete validly: $outcome (exit $status)." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+      - name: Retain bounded proof and timing JSON only
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: p7p4-adoption-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            _local/artifacts/benchmarks/placement-graph-coverage/${{ env.PROOF_ID }}-proof/*.json
+            _local/artifacts/benchmarks/placement-graph-coverage/${{ env.ADOPTION_ID }}-adoption/*.json
           if-no-files-found: ignore
           retention-days: 14

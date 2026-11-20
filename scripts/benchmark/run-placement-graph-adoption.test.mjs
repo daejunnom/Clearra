@@ -50,6 +50,7 @@ function report(step, receipt, output, sha) {
     [AXIS]: step.value, mode: "1", structural_mode: "1",
     static_influence_mode: "0", translation_interval_mode: "0", incremental_domain_mode: "0",
     first_kick_interval_mode: "0", ordered_kick_interval_mode: "0", ilc_lazy_frame_mode: "0",
+    no_entry_components_mode: "0", same_tile_parent_reuse_mode: "0",
     conditional_order_mode: "0", terminal_identity_move_mode: "0",
     input: {
       board: fixture.board, height: fixture.height, placed_pieces: fixture.placed, supplied_pieces: fixture.supplied,
@@ -158,6 +159,7 @@ test("validates previous mapping proof against exact compiled source, host, bina
     (bundle) => { bundle.summary.axis = "ordered_kick_interval_mode"; },
     (bundle) => { bundle.candidate.report.compiled_source_commit = null; bind(bundle.candidate); },
     (bundle) => { bundle.candidate.report.ilc_lazy_frame_mode = "1"; bind(bundle.candidate); },
+    (bundle) => { bundle.candidate.report.no_entry_components_mode = "1"; bind(bundle.candidate); },
     (bundle) => { bundle.candidate.report.compiled_source_commit = digest("b"); },
     (bundle) => { bundle.comparison.report.right_sha256 = digest("e"); bind(bundle.comparison); },
   ]) {
@@ -208,6 +210,7 @@ test("different compiled source or actual worker contract stops instead of takin
     (measured) => { measured.compiled_source_commit = null; },
     (measured) => { measured.cpu.hard_limit = 11; },
     (measured) => { measured.ordered_kick_interval_mode = "1"; },
+    (measured) => { measured.same_tile_parent_reuse_mode = "1"; },
   ]) {
     const io = recordingIo((_, execution) => mutate(execution.report));
     const evidence = await collectPlacementGraphAdoption(options, custody, proof, schedule, io);

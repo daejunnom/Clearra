@@ -30,6 +30,16 @@ const MAPPING_COPY = {
   candidate: { benchmark: "mapping-candidate.json", supervisor: "mapping-candidate-runtime.json" },
 };
 
+const NEUTRAL_ADDITIONAL_AXES = [
+  "ordered_kick_interval_mode", "ilc_lazy_frame_mode",
+  "no_entry_components_mode", "same_tile_parent_reuse_mode",
+];
+
+function isBoundSingleAxisReport(report, sourceCommit) {
+  return report?.compiled_source_commit === sourceCommit &&
+    NEUTRAL_ADDITIONAL_AXES.every((axis) => report[axis] === "0");
+}
+
 function requireThat(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -103,8 +113,7 @@ export function validateAdoptionProof(options, binary, artifactRoot, custody, bu
     step.name + ": stored proof receipt is not bound to this successful phase");
     last = sequentialAfter(last, runtime);
     if (index !== 2) {
-      requireThat(phase.report?.compiled_source_commit === options.sourceCommit &&
-        phase.report.ordered_kick_interval_mode === "0" && phase.report.ilc_lazy_frame_mode === "0",
+      requireThat(isBoundSingleAxisReport(phase.report, options.sourceCommit),
       step.name + ": exact compile-time source or fixed axes missing; comparison-only proof cannot authorize timing");
       const contract = validatedProofArm(phase.report, runtime, step, proofOptions, custody.binarySha);
       referenceContract ??= contract;
@@ -161,8 +170,7 @@ export async function collectPlacementGraphAdoption(options, custody, proof, sch
       active.state = "invalid";
       previous = sequentialAfter(previous, runtime);
       const report = parseBoundBenchmarkOutput(runtime, execution);
-      requireThat(report?.compiled_source_commit === options.sourceCommit &&
-        report.ordered_kick_interval_mode === "0" && report.ilc_lazy_frame_mode === "0",
+      requireThat(isBoundSingleAxisReport(report, options.sourceCommit),
       step.name + ": exact compile-time source or fixed axes missing");
       const contract = validatedProofArm(report, runtime, step, proof.proofOptions, custody.binarySha, "global-only");
       requireThat(isDeepStrictEqual(contract, proof.contract),

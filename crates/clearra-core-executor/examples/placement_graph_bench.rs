@@ -35,7 +35,7 @@ mod solution_coverage_spool;
 #[cfg(all(feature = "parallel", feature = "local-search-ab"))]
 mod run {
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         fs::{self, File, OpenOptions},
         io::{self, BufReader, BufWriter, Read, Write},
         path::{Path, PathBuf},
@@ -49,12 +49,17 @@ mod run {
     use super::solution_coverage_spool::{CoverageFragment, CoverageSpool, CoverageSpoolLimits};
 
     use clearra_core_domain::{
-        execution_cancellation::ExecutionControl, pc::pc_target::PcTarget,
-        piece::piece_kind::PieceKind, runtime_cpu_capacity::CpuCapacity,
-        solution::normalized_tiling_solution::NormalizedTilingSolutionKey,
+        execution_cancellation::ExecutionControl,
+        pc::pc_target::PcTarget,
+        piece::piece_kind::PieceKind,
+        runtime_cpu_capacity::CpuCapacity,
+        solution::normalized_tiling_solution::{
+            NormalizedTilingSolutionKey, PiecePlacementMask, StandardBoard64TilingIdentity,
+        },
     };
     use clearra_core_executor::{
-        backend::CapturedSolutionCoverage, CoreExecutionResult, WasmCpuSearchBackend,
+        backend::{CapturedSolutionCoverage, GeometryDomainExperimentTotals},
+        CoreExecutionResult, WasmCpuSearchBackend,
     };
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
     use clearra_pc_graph::request::{
@@ -69,6 +74,90 @@ mod run {
 
     const LARGE_COUNT: usize = 456_459;
     const LARGE_HASH: &str = "cts1:2fcbc950acdffa31";
+    const EIGHT_I_INITIAL: u64 = 0xc030_0c03;
+    const EIGHT_I_CAPTURE_ERROR: &str =
+        "--nonempty-eight-i supports global-only output; --coverage-slot is unavailable";
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Fixture {
+        OneI,
+        NonemptyEightI,
+        P7P4,
+    }
+
+    impl Fixture {
+        const fn name(self) -> &'static str {
+            match self {
+                Self::OneI => "one-I-preflight",
+                Self::NonemptyEightI => "nonempty-4L-eight-I-jstris180",
+                Self::P7P4 => "empty-4L-P7P4-jstris180",
+            }
+        }
+
+        const fn height(self) -> u16 {
+            match self {
+                Self::OneI => 1,
+                Self::NonemptyEightI | Self::P7P4 => 4,
+            }
+        }
+
+        const fn placed_pieces(self) -> usize {
+            match self {
+                Self::OneI => 1,
+                Self::NonemptyEightI => 8,
+                Self::P7P4 => 10,
+            }
+        }
+
+        const fn fixed_board(self) -> Option<u64> {
+            match self {
+                Self::OneI => Some(0x3f0),
+                Self::NonemptyEightI => Some(EIGHT_I_INITIAL),
+                Self::P7P4 => None,
+            }
+        }
+
+        fn input(self) -> Value {
+            let (board, supply, supplied_pieces, original_supply_count, hold) = match self {
+                Self::OneI => ("0x3f0", "I", 1, 1, "disabled"),
+                Self::NonemptyEightI => ("0xc0300c03", "IIIIIIII", 8, 1, "disabled"),
+                Self::P7P4 => ("0", "P7P4", 11, 4_233_600, "enabled-empty"),
+            };
+            json!({
+                "board": board, "height": self.height(), "placed_pieces": self.placed_pieces(),
+                "supply": supply, "supplied_pieces": supplied_pieces,
+                "original_supply_count": original_supply_count, "hold": hold,
+                "rule": "jstris-180", "count": "unique", "queue_knowledge": "full-future-oracle"
+            })
+        }
+
+        fn capture_universe(self) -> Result<CoverageUniverse, String> {
+            match self {
+                Self::OneI => Ok(CoverageUniverse::SmallI),
+                Self::P7P4 => Ok(CoverageUniverse::P7P4),
+                Self::NonemptyEightI => Err(EIGHT_I_CAPTURE_ERROR.into()),
+            }
+        }
+    }
+
+    fn parse_fixture(args: &[String]) -> Result<(Fixture, Option<&str>), String> {
+        match args {
+            [] => Ok((Fixture::P7P4, None)),
+            [flag] if flag == "--small" => Ok((Fixture::OneI, None)),
+            [flag] if flag == "--nonempty-eight-i" => Ok((Fixture::NonemptyEightI, None)),
+            [flag, slot] if flag == "--coverage-slot" => Ok((Fixture::P7P4, Some(slot.as_str()))),
+            [small, flag, slot] if small == "--small" && flag == "--coverage-slot" => {
+                Ok((Fixture::OneI, Some(slot.as_str())))
+            }
+            [fixture, flag, _] if fixture == "--nonempty-eight-i" && flag == "--coverage-slot" => {
+                Err(EIGHT_I_CAPTURE_ERROR.into())
+            }
+            _ => Err(
+                "usage: placement_graph_bench [[--small] [--coverage-slot SLOT] | --nonempty-eight-i | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
+                    .into(),
+            ),
+        }
+    }
 
     pub fn main() -> Result<(), String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -83,24 +172,13 @@ mod run {
         if args.as_slice() == ["--scalar-demo"] {
             return scalar_demo();
         }
-        let (small, coverage_slot) = match args.as_slice() {
-            [] => (false, None),
-            [flag] if flag == "--small" => (true, None),
-            [flag, slot] if flag == "--coverage-slot" => (false, Some(slot.as_str())),
-            [small, flag, slot] if small == "--small" && flag == "--coverage-slot" => {
-                (true, Some(slot.as_str()))
-            }
-            _ => return Err(
-                "usage: placement_graph_bench [[--small] [--coverage-slot SLOT] | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
-                    .into(),
-            ),
-        };
-        if (!small || coverage_slot.is_some())
+        let (fixture, coverage_slot) = parse_fixture(&args)?;
+        if (fixture != Fixture::OneI || coverage_slot.is_some())
             && (std::env::var("CLEARRA_RUNTIME_SUPERVISED").as_deref() != Ok("1")
                 || std::env::var("CLEARRA_RUNTIME_PROFILE").as_deref() != Ok("benchmark-search"))
         {
             return Err(
-                "P7P4 and coverage capture require the supervised benchmark-search profile".into(),
+                "P7P4, nonempty eight-I and coverage capture require the supervised benchmark-search profile".into(),
             );
         }
         let mode = std::env::var("CLEARRA_PLACEMENT_DEPENDENCY").unwrap_or_else(|_| "0".into());
@@ -128,6 +206,8 @@ mod run {
         let first_kick_interval_mode = experiment_mode("CLEARRA_FIRST_KICK_INTERVAL")?;
         let ordered_kick_interval_mode = experiment_mode("CLEARRA_ORDERED_KICK_INTERVAL")?;
         let ilc_lazy_frame_mode = experiment_mode("CLEARRA_ILC_LAZY_FRAME")?;
+        let no_entry_components_mode = experiment_mode("CLEARRA_NO_ENTRY_COMPONENTS")?;
+        let same_tile_parent_reuse_mode = experiment_mode("CLEARRA_SAME_TILE_PARENT_REUSE")?;
         let conditional_order_mode = experiment_mode("CLEARRA_CONDITIONAL_ORDER")?;
         let terminal_identity_move_mode = experiment_mode("CLEARRA_TERMINAL_IDENTITY_MOVE")?;
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
@@ -142,33 +222,30 @@ mod run {
             .with_conditioned_reachability_enabled(false)
             .with_tablebase_requested(false);
         let compile_started = Instant::now();
-        let problem = compile_problem(small, policy)?;
+        let problem = compile_problem(fixture, policy)?;
         if problem.count_policy() != PcCountPolicy::CountUnique {
             return Err("fixture must retain CountUnique".into());
         }
         let compile_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
             "placement_graph_bench starting: case={} mode={} structural_mode={} static_influence_mode={} translation_interval_mode={} auto_cpu_limit={}",
-            if small {
-                "one-I-preflight"
-            } else {
-                "empty-4L-P7P4-jstris180"
-            },
+            fixture.name(),
             mode,
             structural_mode,
             static_influence_mode,
             translation_interval_mode,
             capacity.hard_limit(),
         );
-        let universe = if small {
-            CoverageUniverse::SmallI
-        } else {
-            CoverageUniverse::P7P4
-        };
-        let capture_path = coverage_slot.map(new_capture_directory).transpose()?;
+        let capture = coverage_slot
+            .map(|slot| -> Result<_, String> {
+                let universe = fixture.capture_universe()?;
+                Ok((new_capture_directory(slot)?, universe))
+            })
+            .transpose()?;
         let search_started = Instant::now();
         let control = ExecutionControl::default();
-        let (result, spool) = if let Some(dir) = &capture_path {
+        let (result, spool) = if let Some((dir, universe)) = &capture {
+            let universe = *universe;
             let spool = Arc::new(Mutex::new(
                 CoverageSpool::create(&dir.join("runs"), universe, CoverageSpoolLimits::default())
                     .map_err(|e| format!("coverage spool: {e}"))?,
@@ -232,9 +309,16 @@ mod run {
             clearra_core_executor::backend::structural_order_experiment_totals();
         let geometry_domains = clearra_core_executor::backend::geometry_domain_experiment_totals();
         let evidence_started = Instant::now();
-        let errors = validate(&result, small, capacity.hard_limit());
-        let solution_coverage = match (capture_path, spool) {
-            (Some(dir), Some(spool)) if errors.is_empty() => {
+        let errors = validate(
+            &result,
+            fixture,
+            capacity.hard_limit(),
+            geometry_domains,
+            incremental_domain_mode == "1",
+            same_tile_parent_reuse_mode == "1",
+        );
+        let solution_coverage = match (capture, spool) {
+            (Some((dir, universe)), Some(spool)) if errors.is_empty() => {
                 finish_capture(dir, spool, universe, &result)?
             }
             _ => Value::Null,
@@ -274,7 +358,7 @@ mod run {
         }
         let output = json!({
             "schema": "clearra.placement-graph-benchmark.v1",
-            "case": if small { "one-I-preflight" } else { "empty-4L-P7P4-jstris180" },
+            "case": fixture.name(),
             "binary_sha256": binary_sha,
             "compiled_source_commit": option_env!("CLEARRA_SOURCE_COMMIT"),
             "supervisor_run_id": std::env::var("CLEARRA_RUNTIME_RUN_ID").ok(),
@@ -289,9 +373,11 @@ mod run {
             "first_kick_interval_mode": first_kick_interval_mode,
             "ordered_kick_interval_mode": ordered_kick_interval_mode,
             "ilc_lazy_frame_mode": ilc_lazy_frame_mode,
+            "no_entry_components_mode": no_entry_components_mode,
+            "same_tile_parent_reuse_mode": same_tile_parent_reuse_mode,
             "conditional_order_mode": conditional_order_mode,
             "terminal_identity_move_mode": terminal_identity_move_mode,
-            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},ordered_kick={ordered_kick_interval_mode},ilc_lazy_frame={ilc_lazy_frame_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode}",
+            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},ordered_kick={ordered_kick_interval_mode},ilc_lazy_frame={ilc_lazy_frame_mode},no_entry_components={no_entry_components_mode},same_tile_parent_reuse={same_tile_parent_reuse_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode}",
                 variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode)),
             "static_influence": {
                 "scope": "completed search, workspace counters aggregated after worker joins; null means metric not exposed",
@@ -357,6 +443,8 @@ mod run {
                 "advanced_incremental_compiles": geometry_domains.advanced_incremental_compiles,
                 "support_cells_reused": geometry_domains.support_cells_reused,
                 "support_cells_recomputed": geometry_domains.support_cells_recomputed,
+                "same_tile_parent_scans": geometry_domains.same_tile_parent_scans,
+                "same_tile_parent_reuses": geometry_domains.same_tile_parent_reuses,
                 "apdp_static_checks": geometry_domains.apdp_static_checks,
                 "apdp_static_complete": geometry_domains.apdp_static_complete,
                 "apdp_pivot_tightenings": geometry_domains.apdp_pivot_tightenings
@@ -366,13 +454,7 @@ mod run {
                 "CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT": std::env::var("CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT").ok()
             },
             "backend_contract": "native-host Rust WasmCpuSearchBackend; no C core; no tablebase",
-            "input": { "board": if small { "0x3f0" } else { "0" },
-                "height": if small { 1 } else { 4 }, "placed_pieces": if small { 1 } else { 10 },
-                "supply": if small { "I" } else { "P7P4" },
-                "supplied_pieces": if small { 1 } else { 11 },
-                "original_supply_count": if small { 1 } else { 4_233_600 },
-                "hold": if small { "disabled" } else { "enabled-empty" },
-                "rule": "jstris-180", "count": "unique", "queue_knowledge": "full-future-oracle" },
+            "input": fixture.input(),
             "cpu": { "available_parallelism": std::thread::available_parallelism().map(usize::from).ok(),
                 "recommended_parallelism": capacity.recommended_parallelism(),
                 "affinity_limit": capacity.affinity_limit(), "expected_vcpus": capacity.expected_vcpus(),
@@ -599,20 +681,24 @@ mod run {
         }
     }
 
-    fn compile_problem(small: bool, policy: PcExecutionPolicy) -> Result<SearchProblem, String> {
-        if small {
+    fn compile_problem(
+        fixture: Fixture,
+        policy: PcExecutionPolicy,
+    ) -> Result<SearchProblem, String> {
+        if let Some(board) = fixture.fixed_board() {
+            let pieces = fixture.placed_pieces();
             let query = PcScenarioQuery::new(
-                PcScenarioBoard::standard_10(1, 0x3f0),
-                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
-                PieceWindow::new(1),
+                PcScenarioBoard::standard_10(fixture.height(), board),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; pieces])),
+                PieceWindow::new(pieces),
             )
             .with_rule(jstris_180())
             .with_allow_hold(false)
-            .with_exact_pieces(Some(1))
+            .with_exact_pieces(Some(pieces))
             .with_count_policy(PcCountPolicy::CountUnique)
             .with_execution_policy(policy);
             ProblemCompiler::compile_scenario_pc(&query)
-                .map_err(|e| format!("preflight compile: {e:?}"))
+                .map_err(|e| format!("{} compile: {e:?}", fixture.name()))
         } else {
             let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
                 .with_rule(jstris_180())
@@ -624,7 +710,56 @@ mod run {
         }
     }
 
-    fn validate(result: &CoreExecutionResult, small: bool, workers: usize) -> Vec<String> {
+    /// Independent tiling enumeration on the 4x8 rectangle behind the two
+    /// occupied leftmost columns. Its left edge is either one vertical I
+    /// column or a four-column slab of four horizontal I pieces. Any tiling
+    /// is a sequence of those blocks, all achievable by placing the bottom
+    /// rows of the horizontal slabs in order while vertical pieces are down.
+    fn eight_i_identity_oracle() -> BTreeSet<StandardBoard64TilingIdentity> {
+        fn visit(
+            col: u8,
+            placed: &mut Vec<PiecePlacementMask>,
+            identities: &mut BTreeSet<StandardBoard64TilingIdentity>,
+        ) {
+            if col == 10 {
+                identities.insert(
+                    StandardBoard64TilingIdentity::from_placements(
+                        EIGHT_I_INITIAL,
+                        placed.iter().copied(),
+                    )
+                    .expect("oracle's placements are disjoint"),
+                );
+                return;
+            }
+            let vertical = (0..4).fold(0_u64, |mask, row| mask | (1_u64 << (row * 10 + col)));
+            placed.push(PiecePlacementMask::new(PieceKind::I, vertical));
+            visit(col + 1, placed, identities);
+            placed.pop();
+            if col <= 6 {
+                let checkpoint = placed.len();
+                for row in 0..4 {
+                    placed.push(PiecePlacementMask::new(
+                        PieceKind::I,
+                        0xf_u64 << (row * 10 + col),
+                    ));
+                }
+                visit(col + 4, placed, identities);
+                placed.truncate(checkpoint);
+            }
+        }
+        let mut identities = BTreeSet::new();
+        visit(2, &mut Vec::with_capacity(8), &mut identities);
+        identities
+    }
+
+    fn validate(
+        result: &CoreExecutionResult,
+        fixture: Fixture,
+        workers: usize,
+        geometry: GeometryDomainExperimentTotals,
+        incremental: bool,
+        same_tile_reuse: bool,
+    ) -> Vec<String> {
         let mut errors = Vec::new();
         for key in ["count_complete", "probability_complete"] {
             if result.bool_field(key) != Some(true) {
@@ -634,12 +769,15 @@ mod run {
         if result.bool_field("resource_truncated") != Some(false) {
             errors.push("resource_truncated must be false".into());
         }
-        if result.usize_field("normalized_unique_solution_count")
-            != Some(if small { 1 } else { LARGE_COUNT })
-        {
+        let expected_count = match fixture {
+            Fixture::OneI => 1,
+            Fixture::NonemptyEightI => 7,
+            Fixture::P7P4 => LARGE_COUNT,
+        };
+        if result.usize_field("normalized_unique_solution_count") != Some(expected_count) {
             errors.push("completed solution count differs from fixture oracle".into());
         }
-        if !small {
+        if fixture == Fixture::P7P4 {
             if result.field("normalized_solution_set_hash") != Some(LARGE_HASH) {
                 errors.push("completed solution-set hash differs from Jstris180 oracle".into());
             }
@@ -655,6 +793,54 @@ mod run {
                 errors.push(format!(
                     "parallel_active_workers must equal detected auto limit {workers}"
                 ));
+            }
+        } else if fixture == Fixture::NonemptyEightI {
+            let actual_identities = result.normalized_solution_identities();
+            if actual_identities.len() != expected_count
+                || actual_identities.iter().copied().collect::<BTreeSet<_>>()
+                    != eight_i_identity_oracle()
+            {
+                errors.push("eight-I canonical identities differ from the rectangle oracle".into());
+            }
+            if result.usize_field("coverage_pattern_count") != Some(1)
+                || result.usize_field("covered_pattern_count") != Some(1)
+                || result.bool_field("coverage_complete") != Some(true)
+                || result.coverage_pattern_words() != [1]
+            {
+                errors.push("eight-I must completely cover its only fixed queue".into());
+            }
+            // The compact fixture permits automatic topology admission to
+            // use fewer workers than P7P4. --compare checks actual topology.
+            if !result
+                .usize_field("workers_used")
+                .is_some_and(|used| (1..=workers).contains(&used))
+            {
+                errors
+                    .push("eight-I must report an actual worker count within the Auto cap".into());
+            }
+            let (expected, excluded) = if incremental {
+                (
+                    geometry.advanced_incremental_compiles,
+                    geometry.advanced_full_compiles,
+                )
+            } else {
+                (
+                    geometry.advanced_full_compiles,
+                    geometry.advanced_incremental_compiles,
+                )
+            };
+            if geometry.completed_families == 0 || expected == 0 || excluded != 0 {
+                errors.push("eight-I must actually execute its selected advanced route".into());
+            }
+            if incremental != (geometry.support_cells_reused > 0) {
+                errors.push("eight-I support-cell reuse did not match the incremental arm".into());
+            }
+            if same_tile_reuse != (geometry.same_tile_parent_reuses > 0) {
+                errors.push("eight-I parent reuse did not match the SameTile arm".into());
+            }
+            if !same_tile_reuse && geometry.same_tile_parent_scans == 0 {
+                errors
+                    .push("eight-I reference arm must perform actual SameTile parent scans".into());
             }
         }
         errors
@@ -784,6 +970,7 @@ mod run {
             })
             .collect::<Result<_, String>>()?;
         let first = &reports[0];
+        let eight_i = first["case"] == Fixture::NonemptyEightI.name();
         let mut differences = Vec::new();
         let summary_keys = [
             "normalized_unique_solution_count",
@@ -825,6 +1012,19 @@ mod run {
                     differences.push(format!("{}: summary.{key} mismatch", paths[index]));
                 }
             }
+            if eight_i {
+                if report["output_mode"] != "global-only" {
+                    differences.push(format!("{}: eight-I must be global-only", paths[index]));
+                }
+                for key in ["workers_used", "cpu_parallel_execution"] {
+                    if report["summary"][key].is_null()
+                        || report["summary"][key] != first["summary"][key]
+                    {
+                        differences
+                            .push(format!("{}: actual topology {key} mismatch", paths[index]));
+                    }
+                }
+            }
         }
         // Missing experimental axes in old reports mean disabled. Keep their
         // original grouping when every report predates that axis. A binary
@@ -861,6 +1061,7 @@ mod run {
         };
         let mut times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         let mut all_axes_times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        let mut domain_work: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
         for report in &reports {
             let dependency_mode = report["mode"].as_str().ok_or("mode missing")?;
             let structural_mode = match report.get("structural_mode") {
@@ -910,19 +1111,28 @@ mod run {
             let first_kick = extra_mode("first_kick_interval_mode")?;
             let ordered_kick = extra_mode("ordered_kick_interval_mode")?;
             let ilc_lazy_frame = extra_mode("ilc_lazy_frame_mode")?;
+            let no_entry_components = extra_mode("no_entry_components_mode")?;
+            let same_tile_parent_reuse = extra_mode("same_tile_parent_reuse_mode")?;
             let conditional = extra_mode("conditional_order_mode")?;
             let terminal_move = extra_mode("terminal_identity_move_mode")?;
-            all_axes_times
-                .entry(format!(
-                    "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ilc_lazy_frame={ilc_lazy_frame},conditional_order={conditional},terminal_identity_move={terminal_move}"
-                ))
-                .or_default()
-                .push(ms);
+            let all_axes = format!(
+                "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ilc_lazy_frame={ilc_lazy_frame},no_entry_components={no_entry_components},same_tile_parent_reuse={same_tile_parent_reuse},conditional_order={conditional},terminal_identity_move={terminal_move}"
+            );
+            if eight_i {
+                let work = report
+                    .get("geometry_domain")
+                    .filter(|work| work.is_object())
+                    .ok_or("eight-I result is missing geometry_domain work counters")?;
+                domain_work.entry(all_axes.clone()).or_default().push(work);
+            }
+            all_axes_times.entry(all_axes).or_default().push(ms);
             if movement == "0"
                 && incremental == "0"
                 && first_kick == "0"
                 && ordered_kick == "0"
                 && ilc_lazy_frame == "0"
+                && no_entry_components == "0"
+                && same_tile_parent_reuse == "0"
                 && conditional == "0"
                 && terminal_move == "0"
             {
@@ -1010,7 +1220,7 @@ mod run {
                 dependency_change,
             )
         };
-        println!("{}", serde_json::to_string_pretty(&json!({
+        let mut comparison = json!({
             "schema": "clearra.placement-graph-comparison.v1", "files": paths,
             "equivalent": differences.is_empty(), "differences": differences,
             "mode_grouping": if legacy_modes { "dependency-only (legacy reports)" }
@@ -1032,7 +1242,14 @@ mod run {
                 "all_experiments_vs_disabled": all_experiments_change
             },
             "scope": "same binary/input/CPU, exact reported full-set hash and global coverage; no p95 claim"
-        })).map_err(|e| e.to_string())?);
+        });
+        if eight_i {
+            comparison["geometry_domain_work_samples_by_all_axes"] = json!(domain_work);
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&comparison).map_err(|e| e.to_string())?
+        );
         if !differences.is_empty() {
             return Err("benchmark result parity failed".into());
         }
@@ -1048,5 +1265,40 @@ mod run {
         format!(
             "dependency={dependency_mode},structural={structural_mode},static_influence={static_influence_mode},translation_interval={translation_interval_mode}"
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn fixture_selection_keeps_capture_universes_separate() {
+            let parse = |arguments: &[&str]| {
+                let arguments: Vec<String> =
+                    arguments.iter().map(|value| (*value).to_owned()).collect();
+                parse_fixture(&arguments).map(|(fixture, slot)| (fixture, slot.map(str::to_owned)))
+            };
+            assert_eq!(parse(&[]).unwrap(), (Fixture::P7P4, None));
+            assert_eq!(parse(&["--small"]).unwrap(), (Fixture::OneI, None));
+            assert_eq!(
+                parse(&["--nonempty-eight-i"]).unwrap(),
+                (Fixture::NonemptyEightI, None)
+            );
+            assert_eq!(
+                parse(&["--small", "--coverage-slot", "sample"]).unwrap(),
+                (Fixture::OneI, Some("sample".to_owned()))
+            );
+            assert_eq!(
+                parse(&["--nonempty-eight-i", "--coverage-slot", "sample"]).unwrap_err(),
+                EIGHT_I_CAPTURE_ERROR
+            );
+            assert!(Fixture::NonemptyEightI.capture_universe().is_err());
+        }
+
+        #[test]
+        fn eight_i_rectangle_oracle_derives_all_seven_placements() {
+            assert_eq!(EIGHT_I_INITIAL.count_ones(), 8);
+            assert_eq!(eight_i_identity_oracle().len(), 7);
+        }
     }
 }

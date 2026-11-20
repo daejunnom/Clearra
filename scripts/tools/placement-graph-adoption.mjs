@@ -19,7 +19,9 @@ const AXES = [
   "movement_clear_certificates_mode", "first_kick_interval_mode", "conditional_order_mode",
   "terminal_identity_move_mode", "ordered_kick_interval_mode", "ilc_lazy_frame_mode",
 ];
-const FIXED_P7P4_AXES = ["incremental_domain_mode"];
+const FIXED_P7P4_AXES = [
+  "incremental_domain_mode", "no_entry_components_mode", "same_tile_parent_reuse_mode",
+];
 const SOLUTIONS = 456_459;
 const QUEUES = 4_233_600;
 const SOLUTION_SET_HASH = "cts1:2fcbc950acdffa31";
@@ -148,7 +150,8 @@ function readCompletedRun(run, label, axis, arm, outputMode) {
     report.other_process_configuration && typeof report.other_process_configuration === "object" &&
     !Array.isArray(report.other_process_configuration), `${label}: missing runtime or process configuration`);
   const fixedModes = {};
-  // Incremental APDP stays fixed: the empty P7P4 fixture cannot qualify it.
+  // Advanced APDP needs a non-empty target; the component experiment needs
+  // movement-clear on both arms. Neither is an axis of this P7P4 handoff.
   requireThat(Object.keys(report).every((key) => !key.endsWith("_mode") || key === "output_mode" ||
     AXES.includes(key) || FIXED_P7P4_AXES.includes(key)), `${label}: unknown experimental axis`);
   for (const key of [...AXES, ...FIXED_P7P4_AXES]) {
