@@ -17,7 +17,7 @@ use clearra_core_domain::{
 use crate::resource::{ExecutionMemoryBound, ExecutionMemoryOwner};
 
 use super::{
-    super::{super::extended_board::ExtendedBoard, ExtendedTilingKey},
+    super::{super::extended_board::ExtendedBoard, ExtendedTilingKey, SealedPcFamily},
     ExecutionControl, WasmExactSearchError,
 };
 
@@ -27,11 +27,6 @@ enum Phase {
     Drain,
     Complete,
     Failed,
-}
-
-struct CanonicalFamily {
-    keys: Vec<String>,
-    hash: String,
 }
 
 #[derive(Clone, Copy)]
@@ -327,17 +322,18 @@ impl CanonicalReduction {
         self.accepted_rows
     }
 
-    fn into_family(
+    pub(super) fn into_family(
         self,
         control: &ExecutionControl,
-    ) -> Result<CanonicalFamily, WasmExactSearchError> {
+    ) -> Result<SealedPcFamily, WasmExactSearchError> {
         self.check_control(control)?;
         if self.phase != Phase::Complete {
             return Err(contract_error());
         }
-        Ok(CanonicalFamily {
+        Ok(SealedPcFamily {
             keys: self.unique,
             hash: self.hash.ok_or_else(contract_error)?,
+            key_text_bytes: self.key_bytes,
         })
     }
 }

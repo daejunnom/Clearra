@@ -1,8 +1,8 @@
 use std::{env, process::Command};
 
 use clearra_core_domain::{
-    board::standard_pc_board::Board256Mask, piece::piece_kind::PieceKind,
-    runtime_cpu_capacity::CpuCapacity,
+    board::standard_pc_board::Board256Mask, execution_cancellation::ExecutionCancellationToken,
+    piece::piece_kind::PieceKind, runtime_cpu_capacity::CpuCapacity,
 };
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
@@ -56,6 +56,7 @@ fn drive(owner: &mut DryRunOwner, control: &ExecutionControl) {
         if !done {
             assert!(owner.completed().is_none());
             assert!(owner.serial_handoff_pending().is_none());
+            assert!(owner.parallel_result_pending().is_none());
         }
         done
     }));
@@ -74,6 +75,68 @@ fn direct_parallel(
         .execute_pc_family_parallel(WORKERS, control)
         .unwrap()
         .expect("a nonempty Geometry plan")
+}
+
+fn assert_parallel_terminal_matches_direct(
+    owner: DryRunOwner,
+    problem: &SearchProblem,
+    expected: &CoreExecutionResult,
+    control: &ExecutionControl,
+) {
+    let lease = owner
+        .parallel_result_pending()
+        .expect("parallel terminal ready");
+    let keys = owner.completed().unwrap().keys;
+    let backing = keys.as_ptr();
+    let first_text = keys.first().map(|key| key.as_ptr());
+    let terminal = owner.into_parallel_result(control).unwrap();
+    assert_eq!(
+        terminal.admission.lease_token(),
+        lease,
+        "same original lease"
+    );
+    assert!(admit_budget_bound_search_execution(problem, WORKERS).is_err());
+    let actual = &terminal.result;
+    assert_eq!(actual.normalized_solution_keys().as_ptr(), backing);
+    assert_eq!(
+        actual
+            .normalized_solution_keys()
+            .first()
+            .map(|key| key.as_ptr()),
+        first_text
+    );
+    assert_eq!(
+        actual.normalized_solution_keys(),
+        expected.normalized_solution_keys()
+    );
+    assert_eq!(
+        actual.coverage_pattern_words(),
+        expected.coverage_pattern_words()
+    );
+    assert_eq!(actual.path_steps(), expected.path_steps());
+    for key in [
+        "normalized_solution_set_hash",
+        "actual_normalized_solution_set_hash",
+        "packing_candidate_count",
+        "packing_candidate_digest",
+        "build_variant_count",
+        "build_variant_count_exact",
+        "count_complete",
+        "objective_complete",
+        "solution_found",
+        "representative_physical_replay_validated",
+        "coverage_pattern_count",
+        "covered_pattern_count",
+        "coverage_probability",
+        "probability_complete",
+        "workers_requested",
+        "workers_used",
+        "cpu_parallel_execution",
+    ] {
+        assert_eq!(actual.field(key), expected.field(key), "{key}");
+    }
+    drop(terminal);
+    assert!(admit_budget_bound_search_execution(problem, WORKERS).is_ok());
 }
 
 #[test]
@@ -149,7 +212,21 @@ fn cooperative_fixed_ordinal_verification_stats_and_serial_handoff() {
     );
     assert_eq!(path, expected.path_steps());
     assert!(admit_budget_bound_search_execution(&problem, WORKERS).is_err());
-    drop(owner);
+    assert_parallel_terminal_matches_direct(owner, &problem, &expected, &control);
+
+    // Cancel only after all immutable facts and the terminal hash are
+    // available. No result is returned and dropping the consumed owner frees
+    // the original lease, rather than allowing this cancellation to retry.
+    let mut owner = DryRunOwner::new(&problem, field).unwrap();
+    drive(&mut owner, &control);
+    assert!(owner.parallel_result_pending().is_some());
+    let cancellation = ExecutionCancellationToken::new();
+    cancellation.handle().cancel();
+    assert!(matches!(
+        owner.into_parallel_result(&ExecutionControl::new(cancellation)),
+        Err(WasmExactSearchError::Cancelled)
+    ));
+    assert!(admit_budget_bound_search_execution(&problem, WORKERS).is_ok());
 
     // Geometry can cover the sealed O and the five disjoint horizontal I
     // slots, but the fixed queue forces O to play before any uncovering I.
@@ -185,7 +262,7 @@ fn cooperative_fixed_ordinal_verification_stats_and_serial_handoff() {
         (0, 0)
     );
     assert!(empty.verification.representative.is_none());
-    drop(owner);
+    assert_parallel_terminal_matches_direct(owner, &problem, &expected, &control);
 
     // Each row and every column has fewer than four holes: no I layout
     // exists even in original-row geometry, independently of reachability.
@@ -196,6 +273,7 @@ fn cooperative_fixed_ordinal_verification_stats_and_serial_handoff() {
     let mut owner = DryRunOwner::new(&problem, field).unwrap();
     drive(&mut owner, &control);
     assert!(owner.completed().is_none(), "no parallel terminal report");
+    assert!(owner.parallel_result_pending().is_none());
     let lease = owner
         .serial_handoff_pending()
         .expect("serial owner handoff");

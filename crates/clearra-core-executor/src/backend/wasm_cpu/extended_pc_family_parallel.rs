@@ -774,6 +774,17 @@ impl ExtendedBuildProbabilitySession {
             self.representative_rank = worker.representative_rank;
             self.representative_pattern_id = worker.representative_pattern_id;
         }
+        self.merge_pc_verifier_counters(&worker)?;
+        let next = self
+            .pc_build_variant_count
+            .checked_add(worker.pc_build_variant_count);
+        self.pc_build_variant_count = next.unwrap_or(u128::MAX);
+        self.pc_build_variant_count_complete &=
+            next.is_some() && worker.pc_build_variant_count_complete;
+        Ok(())
+    }
+
+    fn merge_pc_verifier_counters(&mut self, worker: &Self) -> Result<(), WasmExactSearchError> {
         let count = worker.processed_candidate_count;
         self.processed_candidate_count = self
             .processed_candidate_count
@@ -811,12 +822,6 @@ impl ExtendedBuildProbabilitySession {
         self.witnessed_pattern_count = self
             .witnessed_pattern_count
             .saturating_add(worker.witnessed_pattern_count);
-        let next = self
-            .pc_build_variant_count
-            .checked_add(worker.pc_build_variant_count);
-        self.pc_build_variant_count = next.unwrap_or(u128::MAX);
-        self.pc_build_variant_count_complete &=
-            next.is_some() && worker.pc_build_variant_count_complete;
         Ok(())
     }
 }
@@ -954,7 +959,7 @@ mod cooperative {
         resource::ResourceLeaseToken,
     };
     use clearra_pc_graph::request::PcCountPolicy;
-    use clearra_problem::{BuildProbabilityField, SearchProblem};
+    use clearra_problem::{BuildProbabilityField, SearchOutputPolicy, SearchProblem};
 
     use super::cooperative_canonical::{CanonicalReduction, SourceKey};
 
@@ -1433,8 +1438,16 @@ mod cooperative {
         pub(super) admission: ExecutionAdmission,
     }
 
-    /// Silent exact conformance only. Workers and the complete ordinal proof
-    /// remain borrowed under this request's lease, not surfaced as a Core result.
+    pub(super) struct ParallelTerminal {
+        // The published result and its allocation account drop before the
+        // exact original admission. It is not a new execution or new lease.
+        pub(super) result: CoreExecutionResult,
+        _backing: ExecutionMemoryOwner,
+        pub(super) admission: ExecutionAdmission,
+    }
+
+    /// Test-private exact owner. Proof facts remain borrowed; publication is
+    /// an explicit consuming operation under the same admission.
     pub(super) struct DryRunOwner {
         // Move-out owners precede the admission in destruction order.
         preparation: Option<ExtendedParallelPreparation>,
@@ -1472,6 +1485,10 @@ mod cooperative {
             if width < 2
                 || problem.objective().kind() != ObjectiveKind::All
                 || problem.count_policy() != PcCountPolicy::CountAll
+                || !matches!(
+                    problem.output_policy(),
+                    SearchOutputPolicy::Summary | SearchOutputPolicy::Trace
+                )
                 || problem
                     .piece_source()
                     .materialized_universe()
@@ -1776,6 +1793,7 @@ mod cooperative {
                 .try_reserve_exact(ranges)
                 .map_err(|_| storage_error())?;
             self.candidate_count = plan.candidate_count;
+            self.root.parallel_minimum_worker_candidates = usize::MAX;
             self.plan = Some(plan);
             self.phase = DryPhase::IndexRange;
             Ok(())
@@ -1881,6 +1899,8 @@ mod cooperative {
                             .exact_pieces()
                             .ok_or_else(contract_error)?,
                     )?;
+                    self.root
+                        .merge_pc_verifier_counters(&binding.worker.engine)?;
                     self.workers.push(binding.worker);
                 }
             } else if let Some(worker) = self
@@ -2046,7 +2066,9 @@ mod cooperative {
                         .workers
                         .get(winner.worker_index)
                         .ok_or_else(contract_error)?;
-                    source.engine.validate_pc_representative_physical_chain()?;
+                    source
+                        .engine
+                        .validate_pc_representative_physical_chain(true)?;
                 }
                 _ => return Err(contract_error()),
             }
@@ -2086,6 +2108,68 @@ mod cooperative {
 
         pub(super) fn serial_handoff_pending(&self) -> Option<ResourceLeaseToken> {
             (self.phase == DryPhase::SerialHandoff).then(|| self.admission.lease_token())
+        }
+
+        pub(super) fn parallel_result_pending(&self) -> Option<ResourceLeaseToken> {
+            (self.phase == DryPhase::Complete).then(|| self.admission.lease_token())
+        }
+
+        pub(super) fn into_parallel_result(
+            mut self,
+            control: &ExecutionControl,
+        ) -> Result<ParallelTerminal, WasmExactSearchError> {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            if self.phase != DryPhase::Complete || control.partition().count() != 1 {
+                return Err(contract_error());
+            }
+            let aggregate = self.admitted_memory.as_ref().ok_or_else(contract_error)?;
+            let backing = aggregate.owner(self.width.checked_add(1).ok_or_else(projection_error)?);
+            let family = self
+                .canonical
+                .take()
+                .ok_or_else(contract_error)?
+                .into_family(control)?;
+
+            if let Some(winner) = self.verification.representative {
+                let source = &mut self
+                    .workers
+                    .get_mut(winner.worker_index)
+                    .ok_or_else(contract_error)?
+                    .engine;
+                if source.covered_patterns.word_at(0) != self.verification.coverage_word
+                    || source.representative_rank != Some(winner.ordinal)
+                {
+                    return Err(contract_error());
+                }
+                // Exactly one ordinal: the selected witness necessarily
+                // covers the already-verified union. Move both backing
+                // owners; the worker slot stays charged throughout the
+                // terminal join even after its witness moves into the root.
+                core::mem::swap(
+                    &mut self.root.covered_patterns,
+                    &mut source.covered_patterns,
+                );
+                self.root.representative_path = core::mem::take(&mut source.representative_path);
+                self.root.representative_rank = source.representative_rank;
+                self.root.representative_pattern_id = source.representative_pattern_id;
+            }
+            if self.root.covered_patterns.word_at(0) != self.verification.coverage_word {
+                return Err(contract_error());
+            }
+            self.root.pc_build_variant_count = self.verification.count_all;
+            self.root.candidate_digest = self.digest;
+            self.root.workers_used = self.width;
+            self.root.native_parallel_peak_bytes = aggregate.admitted_peak_bytes();
+            let result = self
+                .root
+                .complete_pc_family_with_sealed_keys(family, &backing, control)?;
+            Ok(ParallelTerminal {
+                result,
+                _backing: backing,
+                admission: self.admission,
+            })
         }
 
         pub(super) fn into_serial_handoff(
