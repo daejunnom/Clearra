@@ -1476,6 +1476,11 @@ impl WasmExactSearchSession {
         problem: &SearchProblem,
     ) -> Result<(), WasmExactSearchError> {
         super::ensure_connected_kick_profile(problem)?;
+        if problem.compact_pc_has_unqualified_capped_family() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_legacy_capped_pc_family_unqualified",
+            ));
+        }
         if problem.objective().kind() == ObjectiveKind::Tiling
             && (problem.objective().score().requested()
                 || problem.objective().execution_constraints().requested()

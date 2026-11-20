@@ -454,7 +454,9 @@ impl WasmCpuSearchBackend {
     }
 
     pub fn distributed_execution_is_worthwhile(problem: &SearchProblem) -> bool {
-        if problem.compact_pc_proven_empty_family_depth().is_some() {
+        if problem.compact_pc_proven_empty_family_depth().is_some()
+            || problem.compact_pc_has_unqualified_capped_family()
+        {
             return false;
         }
         // The compact packed-row worker protocol must not receive four-word

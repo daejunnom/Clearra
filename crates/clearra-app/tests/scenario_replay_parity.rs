@@ -334,9 +334,6 @@ fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
             None,
             false,
         ),
-        // Five pieces could fill this clipped extent, but Native admits
-        // only the six-piece family; a shallower prefix is not a result.
-        (query(2, 0, &cap_queue, 6), 2, Some(6), false),
         // max=2 rounds the active frame to two rows. Fourteen missing
         // cells cannot be covered by any integral number of tetrominoes.
         (
@@ -444,8 +441,43 @@ fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
         }
     }
 
-    // Independently witness that the capped input's five-piece prefix really
-    // solves the board when that is the admitted family size.
+    // Native's root projection needs a family vector of geometry depth 5.
+    // Capping the frame at 2L with max=6 does not give that vector. The
+    // legacy Rust route must neither claim proved-empty nor solve a shorter
+    // prefix; this family is not qualified for a Native-to-Rust handoff.
+    let capped = query(2, 0, &cap_queue, 6);
+    let legacy = ProblemCompiler::compile_legacy_scenario_pc(&capped).unwrap();
+    let ordinary = ProblemCompiler::compile_scenario_pc(&capped).unwrap();
+    assert_eq!(legacy.core_query(), ordinary.core_query());
+    assert_eq!(legacy.initial_board(), ordinary.initial_board());
+    assert_ne!(legacy.problem_id(), ordinary.problem_id());
+    assert!(!ordinary.compact_pc_has_unqualified_capped_family());
+    assert!(legacy.compact_pc_has_unqualified_capped_family());
+    assert_eq!(legacy.compact_pc_proven_empty_family_depth(), None);
+    let request = legacy_scenario(capped);
+    for response in [
+        rust.run(request.clone()),
+        complete_cooperatively(rust, request.clone()),
+    ] {
+        assert_eq!(
+            response.status(),
+            AppStatus::ExecutionFailed,
+            "{response:?}"
+        );
+        assert!(response.render_model().is_none());
+    }
+    #[cfg(feature = "native-c-core")]
+    {
+        let native = AppContext::default().run(request);
+        assert_eq!(native.status(), AppStatus::ExecutionFailed);
+        assert_eq!(
+            native.error().map(clearra_app::AppError::code),
+            Some(clearra_app::AppErrorCode::ExecutionFailed)
+        );
+        assert!(native.render_model().is_none());
+    }
+
+    // The same five-piece prefix solves when it is the admitted family.
     let prefix = query(2, 0, &cap_queue, 5);
     assert_eq!(
         core(&rust.run(legacy_scenario(prefix.clone()))).bool_field("solution_found"),

@@ -8,8 +8,9 @@ mod board_accessors {
     use crate::goal::SearchGoal;
 
     use super::{
-        legacy_scenario_pc_extent::LegacyScenarioPcExtent, OccupancyField, PcChanceEvidencePolicy,
-        SearchOutputPolicy, SearchProblem, SearchProblemBoard,
+        legacy_scenario_pc_extent::{LegacyScenarioPcExtent, LegacyScenarioPcFamily},
+        OccupancyField, PcChanceEvidencePolicy, SearchOutputPolicy, SearchProblem,
+        SearchProblemBoard,
     };
 
     impl SearchProblem {
@@ -42,9 +43,18 @@ mod board_accessors {
         /// The original Native supply-family depth for an admitted target
         /// whose required area provably cannot match that family.
         pub fn compact_pc_proven_empty_family_depth(&self) -> Option<usize> {
-            self.ordinary_legacy_scenario_pc_extent()?
-                .empty_family_depth
-                .map(|depth| usize::from(depth.get()))
+            let extent = self.ordinary_legacy_scenario_pc_extent()?;
+            match extent.family {
+                LegacyScenarioPcFamily::ProvedEmpty(depth) => Some(usize::from(depth.get())),
+                _ => None,
+            }
+        }
+
+        /// A legacy capped request must not become a shorter-prefix Rust
+        /// success before Native family behavior is qualified.
+        pub fn compact_pc_has_unqualified_capped_family(&self) -> bool {
+            self.ordinary_legacy_scenario_pc_extent()
+                .is_some_and(|extent| extent.family == LegacyScenarioPcFamily::CappedUnqualified)
         }
 
         fn ordinary_legacy_scenario_pc_extent(&self) -> Option<LegacyScenarioPcExtent> {
@@ -1777,7 +1787,14 @@ mod legacy_scenario_pc_extent {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(super) struct LegacyScenarioPcExtent {
         pub(super) rows: NonZeroU16,
-        pub(super) empty_family_depth: Option<NonZeroU16>,
+        pub(super) family: LegacyScenarioPcFamily,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum LegacyScenarioPcFamily {
+        ExactArea,
+        ProvedEmpty(NonZeroU16),
+        CappedUnqualified,
     }
 
     impl SearchProblem {
@@ -1790,9 +1807,15 @@ mod legacy_scenario_pc_extent {
                     self.problem_id.as_str(),
                     extent.rows.get()
                 );
-                if let Some(depth) = extent.empty_family_depth {
-                    use core::fmt::Write;
-                    let _ = write!(&mut id, ":empty-family-depth:{depth}");
+                match extent.family {
+                    LegacyScenarioPcFamily::ExactArea => {}
+                    LegacyScenarioPcFamily::ProvedEmpty(depth) => {
+                        use core::fmt::Write;
+                        let _ = write!(&mut id, ":empty-family-depth:{depth}");
+                    }
+                    LegacyScenarioPcFamily::CappedUnqualified => {
+                        id.push_str(":unqualified-capped-family");
+                    }
                 }
                 self.problem_id = SearchProblemId::new(id);
                 self.legacy_scenario_pc_extent = Some(extent);
@@ -1863,19 +1886,29 @@ mod legacy_scenario_pc_extent {
         if required_cells == family_area && rows.get() < board.visible_height() {
             return Some(LegacyScenarioPcExtent {
                 rows,
-                empty_family_depth: None,
+                family: LegacyScenarioPcFamily::ExactArea,
             });
         }
-        // On max-only input Native still requires an exact m-piece family.
-        // Its geometry publishes no candidates for a non-integral depth or
-        // a shallower capped target. These are not shorter-prefix requests.
+        // An area-rounded target with a non-integral depth reaches Native's
+        // empty-graph branch before the projection propagator. Do not infer
+        // the same terminal for an under-capacity target: on an integral
+        // capped frame, Native can reject the mismatched family vector rather
+        // than complete an empty search.
         if query.exact_pieces().is_none()
-            && required_cells != 0
-            && (!required_cells.is_multiple_of(4) || required_cells < family_area)
+            && required_cells > family_area
+            && !required_cells.is_multiple_of(4)
         {
             return Some(LegacyScenarioPcExtent {
                 rows,
-                empty_family_depth: NonZeroU16::new(u16::try_from(n).ok()?),
+                family: LegacyScenarioPcFamily::ProvedEmpty(NonZeroU16::new(
+                    u16::try_from(n).ok()?,
+                )?),
+            });
+        }
+        if query.exact_pieces().is_none() && required_cells < family_area {
+            return Some(LegacyScenarioPcExtent {
+                rows,
+                family: LegacyScenarioPcFamily::CappedUnqualified,
             });
         }
         None
