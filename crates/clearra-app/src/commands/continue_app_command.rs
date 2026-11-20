@@ -147,7 +147,13 @@ fn compile_continue(token: &str) -> Result<(SearchProblem, ContinueKind), AppRes
     if report.has_errors() {
         return Err(AppResponse::validation_failed(report));
     }
-    let compiled = if matches!(kind, ContinueKind::ScenarioReplay) {
+    // An old compact checkpoint can specify a visible frame taller than
+    // the exact residual packing target. Reuse the legacy frame proof only
+    // for sc2 and an explicit piece count: that compiler can admit a
+    // smaller target only on exact area equality and without discarding
+    // occupied cells. Keep sc3 and inferred-count checkpoints unchanged.
+    let legacy_exact_checkpoint = token.starts_with("sc2:") && query.exact_pieces().is_some();
+    let compiled = if matches!(kind, ContinueKind::ScenarioReplay) || legacy_exact_checkpoint {
         ProblemCompiler::compile_legacy_scenario_pc(&query)
     } else {
         ProblemCompiler::compile_scenario_pc(&query)
@@ -209,4 +215,26 @@ fn continue_fields(
             .map(|(key, value)| string_field(key, value)),
     );
     fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_scenario_checkpoint_uses_exact_legacy_packing_frame() {
+        let prefix = "sc2:w10:v2:m0x";
+        let suffix = ":psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:hnone:qI:p1:x1:n0:a1:z0:gclear-to-empty:ccount-all:t1";
+        // Both fields have six occupied cells and request one I. Only the
+        // lower field fits in the proven one-line packing target.
+        for (mask, geometry_height) in [(0x3f0, 1), (0xfc000, 2)] {
+            let token = format!("{prefix}{mask:016x}{suffix}");
+            let (problem, kind) = compile_continue(&token).expect("parse compact checkpoint");
+            assert!(matches!(kind, ContinueKind::ScenarioContinuation));
+            assert_eq!(problem.initial_board().occupied_mask(), mask);
+            assert_eq!(problem.visible_height(), 2);
+            assert_eq!(problem.exact_pieces(), Some(1));
+            assert_eq!(problem.compact_pc_geometry_height(), geometry_height);
+        }
+    }
 }

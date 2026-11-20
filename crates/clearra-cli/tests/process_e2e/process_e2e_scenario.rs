@@ -1,4 +1,5 @@
 use super::*;
+use clearra_pc_graph::request::{PcContinuationToken, PcContinuationTokenCodec};
 
 fn verified_scenario_fixture() -> Value {
     run_json(&[
@@ -53,7 +54,16 @@ fn process_e2e_pc_scenario_simple_4l_fixture_counts_solutions() {
     assert_exact_single_tiling(summary);
     assert_eq!(summary["visible_height"], "4");
     assert_eq!(summary["initial_board_mask"], "0x00000000000003f0");
-    assert_eq!(summary["exact_pieces"], 1);
+    let token = summary["scenario_replay_token"]
+        .as_str()
+        .expect("original-input replay token");
+    let PcContinuationToken::ScenarioReplay(query) =
+        PcContinuationTokenCodec::parse(token).expect("decode scenario replay")
+    else {
+        panic!("expected a scenario replay token, not a checkpoint");
+    };
+    assert_eq!(query.exact_pieces(), Some(1));
+    assert_eq!(summary["trace_steps"], 1);
     assert_eq!(summary["probability_complete"], true);
     assert_eq!(summary["coverage_probability"].as_f64(), Some(1.0));
 }

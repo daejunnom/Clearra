@@ -85,21 +85,21 @@ fn process_e2e_continue_command_accepts_token_without_prompting() {
 
 #[test]
 fn process_e2e_continue_command_accepts_scenario_token_without_prompting() {
-    let output = clearra()
-        .args([
-            "--verbose",
-            "continue",
-            "sc2:w10:v2:m0x00000000000003f0:psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:hnone:qI:p1:x1:n0:a1:z0:gclear-to-empty:ccount-all:t1",
-        ])
-        .output()
-        .expect("clearra-cli process runs");
-
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(stdout.contains("kind: continue"));
-    assert!(stdout.contains("status: scenario-continued-searched"));
-    assert!(stdout.contains("interactive_prompt: false"));
-    assert!(stdout.contains("exact_pieces: 1"));
-    assert!(stdout.contains("retained_trace_limit: 1"));
+    const TOKEN: &str = "sc2:w10:v2:m0x00000000000003f0:psstandard-tetrominoes:bgstandard-7-bag:rsrs-plus:hnone:qI:p1:x1:n0:a1:z0:gclear-to-empty:ccount-all:t1";
+    let result = run_json(&["continue", TOKEN]);
+    assert_eq!(result["kind"], "continue");
+    let summary = &result["summary"];
+    assert_rust_cpu(summary);
+    assert_eq!(summary["status"], "scenario-continued-searched");
+    assert_eq!(summary["continuation_kind"], "scenario");
+    assert_eq!(summary["interactive_prompt"], false);
+    assert_eq!(summary["input_continuation_token"], TOKEN);
+    assert_eq!(summary["count_complete"], "true");
+    assert_eq!(summary["normalized_unique_solution_count"], "1");
+    assert_eq!(
+        summary["normalized_solution_set_hash"],
+        "cts1:1d1a625586ab2220"
+    );
+    assert_eq!(summary["trace_steps"], "1");
+    assert_eq!(summary["retained_trace_count"], "1");
 }
