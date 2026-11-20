@@ -389,6 +389,13 @@ impl ExtendedBuildProbabilitySession {
                 "wasm_extended_build_probability_layout_mismatch",
             ));
         }
+        if problem.allowed_colored_solution_identities().is_some() {
+            // A Board64 colored allow-list cannot authorize a full-height
+            // result. Reject rather than returning an unfiltered family.
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_build_probability_colored_identity_filter_unsupported",
+            ));
+        }
         let target_piece_count = field.target_piece_count();
         if target_piece_count > 60 {
             return Err(WasmExactSearchError::InvalidProblem(

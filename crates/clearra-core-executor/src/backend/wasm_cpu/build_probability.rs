@@ -2453,7 +2453,15 @@ impl CompactBuildProbabilitySession {
         } else {
             GeometrySearch::new_shared(target_cells, &shared_supply_catalog.targets)
         };
-        let covered_patterns = if target_cells == 0 {
+        let trivial_target = target_cells == 0
+            && problem.allows_solution_identity(
+                &StandardBoard64TilingIdentity::from_placements(
+                    catalog.initial_board(),
+                    core::iter::empty(),
+                )
+                .expect("the canonical empty compact tiling is valid"),
+            );
+        let covered_patterns = if trivial_target {
             PatternBitSet::all(universe.pattern_count())
         } else {
             PatternBitSet::new(universe.pattern_count())
@@ -2494,7 +2502,7 @@ impl CompactBuildProbabilitySession {
             peak_reachability_states: 0,
             total_reachability_states: 0,
             truncated_reason: None,
-            trivial_target: target_cells == 0,
+            trivial_target,
             workers_used: 1,
             parallel_active_workers: usize::from(!external_geometry),
             parallel_minimum_worker_candidates: if external_geometry { usize::MAX } else { 0 },
@@ -2538,9 +2546,11 @@ impl CompactBuildProbabilitySession {
             match self.geometry.advance(&self.catalog) {
                 GeometryAdvance::Pending => completed_work += 1,
                 GeometryAdvance::Candidate(candidate) => {
-                    let ordinal = self.candidate_count as u64;
-                    self.process_candidate(candidate, Some(ordinal), true, control)?;
-                    self.ensure_memory_bound(0)?;
+                    if self.problem.allows_solution_identity(&candidate.identity) {
+                        let ordinal = self.candidate_count as u64;
+                        self.process_candidate(candidate, Some(ordinal), true, control)?;
+                        self.ensure_memory_bound(0)?;
+                    }
                     completed_work += 1;
                     if self.truncated_reason.is_some() {
                         return self.complete();
@@ -2557,6 +2567,8 @@ impl CompactBuildProbabilitySession {
         Ok(BuildProbabilityAdvance::Pending)
     }
 
+    /// Both direct and external callers bind the candidate to the supplied
+    /// colored authority before counting it or reaching BuildUp.
     fn process_candidate(
         &mut self,
         candidate: GeometryCandidate,
@@ -2816,6 +2828,9 @@ impl CompactBuildProbabilitySession {
         match self.geometry.advance(&self.catalog) {
             GeometryAdvance::Pending => Ok(WasmCandidateProducerAdvance::Pending),
             GeometryAdvance::Candidate(candidate) => {
+                if !self.problem.allows_solution_identity(&candidate.identity) {
+                    return Ok(WasmCandidateProducerAdvance::Pending);
+                }
                 let row_ids = self.try_copy_distributed_candidate_row_ids_with_memory_guard(
                     candidate.row_ids(),
                     &mut memory_guard,
@@ -2949,6 +2964,11 @@ impl CompactBuildProbabilitySession {
         .ok_or(WasmExactSearchError::InvalidProblem(
             "wasm_build_probability_distributed_candidate_invalid",
         ))?;
+        if !self.problem.allows_solution_identity(&geometry.identity) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_identity_not_allowed",
+            ));
+        }
         self.process_candidate(geometry, Some(candidate.ordinal()), false, control)?;
         self.ensure_memory_bound(0)
     }
@@ -3466,6 +3486,11 @@ impl CompactBuildProbabilitySession {
         {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_build_probability_distributed_identity_domain_mismatch",
+            ));
+        }
+        if !self.problem.allows_solution_identity(&identity) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_identity_not_allowed",
             ));
         }
         let canonical = NormalizedTilingSolutionKey::from_standard_board64_identity(identity);
@@ -6252,6 +6277,89 @@ mod finesse_integration_tests {
             Some(clearra_core_domain::resource::ExecutionAvailabilityReason::MemoryBudgetExceeded)
         );
         assert!(!report.execution_started());
+    }
+
+    #[test]
+    fn build_colored_allow_list_binds_direct_distributed_and_merge() {
+        use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
+
+        let target = 0x3c0f;
+        let two_os =
+            StandardBoard64ColoredTilingIdentity::from_piece_masks(0, [0, target, 0, 0, 0, 0, 0])
+                .unwrap();
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 2])),
+            PieceWindow::new(2),
+        )
+        .with_exact_pieces(Some(2))
+        .with_allow_hold(false);
+        let unfiltered = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let constrained = ProblemCompiler::compile_scenario_pc(
+            &query.with_allowed_colored_solution_identities([two_os]),
+        )
+        .unwrap();
+        let field = BuildProbabilityField::from_words(2, [0; 4], [target, 0, 0, 0]).unwrap();
+        let aggregation = BuildProbabilityAggregation::Buildability;
+        let control = ExecutionControl::default();
+        let direct = crate::WasmBuildProbabilityBackend::execute_with_control(
+            &constrained,
+            field,
+            aggregation,
+            BuildProbabilityFinesseRequest::Off,
+            &control,
+        )
+        .unwrap();
+        assert_eq!(direct.field("packing_candidate_count"), Some("0"));
+        assert_eq!(direct.field("coverage_probability"), Some("0"));
+        assert!(direct.normalized_solution_identities().is_empty());
+
+        let mut raw = CompactBuildProbabilitySession::new(&unfiltered, field, aggregation).unwrap();
+        let mut restricted =
+            CompactBuildProbabilitySession::new(&constrained, field, aggregation).unwrap();
+        let packet = (0..512)
+            .find_map(
+                |_| match raw.advance_distributed_geometry(0, &control).unwrap() {
+                    WasmCandidateProducerAdvance::Candidate(packet) => Some(packet),
+                    WasmCandidateProducerAdvance::Pending => None,
+                    _ => panic!("the unfiltered input packs two Is"),
+                },
+            )
+            .expect("unfiltered candidate");
+        assert!((0..512).any(|_| {
+            match restricted
+                .advance_distributed_geometry(0, &control)
+                .unwrap()
+            {
+                WasmCandidateProducerAdvance::Candidate(_) => panic!("foreign colors dispatched"),
+                WasmCandidateProducerAdvance::Pending => false,
+                WasmCandidateProducerAdvance::Completed(_) => true,
+                WasmCandidateProducerAdvance::Cancelled => panic!("unexpected cancellation"),
+            }
+        }));
+        let external = |problem: &SearchProblem| {
+            CompactBuildProbabilitySession::new_external_geometry(problem, field, aggregation)
+                .unwrap()
+        };
+        let mut restricted_worker = external(&constrained);
+        assert!(matches!(
+            restricted_worker.process_external_candidate(&packet, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_identity_not_allowed"
+            ))
+        ));
+        let mut raw_worker = external(&unfiltered);
+        raw_worker
+            .process_external_candidate(&packet, &control)
+            .unwrap();
+        let raw_result = raw_worker.complete_distributed_worker().unwrap();
+        assert!(!raw_result.normalized_solution_identities().is_empty());
+        assert!(matches!(
+            restricted_worker.absorb_distributed_result(&raw_result),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_distributed_identity_not_allowed"
+            ))
+        ));
     }
 
     #[test]
