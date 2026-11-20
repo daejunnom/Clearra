@@ -1968,6 +1968,10 @@ fn all_mini_plus_b2b_pc_preserves_asymmetric_srs_plus_hold_paths() {
 
 #[test]
 fn wasm_worker_replays_an_extended_visible_seven_token_without_distribution() {
+    use clearra_app::AppResultKind;
+    use clearra_host_contract::AppCommandKind;
+    use clearra_pc_graph::request::{PcContinuationToken, PcContinuationTokenCodec};
+
     let runtime = WasmCommandRuntime::default();
     let seed = runtime
         .run_command_text(concat!(
@@ -1986,7 +1990,21 @@ fn wasm_worker_replays_an_extended_visible_seven_token_without_distribution() {
                 .find_map(|(name, value)| (name == "scenario_replay_token").then_some(value))
         })
         .expect("scenario replay token from a completed PC search");
-    assert!(token.starts_with("sr3:w10:v7:"));
+    let PcContinuationToken::ScenarioReplay(scenario) =
+        PcContinuationTokenCodec::parse(token).expect("decode the generated scenario replay token")
+    else {
+        panic!("expected a scenario replay token");
+    };
+    assert_eq!(scenario.initial_board().visible_height(), 7);
+    assert_eq!(
+        scenario.initial_board().occupied_words(),
+        [0xdff7_fdff_3fef_fbfe, 0x3f, 0, 0]
+    );
+    assert_eq!(scenario.exact_pieces(), Some(2));
+    assert_eq!(
+        scenario.queue_observation_policy().visible_piece_count(),
+        Some(7)
+    );
 
     let command = format!("clearra continue --token {token}");
     assert!(matches!(
@@ -2003,15 +2021,25 @@ fn wasm_worker_replays_an_extended_visible_seven_token_without_distribution() {
         .expect("tiny 7L replay reaches a terminal state");
     let events = worker.drain_events(job);
     assert_eq!(terminal, WasmWorkerAdvanceStatus::Completed, "{events:?}");
-    assert!(events.iter().any(|event| matches!(
-        event,
-        WasmWorkerJobEvent::FinalResponse {
-            response,
-            search_report: None,
-            ..
-        } if response.status() == AppStatus::Success
-            && matches!(response.render_model(), Some(AppRenderModel::Continue(_)))
-    )));
+    let (response, search_report) = events
+        .iter()
+        .find_map(|event| match event {
+            WasmWorkerJobEvent::FinalResponse {
+                job_id,
+                response,
+                search_report,
+                ..
+            } if *job_id == job => Some((response, search_report)),
+            _ => None,
+        })
+        .expect("the replay job returns a final response");
+    assert_eq!(response.status(), AppStatus::Success);
+    assert_eq!(response.command(), Some(AppCommandKind::Continue));
+    assert_eq!(
+        response.result().map(|result| result.kind()),
+        Some(AppResultKind::Continue.as_str())
+    );
+    assert!(search_report.is_none());
 }
 
 #[test]

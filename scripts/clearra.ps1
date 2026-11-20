@@ -151,7 +151,6 @@ try {
         -ReleaseAcceptanceShard $ReleaseAcceptanceShard)
     $script:ClearraReleaseAcceptanceMode = $false
     $script:ClearraReleaseAcceptanceShard = $ReleaseAcceptanceShard
-    $script:ClearraNoProductDebtArchitecturePassed = $false
     if ($VerboseLog.IsPresent) {
         Write-Output "==> Clearra task start | task=$($tasks -join ',') | workers=$Workers | root=$Root"
     }

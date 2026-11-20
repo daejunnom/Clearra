@@ -317,6 +317,7 @@ fn extended_parallel_product_splits_preserve_sixty_row_prefix_and_continuations(
     assert_eq!(actual, serial);
 }
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 #[test]
 fn extended_parallel_cooperative_preparation_budgets_real_and_sixty_row_ordinal_splits() {
     use super::cooperative::{Preparation, PreparationStatus};
@@ -382,6 +383,7 @@ fn extended_parallel_cooperative_preparation_budgets_real_and_sixty_row_ordinal_
     }
 }
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 #[test]
 fn extended_parallel_cooperative_preparation_withholds_plan_on_cancellation_or_refusal() {
     use super::cooperative::{Preparation, PreparationStatus};

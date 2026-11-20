@@ -10,6 +10,10 @@ on:
         required: true
         default: true
         type: boolean
+      minimum_diagnostic:
+        description: Also run the experimental minimum-cover diagnostic (focused mode only)
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -51,14 +55,54 @@ jobs:
               ;;
             *) exit 2 ;;
           esac
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Check candidate authority and artifact boundaries once
+        run: node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/candidate-preflight-regressions.test.mjs scripts/release/candidate-preflight-artifacts.test.mjs
 
   candidate-full-gate:
     if: needs.candidate-source.outputs.full_gate == 'true'
     needs: candidate-source
+    name: Candidate checks (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: no-product-debt
+            task: ReleaseAcceptance
+            shard: FoundationNoProductDebt
+            pnpm: true
+          - suite: adversarial
+            task: ReleaseAcceptance
+            shard: FoundationAdversarialCorrectness
+            pnpm: false
+          - suite: sanitizer
+            task: ReleaseAcceptance
+            shard: Sanitizer
+            pnpm: false
+          - suite: rust-exact
+            task: ReleaseAcceptance
+            shard: RustExact
+            pnpm: false
+          - suite: product-e2e
+            # No release receipt exists in preflight. The product task owns
+            # exactly one CLI build; the canonical RustProduct shard cannot.
+            task: ProductE2E
+            shard: Full
+            pnpm: true
+          - suite: desktop-host
+            task: ReleaseAcceptance
+            shard: FoundationDesktopHost
+            pnpm: true
+          - suite: wasm
+            task: ReleaseAcceptance
+            shard: Pages
+            pnpm: true
     # Same hosted Windows family as the canonical executable acceptance leaves.
     # Keep its native execution policy checks: no signing/unblocking/fallback.
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 120
     env:
       CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
       CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
@@ -72,12 +116,14 @@ jobs:
         with:
           node-version: 22.23.2
       - name: Bind exact Corepack pnpm
+        if: matrix.pnpm == true
         shell: pwsh
         run: |
           corepack enable
           corepack prepare pnpm@11.5.0 --activate
           if ((pnpm --version).Trim() -ne '11.5.0') { throw 'pnpm version mismatch' }
       - name: Install JavaScript workspace
+        if: matrix.pnpm == true
         run: pnpm install --frozen-lockfile --ignore-scripts
       # Read a compatible canonical build snapshot, but never publish cache or
       # acceptance evidence from this unqualified branch.
@@ -91,7 +137,8 @@ jobs:
           key: release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-${{ github.sha }}
           restore-keys: |
             release-acceptance-native-v4-${{ runner.os }}-bindgen-0.2.126-${{ hashFiles('Cargo.lock', 'apps/clearra-desktop/src-tauri/Cargo.lock', 'pnpm-lock.yaml') }}-
-      - name: Prepare acceptance toolchains
+      - name: Prepare WASM toolchain
+        if: matrix.suite == 'wasm'
         shell: powershell
         run: |
           rustup target add wasm32-unknown-unknown
@@ -101,26 +148,34 @@ jobs:
             & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-      - name: Check non-publishing workflow and artifact boundaries
-        run: node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/candidate-preflight-artifacts.test.mjs
-      - name: Run the complete gate once without release authority
+      - name: Run candidate checks without release authority
         id: candidate_wasm
+        env:
+          CANDIDATE_TASK: ${{ matrix.task }}
+          CANDIDATE_SHARD: ${{ matrix.shard }}
+          CANDIDATE_SUITE: ${{ matrix.suite }}
         shell: powershell
         run: |
           . ./scripts/lib/clearra-path-helpers.ps1
           Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose experiment
           try {
             $candidateWorkers = [Math]::Max(1, [Environment]::ProcessorCount)
-            $gateExitCode = 1
-            try {
-              & powershell -NoProfile -File scripts/clearra.ps1 -Task ReleaseAcceptance -ReleaseAcceptanceShard Full -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $candidateWorkers -VerboseLog -ShowWarnings
-              $gateExitCode = $LASTEXITCODE
-            } finally {
-              # Preserve only verified output while the same experiment owner is alive.
+            & powershell -NoProfile -File scripts/clearra.ps1 -Task $env:CANDIDATE_TASK -ReleaseAcceptanceShard $env:CANDIDATE_SHARD -ExecutionSurface Trusted -RuntimeEnvironment windows -Workers $candidateWorkers -VerboseLog -ShowWarnings
+            $gateExitCode = $LASTEXITCODE
+            if ($env:CANDIDATE_SUITE -eq 'wasm') {
+              # Preserve any produced WASM under the same experiment owner.
+              # If this check failed before producing WASM, report its actual
+              # failure rather than trying to seal a missing directory.
               $candidateWasmSource = Join-Path $env:CARGO_TARGET_DIR 'clearra-web-public/wasm'
-              $candidateWasmOutput = Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'unqualified-candidate-wasm'
-              & node scripts/release/candidate-preflight-artifacts.mjs --from $candidateWasmSource --output $candidateWasmOutput --source-commit $env:GITHUB_SHA
-              if ($LASTEXITCODE -ne 0) { throw 'Candidate WASM preservation failed' }
+              $wasmProduced = Test-Path -LiteralPath (Join-Path $candidateWasmSource 'clearra_wasm_bg.wasm') -PathType Leaf
+              if ($gateExitCode -eq 0 -and -not $wasmProduced) {
+                throw 'WASM checks passed without producing the candidate artifact'
+              }
+              if ($wasmProduced) {
+                $candidateWasmOutput = Join-Path $env:CLEARRA_BUILD_TRANSACTION_ROOT 'unqualified-candidate-wasm'
+                & node scripts/release/candidate-preflight-artifacts.mjs --from $candidateWasmSource --output $candidateWasmOutput --source-commit $env:GITHUB_SHA
+                if ($LASTEXITCODE -ne 0) { throw 'Candidate WASM preservation failed' }
+              }
             }
             if ($gateExitCode -ne 0) { exit $gateExitCode }
             Complete-ClearraBuildTransaction
@@ -128,7 +183,7 @@ jobs:
             Exit-ClearraBuildArtifactCacheUsage
           }
       - name: Upload verified but unqualified candidate WASM
-        if: always() && steps.candidate_wasm.outputs.ready == 'true'
+        if: ${{ !cancelled() && matrix.suite == 'wasm' && steps.candidate_wasm.outputs.ready == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: unqualified-candidate-wasm-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
@@ -172,8 +227,6 @@ jobs:
           . ./scripts/lib/clearra-path-helpers.ps1
           . ./scripts/lib/clearra-execution-surface.ps1
           Assert-ClearraTrustedExecutionSurface -TaskName 'CandidateRustWasm' -ExecutionSurface Trusted -RuntimeEnvironment windows
-      - name: Check fixed native regression boundaries
-        run: node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/candidate-preflight-regressions.test.mjs
       - name: Run fixed current-regression selections without the full workspace suite
         shell: powershell
         run: |
@@ -232,12 +285,8 @@ jobs:
             & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-      - name: Check non-publishing focused feedback boundaries
-        id: boundaries
-        run: node --test scripts/release/candidate-preflight-workflow.test.mjs scripts/release/candidate-preflight-regressions.test.mjs scripts/release/candidate-preflight-artifacts.test.mjs
       - name: Build source-bound WASM once for independent unqualified feedback
         id: candidate_wasm
-        if: ${{ !cancelled() && steps.toolchains.outcome == 'success' && steps.boundaries.outcome == 'success' }}
         shell: pwsh
         run: |
           . ./scripts/lib/clearra-path-helpers.ps1
@@ -320,7 +369,7 @@ jobs:
           if-no-files-found: error
           retention-days: 3
   candidate-minimum-diagnostic:
-    if: needs.candidate-source.outputs.full_gate == 'false'
+    if: needs.candidate-source.outputs.full_gate == 'false' && github.event_name == 'workflow_dispatch' && inputs.minimum_diagnostic
     needs: candidate-source
     runs-on: ubuntu-latest
     timeout-minutes: 45

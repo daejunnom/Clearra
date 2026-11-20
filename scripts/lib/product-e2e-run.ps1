@@ -115,7 +115,8 @@ function Invoke-ProductE2ECommandCase(
     [string]$FixturePath,
     [string]$GoldenPath,
     [string[]]$CommandArgs,
-    [int]$ExpectedExitCode = 0
+    [int]$ExpectedExitCode = 0,
+    [scriptblock]$CheckOutput
 ) {
     Invoke-ClearraProgressCase -Scope $script:ProductE2EProgressScope -Name $Name -Body {
         $script:ProductE2ECurrentCaseName = $Name
@@ -133,11 +134,15 @@ function Invoke-ProductE2ECommandCase(
             if ($commandResult.ExitCode -ne $ExpectedExitCode) {
                 throw "expected exit $ExpectedExitCode but got $($commandResult.ExitCode)`n$(Get-ProductE2EExcerpt $commandResult.Output)"
             }
-            $markerText = ConvertTo-ProductE2EMarkerText $commandResult.Output
-            $requiredMarkers = Read-ProductE2ERequiredMarkers $GoldenPath
-            $markerCount = $requiredMarkers.Count
-            Assert-ProductE2EMarkers $Name $markerText $requiredMarkers
-            Assert-ProductE2ETypedCommandAssertions $Name $commandResult.Output
+            if ($null -ne $CheckOutput) {
+                & $CheckOutput (ConvertFrom-ProductE2EJsonOutput $commandResult.Output)
+            } else {
+                $markerText = ConvertTo-ProductE2EMarkerText $commandResult.Output
+                $requiredMarkers = Read-ProductE2ERequiredMarkers $GoldenPath
+                $markerCount = $requiredMarkers.Count
+                Assert-ProductE2EMarkers $Name $markerText $requiredMarkers
+                Assert-ProductE2ETypedCommandAssertions $Name $commandResult.Output
+            }
         } catch {
             $status = "failed"
             $errorMessage = New-ProductE2EFailureMessage `

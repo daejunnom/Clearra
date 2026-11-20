@@ -8,7 +8,7 @@ function Invoke-ProductE2ET4GoldenCases {
     Invoke-ProductE2ECommandCase `
         -Name "T4 scenario clear-to-empty golden contract" `
         -FixturePath "tests/fixtures/product/scenario_clear_to_empty.json" `
-        -GoldenPath "tests/golden/product/scenario_clear_to_empty.json" `
+        -CheckOutput { param($json) Assert-ProductE2EScenarioResult $json "inline" } `
         -CommandArgs (Get-FixtureCommandArgs "tests/fixtures/product/scenario_clear_to_empty.json")
 
     Invoke-ProductE2ECommandCase `

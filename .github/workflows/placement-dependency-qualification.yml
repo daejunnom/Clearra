@@ -47,19 +47,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Check exact source
+        id: exact-source
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-      - name: Test Clearra storage policy and owned WSL lifecycle without a distro
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          status=0
-          cargo test --locked -p clearra-manage --bin clearra-manage -- --skip runtime::tests || status=1
-          node --test scripts/runtime/clearra-wsl-session.test.mjs scripts/runtime/clearra-wsl-guest-paths.test.mjs scripts/runtime/clearra-wsl-source-slot.test.mjs scripts/tools/clearra-build-paths.test.mjs || status=1
-          node --test scripts/tools/clearra-build-capacity.test.mjs || status=1
-          node --test --test-name-pattern 'product retirement preflights|experiment cache retirement preserves' scripts/tools/clearra-build-policy.test.mjs || status=1
-          exit "$status"
       - name: Compare CEGIS, ILC, APDP and coverage capture with focused references
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.exact-source.outcome == 'success' }}
         shell: bash
         run: |
           set -eu
@@ -109,20 +100,20 @@ jobs:
           done
           exit "$status"
       - name: Check request-local profiling across pooled Rust workers
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.exact-source.outcome == 'success' }}
         run: cargo test --locked -p clearra-core-executor --features parallel,wasm-stage-profiling --lib worker_profile_
       - name: Test the bounded solution stream and exact comparison
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.exact-source.outcome == 'success' }}
         run: cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
       - name: Compare actual ClosedWithin proof work on 840 original queues
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.exact-source.outcome == 'success' }}
         run: >-
           cargo test --locked -p clearra-core-executor --features parallel,local-search-ab
           --example conditional_closed_within_work canonical_840_queues_check_three_compiled_arms
           -- --exact --nocapture
       - name: Build the focused proof tools once
         id: focused-tools
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.exact-source.outcome == 'success' }}
         run: |
           set -eu
           df --output=avail -B1 "$GITHUB_WORKSPACE"
@@ -199,14 +190,23 @@ jobs:
         with:
           persist-credentials: false
       - name: Check exact source
+        id: exact-source
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-      - name: Test native exit and memory receipt classification
-        run: cargo test --locked -p clearra-manage --bin clearra-manage runtime::tests
       - uses: actions/setup-node@v4
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.exact-source.outcome == 'success' }}
         id: node
         with:
           node-version: 22.23.2
+      - name: Test managed path, lifecycle, and native receipt contracts
+        if: ${{ !cancelled() && steps.exact-source.outcome == 'success' }}
+        run: cargo test --locked -p clearra-manage --bin clearra-manage
+      - name: Test owned WSL and build lifecycle without a distro
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        run: |
+          status=0
+          node --test scripts/runtime/clearra-wsl-session.test.mjs scripts/runtime/clearra-wsl-guest-paths.test.mjs scripts/runtime/clearra-wsl-source-slot.test.mjs scripts/tools/clearra-build-paths.test.mjs scripts/tools/clearra-build-capacity.test.mjs || status=1
+          node --test --test-name-pattern 'product retirement preflights|experiment cache retirement preserves' scripts/tools/clearra-build-policy.test.mjs || status=1
+          exit "$status"
       - name: Test the work, receipt, and timing evidence boundaries
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: >-
@@ -226,32 +226,44 @@ jobs:
           apps/clearra-discord-bot/test/direct-executor.test.mjs
           apps/clearra-discord-bot/test/cli-authority-result-paths.test.mjs
           apps/clearra-discord-bot/test/job-service.test.mjs
-  operation-reuse:
+  operation-invariants:
     if: >-
       github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
       (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Check exact source
+        id: exact-source
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Test normalized ordered kicks and stable replay identifiers
         run: cargo test --locked -p clearra-rules -p clearra-finesse -p clearra-core-ffi -p clearra-pc-graph --lib --no-fail-fast
       - name: Compare physical clear and Perfect Clear facts across scoring and B2B
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.exact-source.outcome == 'success' }}
         run: |
           status=0
           cargo test --locked -p clearra-scoring --lib clear_fact_parity || status=1
           cargo test --locked -p clearra-postprocess --lib full_height_score_reuses_one_candidate_shape_for_each_original_pattern || status=1
           exit "$status"
       - name: Validate the exact Legacy assignment join independently of the C adapter
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.exact-source.outcome == 'success' }}
         run: cargo test --locked -p clearra-build-coverage --lib verified_assignment_rows_
+  operation-reuse:
+    if: >-
+      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check exact source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Test Legacy Cover, full-height replay and Setup continuation ownership
-        if: ${{ !cancelled() }}
         shell: bash
         run: |
           node scripts/tools/invoke-clearra-build.mjs --purpose experiment -- bash -e -u <<'SH'
@@ -263,9 +275,12 @@ jobs:
           cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core \
             --test legacy_cover_native_witness --test pc_tiling_control_parity --no-fail-fast \
             -- --nocapture || status=1
-          for filter in rust_compact_snapshot_ generic_geometry_ generic_board64_; do
-            cargo test --locked -p clearra-core-executor --features native-c-core --lib "$filter" || status=1
-          done
+          # The product lane already runs the Rust-only variants. This
+          # binary adds only assertions that actually call the C reference.
+          cargo test --locked -p clearra-core-executor --features native-c-core --lib -- \
+            rust_compact_snapshot_matches_native_physical_dag_and_classic_cost \
+            generic_geometry_matches_native_c_custom_regions \
+            generic_board64_matches_native_build_up_for_a_real_custom_width || status=1
           # Measure the opt-in bounded prefix with the same C build and test binary.
           cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core \
             --test legacy_cover_native_witness -- --ignored --exact \
@@ -292,31 +307,52 @@ jobs:
             echo 'Native Continue qualification requires at least three logical processors'
             status=1
           fi
-          for test_name in full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family \
+          # Only these same-process fixtures share the real execution lease.
+          "${app_native[@]}" --test extended_pc_tiling -- --exact --test-threads=1 \
+            full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family \
             full_height_ordinary_scenario_uses_bounded_native_worker_waves \
             full_height_replay_direct_cooperative_and_lazy_pages_preserve_all_words \
             full_height_sr3_local_continue_is_cooperative_on_one_worker \
             full_height_sr3_uses_native_worker_waves_without_publishing_on_a_zero_tick \
-            full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint; do
-            "${app_native[@]}" --test extended_pc_tiling "$test_name" -- --exact || status=1
-          done
-          "${app_native[@]}" --test opening_continuation_parity || status=1
+            full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint || status=1
+          timeout --kill-after=10s 180s "${app_native[@]}" --test opening_continuation_parity || status=1
           "${app_native[@]}" \
             --test scenario_replay_parity --test scenario_verified_kick_admission \
             --test exact_accelerator_policy --no-fail-fast || status=1
           "${app_native[@]}" --test exact_accelerator_product_execution setup_score_reuse || status=1
           exit "$status"
           SH
+  rust-product-boundaries:
+    if: >-
+      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep the product feature graphs independent: a joint workspace
+        # invocation would leak Desktop's parallel-App feature into WASM.
+        surface: [cli, wasm, desktop]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check exact source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Execute the Rust-only CLI product contract
-        if: ${{ !cancelled() }}
+        if: matrix.surface == 'cli'
         run: >-
           cargo test --locked -p clearra-cli --no-default-features --features wasm-cpu-runtime
           --test rust_product_process_contract
-      - name: Check the actual compact distributed continuation boundary
-        if: ${{ !cancelled() }}
-        run: cargo test --locked -p clearra-wasm --lib tests::fixed_no_hold_opening_ -- --test-threads=1
+      - name: Check compact distributed continuation and visible seven-line worker replay
+        if: matrix.surface == 'wasm'
+        run: >-
+          cargo test --locked -p clearra-wasm --lib -- --test-threads=1
+          tests::fixed_no_hold_opening_
+          tests::wasm_worker_replays_an_extended_visible_seven_token_without_distribution
       - name: Verify native Desktop progress relay without launching the GUI
-        if: ${{ !cancelled() }}
+        if: matrix.surface == 'desktop'
         run: cargo test --locked -p clearra-gui-host --features wasm-cpu-runtime --lib desktop_relay_
   desktop-cli-readback:
     if: >-

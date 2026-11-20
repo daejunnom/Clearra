@@ -67,7 +67,6 @@ $ValidationStarted = Get-Date
 . (Join-Path $ArchitectureScriptsRoot "architecture\validate_gui_host_boundary_contract.ps1")
 . (Join-Path $ArchitectureScriptsRoot "architecture\validate_render_exactness_gate_contract.ps1")
 . (Join-Path $ArchitectureScriptsRoot "architecture\validate_asset_import_security_contract.ps1")
-. (Join-Path $ArchitectureScriptsRoot "architecture\validate_tauri_svelte_desktop_host_contract.ps1")
 . (Join-Path $ArchitectureScriptsRoot "architecture\validate_wasm_command_runtime_contract.ps1")
 . (Join-Path $ArchitectureScriptsRoot "architecture\validate_webgpu_backend_contract.ps1")
 . (Join-Path $ArchitectureScriptsRoot "architecture\validate_job_worker_progress_contract.ps1")

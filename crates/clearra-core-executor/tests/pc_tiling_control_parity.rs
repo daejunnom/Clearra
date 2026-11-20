@@ -32,6 +32,10 @@ const IIOOO: [PieceKind; 5] = [
     PieceKind::O,
 ];
 
+// The native reference holds a process-wide packing lease. These independent
+// assertions exercise real admission, but must not compete for the same lease.
+static NATIVE_REFERENCE_FIXTURE: Mutex<()> = Mutex::new(());
+
 fn problem(queue: [PieceKind; 5], max_candidates: Option<usize>) -> SearchProblem {
     let mut policy = PcExecutionPolicy::mvp_default()
         .with_requested_backend(RequestedSearchBackend::Cpu)
@@ -189,6 +193,9 @@ fn report_count_all_witness(
 
 #[test]
 fn native_rust_fixed_queue_count_all_preserves_verified_identity_family() {
+    let _lease = NATIVE_REFERENCE_FIXTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // On this empty 2L board the first I can rest on the floor, the second
     // on the first, and the O pieces can hard-drop into the remaining gaps.
     let expected: BTreeSet<_> = expected_iiooo_identities()
@@ -260,6 +267,9 @@ fn native_rust_fixed_queue_count_all_preserves_verified_identity_family() {
 
 #[test]
 fn native_rust_pc_tiling_controls_do_not_conflate_cancelled_incomplete_and_empty() {
+    let _lease = NATIVE_REFERENCE_FIXTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let complete = problem(IIOOO, None);
     let capped = problem(IIOOO, Some(1));
     // Every T contributes an imbalance of either +2 or -2 in the

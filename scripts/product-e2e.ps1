@@ -60,7 +60,7 @@ try {
         Invoke-ProductE2ECommandCase `
             -Name "scenario 4L simple product pipeline" `
             -FixturePath "tests/fixtures/pc/scenario_simple_4l.json" `
-            -GoldenPath "tests/golden/pc/scenario_simple_4l.json" `
+            -CheckOutput { param($json) Assert-ProductE2EScenarioResult $json "fixture" } `
             -CommandArgs @("--format", "json", "pc-scenario", "--fixture", "tests/fixtures/pc/scenario_simple_4l.json", "--verify-expected")
 
         Invoke-ProductE2ET4GoldenCases
@@ -68,7 +68,7 @@ try {
         Invoke-ProductE2ECommandCase `
             -Name "unsupported 180 scenario reports capability reason" `
             -FixturePath "tests/fixtures/pc/requires_180_unsupported.json" `
-            -GoldenPath "tests/golden/pc/requires_180_unsupported.json" `
+            -CheckOutput { param($json) Assert-ProductE2EScenarioResult $json "fixture" -Unsupported180 } `
             -CommandArgs @("--format", "json", "pc-scenario", "--fixture", "tests/fixtures/pc/requires_180_unsupported.json", "--verify-expected")
 
         Invoke-ProductE2ECommandCase `

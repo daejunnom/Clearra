@@ -342,7 +342,60 @@ function ConvertTo-ProductE2ETypedScalar([object]$Value) {
     if ((ConvertTo-ProductE2ETypedScalar $Fixture.expected.forbidden_algorithm) -ne $AlgorithmName) {
         throw "typed assertion failed: expected forbidden_algorithm '$AlgorithmName'"
     }
-}function Assert-ProductE2ETypedCommandAssertions(
+}
+
+function Assert-ProductE2EScenarioResult(
+    [object]$Json,
+    [ValidateSet("fixture", "inline")]
+    [string]$InputMode,
+    [switch]$Unsupported180
+) {
+    if ($Json.kind -cne "pc-scenario") {
+        throw "typed assertion failed: expected a PC scenario result"
+    }
+    Assert-ProductE2EJsonFieldUniqueEquals $Json "input_mode" $InputMode
+    Assert-ProductE2EJsonFieldUniqueEquals $Json "expected_checked" ($InputMode -eq "fixture")
+
+    if ($Unsupported180.IsPresent) {
+        foreach ($entry in @{
+            expected_match = $true
+            expected_unsupported = $true
+            actual_unsupported = $true
+            actual_unsupported_reason = "scenario_requires_180_unsupported"
+            unsupported_stage = "validation"
+            solution_found = $false
+            count_complete = $false
+        }.GetEnumerator()) {
+            Assert-ProductE2EJsonFieldUniqueEquals $Json $entry.Key $entry.Value
+        }
+        return
+    }
+
+    if ($InputMode -eq "fixture") {
+        Assert-ProductE2EJsonFieldUniqueEquals $Json "expected_match" $true
+    }
+    foreach ($entry in @{
+        visible_height = 4
+        initial_board_mask = "0x00000000000003f0"
+        solution_found = $true
+        normalized_unique_solution_count = 1
+        count_complete = $true
+        probability_complete = $true
+        coverage_probability = 1
+        retained_trace_count = 1
+        trace_steps = 1
+        scenario_replay_token_version = "sr2"
+    }.GetEnumerator()) {
+        Assert-ProductE2EJsonFieldUniqueEquals $Json $entry.Key $entry.Value
+    }
+    $replay = Get-ProductE2EJsonFieldScalar $Json "scenario_replay_token"
+    if (-not $replay.StartsWith("sr2:w10:v4:m0x00000000000003f0:", [StringComparison]::Ordinal) -or
+        -not $replay.Contains(":qI:p1:x1:")) {
+        throw "typed assertion failed: scenario replay must retain the four-line input and exact one-piece request"
+    }
+}
+
+function Assert-ProductE2ETypedCommandAssertions(
     [string]$CaseName,
     [string]$Output
 ) {

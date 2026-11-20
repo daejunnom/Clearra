@@ -1,10 +1,8 @@
 param(
     [string]$CargoPath = "cargo",
     [string]$NodePath = "node",
-    [string]$PowerShellPath = "powershell",
     [int]$Workers = 1,
     [string]$ExecutionSurface = "",
-    [switch]$ArchitectureValidatedByNoProductDebt,
     [switch]$VerboseLog
 )
 
@@ -71,10 +69,9 @@ Push-Location $Root
 $desktopLocationPushed = $true
 $applicationControl = Get-ClearraApplicationControlStatus
 $script:ApplicationControl = $applicationControl
-$stepCount = if ($ArchitectureValidatedByNoProductDebt.IsPresent) { 4 } else { 5 }
 $script:Scope = New-ClearraProgressScope `
     -Name "desktop-host" `
-    -Total $stepCount `
+    -Total 4 `
     -Workers ([Math]::Max(1, $Workers)) `
     -VerboseLog:$VerboseLog.IsPresent
 
@@ -100,19 +97,6 @@ Invoke-DesktopHostCommand `
     -Label "compile desktop UI in memory" `
     -FileName $NodePath `
     -Arguments @((Join-Path $Root "scripts/desktop-ui-compile-check.mjs"))
-
-if ($ArchitectureValidatedByNoProductDebt.IsPresent) {
-    Write-Output 'desktop_architecture=deferred owner=NoProductDebt reason=single-release-suite'
-} else {
-    Invoke-DesktopHostCommand `
-        -Label "architecture U6 Tauri Desktop Host" `
-        -FileName $PowerShellPath `
-        -Arguments @(
-            "-NoProfile",
-            "-File", (Join-Path $Root "scripts/validate_architecture.ps1"),
-            "-TaskName", "U6 Tauri Svelte Desktop Host"
-        )
-}
 
     $env:CARGO_TARGET_DIR = Get-ClearraCargoTargetDir
 

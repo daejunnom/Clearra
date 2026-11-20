@@ -70,21 +70,6 @@ function Invoke-ClearraTask([string]$TaskName, [string]$Root) {
                 Workers = $Workers
                 ExecutionSurface = $ExecutionSurface
             }
-            $noProductDebtArchitecture = Get-Variable `
-                -Name ClearraNoProductDebtArchitecturePassed `
-                -Scope Script `
-                -ErrorAction SilentlyContinue
-            $releaseAcceptanceShard = Get-Variable `
-                -Name ClearraReleaseAcceptanceShard `
-                -Scope Script `
-                -ErrorAction SilentlyContinue
-            $architectureOwnedByParallelLeaf =
-                $null -ne $releaseAcceptanceShard -and
-                [string]$releaseAcceptanceShard.Value -eq "FoundationDesktopHost"
-            if (($null -ne $noProductDebtArchitecture -and [bool]$noProductDebtArchitecture.Value) -or
-                $architectureOwnedByParallelLeaf) {
-                $desktopHostArgs["ArchitectureValidatedByNoProductDebt"] = $true
-            }
             if ($VerboseLog.IsPresent) {
                 $desktopHostArgs["VerboseLog"] = $true
             }
@@ -128,7 +113,6 @@ function Invoke-ClearraTask([string]$TaskName, [string]$Root) {
                 $PowerShellPath `
                 (Get-ClearraCargoTargetDir) `
                 $Workers
-            $script:ClearraNoProductDebtArchitecturePassed = $true
         }
         "AdversarialCorrectness" {
             Invoke-AdversarialCorrectnessGate `
