@@ -591,6 +591,12 @@ fn full_height_sr3_local_continue_is_cooperative_on_one_worker() {
         else {
             panic!("both local drivers must use Continue's existing result");
         };
+        let value = |fields: &[clearra_output::model::RenderField], key: &str| {
+            fields
+                .iter()
+                .find(|field| field.key() == key)
+                .map(|field| field.value().as_text())
+        };
         for key in [
             "status",
             "continuation_kind",
@@ -598,25 +604,38 @@ fn full_height_sr3_local_continue_is_cooperative_on_one_worker() {
             "interactive_prompt",
             "actual_backend",
             "normalized_solution_set_hash",
-            "queue_knowledge",
-            "observation_policy_evaluated",
             "coverage_pattern_count",
             "covered_pattern_count",
             "count_complete",
         ] {
-            let value = |fields: &[clearra_output::model::RenderField]| {
-                fields
-                    .iter()
-                    .find(|field| field.key() == key)
-                    .expect("expected Continue result field")
-                    .value()
-                    .as_text()
-            };
-            assert_eq!(
-                value(expected.fields()),
-                value(actual.fields()),
-                "{height}L: {key}"
-            );
+            let expected = value(expected.fields(), key)
+                .unwrap_or_else(|| panic!("{height}L direct Continue missing {key}"));
+            let actual = value(actual.fields(), key)
+                .unwrap_or_else(|| panic!("{height}L cooperative Continue missing {key}"));
+            assert_eq!(expected, actual, "{height}L: {key}");
+        }
+        // The extended reducer emits policy evidence only when it actually
+        // evaluates an observation policy. The oracle has no such owner.
+        for fields in [expected.fields(), actual.fields()] {
+            if observation.requires_observation_policy() {
+                assert_eq!(
+                    value(fields, "queue_knowledge").as_deref(),
+                    Some(observation.keyword()),
+                    "{height}L must preserve the requested queue observation"
+                );
+                assert_eq!(
+                    value(fields, "observation_policy_evaluated").as_deref(),
+                    Some("true"),
+                    "{height}L must retain evidence of evaluation"
+                );
+            } else {
+                assert_eq!(value(fields, "queue_knowledge"), None, "{height}L oracle");
+                assert_eq!(
+                    value(fields, "observation_policy_evaluated"),
+                    None,
+                    "{height}L oracle must not claim policy evaluation"
+                );
+            }
         }
 
         let mut early = context.start_cooperative_execution(request.clone());
