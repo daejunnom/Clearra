@@ -666,6 +666,6 @@ fn native_and_rust_agree_on_complete_bounded_legacy_prefix_assignment_matrix() {
     eprintln!(
         "legacy cover bounded prefix: assignments={PREFIX_ASSIGNMENT_COUNT}, original_ordinals={PREFIX_COUNT}, compatible_ordinals={compatible}, checked_positive_ordinals={first},{second}, covered_ordinals={}, prefix_probability={}",
         expected_union.count_ones(),
-        reduction.result().probability(),
+        reduction.result().probability().get(),
     );
 }
