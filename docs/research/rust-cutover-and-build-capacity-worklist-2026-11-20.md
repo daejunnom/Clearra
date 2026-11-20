@@ -274,6 +274,16 @@ This locally supervised run remains distinct from the old timing
 receipts. Require its terminal summary, four clean samples, and the
 same complete count, set hash, and ordered key digest on every arm.
 
+The corrected C's first full run still returned 456,842 and
+`cts1:d4b34c7820453afc`: the bounded APDP defect was fixed but does not
+explain the full 81-key deficit. Two clean Rust samples completed at
+100.543 s and 99.835 s with the expected full hash. Because the C arm
+was already semantically ineligible and the product cutover no longer
+uses it, the redundant second long C sample was stopped in its exact
+owned unit. This is not a completed equal-work ABBA. Preserve the two
+Rust receipts and their byte-pinned solver for the separate Rust
+revision comparison.
+
 The candidate's Rust `clearra-wasm-abi` completed an offline
 `wasm32-unknown-unknown` compile check at `375ffdf5`. The native
 witness, C-only correction and notes do not change that Rust target's
