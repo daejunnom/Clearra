@@ -421,7 +421,7 @@ fn full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family() {
         assert_eq!(core.field("scenario_replay_token_version"), Some("sr3"));
         let token = core.field("scenario_replay_token").unwrap();
 
-        let mut execution = context.start_cooperative_execution(request);
+        let mut execution = context.start_cooperative_execution(request.clone());
         let control = ExecutionControl::default();
         let cooperative = (0..4096)
             .find_map(|_| match execution.advance(1, &control) {
@@ -487,19 +487,48 @@ fn full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family() {
         ] {
             assert_eq!(field(key), core.field(key).unwrap(), "{height}L: {key}");
         }
+        if height == 7 {
+            assert_cancelled_at_postprocess_publication(&context, request);
+        }
     }
+}
+
+fn assert_cancelled_at_postprocess_publication(context: &AppContext, request: AppRequest) {
+    use clearra_core_domain::execution_cancellation::{
+        ExecutionCancellationHandle, ExecutionCancellationToken, ExecutionProgress, ProgressSink,
+    };
+    use std::sync::Arc;
+
+    struct CancelAtPublication(ExecutionCancellationHandle);
+    impl ProgressSink for CancelAtPublication {
+        fn report(&self, progress: ExecutionProgress) {
+            if progress.stage == "postprocess" && progress.completed == 1 {
+                self.0.cancel();
+            }
+        }
+    }
+
+    let mut execution = context.start_cooperative_execution(request);
+    let cancellation = ExecutionCancellationToken::new();
+    let handle = cancellation.handle();
+    let control = ExecutionControl::new(cancellation)
+        .with_progress_sink(Arc::new(CancelAtPublication(handle.clone())));
+    let cancelled = (0..4096).any(|_| match execution.advance(1, &control) {
+        CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => false,
+        CooperativeAppAdvance::Cancelled => true,
+        other => panic!("cancelled replay must not publish a result or token: {other:?}"),
+    });
+    assert!(cancelled && handle.is_cancelled());
 }
 
 #[test]
 #[cfg(not(target_family = "wasm"))]
 fn full_height_sr3_local_continue_is_cooperative_on_one_worker() {
     use clearra_app::{AppRenderModel, ContinueAppCommand};
-    use clearra_core_domain::execution_cancellation::{
-        ExecutionCancellationHandle, ExecutionCancellationToken, ExecutionProgress, ProgressSink,
-    };
+    use clearra_core_domain::execution_cancellation::ExecutionCancellationToken;
     use clearra_pc_graph::request::PcContinuationTokenCodec;
     use clearra_supply::QueueObservationPolicy;
-    use std::{env, process::Command, sync::Arc};
+    use std::{env, process::Command};
 
     // Runtime CPU capacity reads an existing outer process setting. Set it
     // only in this isolated test subprocess, never in the parallel test runner.
@@ -521,15 +550,6 @@ fn full_height_sr3_local_continue_is_cooperative_on_one_worker() {
         return;
     }
     assert_eq!(PcExecutionPolicy::mvp_default().workers(), 1);
-
-    struct CancelAtPublication(ExecutionCancellationHandle);
-    impl ProgressSink for CancelAtPublication {
-        fn report(&self, progress: ExecutionProgress) {
-            if progress.stage == "postprocess" && progress.completed == 1 {
-                self.0.cancel();
-            }
-        }
-    }
 
     let context = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
@@ -612,17 +632,7 @@ fn full_height_sr3_local_continue_is_cooperative_on_one_worker() {
             CooperativeAppAdvance::Cancelled
         ));
 
-        let mut late = context.start_cooperative_execution(request);
-        let cancellation = ExecutionCancellationToken::new();
-        let publication_handle = cancellation.handle();
-        let late_control = ExecutionControl::new(cancellation)
-            .with_progress_sink(Arc::new(CancelAtPublication(publication_handle.clone())));
-        let cancelled = (0..4096).any(|_| match late.advance(1, &late_control) {
-            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => false,
-            CooperativeAppAdvance::Cancelled => true,
-            other => panic!("cancelled sr3 replay must not publish: {other:?}"),
-        });
-        assert!(cancelled && publication_handle.is_cancelled());
+        assert_cancelled_at_postprocess_publication(&context, request);
     }
 
     let malformed = AppRequest::new(AppCommand::Continue(ContinueAppCommand::new(Some(

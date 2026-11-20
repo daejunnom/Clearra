@@ -2814,6 +2814,7 @@ impl CooperativeAppExecution {
         if matches!(
             &postprocess.response_kind,
             CooperativeSearchResponseKind::PcOpeningContinuation(_)
+                | CooperativeSearchResponseKind::ScenarioFullHeightInputReplay { .. }
                 | CooperativeSearchResponseKind::LocalContinueSr3(_)
         ) && control.is_cancelled()
         {
