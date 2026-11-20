@@ -1775,6 +1775,101 @@ fn conditional_joint_clear_support_or_preserves_2520_original_queues() {
 }
 
 #[test]
+fn identical_compact_board_changes_pending_i_lock_across_original_clear_frames() {
+    use PieceKind::{I, O};
+
+    let placements = [
+        (O, 0x30_0c00), // x=0,1 above the two initial floor cells
+        (O, 0x300c),
+        (O, 0xc030),
+        (O, 0x3_00c0),
+        (O, 0xc_0300),
+        (I, 0x03c0_0000), // original row two, x=2..5
+        (I, 0x3c00_0000),
+    ];
+    let (catalog, candidate) = fixture(3, &placements);
+    let profile = KickTableProfileId::Srs90;
+    let operation = |piece, cells| {
+        let row = catalog.skeleton_id(piece, cells).unwrap();
+        candidate
+            .row_ids()
+            .iter()
+            .position(|&id| id == row)
+            .unwrap()
+    };
+    let transitions = physical_transitions(&catalog, &candidate, profile);
+    let mut five_os = 0_usize;
+    for &(piece, cells) in &placements[..5] {
+        let bit = 1 << operation(piece, cells);
+        assert_ne!(usize::from(transitions[five_os]) & bit, 0);
+        assert_eq!(subset_state(&catalog, &candidate, five_os).1, 0);
+        five_os |= bit;
+    }
+    let before = subset_state(&catalog, &candidate, 0);
+    let after = subset_state(&catalog, &candidate, five_os);
+    assert_eq!(before, (0x3, 0));
+    assert_eq!(after, (before.0, 0b011));
+    let target = operation(I, placements[5].1);
+    let row_id = candidate.row_ids()[target];
+    assert_eq!(usize::from(transitions[0]) & (1 << target), 0);
+    assert_ne!(usize::from(transitions[five_os]) & (1 << target), 0);
+    let pieces: Vec<_> = candidate
+        .row_ids()
+        .iter()
+        .map(|&id| catalog.skeleton(id).piece)
+        .collect();
+    let words = operation_words(&pieces, &transitions);
+    assert!(words.contains(&vec![O, O, O, O, O, I, I]));
+    assert!(!words.contains(&vec![I, O, O, O, O, O, I]));
+
+    let geometry = placement_poset::CandidateGeometry::for_conditional_order(&catalog, &candidate)
+        .expect("the suspended I has two concrete support alternatives");
+    let mut workspace = ReachabilityWorkspace::default();
+    workspace.configure(pieces.len());
+    workspace.configure_kick_profile(profile, false);
+    // Repeat the floating pose to warm the ordinary exact-point cache. Then
+    // revisit the exact same board *and catalog row*, after and before the
+    // clear. The ILC frame determines which physical poses to ask about.
+    for (visit, (executed, (board, deleted), mask, y)) in [
+        (0, before, 0x03c0_0000, 2),
+        (0, before, 0x03c0_0000, 2),
+        (five_os, after, 0x3c, 0),
+        (0, before, 0x03c0_0000, 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let projected = geometry.conditional_state(executed as u16);
+        assert_eq!((projected.board, projected.deleted), (board, deleted));
+        assert_eq!(geometry.conditional_lock_mask(target, &projected), mask);
+        let expected = usize::from(transitions[executed]) & (1 << target) != 0;
+        let hits = workspace.metrics().cache_unreachable_hits;
+        let mut seen_rotations = 0_u8;
+        for lock in catalog.instantiations(row_id, deleted) {
+            assert_eq!((lock.lock_mask, lock.x, lock.lock_y), (mask, 2, y));
+            seen_rotations |= 1 << lock.rotation.quarter_turns();
+            assert_eq!(
+                workspace.lock_reachable_instantiated_in_frame(
+                    &catalog,
+                    board,
+                    I,
+                    lock,
+                    LocalRelationRowFrame::new(3, deleted),
+                ),
+                expected
+            );
+        }
+        assert_eq!(seen_rotations, 0b0101, "both horizontal I realizations");
+        if visit == 3 {
+            assert!(
+                workspace.metrics().cache_unreachable_hits > hits,
+                "the return to the original physical pose must exercise a cached negative"
+            );
+        }
+    }
+}
+
+#[test]
 fn conditional_support_or_preserves_every_empty_hold_queue_ordinal() {
     use clearra_core_domain::solution::normalized_tiling_solution::{
         PiecePlacementMask, StandardBoard64TilingIdentity,
