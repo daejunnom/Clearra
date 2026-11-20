@@ -142,6 +142,57 @@ thread_local! {
     static CONDITIONAL_ORDERED_NEGATIVE_REUSE: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Isolated fallback probe; neither the normal 256-transition budget nor the
+/// local-feature comparator opts into carrying these negatives to BuildUp.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ConditionalFallbackWork {
+    pub offered: usize,
+    pub filtered_poses: usize,
+    pub root_filtered_poses: usize,
+    pub conflicting_poses: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONDITIONAL_FALLBACK: Cell<Option<(usize, bool, ConditionalFallbackWork)>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn with_conditional_fallback_work<T>(
+    cap: usize,
+    carry: bool,
+    run: impl FnOnce() -> T,
+) -> (T, ConditionalFallbackWork) {
+    assert!((1..=256).contains(&cap));
+    struct Restore(Option<(usize, bool, ConditionalFallbackWork)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CONDITIONAL_FALLBACK.set(self.0);
+        }
+    }
+    let _restore = Restore(CONDITIONAL_FALLBACK.replace(Some((cap, carry, Default::default()))));
+    let result = run();
+    (result, CONDITIONAL_FALLBACK.get().unwrap().2)
+}
+
+#[cfg(test)]
+pub(super) fn conditional_fallback_cap() -> usize {
+    CONDITIONAL_FALLBACK.get().map_or(256, |(cap, _, _)| cap)
+}
+
+#[cfg(test)]
+pub(super) fn record_conditional_fallback(
+    update: impl FnOnce(&mut ConditionalFallbackWork),
+) -> bool {
+    if let Some((cap, carry, mut work)) = CONDITIONAL_FALLBACK.get() {
+        update(&mut work);
+        CONDITIONAL_FALLBACK.set(Some((cap, carry, work)));
+        return carry;
+    }
+    false
+}
+
 pub(super) fn conditional_ordered_work_mode() -> ConditionalOrderedWorkMode {
     if !CONDITIONAL_ORDERED_NEGATIVE.get() {
         ConditionalOrderedWorkMode::Off

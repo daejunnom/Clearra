@@ -2158,6 +2158,8 @@ fn verify_candidate_for_completion_mode(
 // A full buffer is a cache miss, not failure or negative authority.
 #[derive(Default)]
 struct CandidateMovementProofs {
+    #[cfg(test)]
+    conditional_fallback: Option<ConditionalClosedWithinLedger>,
     #[cfg(any(test, feature = "local-search-ab"))]
     enabled: bool,
     #[cfg(any(test, feature = "local-search-ab"))]
@@ -2350,6 +2352,38 @@ fn try_kick_interval_edge(
 
 #[cfg(any(test, feature = "local-search-ab"))]
 impl CandidateMovementProofs {
+    /// Some(false) means conflicting point evidence: leave the exact edge in
+    /// scratch for ordinary reachability. A bounded negative applies to this
+    /// one catalog realization, never to a sibling pose or the whole operation.
+    #[cfg(test)]
+    fn fallback_pose(
+        &self,
+        row_id: u32,
+        piece: PieceKind,
+        profile: clearra_rules::kicks::KickTableProfileId,
+        height: u8,
+        deleted: u16,
+        realization: super::catalog::InstantiatedRealization,
+        board: u64,
+    ) -> Option<bool> {
+        let ledger = self.conditional_fallback.as_ref()?;
+        let key = ConditionalClosedWithinKey {
+            row_id,
+            profile,
+            frame: LocalRelationRowFrame::new(height, deleted)?,
+            realization,
+        };
+        if !ledger.excludes(key, board) {
+            return None;
+        }
+        let positive = self.intervals[..self.len].iter().flatten().any(|(query, _)| {
+            query.piece == piece && query.realization == realization && query.deleted == deleted
+                && query.minimum & !board == 0
+                && matches!(query.proof, super::placement_poset::MovementProof::Reachable { maximum } if board & !maximum == 0)
+        });
+        Some(!positive)
+    }
+
     fn remember(&mut self, query: super::placement_poset::MovementProofQuery) {
         if self.enabled {
             self.insert(query, MovementProofSource::Poset);
@@ -2439,9 +2473,13 @@ fn verify_conditional_order(
     };
     let mut current_state = None;
     let mut ordered = ConditionalOrderedChecks::new();
+    #[cfg(test)]
+    let cap = super::structural_order::conditional_fallback_cap();
+    #[cfg(not(test))]
+    let cap = 256;
     let compiled = workspace
         .piece_order_languages
-        .compile_conditional_language(geometry.pieces(), 64, 256, |executed, operation| {
+        .compile_conditional_language(geometry.pieces(), 64, cap, |executed, operation| {
             metrics.checked_transitions += 1;
             if control.is_cancelled() {
                 return ConditionalTransitionProof::Unknown;
@@ -2481,11 +2519,15 @@ fn verify_conditional_order(
             language
         }
         ConditionalLanguageCompilation::Unknown | ConditionalLanguageCompilation::Unsupported => {
+            #[cfg(test)]
+            ordered.handoff(movement_proofs);
             metrics.unknown_candidates = 1;
             record_conditional_order(metrics);
             return Ok(None);
         }
         ConditionalLanguageCompilation::BudgetExceeded => {
+            #[cfg(test)]
+            ordered.handoff(movement_proofs);
             metrics.budget_candidates = 1;
             record_conditional_order(metrics);
             return Ok(None);
@@ -2493,6 +2535,8 @@ fn verify_conditional_order(
     };
     let coverage = if let Some(root) = language.root {
         let Some(coverage) = workspace.cover_standard_bag_language(problem, root, control)? else {
+            #[cfg(test)]
+            ordered.handoff(movement_proofs);
             record_conditional_order(metrics);
             return Ok(None);
         };
@@ -2507,7 +2551,7 @@ fn verify_conditional_order(
 }
 
 /// Unlike a `MovementProof::Closed`, these negatives have a finite
-/// occupancy upper bound and are owned by one conditional compilation.
+/// occupancy upper bound and are owned by this candidate only.
 #[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct ConditionalClosedWithinKey {
@@ -2564,6 +2608,21 @@ impl ConditionalOrderedChecks {
             ledger: (mode == super::structural_order::ConditionalOrderedWorkMode::ClosedWithin)
                 .then(ConditionalClosedWithinLedger::default),
             work: Default::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn handoff(self, candidate: &mut CandidateMovementProofs) {
+        // Do not compose this diagnostic with other graph movement experiments.
+        if candidate.enabled || candidate.first_kick_enabled || candidate.ordered_kick_enabled {
+            return;
+        }
+        if let Some(ledger) = self.ledger.filter(|ledger| ledger.len != 0) {
+            if super::structural_order::record_conditional_fallback(|work| {
+                work.offered += ledger.len
+            }) {
+                candidate.conditional_fallback = Some(ledger);
+            }
         }
     }
 }
@@ -4970,6 +5029,29 @@ impl BuildOrderGraph {
                         ) {
                             harddrop_edge = Some(edge);
                             break;
+                        }
+                        #[cfg(test)]
+                        if let Some(exclude) = _movement_proofs.fallback_pose(
+                            row_id,
+                            row.piece,
+                            problem.kick_profile().profile_id(),
+                            catalog.height(),
+                            deleted_rows,
+                            realization,
+                            board,
+                        ) {
+                            if exclude {
+                                let _ = edge_scratch.pop();
+                                super::structural_order::record_conditional_fallback(|work| {
+                                    work.filtered_poses += 1;
+                                    work.root_filtered_poses += usize::from(subset == 0);
+                                });
+                            } else {
+                                super::structural_order::record_conditional_fallback(|work| {
+                                    work.conflicting_poses += 1
+                                });
+                            }
+                            continue;
                         }
                         #[cfg(any(test, feature = "local-search-ab"))]
                         if (_movement_proofs.enabled

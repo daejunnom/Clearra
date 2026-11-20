@@ -1475,6 +1475,69 @@ fn conditional_ordered_negative_bypasses_graph_and_reduces_total_pose_work() {
                 "reused ordered-negative candidate queue ordinal {ordinal}"
             );
         }
+        if placements.len() == 4 {
+            // Catalog order at the root is I,T,J,L. Finish these four real
+            // queries (including the bounded L proof); the next callback hits
+            // the compiler's normal BudgetExceeded branch in *both* arms.
+            let l = pieces.iter().position(|&piece| piece == L).unwrap();
+            assert_eq!(transitions[0] & (1_u16 << l), 0);
+            let capped = |carry| {
+                structural_order::with_conditional_fallback_work(4, carry, || run(true, true))
+            };
+            let ((discard, discard_order), discard_work) = capped(false);
+            let ((carry, carry_order), carry_work) = capped(true);
+            assert_parity(&baseline, &discard);
+            assert_parity(&discard, &carry);
+            for work in [discard_order, carry_order] {
+                let order = work.conditional_order;
+                assert_eq!(order.attempted_candidates, 1);
+                assert_eq!(order.budget_candidates, 1);
+                assert_eq!(order.unknown_candidates, 0);
+                assert_eq!(order.graph_bypasses, 0);
+                assert_eq!(order.checked_transitions, 4);
+            }
+            assert_eq!(
+                discard_order.conditional_ordered_negative,
+                carry_order.conditional_ordered_negative
+            );
+            assert_eq!(discard_work.offered, 1);
+            assert_eq!(carry_work.offered, discard_work.offered);
+            assert_eq!(discard_work.filtered_poses, 0);
+            assert!(carry_work.filtered_poses > 0);
+            assert_eq!(carry_work.root_filtered_poses, 1);
+            assert_eq!(carry_work.conflicting_poses, 0);
+            let field = |r: &CoreExecutionResult, key| r.usize_field(key).unwrap();
+            let primitive_calls = |r: &CoreExecutionResult| {
+                field(r, "reachability_partial_searches")
+                    + field(r, "reachability_exhaustive_searches")
+            };
+            let graph_nodes = field(&discard, "total_build_order_nodes");
+            assert!(graph_nodes > 0);
+            assert_eq!(graph_nodes, field(&carry, "total_build_order_nodes"));
+            assert!(
+                field(&carry, "reachability_lock_queries")
+                    < field(&discard, "reachability_lock_queries")
+            );
+            assert!(primitive_calls(&carry) < primitive_calls(&discard));
+            assert!(
+                field(&carry, "total_reachability_states")
+                    <= field(&discard, "total_reachability_states")
+            );
+            let [row] = carry.solution_coverages() else {
+                panic!("missing single fallback solution");
+            };
+            assert_eq!(row.identity(), identity);
+            for ordinal in 0..840 {
+                assert_eq!(
+                    row.covered_patterns().contains(PatternId::new(ordinal)),
+                    words.contains::<[PieceKind]>(universe.sequence_at(ordinal).as_ref()),
+                    "bounded negative fallback original queue {ordinal}"
+                );
+            }
+            eprintln!("bounded fallback: nodes={graph_nodes}, filtered={}, lock queries={}->{}, primitive calls={}->{}",
+                carry_work.filtered_poses, field(&discard,"reachability_lock_queries"), field(&carry,"reachability_lock_queries"),
+                primitive_calls(&discard), primitive_calls(&carry));
+        }
     }
 }
 
