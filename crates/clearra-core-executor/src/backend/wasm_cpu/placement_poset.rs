@@ -350,9 +350,9 @@ pub(super) fn compile_with_movement_guard(
 }
 
 impl CandidateGeometry {
-    /// Start only with the small Boolean candidates intentionally rejected by
-    /// the poset because support needs a disjunction. This admission does not
-    /// prove a single physical move.
+    /// Start only with small Boolean candidates with a geometric support
+    /// disjunction, either initially or after a clear induced by just one
+    /// concrete operation. This admission does not prove a physical move.
     pub(super) fn for_conditional_order(
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
@@ -361,9 +361,9 @@ impl CandidateGeometry {
             return None;
         }
         let geometry = Self::compile(catalog, candidate)?;
-        geometry
-            .has_unprovable_initial_support_disjunction(catalog, candidate)
-            .then_some(geometry)
+        (geometry.has_unprovable_initial_support_disjunction(catalog, candidate)
+            || geometry.has_support_disjunction_after_one_operation_clear(catalog, candidate))
+        .then_some(geometry)
     }
 
     pub(super) fn pieces(&self) -> &[PieceKind] {
@@ -490,6 +490,78 @@ impl CandidateGeometry {
                     // prerequisite, so an AND certificate cannot prove all
                     // ideal transitions. The conditional compiler can.
                     return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn has_support_disjunction_after_one_operation_clear(
+        &self,
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+    ) -> bool {
+        if self.operation_count < 4 {
+            return false;
+        }
+        for (required, deleted) in self.clear_conditions.groups() {
+            if !required.is_power_of_two() {
+                continue;
+            }
+            // This singleton satisfies exactly its own atomic group. Inspect
+            // at most one frame per group; never enumerate execution subsets
+            // just to decide whether to try the bounded compiler.
+            let optional = self.clear_conditions.possible_operations_in_frame(
+                deleted,
+                required,
+                self.all_operations,
+            ) & !required;
+            if optional.count_ones() < 2 {
+                continue;
+            }
+            let (initial, physical) = self.project_frame(deleted);
+            let minimum = initial | physical[required.trailing_zeros() as usize];
+            for (operation, &lock_mask) in physical[..self.operation_count].iter().enumerate() {
+                let operation_bit = 1_u16 << operation;
+                if required & operation_bit != 0
+                    || placement_is_grounded(self.width, minimum, lock_mask)
+                {
+                    continue;
+                }
+                let Some(GroundingSources::AnyOf(mut supporters)) = grounding_sources(
+                    self.width,
+                    minimum,
+                    lock_mask,
+                    &physical[..self.operation_count],
+                    optional & !operation_bit,
+                ) else {
+                    continue;
+                };
+                if supporters.count_ones() < 2
+                    || catalog
+                        .instantiations(candidate.row_ids()[operation], deleted)
+                        .next()
+                        .is_none()
+                {
+                    continue;
+                }
+                let mut available = 0;
+                while supporters != 0 {
+                    let supporter = supporters.trailing_zeros() as usize;
+                    supporters &= supporters - 1;
+                    if catalog
+                        .instantiations(candidate.row_ids()[supporter], deleted)
+                        .next()
+                        .is_some()
+                    {
+                        available += 1;
+                        if available == 2 {
+                            // Still only admission. The ordinary bounded
+                            // proof checks support, movement and the clear
+                            // transition at actual reachable executed sets.
+                            return true;
+                        }
+                    }
                 }
             }
         }

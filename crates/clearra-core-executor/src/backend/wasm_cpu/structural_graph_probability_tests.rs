@@ -1302,6 +1302,145 @@ fn first_kick_certificate_saves_primitive_search_without_collapsing_support_or()
 }
 
 #[test]
+fn conditional_support_or_created_by_one_clear_preserves_four_line_coverage() {
+    use clearra_core_domain::solution::normalized_tiling_solution::{
+        PiecePlacementMask, StandardBoard64ColoredTilingIdentity, StandardBoard64TilingIdentity,
+    };
+    use clearra_coverage::pattern::pattern_id::PatternId;
+    use clearra_rules::profile::builtin_rules::srs;
+    use PieceKind::{I, J, O, T};
+
+    let _guard = product_guard();
+    let placements = [
+        (I, 0x07_8000_0000),
+        (T, 0x1c02),
+        (O, 0x6018),
+        (J, 0x60_0802_0000),
+    ];
+    let (catalog, candidate) = fixture(4, &placements);
+    let initial = catalog.initial_board();
+    assert_eq!(initial, 0x98_77fd_83e5);
+    let pieces: Vec<_> = candidate
+        .row_ids()
+        .iter()
+        .map(|&id| catalog.skeleton(id).piece)
+        .collect();
+    let bit = |piece| 1_usize << pieces.iter().position(|&kind| kind == piece).unwrap();
+    let transitions = physical_transitions(&catalog, &candidate, KickTableProfileId::Srs90);
+    assert_eq!(usize::from(transitions[0]), bit(I) | bit(J));
+    assert_eq!(subset_state(&catalog, &candidate, bit(I)).1, 0);
+    let (after_j, deleted) = subset_state(&catalog, &candidate, bit(J));
+    assert_eq!(deleted, 0b0100);
+    assert_eq!(usize::from(transitions[bit(J)]), bit(T) | bit(O));
+    let i_row = catalog.skeleton_id(I, placements[0].1).unwrap();
+    let i_lock = catalog
+        .instantiations(i_row, deleted)
+        .next()
+        .unwrap()
+        .lock_mask;
+    // The original row cleared by J included fixed initial cells grounding
+    // I. In the new frame, neither the floor nor J grounds I.
+    assert_ne!(initial & (placements[0].1 >> catalog.width()), 0);
+    assert_eq!(i_lock & 0x3ff, 0);
+    assert_eq!(after_j & (i_lock >> catalog.width()), 0);
+    for supporter in [T, O] {
+        let supported = bit(J) | bit(supporter);
+        let (board, frame) = subset_state(&catalog, &candidate, supported);
+        assert_eq!(frame, deleted);
+        assert_ne!(board & (i_lock >> catalog.width()), 0);
+        assert_ne!(usize::from(transitions[supported]) & bit(I), 0);
+    }
+    let words = operation_words(&pieces, &transitions);
+    assert_eq!(
+        words,
+        BTreeSet::from([
+            vec![I, J, T, O],
+            vec![I, J, O, T],
+            vec![J, T, I, O],
+            vec![J, T, O, I],
+            vec![J, O, I, T],
+            vec![J, O, T, I],
+        ])
+    );
+    assert!(
+        placement_poset::compile(&catalog, &candidate).is_none(),
+        "an unconditional predecessor graph cannot express the missing JI prefix"
+    );
+    assert!(
+        placement_poset::CandidateGeometry::for_conditional_order(&catalog, &candidate).is_some(),
+        "the earlier D=0-only admission missed this one-operation clear"
+    );
+
+    let identity = StandardBoard64TilingIdentity::from_placements(
+        initial,
+        placements.map(|(piece, cells)| PiecePlacementMask::new(piece, cells)),
+    )
+    .unwrap();
+    let colored = StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(identity);
+    let problem = ProblemCompiler::compile_scenario_pc(
+        &PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, initial),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(4),
+        )
+        .with_rule(srs())
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(4))
+        .with_supply_window_size(SupplyWindowSize::new(4))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+        // One piece per kind: the colored filter binds exactly this identity.
+        // A graph bypass elsewhere cannot make this regression pass.
+        .with_allowed_colored_solution_identities([colored])
+        .with_retained_trace_limit(0)
+        .with_execution_policy(policy()),
+    )
+    .unwrap()
+    .with_output_policy(SearchOutputPolicy::CoverageSummary);
+    let run = |conditional| {
+        structural_order::with_conditional_order_mode(conditional, || {
+            structural_order::with_first_kick_interval_mode(false, || {
+                structural_order::with_movement_clear_mode(false, || {
+                    structural_order::with_mode(false, || {
+                        placement_dependency::with_mode(false, || {
+                            WasmCpuSearchBackend::execute_with_control(
+                                &problem,
+                                &ExecutionControl::default(),
+                            )
+                            .unwrap()
+                        })
+                        .0
+                    })
+                })
+            })
+        })
+    };
+    let (ordinary, off) = run(false);
+    let (conditional, on) = run(true);
+    assert_parity(&ordinary, &conditional);
+    assert_eq!(off.conditional_order, Default::default());
+    let metrics = on.conditional_order;
+    assert!(metrics.graph_bypasses > 0);
+    assert!(metrics.checked_transitions <= metrics.attempted_candidates * 256);
+    let universe = problem.piece_source().materialized_universe().unwrap();
+    assert_eq!(universe.pattern_count(), 840);
+    assert_eq!(conditional.solution_coverages().len(), 1);
+    let entry = conditional
+        .solution_coverages()
+        .iter()
+        .find(|coverage| coverage.identity() == identity)
+        .unwrap();
+    assert_eq!(entry.covered_patterns().count_ones(), 6);
+    for ordinal in 0..universe.pattern_count() {
+        assert_eq!(
+            entry.covered_patterns().contains(PatternId::new(ordinal)),
+            words.contains::<[PieceKind]>(universe.sequence_at(ordinal).as_ref()),
+            "clear-induced OR queue ordinal {ordinal}"
+        );
+    }
+}
+
+#[test]
 fn conditional_support_or_preserves_every_empty_hold_queue_ordinal() {
     use clearra_core_domain::solution::normalized_tiling_solution::{
         PiecePlacementMask, StandardBoard64TilingIdentity,
