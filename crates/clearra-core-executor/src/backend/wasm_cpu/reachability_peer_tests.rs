@@ -105,8 +105,9 @@ fn assert_full_family(
     );
     assert_eq!(got, reference[0] & 1 != 0);
     assert!(workspace.cache.keys[slot].exhaustive);
+    let payload_index = workspace.cache.keys[slot].payload_index;
     assert_eq!(
-        workspace.cache.locks[slot].anchors,
+        workspace.cache.payload(payload_index).locks.anchors,
         reference,
         "{profile:?} {height}L {piece:?} {board:#x} deleted={}",
         frame.deleted_original_rows()
@@ -248,9 +249,10 @@ fn v081_conditioned_peer_boolean_positive_does_not_authorize_missing_locks() {
         .unwrap();
     assert!(!workspace.cache.keys[slot].exhaustive);
     let reference = reference_spawn_lock_anchors(10, 4, 0, PieceKind::O, profile).unwrap();
+    let payload_index = workspace.cache.keys[slot].payload_index;
     let (rotation, anchor) = reference
         .iter()
-        .zip(workspace.cache.locks[slot].anchors)
+        .zip(workspace.cache.payload(payload_index).locks.anchors)
         .enumerate()
         .find_map(|(rotation, (expected, returned))| {
             let missing = expected & !returned;
