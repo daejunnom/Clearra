@@ -4171,27 +4171,202 @@ fn pc_failed_queue_finalizer_rejects_missing_evidence_and_wrong_render_family() 
         .contains("response render kind mismatch"));
 }
 
+fn compact_failed_queue_request(
+    pattern: &str,
+    failed_pattern_limit: usize,
+    policy: PcExecutionPolicy,
+) -> AppRequest {
+    let query = PcScenarioQuery::new(
+        // Exactly one O fits this original two-row cavity.
+        PcScenarioBoard::standard_10(2, 0xf3fcf),
+        PcQueueInput::pattern_expression(
+            QueuePatternExpression::parse(pattern, 1).expect("one-piece expression"),
+        ),
+        PieceWindow::new(1),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(1))
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_retained_trace_limit(0)
+    .with_execution_policy(policy)
+    .with_objective(ObjectivePolicy::unique());
+    AppRequest::new(AppCommand::Percent(
+        PercentAppCommand::pc_failed_queue(query, PcFailedQueueIngressOrigin::CanonicalFailedQueue)
+            .with_failed_pattern_limit(failed_pattern_limit),
+    ))
+    .with_product_capability_contract(ProductCapabilityContract::PcFailedQueue)
+    .expect("valid typed compact failed-queue request")
+}
+
 #[test]
-fn pc_failed_queue_wasm_and_distributed_paths_fail_closed_without_fallback() {
+fn compact_pc_failed_queue_direct_uses_exact_original_ordinals_and_one_wrapper() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let app = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let policy = PcExecutionPolicy::mvp_default()
+        .with_requested_backend(RequestedSearchBackend::Cpu)
+        .with_workers(1);
+    for (pattern, limit, success_count) in [("[IOT]", 1, 1), ("[IT]", 2, 0), ("[IO]", 0, 1)] {
+        let request = compact_failed_queue_request(pattern, limit, policy.clone());
+        let AppCommand::Percent(command) = request.command() else {
+            panic!("expected the actual App command to be a typed Percent");
+        };
+        let query = command.query().expect("scenario query").clone();
+        let input_problem = ProblemCompiler::compile_scenario_percent(&query).unwrap();
+        let universe = input_problem
+            .piece_source()
+            .materialized_universe()
+            .unwrap();
+        let response = app.run(request);
+        assert_eq!(response.status(), AppStatus::Success, "{response:#?}");
+        assert_eq!(response.command(), Some(AppCommandKind::Percent));
+        assert!(response.pc_failed_queue_execution_evidence().is_none());
+        let wrapper = response.product_capability_result().unwrap();
+        assert_eq!(wrapper.contract(), ProductCapabilityContract::PcFailedQueue);
+        assert_eq!(
+            wrapper.result_kind(),
+            ProductCapabilityResultKind::PcFailedQueueV2
+        );
+        assert_eq!(wrapper.validation_count(), 1);
+        let report = wrapper.pc_failed_queue_v2().unwrap();
+        assert_eq!(
+            report.query(),
+            &crate::PcFailedQueueQuerySnapshot::Scenario(query)
+        );
+        assert_eq!(report.pattern_count(), universe.pattern_count());
+        assert_eq!(report.success_pattern_count(), success_count);
+        assert_eq!(
+            report.failed_pattern_count(),
+            universe.pattern_count() - success_count
+        );
+        assert_eq!(report.failed_pattern_limit(), limit);
+        let core = response
+            .render_model()
+            .and_then(crate::AppRenderModel::core_result)
+            .unwrap();
+        assert_eq!(core.bool_field("probability_complete"), Some(true));
+        assert_eq!(core.bool_field("resource_truncated"), Some(false));
+        assert!(core.pc_chance_coverage_evidence().is_none());
+        let mut expected_examples = Vec::new();
+        for ordinal in 0..universe.pattern_count() {
+            let queue = universe.sequence_at(ordinal);
+            let solves = queue.as_ref() == [PieceKind::O];
+            assert_eq!(
+                core.coverage_pattern_words()[0] & (1 << ordinal) != 0,
+                solves
+            );
+            if !solves {
+                expected_examples.push((ordinal, queue.into_owned()));
+            }
+        }
+        assert_eq!(report.examples_truncated(), expected_examples.len() > limit);
+        expected_examples.truncate(limit);
+        let examples: Vec<_> = report
+            .examples()
+            .iter()
+            .map(|example| (example.pattern_index(), example.pieces().to_vec()))
+            .collect();
+        assert_eq!(examples, expected_examples);
+    }
+}
+
+#[test]
+fn compact_pc_failed_queue_direct_rejects_unsupported_and_incomplete_work() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let app = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let one = PcExecutionPolicy::mvp_default().with_workers(1);
+    for (policy, expected) in [
+        (one.clone().with_workers(2), AppStatus::Unsupported),
+        (
+            one.clone()
+                .with_requested_backend(RequestedSearchBackend::Gpu)
+                .with_allow_backend_fallback(true),
+            AppStatus::Unsupported,
+        ),
+        (
+            one.clone().with_max_candidates(1),
+            AppStatus::ExecutionFailed,
+        ),
+    ] {
+        let response = app.run(compact_failed_queue_request("[IO]", 1, policy));
+        assert_eq!(response.status(), expected, "{response:#?}");
+        assert!(response.product_capability_result().is_none());
+        assert!(response.pc_failed_queue_execution_evidence().is_none());
+    }
+    let stop = ExecutionCancellationToken::new();
+    stop.handle().cancel();
+    let response = app.run_with_cancellation(compact_failed_queue_request("[IO]", 1, one), &stop);
+    assert_eq!(
+        response.status(),
+        AppStatus::ExecutionFailed,
+        "{response:#?}"
+    );
+    assert!(response.product_capability_result().is_none());
+    assert!(response.pc_failed_queue_execution_evidence().is_none());
+}
+
+#[test]
+fn compact_pc_failed_queue_direct_keeps_the_exact_owner_and_lease_until_completion() {
+    use crate::pc_failed_queue_result::PcFailedQueueCompiledAuthority;
+    use clearra_core_executor::WasmCpuTerminalResourceAuthority;
+
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let request =
+        compact_failed_queue_request("[IO]", 1, PcExecutionPolicy::mvp_default().with_workers(1));
+    let AppCommand::Percent(command) = request.command() else {
+        panic!("expected the actual App command to be a typed Percent");
+    };
+    let authority = PcFailedQueueCompiledAuthority::scenario(
+        command.query().unwrap(),
+        PcFailedQueueIngressOrigin::CanonicalFailedQueue,
+        1,
+    )
+    .unwrap();
+    let original = authority.problem_arc();
+    let native =
+        AppCoreExecutorService::default().prepare_direct_pc_failed_queue_authority(authority);
+    assert!(Arc::ptr_eq(&original, &native.problem_arc()));
+    assert_eq!(
+        original
+            .pc_chance_evidence_policy()
+            .pc_failed_queue_example_limit(),
+        None
+    );
+
+    let rust = AppCoreExecutorService::wasm_cpu();
+    let qualified = rust.prepare_direct_pc_failed_queue_authority(native);
+    let binding = qualified.problem_arc();
+    assert!(!Arc::ptr_eq(&original, &binding));
+    assert_eq!(
+        binding
+            .pc_chance_evidence_policy()
+            .pc_failed_queue_example_limit(),
+        Some(1)
+    );
+    rust.execute_pc_failed_queue_with_control(
+        &qualified,
+        &ExecutionControl::default(),
+        |result, evidence| {
+            assert!(evidence.matches_problem_owner(&binding));
+            assert!(!evidence.matches_problem_owner(&original));
+            assert!(WasmCpuTerminalResourceAuthority::try_acquire_full_capacity().is_err());
+            qualified.validate_and_decorate(result, evidence).unwrap();
+        },
+    )
+    .unwrap();
+    assert!(WasmCpuTerminalResourceAuthority::try_acquire_full_capacity().is_ok());
+}
+
+#[test]
+fn compact_pc_failed_queue_distributed_path_stays_closed() {
     let request = failed_queue_request(
         PcFailedQueueIngressOrigin::CanonicalFailedQueue,
         PieceKind::I,
         1,
     );
-    let wasm = AppContext::new(
-        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
-    )
-    .run(request.clone());
-    assert_eq!(wasm.status(), AppStatus::Unsupported, "{wasm:#?}");
-    assert_eq!(wasm.command(), Some(AppCommandKind::Percent));
-    assert!(wasm.product_capability_result().is_none());
-    assert!(wasm.pc_failed_queue_execution_evidence().is_none());
-    assert!(wasm
-        .error()
-        .expect("WASM typed failed-queue rejection")
-        .message()
-        .contains("pc_failed_queue_wasm_typed_execution_unavailable"));
-
     let DistributedSearchPreparation::Ready(distributed) =
         AppContext::default().prepare_distributed_search(request)
     else {

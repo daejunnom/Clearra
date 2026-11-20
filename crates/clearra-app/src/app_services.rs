@@ -20,7 +20,8 @@ use clearra_core_executor::{
     CoreExecutionError, CoreExecutionResult, CoreExecutor, CorePostProcessExecution,
     CorePostProcessScoreCell, CorePostProcessSpinCoverage, PcFailedQueueEvidence,
     PcFailedQueueEvidenceError, PcFailedQueueExecutionError, PercentService, PercentServiceError,
-    WasmBuildProbabilityBackend, WasmCpuSearchBackend, WasmCpuSearchError, WasmSetupSearchBackend,
+    WasmBuildProbabilityBackend, WasmCompactPcFailedQueueSession, WasmCpuSearchBackend,
+    WasmCpuSearchError, WasmPcFailedQueueAdvance, WasmPcFailedQueueSession, WasmSetupSearchBackend,
 };
 use clearra_i18n::{LanguageId, LanguagePreference, LanguageResolver};
 use clearra_objectives::policy::score_objective_policy::SpinProfileSelection;
@@ -1104,49 +1105,51 @@ impl AppCoreExecutorService {
         Ok(result)
     }
 
-    /// Closed execution seam for `pc.failed-queue`. The Core
-    /// service produces the result and its evidence from one execution. App
-    /// post-processing runs only after that producer has returned, and the raw
-    /// evidence never crosses the command boundary.
-    pub(crate) fn execute_pc_failed_queue_with_control(
+    /// Select the exact compiled owner before handing it to the direct
+    /// producer. Only compact Rust needs the additional evidence purpose.
+    pub(crate) fn prepare_direct_pc_failed_queue_authority(
+        &self,
+        authority: PcFailedQueueCompiledAuthority,
+    ) -> PcFailedQueueCompiledAuthority {
+        if matches!(self.backend, AppCoreExecutorBackend::WasmCpu)
+            && !authority.uses_extended_family()
+        {
+            authority.into_compact_rust_source()
+        } else {
+            authority
+        }
+    }
+
+    /// Keep the Rust session alive through App's typed completion callback;
+    /// the result's raw evidence never crosses the command boundary.
+    pub(crate) fn execute_pc_failed_queue_with_control<T>(
         &self,
         authority: &PcFailedQueueCompiledAuthority,
         control: &ExecutionControl,
-    ) -> Result<(CoreExecutionResult, PcFailedQueueEvidence), AppPcFailedQueueExecutionError> {
-        if matches!(self.backend, AppCoreExecutorBackend::WasmCpu)
-            && authority.uses_extended_family()
-        {
-            let mut session =
-                clearra_core_executor::WasmPcFailedQueueSession::new(authority.problem_arc())
-                    .map_err(|error| {
-                        AppPcFailedQueueExecutionError::Core(error.into_core_execution_error())
-                    })?;
-            loop {
-                match session.advance(2048, control).map_err(|error| {
-                    AppPcFailedQueueExecutionError::Core(error.into_core_execution_error())
-                })? {
-                    clearra_core_executor::WasmPcFailedQueueAdvance::Pending => {}
-                    clearra_core_executor::WasmPcFailedQueueAdvance::Cancelled => {
-                        return Err(AppPcFailedQueueExecutionError::Core(
-                            CoreExecutionError::Cancelled,
-                        ))
-                    }
-                    clearra_core_executor::WasmPcFailedQueueAdvance::Completed(
-                        result,
-                        evidence,
-                    ) => {
-                        return self
-                            .postprocess_pc_failed_queue_completion(result, evidence, control)
-                    }
-                }
+        complete: impl FnOnce(CoreExecutionResult, PcFailedQueueEvidence) -> T,
+    ) -> Result<T, AppPcFailedQueueExecutionError> {
+        if matches!(self.backend, AppCoreExecutorBackend::WasmCpu) {
+            if authority.uses_extended_family() {
+                let mut session = WasmPcFailedQueueSession::new(authority.problem_arc())
+                    .map_err(pc_failed_queue_wasm_error)?;
+                return self.advance_direct_pc_failed_queue(
+                    control,
+                    || session.advance(2048, control),
+                    complete,
+                );
             }
-        }
-        if !matches!(self.backend, AppCoreExecutorBackend::NativeCore) {
-            return Err(AppPcFailedQueueExecutionError::Core(
-                CoreExecutionError::RuntimeUnavailable {
-                    component: "pc_failed_queue_wasm_typed_execution_unavailable",
-                },
-            ));
+            if control.is_cancelled() {
+                return Err(AppPcFailedQueueExecutionError::Core(
+                    CoreExecutionError::Cancelled,
+                ));
+            }
+            let mut session = WasmCompactPcFailedQueueSession::new(authority.problem_arc())
+                .map_err(pc_failed_queue_wasm_error)?;
+            return self.advance_direct_pc_failed_queue(
+                control,
+                || session.advance(2048, control),
+                complete,
+            );
         }
         if control.is_cancelled() {
             return Err(AppPcFailedQueueExecutionError::Core(
@@ -1165,7 +1168,44 @@ impl AppCoreExecutorService {
             ));
         }
         let (result, evidence) = execution.into_parts();
-        self.postprocess_pc_failed_queue_completion(result, evidence, control)
+        let (result, evidence) =
+            self.postprocess_pc_failed_queue_completion(result, evidence, control)?;
+        Ok(complete(result, evidence))
+    }
+
+    fn advance_direct_pc_failed_queue<T>(
+        &self,
+        control: &ExecutionControl,
+        mut advance: impl FnMut() -> Result<WasmPcFailedQueueAdvance, WasmCpuSearchError>,
+        complete: impl FnOnce(CoreExecutionResult, PcFailedQueueEvidence) -> T,
+    ) -> Result<T, AppPcFailedQueueExecutionError> {
+        loop {
+            match advance().map_err(pc_failed_queue_wasm_error)? {
+                WasmPcFailedQueueAdvance::Pending => {}
+                WasmPcFailedQueueAdvance::Cancelled => {
+                    return Err(AppPcFailedQueueExecutionError::Core(
+                        CoreExecutionError::Cancelled,
+                    ));
+                }
+                WasmPcFailedQueueAdvance::Completed(result, evidence) => {
+                    let (result, evidence) =
+                        self.postprocess_pc_failed_queue_completion(result, evidence, control)?;
+                    if control.is_cancelled() {
+                        return Err(AppPcFailedQueueExecutionError::Core(
+                            CoreExecutionError::Cancelled,
+                        ));
+                    }
+                    let response = complete(result, evidence);
+                    return if control.is_cancelled() {
+                        Err(AppPcFailedQueueExecutionError::Core(
+                            CoreExecutionError::Cancelled,
+                        ))
+                    } else {
+                        Ok(response)
+                    };
+                }
+            }
+        }
     }
 
     pub(crate) fn postprocess_pc_failed_queue_completion(
@@ -1602,6 +1642,10 @@ fn validate_pc_score_wasm_execution_source(
     validation.map_err(|error| CoreExecutionError::RuntimeUnavailable {
         component: error.component(),
     })
+}
+
+fn pc_failed_queue_wasm_error(error: WasmCpuSearchError) -> AppPcFailedQueueExecutionError {
+    AppPcFailedQueueExecutionError::Core(error.into_core_execution_error())
 }
 
 fn app_error_from_pc_failed_queue_execution(

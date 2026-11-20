@@ -324,6 +324,18 @@ impl PcFailedQueueCompiledAuthority {
         self.problem.visible_height() > 6
     }
 
+    /// Only the selected compact Rust producer requires this evidence purpose.
+    /// Establish it before sharing the immutable problem with the solver: the
+    /// returned evidence must be bound to that same Arc, not an equal clone.
+    pub(crate) fn into_compact_rust_source(mut self) -> Self {
+        debug_assert!(!self.uses_extended_family());
+        self.problem = Arc::new(
+            Arc::unwrap_or_clone(self.problem)
+                .with_pc_failed_queue_v2_evidence(self.failed_pattern_limit),
+        );
+        self
+    }
+
     pub(crate) const fn failed_pattern_limit(&self) -> usize {
         self.failed_pattern_limit
     }

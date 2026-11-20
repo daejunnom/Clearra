@@ -252,21 +252,23 @@ impl PercentAppCommand {
                 )
             }
         };
-        let execution = context
-            .services()
-            .core_executor()
-            .execute_pc_failed_queue_with_control(&authority, context.execution_control());
-        let (result, evidence) = match execution {
-            Ok(execution) => execution,
-            Err(error) => return error.into_response(),
-        };
-        match authority.validate_and_decorate(result, evidence) {
-            Ok((result, evidence)) => AppResponse::success(AppRenderModel::Percent(result))
-                .with_pc_failed_queue_execution_evidence(evidence),
-            Err(error) => AppResponse::failed(
-                AppStatus::ExecutionFailed,
-                AppError::new(AppErrorCode::ExecutionFailed, error.reason()),
-            ),
+        let service = context.services().core_executor();
+        let authority = service.prepare_direct_pc_failed_queue_authority(authority);
+        let completion = service.execute_pc_failed_queue_with_control(
+            &authority,
+            context.execution_control(),
+            |result, evidence| match authority.validate_and_decorate(result, evidence) {
+                Ok((result, evidence)) => AppResponse::success(AppRenderModel::Percent(result))
+                    .with_pc_failed_queue_execution_evidence(evidence),
+                Err(error) => AppResponse::failed(
+                    AppStatus::ExecutionFailed,
+                    AppError::new(AppErrorCode::ExecutionFailed, error.reason()),
+                ),
+            },
+        );
+        match completion {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
         }
     }
 }

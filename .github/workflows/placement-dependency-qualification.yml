@@ -264,6 +264,7 @@ jobs:
               pc_tiling_candidate_budget_preserves_failure_without_publishing setup_score_ordinals \
               setup_score_evaluation_identity_binds \
               explicit_rust_cpu_product_context_preserves_default_service_selection \
+              compact_pc_failed_queue_ \
               full_height_replay_shares_exact_graph_owner_across_staged_promotion; do
               "${app_lib[@]}" "$filter" || status=1
             done

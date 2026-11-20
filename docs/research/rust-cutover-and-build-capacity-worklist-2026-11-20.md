@@ -11,7 +11,7 @@ acceptance receipt or a replacement for the full relation roadmap.
 | R01, R07 | C ABI 23 remains public; no tracked external consumer is confirmed. C packing/build and independent oracle are distinct from data-only FFI imports. | Establish live link/symbol and ownership contracts. Keep the public ABI and independent oracle until scoped evidence allows retirement. |
 | R02, H01 | Published CLI/Discord, Web and packaged Desktop select Rust CPU explicitly. Library/default and explicit C comparison routes differ. | Use one shipped App context constructor; retain explicit C reference and separate generic defaults until feature-by-feature parity. |
 | R03 | Typed Build Probability/Cover V2 and legacy Build Cover are different contracts. Legacy C is the general solver; Rust legacy has a narrow proved-empty adapter. | Verify complete original ordinals on actual C/Rust Core requests, then connect complete positive Legacy Observed data at the App authority seam. Do not treat prefix qualification or finite fixtures as Observed parity. |
-| R04, R06 | Extended 7–24L Rust exists; ordinary native multiworker advance can block for the whole solve. The interrupted exact-admission seam is private. Compact canonical failed-queue remains unavailable on Rust. | Finish sliced parity with resource/terminal checks; separately migrate compact failed-queue exact coverage/complement. Keep variable-depth, unsupported holds/rules and request budgets explicit. |
+| R04, R06 | Extended 7–24L Rust exists; ordinary native multiworker advance can block for the whole solve. The 7L exact-admission seam is private. Compact canonical failed-queue has a scoped direct Rust implementation for a single CPU/Auto worker and complete Oracle coverage. | Run exact Core/App qualification for compact before treating it as verified. Cooperative/distributed compact and multiworker support remain open. Finish sliced parity before expanding 7L or activating products; keep variable depth, unsupported rules and request budgets explicit. |
 | R05, H03 | Setup/score and typed retained Sc3 already have Rust paths; Sr3 one-worker and Sr2 input restart differ. Compact PC2 worker proof is private with no public issuance. | Compare each continuation contract, preserve checkpoint vs restart and cancellation, exercise real host apply/merge and independent physical witness before publishing PC2. |
 | R08–R10 | Packaged CLI already links Rust; release ProductE2E and `clearra-pc-artifact` really execute C. | Qualify family-specific defaults, then split explicit C oracle inputs from Rust release evidence and change the dependent artifact identities rather than just flipping a Cargo flag. |
 | R11–R12 | C sources, public ABI and qualification C oracle remain. | Retire only actual consumers proven unused or migrated after V03/H05/performance per scope, preserving the independent oracle, required data types and historical receipts. |
@@ -53,6 +53,15 @@ processes, WSL isolation, credentials and exact artifact acceptance is
 not part of the storage rule being replaced. Do not provision or delete
 a distro as part of the port. Keep bridge/reader lifetime and independent
 ABI oracles intact while removing duplication.
+
+The branch's managed Node and PowerShell launchers now share admission
+and completion checks and the global catalog lock; Node samples during
+execution. On Windows or under an existing supervisor, do not claim
+descendant shutdown if it could not be observed. PowerShell direct calls
+still lack a live monitor; bare Cargo, the guest's separate WASM target,
+and GUI experiment direct-owner calls must be brought into scope. A full
+catalog with readers of unknown state blocks a fresh slot instead of
+discarding a completed output.
 
 Implementation order: disjoint GUI/Discord/projection owners and Rust
 family fixtures may proceed now; App route integration and Rust release
