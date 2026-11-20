@@ -4113,6 +4113,8 @@ pub(crate) fn compile_search_command(
                     } else {
                         problem
                     };
+                    let render_contract = render_contract
+                        .map(|contract| contract.prepare_compact_input_replay(&problem));
                     (
                         Arc::new(problem),
                         CooperativeSearchResponseKind::Scenario {

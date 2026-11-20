@@ -169,6 +169,7 @@ fn compact_fixed_scenario_input_replay_matches_native_and_cooperative() {
     assert_eq!(core(&bare).field("expected_checked"), None);
 
     assert_legacy_tall_visible_scenario(&rust);
+    assert_legacy_variable_max_scenarios(&rust);
 }
 
 fn assert_legacy_tall_visible_scenario(rust: &AppContext) {
@@ -270,7 +271,136 @@ fn assert_legacy_tall_visible_scenario(rust: &AppContext) {
     let explicit = rust.run(explicit_request);
     assert_ne!(explicit.status(), AppStatus::Success);
     assert!(explicit.render_model().is_none());
-    let variable_depth =
-        ProblemCompiler::compile_legacy_scenario_pc(&raw.with_exact_pieces(None)).unwrap();
-    assert_eq!(variable_depth.compact_pc_geometry_height(), 4);
+}
+
+fn assert_legacy_variable_max_scenarios(rust: &AppContext) {
+    let query = |height, mask, pieces: &[PieceKind], max| {
+        PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(height, mask),
+            PcQueueInput::fixed_sequence(FixedSequence::new(pieces.to_vec())),
+            PieceWindow::new(max),
+        )
+        .with_rule(srs())
+        .with_allow_hold(false)
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_retained_trace_limit(1)
+    };
+    let raw = (0x3f0 << 10) | 0x3ff;
+    for (queue, resolves) in [
+        ([PieceKind::I, PieceKind::O], true),
+        ([PieceKind::O, PieceKind::I], false),
+    ] {
+        // A one-row clear has room for only the first I. In the second
+        // request O cannot fit, and the legal I is outside the max window.
+        let input = query(4, raw, &queue, 1);
+        let legacy = ProblemCompiler::compile_legacy_scenario_pc(&input).unwrap();
+        assert_eq!(legacy.exact_pieces(), None);
+        assert_eq!(legacy.compact_pc_geometry_height(), 1);
+        let request = || legacy_scenario(input.clone());
+        let direct = rust.run(request());
+        let cooperative = complete_cooperatively(rust, request());
+        let direct = core(&direct);
+        let cooperative = core(&cooperative);
+        assert_eq!(direct.bool_field("solution_found"), Some(resolves));
+        assert_eq!(direct.bool_field("count_complete"), Some(true));
+        assert_eq!(direct.bool_field("resource_truncated"), Some(false));
+        assert_eq!(
+            direct.normalized_solution_keys().len(),
+            usize::from(resolves)
+        );
+        if resolves {
+            assert_eq!(
+                direct.normalized_solution_keys()[0],
+                "ctk1|initial=00000000000003f0|placements=I:000000000000000f"
+            );
+        }
+        let token = direct.field("scenario_replay_token").unwrap();
+        assert!(token.starts_with("sr2:w10:v4:"));
+        let PcContinuationToken::ScenarioReplay(decoded) =
+            PcContinuationTokenCodec::parse(token).unwrap()
+        else {
+            panic!("expected a legacy input replay");
+        };
+        assert!(token.split(':').any(|segment| segment == "xnone"));
+        assert_eq!(decoded.exact_pieces(), None);
+        assert_eq!(decoded.piece_window().max_pieces(), 1);
+        assert_eq!(
+            decoded
+                .remaining_queue()
+                .as_fixed_sequence()
+                .unwrap()
+                .pieces(),
+            &queue
+        );
+        assert_eq!(decoded.initial_board(), legacy.initial_board());
+        let fields = [
+            "scenario_replay_token",
+            "normalized_solution_set_hash",
+            "covered_pattern_count",
+            "solution_found",
+            "count_complete",
+        ];
+        for key in fields {
+            assert_eq!(direct.field(key), cooperative.field(key), "{key}");
+        }
+        #[cfg(feature = "native-c-core")]
+        {
+            let native = AppContext::default().run(request());
+            let native = core(&native);
+            assert_eq!(
+                direct.normalized_solution_keys(),
+                native.normalized_solution_keys()
+            );
+            for key in fields {
+                assert_eq!(direct.field(key), native.field(key), "{key}");
+            }
+        }
+
+        let replay = rust.run(AppRequest::new(AppCommand::Continue(
+            ContinueAppCommand::new(Some(token.to_owned())),
+        )));
+        assert_eq!(replay.status(), AppStatus::Success, "{replay:?}");
+        let Some(AppRenderModel::Continue(message)) = replay.render_model() else {
+            panic!("expected the ordinary Continue result");
+        };
+        for key in [
+            "normalized_solution_set_hash",
+            "solution_found",
+            "count_complete",
+        ] {
+            let replay_value = message.fields().iter().find(|field| field.key() == key);
+            assert_eq!(
+                replay_value.map(|field| field.value().as_text()).as_deref(),
+                direct.field(key)
+            );
+        }
+    }
+
+    // Unsupported families preserve their original extent; none is turned
+    // into a cropped target, shorter-prefix solution or artificial empty.
+    let unchanged = [
+        query(4, 0x3f0, &[PieceKind::I, PieceKind::I], 2), // nonintegral area
+        query(4, 0x3f0 << 20, &[PieceKind::I], 1),         // occupied above area
+        query(4, 0x3f0, &[PieceKind::I, PieceKind::O], 1).with_allow_hold(true),
+        query(
+            2,
+            0,
+            &[
+                PieceKind::I,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::I,
+            ],
+            6,
+        ), // would require a 5-piece prefix after clamping
+    ];
+    for input in unchanged {
+        let legacy = ProblemCompiler::compile_legacy_scenario_pc(&input).unwrap();
+        let ordinary = ProblemCompiler::compile_scenario_pc(&input).unwrap();
+        assert_eq!(legacy, ordinary);
+    }
+    let short = query(4, 0x3f0, &[PieceKind::I], 2);
+    assert!(ProblemCompiler::compile_legacy_scenario_pc(&short).is_err());
 }

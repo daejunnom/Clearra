@@ -184,10 +184,7 @@ impl ScenarioAppCommand {
         &'static str,
     > {
         let result_projection = self.validated_result_projection()?;
-        let render_contract = self
-            .render_contract
-            .map(|contract| contract.prepare_compact_input_replay(&self.query));
-        Ok((self.query, render_contract, result_projection))
+        Ok((self.query, self.render_contract, result_projection))
     }
 
     pub(crate) fn compile_standard_scenario(
@@ -514,7 +511,7 @@ impl RunnableAppCommand for ScenarioAppCommand {
                         .core_executor()
                         .supports_cooperative_wasm_search()
                     {
-                        contract.prepare_compact_input_replay(&self.query)
+                        contract.prepare_compact_input_replay(&problem)
                     } else {
                         contract
                     };

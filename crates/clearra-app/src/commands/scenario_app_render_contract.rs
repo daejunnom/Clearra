@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use clearra_core_executor::CoreExecutionResult;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
-use clearra_pc_graph::request::{PcContinuationTokenCodec, PcCountPolicy, PcScenarioQuery};
+use clearra_pc_graph::request::{PcContinuationTokenCodec, PcCountPolicy};
+use clearra_problem::SearchProblem;
 use clearra_validation::diagnostic::diagnostic_report::DiagnosticReport;
 
 use crate::{
@@ -52,7 +53,8 @@ impl ScenarioAppRenderContract {
 
     /// Carries only an immutable input replay for the legacy scenario product;
     /// unlike pc2 it does not assert that an output game state is reachable.
-    pub(crate) fn prepare_compact_input_replay(mut self, query: &PcScenarioQuery) -> Self {
+    pub(crate) fn prepare_compact_input_replay(mut self, problem: &SearchProblem) -> Self {
+        let query = problem.core_query();
         let board = query.initial_board();
         let policy = query.execution_policy();
         let objective_from_count = match query.count_policy() {
@@ -63,7 +65,8 @@ impl ScenarioAppRenderContract {
         if board.width() != 10
             || !(2..=6).contains(&board.visible_height())
             || board.has_extended_occupancy()
-            || query.exact_pieces().is_none()
+            || (query.exact_pieces().is_none()
+                && problem.compact_pc_geometry_height() >= board.visible_height())
             || query.objective() != objective_from_count
             || query.supply_window_size().is_some()
             || query.allowed_colored_solution_identities().is_some()
@@ -82,21 +85,17 @@ impl ScenarioAppRenderContract {
         if fixed.is_empty() || fixed.len() > MAX_COMPACT_SCENARIO_REPLAY_QUEUE {
             return self;
         }
-        let canonical = query
-            .clone()
-            .with_initial_board(board.after_initial_line_clear());
         self.compact_input_replay_token =
-            PcContinuationTokenCodec::encode_scenario_replay(&canonical).ok();
+            PcContinuationTokenCodec::encode_scenario_replay(query).ok();
         if self.compact_input_replay_token.is_some() {
             // Format the original public extent and normalized field, not
             // the possibly smaller catalog used to search the legacy input.
-            let normalized = canonical.initial_board();
             for (key, value) in [
-                ("board_width", normalized.width().to_string()),
-                ("visible_height", normalized.visible_height().to_string()),
+                ("board_width", board.width().to_string()),
+                ("visible_height", board.visible_height().to_string()),
                 (
                     "initial_board_mask",
-                    format!("0x{:016x}", normalized.occupied_mask()),
+                    format!("0x{:016x}", board.occupied_mask()),
                 ),
             ] {
                 if !self

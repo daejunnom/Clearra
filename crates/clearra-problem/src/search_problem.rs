@@ -1764,7 +1764,7 @@ mod legacy_scenario_pc_extent {
     impl SearchProblem {
         /// Select only exact area that the legacy ScenarioPc extent would
         /// admit. The canonical input and scenario layout remain unchanged.
-        pub(crate) fn with_legacy_fixed_exact_scenario_extent(mut self) -> Self {
+        pub(crate) fn with_legacy_scenario_extent(mut self) -> Self {
             if let Some(rows) = active_height(&self) {
                 self.problem_id = SearchProblemId::new(format!(
                     "{}:legacy-pc-active-rows:{}",
@@ -1806,17 +1806,23 @@ mod legacy_scenario_pc_extent {
         {
             return None;
         }
-        let n = query.exact_pieces()?;
+        let max_pieces = query.piece_window().max_pieces();
+        let n = match query.exact_pieces() {
+            Some(n) if n == max_pieces => n,
+            // Native builds an exact family of max_pieces in this case,
+            // even though the legacy C descriptor has no explicit count.
+            None if !query.allow_hold() => max_pieces,
+            _ => return None,
+        };
         let queue = query.remaining_queue().as_fixed_sequence()?;
         if n == 0
-            || query.piece_window().max_pieces() != n
             || !(n..=64).contains(&queue.len())
             || (query.allow_hold() && (n != 1 || queue.len() != 1))
         {
             return None;
         }
-        // With no usable alternate piece, the final clear can consume only
-        // the exact window. No clipping or rounding a non-integral area.
+        // Accept only this family depth, never a shorter prefix after
+        // clamping the frame and never a rounded non-integral fill area.
         let occupied = board.occupied_mask();
         let area = (occupied.count_ones() as usize).checked_add(n.checked_mul(4)?)?;
         if !area.is_multiple_of(10) {
