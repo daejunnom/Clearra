@@ -54,14 +54,16 @@ mod run {
         if args.first().is_some_and(|arg| arg == "--compare") {
             return compare(&args[1..]);
         }
+        if args.as_slice() == ["--scalar-demo"] {
+            return scalar_demo();
+        }
         let small = match args.as_slice() {
             [] => false,
             [flag] if flag == "--small" => true,
-            _ => {
-                return Err(
-                    "usage: placement_graph_bench [--small | --compare FILE FILE ...]".into(),
-                )
-            }
+            _ => return Err(
+                "usage: placement_graph_bench [--small | --scalar-demo | --compare FILE FILE ...]"
+                    .into(),
+            ),
         };
         if !small && std::env::var("CLEARRA_RUNTIME_SUPERVISED").as_deref() != Ok("1") {
             return Err("large P7P4 must run under clearra-manage runtime run --producer benchmark --profile benchmark-search".into());
@@ -69,6 +71,11 @@ mod run {
         let mode = std::env::var("CLEARRA_PLACEMENT_DEPENDENCY").unwrap_or_else(|_| "0".into());
         if !matches!(mode.as_str(), "0" | "1") {
             return Err("CLEARRA_PLACEMENT_DEPENDENCY must be 0 or 1 at process start".into());
+        }
+        let structural_mode =
+            std::env::var("CLEARRA_STRUCTURAL_ORDER").unwrap_or_else(|_| "0".into());
+        if !matches!(structural_mode.as_str(), "0" | "1") {
+            return Err("CLEARRA_STRUCTURAL_ORDER must be 0 or 1 at process start".into());
         }
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
         let capacity = CpuCapacity::current();
@@ -88,13 +95,14 @@ mod run {
         }
         let compile_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
-            "placement_graph_bench starting: case={} mode={} auto_cpu_limit={}",
+            "placement_graph_bench starting: case={} mode={} structural_mode={} auto_cpu_limit={}",
             if small {
                 "one-I-preflight"
             } else {
                 "empty-4L-P7P4-jstris180"
             },
             mode,
+            structural_mode,
             capacity.hard_limit(),
         );
         let search_started = Instant::now();
@@ -102,6 +110,8 @@ mod run {
             WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
                 .map_err(|e| format!("exact core execution failed: {e:?}"))?;
         let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
+        let structural_totals =
+            clearra_core_executor::backend::structural_order_experiment_totals();
         let evidence_started = Instant::now();
         let errors = validate(&result, small, capacity.hard_limit());
         let fields: Vec<_> = result.summary_field_entries().collect();
@@ -142,6 +152,15 @@ mod run {
             "case": if small { "one-I-preflight" } else { "empty-4L-P7P4-jstris180" },
             "binary_sha256": binary_sha,
             "mode": mode,
+            "structural_mode": structural_mode,
+            "variant": variant(&mode, &structural_mode),
+            "structural_order": {
+                "scope": "process lifetime, one completed search; sampled after worker joins",
+                "skipped_build_graphs": structural_totals.skipped_build_graphs,
+                "language_residual_states": structural_totals.language_residual_states,
+                "exchangeable_operations_removed": structural_totals.exchangeable_operations_removed,
+                "cached_interval_guards": structural_totals.cached_interval_guards
+            },
             "other_process_configuration": {
                 "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),
                 "CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT": std::env::var("CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT").ok()
@@ -259,6 +278,104 @@ mod run {
         Ok(format!("{:x}", hash.finalize()))
     }
 
+    fn scalar_demo() -> Result<(), String> {
+        let pieces = PieceKind::STANDARD_TETROMINOES;
+        let cases: [(&str, &[PieceKind], &[u16], u128, u128, bool); 4] = [
+            (
+                "seven independent pieces",
+                &pieces,
+                &[0; 7],
+                5040,
+                5040,
+                false,
+            ),
+            (
+                "seven-piece chain",
+                &pieces,
+                &[0, 1, 2, 4, 8, 16, 32],
+                1,
+                5040,
+                false,
+            ),
+            (
+                "three-piece chain and four independent pieces",
+                &pieces,
+                &[0, 1, 2, 0, 0, 0, 0],
+                840,
+                5040,
+                false,
+            ),
+            (
+                "four-piece irreducible N order",
+                &pieces[..4],
+                &[0, 0, 3, 2],
+                5,
+                840,
+                true,
+            ),
+        ];
+        let mut rows = Vec::new();
+        let mut errors = Vec::new();
+        for (name, kinds, predecessors, expected_count, expected_total, requires_ideals) in cases {
+            let count = clearra_core_executor::backend::count_distinct_no_hold_one_bag_poset(
+                kinds,
+                predecessors,
+            )
+            .ok_or_else(|| format!("{name}: supported distinct-kind poset was rejected"))?;
+            if count.accepted_queue_count != expected_count
+                || count.total_queue_count != expected_total
+            {
+                errors.push(format!(
+                    "{name}: exact queue counts differ from the fixture oracle"
+                ));
+            }
+            if (count.ideal_states > 0) != requires_ideals {
+                errors.push(format!("{name}: unexpected decomposition/ideal-count path"));
+            }
+            rows.push(json!({
+                "case": name,
+                "pieces_in_operation_order": kinds.iter().map(|piece| piece.as_ascii().to_string()).collect::<Vec<_>>(),
+                "predecessor_masks": predecessors,
+                "mask_convention": "bit i names concrete operation i in pieces_in_operation_order",
+                "accepted_queue_count": count.accepted_queue_count,
+                "total_queue_count": count.total_queue_count,
+                "exact_probability": {
+                    "numerator": count.accepted_queue_count,
+                    "denominator": count.total_queue_count,
+                    "fraction": format!("{}/{}", count.accepted_queue_count, count.total_queue_count)
+                },
+                "probability_approximate": count.accepted_queue_count as f64 / count.total_queue_count as f64,
+                "decomposed_subproblems": count.decomposed_subproblems,
+                "ideal_states": count.ideal_states,
+                "oracle": { "accepted_queue_count": expected_count, "total_queue_count": expected_total }
+            }));
+        }
+        let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
+        println!("{}", serde_json::to_string_pretty(&json!({
+            "schema": "clearra.poset-scalar-demonstration.v1",
+            "binary_sha256": binary_sha,
+            "scope": "explicit fixed posets supplied directly; no field or placement certificate is claimed",
+            "assumptions": {
+                "hold": "disabled",
+                "piece_kinds": "distinct, at most seven",
+                "source": "fresh standard seven-piece bag",
+                "draw_count": "exactly k draws, where k is the operation count",
+                "denominator": "7Pk; every target piece must occur among those first k draws",
+                "four_piece_N_probability": "5/840 unconditional; 5/24 would condition on drawing precisely its four piece kinds"
+            },
+            "field_search_performed": false,
+            "placement_certificate_generated": false,
+            "materialized_queue_count": 0,
+            "cases": rows,
+            "valid": errors.is_empty(),
+            "validation_errors": errors
+        })).map_err(|e| e.to_string())?);
+        if !errors.is_empty() {
+            return Err("scalar demonstration failed its exact-count validation".into());
+        }
+        Ok(())
+    }
+
     fn compare(paths: &[String]) -> Result<(), String> {
         if paths.len() < 2 {
             return Err("--compare requires at least two result files".into());
@@ -312,12 +429,32 @@ mod run {
                 }
             }
         }
+        // Old reports contained only the dependency mode. Keep their 0/1
+        // grouping while distinguishing every structural arm in newer runs.
+        let legacy_modes = reports
+            .iter()
+            .all(|report| report.get("structural_mode").is_none());
         let mut times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         for report in &reports {
-            let mode = report["mode"].as_str().ok_or("mode missing")?.to_owned();
+            let dependency_mode = report["mode"].as_str().ok_or("mode missing")?;
+            let structural_mode = match report.get("structural_mode") {
+                None => "0",
+                Some(value) => value.as_str().ok_or("structural_mode must be a string")?,
+            };
+            if !matches!(dependency_mode, "0" | "1") || !matches!(structural_mode, "0" | "1") {
+                return Err("result mode flags must be 0 or 1".into());
+            }
+            let mode = if legacy_modes {
+                dependency_mode.to_owned()
+            } else {
+                variant(dependency_mode, structural_mode)
+            };
             let ms = report["timing_ms"]["search"]
                 .as_f64()
                 .ok_or("search time missing")?;
+            if !ms.is_finite() || ms <= 0.0 {
+                return Err("search time must be finite and positive".into());
+            }
             times.entry(mode).or_default().push(ms);
         }
         let means: BTreeMap<String, f64> = times
@@ -329,20 +466,56 @@ mod run {
                 )
             })
             .collect();
-        let change = means
-            .get("0")
-            .zip(means.get("1"))
-            .map(|(a, b)| (b / a - 1.0) * 100.0);
+        let dependency_baseline = if legacy_modes {
+            "0"
+        } else {
+            "dependency=0,structural=0"
+        };
+        let dependency_treatment = if legacy_modes {
+            "1"
+        } else {
+            "dependency=1,structural=0"
+        };
+        let structural_treatment = "dependency=1,structural=1";
+        let time_change = |baseline: &str, treatment: &str| {
+            means
+                .get(baseline)
+                .zip(means.get(treatment))
+                .map(|(a, b)| (b / a - 1.0) * 100.0)
+        };
+        let dependency_change = time_change(dependency_baseline, dependency_treatment);
+        let structural_change = time_change(dependency_treatment, structural_treatment);
+        let combined_change = time_change(dependency_baseline, structural_treatment);
+        let (primary_baseline, primary_treatment, change) = if structural_change.is_some() {
+            (
+                dependency_treatment,
+                structural_treatment,
+                structural_change,
+            )
+        } else {
+            (dependency_baseline, dependency_treatment, dependency_change)
+        };
         println!("{}", serde_json::to_string_pretty(&json!({
             "schema": "clearra.placement-graph-comparison.v1", "files": paths,
             "equivalent": differences.is_empty(), "differences": differences,
+            "mode_grouping": if legacy_modes { "dependency-only (legacy reports)" } else { "dependency-and-structural" },
             "search_times_ms_by_mode": times, "mean_search_ms_by_mode": means,
             "treatment_time_change_percent": change,
+            "primary_comparison": { "baseline": primary_baseline, "treatment": primary_treatment },
+            "time_change_percent": {
+                "dependency_vs_disabled": dependency_change,
+                "structural_vs_dependency": structural_change,
+                "combined_vs_disabled": combined_change
+            },
             "scope": "same binary/input/CPU, exact reported full-set hash and global coverage; no p95 claim"
         })).map_err(|e| e.to_string())?);
         if !differences.is_empty() {
             return Err("benchmark result parity failed".into());
         }
         Ok(())
+    }
+
+    fn variant(dependency_mode: &str, structural_mode: &str) -> String {
+        format!("dependency={dependency_mode},structural={structural_mode}")
     }
 }

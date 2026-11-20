@@ -180,6 +180,88 @@ impl PlacementDependencyCache {
         None
     }
 
+    /// Reuse one already observed positive certificate for every board B with
+    /// `minimum_board ⊆ B ⊆ maximum_board`, in one exact original-row frame.
+    /// Constancy on the certificate footprint at both endpoints proves
+    /// constancy throughout this occupancy interval. Endpoint reachability by
+    /// itself is insufficient because kick behavior is not occupancy-monotone.
+    ///
+    /// This is a read-only query: it never resets a scope, compiles a footprint,
+    /// changes admission state or starts a movement search. A miss is Unknown.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn proves_positive_interval(
+        &self,
+        catalog: &GeometryCatalog,
+        minimum_board: u64,
+        maximum_board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        rotation: RotationState,
+        x: i8,
+        y: i8,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> bool {
+        if !placement_dependency::enabled() || minimum_board & !maximum_board != 0 {
+            return false;
+        }
+        let Some(owner) = catalog.placement_conditions() else {
+            return false;
+        };
+        let Some(frame) = frame else {
+            return false;
+        };
+        if self.profile != Some(profile)
+            || !self
+                .catalog
+                .as_ref()
+                .is_some_and(|previous| previous.as_ptr() == Arc::as_ptr(owner))
+            || frame.target_height() != catalog.height()
+            || !frame.accepts_physical_board(catalog.width(), minimum_board)
+            || !frame.accepts_physical_board(catalog.width(), maximum_board)
+            || y < 0
+            || y >= catalog.height() as i8
+            || x < 0
+            || x >= catalog.width() as i8
+        {
+            return false;
+        }
+        let buckets = [
+            relation_bucket(piece, RelationScope::WholeFamily),
+            relation_bucket(piece, RelationScope::Target(rotation, x, y)),
+        ];
+        for (position, bucket) in buckets.into_iter().enumerate() {
+            if position == 1 && bucket == buckets[0] {
+                continue;
+            }
+            let mut index = self.bucket_heads[bucket];
+            while index != NO_RELATION {
+                let relation = &self.relations[usize::from(index)];
+                index = relation.next_in_bucket;
+                if relation.piece != piece
+                    || relation.frame != frame
+                    || !relation.scope.contains(rotation, x, y)
+                    || !relation.locks.contains(catalog.width(), rotation, x, y)
+                {
+                    continue;
+                }
+                let family_matches = minimum_board & relation.mask == relation.occupancy
+                    && maximum_board & relation.mask == relation.occupancy;
+                let target_matches = relation.target_condition.is_some_and(|target| {
+                    target.piece == piece
+                        && target.rotation == rotation
+                        && target.x == x
+                        && target.y == y
+                        && (minimum_board ^ relation.source_board) & target.mask == 0
+                        && (maximum_board ^ relation.source_board) & target.mask == 0
+                });
+                if family_matches || target_matches {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare_scope(
         &mut self,
@@ -571,6 +653,332 @@ mod tests {
         assert_eq!(metrics.reverse_relations, 2);
         assert_eq!(metrics.full_relations, 0);
         assert_eq!(metrics.cross_board_reuses, 2);
+    }
+
+    #[test]
+    fn positive_interval_proofs_cover_every_board_without_searching_or_changing_scope() {
+        with_mode(true, || {
+            let source = (0x1ff_u64 << 30) | (7_u64 << 7);
+            let variable = (3_u64 << 2) | (3_u64 << 12);
+            let geometry = catalog(6, source);
+            let foreign_owner = catalog(6, source);
+            let frame = LocalRelationRowFrame::new(6, 0).unwrap();
+            let profile = KickTableProfileId::SrsPlus;
+            let piece = PieceKind::O;
+            let template = ReachabilityTemplate::compile(10, 6, piece, profile);
+            let lock_mask = (3_u64 << 42) | (3_u64 << 52);
+            let row = geometry.skeleton_id(piece, lock_mask).unwrap();
+            let realization = geometry
+                .instantiations(row, 0)
+                .find(|pose| pose.rotation == RotationState::Zero)
+                .unwrap();
+            for reverse_observation in [false, true] {
+                let mut cache = PlacementDependencyCache::default();
+                let mut scratch = ReachabilityScratch::default();
+                if reverse_observation {
+                    let result = reverse_lock_reachable(
+                        &template,
+                        source,
+                        realization.rotation,
+                        realization.x,
+                        realization.lock_y,
+                        &mut scratch,
+                    );
+                    assert!(result.reachable);
+                    cache.observe_reverse(
+                        &geometry,
+                        &template,
+                        source,
+                        piece,
+                        profile,
+                        realization.rotation,
+                        realization.x,
+                        realization.lock_y,
+                        Some(frame),
+                        &scratch,
+                        &result,
+                    );
+                } else {
+                    let result = search_reachable_locks(&template, source, &mut scratch, None);
+                    cache.observe_full(
+                        &geometry,
+                        &template,
+                        source,
+                        piece,
+                        profile,
+                        realization.rotation,
+                        realization.x,
+                        realization.lock_y,
+                        Some(frame),
+                        &scratch,
+                        &result,
+                    );
+                }
+                assert_eq!(cache.relations.len(), 1);
+                assert_eq!(cache.relations[0].mask & variable, 0);
+                let retained = cache.retained_bytes();
+                let mut workspace = ReachabilityWorkspace::default();
+                workspace.placement_dependencies = cache;
+                // Admission precedes configure_kick_profile. The explicit
+                // argument must bind the proof instead of this stale value.
+                workspace.kick_profile_id = KickTableProfileId::NoKick;
+                let (_, query_metrics) = with_mode(true, || {
+                    assert!(workspace.proves_lock_for_interval(
+                        &geometry,
+                        source,
+                        source | variable,
+                        piece,
+                        profile,
+                        realization,
+                        Some(frame),
+                    ));
+                    let mut subset = variable;
+                    loop {
+                        let board = source | subset;
+                        let oracle =
+                            reference_spawn_lock_anchors(10, 6, board, piece, profile).unwrap();
+                        assert_ne!(oracle[0] & (1_u64 << 42), 0);
+                        assert!(workspace.proves_lock_for_interval(
+                            &geometry,
+                            source,
+                            board,
+                            piece,
+                            profile,
+                            realization,
+                            Some(frame),
+                        ));
+                        if subset == 0 {
+                            break;
+                        }
+                        subset = (subset - 1) & variable;
+                    }
+                    for (minimum, maximum, query_piece, query_profile, query_frame) in [
+                        (source | variable, source, piece, profile, Some(frame)),
+                        (source, source | (1_u64 << 60), piece, profile, Some(frame)),
+                        (source, source | lock_mask, piece, profile, Some(frame)),
+                        (source, source, PieceKind::I, profile, Some(frame)),
+                        (
+                            source,
+                            source,
+                            piece,
+                            KickTableProfileId::NoKick,
+                            Some(frame),
+                        ),
+                        (
+                            source,
+                            source,
+                            piece,
+                            profile,
+                            LocalRelationRowFrame::new(6, 1),
+                        ),
+                        (
+                            source,
+                            source,
+                            piece,
+                            profile,
+                            LocalRelationRowFrame::new(5, 0),
+                        ),
+                        (source, source, piece, profile, None),
+                    ] {
+                        assert!(!workspace.proves_lock_for_interval(
+                            &geometry,
+                            minimum,
+                            maximum,
+                            query_piece,
+                            query_profile,
+                            realization,
+                            query_frame,
+                        ));
+                    }
+                    assert!(!workspace.proves_lock_for_interval(
+                        &foreign_owner,
+                        source,
+                        source,
+                        piece,
+                        profile,
+                        realization,
+                        Some(frame),
+                    ));
+                    let absent = InstantiatedRealization {
+                        x: 0,
+                        lock_y: 0,
+                        ..realization
+                    };
+                    assert!(!workspace.proves_lock_for_interval(
+                        &geometry,
+                        source,
+                        source | variable,
+                        piece,
+                        profile,
+                        absent,
+                        Some(frame),
+                    ));
+                    if reverse_observation {
+                        let different_pose = InstantiatedRealization {
+                            rotation: RotationState::Right,
+                            ..realization
+                        };
+                        assert!(!workspace.proves_lock_for_interval(
+                            &geometry,
+                            source,
+                            source,
+                            piece,
+                            profile,
+                            different_pose,
+                            Some(frame),
+                        ));
+                    }
+                    with_mode(false, || {
+                        assert!(!workspace.proves_lock_for_interval(
+                            &geometry,
+                            source,
+                            source,
+                            piece,
+                            profile,
+                            realization,
+                            Some(frame),
+                        ));
+                    });
+                });
+                assert_eq!(
+                    query_metrics,
+                    placement_dependency::PlacementDependencyMetrics::default()
+                );
+                assert_eq!(workspace.generated_state_count(), 0);
+                assert_eq!(workspace.metrics().lock_queries, 0);
+                assert!(workspace.templates.iter().all(Option::is_none));
+                assert_eq!(workspace.placement_dependencies.retained_bytes(), retained);
+                assert_eq!(workspace.placement_dependencies.profile, Some(profile));
+                assert_eq!(workspace.placement_dependencies.relations.len(), 1);
+                assert!(workspace.proves_lock_for_interval(
+                    &geometry,
+                    source,
+                    source | variable,
+                    piece,
+                    profile,
+                    realization,
+                    Some(frame),
+                ));
+            }
+        });
+    }
+
+    #[test]
+    fn positive_interval_can_use_a_narrower_static_target_guard() {
+        with_mode(true, || {
+            // A four-cell shelf grounds this high O, while other columns let
+            // the exhaustive family reach the floor. Its full read mask thus
+            // sees bottom cells that cannot affect the chosen high target.
+            let source = 0xf_u64 << 32;
+            let geometry = catalog(6, source);
+            let profile = KickTableProfileId::NoKick;
+            let piece = PieceKind::O;
+            let template = ReachabilityTemplate::compile(10, 6, piece, profile);
+            let frame = LocalRelationRowFrame::new(6, 0).unwrap();
+            let mut cache = PlacementDependencyCache::default();
+            let mut scratch = ReachabilityScratch::default();
+            assert!(
+                cache
+                    .query(
+                        &geometry,
+                        &template,
+                        source,
+                        piece,
+                        profile,
+                        RotationState::Zero,
+                        2,
+                        4,
+                        Some(frame),
+                        &mut scratch,
+                    )
+                    .unwrap()
+                    .0
+            );
+            let relation = &cache.relations[0];
+            assert_ne!(relation.mask & 1, 0);
+            assert_eq!(relation.target_condition.unwrap().mask & 1, 0);
+            let (_, metrics) = with_mode(true, || {
+                assert!(cache.proves_positive_interval(
+                    &geometry,
+                    source,
+                    source | 1,
+                    piece,
+                    profile,
+                    RotationState::Zero,
+                    2,
+                    4,
+                    Some(frame),
+                ));
+                assert!(!cache.proves_positive_interval(
+                    &geometry,
+                    source,
+                    source | 1,
+                    piece,
+                    profile,
+                    RotationState::Right,
+                    2,
+                    4,
+                    Some(frame),
+                ));
+                for board in [source, source | 1] {
+                    let oracle =
+                        reference_spawn_lock_anchors(10, 6, board, piece, profile).unwrap();
+                    assert_ne!(oracle[0] & (1_u64 << 42), 0);
+                }
+            });
+            assert_eq!(
+                metrics,
+                placement_dependency::PlacementDependencyMetrics::default()
+            );
+        });
+    }
+
+    #[test]
+    fn a_negative_observation_never_proves_a_positive_interval() {
+        with_mode(true, || {
+            let source = (0x1ff_u64 << 30) | (7_u64 << 7);
+            let geometry = catalog(6, source);
+            let profile = KickTableProfileId::SrsPlus;
+            let piece = PieceKind::O;
+            let template = ReachabilityTemplate::compile(10, 6, piece, profile);
+            let frame = LocalRelationRowFrame::new(6, 0).unwrap();
+            let mut cache = PlacementDependencyCache::default();
+            let mut scratch = ReachabilityScratch::default();
+            let result =
+                reverse_lock_reachable(&template, source, RotationState::Zero, 0, 0, &mut scratch);
+            assert!(!result.reachable);
+            cache.observe_reverse(
+                &geometry,
+                &template,
+                source,
+                piece,
+                profile,
+                RotationState::Zero,
+                0,
+                0,
+                Some(frame),
+                &scratch,
+                &result,
+            );
+            assert_eq!(cache.relations.len(), 1);
+            let (_, metrics) = with_mode(true, || {
+                assert!(!cache.proves_positive_interval(
+                    &geometry,
+                    source,
+                    source,
+                    piece,
+                    profile,
+                    RotationState::Zero,
+                    0,
+                    0,
+                    Some(frame),
+                ));
+            });
+            assert_eq!(
+                metrics,
+                placement_dependency::PlacementDependencyMetrics::default()
+            );
+        });
     }
 
     #[test]

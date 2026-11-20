@@ -1,5 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
+#[cfg(any(test, feature = "local-search-ab"))]
+use clearra_core_domain::piece::piece_kind::PieceKind;
+
 use super::{buildup::BuildOrderGraph, mix_digest, WasmExactSearchError};
 
 const EMPTY_REFERENCE: u32 = u32::MAX;
@@ -79,6 +82,39 @@ pub(super) struct PieceOrderLanguageCache {
 pub(super) enum CoverageCacheLookup {
     Hit(Arc<[u64]>),
     Miss { admit_after_compute: bool },
+}
+
+/// A language constructed from a separately certified placement poset.
+/// These are residual class-count states, not physical/subset build states.
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PosetLanguageResult {
+    pub root: u32,
+    pub residual_states: usize,
+    pub operation_classes: usize,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+const MAX_POSET_OPERATIONS: usize = 15;
+
+#[cfg(any(test, feature = "local-search-ab"))]
+struct PosetOperationClass {
+    members: u16,
+    piece_code: u8,
+    count: u8,
+    predecessors: u16,
+    stride: u32,
+}
+
+/// Exact source-queue counts under the restricted contract of
+/// `count_distinct_no_hold_one_bag_poset`, without a queue decision diagram.
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DistinctNoHoldOneBagCount {
+    pub accepted_queue_count: u128,
+    pub total_queue_count: u128,
+    pub decomposed_subproblems: usize,
+    pub ideal_states: usize,
 }
 
 impl PieceOrderLanguageCache {
@@ -229,6 +265,89 @@ impl PieceOrderLanguageCache {
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_piece_language_root_not_live",
             ))
+    }
+
+    /// Construct the kind-word language of a supplied exact placement poset.
+    /// Geometry, grounding, line-clear and kick correctness must already be
+    /// certified by the caller; this method certifies only the poset language.
+    /// No BuildOrderGraph, physical board or reachability state is constructed.
+    ///
+    /// Same-kind operations are exchangeable only when their complete strict
+    /// predecessor AND successor sets are identical. Such incomparable twins
+    /// become one count coordinate. In particular, a free repeated multiset
+    /// uses a product of `(multiplicity + 1)` coordinates, not labeled subsets.
+    /// Other same-kind alternatives remain distinct edges with union semantics.
+    ///
+    /// `None` means unsupported/invalid input or a refused state budget, never
+    /// infeasibility. Budget admission finishes before mutating the language
+    /// arena. The returned root has the usual owner/recycling lifetime.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub fn compile_poset_language(
+        &mut self,
+        pieces: &[PieceKind],
+        predecessors: &[u16],
+        state_budget: usize,
+    ) -> Result<Option<PosetLanguageResult>, WasmExactSearchError> {
+        if pieces.len() != predecessors.len() || state_budget == 0 {
+            return Ok(None);
+        }
+        let Some(closure) = poset_predecessor_closure(predecessors) else {
+            return Ok(None);
+        };
+        let Some((classes, initial)) = poset_operation_classes(pieces, &closure) else {
+            return Ok(None);
+        };
+        let Some(states) = admitted_poset_residual_states(&classes, initial, state_budget) else {
+            return Ok(None);
+        };
+        let mut references = Vec::new();
+        references.try_reserve_exact(states.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_poset_language_storage_unavailable")
+        })?;
+        self.ensure_buckets();
+        for (index, &state) in states.iter().enumerate() {
+            self.edge_scratch.clear();
+            let (remaining, unfinished, depth) = poset_residual_counts(&classes, state);
+            for (class_index, class) in classes.iter().enumerate() {
+                if remaining[class_index] == 0 || class.predecessors & unfinished != 0 {
+                    continue;
+                }
+                let child_index = states.binary_search(&(state - class.stride)).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_poset_language_child_missing")
+                })?;
+                if child_index >= index {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_poset_language_not_topological",
+                    ));
+                }
+                self.edge_scratch.try_reserve(1).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_poset_language_storage_unavailable")
+                })?;
+                self.edge_scratch.push(
+                    CanonicalPieceEdge::new(references[child_index], class.piece_code).ok_or(
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_piece_language_child_index_overflow",
+                        ),
+                    )?,
+                );
+            }
+            self.edge_scratch.sort_unstable();
+            self.edge_scratch.dedup();
+            // In an acyclic poset every nonterminal residual has a minimal
+            // class. Check before interning so an invalid empty language can
+            // never be mistaken for an accepting terminal.
+            if state != 0 && self.edge_scratch.is_empty() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_poset_language_nonterminal_has_no_edges",
+                ));
+            }
+            references.push(self.intern_node(state == 0, depth)?);
+        }
+        Ok(Some(PosetLanguageResult {
+            root: *references.last().expect("admitted poset includes its root"),
+            residual_states: states.len(),
+            operation_classes: classes.len(),
+        }))
     }
 
     /// Solve Boolean completion and the exact piece suffix language in one
@@ -599,6 +718,321 @@ impl PieceOrderLanguageCache {
     }
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
+fn poset_predecessor_closure(predecessors: &[u16]) -> Option<Vec<u16>> {
+    let count = predecessors.len();
+    if count > MAX_POSET_OPERATIONS {
+        return None;
+    }
+    let all = (1_u16 << count) - 1;
+    if predecessors
+        .iter()
+        .enumerate()
+        .any(|(index, &mask)| mask & !all != 0 || mask & (1_u16 << index) != 0)
+    {
+        return None;
+    }
+    let mut closure = Vec::new();
+    closure.try_reserve_exact(count).ok()?;
+    closure.extend_from_slice(predecessors);
+    for via in 0..count {
+        let ancestors = closure[via];
+        for index in 0..count {
+            if closure[index] & (1_u16 << via) != 0 {
+                closure[index] |= ancestors;
+            }
+        }
+    }
+    if closure
+        .iter()
+        .enumerate()
+        .any(|(index, &mask)| mask & (1_u16 << index) != 0)
+    {
+        return None;
+    }
+    Some(closure)
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn poset_successors(predecessors: &[u16]) -> [u16; MAX_POSET_OPERATIONS] {
+    let mut successors = [0_u16; MAX_POSET_OPERATIONS];
+    for (index, &predecessor_mask) in predecessors.iter().enumerate() {
+        let mut remaining = predecessor_mask;
+        while remaining != 0 {
+            let before = remaining.trailing_zeros() as usize;
+            remaining &= remaining - 1;
+            successors[before] |= 1_u16 << index;
+        }
+    }
+    successors
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn poset_operation_classes(
+    pieces: &[PieceKind],
+    predecessors: &[u16],
+) -> Option<(Vec<PosetOperationClass>, u32)> {
+    let successors = poset_successors(predecessors);
+    let mut classes = Vec::<PosetOperationClass>::new();
+    classes.try_reserve_exact(pieces.len()).ok()?;
+    for (index, &piece) in pieces.iter().enumerate() {
+        if let Some(class) = classes.iter_mut().find(|class| {
+            let representative = class.members.trailing_zeros() as usize;
+            class.piece_code == piece_code(piece)
+                && predecessors[representative] == predecessors[index]
+                && successors[representative] == successors[index]
+        }) {
+            class.members |= 1_u16 << index;
+            class.count += 1;
+        } else {
+            classes.push(PosetOperationClass {
+                members: 1_u16 << index,
+                piece_code: piece_code(piece),
+                count: 1,
+                predecessors: 0,
+                stride: 0,
+            });
+        }
+    }
+    let mut stride = 1_u32;
+    for index in 0..classes.len() {
+        let representative = classes[index].members.trailing_zeros() as usize;
+        let mut class_predecessors = 0_u16;
+        for (before, class) in classes.iter().enumerate() {
+            let overlap = predecessors[representative] & class.members;
+            // Exact twins are all predecessors or none. Never quotient a
+            // partial relation between two count coordinates.
+            if overlap != 0 {
+                if overlap != class.members {
+                    return None;
+                }
+                class_predecessors |= 1_u16 << before;
+            }
+        }
+        classes[index].predecessors = class_predecessors;
+        classes[index].stride = stride;
+        stride = stride.checked_mul(u32::from(classes[index].count) + 1)?;
+    }
+    Some((classes, stride - 1))
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn poset_residual_counts(
+    classes: &[PosetOperationClass],
+    state: u32,
+) -> ([u8; MAX_POSET_OPERATIONS], u16, u8) {
+    let mut remaining = [0_u8; MAX_POSET_OPERATIONS];
+    let mut unfinished = 0_u16;
+    let mut depth = 0_u8;
+    for (index, class) in classes.iter().enumerate() {
+        let count = ((state / class.stride) % (u32::from(class.count) + 1)) as u8;
+        remaining[index] = count;
+        depth += count;
+        if count != 0 {
+            unfinished |= 1_u16 << index;
+        }
+    }
+    (remaining, unfinished, depth)
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn admitted_poset_residual_states(
+    classes: &[PosetOperationClass],
+    initial: u32,
+    budget: usize,
+) -> Option<Vec<u32>> {
+    if budget == 0 {
+        return None;
+    }
+    let mut states = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    states.try_reserve(1).ok()?;
+    seen.try_reserve(1).ok()?;
+    states.push(initial);
+    seen.insert(initial);
+    let mut cursor = 0;
+    while cursor < states.len() {
+        let state = states[cursor];
+        cursor += 1;
+        let (remaining, unfinished, _) = poset_residual_counts(classes, state);
+        for (index, class) in classes.iter().enumerate() {
+            if remaining[index] == 0 || class.predecessors & unfinished != 0 {
+                continue;
+            }
+            let child = state - class.stride;
+            if seen.contains(&child) {
+                continue;
+            }
+            if states.len() == budget {
+                return None;
+            }
+            states.try_reserve(1).ok()?;
+            seen.try_reserve(1).ok()?;
+            seen.insert(child);
+            states.push(child);
+        }
+    }
+    // A placement decrements one mixed-radix coordinate, so child keys are
+    // strictly smaller. This is a topological order without operation edges.
+    states.sort_unstable();
+    Some(states)
+}
+
+/// Count queues for a certified poset with at most seven distinct piece kinds,
+/// no hold, and exactly `k = pieces.len()` draws from a fresh standard bag.
+/// Every target piece must occupy the first k positions; unrelated pieces may
+/// not occur before completion. The unconditional denominator is 7Pk, not k!.
+/// A full seven-piece bag gives `linear_extensions / 7!`; ignored trailing
+/// draws give the equivalent `linear_extensions * (7-k)! / 7!`.
+///
+/// Disconnected components combine by a multinomial shuffle; ordinal-sum
+/// components multiply. Only irreducible suborders use memoized ideal states.
+/// No source permutations, language nodes, field states or movement searches
+/// are constructed. Duplicate kinds, malformed orders and cycles return None;
+/// labeled extension counts must never be divided by repeated-kind factorials.
+#[cfg(any(test, feature = "local-search-ab"))]
+pub fn count_distinct_no_hold_one_bag_poset(
+    pieces: &[PieceKind],
+    predecessors: &[u16],
+) -> Option<DistinctNoHoldOneBagCount> {
+    if pieces.len() != predecessors.len() || pieces.len() > 7 {
+        return None;
+    }
+    let mut kinds = 0_u8;
+    for &piece in pieces {
+        let bit = 1_u8 << (piece_code(piece) - 1);
+        if kinds & bit != 0 {
+            return None;
+        }
+        kinds |= bit;
+    }
+    let closure = poset_predecessor_closure(predecessors)?;
+    let successors = poset_successors(&closure);
+    let mut comparable = [0_u16; MAX_POSET_OPERATIONS];
+    for index in 0..pieces.len() {
+        comparable[index] = closure[index] | successors[index];
+    }
+    let mut counter = PosetExtensionCounter {
+        predecessors: &closure,
+        comparable,
+        memo: [None; 1 << 7],
+        decomposed_subproblems: 0,
+        ideal_states: 0,
+    };
+    let accepted_queue_count = counter.count((1_u16 << pieces.len()) - 1)?;
+    let total_queue_count = (0..pieces.len()).try_fold(1_u128, |product, index| {
+        product.checked_mul((7 - index) as u128)
+    })?;
+    Some(DistinctNoHoldOneBagCount {
+        accepted_queue_count,
+        total_queue_count,
+        decomposed_subproblems: counter.decomposed_subproblems,
+        ideal_states: counter.ideal_states,
+    })
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+struct PosetExtensionCounter<'a> {
+    predecessors: &'a [u16],
+    comparable: [u16; MAX_POSET_OPERATIONS],
+    memo: [Option<u128>; 1 << 7],
+    decomposed_subproblems: usize,
+    ideal_states: usize,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+impl PosetExtensionCounter<'_> {
+    fn count(&mut self, active: u16) -> Option<u128> {
+        if let Some(value) = self.memo[usize::from(active)] {
+            return Some(value);
+        }
+        let size = active.count_ones() as usize;
+        if size <= 1 {
+            self.memo[usize::from(active)] = Some(1);
+            return Some(1);
+        }
+        let (parallel, parallel_count) = self.components(active, false);
+        let result = if parallel_count > 1 {
+            self.decomposed_subproblems += 1;
+            let mut product = 1_u128;
+            let mut preceding_size = 0;
+            for &component in &parallel[..parallel_count] {
+                let component_size = component.count_ones() as usize;
+                product = product.checked_mul(self.count(component)?)?;
+                product = product.checked_mul(small_binomial(
+                    preceding_size + component_size,
+                    component_size,
+                )?)?;
+                preceding_size += component_size;
+            }
+            product
+        } else {
+            let (series, series_count) = self.components(active, true);
+            if series_count > 1 {
+                self.decomposed_subproblems += 1;
+                let mut product = 1_u128;
+                for &component in &series[..series_count] {
+                    product = product.checked_mul(self.count(component)?)?;
+                }
+                product
+            } else {
+                self.ideal_states += 1;
+                let mut sum = 0_u128;
+                let mut choices = active;
+                while choices != 0 {
+                    let index = choices.trailing_zeros() as usize;
+                    let bit = 1_u16 << index;
+                    choices &= choices - 1;
+                    if self.predecessors[index] & active == 0 {
+                        sum = sum.checked_add(self.count(active & !bit)?)?;
+                    }
+                }
+                sum
+            }
+        };
+        self.memo[usize::from(active)] = Some(result);
+        Some(result)
+    }
+
+    fn components(
+        &self,
+        active: u16,
+        incomparability: bool,
+    ) -> ([u16; MAX_POSET_OPERATIONS], usize) {
+        let mut components = [0_u16; MAX_POSET_OPERATIONS];
+        let mut count = 0;
+        let mut remaining = active;
+        while remaining != 0 {
+            let mut frontier = 1_u16 << remaining.trailing_zeros();
+            let mut component = 0;
+            while frontier != 0 {
+                let index = frontier.trailing_zeros() as usize;
+                let bit = 1_u16 << index;
+                frontier &= frontier - 1;
+                component |= bit;
+                let neighbors = if incomparability {
+                    !self.comparable[index] & !bit
+                } else {
+                    self.comparable[index]
+                };
+                frontier |= neighbors & active & !component;
+            }
+            components[count] = component;
+            count += 1;
+            remaining &= !component;
+        }
+        (components, count)
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn small_binomial(n: usize, k: usize) -> Option<u128> {
+    let k = k.min(n.checked_sub(k)?);
+    (1..=k).try_fold(1_u128, |value, index| {
+        Some(value.checked_mul((n - k + index) as u128)? / index as u128)
+    })
+}
+
 fn compact_piece_range_ends(edges: &[CanonicalPieceEdge]) -> [u8; 7] {
     debug_assert!(edges.len() <= COMPACT_PIECE_RANGE_EDGE_LIMIT);
     let mut range_ends = [0_u8; 7];
@@ -644,7 +1078,9 @@ mod tests {
 
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 
-    use super::{CanonicalPieceEdge, PieceOrderLanguageCache};
+    use super::{
+        count_distinct_no_hold_one_bag_poset, CanonicalPieceEdge, PieceOrderLanguageCache,
+    };
     use crate::backend::wasm_cpu::buildup::{BuildOrderGraph, BuildOrderNodeSpec};
     use crate::backend::wasm_cpu::queue_observation_policy::{
         ObservationPieceLanguage, RootedPieceLanguageUnion,
@@ -709,6 +1145,208 @@ mod tests {
         let mut output = BTreeSet::new();
         visit(cache, root, &mut Vec::new(), &mut output);
         output
+    }
+
+    fn explicit_poset_words(pieces: &[PieceKind], predecessors: &[u16]) -> BTreeSet<Vec<u8>> {
+        fn visit(
+            pieces: &[PieceKind],
+            predecessors: &[u16],
+            placed: u16,
+            word: &mut Vec<u8>,
+            output: &mut BTreeSet<Vec<u8>>,
+        ) {
+            if word.len() == pieces.len() {
+                output.insert(word.clone());
+                return;
+            }
+            for (index, &piece) in pieces.iter().enumerate() {
+                let bit = 1_u16 << index;
+                if placed & bit == 0 && predecessors[index] & !placed == 0 {
+                    word.push(super::piece_code(piece));
+                    visit(pieces, predecessors, placed | bit, word, output);
+                    word.pop();
+                }
+            }
+        }
+        let mut output = BTreeSet::new();
+        visit(pieces, predecessors, 0, &mut Vec::new(), &mut output);
+        output
+    }
+
+    #[test]
+    fn poset_language_matches_every_four_operation_forward_dag_and_repeated_kind_words() {
+        let pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+        for edge_bits in 0..(1_u16 << pairs.len()) {
+            let mut predecessors = [0_u16; 4];
+            for (edge_index, &(before, after)) in pairs.iter().enumerate() {
+                if edge_bits & (1_u16 << edge_index) != 0 {
+                    predecessors[after] |= 1_u16 << before;
+                }
+            }
+            for pieces in [
+                [PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S],
+                [PieceKind::I, PieceKind::O, PieceKind::I, PieceKind::O],
+            ] {
+                let expected = explicit_poset_words(&pieces, &predecessors);
+                let mut cache = PieceOrderLanguageCache::default();
+                let compiled = cache
+                    .compile_poset_language(&pieces, &predecessors, 16)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    words(&cache, compiled.root),
+                    expected,
+                    "edge mask {edge_bits:#x}, pieces {pieces:?}"
+                );
+                assert!(compiled.residual_states <= 16);
+                if pieces[0] != pieces[2] {
+                    let scalar = count_distinct_no_hold_one_bag_poset(&pieces, &predecessors)
+                        .expect("distinct kind arithmetic contract");
+                    assert_eq!(scalar.accepted_queue_count, expected.len() as u128);
+                    assert_eq!(scalar.total_queue_count, 7 * 6 * 5 * 4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn poset_language_free_multiset_and_twins_use_count_coordinates() {
+        let mut cache = PieceOrderLanguageCache::default();
+        let repeated = cache
+            .compile_poset_language(&[PieceKind::I; 15], &[0; 15], 16)
+            .unwrap()
+            .unwrap();
+        assert_eq!(repeated.operation_classes, 1);
+        assert_eq!(repeated.residual_states, 16);
+        assert_eq!(words(&cache, repeated.root), BTreeSet::from([vec![1; 15]]));
+
+        let free = cache
+            .compile_poset_language(
+                &[
+                    PieceKind::I,
+                    PieceKind::I,
+                    PieceKind::O,
+                    PieceKind::O,
+                    PieceKind::T,
+                ],
+                &[0; 5],
+                18,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(free.operation_classes, 3);
+        assert_eq!(free.residual_states, 3 * 3 * 2);
+        assert_eq!(words(&cache, free.root).len(), 30);
+
+        let twins = cache
+            .compile_poset_language(
+                &[PieceKind::I, PieceKind::I, PieceKind::O, PieceKind::T],
+                &[0, 0, 0b0011, 0b0100],
+                5,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(twins.operation_classes, 3);
+        assert_eq!(twins.residual_states, 5);
+        assert_eq!(
+            words(&cache, twins.root),
+            BTreeSet::from([vec![1, 1, 2, 3]])
+        );
+    }
+
+    #[test]
+    fn poset_language_does_not_merge_same_kind_operations_with_different_successors() {
+        // I0 < O, while I1 is free. Three labeled extensions project to two
+        // words: IIO has two witnesses, IOI has one. Dividing 3 by 2! is wrong.
+        let pieces = [PieceKind::I, PieceKind::I, PieceKind::O];
+        let predecessors = [0, 0, 1];
+        let mut cache = PieceOrderLanguageCache::default();
+        let compiled = cache
+            .compile_poset_language(&pieces, &predecessors, 8)
+            .unwrap()
+            .unwrap();
+        assert_eq!(compiled.operation_classes, 3);
+        assert_eq!(compiled.residual_states, 6);
+        assert_eq!(
+            words(&cache, compiled.root),
+            BTreeSet::from([vec![1, 1, 2], vec![1, 2, 1]])
+        );
+        assert!(count_distinct_no_hold_one_bag_poset(&pieces, &predecessors).is_none());
+    }
+
+    #[test]
+    fn poset_language_budget_and_invalid_input_leave_the_arena_unchanged() {
+        let mut cache = PieceOrderLanguageCache::default();
+        let terminal = cache.compile_poset_language(&[], &[], 1).unwrap().unwrap();
+        let before = (cache.node_count(), cache.edge_count());
+        assert!(cache
+            .compile_poset_language(
+                &[PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S],
+                &[0; 4],
+                15,
+            )
+            .unwrap()
+            .is_none());
+        for (pieces, predecessors, budget) in [
+            (vec![PieceKind::I], vec![0], 0),
+            (vec![PieceKind::I], vec![], 16),
+            (vec![PieceKind::I], vec![1], 16),
+            (vec![PieceKind::I], vec![2], 16),
+            (vec![PieceKind::I, PieceKind::O], vec![2, 1], 16),
+            (vec![PieceKind::I; 16], vec![0; 16], 17),
+        ] {
+            assert!(cache
+                .compile_poset_language(&pieces, &predecessors, budget)
+                .unwrap()
+                .is_none());
+        }
+        assert_eq!((cache.node_count(), cache.edge_count()), before);
+        assert_eq!(words(&cache, terminal.root), BTreeSet::from([Vec::new()]));
+        let valid = cache
+            .compile_poset_language(
+                &[PieceKind::I, PieceKind::O, PieceKind::T, PieceKind::S],
+                &[0; 4],
+                16,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(words(&cache, valid.root).len(), 24);
+    }
+
+    #[test]
+    fn poset_scalar_count_uses_series_parallel_arithmetic_and_fresh_bag_denominator() {
+        let pieces = PieceKind::STANDARD_TETROMINOES;
+        let free = count_distinct_no_hold_one_bag_poset(&pieces, &[0; 7]).unwrap();
+        assert_eq!(
+            (free.accepted_queue_count, free.total_queue_count),
+            (5040, 5040)
+        );
+        assert_eq!(free.ideal_states, 0);
+        assert!(free.decomposed_subproblems > 0);
+
+        let chain =
+            count_distinct_no_hold_one_bag_poset(&pieces, &[0, 1, 2, 4, 8, 16, 32]).unwrap();
+        assert_eq!(
+            (chain.accepted_queue_count, chain.total_queue_count),
+            (1, 5040)
+        );
+        assert_eq!(chain.ideal_states, 0);
+
+        // Parallel chains of lengths two and three, plus two free pieces.
+        let parallel =
+            count_distinct_no_hold_one_bag_poset(&pieces, &[0, 1, 0, 4, 8, 0, 0]).unwrap();
+        assert_eq!(parallel.accepted_queue_count, 5040 / (2 * 6));
+        assert_eq!(parallel.ideal_states, 0);
+
+        let prefix = count_distinct_no_hold_one_bag_poset(&pieces[..3], &[0, 0, 1]).unwrap();
+        assert_eq!(prefix.accepted_queue_count, 3);
+        assert_eq!(prefix.total_queue_count, 7 * 6 * 5);
+
+        // The four-element N order is not a series or parallel composition.
+        let prime = count_distinct_no_hold_one_bag_poset(&pieces[..4], &[0, 0, 3, 2]).unwrap();
+        assert_eq!(prime.accepted_queue_count, 5);
+        assert!(prime.ideal_states > 0);
+        assert!(count_distinct_no_hold_one_bag_poset(&pieces[..2], &[2, 1]).is_none());
     }
 
     #[test]

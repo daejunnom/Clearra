@@ -1483,6 +1483,25 @@ fn verify_candidate_for_completion_mode(
     if RealizationFeasibilityWorkspace::dependency_relaxation_is_infeasible(catalog, candidate) {
         return Ok(infeasible_candidate_result(0));
     }
+    #[cfg(any(test, feature = "local-search-ab"))]
+    if super::structural_order::enabled()
+        && problem.count_policy() == PcCountPolicy::CountUnique
+        && matches!(completion, BuildCompletion::ClearToEmpty)
+        && !retain_trace
+        && !finesse_requested
+        && !finesse_spin_coverage_requested
+        && !witness_mode.enabled()
+        && !problem.objective().execution_constraints().requested()
+        && !problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+    {
+        if let Some(result) =
+            verify_certified_poset(problem, catalog, candidate, workspace, control)?
+        {
+            return Ok(result);
+        }
+    }
     workspace.reachability.configure(candidate.row_ids().len());
     workspace.reachability.configure_kick_profile(
         kick_profile_id,
@@ -1524,6 +1543,90 @@ fn verify_candidate_for_completion_mode(
     );
     workspace.recycle_projection(projection);
     result
+}
+
+/// Exact, proof-gated language production before allocating a candidate's
+/// physical-board subset projection. Failed proofs retain the ordinary exact
+/// graph path. Only a complete poset language may reach the supply union.
+#[cfg(any(test, feature = "local-search-ab"))]
+fn verify_certified_poset(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    workspace: &mut BuildUpWorkspace,
+    control: &ExecutionControl,
+) -> Result<Option<CandidateBuildResult>, WasmExactSearchError> {
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    let Some(universe) = problem.piece_source().materialized_universe() else {
+        return Ok(None);
+    };
+    if !StandardBagCoverage::supports(universe, problem.initial_hold()) {
+        return Ok(None);
+    }
+    let Some(poset) = super::placement_poset::compile_with_guard(
+        catalog,
+        candidate,
+        |piece, realization, deleted, minimum, maximum| {
+            workspace.reachability.proves_lock_for_interval(
+                catalog,
+                minimum,
+                maximum,
+                piece,
+                problem.kick_profile().profile_id(),
+                realization,
+                LocalRelationRowFrame::new(catalog.height(), deleted),
+            )
+        },
+    ) else {
+        return Ok(None);
+    };
+    // A bounded count-vector traversal can still be exponential for a general
+    // poset. Budget exhaustion means Unknown, never a rejected candidate.
+    let Some(language) = workspace.piece_order_languages.compile_poset_language(
+        poset.pieces(),
+        poset.predecessors(),
+        4096,
+    )?
+    else {
+        return Ok(None);
+    };
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    let Some(coverage) = workspace.cover_standard_bag_language(problem, language.root, control)?
+    else {
+        return Ok(None);
+    };
+    super::structural_order::record_bypass(
+        language.residual_states,
+        poset
+            .pieces()
+            .len()
+            .saturating_sub(language.operation_classes),
+        poset.observed_guard_count(),
+    );
+    Ok(Some(CandidateBuildResult {
+        buildable: coverage.covers_any_pattern,
+        covered_patterns: None,
+        symbolic_coverage_root: coverage.covers_any_pattern.then_some(coverage.root),
+        observation_language_root: None,
+        symbolic_covered_pattern_count: coverage.covered_pattern_count,
+        witness_pattern_id: coverage.witness_pattern_id,
+        build_variant_count: 0,
+        count_complete: true,
+        representative_path: Vec::new(),
+        graph_nodes: 0,
+        coverage_product_words: 0,
+        coverage_product_states: coverage.product_states,
+        coverage_product_edge_checks: coverage.edge_checks,
+        feasibility_states: 0,
+        feasibility_rejected: false,
+        reachability_states: 0,
+        retained_bytes: 0,
+        finesse_language: None,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]

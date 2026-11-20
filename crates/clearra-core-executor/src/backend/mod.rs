@@ -35,6 +35,10 @@ pub(crate) use wasm_cpu::exact_local_relation;
 #[cfg(any(test, feature = "qualification-reference"))]
 pub(crate) use wasm_cpu::exact_solver_local_relation_spawn_entries;
 pub(crate) use wasm_cpu::exact_spawn_lock_anchors;
+#[cfg(feature = "local-search-ab")]
+pub use wasm_cpu::{count_distinct_no_hold_one_bag_poset, DistinctNoHoldOneBagCount};
+#[cfg(feature = "local-search-ab")]
+pub use wasm_cpu::{structural_order_experiment_totals, StructuralOrderMetrics};
 pub use wasm_cpu::{
     WasmFullHeightPcProducer, WasmFullHeightPcResultMerger, WasmFullHeightPcVerifier,
     WasmFullHeightTilingProducer, WasmFullHeightTilingResultMerger, WasmFullHeightTilingWorker,

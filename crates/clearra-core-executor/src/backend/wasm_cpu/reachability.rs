@@ -613,6 +613,35 @@ impl ReachabilityWorkspace {
         let _ = self.template(catalog, piece);
     }
 
+    /// Prove an entire fixed-row occupancy interval from an existing positive
+    /// observation. The explicit profile is intentional: structural admission
+    /// runs before this workspace is configured for the next candidate. This
+    /// method neither configures a template nor performs a primitive search.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn proves_lock_for_interval(
+        &self,
+        catalog: &GeometryCatalog,
+        minimum_board: u64,
+        maximum_board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> bool {
+        self.placement_dependencies.proves_positive_interval(
+            catalog,
+            minimum_board,
+            maximum_board,
+            piece,
+            profile,
+            realization.rotation,
+            realization.x,
+            realization.lock_y,
+            frame,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn scoring_lock_evidence(
         &mut self,

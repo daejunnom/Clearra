@@ -46,12 +46,16 @@ mod parallel_search;
 mod parallel_worker;
 mod pc4_graph_materializer;
 mod piece_order_language;
+#[cfg(feature = "local-search-ab")]
+pub use piece_order_language::{count_distinct_no_hold_one_bag_poset, DistinctNoHoldOneBagCount};
 #[cfg(any(test, feature = "local-search-ab"))]
 mod placement_conditions;
 #[cfg(any(test, feature = "local-search-ab"))]
 mod placement_dependency;
 #[cfg(test)]
 mod placement_dependency_integration_tests;
+#[cfg(any(test, feature = "local-search-ab"))]
+mod placement_poset;
 mod queue_observation_policy;
 mod reachability;
 mod realization_feasibility;
@@ -69,6 +73,12 @@ mod setup_representative;
 mod setup_suffix_coverage;
 mod standard_bag_coverage;
 mod standard_bag_product_memo;
+#[cfg(test)]
+mod structural_graph_probability_tests;
+#[cfg(any(test, feature = "local-search-ab"))]
+mod structural_order;
+#[cfg(feature = "local-search-ab")]
+pub use structural_order::{structural_order_experiment_totals, StructuralOrderMetrics};
 mod terminal_hold_projection;
 mod tiling_parallel;
 #[cfg(feature = "webgpu-search")]
