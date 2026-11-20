@@ -1,7 +1,16 @@
 #![cfg(feature = "native-c-core")]
 
+use clearra_build_coverage::{
+    coverage::{
+        BuildCoverageExecution, BuildCoverageExecutionError, ConcreteAssignmentCoverageRow,
+        ConcreteCoverageCompleteness, ConcreteCoverageScope,
+    },
+    domain::slot_domain::SlotDomain,
+    query::{build_coverage_limits::BuildCoverageLimits, build_coverage_query::BuildCoverageQuery},
+    template::{BuildSlot, BuildSlotId, BuildTemplate},
+};
 use clearra_core_domain::{
-    board::board_size::BoardSize,
+    board::{board_size::BoardSize, cell::CellCoord},
     execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     piece::piece_kind::PieceKind,
     pruning::PruningEvidencePolicy,
@@ -14,7 +23,17 @@ use clearra_core_executor::WasmCpuSearchBackend;
 use clearra_core_ffi::{
     problem::{C_PIECE_I, C_PIECE_J, C_PIECE_L, C_PIECE_O, C_PIECE_S, C_PIECE_T, C_PIECE_Z},
     CBuildUpProblemTemplate, CNativeBuildUpEnumerationLimits, CPackingProblemBuilder, CoreCNative,
-    NativeBuildUpWorkspace, NativeCandidateReducer, PackingCandidateBatch, C_BUILDUP_STATUS_OK,
+    NativeBuildUpWorkspace, NativeCandidateReducer, PackingCandidateBatch,
+    C_BUILDUP_STATUS_LOGICAL_REJECT_MAX, C_BUILDUP_STATUS_LOGICAL_REJECT_MIN, C_BUILDUP_STATUS_OK,
+};
+use clearra_coverage::{
+    pattern::{
+        pattern_bitset::PatternBitSet,
+        weighted_pattern_set::{covered_weight_in_pattern_order, WeightedPatternSet},
+    },
+    universe::{
+        pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
+    },
 };
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
@@ -274,4 +293,374 @@ fn native_and_rust_join_two_legacy_four_line_candidates_on_original_ordinal() {
         confirmed[index] = true;
     }
     assert_eq!(confirmed, [true, true]);
+}
+
+const PREFIX_COUNT: usize = 31;
+const PREFIX_ASSIGNMENT_COUNT: usize = 4;
+const MAX_PHYSICAL_PREFIX_ORDINALS: usize = 3;
+
+fn prefix_assignment_pieces() -> [[PieceKind; 10]; PREFIX_ASSIGNMENT_COUNT] {
+    [
+        PIECES,
+        std::array::from_fn(|i| if i == 0 { PieceKind::O } else { PIECES[i] }),
+        std::array::from_fn(|i| if i == 1 { PieceKind::I } else { PIECES[i] }),
+        std::array::from_fn(|i| match i {
+            0 => PieceKind::O,
+            1 => PieceKind::I,
+            _ => PIECES[i],
+        }),
+    ]
+}
+
+fn prefix_assignment_identity(pieces: [PieceKind; 10]) -> StandardBoard64TilingIdentity {
+    StandardBoard64TilingIdentity::from_placements(
+        0,
+        pieces
+            .into_iter()
+            .zip(WITNESSES[0])
+            .map(|(piece, mask)| PiecePlacementMask::new(piece, mask)),
+    )
+    .expect("exact slot ownership in original rows")
+}
+
+fn prefix_matrix_query(board: BoardSize) -> BuildCoverageQuery {
+    let (slots, domains) = PIECES
+        .into_iter()
+        .zip(WITNESSES[0])
+        .enumerate()
+        .map(|(index, (piece, mask))| {
+            let id = BuildSlotId::new(u32::try_from(index).expect("small slot ordinal"));
+            let cells = (0..40_u16)
+                .filter(|&cell| mask & (1_u64 << cell) != 0)
+                .map(|cell| CellCoord::new_unchecked(cell % 10, cell / 10))
+                .collect();
+            let domain = if index < 2 {
+                vec![PieceKind::I, PieceKind::O]
+            } else {
+                vec![piece]
+            };
+            (
+                BuildSlot::new(id, cells).with_allowed_pieces(domain.clone()),
+                SlotDomain::new(id, domain),
+            )
+        })
+        .unzip();
+    BuildCoverageQuery::new(
+        BuildTemplate::new("legacy-bounded-prefix-matrix", slots).with_board_size(board),
+        domains,
+        Vec::new(),
+        PREFIX_COUNT,
+        BuildCoverageLimits::new(1024, 4096),
+    )
+}
+
+#[test]
+#[ignore = "measure this bounded native/Rust prefix matrix separately before routine qualification"]
+fn native_and_rust_agree_on_complete_bounded_legacy_prefix_assignment_matrix() {
+    let cancellation = ExecutionCancellationToken::new();
+    let control = ExecutionControl::new(cancellation.clone());
+    let board = BoardSize::new(10, 4).expect("standard four-line board");
+    let query = prefix_matrix_query(board);
+    let legacy = ProblemCompiler::compile_build(&BuildQuery::coverage_bridge(
+        BuildTemplateBridge::new(query.template().id(), board, PIECES.len()),
+        query.pattern_count(),
+        BuildProblemLimits::new(
+            query.limits().max_assignments(),
+            query.limits().max_patterns(),
+        ),
+    ))
+    .expect("actual Legacy Build bridge and observed ordinal source");
+    let source = legacy.piece_source();
+    let universe = source
+        .materialized_universe()
+        .expect("materialized Legacy source");
+    assert!(
+        !source.complete(),
+        "this probe never qualifies the full source"
+    );
+    assert!(!legacy.supply().hold_enabled());
+    assert!(universe.pattern_count() >= PREFIX_COUNT);
+    let queues = (0..PREFIX_COUNT)
+        .map(|ordinal| universe.sequence_at(ordinal))
+        .collect::<Vec<_>>();
+    let first = queues
+        .iter()
+        .position(|queue| queue.as_ref() == &PIECES)
+        .expect("the original native witness queue is in scope");
+    // Leave the first seven fixed. In the second bag O and I may be placed
+    // in either order, with the same original-row masks, before T locks last.
+    let mut swapped_tail = PIECES;
+    swapped_tail.swap(7, 8);
+    let second = queues
+        .iter()
+        .position(|queue| queue.as_ref() == &swapped_tail)
+        .expect("find the independently replayed order in the real requested prefix");
+    assert_ne!(first, second);
+
+    let assignment_pieces = prefix_assignment_pieces();
+    let identities = assignment_pieces.map(prefix_assignment_identity);
+    let multisets = assignment_pieces.map(PieceMultisetKey::from_pieces);
+    assert_eq!(
+        multisets[0], multisets[3],
+        "the swapped assignment cannot be ruled out by supply",
+    );
+    let compatible = queues
+        .iter()
+        .filter(|queue| multisets.contains(&PieceMultisetKey::from_pieces(queue.iter().copied())))
+        .count();
+    assert!(
+        (2..=MAX_PHYSICAL_PREFIX_ORDINALS).contains(&compatible),
+        "unexpected compatible fixture count: {compatible}"
+    );
+    let compact =
+        CPackingProblemBuilder::from_search_problem_with_piece_multiset(&legacy, multisets[0])
+            .expect("compact Geometry descriptor for the source multiset");
+    let catalog = CoreCNative::compile_geometry_catalog_with_cancellation(&compact, &cancellation)
+        .expect("Native exact ILC catalog");
+    let view = catalog.view();
+    let skeleton_row = |piece, mask| {
+        view.skeleton_cell_masks()
+            .iter()
+            .zip(view.skeleton_piece_kinds())
+            .position(|(&cells, &kind)| cells == mask && kind == u32::from(c_piece(piece)))
+    };
+    let skeleton_rows = PIECES
+        .into_iter()
+        .zip(WITNESSES[0])
+        .map(|(piece, mask)| {
+            u32::try_from(skeleton_row(piece, mask).expect("native exact positive placement"))
+                .expect("catalog row fits u32")
+        })
+        .collect::<Vec<_>>();
+    for wrong_pieces in assignment_pieces.iter().skip(1) {
+        // I/O cannot represent one another's four-cell slot. An absent
+        // skeleton row is a geometry proof; never reinterpret a failed or
+        // resource-limited BuildUp call as a coverage zero.
+        assert!(wrong_pieces
+            .iter()
+            .copied()
+            .zip(WITNESSES[0])
+            .any(|(piece, mask)| skeleton_row(piece, mask).is_none()));
+    }
+
+    let template =
+        CBuildUpProblemTemplate::compile(&legacy).expect("Native observed source scratch");
+    let mut scratch = template.new_scratch();
+    template.attach_geometry_catalog(&mut scratch, &catalog);
+    template
+        .configure_piece_source_pattern(&mut scratch, u32::try_from(first).unwrap())
+        .expect("admit the known candidate using its actual original ordinal");
+    let mut workspace = NativeBuildUpWorkspace::new();
+    let mut sink = NativeCandidateReducer::new(&compact).expect("one-candidate native reducer");
+    let admitted = catalog
+        .stream_buildable_rows(
+            &skeleton_rows,
+            &compact,
+            &mut scratch,
+            &mut workspace,
+            &cancellation,
+            PruningEvidencePolicy::BestEffort,
+            &mut sink,
+        )
+        .expect("one concrete native candidate");
+    assert_eq!(admitted.status, 0, "{admitted:?}");
+    assert_ne!(admitted.report.complete, 0);
+    assert_eq!(admitted.report.buildable_count, 1);
+    let candidates = sink.into_candidates();
+    assert_eq!(candidates.len(), 1);
+    let candidate = candidates.iter().next().expect("verified native candidate");
+    assert_eq!(
+        candidate.standard_board64_tiling_identity(0).unwrap(),
+        identities[0],
+    );
+
+    let mut native_bits = [0_u64; PREFIX_ASSIGNMENT_COUNT];
+    let mut rust_bits = [0_u64; PREFIX_ASSIGNMENT_COUNT];
+    for (ordinal, queue) in queues.into_iter().enumerate() {
+        let multiset = PieceMultisetKey::from_pieces(queue.iter().copied());
+        if !multisets.contains(&multiset) {
+            // No hold, exactly ten locks: all four cells are exact
+            // negative for this ordinal by piece conservation.
+            continue;
+        }
+        let index = u32::try_from(ordinal).expect("small original ordinal");
+        if multiset == multisets[0] {
+            let mut scratch = template.new_scratch();
+            template.attach_geometry_catalog(&mut scratch, &catalog);
+            template
+                .configure_packing_candidate(&mut scratch, &candidate, index, index)
+                .expect("bind Native concrete candidate and original ordinal");
+            let native = workspace
+                .enumerate_buildup_variants_with_cancellation(
+                    &scratch,
+                    &CNativeBuildUpEnumerationLimits {
+                        max_variants: 1,
+                        ..Default::default()
+                    },
+                    &cancellation,
+                )
+                .expect("Native exact fixed-ordinal result");
+            assert_ne!(
+                native.buffer.count_complete, 0,
+                "ordinal {ordinal}: {}",
+                native.status,
+            );
+            if native.status == C_BUILDUP_STATUS_OK {
+                assert_eq!(native.buffer.count, 1);
+                assert!(native.buffer.total_variant_count > 0);
+                let witness = &native.buffer.variants[0];
+                assert_eq!(witness.candidate_id, candidate.candidate_id);
+                assert_eq!(witness.coverage_pattern_id, index);
+                assert_eq!(witness.placed_count, 10);
+                assert_eq!(witness.cleared_lines, 4);
+                assert_eq!(witness.final_board, 0);
+                native_bits[0] |= 1_u64 << ordinal;
+            } else {
+                assert!(
+                    (C_BUILDUP_STATUS_LOGICAL_REJECT_MIN..=C_BUILDUP_STATUS_LOGICAL_REJECT_MAX)
+                        .contains(&native.status),
+                    "non-logical Native failure at ordinal {ordinal}: {}",
+                    native.status,
+                );
+                assert_eq!(native.buffer.total_variant_count, 0);
+                assert_eq!(native.buffer.count, 0);
+            }
+        }
+
+        let filters = identities
+            .into_iter()
+            .zip(multisets)
+            .filter(|(_, needed)| *needed == multiset)
+            .map(|(identity, _)| {
+                StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(identity)
+            });
+        let rust_problem = ProblemCompiler::compile_scenario_pc(
+            &PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, 0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(queue.into_owned())),
+                PieceWindow::new(PIECES.len()),
+            )
+            .with_rule(legacy.rule_profile_value())
+            .with_allow_hold(false)
+            .with_exact_pieces(Some(PIECES.len()))
+            .with_count_policy(PcCountPolicy::CountAll)
+            .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+            .with_allowed_colored_solution_identities(filters)
+            .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1)),
+        )
+        .expect("independent Rust physical execution for the same original ordinal");
+        let rust = WasmCpuSearchBackend::execute_with_control(&rust_problem, &control)
+            .expect("the fixed-ordinal Rust producer must finish");
+        assert_eq!(rust.usize_field("coverage_pattern_count"), Some(1));
+        for field in [
+            "count_complete",
+            "probability_complete",
+            "solution_probability_complete",
+        ] {
+            assert_eq!(
+                rust.bool_field(field),
+                Some(true),
+                "ordinal {ordinal}: {field}"
+            );
+        }
+        assert_eq!(rust.bool_field("resource_truncated"), Some(false));
+        for (assignment, identity) in identities.iter().enumerate() {
+            let mut matching = rust
+                .solution_coverages()
+                .iter()
+                .filter(|row| row.identity() == *identity);
+            let row = matching.next();
+            assert!(
+                matching.next().is_none(),
+                "duplicate Rust evidence for one exact identity",
+            );
+            assert_eq!(
+                row.is_some(),
+                rust.normalized_solution_identities().contains(identity),
+            );
+            if let Some(row) = row {
+                assert_eq!(
+                    multisets[assignment], multiset,
+                    "Rust cannot add foreign supply"
+                );
+                assert_eq!(row.covered_patterns().pattern_count(), 1);
+                assert_eq!(row.covered_patterns().word_at(0), 1);
+                rust_bits[assignment] |= 1_u64 << ordinal;
+            }
+        }
+    }
+    assert_eq!(
+        native_bits, rust_bits,
+        "compare every assignment×original-ordinal cell",
+    );
+    assert_ne!(native_bits[0] & (1_u64 << first), 0);
+    assert_ne!(native_bits[0] & (1_u64 << second), 0);
+    assert_eq!(&native_bits[1..], &[0; PREFIX_ASSIGNMENT_COUNT - 1]);
+    assert!(native_bits[0].count_ones() < PREFIX_COUNT as u32);
+
+    // This artificially names only the fixture's original prefix. Its
+    // denominator must not become the globally truncated Cover source.
+    let scope = ConcreteCoverageScope::new_uniform(
+        board,
+        source.id().get(),
+        PatternUniverseId::new(0x4c45_4741_4359_001f),
+        PatternWeightModelId::new(0x554e_4946_4f52_001f),
+        0x4e41_5449_5645_001f,
+    );
+    let evidence = identities
+        .into_iter()
+        .zip(rust_bits)
+        .rev()
+        .map(|(identity, word)| {
+            ConcreteAssignmentCoverageRow::new(
+                identity,
+                scope,
+                PatternBitSet::from_words(PREFIX_COUNT, vec![word]).unwrap(),
+                ConcreteCoverageCompleteness::Complete,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        BuildCoverageExecution::from_verified_concrete_assignment_rows(
+            &query,
+            scope,
+            evidence[1..].to_vec(),
+        ),
+        Err(BuildCoverageExecutionError::MissingConcreteCoverageRow { .. })
+    ));
+    let reduction =
+        BuildCoverageExecution::from_verified_concrete_assignment_rows(&query, scope, evidence)
+            .expect("complete shuffled identity-keyed rows, including explicit zeros");
+    assert!(reduction.exact_cover_complete());
+    assert_eq!(reduction.assignments().len(), PREFIX_ASSIGNMENT_COUNT);
+    assert_eq!(reduction.matrix().matrix().pattern_count(), PREFIX_COUNT);
+    for (assignment, matrix_row) in reduction
+        .assignments()
+        .iter()
+        .zip(reduction.matrix().matrix().rows())
+    {
+        let exact = StandardBoard64TilingIdentity::from_placements(
+            0,
+            assignment.assigned_slots().iter().map(|slot| {
+                PiecePlacementMask::new(slot.piece(), WITNESSES[0][slot.slot_id().get() as usize])
+            }),
+        )
+        .expect("reducer identity still uses each concrete placement");
+        let index = identities
+            .iter()
+            .position(|identity| *identity == exact)
+            .unwrap();
+        assert_eq!(matrix_row.coverage_bits().word_at(0), native_bits[index]);
+    }
+    let expected_union = PatternBitSet::from_words(PREFIX_COUNT, vec![native_bits[0]]).unwrap();
+    let prefix_weights = WeightedPatternSet::uniform(PREFIX_COUNT).expect("uniform Legacy prefix");
+    assert_eq!(reduction.union().covered_patterns(), &expected_union);
+    assert_eq!(
+        reduction.result().probability(),
+        covered_weight_in_pattern_order(PREFIX_COUNT, &expected_union, |pattern| {
+            prefix_weights.weight(pattern)
+        })
+        .expect("every covered ordinal has a prefix weight"),
+        "exact uniform requested-prefix weights in Legacy ordinal order",
+    );
 }
