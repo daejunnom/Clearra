@@ -42,12 +42,13 @@ pub(super) fn verify_compact_five_lock_replay(
     representative: &[CorePathStep],
 ) -> Option<Pc2ReplayProof> {
     let profile = verified_profile.profile();
+    let profile_id = verified_profile.profile_id();
     if catalog.width() != WIDTH
         || catalog.height() != HEIGHT
         || catalog.initial_board() != 0
         || catalog.required_cells() != FULL_BOARD
         || representative.len() != LOCK_COUNT
-        || builtin_kick_profile(profile.profile_id())? != profile
+        || builtin_kick_profile(profile_id)? != profile
     {
         return None;
     }
@@ -127,7 +128,7 @@ pub(super) fn verify_compact_five_lock_replay(
     (physical_board == 0 && deleted_rows == ALL_ORIGINAL_ROWS && logical_placed == FULL_BOARD)
         .then_some(Pc2ReplayProof {
             catalog_identity: catalog.identity_digest(),
-            profile: profile.profile_id(),
+            profile: profile_id,
             rows_in_lock_order,
             newly_cleared_original_rows,
         })
