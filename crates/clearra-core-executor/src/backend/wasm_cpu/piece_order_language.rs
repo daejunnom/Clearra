@@ -536,7 +536,7 @@ impl PieceOrderLanguageCache {
     /// bit only for an already verified operation. Unvisited entries in the
     /// dense subset lookup may still contain data from an earlier traversal.
     #[cfg(test)]
-    fn compile_traversed_subset_masks(
+    pub(super) fn compile_traversed_subset_masks(
         &mut self,
         pieces: &[PieceKind],
         subsets: &[u16],

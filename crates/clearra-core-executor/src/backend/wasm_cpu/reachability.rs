@@ -511,6 +511,8 @@ pub(super) struct ReachabilityMetrics {
 /// stage. Templates are immutable after first use; mutable scratch and cache
 /// never escape the query session.
 pub(super) struct ReachabilityWorkspace {
+    #[cfg(not(target_family = "wasm"))]
+    local_import: Option<super::compact_kick_authority::CompactKickAuthority>,
     #[cfg(any(test, feature = "local-search-ab"))]
     placement_dependencies: dependency_cache::PlacementDependencyCache,
     #[cfg(any(test, feature = "local-search-ab"))]
@@ -585,6 +587,8 @@ fn conditioned_context_frame_capacity(height: u8) -> Option<u128> {
 impl Default for ReachabilityWorkspace {
     fn default() -> Self {
         Self {
+            #[cfg(not(target_family = "wasm"))]
+            local_import: None,
             #[cfg(any(test, feature = "local-search-ab"))]
             placement_dependencies: dependency_cache::PlacementDependencyCache::default(),
             #[cfg(any(test, feature = "local-search-ab"))]
@@ -608,12 +612,45 @@ impl Default for ReachabilityWorkspace {
 }
 
 impl ReachabilityWorkspace {
+    #[cfg(not(target_family = "wasm"))]
+    pub(super) fn bind_local_import(
+        &mut self,
+        authority: super::compact_kick_authority::CompactKickAuthority,
+        catalog: &GeometryCatalog,
+    ) -> Result<(), &'static str> {
+        if self.local_import.is_some()
+            || self.shared_templates.is_some()
+            || self.template_dimensions.is_some()
+            || self.conditioned_profile.is_some()
+            || authority.dimensions() != (catalog.width(), catalog.height())
+        {
+            return Err("wasm_local_ordered_kick_owner_mismatch");
+        }
+        self.kick_profile_id = authority.profile_id();
+        self.local_import = Some(authority);
+        Ok(())
+    }
+
+    pub(super) fn has_local_import(&self) -> bool {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.local_import.is_some()
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            false
+        }
+    }
+
     #[cfg(any(feature = "parallel", test))]
     pub fn set_shared_templates(
         &mut self,
         templates: Arc<SharedReachabilityTemplates>,
     ) -> Result<(), &'static str> {
-        if self.shared_templates.is_some() || self.template_dimensions.is_some() {
+        if self.shared_templates.is_some()
+            || self.template_dimensions.is_some()
+            || self.has_local_import()
+        {
             return Err("wasm_shared_reachability_request_already_initialized");
         }
         self.shared_templates = Some(templates);
@@ -1108,7 +1145,9 @@ impl ReachabilityWorkspace {
                 } => (exhaustive, admit, key_present),
             };
         #[cfg(any(test, feature = "local-search-ab"))]
-        let static_query = if static_influence::enabled() {
+        let reuse_builtin_proofs = !self.has_local_import();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let static_query = if reuse_builtin_proofs && static_influence::enabled() {
             if piece == PieceKind::O {
                 if let Some(result) =
                     monotone_reachability::MonotoneOCapability::for_profile(self.kick_profile_id)
@@ -1188,16 +1227,21 @@ impl ReachabilityWorkspace {
             None
         };
         #[cfg(any(test, feature = "local-search-ab"))]
-        if let Some(reachable) = self.placement_dependencies.lookup(
-            catalog,
-            board,
-            piece,
-            self.kick_profile_id,
-            rotation,
-            x,
-            y,
-            frame,
-        ) {
+        if let Some(reachable) = reuse_builtin_proofs
+            .then(|| {
+                self.placement_dependencies.lookup(
+                    catalog,
+                    board,
+                    piece,
+                    self.kick_profile_id,
+                    rotation,
+                    x,
+                    y,
+                    frame,
+                )
+            })
+            .flatten()
+        {
             if let Some(query) = static_query {
                 self.static_influence_cache.insert(query, reachable);
             }
@@ -1464,19 +1508,21 @@ impl ReachabilityWorkspace {
             if exhaustive {
                 let result = search_reachable_locks(template, board, &mut self.scratch, None);
                 #[cfg(any(test, feature = "local-search-ab"))]
-                self.placement_dependencies.observe_full(
-                    catalog,
-                    template,
-                    board,
-                    piece,
-                    self.kick_profile_id,
-                    rotation,
-                    x,
-                    y,
-                    frame,
-                    &self.scratch,
-                    &result,
-                );
+                if reuse_builtin_proofs {
+                    self.placement_dependencies.observe_full(
+                        catalog,
+                        template,
+                        board,
+                        piece,
+                        self.kick_profile_id,
+                        rotation,
+                        x,
+                        y,
+                        frame,
+                        &self.scratch,
+                        &result,
+                    );
+                }
                 (
                     result.locks.contains(catalog.width(), rotation, x, y),
                     result.locks,
@@ -1488,19 +1534,21 @@ impl ReachabilityWorkspace {
                 let result =
                     reverse_lock_reachable(template, board, rotation, x, y, &mut self.scratch);
                 #[cfg(any(test, feature = "local-search-ab"))]
-                self.placement_dependencies.observe_reverse(
-                    catalog,
-                    template,
-                    board,
-                    piece,
-                    self.kick_profile_id,
-                    rotation,
-                    x,
-                    y,
-                    frame,
-                    &self.scratch,
-                    &result,
-                );
+                if reuse_builtin_proofs {
+                    self.placement_dependencies.observe_reverse(
+                        catalog,
+                        template,
+                        board,
+                        piece,
+                        self.kick_profile_id,
+                        rotation,
+                        x,
+                        y,
+                        frame,
+                        &self.scratch,
+                        &result,
+                    );
+                }
                 (
                     result.reachable,
                     if result.reachable {
@@ -1581,6 +1629,12 @@ impl ReachabilityWorkspace {
         profile_id: KickTableProfileId,
         conditioned_enabled: bool,
     ) {
+        if self.has_local_import() {
+            // A nominal profile ID cannot authorize a built-in data pack
+            // for a submitted ordered variant. Never replace the owner.
+            self.metrics.conditioned_requested = conditioned_enabled;
+            return;
+        }
         let policy_enabled = crate::search_prune_policy::conditioned_reachability_enabled();
         // Pin one immutable pack for the complete workspace/session. A host
         // update becomes visible only to a new workspace, never mid-result.
@@ -1632,8 +1686,16 @@ impl ReachabilityWorkspace {
             + self.static_influence_cache.retained_bytes();
         #[cfg(not(any(test, feature = "local-search-ab")))]
         let prototype_bytes = 0;
+        #[cfg(not(target_family = "wasm"))]
+        let import_bytes = self.local_import.as_ref().map_or(
+            0,
+            super::compact_kick_authority::CompactKickAuthority::retained_bytes,
+        );
+        #[cfg(target_family = "wasm")]
+        let import_bytes = 0;
         self.cache.retained_bytes()
             + prototype_bytes
+            + import_bytes
             + self
                 .templates
                 .iter()
@@ -1671,6 +1733,13 @@ impl ReachabilityWorkspace {
         let index = piece_index(piece);
         let profile_id = self.kick_profile_id;
         self.templates[index].get_or_insert_with(|| {
+            #[cfg(not(target_family = "wasm"))]
+            if let Some(authority) = &self.local_import {
+                // Only the immutable catalog used to bind this workspace
+                // reaches the local ordered-profile path.
+                assert_eq!(authority.dimensions(), dimensions);
+                return Arc::new(ReachabilityTemplate::compile_authority(authority, piece));
+            }
             if let Some(shared) = &self.shared_templates {
                 if shared.matches(catalog.width(), catalog.height(), profile_id) {
                     return shared.template(piece);
@@ -1912,7 +1981,7 @@ impl ReachabilityTemplate {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(not(target_family = "wasm"))]
     pub(super) fn compile_authority(
         authority: &super::compact_kick_authority::CompactKickAuthority,
         piece: PieceKind,

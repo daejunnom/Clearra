@@ -668,7 +668,27 @@ impl WasmCpuSearchBackend {
         if worker_count > 1 && !gpu_selected && Self::distributed_execution_is_worthwhile(problem) {
             return terminal(Err(WasmCpuSearchError::WorkerPoolUnavailable), None);
         }
-        let mut session = match WasmCpuSearchSession::new(problem) {
+        #[cfg(not(target_family = "wasm"))]
+        let session = {
+            let complete_direct_execution = worker_count == 1 && control.partition().count() == 1;
+            #[cfg(any(test, feature = "local-search-ab"))]
+            let complete_direct_execution = complete_direct_execution && capture.is_none();
+            WasmExactSearchSession::try_new_local_import(problem, complete_direct_execution)
+                .map_err(map_error)
+                .and_then(|local| {
+                    local.map_or_else(
+                        || WasmCpuSearchSession::new(problem),
+                        |session| {
+                            Ok(WasmCpuSearchSession {
+                                inner: WasmSearchSessionInner::Cpu(session),
+                            })
+                        },
+                    )
+                })
+        };
+        #[cfg(target_family = "wasm")]
+        let session = WasmCpuSearchSession::new(problem);
+        let mut session = match session {
             Ok(session) => session,
             Err(error) => return terminal(Err(error), None),
         };

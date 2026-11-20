@@ -13,7 +13,10 @@ use clearra_pc_graph::request::{
 use clearra_problem::{ProblemCompiler, SearchProblem};
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
-use super::placement_dependency::{with_mode, PlacementDependencyMetrics};
+use super::{
+    buildup::with_operation_mask_comparison,
+    placement_dependency::{with_mode, PlacementDependencyMetrics},
+};
 use crate::{CoreExecutionResult, WasmCpuSearchBackend};
 
 static GRAPH_PRODUCT_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -216,6 +219,85 @@ fn fused_graph_skips_dead_languages_without_changing_live_solution_queues() {
         metrics.skipped_dead_language_graphs,
         metrics.skipped_dead_language_nodes,
     );
+}
+
+#[test]
+fn operation_mask_physical_traversal_preserves_840_queue_coverage_and_graph_replay() {
+    let _guard = product_guard();
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(4, 0xfc3f_0fc3_f0),
+        PcQueueInput::standard_7_bag(),
+        PieceWindow::new(4),
+    )
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(4))
+    .with_supply_window_size(SupplyWindowSize::new(4))
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+    .with_retained_trace_limit(1)
+    .with_execution_policy(execution_policy());
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("mixed candidate fixture");
+    let ((baseline, _), graph) = with_operation_mask_comparison(false, || run(&problem, false));
+    let ((treatment, _), masks) = with_operation_mask_comparison(true, || run(&problem, false));
+
+    assert_same_solution_queues(&baseline, &treatment);
+    assert_eq!(treatment.usize_field("coverage_pattern_count"), Some(840));
+    assert_eq!(treatment.usize_field("covered_pattern_count"), Some(173));
+    assert_eq!(treatment.solution_coverages().len(), 135);
+    assert!(treatment
+        .solution_coverages()
+        .iter()
+        .all(|row| { row.covered_patterns().pattern_count() == 840 }));
+    assert_eq!(graph.mask_passes, 0);
+    assert_eq!(graph.max_mask_capacity, 0);
+    assert!(graph.max_node_capacity > 0 && graph.max_edge_capacity > 0);
+    assert!(masks.mask_live_passes > 0 && masks.mask_dead_passes > 0);
+    assert_eq!(
+        masks.mask_passes,
+        masks.mask_live_passes + masks.mask_dead_passes
+    );
+    assert_eq!(masks.graph_passes + masks.mask_passes, graph.graph_passes);
+    assert_eq!(masks.visited_subsets, graph.visited_subsets);
+    assert_eq!(masks.selected_edges, graph.selected_edges);
+    assert!(masks.max_mask_capacity >= 1 << 4);
+    assert_eq!(masks.max_mask_owner_node_capacity, 0);
+    assert_eq!(masks.max_mask_owner_edge_capacity, 0);
+
+    // A representative still enters verify_candidate with retain_trace and
+    // replays a concrete graph path; no mask-generated pose escapes storage.
+    assert!(masks.representative_graph_paths > 0);
+    assert_eq!(
+        masks.representative_graph_paths,
+        graph.representative_graph_paths
+    );
+    assert_eq!(treatment.path_steps(), baseline.path_steps());
+    assert_eq!(treatment.path_steps().len(), 4);
+    assert_eq!(
+        treatment
+            .path_steps()
+            .iter()
+            .map(|step| usize::from(step.cleared_lines()))
+            .sum::<usize>(),
+        4
+    );
+    let pattern_id = treatment
+        .usize_field("representative_pattern_id")
+        .expect("representative has an explicit source queue");
+    assert_eq!(
+        Some(pattern_id),
+        baseline.usize_field("representative_pattern_id")
+    );
+    let queue = problem
+        .piece_source()
+        .materialized_universe()
+        .expect("fixture source universe")
+        .sequence_at(pattern_id);
+    assert!(treatment
+        .path_steps()
+        .iter()
+        .map(|step| step.piece())
+        .eq(queue.iter().copied()));
+    eprintln!("operation-mask raw slots: graph={graph:?}, treatment={masks:?}");
 }
 
 #[test]

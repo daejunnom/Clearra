@@ -8,7 +8,7 @@ mod build_probability_distributed;
 mod buildup;
 mod catalog;
 mod compact_exact_u64_map;
-#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 mod compact_kick_authority;
 #[cfg(test)]
 mod compact_pc2_completion_ledger;

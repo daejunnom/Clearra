@@ -9,7 +9,7 @@ use clearra_rules::{
     profile::rule_profile::RuleProfileId,
 };
 
-use super::piece_index;
+use super::{kick_profiles::builtin_kick_profile, piece_index};
 
 const SLOTS_PER_PIECE: usize = 12;
 const MAX_TRANSITIONS: usize = 7 * SLOTS_PER_PIECE;
@@ -27,7 +27,7 @@ struct CompileBudget {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum CompactKickAdmission {
+pub(super) enum CompactKickAdmission {
     Unsupported,
     IndexOrCoordinateOverflow,
     BudgetExceeded,
@@ -65,6 +65,68 @@ pub(super) struct CompactPieceKicks<'a> {
 }
 
 impl CompactKickAuthority {
+    pub(super) fn admit_srs90_order_variant(
+        width: u8,
+        height: u8,
+        verified: &VerifiedKickTableProfile,
+    ) -> Result<Self, CompactKickAdmission> {
+        let canonical = builtin_kick_profile(KickTableProfileId::Srs90)
+            .expect("the standard SRS90 table is available");
+        let supplied = verified.profile();
+        // Keep the existing compact free-sky scope: this tranche only
+        // permits ordering changes to the standard quarter-turn candidates.
+        // A new candidate membership or rotation topology is unqualified.
+        if supplied.id() != canonical.id()
+            || supplied.source_rule() != canonical.source_rule()
+            || supplied.transition_count() != canonical.transition_count()
+            || !supplied.entries().iter().all(|entry| {
+                let Some(expected) = canonical.sequence_for(entry.transition()) else {
+                    return false;
+                };
+                let actual = entry.sequence().offsets();
+                let expected = expected.offsets();
+                actual.len() == expected.len()
+                    && expected.iter().all(|kick| {
+                        actual.iter().filter(|item| *item == kick).count()
+                            == expected.iter().filter(|item| *item == kick).count()
+                    })
+            })
+        {
+            return Err(CompactKickAdmission::Unsupported);
+        }
+        Self::admit(
+            width,
+            height,
+            RuleProfileId::Srs,
+            verified,
+            CompileBudget {
+                poses: 10_000,
+                rotation_targets: 100_000,
+                index_entries: 50_000,
+            },
+        )
+    }
+
+    pub(super) fn dimensions(&self) -> (u8, u8) {
+        (self.0.width, self.0.height)
+    }
+
+    pub(super) fn profile_id(&self) -> KickTableProfileId {
+        self.0.profile
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        core::mem::size_of::<CompactKickTable>()
+            + 2 * core::mem::size_of::<usize>() // Arc control block.
+            + self
+                .0
+                .pieces
+                .iter()
+                .flat_map(|piece| piece.ordered.iter().flatten())
+                .map(|entries| core::mem::size_of_val(entries.as_ref()))
+                .sum::<usize>()
+    }
+
     fn admit(
         width: u8,
         height: u8,
@@ -249,11 +311,8 @@ mod tests {
 
     use crate::reachability_reference::reference_spawn_locks_for_ordered_profile;
 
-    use super::super::{
-        kick_profiles::builtin_kick_profile,
-        reachability::{
-            search_reachable_locks, ReachabilityScratch, ReachabilityTemplate, ReachableLocks,
-        },
+    use super::super::reachability::{
+        search_reachable_locks, ReachabilityScratch, ReachabilityTemplate, ReachableLocks,
     };
     use super::*;
 

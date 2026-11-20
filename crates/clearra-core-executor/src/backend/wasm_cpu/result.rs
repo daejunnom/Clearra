@@ -1002,6 +1002,83 @@ impl WasmExactSearchSession {
         Self::new_with_external_geometry(problem, false)
     }
 
+    /// Native direct ordinary Scenario PC only. The general, cooperative,
+    /// distributed and typed constructors retain their canonical admission.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn try_new_local_import(
+        problem: &SearchProblem,
+        complete_direct_execution: bool,
+    ) -> Result<Option<Self>, WasmExactSearchError> {
+        use super::compact_kick_authority::{CompactKickAdmission, CompactKickAuthority};
+        use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+        use clearra_pc_graph::request::{PcCountPolicy, WorkerPolicy};
+        use clearra_problem::{goal::SearchGoal, SearchProblemKind, SearchProblemPreset};
+
+        let rule = problem.rule_profile();
+        let Some(verified) = rule.verified_kick_profile() else {
+            return Ok(None);
+        };
+        let Err(unconnected) = super::ensure_connected_kick_profile(problem) else {
+            return Ok(None);
+        };
+        let backend = problem.backend_policy();
+        if !complete_direct_execution
+            || problem.preset() != SearchProblemPreset::ScenarioPc
+            || problem.problem_kind() != SearchProblemKind::ScenarioPc
+            || !matches!(problem.search_goal(), SearchGoal::ClearToEmpty)
+            || problem.initial_board().width() != 10
+            || !(1..=6).contains(&problem.visible_height())
+            || !(1..=6).contains(&problem.compact_pc_geometry_height())
+            || backend.requested_backend() != RequestedSearchBackend::Cpu
+            || backend.worker_policy() != WorkerPolicy::Fixed(1)
+            || backend.tablebase_requested()
+            || backend.precompute_build_dependencies()
+            || problem.count_policy() != PcCountPolicy::CountUnique
+            || problem.objective() != ObjectivePolicy::unique()
+            || problem.pc_chance_evidence_policy() != PcChanceEvidencePolicy::Disabled
+            || problem.build_replay_evidence_requested()
+            || problem.replay_trace_policy().retained_trace_limit() != 0
+            || problem.output_policy() != SearchOutputPolicy::Trace
+            || problem.solution_probability_policy().requested()
+            || problem
+                .queue_observation_policy()
+                .requires_observation_policy()
+            || problem.allowed_colored_solution_identities().is_some()
+            || problem.supply().hold_enabled()
+            || problem.supply().hold_piece().is_some()
+            || problem.supply().projects_unplaced_lookahead()
+            || problem.piece_source().fixed_sequence().is_none()
+            || problem.exact_pieces() != Some(problem.supply().source_sequence_length())
+            || problem.continuation_policy().min_remaining_queue() != 0
+            || verified.profile().source_rule() != rule.rule().id()
+        {
+            return Err(unconnected);
+        }
+        let height = u8::try_from(problem.compact_pc_geometry_height())
+            .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_local_ordered_kick_height"))?;
+        let authority = CompactKickAuthority::admit_srs90_order_variant(10, height, verified)
+            .map_err(|error| match error {
+                CompactKickAdmission::Unsupported => unconnected,
+                CompactKickAdmission::IndexOrCoordinateOverflow => {
+                    WasmExactSearchError::InvalidProblem("wasm_local_ordered_kick_bounds_exceeded")
+                }
+                CompactKickAdmission::BudgetExceeded => {
+                    WasmExactSearchError::InvalidProblem("wasm_local_ordered_kick_compile_budget")
+                }
+            })?;
+        let execution_admission = preflight_and_acquire_execution_resources(problem)?;
+        let mut session = Self::new_with_preacquired_execution_admission(
+            Arc::new(problem.clone()),
+            false,
+            SearchProblemRetention::SessionOwnedCloneUnaccounted,
+            execution_admission,
+        )?;
+        session
+            .buildup_workspace
+            .bind_local_import(authority, &session.catalog)?;
+        Ok(Some(session))
+    }
+
     pub(crate) fn new_shared(problem: Arc<SearchProblem>) -> Result<Self, WasmExactSearchError> {
         Self::new_with_problem(
             problem,
@@ -3179,6 +3256,9 @@ impl WasmExactSearchSession {
             })?;
             self.ensure_session_memory_bound(future)?;
         }
+        let retain_representative_trace = !self.buildup_workspace.has_local_import()
+            && self.problem.output_policy().retains_representative_trace()
+            && self.representative_path.is_empty();
         let result = match verify_candidate(
             &self.problem,
             &self.catalog,
@@ -3187,8 +3267,7 @@ impl WasmExactSearchSession {
             &mut self.buildup_workspace,
             &mut self.coverage_evaluator,
             witness_mode,
-            self.problem.output_policy().retains_representative_trace()
-                && self.representative_path.is_empty(),
+            retain_representative_trace,
             profile_scale,
             control,
         ) {

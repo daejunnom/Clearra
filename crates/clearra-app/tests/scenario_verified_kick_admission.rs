@@ -130,3 +130,115 @@ fn imported_srs_plus_requires_the_same_ordered_transition_table_in_rust() {
         assert!(rejected.render_model().is_none());
     }
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn local_compact_rust_executes_the_submitted_srs90_order_only_in_its_authorized_scope() {
+    use clearra_core_domain::piece::rotation::RotationState::{Right, Zero};
+    use clearra_rules::kicks::{KickOffset, KickTransition};
+
+    const START: u64 = 0x000f_83c7;
+    const SOLUTION: &str =
+        "ctk1|initial=00000000000f83c7|placements=I:0000000000003c00,T:0000000000004038";
+
+    let canonical = SrsKicks::profile();
+    let mut entries = canonical.entries().to_vec();
+    let transition = KickTransition::new(PieceKind::T, Right, Zero);
+    let selected = entries
+        .iter_mut()
+        .find(|entry| entry.transition() == transition)
+        .unwrap();
+    let mut offsets = selected.sequence().offsets().to_vec();
+    assert_eq!(offsets[2], KickOffset::new(1, -1));
+    offsets[..=2].rotate_right(1);
+    *selected = KickTableEntry::new(transition, KickOffsetSequence::new(offsets));
+    let changed = KickTableProfile::new(canonical.id(), canonical.source_rule(), entries.clone());
+    let selected = entries
+        .iter_mut()
+        .find(|entry| entry.transition() == transition)
+        .unwrap();
+    // Still a structurally verified table, but not an allowed order variant.
+    *selected = KickTableEntry::new(transition, KickOffsetSequence::no_kick());
+    let different_membership =
+        KickTableProfile::new(canonical.id(), canonical.source_rule(), entries);
+
+    let request = |profile: &KickTableProfile, workers, retain| {
+        let json = KickImport::to_json(profile).unwrap();
+        let verified =
+            VerifiedKickTableProfile::try_new(KickImport::from_json(&json).unwrap()).unwrap();
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, START),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::T, PieceKind::I])),
+            PieceWindow::new(2),
+        )
+        .with_exact_pieces(Some(2))
+        .with_allow_hold(false)
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_retained_trace_limit(retain)
+        .with_verified_kick_table_profile(verified)
+        .with_execution_policy(
+            PcExecutionPolicy::default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_workers(workers)
+                .with_allow_backend_fallback(false),
+        );
+        AppRequest::new(AppCommand::Scenario(
+            ScenarioAppCommand::new(query)
+                .with_render_contract(ScenarioAppRenderContract::new(false, Vec::new())),
+        ))
+    };
+    let rust = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for (profile, expected) in [(&canonical, false), (&changed, true), (&canonical, false)] {
+        let response = rust.run(request(profile, 1, 0));
+        assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+        let result = response.render_model().unwrap().core_result().unwrap();
+        assert_eq!(result.bool_field("count_complete"), Some(true));
+        assert_eq!(
+            result
+                .normalized_solution_keys()
+                .iter()
+                .any(|key| key == SOLUTION),
+            expected
+        );
+        if expected {
+            assert!(result.path_steps().is_empty());
+            assert!(result.field("scenario_replay_token").is_none());
+        }
+    }
+
+    #[cfg(feature = "native-c-core")]
+    {
+        // The native C descriptor already accepts these checked SRS90
+        // transitions; it is a differential authority, not a fallback.
+        let native = AppContext::default();
+        for (profile, expected) in [(&canonical, false), (&changed, true)] {
+            let response = native.run(request(profile, 1, 0));
+            assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+            let result = response.render_model().unwrap().core_result().unwrap();
+            assert_eq!(result.bool_field("count_complete"), Some(true));
+            assert_eq!(
+                result
+                    .normalized_solution_keys()
+                    .iter()
+                    .any(|key| key == SOLUTION),
+                expected
+            );
+        }
+    }
+
+    for response in [
+        rust.run(request(&changed, 2, 0)),
+        rust.run(request(&changed, 1, 1)),
+        rust.run(request(&different_membership, 1, 0)),
+        cooperatively(&rust, request(&changed, 1, 0)),
+    ] {
+        assert_eq!(
+            response.status(),
+            AppStatus::ExecutionFailed,
+            "{response:?}"
+        );
+        assert!(response.render_model().is_none());
+    }
+}

@@ -249,6 +249,102 @@ pub(super) struct BuildOrderGraph {
     canonical_language_root: Option<u32>,
 }
 
+#[derive(Clone, Copy)]
+enum BuildPassRepresentation {
+    Graph,
+    #[cfg(test)]
+    OperationMasks,
+}
+
+enum BuildPassOutput {
+    Graph(BuildOrderGraph),
+    #[cfg(test)]
+    OperationMasks {
+        language_root: Option<u32>,
+        visited_subsets: usize,
+        reachability_states: usize,
+    },
+}
+
+impl BuildPassOutput {
+    fn into_graph(self) -> BuildOrderGraph {
+        match self {
+            Self::Graph(graph) => graph,
+            #[cfg(test)]
+            Self::OperationMasks { .. } => unreachable!("concrete graph requested"),
+        }
+    }
+
+    #[cfg(any(test, feature = "local-search-ab"))]
+    fn set_reachability_states(&mut self, count: usize) {
+        match self {
+            Self::Graph(graph) => graph.reachability_states = count,
+            #[cfg(test)]
+            Self::OperationMasks {
+                reachability_states,
+                ..
+            } => *reachability_states = count,
+        }
+    }
+}
+
+// Initial fixture-only admission domain. This bounds the transient mask
+// payload and does not alter the product's existing memory policy.
+#[cfg(test)]
+const OPERATION_MASK_TEST_MAX_SUBSETS: usize = 1024;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct OperationMaskComparison {
+    pub graph_passes: usize,
+    pub mask_passes: usize,
+    pub mask_live_passes: usize,
+    pub mask_dead_passes: usize,
+    pub representative_graph_paths: usize,
+    pub visited_subsets: usize,
+    pub selected_edges: usize,
+    pub max_node_capacity: usize,
+    pub max_edge_capacity: usize,
+    pub max_piece_edge_capacity: usize,
+    pub max_mask_capacity: usize,
+    pub max_mask_owner_node_capacity: usize,
+    pub max_mask_owner_edge_capacity: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static OPERATION_MASK_TEST: std::cell::Cell<Option<(bool, OperationMaskComparison)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn with_operation_mask_comparison<T>(
+    enabled: bool,
+    run: impl FnOnce() -> T,
+) -> (T, OperationMaskComparison) {
+    struct Reset(Option<(bool, OperationMaskComparison)>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OPERATION_MASK_TEST.set(self.0);
+        }
+    }
+    let _reset =
+        Reset(OPERATION_MASK_TEST.replace(Some((enabled, OperationMaskComparison::default()))));
+    let result = run();
+    let (_, comparison) = OPERATION_MASK_TEST
+        .get()
+        .expect("fixture operation-mask comparison scope");
+    (result, comparison)
+}
+
+#[cfg(test)]
+fn record_operation_mask_pass(update: impl FnOnce(&mut OperationMaskComparison)) {
+    if let Some((enabled, mut comparison)) = OPERATION_MASK_TEST.get() {
+        update(&mut comparison);
+        OPERATION_MASK_TEST.set(Some((enabled, comparison)));
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct CoverageState {
     node: u32,
@@ -650,6 +746,8 @@ pub(super) struct BuildUpWorkspace {
     graph_reachable_generations: Vec<u32>,
     graph_subset_node_ids: Vec<u32>,
     graph_subset_queue: Vec<u16>,
+    #[cfg(test)]
+    graph_allowed_operations: Vec<u16>,
     graph_generation: u32,
     projection_deleted_rows: Vec<u16>,
     projection_physical_boards: Vec<u64>,
@@ -664,6 +762,21 @@ pub(super) struct BuildUpWorkspace {
 }
 
 impl BuildUpWorkspace {
+    #[cfg(not(target_family = "wasm"))]
+    pub(super) fn bind_local_import(
+        &mut self,
+        authority: super::compact_kick_authority::CompactKickAuthority,
+        catalog: &GeometryCatalog,
+    ) -> Result<(), WasmExactSearchError> {
+        self.reachability
+            .bind_local_import(authority, catalog)
+            .map_err(WasmExactSearchError::InvalidProblem)
+    }
+
+    pub(super) fn has_local_import(&self) -> bool {
+        self.reachability.has_local_import()
+    }
+
     #[cfg(any(feature = "parallel", test))]
     pub fn set_shared_reachability_templates(
         &mut self,
@@ -718,7 +831,12 @@ impl BuildUpWorkspace {
     }
 
     fn graph_projection_retained_bytes(&self) -> usize {
-        self.graph_nodes.capacity() * core::mem::size_of::<BuildNode>()
+        #[cfg(test)]
+        let mask_bytes = self.graph_allowed_operations.capacity() * core::mem::size_of::<u16>();
+        #[cfg(not(test))]
+        let mask_bytes = 0;
+        mask_bytes
+            + self.graph_nodes.capacity() * core::mem::size_of::<BuildNode>()
             + (self.graph_edges.capacity()
                 + self.graph_piece_edges.capacity()
                 + self.graph_edge_scratch.capacity())
@@ -1739,7 +1857,8 @@ fn verify_candidate_for_completion_mode(
     control: &ExecutionControl,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
     let kick_profile_id = problem.kick_profile().profile_id();
-    if super::kick_profiles::builtin_kick_profile(kick_profile_id).is_none() {
+    let use_builtin_rule = !workspace.has_local_import();
+    if use_builtin_rule && super::kick_profiles::builtin_kick_profile(kick_profile_id).is_none() {
         return Err(WasmExactSearchError::InvalidProblem(
             "wasm_exact_backend_requires_connected_kick_profile",
         ));
@@ -1750,7 +1869,8 @@ fn verify_candidate_for_completion_mode(
     let movement_proofs = CandidateMovementProofs::default();
     #[cfg(any(test, feature = "local-search-ab"))]
     let movement_proofs = {
-        let eligible = problem.count_policy() == PcCountPolicy::CountUnique
+        let eligible = use_builtin_rule
+            && problem.count_policy() == PcCountPolicy::CountUnique
             && matches!(completion, BuildCompletion::ClearToEmpty)
             && !retain_trace
             && !finesse_requested
@@ -1812,7 +1932,7 @@ fn verify_candidate_for_completion_mode(
         );
     workspace.configure_legal_board(
         kick_profile_id,
-        problem.backend_policy().exact_legal_board_enabled(),
+        use_builtin_rule && problem.backend_policy().exact_legal_board_enabled(),
     );
     let projection_span =
         SearchStageSpan::begin_scaled(ExecutorSearchStage::WasmCandidateProjection, profile_scale);
@@ -2672,6 +2792,101 @@ fn verify_candidate_with_projection(
         ExecutorSearchStage::WasmBuildOrderReachability,
         profile_scale,
     );
+    #[cfg(test)]
+    if OPERATION_MASK_TEST
+        .get()
+        .is_some_and(|(enabled, _)| enabled)
+        && problem.count_policy() == PcCountPolicy::CountUnique
+        && matches!(
+            problem.objective().kind(),
+            clearra_core_domain::objective::objective_kind::ObjectiveKind::All
+                | clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique
+        )
+        && matches!(
+            problem.output_policy(),
+            clearra_problem::SearchOutputPolicy::Summary
+                | clearra_problem::SearchOutputPolicy::Trace
+        )
+        && matches!(
+            problem.pc_chance_evidence_policy(),
+            clearra_problem::PcChanceEvidencePolicy::Disabled
+        )
+        && matches!(completion, BuildCompletion::ClearToEmpty)
+        && !retain_trace
+        && !finesse_requested
+        && !finesse_spin_coverage_requested
+        && !problem.objective().score().requested()
+        && !problem.objective().execution_constraints().requested()
+        && !problem.build_replay_evidence_requested()
+        && !problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+        && target.pattern_index.is_none()
+        && StandardBagCoverage::supports(universe, problem.initial_hold())
+        && (1..=OPERATION_MASK_TEST_MAX_SUBSETS).contains(&projection.state_count())
+        && projection.operation_count() != 0
+    {
+        let output = BuildOrderGraph::build_representation(
+            problem,
+            catalog,
+            candidate,
+            projection,
+            workspace,
+            true,
+            completion,
+            Some(feasibility),
+            BuildReachabilityMode::Existing,
+            movement_proofs,
+            BuildPassRepresentation::OperationMasks,
+        )?;
+        let BuildPassOutput::OperationMasks {
+            language_root,
+            visited_subsets,
+            reachability_states,
+        } = output
+        else {
+            unreachable!("operation-mask traversal requested")
+        };
+        graph_span.finish(visited_subsets as u64);
+        let coverage_span = SearchStageSpan::begin_scaled(
+            ExecutorSearchStage::WasmCoverageLanguageProduct,
+            profile_scale,
+        );
+        let coverage = language_root
+            .map(|root| {
+                workspace
+                    .cover_standard_bag_language(problem, root, control)?
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_operation_masks_require_standard_bag_coverage",
+                    ))
+            })
+            .transpose()?;
+        let edge_checks = coverage.as_ref().map_or(0, |value| value.edge_checks);
+        let covered = coverage.as_ref().filter(|value| value.covers_any_pattern);
+        coverage_span.finish(edge_checks as u64);
+        return Ok(CandidateBuildResult {
+            buildable: covered.is_some(),
+            witness_pattern_id: covered.and_then(|value| value.witness_pattern_id),
+            covered_patterns: None,
+            symbolic_coverage_root: covered.map(|value| value.root),
+            observation_language_root: None,
+            symbolic_covered_pattern_count: covered.map_or(0, |value| value.covered_pattern_count),
+            build_variant_count: 0,
+            count_complete: true,
+            representative_path: Vec::new(),
+            // This diagnostic counts the logical subsets visited by BuildUp,
+            // independent of their transient representation.
+            graph_nodes: visited_subsets,
+            coverage_product_words: 0,
+            coverage_product_states: coverage.as_ref().map_or(0, |value| value.product_states),
+            coverage_product_edge_checks: edge_checks,
+            feasibility_states,
+            feasibility_rejected: false,
+            reachability_states,
+            retained_bytes: 0,
+            finesse_language: None,
+        });
+    }
     let finesse_geometry_span =
         finesse_requested.then(|| SearchStageSpan::begin(ExecutorSearchStage::FinesseGeometry));
     let mut graph = BuildOrderGraph::build(
@@ -2966,6 +3181,10 @@ fn verify_candidate_with_projection(
         }
     }
     coverage_span.finish(coverage_product_edge_checks as u64);
+    #[cfg(test)]
+    if retain_trace && !representative_path.is_empty() {
+        record_operation_mask_pass(|metrics| metrics.representative_graph_paths += 1);
+    }
 
     let graph_nodes = graph.nodes.len();
     let reachability_states = graph.reachability_states;
@@ -4104,13 +4323,43 @@ impl BuildOrderGraph {
         reachability_mode: BuildReachabilityMode,
         movement_proofs: &CandidateMovementProofs,
     ) -> Result<Self, WasmExactSearchError> {
+        Self::build_representation(
+            problem,
+            catalog,
+            candidate,
+            projection,
+            workspace,
+            piece_language_projection_only,
+            completion,
+            feasibility,
+            reachability_mode,
+            movement_proofs,
+            BuildPassRepresentation::Graph,
+        )
+        .map(BuildPassOutput::into_graph)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_representation(
+        problem: &SearchProblem,
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        projection: &mut CandidateProjection,
+        workspace: &mut BuildUpWorkspace,
+        piece_language_projection_only: bool,
+        completion: BuildCompletion,
+        feasibility: Option<RealizationFeasibility>,
+        reachability_mode: BuildReachabilityMode,
+        movement_proofs: &CandidateMovementProofs,
+        representation: BuildPassRepresentation,
+    ) -> Result<BuildPassOutput, WasmExactSearchError> {
         let legal_board_eligible = catalog.width() == 10
             && catalog.height() == 4
             && catalog.initial_board() == 0
             && matches!(completion, BuildCompletion::ClearToEmpty)
             && (workspace.legal_board.is_some() || cfg!(feature = "local-search-ab"))
             && crate::search_prune_policy::legal_board_enabled();
-        Self::build_with_legal_board_admission(
+        Self::build_pass_with_retry(
             problem,
             catalog,
             candidate,
@@ -4122,11 +4371,13 @@ impl BuildOrderGraph {
             reachability_mode,
             legal_board_eligible,
             movement_proofs,
+            representation,
         )
     }
 
     // The normal entry point owns eligibility. Bounded tests can exercise the
     // admission control flow without a global registry or a qualified asset.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn build_with_legal_board_admission(
         problem: &SearchProblem,
@@ -4141,11 +4392,7 @@ impl BuildOrderGraph {
         legal_board_eligible: bool,
         movement_proofs: &CandidateMovementProofs,
     ) -> Result<Self, WasmExactSearchError> {
-        #[cfg(any(test, feature = "local-search-ab"))]
-        let states_before = movement_proofs
-            .kick_guard_reuse_enabled
-            .then(|| workspace.reachability.generated_state_count());
-        let graph = Self::build_pass(
+        Self::build_pass_with_retry(
             problem,
             catalog,
             candidate,
@@ -4157,17 +4404,54 @@ impl BuildOrderGraph {
             reachability_mode,
             legal_board_eligible,
             movement_proofs,
+            BuildPassRepresentation::Graph,
+        )
+        .map(BuildPassOutput::into_graph)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_pass_with_retry(
+        problem: &SearchProblem,
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        projection: &mut CandidateProjection,
+        workspace: &mut BuildUpWorkspace,
+        piece_language_projection_only: bool,
+        completion: BuildCompletion,
+        feasibility: Option<RealizationFeasibility>,
+        reachability_mode: BuildReachabilityMode,
+        legal_board_eligible: bool,
+        movement_proofs: &CandidateMovementProofs,
+        representation: BuildPassRepresentation,
+    ) -> Result<BuildPassOutput, WasmExactSearchError> {
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let states_before = movement_proofs
+            .kick_guard_reuse_enabled
+            .then(|| workspace.reachability.generated_state_count());
+        let pass = Self::build_pass(
+            problem,
+            catalog,
+            candidate,
+            projection,
+            workspace,
+            piece_language_projection_only,
+            completion,
+            feasibility,
+            reachability_mode,
+            legal_board_eligible,
+            movement_proofs,
+            representation,
         )?;
         #[cfg(not(any(test, feature = "local-search-ab")))]
         {
-            graph.ok_or(WasmExactSearchError::InvalidProblem(
+            pass.ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_exact_build_pass_witness_conflict",
             ))
         }
         #[cfg(any(test, feature = "local-search-ab"))]
         {
-            if let Some(graph) = graph {
-                return Ok(graph);
+            if let Some(pass) = pass {
+                return Ok(pass);
             }
             let states_before = states_before.ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_exact_build_pass_witness_conflict",
@@ -4180,7 +4464,7 @@ impl BuildOrderGraph {
                     ..super::structural_order::KickGuardReuseMetrics::default()
                 },
             );
-            let mut graph = Self::build_pass(
+            let mut pass = Self::build_pass(
                 problem,
                 catalog,
                 candidate,
@@ -4192,15 +4476,18 @@ impl BuildOrderGraph {
                 reachability_mode,
                 legal_board_eligible,
                 &CandidateMovementProofs::default(),
+                representation,
             )?
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_exact_build_pass_witness_conflict",
             ))?;
-            graph.reachability_states = workspace
-                .reachability
-                .generated_state_count()
-                .saturating_sub(states_before);
-            Ok(graph)
+            pass.set_reachability_states(
+                workspace
+                    .reachability
+                    .generated_state_count()
+                    .saturating_sub(states_before),
+            );
+            Ok(pass)
         }
     }
 
@@ -4217,7 +4504,8 @@ impl BuildOrderGraph {
         reachability_mode: BuildReachabilityMode,
         legal_board_eligible: bool,
         _movement_proofs: &CandidateMovementProofs,
-    ) -> Result<Option<Self>, WasmExactSearchError> {
+        representation: BuildPassRepresentation,
+    ) -> Result<Option<BuildPassOutput>, WasmExactSearchError> {
         if candidate.row_ids().len() > 15 {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_buildup_operation_count_exceeds_bitset",
@@ -4232,33 +4520,58 @@ impl BuildOrderGraph {
         let all_placed = projection.all_placed;
         let share_piece_edges =
             piece_language_projection_only && matches!(completion, BuildCompletion::ClearToEmpty);
+        let materialize_graph = matches!(representation, BuildPassRepresentation::Graph);
+        #[cfg(test)]
+        debug_assert!(
+            materialize_graph
+                || (share_piece_edges
+                    && reachability_mode == BuildReachabilityMode::Existing
+                    && (1..=OPERATION_MASK_TEST_MAX_SUBSETS).contains(&state_count)
+                    && operation_count != 0)
+        );
         let graph_generation = workspace.begin_graph_generation(state_count)?;
         workspace.graph_reachable_generations[0] = graph_generation;
         workspace.graph_subset_node_ids[0] = 0;
-        let mut nodes = core::mem::take(&mut workspace.graph_nodes);
-        nodes.clear();
-        nodes.try_reserve(1).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_build_order_node_storage_unavailable")
-        })?;
-        nodes.push(BuildNode {
-            edge_start: 0,
-            edge_count: 0,
-            piece_edge_start: 0,
-            piece_edge_count: 0,
-            depth: 0,
-            live: false,
-            accepting: false,
-        });
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        let mut piece_edges = Vec::new();
+        if materialize_graph {
+            nodes = core::mem::take(&mut workspace.graph_nodes);
+            nodes.clear();
+            nodes.try_reserve(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_build_order_node_storage_unavailable")
+            })?;
+            nodes.push(BuildNode {
+                edge_start: 0,
+                edge_count: 0,
+                piece_edge_start: 0,
+                piece_edge_count: 0,
+                depth: 0,
+                live: false,
+                accepting: false,
+            });
+            edges = core::mem::take(&mut workspace.graph_edges);
+            edges.clear();
+            piece_edges = core::mem::take(&mut workspace.graph_piece_edges);
+            piece_edges.clear();
+        }
+        #[cfg(test)]
+        let mut allowed_operations = if materialize_graph {
+            Vec::new()
+        } else {
+            let mut masks = core::mem::take(&mut workspace.graph_allowed_operations);
+            masks.clear();
+            masks.try_reserve_exact(state_count).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_operation_mask_storage_unavailable")
+            })?;
+            masks
+        };
         let mut subset_queue = core::mem::take(&mut workspace.graph_subset_queue);
         subset_queue.clear();
         subset_queue.try_reserve(1).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_build_order_queue_storage_unavailable")
         })?;
         subset_queue.push(0);
-        let mut edges = core::mem::take(&mut workspace.graph_edges);
-        edges.clear();
-        let mut piece_edges = core::mem::take(&mut workspace.graph_piece_edges);
-        piece_edges.clear();
         let mut edge_scratch = core::mem::take(&mut workspace.graph_edge_scratch);
         edge_scratch.clear();
         let reachability_states_before = workspace.reachability.generated_state_count();
@@ -4270,6 +4583,8 @@ impl BuildOrderGraph {
         });
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut accepting_reached = false;
+        #[cfg(test)]
+        let mut selected_mask_edges = 0usize;
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut movement_metrics = super::structural_order::MovementClearMetrics::default();
         #[cfg(any(test, feature = "local-search-ab"))]
@@ -4292,18 +4607,28 @@ impl BuildOrderGraph {
             let subset = usize::from(subset_queue[subset_cursor]);
             subset_cursor += 1;
             let node_index = workspace.graph_subset_node_ids[subset] as usize;
-            nodes[node_index].edge_start = edges.len() as u32;
-            nodes[node_index].piece_edge_start = if share_piece_edges {
-                edges.len() as u32
-            } else {
-                piece_edges.len() as u32
-            };
+            if materialize_graph {
+                nodes[node_index].edge_start = edges.len() as u32;
+                nodes[node_index].piece_edge_start = if share_piece_edges {
+                    edges.len() as u32
+                } else {
+                    piece_edges.len() as u32
+                };
+            }
             if subset == all_placed {
-                nodes[node_index].accepting = completion.accepts(projection, subset);
-                nodes[node_index].live = nodes[node_index].accepting;
+                let accepting = completion.accepts(projection, subset);
+                if materialize_graph {
+                    nodes[node_index].accepting = accepting;
+                    nodes[node_index].live = accepting;
+                }
+                #[cfg(test)]
+                if !materialize_graph {
+                    debug_assert_eq!(allowed_operations.len(), node_index);
+                    allowed_operations.push(0);
+                }
                 #[cfg(any(test, feature = "local-search-ab"))]
                 {
-                    accepting_reached |= nodes[node_index].accepting;
+                    accepting_reached |= accepting;
                 }
                 continue;
             }
@@ -4646,38 +4971,56 @@ impl BuildOrderGraph {
                 });
                 edge_scratch.dedup();
             }
+            #[cfg(test)]
+            let mut selected_operation_mask = 0_u16;
             for edge in &mut edge_scratch {
                 let child_subset = edge.to as usize;
                 if workspace.graph_reachable_generations[child_subset] != graph_generation
                     || workspace.graph_subset_node_ids[child_subset] == LEGAL_BOARD_PENDING_NODE
                 {
                     workspace.graph_reachable_generations[child_subset] = graph_generation;
-                    let child_node = u32::try_from(nodes.len()).map_err(|_| {
+                    let child_node = u32::try_from(subset_queue.len()).map_err(|_| {
                         WasmExactSearchError::InvalidProblem("wasm_build_order_node_index_overflow")
                     })?;
                     workspace.graph_subset_node_ids[child_subset] = child_node;
-                    nodes.try_reserve(1).map_err(|_| {
-                        WasmExactSearchError::InvalidProblem(
-                            "wasm_build_order_node_storage_unavailable",
-                        )
-                    })?;
                     subset_queue.try_reserve(1).map_err(|_| {
                         WasmExactSearchError::InvalidProblem(
                             "wasm_build_order_queue_storage_unavailable",
                         )
                     })?;
-                    nodes.push(BuildNode {
-                        edge_start: 0,
-                        edge_count: 0,
-                        piece_edge_start: 0,
-                        piece_edge_count: 0,
-                        depth: child_subset.count_ones() as u8,
-                        live: false,
-                        accepting: false,
-                    });
+                    if materialize_graph {
+                        debug_assert_eq!(nodes.len(), subset_queue.len());
+                        nodes.try_reserve(1).map_err(|_| {
+                            WasmExactSearchError::InvalidProblem(
+                                "wasm_build_order_node_storage_unavailable",
+                            )
+                        })?;
+                        nodes.push(BuildNode {
+                            edge_start: 0,
+                            edge_count: 0,
+                            piece_edge_start: 0,
+                            piece_edge_count: 0,
+                            depth: child_subset.count_ones() as u8,
+                            live: false,
+                            accepting: false,
+                        });
+                    }
                     subset_queue.push(child_subset as u16);
                 }
-                edge.to = workspace.graph_subset_node_ids[child_subset];
+                if materialize_graph {
+                    edge.to = workspace.graph_subset_node_ids[child_subset];
+                }
+                #[cfg(test)]
+                if !materialize_graph {
+                    selected_operation_mask |= 1_u16 << edge.operation_index;
+                }
+            }
+            #[cfg(test)]
+            if !materialize_graph {
+                debug_assert_eq!(allowed_operations.len(), node_index);
+                allowed_operations.push(selected_operation_mask);
+                selected_mask_edges += edge_scratch.len();
+                continue;
             }
             if !share_piece_edges {
                 let mut previous_piece_transition = None;
@@ -4720,9 +5063,16 @@ impl BuildOrderGraph {
             if kick_guards.conflicted {
                 // Recycle un-published graph scratch, but keep only exact
                 // template/reachability caches and exact physical projection.
-                workspace.graph_nodes = nodes;
-                workspace.graph_edges = edges;
-                workspace.graph_piece_edges = piece_edges;
+                if materialize_graph {
+                    workspace.graph_nodes = nodes;
+                    workspace.graph_edges = edges;
+                    workspace.graph_piece_edges = piece_edges;
+                }
+                #[cfg(test)]
+                if !materialize_graph {
+                    allowed_operations.clear();
+                    workspace.graph_allowed_operations = allowed_operations;
+                }
                 workspace.graph_subset_queue = subset_queue;
                 workspace.graph_edge_scratch = edge_scratch;
                 kick_guard_metrics.conflicts += 1;
@@ -4733,6 +5083,62 @@ impl BuildOrderGraph {
             }
             super::structural_order::record_ordered_kick_guard_reuse(kick_guard_metrics);
         }
+        #[cfg(test)]
+        if !materialize_graph {
+            let visited_subsets = subset_queue.len();
+            let reachability_states = workspace
+                .reachability
+                .generated_state_count()
+                .saturating_sub(reachability_states_before);
+            let mut pieces = [PieceKind::I; 15];
+            for (index, &row_id) in candidate.row_ids().iter().enumerate() {
+                pieces[index] = catalog.skeleton(row_id).piece;
+            }
+            let language_root = workspace
+                .piece_order_languages
+                .compile_traversed_subset_masks(
+                    &pieces[..operation_count],
+                    &subset_queue,
+                    &allowed_operations,
+                    &workspace.graph_subset_node_ids[..state_count],
+                    accepting_reached,
+                );
+            record_operation_mask_pass(|metrics| {
+                metrics.mask_passes += 1;
+                metrics.mask_live_passes += usize::from(accepting_reached);
+                metrics.mask_dead_passes += usize::from(!accepting_reached);
+                metrics.visited_subsets += visited_subsets;
+                metrics.selected_edges += selected_mask_edges;
+                metrics.max_mask_capacity =
+                    metrics.max_mask_capacity.max(allowed_operations.capacity());
+                metrics.max_mask_owner_node_capacity =
+                    metrics.max_mask_owner_node_capacity.max(nodes.capacity());
+                metrics.max_mask_owner_edge_capacity = metrics
+                    .max_mask_owner_edge_capacity
+                    .max(edges.capacity() + piece_edges.capacity());
+            });
+            allowed_operations.clear();
+            workspace.graph_allowed_operations = allowed_operations;
+            subset_queue.clear();
+            workspace.graph_subset_queue = subset_queue;
+            edge_scratch.clear();
+            workspace.graph_edge_scratch = edge_scratch;
+            return Ok(Some(BuildPassOutput::OperationMasks {
+                language_root: language_root?,
+                visited_subsets,
+                reachability_states,
+            }));
+        }
+        #[cfg(test)]
+        record_operation_mask_pass(|metrics| {
+            metrics.graph_passes += 1;
+            metrics.visited_subsets += nodes.len();
+            metrics.selected_edges += edges.len();
+            metrics.max_node_capacity = metrics.max_node_capacity.max(nodes.capacity());
+            metrics.max_edge_capacity = metrics.max_edge_capacity.max(edges.capacity());
+            metrics.max_piece_edge_capacity =
+                metrics.max_piece_edge_capacity.max(piece_edges.capacity());
+        });
         #[cfg(any(test, feature = "local-search-ab"))]
         let fuse_language = super::placement_dependency::enabled()
             && piece_language_projection_only
@@ -4805,7 +5211,7 @@ impl BuildOrderGraph {
             }
             graph
         };
-        Ok(Some(graph))
+        Ok(Some(BuildPassOutput::Graph(graph)))
     }
 
     pub fn max_depth(&self) -> usize {
