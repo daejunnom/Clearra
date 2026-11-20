@@ -1870,6 +1870,93 @@ fn identical_compact_board_changes_pending_i_lock_across_original_clear_frames()
 }
 
 #[test]
+fn one_i_operation_keeps_opposite_ordered_kick_answers_for_its_two_realizations() {
+    use clearra_core_domain::piece::rotation::RotationState::{Two, Zero};
+    use PieceKind::I;
+
+    let (catalog, candidate) = fixture(2, &[(I, 0xf), (I, 0x7800)]);
+    let (board, deleted) = subset_state(&catalog, &candidate, 0);
+    assert_eq!((board, deleted), (0xf87f0, 0));
+    let frame = LocalRelationRowFrame::new(2, deleted).unwrap();
+    let profile = KickTableProfileId::Srs90;
+    let row = catalog.skeleton_id(I, 0xf).unwrap();
+    let mut poses: Vec<_> = catalog.instantiations(row, deleted).collect();
+    poses.sort_unstable_by_key(|pose| pose.rotation.quarter_turns());
+    let [zero, two] = poses.as_slice() else {
+        panic!("expected both horizontal I realizations of a single row");
+    };
+    assert_eq!((zero.rotation, two.rotation), (Zero, Two));
+    for lock in &poses {
+        assert_eq!((lock.lock_mask, lock.x, lock.lock_y), (0xf, 0, 0));
+    }
+
+    // Row one has holes at x=1..4. A vertical Left I can descend at x=3:
+    // Left->Two's first three landings hit the roof; raw kick 3 enters
+    // the floor cavity. Right->Zero instead takes an earlier sky landing,
+    // and the alternative Left source at x=0 collides with the roof.
+    let anchors = reference_spawn_lock_anchors(10, 2, board, I, profile).unwrap();
+    let oracle = |rotation: clearra_core_domain::piece::rotation::RotationState| {
+        anchors[rotation.quarter_turns() as usize] & 1 != 0
+    };
+    assert_eq!((oracle(Zero), oracle(Two)), (false, true));
+    let transitions = physical_transitions(&catalog, &candidate, profile);
+    let operation = candidate
+        .row_ids()
+        .iter()
+        .position(|&id| id == row)
+        .unwrap();
+    let allowed = transitions[0] & (1 << operation) != 0;
+    assert!(allowed, "one reachable realization admits the operation");
+    assert_ne!(
+        transitions[1 << operation],
+        0,
+        "bottom I first can finish the PC"
+    );
+
+    for order in [[*zero, *two], [*two, *zero]] {
+        let mut workspace = ReachabilityWorkspace::default();
+        workspace.configure(2);
+        workspace.configure_kick_profile(profile, false);
+        for lock in order {
+            let expected = oracle(lock.rotation);
+            assert!(!workspace.lock_harddrop_reachable_instantiated(10, board, lock));
+            // Neither missing certificate supplies the opposite Boolean.
+            if let (Some(bounds), _) = workspace
+                .try_prove_ordered_lock_pose_closed_within(&catalog, board, I, profile, lock, frame)
+            {
+                assert!(bounds.excludes(board) && !expected);
+            }
+            if workspace.try_prove_ordered_kick_lock_interval(
+                &catalog,
+                board,
+                board,
+                I,
+                profile,
+                lock,
+                Some(frame),
+            ) {
+                assert!(expected);
+            }
+        }
+        for _ in 0..3 {
+            let answers = order.map(|lock| {
+                workspace.lock_reachable_instantiated_in_frame(
+                    &catalog,
+                    board,
+                    I,
+                    lock,
+                    Some(frame),
+                )
+            });
+            assert_eq!(answers, order.map(|lock| oracle(lock.rotation)));
+            assert_eq!(answers.into_iter().any(|answer| answer), allowed);
+        }
+        let metrics = workspace.metrics();
+        assert!(metrics.cache_unreachable_hits > 0 && metrics.cache_reachable_hits > 0);
+    }
+}
+
+#[test]
 fn conditional_support_or_preserves_every_empty_hold_queue_ordinal() {
     use clearra_core_domain::solution::normalized_tiling_solution::{
         PiecePlacementMask, StandardBoard64TilingIdentity,
