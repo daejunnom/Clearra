@@ -37,8 +37,6 @@ if ($OutputExcerptLines -lt 1) {
     throw "-OutputExcerptLines must be at least 1."
 }
 
-Remove-StaleProductE2EClearraCliBinary
-
 $script:ProductE2ECurrentCaseName = ""
 $script:ProductE2EExactProbeCache =
     [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
@@ -56,7 +54,7 @@ try {
         Invoke-ProductE2ECommandCase `
             -Name "opening 2L product pipeline" `
             -FixturePath "tests/fixtures/pc/opening_2l_empty.json" `
-            -GoldenPath "tests/golden/pc/opening_2l_empty.json" `
+            -GoldenPath "tests/golden/product/pc_2l_fixed_queue.json" `
             -CommandArgs (Get-FixtureCommandArgs "tests/fixtures/pc/opening_2l_empty.json")
 
         Invoke-ProductE2ECommandCase `

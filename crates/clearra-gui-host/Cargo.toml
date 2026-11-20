@@ -6,7 +6,6 @@ license.workspace = true
 
 [features]
 default = []
-native-c-core = ["clearra-app/native-c-core"]
 wasm-cpu-runtime = ["dep:clearra-wasm", "clearra-app/parallel"]
 webgpu-search = ["clearra-app/webgpu-search"]
 

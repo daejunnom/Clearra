@@ -19,14 +19,9 @@ fn path_command_renders_retained_solution_trace_steps() {
     assert!(output
         .stdout()
         .contains("retained_representative_trace: true"));
-    assert!(output.stdout().contains(&format!(
-        "total_solution_count: {}",
-        expected_path_solution_count()
-    )));
-    assert!(output.stdout().contains(&format!(
-        "retained_trace_count: {}",
-        expected_path_retained_trace_count()
-    )));
+    // Four exact solved fields; the result retains one representative trace.
+    assert!(output.stdout().contains("total_solution_count: 4"));
+    assert!(output.stdout().contains("retained_trace_count: 1"));
     assert!(output.stdout().contains("score_post_processing: false"));
     assert!(output.stdout().contains("score_accuracy_level: none"));
     assert!(output.stdout().contains("trace_steps:"));
@@ -48,20 +43,4 @@ fn path_command_reports_trace_requirement_when_no_solution_trace_exists() {
         .stderr()
         .contains(CliErrorCode::PathNoSolution.as_str()));
     assert!(output.stderr().contains("sample_trace_available=false"));
-}
-
-fn expected_path_solution_count() -> usize {
-    if cfg!(feature = "native-c-core") {
-        4
-    } else {
-        1
-    }
-}
-
-fn expected_path_retained_trace_count() -> usize {
-    if cfg!(feature = "native-c-core") {
-        4
-    } else {
-        1
-    }
 }

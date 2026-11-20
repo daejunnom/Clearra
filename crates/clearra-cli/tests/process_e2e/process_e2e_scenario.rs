@@ -1,155 +1,102 @@
 use super::*;
 
+fn verified_scenario_fixture() -> Value {
+    run_json(&[
+        "pc-scenario",
+        "--fixture",
+        "tests/fixtures/pc/scenario_simple_4l.json",
+        "--verify-expected",
+        "--backend",
+        "cpu",
+        "--workers",
+        "1",
+    ])
+}
+
+fn assert_exact_single_tiling(summary: &Value) {
+    assert_rust_cpu(summary);
+    assert_eq!(summary["solution_found"], true);
+    assert_eq!(summary["count_complete"], true);
+    assert_eq!(summary["normalized_unique_solution_count"], 1);
+}
+
 #[test]
 fn process_e2e_pc_scenario_fixture_json_counts_solutions() {
-    let output = clearra()
-        .args([
-            "pc-scenario",
-            "--fixture",
-            "tests/fixtures/pc/example.json",
-            "--verify-expected",
-            "--format",
-            "json",
-        ])
-        .output()
-        .expect("clearra-cli process runs");
-
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    for marker in [
-        "\"kind\":\"pc-scenario\"",
-        "\"expected_checked\":true",
-        "\"expected_match\":true",
-        "\"expected_total_solution_count\":\"none\"",
-        "\"expected_retained_trace_key_count\":1",
-        "\"retained_trace_keys_checked\":true",
-        "\"retained_trace_keys_match\":true",
-        "\"exact_pieces\":1",
-        "\"min_remaining_queue\":0",
-        "\"allow_hold\":true",
-        "\"count_policy\":\"count-all\"",
-        "\"retained_trace_limit\":1",
-        "\"solution_found\":true",
-        "\"retained_trace_count\":1",
-        "\"retained_trace_key_count\":1",
-        "\"scenario_replay_token_version\":\"sr2\"",
-        "\"scenario_replay_token\":\"sr2:",
-        "\"replay_hint\":\"clearra continue sr2:",
-    ] {
-        assert!(stdout.contains(marker), "missing marker {marker}");
-    }
-    assert!(
-        stdout.contains(&format!(
-            "\"total_solution_count\":{}",
-            expected_scenario_solution_count()
-        )),
-        "single final-current solution count: {stdout}"
-    );
-    assert!(stdout.contains(if native_core_enabled() {
-        "\"count_complete\":true"
-    } else {
-        "\"count_complete\":false"
-    }));
-    assert!(stdout.contains(expected_retained_trace_key_prefix()));
-    assert!(stdout.contains("\"continuation_token_version\":\"none\""));
-    assert!(stdout.contains("\"continuation_token\":\"none\""));
-    assert!(stdout.contains("\"continue_hint\":\"none\""));
+    let result = verified_scenario_fixture();
+    assert_eq!(result["kind"], "pc-scenario");
+    let summary = &result["summary"];
+    assert_exact_single_tiling(summary);
+    assert_eq!(summary["expected_checked"], true);
+    assert_eq!(summary["expected_match"], true);
+    assert_eq!(summary["retained_trace_count"], 1);
+    assert_eq!(summary["scenario_replay_token_version"], "sr2");
+    let token = summary["scenario_replay_token"]
+        .as_str()
+        .filter(|token| token.starts_with("sr2:w10:v4:"))
+        .expect("the verified scenario exposes its original-height input replay");
+    let hash = summary["normalized_solution_set_hash"]
+        .as_str()
+        .filter(|hash| hash.starts_with("cts1:"))
+        .expect("complete canonical solution family");
+    let replay = run_json(&["continue", token]);
+    assert_eq!(replay["kind"], "continue");
+    assert_eq!(replay["summary"]["status"], "scenario-replayed-searched");
+    assert_eq!(replay["summary"]["interactive_prompt"], false);
+    assert_eq!(replay["summary"]["normalized_solution_set_hash"], hash);
 }
 
 #[test]
 fn process_e2e_pc_scenario_simple_4l_fixture_counts_solutions() {
-    let output = clearra()
-        .args([
-            "pc-scenario",
-            "--fixture",
-            "tests/fixtures/pc/scenario_simple_4l.json",
-            "--verify-expected",
-            "--format",
-            "json",
-        ])
-        .output()
-        .expect("clearra-cli process runs");
-
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    for marker in [
-        "\"kind\":\"pc-scenario\"",
-        "\"expected_checked\":true",
-        "\"expected_match\":true",
-        "\"visible_height\":\"4\"",
-        "\"initial_board_mask\":\"0x00000000000003f0\"",
-        "\"exact_pieces\":1",
-        "\"solution_found\":true",
-        expected_scenario_coverage_probability_json(),
-        "\"scenario_replay_token_version\":\"sr2\"",
-        "\"scenario_replay_token\":\"sr2:w10:v4:",
-    ] {
-        assert!(stdout.contains(marker), "missing marker {marker}");
-    }
-    assert!(
-        stdout.contains(&format!(
-            "\"total_solution_count\":{}",
-            expected_scenario_solution_count()
-        )),
-        "single final-current solution count: {stdout}"
-    );
+    let result = verified_scenario_fixture();
+    assert_eq!(result["kind"], "pc-scenario");
+    let summary = &result["summary"];
+    assert_exact_single_tiling(summary);
+    assert_eq!(summary["visible_height"], "4");
+    assert_eq!(summary["initial_board_mask"], "0x00000000000003f0");
+    assert_eq!(summary["exact_pieces"], 1);
+    assert_eq!(summary["probability_complete"], true);
+    assert_eq!(summary["coverage_probability"].as_f64(), Some(1.0));
 }
 
 #[test]
 fn process_e2e_pc_scenario_expected_unsupported_fixture_succeeds() {
-    let output = clearra()
-        .args([
-            "pc-scenario",
-            "--fixture",
-            "tests/fixtures/pc/requires_180_unsupported.json",
-            "--verify-expected",
-            "--format",
-            "json",
-        ])
-        .output()
-        .expect("clearra-cli process runs");
-
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    for marker in [
-        "\"kind\":\"pc-scenario\"",
-        "\"status\":\"scenario-unsupported-expected\"",
-        "\"expected_match\":true",
-        "\"expected_unsupported\":true",
-        "\"actual_unsupported\":true",
-        "\"unsupported_stage\":\"validation\"",
-        "\"actual_unsupported_reason\":\"scenario_requires_180_unsupported\"",
-    ] {
-        assert!(stdout.contains(marker), "missing marker {marker}");
-    }
+    let result = run_json(&[
+        "pc-scenario",
+        "--fixture",
+        "tests/fixtures/pc/requires_180_unsupported.json",
+        "--verify-expected",
+    ]);
+    assert_eq!(result["kind"], "pc-scenario");
+    let summary = &result["summary"];
+    assert_eq!(summary["status"], "scenario-unsupported-expected");
+    assert_eq!(summary["expected_match"], true);
+    assert_eq!(summary["expected_unsupported"], true);
+    assert_eq!(summary["actual_unsupported"], true);
+    assert_eq!(summary["unsupported_stage"], "validation");
+    assert_eq!(
+        summary["actual_unsupported_reason"],
+        "scenario_requires_180_unsupported"
+    );
 }
 
 #[test]
 fn process_e2e_pc_scenario_inline_json_counts_solutions() {
-    let output = clearra()
-        .args([
-            "pc-scenario",
-            "--field",
-            "0x00000000000003f0",
-            "--queue",
-            "I",
-            "--max-pieces",
-            "1",
-            "--exact-pieces",
-            "1",
-            "--format",
-            "json",
-        ])
-        .output()
-        .expect("clearra-cli process runs");
-
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(stdout.contains("\"kind\":\"pc-scenario\""));
-    assert!(stdout.contains("\"input_mode\":\"inline\""));
-    assert!(stdout.contains("\"solution_found\":true"));
+    let result = run_json(&[
+        "pc-scenario",
+        "--field",
+        "0x00000000000003f0",
+        "--queue",
+        "I",
+        "--max-pieces",
+        "1",
+        "--exact-pieces",
+        "1",
+        "--backend",
+        "cpu",
+        "--workers",
+        "1",
+    ]);
+    assert_eq!(result["kind"], "pc-scenario");
+    assert_eq!(result["summary"]["input_mode"], "inline");
+    assert_exact_single_tiling(&result["summary"]);
 }

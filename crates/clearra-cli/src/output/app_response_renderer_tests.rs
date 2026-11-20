@@ -1033,10 +1033,6 @@ fn canonical_pc_minimals_cli_json_uses_the_typed_v2_result_kind() {
 }
 
 #[test]
-#[cfg_attr(
-    not(feature = "native-c-core"),
-    ignore = "requires the native clearra_core static library"
-)]
 fn canonical_pc_failed_queue_cli_json_uses_v2_while_legacy_stays_percent() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     for (source, expected_kind) in [
@@ -1072,10 +1068,6 @@ fn canonical_pc_failed_queue_cli_json_uses_v2_while_legacy_stays_percent() {
 }
 
 #[test]
-#[cfg_attr(
-    not(feature = "native-c-core"),
-    ignore = "requires the native clearra_core static library"
-)]
 fn canonical_pc_chance_cli_json_uses_v2_while_legacy_routes_stay_generic() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     for (source, expected_kind) in [

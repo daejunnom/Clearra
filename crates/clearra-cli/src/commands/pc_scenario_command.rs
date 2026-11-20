@@ -8,7 +8,7 @@ use crate::{
     output::{CliOutput, CommandRenderer, RenderFormat},
 };
 
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(test)]
 #[path = "pc_scenario_command_tests.rs"]
 mod pc_scenario_command_tests;
 

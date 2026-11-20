@@ -2,13 +2,11 @@
   "fixture": "percent_uniform_bag",
   "required_markers": [
     "kind=percent",
-    "status=percent-executed",
-    "route=search-problem-core-executor",
-    "percent_workflow=queue pattern universe -> multiset-grouped C Packing -> pattern-specific C BuildUp coverage rows -> PatternBitSet union -> weighted probability",
-    "coverage_reducer=pattern-bitset-union",
-    "coverage_row_source=c-coverage-row-view",
+    "actual_backend=wasm-cpu",
+    "percent_evidence_contract=coverage-summary",
     "total_pattern_count=1",
     "covered_pattern_count=1",
+    "failed_pattern_count=0",
     "probability_complete=true",
     "renormalized=false",
     "coverage_probability=1"

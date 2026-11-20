@@ -84,6 +84,6 @@ fn pc_assembly_error(error: PcQueryAssemblyError) -> CliOutput {
     }
 }
 
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(test)]
 #[path = "path_command_tests.rs"]
 mod tests;

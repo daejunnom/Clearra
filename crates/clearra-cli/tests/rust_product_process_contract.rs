@@ -1,6 +1,5 @@
-//! Compare public product behavior at the executable boundary. The C process
-//! goldens stay independent: C-only candidate IDs and diagnostics are not Rust
-//! product assertions.
+//! Check exact public behavior at the Rust product executable boundary.
+//! The independent C oracle is exercised in App and Core tests.
 
 use std::{path::Path, process::Command};
 
@@ -40,6 +39,8 @@ fn assert_exact_cpu_pc(result: &Value, expected_kind: &str, solution_count: u64)
     assert_eq!(result["kind"], expected_kind);
     let summary = &result["summary"];
     assert_eq!(summary["actual_backend"], "wasm-cpu", "{summary}");
+    assert_ne!(summary["native_c_core_executed"], true);
+    assert_ne!(summary["native_c_core_linked"], true);
     assert_eq!(summary["solution_found"], true);
     assert_eq!(summary["count_complete"], true);
     assert_eq!(summary["probability_complete"], true);

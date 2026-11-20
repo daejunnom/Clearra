@@ -60,7 +60,7 @@ fn unsupported_runtime_response(reason: &'static str) -> AppResponse {
         || reason == "core_c_buildup_runtime_unavailable"
     {
         AppErrorCode::NativeCoreUnavailable
-    } else if reason.starts_with("gpu_") {
+    } else if reason.starts_with("gpu_") || reason == "webgpu_backend_unavailable" {
         AppErrorCode::BackendGpuUnavailable
     } else {
         AppErrorCode::Unsupported
@@ -77,6 +77,19 @@ fn unsupported_runtime_response(reason: &'static str) -> AppResponse {
 #[cfg(test)]
 mod replay_failure_tests {
     use super::*;
+
+    #[test]
+    fn unconnected_gpu_runtime_is_unsupported_with_backend_identity() {
+        let response = core_execution_error_response(CoreExecutionError::RuntimeUnavailable {
+            component: "webgpu_backend_unavailable",
+        });
+        assert_eq!(response.status(), AppStatus::Unsupported);
+        assert_eq!(
+            response.error().unwrap().code(),
+            AppErrorCode::BackendGpuUnavailable
+        );
+        assert!(!response.resource_report().solver_executed());
+    }
 
     #[test]
     fn terminal_replay_failures_preserve_executed_incomplete_search() {

@@ -81,24 +81,6 @@ function Invoke-VerifyCargoCompile(
     return Invoke-VerifyNative $CargoPath $Arguments $Label
 }
 
-function Assert-ProductContractSourceSurface {
-    $contract = Join-Path $Root "crates/clearra-cli/tests/product_contract_e2e.rs"
-    if (-not (Test-Path -LiteralPath $contract -PathType Leaf)) {
-        throw "product contract target is missing: $contract"
-    }
-    $text = Get-Content -LiteralPath $contract -Raw
-    foreach ($marker in @(
-        "run_with_args",
-        "library_route_product_e2e_opening_2l_empty_matches_golden",
-        "product_gpu_no_fallback_returns_error_when_unavailable",
-        "product_gpu_allow_fallback_reports_reason"
-    )) {
-        if (-not $text.Contains($marker)) {
-            throw "product contract source is missing '$marker'"
-        }
-    }
-}
-
 function Write-VerifyReport(
     [string]$Status,
     [object]$CoreResult,
@@ -173,7 +155,7 @@ try {
     Invoke-ClearraProgressCase -Scope $progress -Name "WebGPU test surface" -Body {
         if ($trustedExecution) {
             Invoke-VerifyCargoCompile @(
-                "check", "-p", "clearra-core-executor", "--features", "native-c-core,webgpu-search", "--tests"
+                "check", "--locked", "-p", "clearra-core-executor", "--features", "parallel,webgpu-search", "--tests"
             ) "cargo check clearra-core-executor WebGPU tests"
         } else {
             Write-Output "[verify] ManagedLocal leaves WebGPU compilation to Trusted execution"
@@ -194,15 +176,18 @@ try {
     }
 
     Invoke-ClearraProgressCase -Scope $progress -Name "product contract" -Body {
-        Assert-ProductContractSourceSurface
         if ($nativeTestExecutionAllowed) {
-            Invoke-VerifyCargoCompile @(
-                "test", "-p", "clearra-cli", "--features", "native-c-core,webgpu-search",
+            $output = Invoke-VerifyCargoCompile @(
+                "test", "--locked", "-p", "clearra-cli", "--features", "wasm-cpu-runtime,webgpu-search",
                 "--lib", "product_contract_e2e::",
                 "--", "--test-threads=1"
             ) "product contract E2E"
+            if (($output -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed; 0 failed;') {
+                throw 'No executable Rust product contract cases passed'
+            }
+            $output | Write-Output
         } else {
-            Write-Output "[verify] ManagedLocal validated the product contract source without compiling a test harness"
+            Write-Output "[verify] ManagedLocal does not execute the Rust product contract"
         }
     }
 
@@ -245,7 +230,7 @@ try {
     $productRoute = if ($nativeTestExecutionAllowed) {
         "library"
     } else {
-        "source-contract"
+        "not-run"
     }
     Write-Output "[verify] gate summary | execution_surface=$ExecutionSurface | rust_test_execution=$script:VerifyRustMode | wasm_exact_execution=$script:VerifyWasmMode | c_core_test_execution=$cMode | product_e2e_route=$productRoute | architecture_validation=$script:VerifyArchitectureStatus | application_control=$($applicationControl.user_mode_code_integrity_policy) | policy_fallback_used=false"
     Write-VerifyReport `

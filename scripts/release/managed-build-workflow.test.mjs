@@ -71,21 +71,34 @@ test('workflow source gate rejects missing completion or leaked direct-owner lea
   }
 });
 
-test('native ProductE2E identity, Cargo build and artifact seal share one product owner', () => {
+test('ProductE2E verifies and executes the same Rust release CLI that Windows ships', () => {
   const source = workflows.get('release-cli.yml');
-  const step = source.split('      - name: Build and seal exact ProductE2E CLI input\n')[1]
-    .split(/^      - /mu)[0];
+  const producer = source.split('  windows-cli:\n')[1].split(/^  [a-z][a-z0-9-]*:\n/mu)[0];
+  const consumer = source.split('  release-acceptance-rust-product:\n')[1]
+    .split(/^  [a-z][a-z0-9-]*:\n/mu)[0];
   const operations = [
     'Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose product',
-    './scripts/release/prepare-native-build-identity.ps1',
-    '$nativeIdentity.runtime_paths.native_library_directory',
-    'cargo build --locked -p clearra-cli --features native-c-core,webgpu-search --bin clearra',
+    'cargo build --locked --release --package clearra-cli --bin clearra --no-default-features --features online-pc4-tablebase,wasm-cpu-runtime,webgpu-search',
+    'Copy-Item -LiteralPath $builtCli -Destination $cli',
+    "Invoke-ClearraJsonSmoke -Name 'terminal-supply-p0'",
     'node scripts/release/product-e2e-cli-artifact.mjs seal',
-    '"artifact_path=',
-  ].map((marker) => step.indexOf(marker));
+    '--binary $cli',
+    'Complete-ClearraBuildTransaction',
+  ].map((marker) => producer.indexOf(marker));
   assert.ok(operations.every((position) => position >= 0));
   assert.deepEqual([...operations].sort((left, right) => left - right), operations);
-  assert.match(source, /path: \$\{\{ steps\.native\.outputs\.artifact_path \}\}/u);
+  assert.doesNotMatch(producer, /native-c-core|prepare-native-build-identity/u);
+  assert.doesNotMatch(consumer, /cargo build|native-c-core|prepare-native-build-identity/u);
+  assert.doesNotMatch(source, /^  release-acceptance-product-cli:/mu);
+  assert.match(consumer, /needs: \[metadata, ctk3, windows-cli\]/u);
+  const artifactNames = (job) => job.match(/^\s*name: (?:clearra-windows-cli-v|product-e2e-cli-receipt-).+$/gmu)
+    ?.map((name) => name.trim());
+  assert.equal(artifactNames(producer)?.length, 2);
+  assert.deepEqual(artifactNames(consumer), artifactNames(producer));
+  assert.match(producer, /path: \$\{\{ steps\.windows_cli_build\.outputs\.artifact_path \}\}/u);
+  assert.match(producer, /path: \$\{\{ steps\.windows_cli_build\.outputs\.receipt_path \}\}/u);
+  assert.match(consumer, /node scripts\/release\/product-e2e-cli-artifact\.mjs verify/u);
+  assert.match(consumer, /CLEARRA_VERIFIED_PRODUCT_E2E_CLI: \$\{\{ steps\.product_cli\.outputs\.binary_path \}\}/u);
 });
 
 test('Windows release binaries are staged inside and exported by their product owner', () => {

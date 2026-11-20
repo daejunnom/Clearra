@@ -26,7 +26,7 @@ B2Bを維持できる解法の有無を調べる専用形式: `clearra pc allspi
 ASCとARSはルールレジストリで確認できますが、出現位置からの到達可能性が実装されるまでは検索に使用できません。"#
         }
         CliHelpTopic::PcScenario => {
-            r#"使い方: clearra pc-scenario --fixture tests/fixtures/pc/example.json [--verify-expected] [--solution-probabilities] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--no-gpu]
+            r#"使い方: clearra pc-scenario --fixture tests/fixtures/pc/scenario_simple_4l.json [--verify-expected] [--solution-probabilities] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--no-gpu]
   または: clearra pc-scenario --field 0x... --queue IOTSZJ --max-pieces 6 [--solution-probabilities] [--rule srs-plus|srs|srs-x|jstris-180|asc|ars|no-kick] [--kick-profile-json JSON] [--workers N|--cpu-threads N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]
 シナリオプリセットをSearchProblemに変換します。解法別確率の出力はCLIの正規化された解法順序を維持します。"#
         }

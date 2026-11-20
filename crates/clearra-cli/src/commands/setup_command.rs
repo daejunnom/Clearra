@@ -28,6 +28,6 @@ impl SetupCommand {
     }
 }
 
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(test)]
 #[path = "setup_command_tests.rs"]
 mod tests;

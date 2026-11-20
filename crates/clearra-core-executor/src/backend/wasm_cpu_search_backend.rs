@@ -365,15 +365,18 @@ impl WasmCpuSearchSession {
         control: &ExecutionControl,
     ) -> Result<WasmCpuSearchAdvance, WasmCpuSearchError> {
         let advance = match &mut self.inner {
-            WasmSearchSessionInner::Cpu(session) => session.advance(work_budget, control),
-            WasmSearchSessionInner::ExtendedPc(session) => session.advance(work_budget, control),
+            WasmSearchSessionInner::Cpu(session) => {
+                session.advance(work_budget, control).map_err(map_error)
+            }
+            WasmSearchSessionInner::ExtendedPc(session) => {
+                session.advance(work_budget, control).map_err(map_error)
+            }
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
-                session.advance(work_budget, control)
+                session.advance(work_budget, control).map_err(map_error)
             }
             #[cfg(feature = "webgpu-search")]
             WasmSearchSessionInner::WebGpu(session) => session.advance(work_budget, control),
-        }
-        .map_err(map_error)?;
+        }?;
         match advance {
             ExactSearchAdvance::Pending => Ok(WasmCpuSearchAdvance::Pending),
             ExactSearchAdvance::Completed(result) => Ok(WasmCpuSearchAdvance::Completed(result)),
@@ -1993,6 +1996,38 @@ mod coverage_summary_tests {
                 reason: "webgpu_backend_unavailable"
             })
         ));
+    }
+
+    #[cfg(feature = "webgpu-search")]
+    #[test]
+    fn unavailable_selected_adapter_is_not_reported_available_after_native_cpu_fallback() {
+        use super::{ExactSearchAdvance, WasmExactSearchSession};
+
+        let _resource_guard = score_resource_test_guard();
+        let problem = one_piece_problem(RequestedSearchBackend::Gpu, true, true);
+        let mut fallback = WasmExactSearchSession::new(&problem).expect("CPU replacement session");
+        fallback.mark_cpu_fallback(
+            "gpu_device_not_found",
+            "unavailable",
+            "capability-query",
+            false,
+            false,
+        );
+        let control = ExecutionControl::default();
+        let result = loop {
+            match fallback.advance(4096, &control).expect("CPU replacement") {
+                ExactSearchAdvance::Completed(result) => break result,
+                ExactSearchAdvance::Pending => {}
+                ExactSearchAdvance::Cancelled => panic!("CPU replacement cancelled"),
+            }
+        };
+        assert_eq!(result.field("backend_selected"), Some("wasm-cpu"));
+        assert_eq!(result.field("gpu_available"), Some("false"));
+        assert_eq!(
+            result.field("gpu_disabled_reason"),
+            Some("gpu_device_not_found")
+        );
+        assert_eq!(result.field("gpu_trust_state"), Some("fallback-used"));
     }
 
     #[test]

@@ -20,8 +20,7 @@ $testRoot = Join-Path `
     ([System.IO.Path]::GetTempPath()) `
     "clearra-product-process-contract-$PID-$([guid]::NewGuid().ToString('N'))"
 $script:TestCargoTargetDir = Join-Path $testRoot 'cargo-target'
-$script:TestExePath = Join-Path $script:TestCargoTargetDir 'debug/clearra.exe'
-$script:TestNativeLibraryDir = Join-Path $testRoot 'native'
+$script:TestExePath = Join-Path $script:TestCargoTargetDir 'release/clearra.exe'
 $previousCargoTargetDir = $env:CARGO_TARGET_DIR
 $previousWindowsRustFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
 $previousAcceptedCtk3Dist = $env:CLEARRA_ACCEPTED_CTK3_DIST
@@ -40,7 +39,6 @@ $previousReleaseAcceptanceShard = Get-Variable `
 
 try {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $script:TestExePath) | Out-Null
-    New-Item -ItemType Directory -Force -Path $script:TestNativeLibraryDir | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'scripts') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'scripts/tools') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'packages/ctk3/dist') | Out-Null
@@ -120,23 +118,8 @@ try {
     function Get-ClearraCargoTargetDir {
         return $script:TestCargoTargetDir
     }
-    function Get-StartTestsPersistentBuildDir([string]$Name) {
-        return $script:TestNativeLibraryDir
-    }
-    function Get-StartTestsCMakeConfigureArgs([object[]]$AdditionalArgs) {
-        return @($AdditionalArgs)
-    }
     function Invoke-CoreCBuild {
-        param(
-            [string]$BuildDir,
-            [string]$Configuration,
-            [object[]]$ConfigureArgs,
-            [int]$BuildWorkers
-        )
-        return [pscustomobject]@{ Status = 'Passed'; Reason = '' }
-    }
-    function Find-CoreCLibraryDir([string]$BuildDir) {
-        return $script:TestNativeLibraryDir
+        throw 'A shipped Rust CLI build must not configure the C reference'
     }
     function New-ClearraProgressScope {
         param(
@@ -163,19 +146,7 @@ try {
         return $Path
     }
     function Sync-ClearraNativeCargoLinkState {
-        param(
-            [string]$LibraryDirectory,
-            [string]$CargoTargetDirectory,
-            [string]$CargoPath,
-            [string]$WorkspaceRoot
-        )
-        Write-Output '[native-link-cache] reused | package=clearra-core-ffi'
-    }
-    function Add-ClearraWindowsNativeRustLinkFlags(
-        [AllowNull()][string]$ExistingFlags,
-        [string]$LibraryDirectory
-    ) {
-        return $ExistingFlags
+        throw 'A shipped Rust CLI build must not link the C reference'
     }
     function Invoke-ClearraProgressCase {
         param($Scope, [string]$Name, [scriptblock]$Body)
@@ -211,7 +182,7 @@ try {
         param($Scope)
     }
     function Resolve-ProductE2ENativeLibraryDir {
-        return $script:TestNativeLibraryDir
+        throw 'A shipped Rust CLI probe must not resolve the C reference'
     }
 
     $script:Workers = 1
@@ -236,22 +207,32 @@ try {
         param([string]$Surface, [string]$Label)
     }
 
+    $buildCallCount = $script:NativeProgressCalls.Count
     $builtBinaryResult = @(Ensure-ClearraBuiltBinary $testRoot)
     Assert-ProductProcessCondition `
         ($builtBinaryResult.Count -eq 1 -and $builtBinaryResult[0] -is [string]) `
-        'built_binary_returns_one_scalar_value_when_native_link_sync_reports_status'
+        'built_binary_returns_one_scalar_executable'
     Assert-ProductProcessCondition `
         ($builtBinaryResult[0] -eq $script:TestExePath) `
         'built_binary_returns_only_the_executable_path'
+    Assert-ProductProcessCondition `
+        ($script:NativeProgressCalls.Count -eq ($buildCallCount + 1) -and
+            ($script:NativeProgressCalls[$buildCallCount].Arguments -join ' ') -ceq
+                'build --locked --release -p clearra-cli --features wasm-cpu-runtime,webgpu-search --bin clearra') `
+        'local_built_product_uses_the_shipped_rust_build_recipe'
 
     $env:CARGO_TARGET_DIR = $script:TestCargoTargetDir
     $commandResult = @(Invoke-ProductE2EClearra -CommandArgs @('help'))
     Assert-ProductProcessCondition `
         ($commandResult.Count -eq 1 -and $commandResult[0].GetType().Name -eq 'PSCustomObject') `
-        'non_built_product_command_returns_one_result_when_native_link_sync_reports_status'
+        'non_built_product_command_returns_one_result'
     Assert-ProductProcessCondition `
         ($commandResult[0].ExitCode -eq 0 -and $commandResult[0].Command -eq 'clearra help') `
         'non_built_product_command_preserves_the_typed_result_contract'
+    Assert-ProductProcessCondition `
+        (($script:NativeProgressCalls[$script:NativeProgressCalls.Count - 1].Arguments -join ' ') -ceq
+            'run --quiet --locked --release -p clearra-cli --features wasm-cpu-runtime,webgpu-search --bin clearra -- help') `
+        'local_direct_probe_uses_the_shipped_rust_build_recipe'
 
     $nativeCallCountBeforeExactProbe = $script:NativeProgressCalls.Count
     $freshProbe = Invoke-ProductE2EClearra `
@@ -394,8 +375,20 @@ try {
             $capturedVerifyFailure.Contains('native-stderr-failure')) `
         'release_built_product_fails_closed_on_accepted_ctk3_verification'
 
-    $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI = $script:TestExePath
     $script:ClearraReleaseAcceptanceShard = 'RustProduct'
+    Remove-Item Env:\CLEARRA_VERIFIED_PRODUCT_E2E_CLI -ErrorAction SilentlyContinue
+    $missingArtifactFailure = ''
+    $buildCallCount = $script:NativeProgressCalls.Count
+    try {
+        Resolve-ClearraProductE2EBinary $testRoot | Out-Null
+    } catch {
+        $missingArtifactFailure = $_.Exception.Message
+    }
+    Assert-ProductProcessCondition `
+        ($missingArtifactFailure.Contains('requires the verified shipped CLI artifact') -and
+            $script:NativeProgressCalls.Count -eq $buildCallCount) `
+        'rust_product_shard_never_rebuilds_a_missing_artifact'
+    $env:CLEARRA_VERIFIED_PRODUCT_E2E_CLI = $script:TestExePath
     $resolvedVerifiedProduct = @(Resolve-ClearraProductE2EBinary $testRoot)
     Assert-ProductProcessCondition `
         ($resolvedVerifiedProduct.Count -eq 1 -and

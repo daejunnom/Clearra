@@ -36,6 +36,6 @@ fn percent_assembly_error(error: PercentQueryAssemblyError) -> CliOutput {
     CliOutput::error(CliErrorCode::PercentQueryInvalid, message)
 }
 
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(test)]
 #[path = "percent_command_tests.rs"]
 mod tests;

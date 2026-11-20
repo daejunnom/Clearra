@@ -1030,8 +1030,9 @@ mod case_tauri_command_calls_clearra_gui_host_only {
             .as_str()
             .expect("desktop response status string");
 
-        if cfg!(any(feature = "native-c-core", feature = "wasm-cpu-runtime")) {
+        if cfg!(feature = "wasm-cpu-runtime") {
             assert_eq!(status, "success");
+            assert_eq!(value["backend_report"]["backend_selected"], "wasm-cpu");
         }
 
         match status {
@@ -1136,7 +1137,7 @@ mod case_desktop_job_queue_reports_progress_cancel_result {
         assert_event_order(&second_events, second_job);
     }
 
-    #[cfg(feature = "native-c-core")]
+    #[cfg(feature = "wasm-cpu-runtime")]
     #[test]
     fn cancel_button_stops_real_search() {
         let mut bridge = DesktopTauriCommandBridge::default();
@@ -1204,7 +1205,7 @@ mod case_desktop_job_queue_reports_progress_cancel_result {
         }
     }
 
-    #[cfg(feature = "native-c-core")]
+    #[cfg(feature = "wasm-cpu-runtime")]
     fn drain_until_progress(bridge: &mut DesktopTauriCommandBridge, job_id: u64) -> Vec<Value> {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut events = Vec::new();
@@ -1219,7 +1220,7 @@ mod case_desktop_job_queue_reports_progress_cancel_result {
                     event["event"].as_str(),
                     Some("completed" | "failed" | "cancelled")
                 )),
-                "native search ended before the cancellation signal was exercised"
+                "Rust search ended before the cancellation signal was exercised"
             );
             let progress = batch.iter().any(|event| event["event"] == "progress");
             events.append(&mut batch);

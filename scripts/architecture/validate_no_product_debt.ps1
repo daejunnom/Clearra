@@ -1,5 +1,5 @@
-# Release-blocking checks for product-code debt. Tests, fixture support, and
-# historical documents are excluded explicitly; product source is not.
+# Release-blocking checks for product-code debt. Tests, fixture support,
+# separate Cargo example targets and historical documents are not products.
 . (Join-Path $PSScriptRoot '../lib/clearra-local-diagnostics-policy.ps1')
 . (Join-Path $PSScriptRoot '../lib/clearra-path-helpers.ps1')
 
@@ -8,6 +8,7 @@ function Test-NoProductDebtAllowlistedPath([string]$RelativePath) {
     return $path -match '(^|/)tests?/' -or
         $path -match '(^|/)test_support/' -or
         $path -match '(^|/)fixtures?/' -or
+        $path -match '^crates/[^/]+/examples/' -or
         $path -match '(^|/)[^/]*_tests\.rs$' -or
         $path -match '(^|/)[^/]*_behavior(/|\.rs$)' -or
         $path -match '^docs/history/'

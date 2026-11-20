@@ -23,10 +23,6 @@ fn unique_suffix() -> u128 {
         .as_nanos()
 }
 
-fn expected_solver_backend() -> &'static str {
-    "core-c-cpu-packing-cpu-buildup"
-}
-
 mod case_run_with_args_routes_pc_command_through_validation {
     use super::*;
 
@@ -160,7 +156,7 @@ mod case_run_with_args_selects_json_output_format {
         assert!(output.stdout().contains("\"contract\":{\"command\""));
         assert!(output.stdout().contains("\"lines\":2"));
         assert!(output.stdout().contains("\"queue_mode\":\"fixed\""));
-        assert!(output.stdout().contains("\"executor_flow\""));
+        assert!(output.stdout().contains("\"actual_backend\":\"wasm-cpu\""));
     }
 }
 
@@ -452,11 +448,11 @@ mod case_failed_queue_json_quotes_not_calculated_solution_metadata {
     }
 }
 
-mod case_run_with_args_verbose_text_contains_executor_flow {
+mod case_run_with_args_verbose_text_reports_selected_product_backend {
     use super::*;
 
     #[test]
-    fn run_with_args_verbose_text_contains_executor_flow() {
+    fn run_with_args_verbose_text_reports_selected_product_backend() {
         let output = run_with_args([
             "clearra",
             "--verbose",
@@ -470,10 +466,8 @@ mod case_run_with_args_verbose_text_contains_executor_flow {
         ]);
 
         assert_eq!(output.exit_code(), ExitCode::Success);
-        assert!(output.stdout().contains("executor_flow:"));
-        assert!(output
-            .stdout()
-            .contains("route: search-problem-core-executor"));
+        assert!(output.stdout().contains("actual_backend: wasm-cpu"));
+        assert!(!output.stdout().contains("native_c_core_executed: true"));
     }
 }
 
@@ -564,12 +558,7 @@ mod case_run_with_args_routes_pc_queue_hold_and_objective {
         assert!(output.stdout().contains("queue_len: 5"));
         assert!(output.stdout().contains("hold_enabled: false"));
         assert!(output.stdout().contains("objective: unique"));
-        assert!(output
-            .stdout()
-            .contains("route: search-problem-core-executor"));
-        assert!(output
-            .stdout()
-            .contains("two_line_fallback_reason: unsupported_hold_disabled"));
+        assert!(output.stdout().contains("actual_backend: wasm-cpu"));
     }
 }
 
@@ -582,7 +571,7 @@ mod case_run_with_args_routes_pc_scenario_fixture {
             "clearra".to_owned(),
             "pc-scenario".to_owned(),
             "--fixture".to_owned(),
-            fixture_path("tests/fixtures/pc/example.json")
+            fixture_path("tests/fixtures/pc/scenario_simple_4l.json")
                 .display()
                 .to_string(),
             "--verify-expected".to_owned(),
@@ -600,14 +589,10 @@ mod case_run_with_args_routes_pc_scenario_fixture {
         assert!(output.stdout().contains("\"count_policy\":\"count-all\""));
         assert!(output.stdout().contains("\"retained_trace_limit\":1"));
         assert!(output.stdout().contains("\"solution_found\":true"));
-        assert!(output.stdout().contains("\"total_solution_count\":1"));
         assert!(output
             .stdout()
-            .contains(if cfg!(feature = "native-c-core") {
-                "\"count_complete\":true"
-            } else {
-                "\"count_complete\":false"
-            }));
+            .contains("\"normalized_unique_solution_count\":1"));
+        assert!(output.stdout().contains("\"count_complete\":true"));
     }
 }
 
@@ -649,7 +634,7 @@ mod case_run_with_args_selects_command_local_output_format {
             "--lines",
             "2",
             "--queue",
-            "IJLOO",
+            "IIOOO",
             "--fixed",
             "--no-hold",
         ]);
@@ -659,19 +644,10 @@ mod case_run_with_args_selects_command_local_output_format {
         assert_eq!(decoded.pages().len(), 1);
         assert!(decoded.pages()[0].contains("kind=pc"));
         assert!(decoded.pages()[0].contains("status=searched"));
-        assert!(decoded.pages()[0].contains("route=search-problem-core-executor"));
-        assert!(decoded.pages()[0].contains("supply_pattern_count=1"));
-        assert!(decoded.pages()[0].contains("supply_probability_model=fixed-sequence"));
-        assert!(decoded.pages()[0].contains("supply_probability_complete=true"));
-        assert!(decoded.pages()[0].contains("supply_expansion_truncated=false"));
-        assert!(decoded.pages()[0].contains("two_line_fallback_reason=unsupported_hold_disabled"));
-        assert!(
-            decoded.pages()[0].contains(&format!("solver_backend={}", expected_solver_backend()))
-        );
-        assert!(decoded.pages()[0].contains("objective_execution=all-traces"));
-        assert!(decoded.pages()[0].contains("objective_search_mode=all-traces"));
-        assert!(decoded.pages()[0].contains("objective_applied=true"));
-        assert!(decoded.pages()[0].contains("checkpoints=1"));
+        assert!(decoded.pages()[0].contains("actual_backend=wasm-cpu"));
+        assert!(decoded.pages()[0].contains("normalized_unique_solution_count=4"));
+        assert!(decoded.pages()[0].contains("count_complete=true"));
+        assert!(decoded.pages()[0].contains("probability_complete=true"));
     }
 }
 

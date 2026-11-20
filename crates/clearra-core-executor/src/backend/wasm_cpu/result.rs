@@ -5053,7 +5053,8 @@ impl WasmExactSearchSession {
         let gpu_available = self.backend_selected == "webgpu"
             || (explicit_gpu_backend
                 && runtime_webgpu_available
-                && cfg!(feature = "webgpu-search"));
+                && cfg!(feature = "webgpu-search")
+                && self.gpu_failure_class != Some("unavailable"));
         let gpu_disabled_reason = if self.backend_selected == "webgpu" {
             "none"
         } else if self.backend_fallback_used {

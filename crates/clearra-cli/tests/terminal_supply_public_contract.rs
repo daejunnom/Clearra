@@ -86,6 +86,7 @@ fn terminal_supply_p0_cli_json_preserves_the_exact_solution_set() {
         assert_eq!(identity["engine_build_id"], expected);
     }
     assert_eq!(value["kind"], "pc-scenario");
+    assert_eq!(value["summary"]["actual_backend"], "wasm-cpu");
     assert_eq!(
         value["summary"]["unique_solution_count"],
         TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT

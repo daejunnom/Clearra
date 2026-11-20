@@ -23,7 +23,7 @@ test('all-success summary never creates acceptance authority', () => {
   const report = collectReleaseFailureSummary(allSuccess());
   assert.equal(report.status, 'all-jobs-succeeded');
   assert.equal(report.release_authority, false);
-  assert.equal(report.jobs.length, 18);
+  assert.equal(report.jobs.length, 17);
   assert.match(renderReleaseFailureSummary(report), /cannot authorize acceptance or publication/);
 });
 
@@ -32,7 +32,7 @@ test('independent failures and downstream blocks are all visible', () => {
   for (const name of ['release-acceptance-rust', 'release-acceptance-wasm-build', 'windows-cli']) {
     needs[name].result = 'failure';
   }
-  for (const name of ['release-acceptance-pages', 'release-acceptance', 'canonical-evidence']) {
+  for (const name of ['release-acceptance-rust-product', 'release-acceptance-pages', 'release-acceptance', 'canonical-evidence']) {
     needs[name].result = 'skipped';
   }
   const report = collectReleaseFailureSummary(needs);
@@ -40,6 +40,8 @@ test('independent failures and downstream blocks are all visible', () => {
   assert.equal(report.jobs.filter((job) => job.result === 'failure').length, 3);
   assert.deepEqual(report.jobs.find((job) => job.name === 'release-acceptance-pages').blocked_by,
     ['release-acceptance-wasm-build']);
+  assert.deepEqual(report.jobs.find((job) => job.name === 'release-acceptance-rust-product').blocked_by,
+    ['windows-cli']);
   assert.equal(report.jobs.find((job) => job.name === 'release-acceptance-pages').diagnostic_status, 'blocked');
   assert.equal(report.jobs.find((job) => job.name === 'windows-gui').result, 'success');
 });

@@ -51,6 +51,6 @@ mod sequence_dependencies_tests;
 #[path = "cli_entry_document_utility_tests.rs"]
 mod document_utility_tests;
 
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(test)]
 #[path = "cli_entry_tests.rs"]
 mod tests;

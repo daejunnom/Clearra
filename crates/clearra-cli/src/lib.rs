@@ -26,15 +26,15 @@ pub use accelerator_gui_bridge::{
 };
 pub use cli_entry::{run, run_with_args};
 
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(all(test, feature = "wasm-cpu-runtime"))]
 #[path = "../tests/product_cli_surface_contract.rs"]
 mod product_cli_surface_contract;
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(all(test, feature = "wasm-cpu-runtime"))]
 #[path = "../tests/product_contract_e2e.rs"]
 mod product_contract_e2e;
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(all(test, feature = "wasm-cpu-runtime"))]
 #[path = "../tests/product_contract_json_assert.rs"]
 mod product_contract_json_assert;
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(all(test, feature = "wasm-cpu-runtime"))]
 #[path = "../tests/product_golden_t4_contract.rs"]
 mod product_golden_t4_contract;

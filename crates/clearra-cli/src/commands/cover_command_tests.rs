@@ -12,16 +12,11 @@ fn cover_command_assembles_and_validates_canonical_query() {
     assert_eq!(output.exit_code(), ExitCode::Success);
     assert!(output.stdout().contains("template: basic"));
     assert!(output.stdout().contains("status: cover-executed"));
-    assert!(output
-        .stdout()
-        .contains("execution_scope: m21-build-coverage-product-path"));
-    assert!(output
-        .stdout()
-        .contains("coverage_row_source: C BuildUp coverage row"));
     assert!(output.stdout().contains("build_coverage_probability:"));
     assert!(output
         .stdout()
-        .contains("route: search-problem-core-executor"));
+        .contains("coverage_scope: requested-materialized-ordinals"));
+    assert!(output.stdout().contains("probability_complete: true"));
 }
 
 #[test]

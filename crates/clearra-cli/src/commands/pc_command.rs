@@ -97,6 +97,6 @@ impl PcCommand {
     }
 }
 
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(test)]
 #[path = "pc_command_tests.rs"]
 mod tests;

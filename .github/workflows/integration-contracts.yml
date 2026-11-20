@@ -68,7 +68,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-      - name: Build native archive and execute real CLI process tests
+      - name: Execute the Rust product CLI process tests
         shell: pwsh
         run: |
           & ./scripts/tools/invoke-clearra-build.ps1 -Purpose experiment -Command pwsh -ArgumentsJson '["-NoProfile","-File","scripts/tools/check-native-cli-contracts.ps1","-ExecutionSurface","Trusted","-FetchDependencies"]'

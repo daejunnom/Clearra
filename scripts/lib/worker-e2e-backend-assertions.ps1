@@ -49,7 +49,9 @@ function Assert-WorkerE2EGpuUnavailableReason([object]$Json) {
             ForEach-Object { ConvertTo-WorkerE2EScalar $_ } |
             Sort-Object -Unique
     )
-    $invalidReasons = @($actualReasons | Where-Object { $_ -notin @("gpu_device_not_found", "gpu_kernel_unavailable") })
+    $invalidReasons = @($actualReasons | Where-Object {
+        $_ -notin @("gpu_device_not_found", "gpu_kernel_unavailable", "gpu_binding_unavailable", "gpu_backend_not_connected")
+    })
     if ($invalidReasons.Count -gt 0) {
         throw "WorkerE2E backend reported unsupported GPU unavailable reason '$($invalidReasons -join ', ')'"
     }
@@ -61,7 +63,7 @@ function Assert-WorkerE2EHybridUnavailableReason([object]$Json) {
     $gpuReason = Get-WorkerE2EJsonFieldScalar $Json "gpu_disabled_reason"
     $hybridReason = Get-WorkerE2EJsonFieldScalar $Json "hybrid_disabled_reason"
     foreach ($reason in @($gpuReason, $hybridReason)) {
-        if ($reason -notin @("gpu_backend_not_connected", "gpu_device_not_found", "gpu_kernel_unavailable")) {
+        if ($reason -notin @("gpu_backend_not_connected", "gpu_device_not_found", "gpu_kernel_unavailable", "gpu_binding_unavailable")) {
             throw "WorkerE2E backend reported unsupported hybrid unavailable reason '$reason'"
         }
     }
@@ -85,6 +87,34 @@ function Assert-WorkerE2ENoFallbackReason([object]$Json) {
         throw "WorkerE2E no-fallback result reported reason '$($unexpected -join ', ')'"
     }
 }
+function Assert-WorkerE2ERustCpuFallback([object]$Json) {
+    if ((Get-WorkerE2EJsonFieldScalar $Json "fallback_backend") -ne "wasm-cpu" -or
+        (Get-WorkerE2EJsonFieldScalar $Json "gpu_trust_state") -ne "fallback-used") {
+        throw "WorkerE2E fallback must identify the Rust CPU result, not a GPU result"
+    }
+    $reason = Get-WorkerE2EJsonFieldScalar $Json "backend_fallback_reason"
+    $class = Get-WorkerE2EJsonFieldScalar $Json "gpu_failure_class"
+    $incomplete = Get-WorkerE2EJsonFieldScalar $Json "gpu_original_result_incomplete"
+    switch ($reason) {
+        "gpu_resource_incomplete" {
+            if ($class -ne "resource-incomplete" -or $incomplete -ne "true" -or
+                (Get-WorkerE2EJsonFieldScalar $Json "discarded_partial_gpu_result") -ne "true") {
+                throw "WorkerE2E rerun must discard the incomplete GPU result"
+            }
+        }
+        "gpu_transient_before_commit" {
+            if ($class -ne "transient-before-commit" -or $incomplete -ne "false") {
+                throw "WorkerE2E transient fallback must occur before GPU commit"
+            }
+        }
+        default {
+            Assert-WorkerE2EGpuUnavailableReason $Json
+            if ($class -ne "unavailable" -or $incomplete -ne "false") {
+                throw "WorkerE2E unavailable GPU must not produce an incomplete result"
+            }
+        }
+    }
+}
 function Assert-WorkerE2EBackendOutput(
     [string]$Backend,
     [object]$Json
@@ -93,7 +123,10 @@ function Assert-WorkerE2EBackendOutput(
     Assert-WorkerE2EJsonFieldEquals $Json "expected_match" "true"
     Assert-WorkerE2EJsonFieldEquals $Json "solution_found" "true"
     Assert-WorkerE2EJsonFieldEquals $Json "packing_candidate_is_solution" "false"
-    Assert-WorkerE2EJsonFieldEquals $Json "memory_leak_report_clean" "true"
+    if ((Get-WorkerE2EJsonFieldScalar $Json "count_complete") -ne "true" -or
+        (Get-WorkerE2EJsonFieldScalar $Json "resource_truncated") -ne "false") {
+        throw "WorkerE2E requires a complete result without resource truncation"
+    }
     $requested = Get-WorkerE2EJsonFieldScalar $Json "backend_requested"
     if ($requested -ne $Backend) {
         throw "WorkerE2E backend request mismatch expected '$Backend' actual '$requested'"
@@ -106,8 +139,8 @@ function Assert-WorkerE2EBackendOutput(
 
     switch ($Backend) {
         "cpu" {
-            if ((Get-WorkerE2EJsonFieldScalar $Json "backend_selected") -ne "cpu") {
-                throw "CPU backend must select cpu"
+            if ((Get-WorkerE2EJsonFieldScalar $Json "backend_selected") -ne "wasm-cpu") {
+                throw "CPU backend must select the Rust CPU solver"
             }
             if ((Get-WorkerE2EJsonFieldScalar $Json "backend_fallback_used") -ne "false") {
                 throw "CPU backend must not report fallback"
@@ -117,20 +150,15 @@ function Assert-WorkerE2EBackendOutput(
         "gpu" {
             $selected = Get-WorkerE2EJsonFieldScalar $Json "backend_selected"
             $fallback = Get-WorkerE2EJsonFieldScalar $Json "backend_fallback_used"
-            if ($selected -eq "gpu") {
+            if ($selected -eq "webgpu") {
                 Assert-WorkerE2EJsonFieldEquals $Json "backend_fallback_used" "false"
                 if ((Get-WorkerE2EJsonFieldScalar $Json "fallback_backend") -ne "none") {
                     throw "GPU execution must not report a fallback backend"
                 }
                 Assert-WorkerE2ENoFallbackReason $Json
-                Assert-WorkerE2EJsonFieldEquals $Json "gpu_result_cpu_confirmed" "true"
-                Assert-WorkerE2EJsonFieldEquals $Json "gpu_cpu_reference_match" "true"
-                Assert-WorkerE2EJsonFieldEquals $Json "gpu_assisted_buildup_reached" "true"
-            } elseif ($selected -eq "cpu" -and $fallback -eq "true") {
-                if ((Get-WorkerE2EJsonFieldScalar $Json "fallback_backend") -ne "cpu") {
-                    throw "GPU fallback must select the CPU fallback backend"
-                }
-                Assert-WorkerE2EGpuUnavailableReason $Json
+                Assert-WorkerE2EJsonFieldEquals $Json "gpu_trust_state" "gpu-computed-cpu-confirmed"
+            } elseif ($selected -eq "wasm-cpu" -and $fallback -eq "true") {
+                Assert-WorkerE2ERustCpuFallback $Json
             } else {
                 throw "GPU backend must either select gpu or report explicit fallback"
             }
@@ -138,28 +166,24 @@ function Assert-WorkerE2EBackendOutput(
         "hybrid" {
             $selected = Get-WorkerE2EJsonFieldScalar $Json "backend_selected"
             $fallback = Get-WorkerE2EJsonFieldScalar $Json "backend_fallback_used"
-            if ($selected -eq "hybrid" -or $selected -eq "gpu") {
+            if ($selected -eq "webgpu") {
                 Assert-WorkerE2EJsonFieldEquals $Json "backend_fallback_used" "false"
                 if ((Get-WorkerE2EJsonFieldScalar $Json "fallback_backend") -ne "none") {
                     throw "Hybrid execution must not report a fallback backend"
                 }
                 Assert-WorkerE2ENoFallbackReason $Json
-                Assert-WorkerE2EJsonFieldEquals $Json "hybrid_memory_leak_report_clean" "true"
-            } elseif ($selected -eq "cpu" -and $fallback -eq "false") {
+                Assert-WorkerE2EJsonFieldEquals $Json "gpu_trust_state" "gpu-computed-cpu-confirmed"
+                Assert-WorkerE2EJsonFieldEquals $Json "hybrid_status" "gpu-ready"
+            } elseif ($selected -eq "wasm-cpu" -and $fallback -eq "false") {
                 Assert-WorkerE2ENoFallbackReason $Json
                 if ((Get-WorkerE2EJsonFieldScalar $Json "fallback_backend") -ne "none") {
                     throw "Hybrid CPU selection must not report a fallback backend"
                 }
                 Assert-WorkerE2EJsonFieldEquals $Json "hybrid_status" "cpu-selected"
                 Assert-WorkerE2EHybridUnavailableReason $Json
-            } elseif ($selected -eq "cpu" -and $fallback -eq "true") {
-                if ((Get-WorkerE2EJsonFieldScalar $Json "fallback_backend") -ne "cpu") {
-                    throw "Hybrid execution fallback must select the CPU fallback backend"
-                }
-                $reason = Get-WorkerE2EJsonFieldScalar $Json "backend_fallback_reason"
-                if ($reason -notin @("gpu_transient_before_commit", "gpu_resource_incomplete")) {
-                    throw "Hybrid execution fallback reported unsupported reason '$reason'"
-                }
+            } elseif ($selected -eq "wasm-cpu" -and $fallback -eq "true") {
+                Assert-WorkerE2EJsonFieldEquals $Json "hybrid_status" "cpu-selected"
+                Assert-WorkerE2ERustCpuFallback $Json
             } else {
                 throw "Hybrid backend must select hybrid/gpu, select CPU normally, or report an execution fallback"
             }

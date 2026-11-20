@@ -1,6 +1,6 @@
-#![cfg(feature = "native-c-core")]
-
 use std::{path::PathBuf, process::Command};
+
+use serde_json::Value;
 
 fn clearra() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_clearra"));
@@ -16,80 +16,28 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn native_core_enabled() -> bool {
-    cfg!(feature = "native-c-core")
+fn run_json(args: &[&str]) -> Value {
+    let output = clearra()
+        .args(["--format", "json"])
+        .args(args)
+        .output()
+        .expect("launch the product CLI");
+    assert!(
+        output.status.success() && output.stderr.is_empty(),
+        "{args:?}: {}, stdout={}, stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    serde_json::from_slice(&output.stdout).expect("product CLI JSON")
 }
 
-fn expected_retained_trace_key_prefix() -> &'static str {
-    if native_core_enabled() {
-        "\"retained_trace_keys\":[\"bvk2:"
-    } else {
-        "\"retained_trace_keys\":[\"trk1:"
-    }
-}
-
-fn expected_percent_covered_pattern_count() -> usize {
-    1
-}
-
-fn expected_percent_probability() -> &'static str {
-    "100%"
-}
-
-fn expected_path_solution_count() -> usize {
-    if native_core_enabled() {
-        // IIOOO on 2L has four field tilings: the aligned horizontal Is
-        // start at x=0,2,4,6 and the three Os fill the remaining columns.
-        // Build-order/rotation witnesses are not extra solution fields.
-        4
-    } else {
-        1
-    }
-}
-
-fn expected_path_retained_trace_count() -> usize {
-    if native_core_enabled() {
-        4
-    } else {
-        1
-    }
-}
-
-fn expected_scenario_solution_count() -> usize {
-    // The only empty cells form one horizontal I. Storing the final current
-    // in an empty hold cannot produce a second execution without a next piece.
-    1
-}
-
-fn expected_scenario_coverage_probability_json() -> &'static str {
-    if native_core_enabled() {
-        "\"coverage_probability\":1.0"
-    } else {
-        "\"coverage_probability\":0.0"
-    }
-}
-
-fn expected_cpu_confirmed_json() -> &'static str {
-    if native_core_enabled() {
-        "true"
-    } else {
-        "false"
-    }
-}
-
-fn expected_candidate_backend() -> &'static str {
-    "cpu-packing"
-}
-
-fn expected_buildup_backend() -> &'static str {
-    "cpu-buildup"
-}
-
-fn expected_native_c_core_executed_json() -> &'static str {
-    if native_core_enabled() {
-        "true"
-    } else {
-        "false"
+fn assert_rust_cpu(summary: &Value) {
+    assert_eq!(summary["actual_backend"], "wasm-cpu", "{summary}");
+    for key in ["native_c_core_linked", "native_c_core_executed"] {
+        if let Some(flag) = summary.get(key) {
+            assert_eq!(flag, &Value::Bool(false), "{key}: {summary}");
+        }
     }
 }
 
@@ -101,6 +49,7 @@ mod process_e2e_path_percent;
 mod process_e2e_routing;
 #[path = "process_e2e/process_e2e_scenario.rs"]
 mod process_e2e_scenario;
+#[cfg(not(feature = "webgpu-search"))]
 #[path = "process_e2e/process_e2e_setup_backend.rs"]
 mod process_e2e_setup_backend;
 #[path = "process_e2e/process_e2e_verify_continue.rs"]

@@ -28,6 +28,6 @@ impl CoverCommand {
     }
 }
 
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(test)]
 #[path = "cover_command_tests.rs"]
 mod tests;

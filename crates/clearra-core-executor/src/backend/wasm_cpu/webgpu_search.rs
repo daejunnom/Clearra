@@ -16,8 +16,9 @@ use clearra_webgpu::{
 };
 
 use crate::backend::{
-    GpuExecutionFailure, GpuExecutionFailureStage, GpuFailureDisposition,
-    GpuPartialResultDisposition, SearchBackendFallbackReason,
+    wasm_cpu_search_backend::{map_error, WasmCpuSearchError},
+    GpuExecutionFailure, GpuExecutionFailureResolution, GpuExecutionFailureStage,
+    GpuFailureDisposition, GpuPartialResultDisposition, SearchBackendFallbackReason,
 };
 use crate::performance::{ExecutorSearchStage, SearchStageSpan};
 
@@ -140,7 +141,7 @@ impl WasmWebGpuSearchSession {
         &mut self,
         work_budget: usize,
         control: &ExecutionControl,
-    ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
+    ) -> Result<ExactSearchAdvance, WasmCpuSearchError> {
         if control.is_cancelled() {
             return Ok(ExactSearchAdvance::Cancelled);
         }
@@ -200,7 +201,7 @@ impl WasmWebGpuSearchSession {
                         return Ok(ExactSearchAdvance::Cancelled);
                     }
                     Poll::Ready(Err(GpuRunFailure::TrustMismatch(reason))) => {
-                        return Err(WasmExactSearchError::InvalidProblem(reason));
+                        return Err(WasmCpuSearchError::InvalidProblem { reason });
                     }
                     Poll::Ready(Err(GpuRunFailure::Execution(failure))) => {
                         let fallback_policy = if self.fallback_allowed {
@@ -229,29 +230,14 @@ impl WasmWebGpuSearchSession {
                             self.phase = WebGpuSearchPhase::CpuFallback(cpu);
                             continue;
                         }
-                        return Err(WasmExactSearchError::InvalidProblem(
-                            match resolution.disposition() {
-                                GpuFailureDisposition::Unavailable => "webgpu_backend_unavailable",
-                                GpuFailureDisposition::TransientFailure => {
-                                    "webgpu_transient_before_commit"
-                                }
-                                GpuFailureDisposition::Incomplete => "webgpu_resource_incomplete",
-                                GpuFailureDisposition::InvalidRequest => "webgpu_invalid_request",
-                                GpuFailureDisposition::RejectedMismatch => "webgpu_trust_mismatch",
-                                GpuFailureDisposition::FatalInternal => "webgpu_fatal_internal",
-                                GpuFailureDisposition::CpuFallback
-                                | GpuFailureDisposition::CpuRerunAfterIncomplete => {
-                                    "webgpu_fallback_resolution_inconsistent"
-                                }
-                            },
-                        ));
+                        return Err(rejected_gpu_execution(resolution));
                     }
                 },
                 WebGpuSearchPhase::Reducing(mut reduction) => {
                     let Some(exact) = self.exact.as_mut() else {
-                        return Err(WasmExactSearchError::InvalidProblem(
-                            "webgpu_exact_session_missing",
-                        ));
+                        return Err(WasmCpuSearchError::InvalidProblem {
+                            reason: "webgpu_exact_session_missing",
+                        });
                     };
                     let mut processed = 0usize;
                     while processed < work_budget.max(1) {
@@ -272,10 +258,12 @@ impl WasmWebGpuSearchSession {
                                     reduction.session_reused,
                                 );
                                 self.phase = WebGpuSearchPhase::Finished;
-                                return exact.complete_external_geometry(
-                                    reduction.expanded_records,
-                                    reduction.peak_frontier_states,
-                                );
+                                return exact
+                                    .complete_external_geometry(
+                                        reduction.expanded_records,
+                                        reduction.peak_frontier_states,
+                                    )
+                                    .map_err(map_error);
                             };
                             reduction.path_cursor = Some(graph.graph.path_cursor());
                         }
@@ -307,9 +295,9 @@ impl WasmWebGpuSearchSession {
                                 reduction.path_cursor = None;
                             }
                             Err(_) => {
-                                return Err(WasmExactSearchError::InvalidProblem(
-                                    "webgpu_solution_graph_invalid",
-                                ));
+                                return Err(WasmCpuSearchError::InvalidProblem {
+                                    reason: "webgpu_solution_graph_invalid",
+                                });
                             }
                         }
                     }
@@ -330,9 +318,9 @@ impl WasmWebGpuSearchSession {
                     return Ok(outcome);
                 }
                 WebGpuSearchPhase::Finished => {
-                    return Err(WasmExactSearchError::InvalidProblem(
-                        "wasm_search_session_already_finished",
-                    ));
+                    return Err(WasmCpuSearchError::InvalidProblem {
+                        reason: "wasm_search_session_already_finished",
+                    });
                 }
             }
         }
@@ -664,6 +652,34 @@ fn input_failure(error: WebGpuGeometryExactCoverInputError) -> GpuExecutionFailu
     }
 }
 
+impl From<WasmExactSearchError> for WasmCpuSearchError {
+    fn from(error: WasmExactSearchError) -> Self {
+        map_error(error)
+    }
+}
+
+fn rejected_gpu_execution(resolution: GpuExecutionFailureResolution) -> WasmCpuSearchError {
+    let reason = match resolution.disposition() {
+        GpuFailureDisposition::Unavailable => {
+            return WasmCpuSearchError::Unsupported {
+                reason: resolution.failure_reason().map_or(
+                    SearchBackendFallbackReason::GpuBackendNotConnected.as_str(),
+                    SearchBackendFallbackReason::as_str,
+                ),
+            };
+        }
+        GpuFailureDisposition::TransientFailure => "webgpu_transient_before_commit",
+        GpuFailureDisposition::Incomplete => "webgpu_resource_incomplete",
+        GpuFailureDisposition::InvalidRequest => "webgpu_invalid_request",
+        GpuFailureDisposition::RejectedMismatch => "webgpu_trust_mismatch",
+        GpuFailureDisposition::FatalInternal => "webgpu_fatal_internal",
+        GpuFailureDisposition::CpuFallback | GpuFailureDisposition::CpuRerunAfterIncomplete => {
+            "webgpu_fallback_resolution_inconsistent"
+        }
+    };
+    WasmCpuSearchError::InvalidProblem { reason }
+}
+
 fn unavailable_reason(reason: &str) -> SearchBackendFallbackReason {
     if reason.contains("IndexNotFound") || reason.contains("adapter_unavailable") {
         SearchBackendFallbackReason::GpuDeviceNotFound
@@ -705,9 +721,25 @@ mod tests {
     use clearra_pc_graph::request::BackendFallbackPolicy;
     use clearra_webgpu::WebGpuGeometryExactCoverInputError;
 
-    use crate::backend::{GpuExecutionFailureClass, GpuFailureDisposition};
+    use crate::{backend::GpuExecutionFailureClass, CoreExecutionError};
 
-    use super::input_failure;
+    use super::*;
+
+    #[test]
+    fn unavailable_gpu_with_denied_fallback_keeps_the_adapter_reason() {
+        let resolution = GpuExecutionFailure::unavailable(
+            GpuExecutionFailureStage::CapabilityQuery,
+            unavailable_reason("webgpu_adapter_unavailable: IndexNotFound(255)"),
+        )
+        .resolve(BackendFallbackPolicy::Deny);
+        assert!(!resolution.fallback_used());
+        assert_eq!(
+            rejected_gpu_execution(resolution).into_core_execution_error(),
+            CoreExecutionError::RuntimeUnavailable {
+                component: "gpu_device_not_found",
+            }
+        );
+    }
 
     #[test]
     fn readback_failure_can_fallback_only_after_gpu_data_is_discarded() {
@@ -734,5 +766,11 @@ mod tests {
             GpuFailureDisposition::RejectedMismatch
         );
         assert!(!resolution.fallback_used());
+        assert_eq!(
+            rejected_gpu_execution(resolution),
+            WasmCpuSearchError::InvalidProblem {
+                reason: "webgpu_trust_mismatch",
+            }
+        );
     }
 }

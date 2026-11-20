@@ -1,48 +1,35 @@
-# Prepare the real native archive and test the CLI in the same managed owner.
+# Test the ordinary native executable and its Rust product library.
 param([string]$ExecutionSurface = '', [switch]$FetchDependencies)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $Root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 . (Join-Path $Root 'scripts/lib/clearra-path-helpers.ps1')
-. (Join-Path $Root 'scripts/lib/clearra-native-helpers.ps1')
 . (Join-Path $Root 'scripts/lib/clearra-execution-surface.ps1')
-. (Join-Path $Root 'scripts/lib/product-e2e-build.ps1')
-if (-not (Test-StartTestsWindows)) {
-    throw 'This helper binds the Windows MSVC native archive; use the existing platform-native CI entrypoint elsewhere.'
-}
 if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
     throw 'Run check-native-cli-contracts through invoke-clearra-build.ps1.'
 }
 Assert-ClearraCanonicalCargoTargetDir $env:CARGO_TARGET_DIR | Out-Null
-Assert-ClearraTrustedExecutionSurface $ExecutionSurface 'native CLI process contracts'
+Assert-ClearraTrustedExecutionSurface $ExecutionSurface 'Rust CLI product process contracts'
 if ($FetchDependencies) {
     Push-Location $Root
     try {
         & cargo fetch --locked
-        if ($LASTEXITCODE -ne 0) { throw "native CLI dependency fetch failed: $LASTEXITCODE" }
+        if ($LASTEXITCODE -ne 0) { throw "Rust CLI dependency fetch failed: $LASTEXITCODE" }
     } finally { Pop-Location }
 }
-$previousFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
 $previousDebug = $env:CARGO_PROFILE_TEST_DEBUG
 try {
-    $libraryDirectory = Resolve-ProductE2ENativeLibraryDir
-    Sync-ClearraNativeCargoLinkState -LibraryDirectory $libraryDirectory `
-        -CargoTargetDirectory $env:CARGO_TARGET_DIR -WorkspaceRoot $Root | Out-Host
-    $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS =
-        Add-ClearraWindowsNativeRustLinkFlags $previousFlags $libraryDirectory
     $env:CARGO_PROFILE_TEST_DEBUG = '0'
     Push-Location $Root
     try {
-        # wasm-cpu-runtime selects a different App context even when C is
-        # linked. These process contracts deliberately verify the native route.
-        & cargo test --locked --offline -p clearra-cli --features native-c-core `
-            --test process_e2e -j 2 -- --test-threads=2
-        if ($LASTEXITCODE -ne 0) { throw "native CLI process contracts failed: $LASTEXITCODE" }
-        & cargo test --locked --offline -p clearra-cli --features native-c-core `
+        & cargo test --locked --offline -p clearra-cli --features wasm-cpu-runtime `
+            --test process_e2e --test rust_product_process_contract --test terminal_supply_public_contract `
+            -j 2 -- --test-threads=1
+        if ($LASTEXITCODE -ne 0) { throw "Rust CLI process contracts failed: $LASTEXITCODE" }
+        & cargo test --locked --offline -p clearra-cli --features wasm-cpu-runtime `
             --lib tablebase_download -j 2 -- --test-threads=2
-        if ($LASTEXITCODE -ne 0) { throw "native TB download contracts failed: $LASTEXITCODE" }
+        if ($LASTEXITCODE -ne 0) { throw "Rust CLI TB download contracts failed: $LASTEXITCODE" }
     } finally { Pop-Location }
 } finally {
-    $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $previousFlags
     $env:CARGO_PROFILE_TEST_DEBUG = $previousDebug
 }

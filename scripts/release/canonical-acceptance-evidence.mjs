@@ -197,10 +197,6 @@ const REQUIRED_JOBS = Object.freeze(new Map([
     "Seal canonical release acceptance sanitizer shard",
     "Upload canonical release acceptance sanitizer shard",
   ])],
-  ["release-acceptance-product-cli", Object.freeze([
-    "Build and seal exact ProductE2E CLI input",
-    "Upload exact ProductE2E CLI input",
-  ])],
   ["release-acceptance-rust", Object.freeze([
     "Run canonical release acceptance RustExact shard",
     "Seal canonical release acceptance RustExact shard",
@@ -208,8 +204,9 @@ const REQUIRED_JOBS = Object.freeze(new Map([
   ])],
   ["release-acceptance-rust-product", Object.freeze([
     "Download accepted CTK3 distribution",
-    "Download exact ProductE2E CLI input",
-    "Verify exact ProductE2E CLI input",
+    "Download shipping Windows CLI for ProductE2E",
+    "Download shipping Windows CLI receipt for ProductE2E",
+    "Verify shipping Windows CLI for ProductE2E",
     "Run canonical release acceptance RustProduct shard without rebuilding",
     "Seal canonical release acceptance RustProduct shard",
     "Upload canonical release acceptance RustProduct shard",
@@ -237,6 +234,7 @@ const REQUIRED_JOBS = Object.freeze(new Map([
   ["windows-cli", Object.freeze([
     "Build and exercise standalone WASM CPU CLI",
     "Upload Windows CLI artifact",
+    "Upload shipping Windows CLI receipt for ProductE2E",
   ])],
   ["windows-gui", Object.freeze([
     "Build standalone SvelteKit and Tauri GUI",

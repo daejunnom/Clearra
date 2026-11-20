@@ -26,9 +26,8 @@ They are not safe to background inside one job:
 - `NoProductDebt` owns static architecture evidence and delegates specific
   executed evidence to later owners.
 - `RustExactTests` and `RenderGolden` share the canonical native test target.
-  `ProductE2E` needs a product CLI with a different feature/profile contract,
-  so its exact binary is built in an isolated producer rather than copied from
-  an unrelated candidate artifact.
+  `ProductE2E` instead uses the release-profile Rust CLI built and exercised by
+  the Windows product job. The C reference archive is not its input.
 - `CSanitizer` owns its sanitizer-specific C build tree.
 - WASM source/host contracts use native Windows test binaries.
 - Accepted WASM artifact compilation uses a dedicated Linux target tree.
@@ -53,7 +52,7 @@ the tracked `-ReleaseAcceptanceShard` parameter:
 | Foundation DesktopHost | `DesktopHost` | exact source/run/attempt |
 | Sanitizer | `CSanitizer` | exact source/run/attempt |
 | RustExact | `RustExactTests`, `RenderGolden` | exact source/run/attempt |
-| RustProduct | `ProductE2E` | exact accepted CTK3 distribution and source/run/attempt-bound ProductE2E CLI |
+| RustProduct | `ProductE2E` | exact accepted CTK3 distribution and source/run/attempt-bound shipping Windows CLI |
 | Pages | `WasmBuildTest` | exact accepted WASM build, source/run/attempt, and Pages base path |
 
 Three sibling prerequisite jobs replace serial production and duplicate
@@ -66,18 +65,19 @@ ProductE2E compilation:
 2. `release-acceptance-wasm-build` runs on Linux. It only builds the accepted
    WASM artifact, seals the closed receipt, and uploads the source/run/attempt-
    bound artifact. It does not repeat the native source/host contract suite.
-3. `release-acceptance-product-cli` runs on Windows as soon as metadata is
-   bound. It builds the exact debug/native feature combination consumed by
-   ProductE2E, seals the native-library identity and executable digest, and
-   uploads an immutable source/run/attempt-bound input. `RustExact` also starts
-   from metadata immediately; it never waits for this producer or CTK3.
+3. `windows-cli` runs as soon as metadata is bound. It builds and smokes the
+   release-profile Rust CLI once, uploads exactly the executable that will
+   ship, and separately uploads a receipt binding its name, size, digest,
+   recipe, version, and source/run/attempt. `RustExact` also starts from
+   metadata immediately; it never waits for this product or CTK3.
 
 `release-acceptance-rust-product` starts only after its exact CLI and CTK3
-inputs exist. It verifies both inputs, exports the verified executable through
-the closed RustProduct-only bridge, and runs ProductE2E without invoking Cargo.
-This is deliberate artifact reuse. A Windows release CLI, Linux Bookworm CLI,
-WASM artifact, or prior-run Cargo output cannot substitute for it because its
-target, profile, features, native-link identity, or release identity differs.
+inputs exist. It downloads the same Windows CLI artifact used by final
+acceptance, verifies it against the current receipt, and passes that downloaded
+path through the closed RustProduct-only bridge without invoking Cargo. A C
+reference build, Linux CLI, WASM artifact, or prior-run Windows executable
+cannot substitute. Prior C-era acceptance evidence remains historical; it
+does not demonstrate that ProductE2E ran on the shipping Rust CLI.
 
 The closed receipt binds:
 
@@ -206,8 +206,8 @@ second producer step.
 ## Expected effect and verification boundary
 
 This design removes native contract compilation from the accepted artifact's
-serial critical path, starts RustExact and the ProductE2E CLI producer together,
-reuses that exact CLI instead of compiling it again after RustExact, uses the
+serial critical path, starts RustExact and the shipping Windows CLI producer
+together, replaces the former separate C ProductE2E build, uses the
 Linux WASM producer path, and makes the real Cargo parallelism visible.
 RustProduct remains behind only its true CTK3 and CLI inputs. Candidate focused
 WASM feedback uses the same Linux cache family, while candidate native

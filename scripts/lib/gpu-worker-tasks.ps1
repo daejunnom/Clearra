@@ -1,5 +1,5 @@
-# GPU worker verification workflows. Search correctness remains in the native
-# C tests and product library route; these functions orchestrate only the gate.
+# The product gate checks Rust WebGPU. The explicit native-reference task
+# below still runs the independent C tests.
 
 function Invoke-GpuWorkerCargoCheck([string]$Root, [string[]]$Packages) {
     $scope = New-ClearraProgressScope `
@@ -14,7 +14,7 @@ function Invoke-GpuWorkerCargoCheck([string]$Root, [string[]]$Packages) {
         foreach ($packageName in $Packages) {
             $arguments = @("check", "-p", $packageName, "--lib", "--tests")
             if ($packageName -in @("clearra-core-executor", "clearra-app")) {
-                $arguments += @("--features", "native-c-core,webgpu-search")
+                $arguments += @("--features", "parallel,webgpu-search")
             }
             Invoke-ClearraProgressCase `
                 -Scope $scope `
@@ -50,7 +50,6 @@ function Invoke-GpuWorkerAcceptanceTask([string]$Root) {
         "clearra-output",
         "clearra-app"
     )
-    Invoke-CoreCTestStartMode $Root "GpuWorkerAcceptance" (Get-StartTestsCMakeConfigureArgs)
     Invoke-ProductE2EBuiltTask $Root
     & (Join-Path $Root "scripts/desktop-host-check.ps1") `
         -Workers $Workers `

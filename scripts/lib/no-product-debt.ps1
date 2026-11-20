@@ -17,7 +17,7 @@ function Invoke-NoProductDebtStaticGate {
     if ($result.ExitCode -ne 0) {
         throw "NoProductDebt static validation failed with exit code $($result.ExitCode)"
     }
-    Write-Output 'no_product_debt_static=passed allowlist=test-fixtures,docs-history'
+    Write-Output 'no_product_debt_static=passed allowlist=test-fixtures,cargo-examples,docs-history'
 }
 
 function Invoke-NoProductDebtRustCase {
@@ -54,57 +54,15 @@ function Invoke-NoProductDebtRustCase {
 }
 
 function Invoke-NoProductDebtMaxScoreProbe {
-    param(
-        [string]$Root,
-        [string]$CargoPath,
-        [int]$Workers
-    )
+    param([string]$CargoPath)
 
-    Write-Output '[no-product-debt] native max-score library product probe'
-    $libDir = Get-NoProductDebtNativeCoreLibraryDir $Workers
-
-    $previousWindowsRustFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
-    try {
-        Sync-ClearraNativeCargoLinkState `
-            -LibraryDirectory $libDir `
-            -CargoTargetDirectory (Get-ClearraCargoTargetDir) `
-            -CargoPath $CargoPath `
-            -WorkspaceRoot $Root
-        $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS =
-            Add-ClearraWindowsNativeRustLinkFlags $previousWindowsRustFlags $libDir
-        Invoke-NoProductDebtRustCase $CargoPath 'clearra-cli' `
-            @('--features', 'native-c-core,webgpu-search', '--lib') `
-            'library_route_max_score_materializes_profile_specific_nonzero_matrix' `
-            'library_route_max_score_materializes_profile_specific_nonzero_matrix' `
-            'max_score_nonzero_profile_matrix'
-    }
-    finally {
-        if ([string]::IsNullOrWhiteSpace($previousWindowsRustFlags)) {
-            Remove-Item Env:\CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS -ErrorAction SilentlyContinue
-        } else {
-            $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $previousWindowsRustFlags
-        }
-    }
+    Write-Output '[no-product-debt] Rust max-score library product probe'
+    Invoke-NoProductDebtRustCase $CargoPath 'clearra-cli' `
+        @('--features', 'wasm-cpu-runtime,webgpu-search', '--lib') `
+        'library_route_max_score_materializes_profile_specific_nonzero_matrix' `
+        'library_route_max_score_materializes_profile_specific_nonzero_matrix' `
+        'max_score_nonzero_profile_matrix'
     Write-Output 'no_product_debt_execution_surface=max-score route=clearra_cli::run_with_args process-launch=False'
-}
-
-function Get-NoProductDebtNativeCoreLibraryDir {
-    param([int]$Workers)
-
-    $buildDir = Get-StartTestsPersistentBuildDir 'core-c-library-cache'
-    $coreBuild = Invoke-CoreCBuild `
-        -BuildDir $buildDir `
-        -Configuration 'Debug' `
-        -ConfigureArgs (Get-StartTestsCMakeConfigureArgs @('-DBUILD_TESTING=OFF')) `
-        -BuildWorkers ([Math]::Max(1, $Workers))
-    if ($coreBuild.Status -ne 'Passed') {
-        throw "NoProductDebt could not build native C core: $($coreBuild.Reason)"
-    }
-    $libDir = Find-CoreCLibraryDir $buildDir
-    if ([string]::IsNullOrWhiteSpace($libDir)) {
-        throw "NoProductDebt could not find clearra_core under $buildDir"
-    }
-    return $libDir
 }
 
 function Invoke-NoProductDebtDesktopProbe {
@@ -206,8 +164,8 @@ function Invoke-NoProductDebtGate {
             -ErrorAction SilentlyContinue
         $isReleaseAcceptance = $null -ne $releaseAcceptance -and [bool]$releaseAcceptance.Value
         Invoke-NoProductDebtRustCase $CargoPath 'clearra-core-executor' @('--lib') `
-            'default_build_reports_native_runtime_unavailable' `
-            'default_build_reports_native_runtime_unavailable' `
+            'explicit_c_reference_without_linked_native_runtime_reports_unavailable' `
+            'explicit_c_reference_without_linked_native_runtime_reports_unavailable' `
             'native_unavailable_explicit_error'
         Invoke-NoProductDebtRustCase $CargoPath 'clearra-wasm' @('--lib') `
             'wasm_output_keys_are_not_localized' `
@@ -238,7 +196,7 @@ function Invoke-NoProductDebtGate {
         } else {
             Invoke-NoProductDebtDesktopProbe $CargoPath
         }
-        Invoke-NoProductDebtMaxScoreProbe $Root $CargoPath $Workers
+        Invoke-NoProductDebtMaxScoreProbe $CargoPath
     }
     finally {
         if ([string]::IsNullOrWhiteSpace($previousCargoTargetDir)) {

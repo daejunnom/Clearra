@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,110 +10,150 @@ import test from 'node:test';
 
 const script = fileURLToPath(new URL('./product-e2e-cli-artifact.mjs', import.meta.url));
 const source = 'a'.repeat(40);
+const version = '0.8.6';
+const shippingName = `Clearra-CLI-v${version}-windows-x86_64.exe`;
+const receiptName = 'clearra-product-e2e-cli-input.v2.json';
+const shippingBytes = 'exact-binary-bytes';
 
-function fixture() {
+function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'clearra-product-cli-'));
-  const binary = join(root, 'source.exe');
-  const identity = join(root, 'identity.json');
-  const artifact = join(root, 'artifact');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const artifact = join(root, 'downloaded Windows CLI');
+  const receipt = join(root, 'receipt');
+  const binary = join(artifact, shippingName);
+  const receiptFile = join(receipt, receiptName);
   const output = join(root, 'github-output.txt');
-  writeFileSync(binary, 'exact-binary-bytes');
-  writeFileSync(identity, `${JSON.stringify({
-    schema_version: 'clearra.native-build-identity.v1',
-    authority: 'non-authoritative-build-input',
-    source_commit: source,
-    identity_sha256: 'b'.repeat(64),
-    tracked_inputs_sha256: 'c'.repeat(64),
-    tracked_input_count: 7,
-    configuration: {},
-    native_archive: {},
-    toolchain: {},
-    runtime_paths: {},
-  })}\n`);
-  return { root, binary, identity, artifact, output };
+  mkdirSync(artifact);
+  writeFileSync(binary, shippingBytes);
+  return { binary, artifact, receipt, receiptFile, output };
 }
 
-function seal(paths) {
-  execFileSync(process.execPath, [script, 'seal',
-    '--binary', paths.binary,
-    '--native-identity', paths.identity,
+function run(args) {
+  const result = spawnSync(process.execPath, [script, ...args], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  assert.ifError(result.error);
+  return result;
+}
+
+function seal(paths, { binary = paths.binary } = {}) {
+  return run(['seal',
+    '--binary', binary,
+    '--version', version,
     '--source-commit', source,
     '--run-id', '41',
     '--run-attempt', '2',
-    '--output', paths.artifact,
+    '--output', paths.receipt,
   ]);
 }
 
 function verify(paths, overrides = {}) {
-  return spawnSync(process.execPath, [script, 'verify',
+  return run(['verify',
     '--artifact', paths.artifact,
+    '--receipt', paths.receipt,
+    '--expected-version', overrides.version ?? version,
     '--expected-source-commit', overrides.source ?? source,
     '--expected-run-id', overrides.runId ?? '41',
     '--expected-run-attempt', overrides.runAttempt ?? '2',
     '--github-output', paths.output,
-  ], { encoding: 'utf8' });
+  ]);
 }
 
-test('seals and verifies one exact source/run/attempt-bound product CLI', () => {
-  const paths = fixture();
-  try {
-    seal(paths);
-    const result = verify(paths);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /product_e2e_cli_artifact=verified/u);
-    assert.equal(readFileSync(paths.output, 'utf8'), `binary_path=${join(paths.artifact, 'clearra.exe')}\n`);
-  } finally {
-    rmSync(paths.root, { recursive: true, force: true });
-  }
+function sealSuccessfully(paths) {
+  const result = seal(paths);
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function assertVerifyRejected(paths, overrides) {
+  const result = verify(paths, overrides);
+  assert.ok(Number.isInteger(result.status) && result.status !== 0);
+  assert.equal(existsSync(paths.output), false, 'failed verification must not authorize an executable');
+}
+
+test('seals only a receipt and returns the actual downloaded shipping CLI', (t) => {
+  const paths = fixture(t);
+  sealSuccessfully(paths);
+  assert.deepEqual(readdirSync(paths.receipt), [receiptName]);
+  const result = verify(paths);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(paths.output, 'utf8'), `binary_path=${paths.binary}\n`);
+  assert.deepEqual(readdirSync(paths.artifact), [shippingName]);
+  assert.equal(readFileSync(paths.binary, 'utf8'), shippingBytes);
+  assert.deepEqual(readdirSync(paths.receipt), [receiptName], 'verification must not copy the executable');
 });
 
-test('rejects a mutated binary without rebuilding or falling back', () => {
-  const paths = fixture();
-  try {
-    seal(paths);
-    writeFileSync(join(paths.artifact, 'clearra.exe'), 'mutated');
-    const result = verify(paths);
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /digest or size mismatch/u);
-  } finally {
-    rmSync(paths.root, { recursive: true, force: true });
-  }
+test('rejects different bytes of the same size without rebuilding or falling back', (t) => {
+  const paths = fixture(t);
+  sealSuccessfully(paths);
+  const mutated = 'X' + shippingBytes.slice(1);
+  writeFileSync(paths.binary, mutated);
+  assertVerifyRejected(paths);
+  assert.equal(readFileSync(paths.binary, 'utf8'), mutated);
 });
 
-test('rejects source, run, attempt, and extra-file mismatches', () => {
-  for (const mutate of [
-    (paths) => verify(paths, { source: 'd'.repeat(40) }),
-    (paths) => verify(paths, { runId: '42' }),
-    (paths) => verify(paths, { runAttempt: '3' }),
-    (paths) => { writeFileSync(join(paths.artifact, 'extra.txt'), 'extra'); return verify(paths); },
+test('rejects version, source, run, and attempt mismatches', (t) => {
+  const paths = fixture(t);
+  sealSuccessfully(paths);
+  for (const overrides of [
+    { version: '0.8.7' }, { source: 'd'.repeat(40) }, { runId: '42' }, { runAttempt: '3' },
   ]) {
-    const paths = fixture();
-    try {
-      seal(paths);
-      const result = mutate(paths);
-      assert.notEqual(result.status, 0);
-    } finally {
-      rmSync(paths.root, { recursive: true, force: true });
-    }
+    assertVerifyRejected(paths, overrides);
   }
 });
 
-test('rejects a non-empty seal destination', () => {
-  const paths = fixture();
-  try {
-    mkdirSync(paths.artifact);
-    writeFileSync(join(paths.artifact, 'existing'), 'x');
-    const result = spawnSync(process.execPath, [script, 'seal',
-      '--binary', paths.binary,
-      '--native-identity', paths.identity,
-      '--source-commit', source,
-      '--run-id', '41',
-      '--run-attempt', '2',
-      '--output', paths.artifact,
-    ], { encoding: 'utf8' });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /must be empty/u);
-  } finally {
-    rmSync(paths.root, { recursive: true, force: true });
+test('rejects a nonshipping executable name at seal and verify', (t) => {
+  const sealing = fixture(t);
+  const unexpected = join(sealing.artifact, 'clearra.exe');
+  renameSync(sealing.binary, unexpected);
+  const result = seal(sealing, { binary: unexpected });
+  assert.ok(Number.isInteger(result.status) && result.status !== 0);
+  assert.equal(existsSync(sealing.receiptFile), false);
+
+  const verifying = fixture(t);
+  sealSuccessfully(verifying);
+  renameSync(verifying.binary, join(verifying.artifact, 'clearra.exe'));
+  assertVerifyRejected(verifying);
+});
+
+test('rejects extra files in either artifact directory', (t) => {
+  for (const name of ['artifact', 'receipt']) {
+    const paths = fixture(t);
+    sealSuccessfully(paths);
+    writeFileSync(join(paths[name], 'extra.txt'), 'extra');
+    assertVerifyRejected(paths);
   }
+});
+
+test('cannot use the historical C ProductE2E receipt as shipping authority', (t) => {
+  for (const historicalSchema of [true, false]) {
+    const paths = fixture(t);
+    sealSuccessfully(paths);
+    const receipt = JSON.parse(readFileSync(paths.receiptFile, 'utf8'));
+    if (historicalSchema) {
+      receipt.schema_version = 'clearra.product-e2e-cli-input.v1';
+    } else {
+      receipt.recipe = {
+        package: 'clearra-cli',
+        binary: 'clearra',
+        profile: 'dev',
+        target_triple: 'x86_64-pc-windows-msvc',
+        features: ['native-c-core', 'webgpu-search'],
+      };
+    }
+    writeFileSync(paths.receiptFile, `${JSON.stringify(receipt)}\n`);
+    assertVerifyRejected(paths);
+  }
+});
+
+test('does not overwrite a non-empty seal destination', (t) => {
+  const paths = fixture(t);
+  mkdirSync(paths.receipt);
+  const existing = join(paths.receipt, 'existing');
+  writeFileSync(existing, 'preserve');
+  const result = seal(paths);
+  assert.ok(Number.isInteger(result.status) && result.status !== 0);
+  assert.deepEqual(readdirSync(paths.receipt), ['existing']);
+  assert.equal(readFileSync(existing, 'utf8'), 'preserve');
 });

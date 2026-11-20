@@ -11,7 +11,7 @@ fn process_e2e_mvp2_cli_commands_are_routed() {
         .output()
         .expect("clearra-cli process runs");
     let percent = clearra()
-        .args(["percent", "--queue", "IOT", "--min-len", "5"])
+        .args(["percent", "--queue", "IOT", "--fixed", "--min-len", "3"])
         .output()
         .expect("clearra-cli process runs");
     let path = clearra()
@@ -48,82 +48,15 @@ fn process_e2e_mvp2_cli_commands_are_routed() {
 
 #[test]
 fn process_e2e_m18_cli_commands_use_search_problem_executor_route() {
-    let commands: [(&[&str], &str, &str); 5] = [
-        (
-            &[
-                "--verbose",
-                "pc",
-                "--lines",
-                "2",
-                "--queue",
-                "IJLOO",
-                "--fixed",
-                "--no-hold",
-            ],
-            "kind: pc",
-            "route: search-problem-core-executor",
-        ),
-        (
-            &[
-                "--verbose",
-                "pc-scenario",
-                "--fixture",
-                "tests/fixtures/pc/example.json",
-            ],
-            "kind: pc-scenario",
-            "route: search-problem-core-executor",
-        ),
-        (
-            &[
-                "--verbose",
-                "path",
-                "--lines",
-                "2",
-                "--queue",
-                "IIOOO",
-                "--fixed",
-                "--no-hold",
-            ],
-            "kind: path",
-            "status: path-rendered",
-        ),
-        (
-            &["--verbose", "percent", "--queue", "IOT", "--min-len", "5"],
-            "kind: percent",
-            "route: search-problem-core-executor",
-        ),
-        (
-            &["--verbose", "cover", "--template", "basic"],
-            "kind: build_coverage",
-            "route: search-problem-core-executor",
-        ),
-    ];
-
-    for (args, kind_marker, route_marker) in commands {
-        let output = clearra()
-            .args(args)
-            .output()
-            .expect("clearra-cli process runs");
-        assert!(
-            output.status.success(),
-            "command failed: {:?}\nstderr={}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            output.stderr.is_empty(),
-            "stderr for {args:?} was not empty"
-        );
-        let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-        assert!(
-            stdout.contains(kind_marker),
-            "missing {kind_marker}: {stdout}"
-        );
-        assert!(
-            stdout.contains(route_marker),
-            "missing {route_marker}: {stdout}"
-        );
-    }
+    // Opening, scenario, Path and Percent are covered by their command-specific
+    // process tests. Keep the remaining legacy route under executable coverage
+    // with its real compiled template and complete Rust build union.
+    let cover = run_json(&["cover", "--template", "basic"]);
+    assert_eq!(cover["kind"], "build_coverage");
+    let summary = &cover["summary"];
+    assert_eq!(summary["coverage_scope"], "requested-materialized-ordinals");
+    assert_eq!(summary["count_complete"], true);
+    assert_eq!(summary["probability_complete"], true);
 }
 
 #[test]

@@ -35,8 +35,10 @@ jobs:
       - name: Verify canonical rules and Rust-to-C descriptors
         run: cargo +1.98.1 test --locked -p clearra-rules -p clearra-core-ffi --lib
       - name: Verify public kick diagnostics
-        run: cargo +1.98.1 test --locked -p clearra-cli --lib verify_command_reports_builtin_kick_contracts
-      - name: Verify C rules, reachability, and native CLI routing in a managed build
+        run: |
+          cargo +1.98.1 test --locked -p clearra-cli --lib verify_command_reports_builtin_kick_contracts
+          cargo +1.98.1 test --locked -p clearra-cli --lib run_with_args_routes_verify_kicks_command
+      - name: Verify independent C rules and reachability in a managed build
         shell: bash
         run: |
           node scripts/tools/invoke-clearra-build.mjs --purpose experiment -- node --input-type=module <<'JS'
@@ -53,8 +55,4 @@ jobs:
           run('cmake', ['-S', 'core-c', '-B', out, '-DBUILD_TESTING=ON', '-DCLEARRA_CORE_SPLIT_TESTS=ON', '-DCMAKE_BUILD_TYPE=Debug']);
           run('cmake', ['--build', out, '--target', 'clearra_core', 'clearra_core_test_oracle', 'rule_profile_tests', 'candidate_tests', 'reachability_tests', '-j', '4']);
           run('ctest', ['--test-dir', out, '--output-on-failure', '-R', '^(rule_profile_tests|candidate_tests|reachability_tests)$']);
-          run('cargo', ['+1.98.1', 'test', '--locked', '-p', 'clearra-cli', '--features', 'native-c-core', '--lib', 'run_with_args_routes_verify_kicks_command'], {
-            ...process.env,
-            RUSTFLAGS: [process.env.RUSTFLAGS, `-L native=${out}`].filter(Boolean).join(' ')
-          });
           JS

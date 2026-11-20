@@ -107,13 +107,9 @@ function ConvertTo-ProductE2ETypedScalar([object]$Value) {
 }function Test-ProductE2EGpuUnavailableReason([string]$Reason) {
     return $Reason -in @(
         "gpu_device_not_found",
-        "gpu_kernel_unavailable"
-    )
-}function Test-ProductE2EHybridUnavailableReason([string]$Reason) {
-    return $Reason -in @(
-        "gpu_backend_not_connected",
-        "gpu_device_not_found",
-        "gpu_kernel_unavailable"
+        "gpu_kernel_unavailable",
+        "gpu_binding_unavailable",
+        "gpu_backend_not_connected"
     )
 }function Assert-ProductE2EJsonFieldGpuUnavailableReason(
     [object]$Json,
@@ -138,29 +134,6 @@ function ConvertTo-ProductE2ETypedScalar([object]$Value) {
         throw "typed assertion failed: field '$FieldName' reported inconsistent GPU unavailable reasons '$($actualReasons -join ', ')'"
     }
     return $actualReasons[0]
-}function Assert-ProductE2EJsonFieldHybridUnavailableReason(
-    [object]$Json,
-    [string]$FieldName
-) {
-    $values = New-Object System.Collections.Generic.List[object]
-    Add-ProductE2EJsonFieldValues $Json $FieldName $values
-    if ($values.Count -eq 0) {
-        throw "typed assertion failed: expected field '$FieldName' to exist"
-    }
-
-    $actualReasons = @(
-        $values.ToArray() |
-            ForEach-Object { ConvertTo-ProductE2ETypedScalar $_ } |
-            Sort-Object -Unique
-    )
-    $invalidReasons = @($actualReasons | Where-Object { -not (Test-ProductE2EHybridUnavailableReason $_) })
-    if ($invalidReasons.Count -gt 0) {
-        throw "typed assertion failed: field '$FieldName' reported unsupported hybrid unavailable reason '$($invalidReasons -join ', ')'"
-    }
-    if ($actualReasons.Count -ne 1) {
-        throw "typed assertion failed: field '$FieldName' reported inconsistent hybrid unavailable reasons '$($actualReasons -join ', ')'"
-    }
-    return $actualReasons[0]
 }function Assert-ProductE2EJsonFieldNoFallbackReason([object]$Json) {
     $values = New-Object System.Collections.Generic.List[object]
     Add-ProductE2EJsonFieldValues $Json "backend_fallback_reason" $values
@@ -176,18 +149,14 @@ function ConvertTo-ProductE2ETypedScalar([object]$Value) {
     if ($unexpected.Count -gt 0) {
         throw "typed assertion failed: no-fallback result reported reason '$($unexpected -join ', ')'"
     }
-}function Assert-ProductE2EOutputGpuUnavailableReason([string]$Output) {
-    $actualReasons = @(
-        @("gpu_device_not_found", "gpu_kernel_unavailable") |
-            Where-Object { $Output -like "*$_*" }
-    )
-    if ($actualReasons.Count -eq 0) {
-        throw "typed assertion failed: output must report gpu_device_not_found or gpu_kernel_unavailable"
+}function Assert-ProductE2EMissingGpuDenial([string]$Output) {
+    # The JSON-request error contract is stderr-only for unsupported requests.
+    if ($Output -cnotmatch '(?m)^error E_BACKEND_GPU_UNAVAILABLE\b[^\r\n]*\bgpu_device_not_found\b') {
+        throw "typed assertion failed: denied GPU fallback must report the missing device without exposing a CPU result"
     }
-    if ($actualReasons.Count -ne 1) {
-        throw "typed assertion failed: output reported inconsistent GPU unavailable reasons '$($actualReasons -join ', ')'"
+    if ($Output -match '(?im)^\s*\{|(?:backend_selected|actual_backend|selected_backend)["'']?\s*[:=]\s*["'']?(?:wasm-cpu|cpu)(?![\w-])') {
+        throw "typed assertion failed: denied GPU fallback included a result or CPU selection"
     }
-    return $actualReasons[0]
 }function Assert-ProductE2EJsonFieldSame(
     [object]$ExpectedJson,
     [object]$ActualJson,
@@ -240,6 +209,9 @@ function ConvertTo-ProductE2ETypedScalar([object]$Value) {
             "fallback_used",
             "fallback_backend",
             "backend_fallback_reason",
+            "gpu_failure_class",
+            "gpu_failure_stage",
+            "discarded_partial_gpu_result",
             "hybrid_status",
             "hybrid_disabled_reason",
             "memory_pressure_level",
@@ -276,40 +248,35 @@ function ConvertTo-ProductE2ETypedScalar([object]$Value) {
         throw "typed assertion failed: backend_report.$FieldName reported unsupported GPU unavailable reason '$actual'"
     }
     return $actual
-}function Assert-ProductE2EBackendReportHybridUnavailableReason(
-    [object]$Json,
-    [string]$FieldName
-) {
-    $report = Get-ProductE2EBackendReport $Json
-    if (-not ($report.PSObject.Properties.Name -contains $FieldName)) {
-        throw "typed assertion failed: backend_report.$FieldName must be present"
-    }
-    $actual = ConvertTo-ProductE2ETypedScalar $report.$FieldName
-    if (-not (Test-ProductE2EHybridUnavailableReason $actual)) {
-        throw "typed assertion failed: backend_report.$FieldName reported unsupported hybrid unavailable reason '$actual'"
-    }
-    return $actual
 }function Assert-ProductE2ECpuSelectionReport([object]$Json) {
     Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_requested" "cpu"
-    Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_selected" "cpu"
+    Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_selected" "wasm-cpu"
     Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_fallback_used" "false"
     Assert-ProductE2EBackendReportFieldEquals $Json "backend_requested" "cpu"
-    Assert-ProductE2EBackendReportFieldEquals $Json "backend_selected" "cpu"
+    Assert-ProductE2EBackendReportFieldEquals $Json "backend_selected" "wasm-cpu"
     Assert-ProductE2EBackendReportFieldEquals $Json "fallback_used" "false"
     Assert-ProductE2EBackendReportFieldEquals $Json "fallback_backend" "none"
     Assert-ProductE2EBackendReportFieldEquals $Json "backend_fallback_reason" $null
     Assert-ProductE2EJsonFieldNoFallbackReason $Json
-}function Assert-ProductE2EGpuCpuFallbackReport([object]$Json) {
-    Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_requested" "gpu"
-    Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_selected" "cpu"
+}function Assert-ProductE2EGpuCpuFallbackReport(
+    [object]$Json,
+    [string]$RequestedBackend = "gpu",
+    [switch]$MissingDevice
+) {
+    Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_requested" $RequestedBackend
+    Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_selected" "wasm-cpu"
+    Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_fallback_allowed" "true"
     Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_fallback_used" "true"
-    Assert-ProductE2EBackendReportFieldEquals $Json "backend_requested" "gpu"
-    Assert-ProductE2EBackendReportFieldEquals $Json "backend_selected" "cpu"
+    Assert-ProductE2EBackendReportFieldEquals $Json "backend_requested" $RequestedBackend
+    Assert-ProductE2EBackendReportFieldEquals $Json "backend_selected" "wasm-cpu"
     Assert-ProductE2EBackendReportFieldEquals $Json "gpu_available" "false"
+    Assert-ProductE2EBackendReportFieldEquals $Json "gpu_trust_state" "fallback-used"
+    Assert-ProductE2EBackendReportFieldEquals $Json "gpu_failure_class" "unavailable"
     $disabledReason = Assert-ProductE2EBackendReportGpuUnavailableReason $Json "gpu_disabled_reason"
     $recursiveDisabledReason = Assert-ProductE2EJsonFieldGpuUnavailableReason $Json "gpu_disabled_reason"
     Assert-ProductE2EBackendReportFieldEquals $Json "fallback_used" "true"
-    Assert-ProductE2EBackendReportFieldEquals $Json "fallback_backend" "cpu"
+    Assert-ProductE2EBackendReportFieldEquals $Json "fallback_backend" "wasm-cpu"
+    Assert-ProductE2EBackendReportFieldEquals $Json "discarded_partial_gpu_result" "false"
     $fallbackReason = Assert-ProductE2EBackendReportGpuUnavailableReason $Json "backend_fallback_reason"
     $recursiveFallbackReason = Assert-ProductE2EJsonFieldGpuUnavailableReason $Json "backend_fallback_reason"
     if ($fallbackReason -ne $disabledReason) {
@@ -321,29 +288,37 @@ function ConvertTo-ProductE2ETypedScalar([object]$Value) {
     if ($fallbackReason -ne $recursiveFallbackReason) {
         throw "typed assertion failed: GPU fallback reason must match every product layer"
     }
-}function Assert-ProductE2EHybridCpuSelectionReport([object]$Json) {
-    Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_requested" "hybrid"
-    Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_selected" "cpu"
+    if ($MissingDevice.IsPresent) {
+        if ($disabledReason -cne "gpu_device_not_found") {
+            throw "typed assertion failed: explicit nonexistent adapter reported '$disabledReason'"
+        }
+        Assert-ProductE2EBackendReportFieldEquals $Json "gpu_failure_stage" "capability-query"
+    }
+    if ($RequestedBackend -eq "hybrid") {
+        Assert-ProductE2EBackendReportFieldEquals $Json "hybrid_status" "cpu-selected"
+        Assert-ProductE2EJsonFieldUniqueEquals $Json "hybrid_disabled_reason" $disabledReason
+    } else {
+        Assert-ProductE2EBackendReportFieldEquals $Json "hybrid_status" "not-requested"
+    }
+}function Assert-ProductE2EGpuSelectionReport([object]$Json, [string]$RequestedBackend) {
+    if ((Get-ProductE2EJsonFieldScalar $Json "backend_selected") -cne "webgpu") {
+        Assert-ProductE2EGpuCpuFallbackReport $Json $RequestedBackend
+        return
+    }
+    Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_requested" $RequestedBackend
     Assert-ProductE2EJsonFieldUniqueEquals $Json "backend_fallback_used" "false"
-    Assert-ProductE2EBackendReportFieldEquals $Json "backend_requested" "hybrid"
-    Assert-ProductE2EBackendReportFieldEquals $Json "backend_selected" "cpu"
+    Assert-ProductE2EBackendReportFieldEquals $Json "backend_requested" $RequestedBackend
+    Assert-ProductE2EBackendReportFieldEquals $Json "backend_selected" "webgpu"
+    Assert-ProductE2EBackendReportFieldEquals $Json "gpu_available" "true"
+    Assert-ProductE2EBackendReportFieldEquals $Json "gpu_trust_state" "gpu-computed-cpu-confirmed"
+    Assert-ProductE2EBackendReportFieldEquals $Json "gpu_disabled_reason" $null
+    Assert-ProductE2EBackendReportFieldEquals $Json "gpu_failure_class" $null
+    Assert-ProductE2EBackendReportFieldEquals $Json "discarded_partial_gpu_result" "false"
     Assert-ProductE2EBackendReportFieldEquals $Json "fallback_used" "false"
     Assert-ProductE2EBackendReportFieldEquals $Json "fallback_backend" "none"
     Assert-ProductE2EBackendReportFieldEquals $Json "backend_fallback_reason" $null
     Assert-ProductE2EJsonFieldNoFallbackReason $Json
-    Assert-ProductE2EBackendReportFieldEquals $Json "hybrid_status" "cpu-selected"
-    Assert-ProductE2EBackendReportFieldEquals $Json "gpu_available" "false"
-    $gpuDisabledReason = Assert-ProductE2EBackendReportHybridUnavailableReason $Json "gpu_disabled_reason"
-    $hybridDisabledReason = Assert-ProductE2EBackendReportHybridUnavailableReason $Json "hybrid_disabled_reason"
-    $recursiveGpuDisabledReason = Assert-ProductE2EJsonFieldHybridUnavailableReason $Json "gpu_disabled_reason"
-    $recursiveHybridDisabledReason = Assert-ProductE2EJsonFieldHybridUnavailableReason $Json "hybrid_disabled_reason"
-    if ($gpuDisabledReason -ne $hybridDisabledReason) {
-        throw "typed assertion failed: hybrid GPU disabled reasons must match"
-    }
-    if ($gpuDisabledReason -ne $recursiveGpuDisabledReason -or
-        $hybridDisabledReason -ne $recursiveHybridDisabledReason) {
-        throw "typed assertion failed: hybrid GPU disabled reasons must match every product layer"
-    }
+    Assert-ProductE2EBackendReportFieldEquals $Json "hybrid_status" $(if ($RequestedBackend -eq "hybrid") { "gpu-ready" } else { "not-requested" })
 }function Assert-ProductE2EU0BackendCapabilityReport(
     [object]$CpuJson,
     [object]$GpuJson,
@@ -358,9 +333,8 @@ function ConvertTo-ProductE2ETypedScalar([object]$Value) {
     Assert-ProductE2EBackendReportFieldEquals $CpuJson "gpu_disabled_reason" "not_requested"
     Assert-ProductE2EBackendReportFieldEquals $CpuJson "hybrid_status" "not-requested"
 
-    Assert-ProductE2EGpuCpuFallbackReport $GpuJson
-
-    Assert-ProductE2EHybridCpuSelectionReport $HybridJson
+    Assert-ProductE2EGpuSelectionReport $GpuJson "gpu"
+    Assert-ProductE2EGpuSelectionReport $HybridJson "hybrid"
 }function Assert-ProductE2EFixtureForbidsAlgorithm(
     [object]$Fixture,
     [string]$AlgorithmName
@@ -375,11 +349,41 @@ function ConvertTo-ProductE2ETypedScalar([object]$Value) {
     switch -Wildcard ($CaseName) {
         "opening 2L product pipeline" {
             $json = ConvertFrom-ProductE2EJsonOutput $Output
-            Assert-ProductE2EJsonFieldEquals $json "kind" "pc"
-            Assert-ProductE2EJsonFieldEquals $json "problem_preset" "opening-pc"
-            Assert-ProductE2EJsonFieldEquals $json "compiled_goal" "clear-to-empty"
-            Assert-ProductE2EJsonFieldEquals $json "compiled_piece_window" "5"
-            Assert-ProductE2EJsonFieldEquals $json "packing_candidate_is_solution" "false"
+            if ($json.kind -cne "pc") { throw "typed assertion failed: expected a PC result" }
+            Assert-ProductE2ECpuSelectionReport $json
+            foreach ($entry in @{
+                packing_candidate_is_solution = $false
+                normalized_unique_solution_count = 4
+                count_complete = $true
+                probability_complete = $true
+                covered_pattern_count = 1
+                coverage_probability = 1
+            }.GetEnumerator()) {
+                Assert-ProductE2EJsonFieldUniqueEquals $json $entry.Key $entry.Value
+            }
+        }
+        "T4 pc 4L fixed candidate budget golden contract" {
+            $json = ConvertFrom-ProductE2EJsonOutput $Output
+            Assert-ProductE2ECpuSelectionReport $json
+            Assert-ProductE2EJsonFieldUniqueEquals $json "resource_truncated" $true
+            Assert-ProductE2EJsonFieldUniqueEquals $json "resource_truncation_reason" "candidate_budget_exceeded"
+            Assert-ProductE2EJsonFieldUniqueEquals $json "probability_complete" $false
+            Assert-ProductE2EJsonFieldUniqueEquals $json "count_complete" $false
+        }
+        "T4 percent uniform bag golden contract" {
+            $json = ConvertFrom-ProductE2EJsonOutput $Output
+            if ($json.kind -cne "percent") { throw "typed assertion failed: expected a Percent result" }
+            Assert-ProductE2EJsonFieldUniqueEquals $json "actual_backend" "wasm-cpu"
+            foreach ($entry in @{
+                total_pattern_count = 1
+                covered_pattern_count = 1
+                coverage_probability = 1
+                probability_complete = $true
+                failed_pattern_count = 0
+                renormalized = $false
+            }.GetEnumerator()) {
+                Assert-ProductE2EJsonFieldUniqueEquals $json $entry.Key $entry.Value
+            }
         }
         default {
             return

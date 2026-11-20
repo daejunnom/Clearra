@@ -133,10 +133,6 @@ const REQUIRED_JOB_STEPS = Object.freeze(new Map([
     "Seal canonical release acceptance sanitizer shard",
     "Upload canonical release acceptance sanitizer shard",
   ]],
-  ["release-acceptance-product-cli", [
-    "Build and seal exact ProductE2E CLI input",
-    "Upload exact ProductE2E CLI input",
-  ]],
   ["release-acceptance-rust", [
     "Run canonical release acceptance RustExact shard",
     "Seal canonical release acceptance RustExact shard",
@@ -144,8 +140,9 @@ const REQUIRED_JOB_STEPS = Object.freeze(new Map([
   ]],
   ["release-acceptance-rust-product", [
     "Download accepted CTK3 distribution",
-    "Download exact ProductE2E CLI input",
-    "Verify exact ProductE2E CLI input",
+    "Download shipping Windows CLI for ProductE2E",
+    "Download shipping Windows CLI receipt for ProductE2E",
+    "Verify shipping Windows CLI for ProductE2E",
     "Run canonical release acceptance RustProduct shard without rebuilding",
     "Seal canonical release acceptance RustProduct shard",
     "Upload canonical release acceptance RustProduct shard",
@@ -173,6 +170,7 @@ const REQUIRED_JOB_STEPS = Object.freeze(new Map([
   ["windows-cli", [
     "Build and exercise standalone WASM CPU CLI",
     "Upload Windows CLI artifact",
+    "Upload shipping Windows CLI receipt for ProductE2E",
   ]],
   ["windows-gui", [
     "Build standalone SvelteKit and Tauri GUI",
@@ -477,6 +475,23 @@ test("diagnostic summary remains outside the canonical evidence job set", () => 
   payload.total_count += 1;
   assert.deepEqual(validateReleaseJobs(payload, authority()), expected);
   assert.ok(expected.every((job) => job.name !== "release-failure-summary"));
+});
+
+test("historical C ProductE2E cannot stand in for verification of shipping Rust CLI bytes", () => {
+  const payload = jobsPayload();
+  const product = payload.jobs.find((job) => job.name === "release-acceptance-rust-product");
+  const verification = product.steps.find((step) => step.name === "Verify shipping Windows CLI for ProductE2E");
+  verification.name = "Verify exact ProductE2E CLI input";
+  payload.jobs.push({
+    ...structuredClone(product),
+    id: 12345,
+    name: "release-acceptance-product-cli",
+    steps: ["Build and seal exact ProductE2E CLI input", "Upload exact ProductE2E CLI input"]
+      .map((name) => ({ name, status: "completed", conclusion: "success" })),
+  });
+  payload.total_count += 1;
+  assert.throws(() => validateReleaseJobs(payload, authority()),
+    /Verify shipping Windows CLI for ProductE2E did not pass exactly once/u);
 });
 
 test("canonical acceptance evidence validates accepted inputs and hashes three real products", async () => {

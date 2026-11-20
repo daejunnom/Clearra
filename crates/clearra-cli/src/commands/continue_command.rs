@@ -23,6 +23,6 @@ impl ContinueCommand {
     }
 }
 
-#[cfg(all(test, feature = "native-c-core"))]
+#[cfg(test)]
 #[path = "continue_command_tests.rs"]
 mod tests;

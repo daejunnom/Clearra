@@ -2,14 +2,12 @@
   "fixture": "pc_2l_fixed_queue",
   "required_markers": [
     "kind=pc",
-    "route=search-problem-core-executor",
-    "problem_preset=opening-pc",
-    "compiled_goal=clear-to-empty",
-    "packing_backend=cpu",
-    "buildup_backend_owner=cpu",
-    "coverage_reducer=pattern-bitset-union",
-    "coverage_row_source=c-coverage-row-view",
-    "rust_objective_reducer=ObjectiveReducer::reduce",
+    "actual_backend=wasm-cpu",
+    "normalized_unique_solution_count=4",
+    "count_complete=true",
+    "probability_complete=true",
+    "covered_pattern_count=1",
+    "coverage_probability=1",
     "packing_candidate_is_solution=false"
   ]
 }

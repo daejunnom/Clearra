@@ -91,12 +91,22 @@ fn path_fields(
     query: &OpeningPcSearchQuery,
     result: &CoreExecutionResult,
 ) -> Vec<clearra_output::model::RenderField> {
+    // The Rust path holds a representative execution, not one retained
+    // execution per solved field. Use the completed field family when the
+    // legacy result does not carry its own total; do not turn missing or
+    // partial evidence into an exact zero.
+    let solved_field_count = result.field("total_solution_count").or_else(|| {
+        (result.bool_field("count_complete") == Some(true)
+            && result.bool_field("solution_set_materialized") == Some(true))
+        .then(|| result.field("normalized_unique_solution_count"))
+        .flatten()
+    });
     let mut fields = vec![
         string_field("status", "path-rendered"),
         string_field("product_slice", "M26 Percent / Path Product Slice"),
         string_field(
             "path_workflow",
-            "SearchProblem -> C Packing / BuildUp -> representative replay -> retained trace -> output",
+            "SearchProblem -> Geometry / BuildUp -> representative replay -> retained trace -> output",
         ),
         string_field("route", "search-problem-core-executor"),
         number_field("lines", query.target().lines()),
@@ -106,7 +116,7 @@ fn path_fields(
         bool_field("retained_representative_trace", !result.path_steps().is_empty()),
         string_field("representative_trace_source", "retained-trace"),
         bool_field("path_distinguishes_retained_trace_from_total_count", true),
-        string_field("total_solution_count", field_or(result, "total_solution_count", "0")),
+        string_field("total_solution_count", solved_field_count.unwrap_or("not-calculated")),
         string_field("unique_solution_count", field_or(result, "unique_solution_count", "0")),
         string_field("retained_trace_count", field_or(result, "retained_trace_count", "0")),
         string_field("solution_trace_count", field_or(result, "solution_trace_count", "0")),

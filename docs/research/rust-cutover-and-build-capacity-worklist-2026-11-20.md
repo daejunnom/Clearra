@@ -282,11 +282,34 @@ from compilation.
 
 Check the build recipe as well as the binary name when interpreting
 future results. The Windows release CLI uses `wasm-cpu-runtime`, as do
-the Rust product tests above. The current canonical ProductE2E producer
-still builds `native-c-core,webgpu-search` without `wasm-cpu-runtime`.
+the Rust product tests above. At the measured reference, the canonical
+ProductE2E producer built `native-c-core,webgpu-search` without
+`wasm-cpu-runtime`.
 That resolves to the C reference context and seals an archive-bound
 receipt; it is not shipping-Rust CLI process evidence. The current
 percent golden also asserts C-only progress and coverage markers. An
 eventual exact-release-binary E2E migration must update these to typed
 evidence while preserving exact source, run, attempt and binary binding.
 Keep the separate C differential tests in RustExact.
+
+## Product cutover and first Rust-only reuse candidates
+
+The active CLI line no longer selects C from a Cargo feature
+combination. Desktop's host also no longer exposes a C-link feature.
+The C archive, explicit Core/App comparison entrypoints, RustExact and
+the C sanitizer lane are still available on their named routes.
+The release RustProduct shard now requires the Windows release build's
+actual executable and verifies a separate receipt binding its bytes
+to the version, source SHA, run and attempt. There is no second C
+producer or rebuild fallback if the shipping input is absent.
+
+The distinct Rust optimization commits defer per-worker reachability
+evidence allocation until concrete keys need it and reuse an existing
+decision node when a language union preserves its exact children.
+The cache width and replacement semantics are unchanged. The new
+Rust/revision ABBA mode checks both managed binaries, each embedded
+source SHA, actual worker participation, complete counts and ordered
+keys before comparing time or kernel RSS. The first tests of the
+runner and the release/process boundaries are local; they do not
+qualify peak-memory or end-to-end product improvement. Distinguish
+the old C baseline from this independent Rust-only measurement.
