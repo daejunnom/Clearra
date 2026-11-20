@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, win32 } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -73,13 +73,18 @@ test('path identity is stable across Windows, WSL mounts, and WSL-native sources
   assert.throws(() => assertBuildPathWithin('/tmp/clearra-build/../escape', '/tmp/clearra-build'));
 });
 
-test('GitHub Windows builds keep the canonical root on the checkout volume', () => {
-  const hosted = { GITHUB_ACTIONS: 'true', GITHUB_WORKSPACE: 'D:\\a\\Clearra\\Clearra',
-    RUNNER_TEMP: 'D:\\a\\_temp', LOCALAPPDATA: 'C:\\Users\\runneradmin\\AppData\\Local' };
-  assert.equal(canonicalBuildRoot(hosted, 'win32'), 'D:\\a\\_temp\\Clearra\\build');
-  assert.throws(() => canonicalBuildRoot({ ...hosted, RUNNER_TEMP: 'C:\\runner-temp' }, 'win32'), /share the checkout volume/u);
-  assert.equal(canonicalBuildRoot({ LOCALAPPDATA: hosted.LOCALAPPDATA }, 'win32'),
-    'C:\\Users\\runneradmin\\AppData\\Local\\Clearra\\build');
+test('GitHub Windows builds keep the canonical root on the checkout volume', async t => {
+  // Only a native Windows host resolves existing prefixes on disk. Use its
+  // own temporary fixture's drive rather than assume the CI runner has D:.
+  const base = process.platform === 'win32' ? realpathSync.native((await fixture(t)).temporary) : 'D:\\a';
+  const otherDrive = win32.parse(base).root.toUpperCase() === 'W:\\' ? 'Z:\\' : 'W:\\';
+  const hosted = { GITHUB_ACTIONS: 'true', GITHUB_WORKSPACE: win32.join(base, 'Clearra', 'Clearra'),
+    RUNNER_TEMP: win32.join(base, '_temp'), LOCALAPPDATA: win32.join(otherDrive, 'ignored-local-appdata') };
+  assert.equal(canonicalBuildRoot(hosted, 'win32'), win32.join(hosted.RUNNER_TEMP, 'Clearra', 'build'));
+  assert.throws(() => canonicalBuildRoot({ ...hosted, RUNNER_TEMP: win32.join(otherDrive, '_temp') }, 'win32'),
+    /share the checkout volume/u);
+  const localAppData = win32.join(base, 'local-appdata');
+  assert.equal(canonicalBuildRoot({ LOCALAPPDATA: localAppData }, 'win32'), win32.join(localAppData, 'Clearra', 'build'));
 });
 
 test('Windows native compiler guard preserves argv beyond the cmd limit', { skip: process.platform !== 'win32' }, async t => {

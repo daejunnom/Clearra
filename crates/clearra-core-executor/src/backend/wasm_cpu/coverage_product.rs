@@ -675,6 +675,10 @@ const fn piece_from_code(code: u8) -> Option<PieceKind> {
 }
 
 #[cfg(test)]
+#[path = "coverage_product_semiring_contract_tests.rs"]
+mod semiring_contract_tests;
+
+#[cfg(test)]
 mod resource_tests {
     use super::super::buildup::BuildOrderNodeSpec;
     use super::*;

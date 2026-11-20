@@ -55,6 +55,7 @@ jobs:
           status=0
           filters=(structural_graph_probability_tests bounded_no_entry first_kick_interval_preserves
             frontier_certificate_
+            placement_algebra_ wide_checker_projection_ semiring_contract_
             ordered_kick_interval_requires ordered_kick_witness_guard_ ordered_negative_ candidate_kick_guard_
             reachability::reference_tests incremental_domain_ minimum_domain_cutoff_
             exact_clear_domain_tests placement_conditions::tests geometric_edge_reuse_
@@ -64,6 +65,8 @@ jobs:
             extended_parallel_cooperative_preparation_
             extended_pc_native_cooperative_worker_waves_preserve_exact_family_and_drain
             cooperative_canonical_reduction
+            cooperative_fixed_ordinal_verification_stats_and_serial_handoff
+            extended_pc_sealed_terminal_preserves_direct_result_and_admission
             extended_pc_terminal_projection_moves_private_solution_owners
             extended_result_materialization_projection_has_an_exact_one_byte_boundary
             typed_score_publication_releases_transient_backing_slots

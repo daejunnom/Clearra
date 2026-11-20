@@ -635,6 +635,10 @@ fn low_bits(count: u32) -> u64 {
 }
 
 #[cfg(test)]
+#[path = "placement_conditions_algebra_tests.rs"]
+mod algebra_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use clearra_core_domain::piece::piece_kind::PieceKind;
