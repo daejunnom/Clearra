@@ -4971,7 +4971,7 @@ impl WasmExactSearchSession {
                     .iter()
                     .copied()
                     .map(NormalizedTilingSolutionKey::from_standard_board64_identity)
-                    .map(|key| key.as_str().to_owned()),
+                    .map(NormalizedTilingSolutionKey::into_string),
             );
             keys
         } else {

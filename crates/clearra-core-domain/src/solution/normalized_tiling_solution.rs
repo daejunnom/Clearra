@@ -114,6 +114,11 @@ impl NormalizedTilingSolutionKey {
         &self.0
     }
 
+    /// Transfers the existing canonical string buffer to the caller.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
     pub fn parse_canonical(value: &str) -> Result<Self, NormalizedTilingSolutionError> {
         if value.starts_with("ctk2|") {
             super::ExtendedTilingSolutionKey::parse_canonical(value)?;
@@ -327,7 +332,11 @@ impl StandardBoard64TilingIdentity {
     }
 
     fn canonical_string(self) -> String {
-        let mut output = String::with_capacity(42 + self.placement_count() * 20);
+        const HEADER_BYTES: usize = "ctk1|initial=".len() + 16 + "|placements=".len();
+        const PLACEMENT_BYTES: usize = 1 + 1 + 16; // ASCII piece, colon, u64 hex.
+        let placements = self.placement_count();
+        let bytes = HEADER_BYTES + placements * PLACEMENT_BYTES + placements.saturating_sub(1);
+        let mut output = String::with_capacity(bytes);
         self.write_canonical(&mut output)
             .expect("writing to String cannot fail");
         output
@@ -640,6 +649,36 @@ mod incremental_hasher_tests {
     ) -> NormalizedTilingSolutionKey {
         NormalizedTilingSolutionKey::from_placements(initial_board_mask, placements)
             .expect("valid normalized key")
+    }
+
+    #[test]
+    fn board64_canonical_key_consumes_original_buffer_at_fixed_format_lengths() {
+        let pieces = PieceKind::STANDARD_TETROMINOES;
+        for (initial, count, expected_len) in [
+            (u64::MAX, 0, 41),
+            (1_u64 << 63, 1, 59),
+            (1_u64 << 63, 10, 230),
+            (0, STANDARD_BOARD64_TILING_MAX_PLACEMENTS, 344),
+        ] {
+            let identity = StandardBoard64TilingIdentity::from_placements(
+                initial,
+                (0..count).map(|index| {
+                    PiecePlacementMask::new(pieces[index % pieces.len()], 0xf_u64 << (index * 4))
+                }),
+            )
+            .expect("all placement areas are four and disjoint");
+            let key = NormalizedTilingSolutionKey::from_standard_board64_identity(identity);
+            assert_eq!(key.as_str().len(), expected_len);
+            let buffer = key.as_str().as_ptr();
+            let encoded = key.into_string();
+            assert_eq!(encoded.as_ptr(), buffer);
+            assert_eq!(
+                NormalizedTilingSolutionKey::parse_canonical(&encoded)
+                    .and_then(|key| key.standard_board64_identity())
+                    .expect("canonical key round trip"),
+                identity,
+            );
+        }
     }
 
     #[test]
