@@ -1489,7 +1489,11 @@ impl StandardBagCoverage {
                 )?;
                 branch = self.union(branch, next)?;
             }
-            if self.hold_enabled && hold_code != 0 {
+            // This product unions queues, not execution histories. If current
+            // equals held, Current already followed every same-kind language
+            // edge with exactly the same next cursor, bag remainder and hold.
+            // CountAll still traverses both actions in CoverageProductEvaluator.
+            if self.hold_enabled && hold_code != 0 && hold_code != current_code {
                 let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
                 let swap_step = self
                     .matching_supply_step(
@@ -2216,6 +2220,115 @@ mod supply_automaton_tests {
             SupplyProvenanceId(0x77),
         );
         (universe, initial)
+    }
+
+    #[test]
+    fn occupied_same_kind_hold_visits_one_boolean_continuation_per_draw() {
+        use clearra_core_domain::solution::normalized_tiling_solution::{
+            NormalizedTilingSolutionKey, PiecePlacementMask, StandardBoard64TilingIdentity,
+        };
+        use clearra_pc_graph::request::{
+            PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+            PcSolutionProbabilityPolicy, PieceWindow, RequestedSearchBackend, SupplyWindowSize,
+        };
+        use clearra_problem::ProblemCompiler;
+        use PieceKind::O;
+
+        let placements = [
+            PiecePlacementMask::new(O, 0x0c03),
+            PiecePlacementMask::new(O, 0x300c),
+        ];
+        let board = 0x0f_ffff & !(placements[0].cells_mask() | placements[1].cells_mask());
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, board),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(2),
+        )
+        .with_exact_pieces(Some(2))
+        .with_supply_window_size(SupplyWindowSize::new(2))
+        .with_allow_hold(true)
+        .with_hold_piece(Some(O))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_allow_backend_fallback(false)
+                .with_workers(1)
+                .with_exact_legal_board_enabled(false)
+                .with_conditioned_reachability_enabled(false)
+                .with_tablebase_requested(false)
+                .with_max_memory_mib(Some(256)),
+        );
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("two O placements");
+        let universe = problem.piece_source().materialized_universe().unwrap();
+        assert_eq!(universe.pattern_count(), 42);
+        assert!(!problem.supply().projects_unplaced_lookahead());
+
+        // For this fixed OO word, explicitly count Current and SwapHeld as
+        // distinct even when both produce the same piece and leave O in hold.
+        let mut expected = 0_u64;
+        let mut histories = 0;
+        for ordinal in 0..universe.pattern_count() {
+            let queue = universe.sequence_at(ordinal);
+            let mut ways = 0;
+            for (placed, held_after) in [(queue[0], O), (O, queue[0])] {
+                if placed == O {
+                    ways += usize::from(queue[1] == O) + usize::from(held_after == O);
+                }
+            }
+            if ways != 0 {
+                expected |= 1_u64 << ordinal;
+                histories += ways;
+            }
+        }
+        assert_eq!((expected.count_ones(), histories), (12, 18));
+
+        let mut languages = PieceOrderLanguageCache::default();
+        let word = languages
+            .compile_poset_language(&[O, O], &[0, 1], 4)
+            .unwrap()
+            .unwrap();
+        let mut coverage = StandardBagCoverage::for_universe(
+            universe,
+            problem.initial_hold(),
+            problem.supply().hold_enabled(),
+            problem.supply().projects_unplaced_lookahead(),
+        )
+        .unwrap()
+        .unwrap();
+        let control = ExecutionControl::default();
+        let result = coverage
+            .cover_language(&languages, word.root, &control)
+            .unwrap();
+        assert_eq!(result.covered_pattern_count, expected.count_ones() as usize);
+        assert_eq!(result.witness_pattern_id, Some(expected.trailing_zeros()));
+        let row = coverage.materialize_root(result.root).unwrap();
+        assert_eq!(row.to_owned_words(), vec![expected]);
+        // Seven first draws plus one distinct second edge per accepted queue.
+        assert!(result.edge_checks <= STANDARD_PIECE_COUNT + result.covered_pattern_count);
+
+        let product =
+            crate::WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap();
+        let identity = StandardBoard64TilingIdentity::from_placements(board, placements).unwrap();
+        let entry = product
+            .solution_coverages()
+            .iter()
+            .find(|entry| entry.identity() == identity)
+            .expect("the two-O tiling has a public Include row");
+        assert_eq!(entry.covered_patterns(), &row);
+        let key = NormalizedTilingSolutionKey::from_standard_board64_identity(identity);
+        let report = product
+            .solution_probabilities()
+            .iter()
+            .find(|report| report.solution_key() == key.as_str())
+            .expect("probability belongs to the same tiling");
+        assert!(report.probability_complete());
+        assert_eq!(
+            (report.covered_pattern_count(), report.pattern_count()),
+            (12, 42)
+        );
+        assert!((report.probability().parse::<f64>().unwrap() - 12.0 / 42.0).abs() < 1e-14);
     }
 
     fn full_p7p4_capture_fixture(
