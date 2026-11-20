@@ -5,6 +5,7 @@ on:
     branches:
       - codex/v090-relation-rust-integration
       - codex/v090-relation-rust-p7p4
+      - codex/v090-relation-rust-proof-operation-masks-*
       # Pre-main opt-in: only an owner-created, SHA-addressed branch can
       # request the entire proof and timing suite on one hosted runner.
       - codex/v090-relation-rust-adoption-*
@@ -364,12 +365,30 @@ jobs:
             --producer web-cpu-chromium --profile local-service --timeout 360 -- \
             node scripts/tools/run-real-chromium-cpu-worker-smoke.mjs
   p7p4-exact-handoff:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/v090-relation-rust-p7p4'
+    if: >-
+      github.event_name == 'push' &&
+      (
+        github.ref == 'refs/heads/codex/v090-relation-rust-p7p4' ||
+        (
+          github.repository == 'daejunnom/Clearra' &&
+          github.ref_type == 'branch' &&
+          github.actor == github.repository_owner &&
+          github.triggering_actor == github.repository_owner &&
+          github.run_attempt == '1' && github.event.created &&
+          !github.event.deleted && !github.event.forced &&
+          github.event.before == '0000000000000000000000000000000000000000' &&
+          github.event.after == github.sha &&
+          github.ref == format('refs/heads/codex/v090-relation-rust-proof-operation-masks-{0}', github.sha)
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 125
+    env:
+      PROOF_EXPERIMENT: ${{ github.ref == 'refs/heads/codex/v090-relation-rust-p7p4' && 'movement-clear' || 'operation-masks' }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Require the exact source and enough managed workspace storage
         run: |
@@ -384,12 +403,13 @@ jobs:
       - name: Compare all per-solution queues under separate supervised leases
         run: |
           node scripts/benchmark/run-placement-coverage-proof.mjs --case p7p4 \
-            --id "large-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source-sha "$GITHUB_SHA"
+            --id "large-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source-sha "$GITHUB_SHA" \
+            --experiment "$PROOF_EXPERIMENT"
       - name: Retain bounded proof evidence without publishing raw queue files
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: p7p4-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ env.PROOF_EXPERIMENT == 'operation-masks' && 'p7p4-operation-masks-proof' || 'p7p4-proof' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: _local/artifacts/benchmarks/placement-graph-coverage/large-${{ github.run_id }}-${{ github.run_attempt }}-proof/*.json
           if-no-files-found: ignore
           retention-days: 14
