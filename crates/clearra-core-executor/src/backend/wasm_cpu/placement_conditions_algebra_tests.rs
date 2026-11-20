@@ -1,6 +1,9 @@
 //! Bounded algebra differential. Contributors are concrete operation IDs,
 //! not pieces or sampled boards. These tests prove no movement facts.
-use super::GroupedClearConditions;
+use super::{
+    FramePrefixBounds, FramePrefixCompileError, GroupedClearConditions,
+    PrefixOperationOutsideDomain,
+};
 
 const OPERATIONS: usize = 4;
 const ALL: u16 = (1 << OPERATIONS) - 1;
@@ -86,11 +89,37 @@ fn check_model(completed_groups: &[u16]) {
             "{rows:?} frame={frame:04b}"
         );
         assert_eq!(closure(frame) == frame, exact_minimum.is_some());
+        let compiled = conditions.compile_frame_prefix(frame, OPERATIONS as u8);
+        if frame & !complete != 0 {
+            assert_eq!(compiled, Err(FramePrefixCompileError::NonCompletableRows));
+            continue;
+        }
         let Some(minimum) = exact_minimum else {
+            assert_eq!(
+                compiled,
+                Err(FramePrefixCompileError::NotClosed {
+                    closure: closure(frame),
+                })
+            );
             continue;
         };
+        let compiled = compiled.unwrap();
+        assert_eq!(compiled.deleted_rows(), frame);
         let allowed = conditions.possible_operations_in_frame(frame, minimum, ALL);
         assert_eq!(allowed, exact_union, "{rows:?} frame={frame:04b}");
+        assert_eq!(
+            compiled.constrain(0, 0),
+            Ok(Some(FramePrefixBounds {
+                minimum,
+                individually_possible: allowed,
+            }))
+        );
+        for (index, &a) in compiled.forbidden_masks().iter().enumerate() {
+            for &b in &compiled.forbidden_masks()[index + 1..] {
+                assert_ne!(a & !b, 0, "compiled masks must form an antichain");
+                assert_ne!(b & !a, 0, "compiled masks must form an antichain");
+            }
+        }
         let mandatory = mandatory_for(&rows, frame);
         assert_eq!(minimum, mandatory);
         let bad_additions: Vec<u16> = rows
@@ -106,6 +135,28 @@ fn check_model(completed_groups: &[u16]) {
             let admissible =
                 minimum & !executed == 0 && bad_additions.iter().all(|bad| bad & !executed != 0);
             assert_eq!(admissible, frame_of(executed) == frame);
+            assert_eq!(compiled.admits(executed), Ok(frame_of(executed) == frame));
+        }
+
+        for must_execute in subsets() {
+            for must_be_absent in subsets().filter(|absent| must_execute & absent == 0) {
+                let matching = || {
+                    possible().filter(|executed| {
+                        must_execute & !executed == 0 && must_be_absent & executed == 0
+                    })
+                };
+                let reference = matching()
+                    .reduce(|intersection, executed| intersection & executed)
+                    .map(|minimum| FramePrefixBounds {
+                        minimum,
+                        individually_possible: matching().fold(0, |union, mask| union | mask),
+                    });
+                assert_eq!(
+                    compiled.constrain(must_execute, must_be_absent),
+                    Ok(reference),
+                    "{rows:?} frame={frame:04b} execute={must_execute:04b} exclude={must_be_absent:04b}",
+                );
+            }
         }
 
         for operation in 0..OPERATIONS {
@@ -184,4 +235,55 @@ fn placement_algebra_three_contributors_and_implied_frames_are_not_binary_cases(
     assert_eq!(three.deleted_rows(0b0101), 0);
     assert_eq!(three.deleted_rows(0b0110), 0);
     assert_eq!(three.deleted_rows(0b0111), 1);
+}
+
+#[test]
+fn placement_algebra_compiled_frame_bounds_preserve_domain_and_clause_capacity() {
+    let four = GroupedClearConditions::from_completed_rows(&[0x8001], 1).unwrap();
+    assert_eq!(
+        four.compile_frame_prefix(0, 4),
+        Err(FramePrefixCompileError::ContributorOutsideOperationDomain)
+    );
+    assert_eq!(
+        four.compile_frame_prefix(0, 17),
+        Err(FramePrefixCompileError::OperationCountOutOfRange)
+    );
+    let full_mask = GroupedClearConditions::from_completed_rows(&[u16::MAX], 1).unwrap();
+    let unfilled = full_mask.compile_frame_prefix(0, 16).unwrap();
+    assert_eq!(unfilled.constrain(0x8000, 0x8000), Ok(None));
+    assert_eq!(unfilled.admits(u16::MAX), Ok(false));
+    assert_eq!(
+        unfilled.constrain(0x7fff, 0),
+        Ok(Some(FramePrefixBounds {
+            minimum: 0x7fff,
+            individually_possible: 0x7fff,
+        }))
+    );
+
+    // Six incomparable masks attain the compact frame's entire slot budget.
+    let pairs = [0b0011, 0b0101, 0b1001, 0b0110, 0b1010, 0b1100];
+    let pairs = GroupedClearConditions::from_completed_rows(&pairs, 0b11_1111).unwrap();
+    let unfilled = pairs.compile_frame_prefix(0, 4).unwrap();
+    assert_eq!(unfilled.forbidden_masks().len(), 6);
+    assert_eq!(unfilled.admits(0x8000), Err(PrefixOperationOutsideDomain));
+    assert_eq!(
+        unfilled.constrain(0, 0x10),
+        Err(PrefixOperationOutsideDomain)
+    );
+    assert_eq!(unfilled.constrain(0b1100, 0), Ok(None));
+    assert_eq!(
+        unfilled.constrain(0b1000, 0),
+        Ok(Some(FramePrefixBounds {
+            minimum: 0b1000,
+            individually_possible: 0b1000,
+        }))
+    );
+
+    // The last clause subsumes all earlier ones; no extra slot is needed.
+    let subsumed = [0b1111, 0b0111, 0b0011, 0b0101, 0b1001, 0b0001];
+    let subsumed = GroupedClearConditions::from_completed_rows(&subsumed, 0b11_1111).unwrap();
+    let unfilled = subsumed.compile_frame_prefix(0, 4).unwrap();
+    assert_eq!(unfilled.forbidden_masks(), &[1]);
+    assert_eq!(unfilled.admits(0b1110), Ok(true));
+    assert_eq!(unfilled.admits(0b1111), Ok(false));
 }

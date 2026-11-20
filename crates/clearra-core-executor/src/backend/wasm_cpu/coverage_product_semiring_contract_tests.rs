@@ -27,6 +27,9 @@ use clearra_supply::{
 use super::super::buildup::{BuildOrderGraph, BuildOrderNodeSpec};
 use super::{CoverageProductEvaluator, CoverageProductResult};
 
+#[path = "coverage_product_ordinal_bounds_tests.rs"]
+mod ordinal_bounds;
+
 const ROOT: u32 = 0;
 const AFTER_O: u32 = 1;
 const COMPLETE: u32 = 2;

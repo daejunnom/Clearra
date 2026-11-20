@@ -576,6 +576,166 @@ impl GroupedClearConditions {
     }
 }
 
+/// A checked frame is still geometry-only: none of these results asserts
+/// reachability, ordered-kick legality, or a valid supply order.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FramePrefixCompileError {
+    OperationCountOutOfRange,
+    NonCompletableRows,
+    ContributorOutsideOperationDomain,
+    NotClosed { closure: u16 },
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PrefixOperationOutsideDomain;
+
+/// Exact extrema for a nonempty prefix slice. The upper mask is the union
+/// of possible prefixes, not necessarily a possible prefix itself.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FramePrefixBounds {
+    pub(super) minimum: u16,
+    pub(super) individually_possible: u16,
+}
+
+/// The frame's prefixes are exactly the supersets of `minimum` that do not
+/// contain any whole forbidden conjunction. Retaining only minimal forbidden
+/// masks is exact: if A is a subset of B, forbidding A also forbids B.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FramePrefixDomain {
+    deleted: u16,
+    operations: u16,
+    minimum: u16,
+    forbidden: [u16; MAX_CONDITION_HEIGHT as usize],
+    forbidden_count: u8,
+}
+
+#[cfg(test)]
+const _: () = assert!(core::mem::size_of::<FramePrefixDomain>() <= 20);
+
+#[cfg(test)]
+impl GroupedClearConditions {
+    pub(super) fn compile_frame_prefix(
+        &self,
+        deleted: u16,
+        operation_count: u8,
+    ) -> Result<FramePrefixDomain, FramePrefixCompileError> {
+        if u32::from(operation_count) > u16::BITS {
+            return Err(FramePrefixCompileError::OperationCountOutOfRange);
+        }
+        if deleted & !self.completed_rows() != 0 {
+            return Err(FramePrefixCompileError::NonCompletableRows);
+        }
+        let operations = ((1_u32 << operation_count) - 1) as u16;
+        let mut minimum = 0;
+        for group in self.active_groups() {
+            if group.contributors & !operations != 0 {
+                return Err(FramePrefixCompileError::ContributorOutsideOperationDomain);
+            }
+            if group.rows & deleted != 0 {
+                minimum |= group.contributors;
+            }
+        }
+        // Forcing the contributors of every requested deleted row may also
+        // delete other rows. The requested frame is possible exactly when
+        // it is a fixed point of this closure.
+        let closure = self.deleted_rows(minimum);
+        if closure != deleted {
+            return Err(FramePrefixCompileError::NotClosed { closure });
+        }
+        let mut domain = FramePrefixDomain {
+            deleted,
+            operations,
+            minimum,
+            forbidden: [0; MAX_CONDITION_HEIGHT as usize],
+            forbidden_count: 0,
+        };
+        for group in self.active_groups() {
+            if group.rows & deleted == 0 {
+                let bad = group.contributors & !minimum;
+                debug_assert_ne!(bad, 0, "the frame closure already ruled this out");
+                domain.insert_minimal_forbidden(bad);
+            }
+        }
+        Ok(domain)
+    }
+}
+
+#[cfg(test)]
+impl FramePrefixDomain {
+    fn insert_minimal_forbidden(&mut self, bad: u16) {
+        if self.forbidden_masks().iter().any(|&old| old & !bad == 0) {
+            return;
+        }
+        let mut kept = 0;
+        for index in 0..usize::from(self.forbidden_count) {
+            let old = self.forbidden[index];
+            if bad & !old != 0 {
+                self.forbidden[kept] = old;
+                kept += 1;
+            }
+        }
+        // One insertion per original group, at most MAX_CONDITION_HEIGHT.
+        self.forbidden[kept] = bad;
+        self.forbidden[kept + 1..].fill(0);
+        self.forbidden_count = (kept + 1) as u8;
+    }
+
+    pub(super) fn forbidden_masks(&self) -> &[u16] {
+        &self.forbidden[..usize::from(self.forbidden_count)]
+    }
+
+    pub(super) fn deleted_rows(&self) -> u16 {
+        self.deleted
+    }
+
+    pub(super) fn admits(&self, executed: u16) -> Result<bool, PrefixOperationOutsideDomain> {
+        if executed & !self.operations != 0 {
+            return Err(PrefixOperationOutsideDomain);
+        }
+        Ok(self.minimum & !executed == 0
+            && self
+                .forbidden_masks()
+                .iter()
+                .all(|bad| bad & !executed != 0))
+    }
+
+    /// Restrict the same frame by explicit executed or absent operations.
+    /// Only the minimum and one missing operation per clause can affect the
+    /// extrema. Work is linear in the bounded number of row groups. This
+    /// does not close requirements under a separate precedence relation.
+    pub(super) fn constrain(
+        &self,
+        must_execute: u16,
+        must_be_absent: u16,
+    ) -> Result<Option<FramePrefixBounds>, PrefixOperationOutsideDomain> {
+        if (must_execute | must_be_absent) & !self.operations != 0 {
+            return Err(PrefixOperationOutsideDomain);
+        }
+        let minimum = self.minimum | must_execute;
+        if minimum & must_be_absent != 0 {
+            return Ok(None);
+        }
+        let mut individually_possible = self.operations & !must_be_absent;
+        for bad in self.forbidden_masks() {
+            let missing = bad & !minimum;
+            if missing == 0 {
+                return Ok(None);
+            }
+            if missing.is_power_of_two() {
+                individually_possible &= !missing;
+            }
+        }
+        Ok(Some(FramePrefixBounds {
+            minimum,
+            individually_possible,
+        }))
+    }
+}
+
 /// Binds the grouped conjunctions to the selected canonical row identities.
 #[cfg(test)]
 #[derive(Debug, Eq, PartialEq)]

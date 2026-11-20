@@ -5,6 +5,9 @@ use super::*;
 use crate::backend::wasm_cpu::geometry::GeometryCandidate;
 use crate::reachability_reference::reference_spawn_lock_anchors;
 
+#[path = "reachability_template_structure_tests.rs"]
+mod template_structure_tests;
+
 const MAX_CLAUSES: usize = 32;
 const MAX_EDGE_VISITS: usize = 512;
 const MAX_VERIFY_WORK: usize = 16 * 1024;
