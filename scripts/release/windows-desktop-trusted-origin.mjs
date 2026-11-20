@@ -76,7 +76,7 @@ function verifyJobs(payload, sourceCommit, runId, runAttempt) {
   return positiveId(producer.id, 'Windows GUI producer job ID');
 }
 
-function verifyArtifact(catalog, name, observed, repositoryId, runId, sourceCommit) {
+function selectArtifact(catalog, name, repositoryId, runId, sourceCommit) {
   const matches = catalog.filter((entry) => entry.name === name);
   requireThat(matches.length === 1, `no unique artifact named ${name}`);
   const artifact = matches[0];
@@ -88,18 +88,14 @@ function verifyArtifact(catalog, name, observed, repositoryId, runId, sourceComm
     positiveId(run.head_repository_id, 'artifact head repository ID') === repositoryId &&
     run.head_sha === sourceCommit && run.head_branch === 'main',
   `artifact ${name} is expired or not owned by the exact source run`);
-  requireExactKeys(observed, ['artifact_id', 'sha256'], 'independent raw ZIP observation');
-  requireThat(positiveId(observed.artifact_id, 'observed artifact ID') === artifactId,
-    `raw ZIP was obtained from a different artifact ID than ${name}`);
   const apiSha = typeof artifact.digest === 'string' && API_DIGEST.exec(artifact.digest);
-  const sha256 = requireSha256(observed.sha256, 'observed raw ZIP SHA-256');
-  requireThat(apiSha && apiSha[1] === sha256, `API archive digest differs from the observed ZIP for ${name}`);
-  return { artifactId, sha256 };
+  requireThat(apiSha, `API archive SHA-256 for ${name} is missing or invalid`);
+  return Object.freeze({ artifactId, name, sha256: apiSha[1] });
 }
 
-export function buildWindowsDesktopTrustedOrigin({
-  expected, attempt, jobs, artifactCatalog, acceptedEvidence, downloadedArchives,
-}) {
+// Validates authenticated API metadata BEFORE any archive is acquired. This
+// selection alone carries no authority to stage an executable.
+export function selectWindowsDesktopTrustedOriginArtifacts({ expected, attempt, jobs, artifactCatalog }) {
   requireExactKeys(expected, EXPECTED_KEYS, 'expected canonical acceptance identity');
   const sourceCommit = requireSourceCommit(expected.source_commit);
   const runId = positiveId(expected.run_id, 'expected run ID');
@@ -108,12 +104,30 @@ export function buildWindowsDesktopTrustedOrigin({
   const producerJobId = verifyJobs(jobs, sourceCommit, runId, runAttempt);
 
   const catalog = completeList(artifactCatalog, 'artifacts', 'run artifact catalog');
-  requireExactKeys(downloadedArchives, ['gui', 'canonical'], 'raw ZIP observations');
   const guiName = `clearra-windows-gui-v${expected.release_version}-run-${runId}-attempt-${runAttempt}`;
   const canonicalName = `canonical-acceptance-evidence-${sourceCommit}-run-${runId}-attempt-${runAttempt}`;
-  const gui = verifyArtifact(catalog, guiName, downloadedArchives.gui, repositoryId, runId, sourceCommit);
-  const canonical = verifyArtifact(catalog, canonicalName, downloadedArchives.canonical, repositoryId, runId, sourceCommit);
+  const gui = selectArtifact(catalog, guiName, repositoryId, runId, sourceCommit);
+  const canonical = selectArtifact(catalog, canonicalName, repositoryId, runId, sourceCommit);
   requireThat(gui.sha256 !== canonical.sha256, 'GUI and canonical ZIP archives cannot be the same bytes');
+  return Object.freeze({ gui, canonical, sourceCommit, runId, runAttempt, producerJobId });
+}
+
+function verifyArtifactObservation(selected, observed) {
+  requireExactKeys(observed, ['artifact_id', 'sha256'], 'independent raw ZIP observation');
+  requireThat(positiveId(observed.artifact_id, 'observed artifact ID') === selected.artifactId,
+    `raw ZIP was obtained from a different artifact ID than ${selected.name}`);
+  requireThat(requireSha256(observed.sha256, 'observed raw ZIP SHA-256') === selected.sha256,
+    `API archive digest differs from the observed ZIP for ${selected.name}`);
+}
+
+export function buildWindowsDesktopTrustedOrigin({
+  expected, attempt, jobs, artifactCatalog, acceptedEvidence, downloadedArchives,
+}) {
+  const { gui, canonical, sourceCommit, runId, runAttempt, producerJobId } =
+    selectWindowsDesktopTrustedOriginArtifacts({ expected, attempt, jobs, artifactCatalog });
+  requireExactKeys(downloadedArchives, ['gui', 'canonical'], 'raw ZIP observations');
+  verifyArtifactObservation(gui, downloadedArchives.gui);
+  verifyArtifactObservation(canonical, downloadedArchives.canonical);
 
   // Existing closed sidecar contract only; no extra authority or executor flag.
   const origin = Object.freeze({
@@ -124,7 +138,7 @@ export function buildWindowsDesktopTrustedOrigin({
     run_attempt: runAttempt,
     producer_job_id: producerJobId,
     artifact_id: gui.artifactId,
-    artifact_name: guiName,
+    artifact_name: gui.name,
     artifact_archive_sha256: gui.sha256,
     canonical_acceptance_sha256: acceptedEvidence?.report_sha256,
     release_version: expected.release_version,
