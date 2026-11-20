@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  assertExactComparison, classifyProofRuntime, collectPlacementCoverageProof,
+  assertExactComparison, benchmarkEnvironment, classifyProofRuntime, collectPlacementCoverageProof,
   parseProofArguments, proofSchedule, validatedProofArm,
 } from "./run-placement-coverage-proof.mjs";
 
@@ -140,6 +140,22 @@ test("capture qualification catches worker substitutions even when counts match"
   const report = armReport(reference, receipt, options.fixture);
   report.summary.workers_used = "11";
   assert.throws(() => validatedProofArm(report, receipt, reference, options, binarySha), /automatic parallel/u);
+});
+
+test("movement-clear proof neutralizes both APDP follow-on modes", () => {
+  const input = { clearra_minimum_domain_cutoff: "1", CLEARRA_MINIMUM_DOMAIN_WORK: "1" };
+  const environment = benchmarkEnvironment(input, reference);
+  assert.equal(environment.CLEARRA_MINIMUM_DOMAIN_CUTOFF, "0");
+  assert.equal(environment.CLEARRA_MINIMUM_DOMAIN_WORK, "0");
+  assert.equal(environment.clearra_minimum_domain_cutoff, undefined);
+  const options = parseProofArguments(cli("p7p4"));
+  const receipt = runtime(reference, 0);
+  for (const axis of ["minimum_domain_cutoff_mode", "minimum_domain_work_mode"]) {
+    const report = armReport(reference, receipt, options.fixture);
+    report[axis] = "1";
+    assert.throws(() => validatedProofArm(report, receipt, reference, options, binarySha),
+      /unexpected source, mode, or coverage output/u);
+  }
 });
 
 test("successful exact sequence writes bound mapping and no release/performance authority", async () => {

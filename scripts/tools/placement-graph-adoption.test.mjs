@@ -169,6 +169,9 @@ test("run order, output identity and reported operation are enforced", () => {
   const nonemptyOnly = setup();
   nonemptyOnly.axis = "incremental_domain_mode";
   assert.throws(() => evaluatePlacementGraphAdoption(nonemptyOnly), /one known axis/u);
+  const apdp = setup();
+  rewriteReport(apdp.runs[1], (report) => { report.minimum_domain_cutoff_mode = "1"; });
+  assert.throws(() => evaluatePlacementGraphAdoption(apdp), /non-neutral axis minimum_domain_cutoff_mode/u);
   const changedMode = setup();
   rewriteReport(changedMode.runs[1], (report) => { report.output_mode = "solution-coverage"; });
   assert.throws(() => evaluatePlacementGraphAdoption(changedMode), /unbound benchmark/u);

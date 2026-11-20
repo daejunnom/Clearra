@@ -26,6 +26,8 @@ const MODES = Object.freeze({
   CLEARRA_STATIC_INFLUENCE: "0",
   CLEARRA_TRANSLATION_INTERVAL: "0",
   CLEARRA_INCREMENTAL_DOMAIN: "0",
+  CLEARRA_MINIMUM_DOMAIN_CUTOFF: "0",
+  CLEARRA_MINIMUM_DOMAIN_WORK: "0",
   CLEARRA_FIRST_KICK_INTERVAL: "0",
   CLEARRA_CONDITIONAL_ORDER: "0",
   CLEARRA_TERMINAL_IDENTITY_MOVE: "0",
@@ -132,6 +134,8 @@ export function validatedProofArm(report, receipt, step, options, binarySha, out
     report.mode === "1" && report.structural_mode === "1" &&
     report.static_influence_mode === "0" && report.translation_interval_mode === "0" &&
     report.incremental_domain_mode === "0" && report.first_kick_interval_mode === "0" &&
+    (report.minimum_domain_cutoff_mode ?? "0") === "0" &&
+    (report.minimum_domain_work_mode ?? "0") === "0" &&
     report.conditional_order_mode === "0" && report.terminal_identity_move_mode === "0" &&
     (report.ordered_kick_interval_mode ?? "0") === "0" &&
     (report.ilc_lazy_frame_mode ?? "0") === "0" &&

@@ -42,6 +42,15 @@ pub(super) enum DomainStatus {
     Empty,
 }
 
+/// Work on direct support incidences only; bumper-domain scans are unchanged
+/// and excluded. A cell is counted as cut off only when an incidence was skipped.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct MinimumDomainSupportWork {
+    pub incidence_rows_scanned: u64,
+    pub incidence_rows_skipped: u64,
+    pub cells_cut_off: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SameTileParentMode {
     Scan,
@@ -484,26 +493,81 @@ impl DomainPropagation {
         remaining: u64,
         feasible_piece_mask: u8,
     ) -> (DomainStatus, Self) {
+        let (status, propagation, _) =
+            Self::compile_minimum_support::<false, false>(catalog, remaining, feasible_piece_mask);
+        (status, propagation)
+    }
+
+    #[cfg(any(feature = "local-search-ab", test))]
+    pub fn compile_minimum_cutoff(
+        catalog: &GeometryCatalog,
+        remaining: u64,
+        feasible_piece_mask: u8,
+    ) -> (DomainStatus, Self) {
+        let (status, propagation, _) =
+            Self::compile_minimum_support::<true, false>(catalog, remaining, feasible_piece_mask);
+        (status, propagation)
+    }
+
+    #[cfg(any(feature = "local-search-ab", test))]
+    pub fn compile_minimum_profiled(
+        catalog: &GeometryCatalog,
+        remaining: u64,
+        feasible_piece_mask: u8,
+        cutoff: bool,
+    ) -> (DomainStatus, Self, MinimumDomainSupportWork) {
+        if cutoff {
+            Self::compile_minimum_support::<true, true>(catalog, remaining, feasible_piece_mask)
+        } else {
+            Self::compile_minimum_support::<false, true>(catalog, remaining, feasible_piece_mask)
+        }
+    }
+
+    fn compile_minimum_support<const CUTOFF: bool, const RECORD_WORK: bool>(
+        catalog: &GeometryCatalog,
+        remaining: u64,
+        feasible_piece_mask: u8,
+    ) -> (DomainStatus, Self, MinimumDomainSupportWork) {
         let mut result = Self::empty();
         result.pivot_support_count = usize::MAX;
+        let mut work = MinimumDomainSupportWork::default();
         let mut cells = remaining;
         while cells != 0 {
             let cell = cells.trailing_zeros() as u8;
             cells &= cells - 1;
             let mut support_count = 0;
             let mut piece_mask = 0;
-            for row_id in catalog.support(cell).iter().copied() {
+            let incidences = catalog.support(cell);
+            let mut scanned = incidences.len();
+            for (index, &row_id) in incidences.iter().enumerate() {
                 if !row_feasible(catalog, row_id, remaining, feasible_piece_mask) {
                     continue;
                 }
                 support_count += 1;
                 piece_mask |= 1_u8 << piece_index(catalog.skeleton(row_id).piece);
+                if CUTOFF && support_count == result.pivot_support_count {
+                    // Only a strict improvement can replace the earlier
+                    // pivot. This cell has at least as many feasible parents
+                    // and is not empty, so its tail cannot affect either
+                    // decision. A contender below the bound is scanned to
+                    // exhaustion and retains its exact kind mask.
+                    if RECORD_WORK {
+                        scanned = index + 1;
+                    }
+                    break;
+                }
+            }
+            if RECORD_WORK {
+                let skipped = incidences.len() - scanned;
+                work.incidence_rows_scanned += scanned as u64;
+                work.incidence_rows_skipped += skipped as u64;
+                work.cells_cut_off += u64::from(skipped != 0);
             }
             if support_count == 0 {
                 result.pivot_cell = cell;
                 result.pivot_required_cells = 1_u64 << cell;
                 result.pivot_support_count = 0;
-                return (DomainStatus::Empty, result);
+                return (DomainStatus::Empty, result, work);
             }
             if support_count < result.pivot_support_count {
                 result.pivot_cell = cell;
@@ -522,7 +586,7 @@ impl DomainPropagation {
                 result.pivot_cell = cell;
                 result.pivot_required_cells = 1_u64 << cell;
                 result.pivot_support_count = 0;
-                return (DomainStatus::Empty, result);
+                return (DomainStatus::Empty, result, work);
             }
             result.pivot_cell = cell;
             result.pivot_required_cells = 1_u64 << cell;
@@ -530,7 +594,7 @@ impl DomainPropagation {
             result.pivot_piece_mask = piece_mask;
             result.bumper_cell = cell;
         }
-        (DomainStatus::Supported, result)
+        (DomainStatus::Supported, result, work)
     }
 
     pub fn row_allowed(
@@ -844,6 +908,111 @@ mod tests {
             }
         }
         support
+    }
+
+    fn exhaustive_minimum_on_empty_board(
+        catalog: &GeometryCatalog,
+        remaining: u64,
+        piece_mask: u8,
+    ) -> (DomainStatus, DomainPropagation) {
+        // With an empty origin, no dynamic bumper can replace the pivot.
+        assert_eq!(catalog.initial_board(), 0);
+        let mut best = DomainPropagation::empty();
+        best.pivot_support_count = usize::MAX;
+        for cell in 0..64 {
+            let bit = 1_u64 << cell;
+            if remaining & bit == 0 {
+                continue;
+            }
+            let support = exhaustive_cell_support(catalog, cell, remaining, piece_mask);
+            if support.count == 0 {
+                best.pivot_cell = cell;
+                best.pivot_required_cells = bit;
+                best.pivot_support_count = 0;
+                return (DomainStatus::Empty, best);
+            }
+            if (support.count as usize, cell) < (best.pivot_support_count, best.pivot_cell) {
+                best.pivot_cell = cell;
+                best.pivot_required_cells = bit;
+                best.pivot_support_count = support.count as usize;
+                best.pivot_piece_mask = support.pieces;
+            }
+        }
+        (DomainStatus::Supported, best)
+    }
+
+    #[test]
+    fn minimum_domain_cutoff_preserves_winner_and_skips_real_incidence_rows() {
+        let full = 0xfffff;
+        let catalog = GeometryCatalog::compile_build_stage(2, 0, full).unwrap();
+        let o_only = 1 << piece_index(PieceKind::O);
+        let (full_status, full_pivot, reference) =
+            DomainPropagation::compile_minimum_profiled(&catalog, full, o_only, false);
+        let (fast_status, fast_pivot, cutoff) =
+            DomainPropagation::compile_minimum_profiled(&catalog, full, o_only, true);
+
+        assert_eq!(
+            (fast_status, fast_pivot),
+            exhaustive_minimum_on_empty_board(&catalog, full, o_only),
+        );
+        assert_eq!((fast_status, fast_pivot), (full_status, full_pivot));
+        assert_eq!(fast_status, DomainStatus::Supported);
+        assert_eq!(fast_pivot.pivot_cell, 0);
+        assert_eq!(fast_pivot.pivot_support_count, 1);
+        assert_eq!(fast_pivot.pivot_piece_mask, o_only);
+        assert_eq!(reference.incidence_rows_skipped, 0);
+        assert_eq!(reference.cells_cut_off, 0);
+        assert!(cutoff.incidence_rows_skipped > 0);
+        assert!(cutoff.cells_cut_off > 0);
+        assert_eq!(
+            cutoff.incidence_rows_scanned + cutoff.incidence_rows_skipped,
+            reference.incidence_rows_scanned
+        );
+    }
+
+    #[test]
+    fn minimum_domain_cutoff_still_detects_late_zero_after_positive_pivots() {
+        let catalog = GeometryCatalog::compile_build_stage(2, 0, 0xfffff).unwrap();
+        let o_only = 1 << piece_index(PieceKind::O);
+        // Cells 0 and 1 have a feasible O. Cell 4 (the next cell)
+        // cannot participate in any feasible O, despite four extra cells.
+        let remaining = LEFT_O | 1 << 4 | 1 << 6 | 1 << 8 | 1 << 9;
+        let (status, pivot, _) =
+            DomainPropagation::compile_minimum_profiled(&catalog, remaining, o_only, true);
+        assert_eq!(
+            (status, pivot),
+            exhaustive_minimum_on_empty_board(&catalog, remaining, o_only)
+        );
+        assert_eq!(status, DomainStatus::Empty);
+        assert_eq!(pivot.pivot_cell, 4);
+        assert_eq!(pivot.pivot_support_count, 0);
+    }
+
+    #[test]
+    fn minimum_domain_cutoff_matches_full_selection_for_all_piece_masks() {
+        let full = 0xfffff;
+        let catalog = GeometryCatalog::compile_build_stage(2, 0, full).unwrap();
+        for remaining in [full, full & !LEFT_O, full & !(LEFT_O | RIGHT_O), LEFT_O, 0] {
+            for piece_mask in 0..=ALL_STANDARD_PIECES {
+                let reference = exhaustive_minimum_on_empty_board(&catalog, remaining, piece_mask);
+                let (status, pivot, _) = DomainPropagation::compile_minimum_profiled(
+                    &catalog, remaining, piece_mask, true,
+                );
+                assert_eq!(
+                    (status, pivot),
+                    reference,
+                    "remaining {remaining:#x}, pieces {piece_mask:#x}"
+                );
+                assert_eq!(
+                    DomainPropagation::compile_minimum_cutoff(&catalog, remaining, piece_mask),
+                    reference
+                );
+                assert_eq!(
+                    DomainPropagation::compile_minimum(&catalog, remaining, piece_mask),
+                    reference
+                );
+            }
+        }
     }
 
     fn assert_matches_full(

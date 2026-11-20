@@ -22,6 +22,9 @@ const AXES = [
 const FIXED_P7P4_AXES = [
   "incremental_domain_mode", "no_entry_components_mode", "same_tile_parent_reuse_mode",
 ];
+// New axes are forbidden in this existing single-axis handoff; an older
+// receipt that predates them has the neutral behavior by construction.
+const NEUTRAL_FOLLOW_ON_AXES = ["minimum_domain_cutoff_mode", "minimum_domain_work_mode"];
 const SOLUTIONS = 456_459;
 const QUEUES = 4_233_600;
 const SOLUTION_SET_HASH = "cts1:2fcbc950acdffa31";
@@ -153,7 +156,11 @@ function readCompletedRun(run, label, axis, arm, outputMode) {
   // Advanced APDP needs a non-empty target; the component experiment needs
   // movement-clear on both arms. Neither is an axis of this P7P4 handoff.
   requireThat(Object.keys(report).every((key) => !key.endsWith("_mode") || key === "output_mode" ||
-    AXES.includes(key) || FIXED_P7P4_AXES.includes(key)), `${label}: unknown experimental axis`);
+    AXES.includes(key) || FIXED_P7P4_AXES.includes(key) || NEUTRAL_FOLLOW_ON_AXES.includes(key)),
+  `${label}: unknown experimental axis`);
+  for (const key of NEUTRAL_FOLLOW_ON_AXES) {
+    requireThat(!Object.hasOwn(report, key) || report[key] === "0", `${label}: non-neutral axis ${key}`);
+  }
   for (const key of [...AXES, ...FIXED_P7P4_AXES]) {
     requireThat(["0", "1"].includes(report[key]), `${label}: missing or invalid axis ${key}`);
     if (key === axis) {

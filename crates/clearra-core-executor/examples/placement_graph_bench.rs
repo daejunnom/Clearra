@@ -203,6 +203,8 @@ mod run {
         let movement_clear_certificates_mode =
             experiment_mode("CLEARRA_MOVEMENT_CLEAR_CERTIFICATES")?;
         let incremental_domain_mode = experiment_mode("CLEARRA_INCREMENTAL_DOMAIN")?;
+        let minimum_domain_cutoff_mode = experiment_mode("CLEARRA_MINIMUM_DOMAIN_CUTOFF")?;
+        let minimum_domain_work_mode = experiment_mode("CLEARRA_MINIMUM_DOMAIN_WORK")?;
         let first_kick_interval_mode = experiment_mode("CLEARRA_FIRST_KICK_INTERVAL")?;
         let ordered_kick_interval_mode = experiment_mode("CLEARRA_ORDERED_KICK_INTERVAL")?;
         let ilc_lazy_frame_mode = experiment_mode("CLEARRA_ILC_LAZY_FRAME")?;
@@ -372,6 +374,8 @@ mod run {
             "translation_interval_mode": translation_interval_mode,
             "movement_clear_certificates_mode": movement_clear_certificates_mode,
             "incremental_domain_mode": incremental_domain_mode,
+            "minimum_domain_cutoff_mode": minimum_domain_cutoff_mode,
+            "minimum_domain_work_mode": minimum_domain_work_mode,
             "first_kick_interval_mode": first_kick_interval_mode,
             "ordered_kick_interval_mode": ordered_kick_interval_mode,
             "ilc_lazy_frame_mode": ilc_lazy_frame_mode,
@@ -379,7 +383,7 @@ mod run {
             "same_tile_parent_reuse_mode": same_tile_parent_reuse_mode,
             "conditional_order_mode": conditional_order_mode,
             "terminal_identity_move_mode": terminal_identity_move_mode,
-            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},ordered_kick={ordered_kick_interval_mode},ilc_lazy_frame={ilc_lazy_frame_mode},no_entry_components={no_entry_components_mode},same_tile_parent_reuse={same_tile_parent_reuse_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode}",
+            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},ordered_kick={ordered_kick_interval_mode},ilc_lazy_frame={ilc_lazy_frame_mode},no_entry_components={no_entry_components_mode},same_tile_parent_reuse={same_tile_parent_reuse_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode},minimum_domain_cutoff={minimum_domain_cutoff_mode},minimum_domain_work={minimum_domain_work_mode}",
                 variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode)),
         });
         let structural_metrics = json!({
@@ -445,6 +449,10 @@ mod run {
                 "minimum_resource_authoritative": geometry_domains.minimum_resource_authoritative,
                 "minimum_below_seven_pieces": geometry_domains.minimum_below_seven_pieces,
                 "minimum_empty_origin": geometry_domains.minimum_empty_origin,
+                "minimum_profiled_compiles": geometry_domains.minimum_profiled_compiles,
+                "minimum_incidence_rows_scanned": geometry_domains.minimum_incidence_rows_scanned,
+                "minimum_incidence_rows_skipped": geometry_domains.minimum_incidence_rows_skipped,
+                "minimum_cells_cut_off": geometry_domains.minimum_cells_cut_off,
                 "advanced_full_compiles": geometry_domains.advanced_full_compiles,
                 "advanced_incremental_compiles": geometry_domains.advanced_incremental_compiles,
                 "support_cells_reused": geometry_domains.support_cells_reused,
@@ -1183,6 +1191,8 @@ mod run {
             };
             let movement = extra_mode("movement_clear_certificates_mode")?;
             let incremental = extra_mode("incremental_domain_mode")?;
+            let minimum_domain_cutoff = extra_mode("minimum_domain_cutoff_mode")?;
+            let minimum_domain_work = extra_mode("minimum_domain_work_mode")?;
             let first_kick = extra_mode("first_kick_interval_mode")?;
             let ordered_kick = extra_mode("ordered_kick_interval_mode")?;
             let ilc_lazy_frame = extra_mode("ilc_lazy_frame_mode")?;
@@ -1191,7 +1201,7 @@ mod run {
             let conditional = extra_mode("conditional_order_mode")?;
             let terminal_move = extra_mode("terminal_identity_move_mode")?;
             let all_axes = format!(
-                "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ilc_lazy_frame={ilc_lazy_frame},no_entry_components={no_entry_components},same_tile_parent_reuse={same_tile_parent_reuse},conditional_order={conditional},terminal_identity_move={terminal_move}"
+                "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ilc_lazy_frame={ilc_lazy_frame},no_entry_components={no_entry_components},same_tile_parent_reuse={same_tile_parent_reuse},conditional_order={conditional},terminal_identity_move={terminal_move},minimum_domain_cutoff={minimum_domain_cutoff},minimum_domain_work={minimum_domain_work}"
             );
             if eight_i {
                 let work = report
@@ -1203,6 +1213,8 @@ mod run {
             all_axes_times.entry(all_axes).or_default().push(ms);
             if movement == "0"
                 && incremental == "0"
+                && minimum_domain_cutoff == "0"
+                && minimum_domain_work == "0"
                 && first_kick == "0"
                 && ordered_kick == "0"
                 && ilc_lazy_frame == "0"

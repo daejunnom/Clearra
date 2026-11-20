@@ -35,6 +35,17 @@ fn incremental_domain_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("CLEARRA_INCREMENTAL_DOMAIN").as_deref() == Ok("1"))
 }
 
+#[cfg(any(feature = "local-search-ab", test))]
+fn minimum_domain_modes() -> (bool, bool) {
+    static MODES: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+    *MODES.get_or_init(|| {
+        (
+            std::env::var("CLEARRA_MINIMUM_DOMAIN_CUTOFF").as_deref() == Ok("1"),
+            std::env::var("CLEARRA_MINIMUM_DOMAIN_WORK").as_deref() == Ok("1"),
+        )
+    })
+}
+
 /// Exact compact-domain activity of completed family compilers only. This
 /// excludes early projection/cache exits, extended domains and incomplete
 /// families. A zero means none in the recorded families.
@@ -46,6 +57,12 @@ pub struct GeometryDomainExperimentTotals {
     pub minimum_resource_authoritative: u64,
     pub minimum_below_seven_pieces: u64,
     pub minimum_empty_origin: u64,
+    /// Optional work counts for the minimum route; do not mix with the
+    /// advanced support cache or uninstrumented timing runs.
+    pub minimum_profiled_compiles: u64,
+    pub minimum_incidence_rows_scanned: u64,
+    pub minimum_incidence_rows_skipped: u64,
+    pub minimum_cells_cut_off: u64,
     /// Reference route only. A full recompute inside the incremental route
     /// is still an incremental compile, with zero reused cells.
     pub advanced_full_compiles: u64,
@@ -109,6 +126,22 @@ impl GeometryDomainExperimentTotals {
                 family.minimum_below_seven_pieces,
             ),
             (&mut self.minimum_empty_origin, family.minimum_empty_origin),
+            (
+                &mut self.minimum_profiled_compiles,
+                family.minimum_profiled_compiles,
+            ),
+            (
+                &mut self.minimum_incidence_rows_scanned,
+                family.minimum_incidence_rows_scanned,
+            ),
+            (
+                &mut self.minimum_incidence_rows_skipped,
+                family.minimum_incidence_rows_skipped,
+            ),
+            (
+                &mut self.minimum_cells_cut_off,
+                family.minimum_cells_cut_off,
+            ),
             (
                 &mut self.advanced_full_compiles,
                 family.advanced_full_compiles,
@@ -1214,8 +1247,35 @@ impl FamilyCompiler {
                 )
             } else {
                 #[cfg(any(feature = "local-search-ab", test))]
-                self.domain_metrics
-                    .record_minimum(self.resource_authoritative, self.target_depth);
+                let (status, propagation) = {
+                    self.domain_metrics
+                        .record_minimum(self.resource_authoritative, self.target_depth);
+                    let (cutoff, profile_work) = minimum_domain_modes();
+                    if profile_work {
+                        let (status, propagation, work) =
+                            DomainPropagation::compile_minimum_profiled(
+                                catalog,
+                                remaining,
+                                feasible_piece_mask,
+                                cutoff,
+                            );
+                        let totals = &mut self.domain_metrics;
+                        totals.minimum_profiled_compiles += 1;
+                        totals.minimum_incidence_rows_scanned += work.incidence_rows_scanned;
+                        totals.minimum_incidence_rows_skipped += work.incidence_rows_skipped;
+                        totals.minimum_cells_cut_off += work.cells_cut_off;
+                        (status, propagation)
+                    } else if cutoff {
+                        DomainPropagation::compile_minimum_cutoff(
+                            catalog,
+                            remaining,
+                            feasible_piece_mask,
+                        )
+                    } else {
+                        DomainPropagation::compile_minimum(catalog, remaining, feasible_piece_mask)
+                    }
+                };
+                #[cfg(not(any(feature = "local-search-ab", test)))]
                 let (status, propagation) =
                     DomainPropagation::compile_minimum(catalog, remaining, feasible_piece_mask);
                 (status, propagation, [0; 64])
