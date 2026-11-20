@@ -34,6 +34,23 @@ const STANDARD_BAG_MASK_COUNT: usize = 1 << STANDARD_PIECE_COUNT;
 const CURSOR_TRANSITION_UNAVAILABLE: u8 = u8::MAX;
 
 #[cfg(any(test, feature = "local-search-ab"))]
+const UNION_MEMO_LIMIT_INVALID: &str = "wasm_standard_bag_union_memo_entry_limit_invalid";
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn parse_union_memo_entry_limit(value: Option<&str>) -> Result<Option<usize>, &'static str> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(UNION_MEMO_LIMIT_INVALID);
+    }
+    value
+        .parse()
+        .map(Some)
+        .map_err(|_| UNION_MEMO_LIMIT_INVALID)
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
 const P7P4_PREFIXES: usize = 5_040;
 #[cfg(any(test, feature = "local-search-ab"))]
 const P7P4_TAIL_BITS: usize = 840;
@@ -745,6 +762,10 @@ pub(super) struct StandardBagCoverage {
     bucket_heads: Vec<u32>,
     product_memo: StandardBagProductMemo,
     union_memo: ExactU64MemoMap,
+    // Experimental admission bound on live keys, not a byte/RSS cap. Hash
+    // allocation still follows the map's growth policy and survives recycling.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    union_memo_entry_limit: Option<usize>,
     epoch_global_root: u32,
     global_words: Vec<u64>,
     global_covered_pattern_count: usize,
@@ -827,6 +848,14 @@ impl StandardBagCoverage {
             .map_err(WasmExactSearchError::InvalidProblem)?;
         let product_layout = StandardBagProductMemoLayout::from_environment()
             .map_err(WasmExactSearchError::InvalidProblem)?;
+        #[cfg(feature = "local-search-ab")]
+        let union_memo_entry_limit =
+            match std::env::var("CLEARRA_STANDARD_BAG_UNION_MEMO_MAX_ENTRIES") {
+                Ok(value) => parse_union_memo_entry_limit(Some(&value)),
+                Err(std::env::VarError::NotPresent) => parse_union_memo_entry_limit(None),
+                Err(std::env::VarError::NotUnicode(_)) => Err(UNION_MEMO_LIMIT_INVALID),
+            }
+            .map_err(WasmExactSearchError::InvalidProblem)?;
         let max_source_depth = tables.cursor_transitions.max_source_depth;
         Ok(Self {
             sequence_len: tables.sequence_len,
@@ -848,6 +877,10 @@ impl StandardBagCoverage {
                 max_source_depth,
             ),
             union_memo: ExactU64MemoMap::new(memo_storage),
+            #[cfg(feature = "local-search-ab")]
+            union_memo_entry_limit,
+            #[cfg(all(test, not(feature = "local-search-ab")))]
+            union_memo_entry_limit: None,
             epoch_global_root: REJECT,
             global_words: Vec::new(),
             global_covered_pattern_count: 0,
@@ -1768,6 +1801,15 @@ impl StandardBagCoverage {
         } else {
             self.intern_node(level, valid_mask, children)?
         };
+        // The exact root is already available. Skipping a memo insertion
+        // changes neither the root nor coverage, just future recomputation.
+        #[cfg(any(test, feature = "local-search-ab"))]
+        if self
+            .union_memo_entry_limit
+            .is_some_and(|limit| self.union_memo.len() >= limit)
+        {
+            return Ok(root);
+        }
         if self.union_memo.try_reserve(1).is_ok() {
             self.union_memo.insert(key, root);
         }
@@ -2251,6 +2293,112 @@ mod supply_automaton_tests {
             SupplyProvenanceId(0x77),
         );
         (universe, initial)
+    }
+
+    #[test]
+    fn union_memo_entry_limit_is_explicit_and_defaults_to_unbounded() {
+        assert_eq!(parse_union_memo_entry_limit(None), Ok(None));
+        assert_eq!(parse_union_memo_entry_limit(Some("0")), Ok(Some(0)));
+        assert_eq!(
+            parse_union_memo_entry_limit(Some("3670016")),
+            Ok(Some(3_670_016))
+        );
+        for malformed in [
+            "",
+            "-1",
+            "+1",
+            " 2",
+            "full",
+            "99999999999999999999999999999",
+        ] {
+            assert_eq!(
+                parse_union_memo_entry_limit(Some(malformed)),
+                Err(UNION_MEMO_LIMIT_INVALID)
+            );
+        }
+    }
+
+    #[test]
+    fn tiny_union_memo_caps_preserve_exact_coverage_witnesses_and_recycling() {
+        use PieceKind::{I, J, O, S, T, Z};
+
+        let (_, initial) = request_fixture(4);
+        let universe = PatternUniverseMaterializer::standard_7_bag(4, 0, 0x77)
+            .expect("full four-draw standard bag");
+        assert_eq!(universe.pattern_count(), 840);
+        let make = |storage, limit| {
+            let mut coverage = StandardBagCoverage::for_universe(&universe, initial, true, true)
+                .expect("bag coverage")
+                .expect("supported universe");
+            coverage.union_memo = ExactU64MemoMap::new(storage);
+            coverage.union_memo_entry_limit = limit;
+            coverage
+        };
+        for storage in [ExactU64MemoStorage::Reference, ExactU64MemoStorage::Compact] {
+            for limit in [0, 1] {
+                let mut reference = make(storage, None);
+                let mut treatment = make(storage, Some(limit));
+                let mut language = PieceOrderLanguageCache::default();
+                let control = ExecutionControl::default();
+                let mut saw_witness = false;
+                for (epoch, prefixes) in [[I, O, T], [J, S, Z]].into_iter().enumerate() {
+                    // Each distinct prefix merges into the same pending global
+                    // root, forcing two nontrivial union entries per epoch.
+                    for piece in prefixes {
+                        let mut children = [REJECT; 7];
+                        children[usize::from(piece_code(piece) - 1)] = ACCEPT;
+                        for coverage in [&mut reference, &mut treatment] {
+                            let root = coverage
+                                .intern_node(0, FULL_STANDARD_BAG, children)
+                                .expect("first-piece language");
+                            coverage.merge_global(root).expect("exact union");
+                        }
+                    }
+                    assert_eq!(reference.union_memo.len(), 2);
+                    assert_eq!(treatment.union_memo.len(), limit);
+                    for placed_len in [3, 4] {
+                        for phase in [epoch, epoch + 1] {
+                            let root = language
+                                .canonicalize(&branching_piece_language(placed_len, phase))
+                                .expect("canonical piece language");
+                            let a = reference
+                                .cover_language(&language, root, &control)
+                                .expect("reference coverage");
+                            let b = treatment
+                                .cover_language(&language, root, &control)
+                                .expect("bounded coverage");
+                            saw_witness |= a.witness_pattern_id.is_some();
+                            assert_eq!(a.covers_any_pattern, b.covers_any_pattern);
+                            assert_eq!(a.witness_pattern_id, b.witness_pattern_id);
+                            assert_eq!(a.covered_pattern_count, b.covered_pattern_count);
+                            assert_eq!(
+                                reference.materialize_root(a.root).expect("full coverage"),
+                                treatment.materialize_root(b.root).expect("full coverage")
+                            );
+                            reference.merge_global(a.root).expect("reference union");
+                            treatment.merge_global(b.root).expect("bounded union");
+                            assert!(treatment.union_memo.len() <= limit);
+                        }
+                    }
+                    reference
+                        .flush_and_recycle_local_cache()
+                        .expect("reference recycle");
+                    treatment
+                        .flush_and_recycle_local_cache()
+                        .expect("bounded recycle");
+                    assert_eq!(treatment.union_memo.len(), 0);
+                    assert_eq!(
+                        reference
+                            .materialize_global()
+                            .expect("reference committed union"),
+                        treatment
+                            .materialize_global()
+                            .expect("bounded committed union")
+                    );
+                }
+                assert!(saw_witness);
+            }
+        }
     }
 
     #[test]
