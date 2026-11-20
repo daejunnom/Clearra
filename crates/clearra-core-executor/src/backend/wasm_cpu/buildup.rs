@@ -2570,7 +2570,7 @@ fn prove_conditional_transition(
 
     let board = state.board;
     let deleted = state.deleted;
-    let lock_mask = geometry.conditional_lock_mask(operation, state);
+    let (lock_mask, expected_child) = geometry.conditional_operation(state, executed, operation);
     let mut realizations = catalog.instantiations(row_id, deleted).peekable();
     if realizations.peek().is_none() {
         return Forbidden;
@@ -2589,7 +2589,7 @@ fn prove_conditional_transition(
     }
     let (next_board, current_clears, _) =
         place_and_clear(catalog.width(), catalog.height(), board | lock_mask);
-    let expected = geometry.conditional_after_operation(state, executed, operation);
+    let expected = expected_child();
     if next_board != expected.0
         || merge_deleted_rows(catalog.height(), deleted, current_clears) != Some(expected.1)
     {

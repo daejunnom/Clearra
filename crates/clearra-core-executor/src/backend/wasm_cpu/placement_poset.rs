@@ -32,6 +32,40 @@ const MAX_CLEAR_FRAMES: usize = 1 << MAX_HEIGHT;
 #[cfg(test)]
 thread_local! {
     static JOINT_CLEAR_ADMISSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PROJECTION_COMPARISON: std::cell::Cell<Option<(bool, ConditionalProjectionWork)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ConditionalProjectionWork {
+    pub lock_projections: usize,
+    pub reused_same_frame: usize,
+    pub clear_reprojections: usize,
+}
+
+#[cfg(test)]
+fn record_projection_work(update: impl FnOnce(&mut ConditionalProjectionWork)) {
+    if let Some((reuse, mut counts)) = PROJECTION_COMPARISON.get() {
+        update(&mut counts);
+        PROJECTION_COMPARISON.set(Some((reuse, counts)));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn with_conditional_projection_reuse<T>(
+    reuse: bool,
+    action: impl FnOnce() -> T,
+) -> (T, ConditionalProjectionWork) {
+    struct Restore(Option<(bool, ConditionalProjectionWork)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PROJECTION_COMPARISON.set(self.0);
+        }
+    }
+    let _restore = Restore(PROJECTION_COMPARISON.replace(Some((reuse, Default::default()))));
+    let output = action();
+    (output, PROJECTION_COMPARISON.get().unwrap().1)
 }
 
 #[cfg(test)]
@@ -422,14 +456,32 @@ impl CandidateGeometry {
     }
 
     pub(super) fn conditional_lock_mask(&self, operation: usize, state: &ConditionalState) -> u64 {
+        #[cfg(test)]
+        record_projection_work(|work| work.lock_projections += 1);
         state.projection.physical_board(self.cells[operation])
     }
 
-    pub(super) fn conditional_after_operation(
+    /// Return this concrete operation's projected footprint and a deferred
+    /// child check bound to the same candidate, executed set and row frame.
+    /// Rejecting an ungrounded or uninstantiable operation need not build its child.
+    pub(super) fn conditional_operation<'a>(
+        &'a self,
+        state: &'a ConditionalState,
+        executed: u16,
+        operation: usize,
+    ) -> (u64, impl FnOnce() -> (u64, u16) + 'a) {
+        let mask = self.conditional_lock_mask(operation, state);
+        (mask, move || {
+            self.conditional_after_operation(state, executed, operation, mask)
+        })
+    }
+
+    fn conditional_after_operation(
         &self,
         state: &ConditionalState,
         executed: u16,
         operation: usize,
+        mask: u64,
     ) -> (u64, u16) {
         let bit = 1_u16 << operation;
         debug_assert_eq!(executed & bit, 0);
@@ -438,17 +490,26 @@ impl CandidateGeometry {
         let deleted = self.clear_conditions.deleted_rows(next);
         if deleted == state.deleted {
             // Projection is a fixed permutation/truncation of disjoint cells.
-            // On this frame ORing the new lock does not move existing cells.
-            return (
-                state.board | self.conditional_lock_mask(operation, state),
-                deleted,
-            );
+            // The unchanged frame preserves the exact footprint already used
+            // by the ILC/grounding checks of this same operation.
+            #[cfg(test)]
+            if PROJECTION_COMPARISON.get().is_some_and(|(reuse, _)| !reuse) {
+                return (
+                    state.board | self.conditional_lock_mask(operation, state),
+                    deleted,
+                );
+            }
+            #[cfg(test)]
+            record_projection_work(|work| work.reused_same_frame += 1);
+            return (state.board | mask, deleted);
         }
         // When rows clear, reproject the exact original executed union;
         // neither the stale compacted board nor individually possible pieces
         // identify the survivors in the new frame.
         let projection = self.row_projection(deleted);
         let original = board_for_operations(self.initial_board, &self.cells, next);
+        #[cfg(test)]
+        record_projection_work(|work| work.clear_reprojections += 1);
         (projection.physical_board(original), deleted)
     }
 

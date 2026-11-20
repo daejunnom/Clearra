@@ -1559,10 +1559,8 @@ fn conditional_support_or_created_by_one_clear_preserves_four_line_coverage() {
                 continue;
             }
             let expected = subset_state(&catalog, &candidate, executed | bit);
-            assert_eq!(
-                geometry.conditional_after_operation(&state, executed as u16, operation),
-                expected,
-            );
+            let (_, child) = geometry.conditional_operation(&state, executed as u16, operation);
+            assert_eq!(child(), expected);
             reused_frame |= expected.1 == state.deleted;
             projected_new_frame |= expected.1 != state.deleted;
         }
@@ -1614,8 +1612,30 @@ fn conditional_support_or_created_by_one_clear_preserves_four_line_coverage() {
         })
     };
     let (ordinary, off) = run(false);
-    let (conditional, on) = run(true);
-    assert_parity(&ordinary, &conditional);
+    let ((reference, reference_order), reference_work) =
+        placement_poset::with_conditional_projection_reuse(false, || run(true));
+    let ((conditional, on), reused_work) =
+        placement_poset::with_conditional_projection_reuse(true, || run(true));
+    assert_parity(&ordinary, &reference);
+    assert_parity(&reference, &conditional);
+    assert_eq!(reference_order.conditional_order, on.conditional_order);
+    for name in ["total_build_order_nodes", "total_reachability_states"] {
+        assert_eq!(
+            reference.usize_field(name).unwrap(),
+            conditional.usize_field(name).unwrap()
+        );
+    }
+    assert_eq!(reference_work.reused_same_frame, 0);
+    assert!(reused_work.reused_same_frame > 0 && reused_work.clear_reprojections > 0);
+    assert_eq!(
+        reference_work.clear_reprojections,
+        reused_work.clear_reprojections
+    );
+    assert_eq!(
+        reference_work.lock_projections,
+        reused_work.lock_projections + reused_work.reused_same_frame,
+    );
+    eprintln!("conditional lock projections: reference={reference_work:?} reuse={reused_work:?}");
     assert_eq!(off.conditional_order, Default::default());
     let metrics = on.conditional_order;
     assert!(metrics.graph_bypasses > 0);
