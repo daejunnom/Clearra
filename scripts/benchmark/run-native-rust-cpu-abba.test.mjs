@@ -2,10 +2,26 @@ import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import test from 'node:test';
 
-import { compilePlan, summarize, validateSample } from './run-native-rust-cpu-abba.mjs';
+import { compilePlan, summarize, validateRevisionSample, validateSample } from './run-native-rust-cpu-abba.mjs';
 
 const C = 'native-c';
 const R = 'rust-cpu';
+const BASELINE = 'rust-baseline';
+const CANDIDATE = 'rust-candidate';
+const BASELINE_COMMIT = 'a'.repeat(40);
+const CANDIDATE_COMMIT = 'b'.repeat(40);
+const KEY_DIGEST = 'c'.repeat(64);
+
+function revisionOptions() {
+  return [
+    '--manager', resolve('clearra-manage'), '--binary', resolve('candidate', 'native_rust_cpu_abba'),
+    '--output', resolve('benchmark-test-placeholder'), '--case', 'full-p7p4',
+    '--workers', '11', '--timeout-seconds', '1800',
+    '--baseline-binary', resolve('baseline', 'native_rust_cpu_abba'),
+    '--baseline-commit', BASELINE_COMMIT, '--baseline-sha256', '1'.repeat(64),
+    '--candidate-sha256', '2'.repeat(64),
+  ];
+}
 
 function evidence(arm, workers) {
   const native = arm === C;
@@ -49,6 +65,52 @@ test('plan binds exactly C/Rust/Rust/C, one timeout, and deliberate serial fixtu
   assert.throws(() => compilePlan([...options, '--case', 'fixed-2l', '--workers', '2', '--timeout-seconds', '60']), /one worker/);
   assert.throws(() => compilePlan([...options, '--case', 'full-p7p4', '--workers', '11', '--timeout-seconds', '1801']), /timeout/);
   assert.throws(() => compilePlan([...options, '--case', 'full-p7p4', '--workers', '11', '--max-candidates', '1000000']), /option/);
+});
+
+test('Rust revision plan requires two independently pinned executable inputs', () => {
+  const options = revisionOptions();
+  const plan = compilePlan(options);
+  assert.deepEqual(plan.schedule, [BASELINE, CANDIDATE, CANDIDATE, BASELINE]);
+  assert.equal(plan.options['--baseline-commit'], BASELINE_COMMIT);
+  assert.throws(() => compilePlan(options.slice(0, -2)), /requires/);
+  const override = (flag, value) => options.map((part, index) =>
+    options[index - 1] === flag ? value : part);
+  assert.throws(() => compilePlan(override('--baseline-binary', 'relative/baseline')), /must be absolute/);
+  assert.throws(() => compilePlan(override('--baseline-commit', 'a'.repeat(7))), /exact lowercase baseline commit/);
+  assert.throws(() => compilePlan(override('--baseline-sha256', 'A'.repeat(64))), /lowercase baseline binary SHA-256/);
+  assert.throws(() => compilePlan(override('--candidate-sha256', '1'.repeat(64))), /distinct/);
+});
+
+test('Rust revisions both report actual Rust CPU work, exact source and full ordered keys', () => {
+  const revisionEvidence = (commit, workers = 11) => {
+    const sample = evidence(R, workers);
+    sample.compiled_source_commit = commit;
+    sample.semantic.ordered_key_sha256 = KEY_DIGEST;
+    return sample;
+  };
+  const baseline = revisionEvidence(BASELINE_COMMIT);
+  const candidate = revisionEvidence(CANDIDATE_COMMIT);
+  const a = validateRevisionSample(baseline, 'full-p7p4', 11, BASELINE_COMMIT);
+  const b = validateRevisionSample(candidate, 'full-p7p4', 11, CANDIDATE_COMMIT);
+  assert.deepEqual(a.identity, b.identity);
+  assert.equal(a.identity.ordered_key_sha256, KEY_DIGEST);
+  assert.throws(() => validateRevisionSample(baseline, 'full-p7p4', 11, CANDIDATE_COMMIT), /not bound/);
+  for (const mutate of [
+    sample => { sample.arm = C; },
+    sample => { sample.backend.selected = 'cpu'; },
+    sample => { sample.backend.fallback = true; },
+    sample => { sample.backend.reported_active_workers = 1; },
+    sample => { sample.semantic.ordered_key_sha256 = null; },
+  ]) {
+    const sample = revisionEvidence(CANDIDATE_COMMIT);
+    mutate(sample);
+    assert.throws(() => validateRevisionSample(sample, 'full-p7p4', 11, CANDIDATE_COMMIT));
+  }
+  candidate.semantic.ordered_key_sha256 = 'd'.repeat(64);
+  assert.notDeepEqual(a.identity, validateRevisionSample(candidate, 'full-p7p4', 11, CANDIDATE_COMMIT).identity);
+  const solo = revisionEvidence(CANDIDATE_COMMIT, 1);
+  solo.backend.reported_active_workers = 0;
+  assert.throws(() => validateRevisionSample(solo, 'full-p7p4', 1, CANDIDATE_COMMIT), /useful participation/);
 });
 
 test('C packing width remains limited evidence, not proof of C BuildUp active workers', () => {
@@ -133,4 +195,20 @@ test('time ratios include only complete and undisturbed ABBA pairs', () => {
   regressed[1] = observation(R, 700, { state: 'censored' });
   assert.equal(summarize(regressed).result, 'incomplete-abba');
   assert.equal(summarize(regressed).aggregate[R].mean_solver_ms, null);
+});
+
+test('Rust revision summary never labels the Rust baseline as native C', () => {
+  const { schedule } = compilePlan(revisionOptions());
+  const samples = [
+    observation(BASELINE, 1000), observation(CANDIDATE, 750),
+    observation(CANDIDATE, 850), observation(BASELINE, 1100),
+  ];
+  const clean = summarize(samples, null, schedule);
+  assert.deepEqual(Object.keys(clean.aggregate), [BASELINE, CANDIDATE]);
+  assert.equal(clean.result, 'complete-clean-abba');
+  assert(Math.abs(clean.solver_mean_ratio - 800 / 1050) <= Number.EPSILON);
+  assert.equal(clean.no_regression_observed, true);
+  assert.equal(summarize(samples, 'candidate binary changed within ABBA', schedule).no_regression_observed, null);
+  samples[1].performance_eligible = false;
+  assert.equal(summarize(samples, null, schedule).result, 'complete-disturbed-abba');
 });

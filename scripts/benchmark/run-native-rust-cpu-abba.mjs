@@ -1,5 +1,7 @@
 // Serial subprocess ABBA with a fresh benchmark-search lease for each arm.
 // Never package this runner or its artifacts as acceptance/release evidence.
+// --binary selects the candidate; the four revision flags opt into an exact
+// Rust-vs-Rust comparison with a separately managed baseline executable.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -10,6 +12,10 @@ import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 
 const ARM_ORDER = Object.freeze(['native-c', 'rust-cpu', 'rust-cpu', 'native-c']);
+const RUST_REVISION_ORDER = Object.freeze(['rust-baseline', 'rust-candidate', 'rust-candidate', 'rust-baseline']);
+const REVISION_FLAGS = ['--baseline-binary', '--baseline-commit', '--baseline-sha256', '--candidate-sha256'];
+const COMMIT_HASH = /^[0-9a-f]{40}$/;
+const CONTENT_HASH = /^[0-9a-f]{64}$/;
 const OUTPUT_BYTES = 1024 * 1024;
 const LOCAL_LEASE_MS = 7_200_000;
 const GUARD_MS = 30_000;
@@ -24,7 +30,8 @@ const integer = (value, min, max = Number.MAX_SAFE_INTEGER) =>
   Number.isSafeInteger(value) && value >= min && value <= max;
 
 export function compilePlan(argv) {
-  const allowed = new Set(['--manager', '--binary', '--output', '--case', '--workers', '--timeout-seconds']);
+  const allowed = new Set(['--manager', '--binary', '--output', '--case', '--workers', '--timeout-seconds',
+    ...REVISION_FLAGS]);
   const options = {};
   for (let index = 0; index < argv.length; index += 2) {
     const [key, value] = argv.slice(index, index + 2);
@@ -42,6 +49,16 @@ export function compilePlan(argv) {
   assert(CASES[caseId].workers === undefined || workers === CASES[caseId].workers,
     'fixed-2l fixture is qualified only at one worker');
   const timeout = parseIntegerOption(options['--timeout-seconds'], 1, 1800, 'timeout-seconds');
+  if (REVISION_FLAGS.some(flag => Object.hasOwn(options, flag))) {
+    assert(REVISION_FLAGS.every(flag => Object.hasOwn(options, flag)),
+      'Rust revision ABBA requires --baseline-binary, --baseline-commit, --baseline-sha256 and --candidate-sha256');
+    assert(path.isAbsolute(options['--baseline-binary']), '--baseline-binary must be absolute');
+    assert(COMMIT_HASH.test(options['--baseline-commit']), 'expected exact lowercase baseline commit SHA');
+    assert(CONTENT_HASH.test(options['--baseline-sha256']), 'expected exact lowercase baseline binary SHA-256');
+    assert(CONTENT_HASH.test(options['--candidate-sha256']), 'expected exact lowercase candidate binary SHA-256');
+    assert.notEqual(options['--baseline-sha256'], options['--candidate-sha256'], 'the two binaries must be distinct');
+    return { options, caseId, workers, timeout, schedule: RUST_REVISION_ORDER };
+  }
   return { options, caseId, workers, timeout, schedule: ARM_ORDER };
 }
 
@@ -123,9 +140,24 @@ export function validateSample(sample, caseId, arm, workers) {
   };
 }
 
-export function summarize(samples, failure) {
+export function validateRevisionSample(sample, caseId, workers, compiledCommit) {
+  assert(COMMIT_HASH.test(compiledCommit ?? ''), 'expected exact compiled revision');
+  assert.equal(sample.compiled_source_commit, compiledCommit, 'binary is not bound to this revision');
+  const accepted = validateSample(sample, caseId, 'rust-cpu', workers);
+  // Both arms exercise Rust CPU materialization. A set hash alone
+  // is not sufficient to qualify a change to canonical output order.
+  assert(CONTENT_HASH.test(sample.semantic.ordered_key_sha256 ?? ''), 'missing ordered normalized-key sequence digest');
+  assert.equal(sample.backend.reported_active_workers, workers, 'Rust useful participation differs from width');
+  return {
+    workerEvidence: accepted.workerEvidence,
+    identity: { ...accepted.identity, ordered_key_sha256: sample.semantic.ordered_key_sha256 },
+  };
+}
+
+export function summarize(samples, failure, schedule = ARM_ORDER) {
+  const [baselineLabel, candidateLabel] = schedule;
   const aggregate = {};
-  for (const arm of ['native-c', 'rust-cpu']) {
+  for (const arm of [baselineLabel, candidateLabel]) {
     const completed = samples.filter(sample => sample.arm === arm && sample.state === 'complete');
     const clean = completed.filter(sample => sample.performance_eligible);
     aggregate[arm] = {
@@ -142,10 +174,10 @@ export function summarize(samples, failure) {
       peak_metric: completed[0]?.peak_metric ?? null,
     };
   }
-  const complete = !failure && samples.length === ARM_ORDER.length &&
-    samples.every((sample, index) => sample.arm === ARM_ORDER[index] && sample.state === 'complete');
+  const complete = !failure && samples.length === schedule.length &&
+    samples.every((sample, index) => sample.arm === schedule[index] && sample.state === 'complete');
   const eligible = complete && Object.values(aggregate).every(arm => arm.clean === 2);
-  const baseline = aggregate['native-c'], candidate = aggregate['rust-cpu'];
+  const baseline = aggregate[baselineLabel], candidate = aggregate[candidateLabel];
   return {
     result: complete
       ? (eligible ? 'complete-clean-abba' : 'complete-disturbed-abba')
@@ -169,23 +201,39 @@ async function main(argv) {
   assert(hosted || supervised, 'use a finite hosted CI job or the managed local-service orchestrator');
   const { options, caseId, workers, timeout, schedule } = compilePlan(argv);
   const manager = fs.realpathSync(options['--manager']);
-  const binary = fs.realpathSync(options['--binary']);
   const output = path.resolve(options['--output']);
   assert(/^clearra-manage(?:\.exe)?$/.test(path.basename(manager)), 'expected clearra-manage');
-  assert(/^native_rust_cpu_abba(?:\.exe)?$/.test(path.basename(binary)), 'expected the ABBA example binary');
+  const rustRevisions = schedule === RUST_REVISION_ORDER;
+  const binary = resolveExample(options['--binary'], rustRevisions ? manager : null);
   const sourceRevision = checkedCommand('git', ['rev-parse', 'HEAD']).trim();
-  assert(/^[0-9a-f]{40}$/.test(sourceRevision), 'invalid source revision');
+  assert(COMMIT_HASH.test(sourceRevision), 'invalid source revision');
   checkedCommand('git', ['diff', '--quiet', 'HEAD', '--']);
   checkedCommand(manager, ['storage', 'verify', '--path', output]);
+  const binaryHash = await sha256(binary);
+  let variants;
+  if (rustRevisions) {
+    const baselineRevision = options['--baseline-commit'];
+    assert.notEqual(baselineRevision, sourceRevision, 'baseline commit is the candidate checkout');
+    assert.equal(checkedCommand('git', ['rev-parse', '--verify', `${baselineRevision}^{commit}`]).trim(),
+      baselineRevision, 'baseline is not an exact commit object in this repository');
+    const baselineBinary = resolveExample(options['--baseline-binary'], manager);
+    assert.notEqual(baselineBinary, binary, 'the two variants resolve to the same executable path');
+    const baselineHash = await sha256(baselineBinary);
+    assert.equal(baselineHash, options['--baseline-sha256'], 'baseline binary SHA-256 differs from pin');
+    assert.equal(binaryHash, options['--candidate-sha256'], 'candidate binary SHA-256 differs from pin');
+    variants = {
+      'rust-baseline': { binary: baselineBinary, binary_sha256: baselineHash, source_revision: baselineRevision, solver_arm: 'rust-cpu' },
+      'rust-candidate': { binary, binary_sha256: binaryHash, source_revision: sourceRevision, solver_arm: 'rust-cpu' },
+    };
+  }
   // No replacement, including an accidental path to a prior receipt.
   fs.mkdirSync(path.dirname(output), { recursive: true });
   fs.mkdirSync(output);
-  const binaryHash = await sha256(binary);
   const manifest = {
-    schema: 'clearra.native-rust-cpu-abba.v2',
+    schema: variants ? 'clearra.rust-cpu-revision-abba.v1' : 'clearra.native-rust-cpu-abba.v2',
     authority: 'benchmark-only-not-release',
     source_revision: sourceRevision,
-    binary, binary_sha256: binaryHash,
+    ...(variants ? { variants } : { binary, binary_sha256: binaryHash }),
     host: {
       platform: process.platform, architecture: process.arch,
       logical_capacity: os.availableParallelism(), cpu_model: os.cpus()[0]?.model ?? null,
@@ -194,7 +242,9 @@ async function main(argv) {
     comparison_scope: CASES[caseId].compareCoverage ? 'normalized-solution-family-and-fixed-queue-coverage' : 'normalized-unique-solution-family-only',
     coverage_note: CASES[caseId].compareCoverage
       ? 'Compare the one fixed queue; build-variant diagnostics are not equivalent.'
-      : 'Probabilities were not requested. Rust can do additional coverage work; its probability/count/hash fields are diagnostics, not coverage parity.',
+      : variants
+        ? 'Probabilities were not requested; probability/count/hash fields are diagnostics, not coverage parity.'
+        : 'Probabilities were not requested. Rust can do additional coverage work; its probability/count/hash fields are diagnostics, not coverage parity.',
     requested_workers: workers, schedule,
     timeout_seconds_per_sample: timeout,
     tool_profile: 'benchmark-search',
@@ -202,16 +252,20 @@ async function main(argv) {
     peak_scope: process.platform === 'linux'
       ? 'Linux kernel solver-process VmHWM (all solver threads, no child workers); independently record manager sampled tree RSS'
       : 'supervisor-owned tree; includes result evidence emission',
-    cold_policy: 'fresh child, same binary, CPU warmup disabled; system caches not flushed',
+    cold_policy: variants
+      ? 'fresh child, two pinned binaries, SHA-256 readback before each sample, CPU warmup disabled; system caches not flushed'
+      : 'fresh child, same binary, CPU warmup disabled; system caches not flushed',
     accelerators: 'disabled',
-    comparison_rule: 'Rust mean and observed maximum must not exceed C on two clean samples each',
+    comparison_rule: variants
+      ? 'Rust candidate mean and observed maximum must not exceed Rust baseline on two clean samples each'
+      : 'Rust mean and observed maximum must not exceed C on two clean samples each',
   };
   write('manifest.json', manifest);
   const samples = [];
   const runIds = new Set();
   const orderedHashes = new Set();
-  const coverageHashes = { 'native-c': new Set(), 'rust-cpu': new Set() };
-  let identity, failure;
+  const coverageHashes = Object.fromEntries(schedule.slice(0, 2).map(arm => [arm, new Set()]));
+  let identity, failure, revisionParallelism;
   let missingTreeProof = false;
   for (const [index, arm] of schedule.entries()) {
     if (!hosted && performance.now() - started + timeout * 1_000 + GUARD_MS > LOCAL_LEASE_MS) {
@@ -220,8 +274,16 @@ async function main(argv) {
     }
     const slot = index + 1;
     const name = String(slot) + '-' + arm;
-    const command = [binary, arm, caseId, String(workers)];
-    const sample = { slot, arm, state: 'invalid', reason: null };
+    const variant = variants?.[arm];
+    if (variant) {
+      const readbackError = await verifyReadback(arm, variant);
+      if (readbackError) {
+        failure ??= readbackError;
+        break; // No child was admitted for this slot.
+      }
+    }
+    const command = [variant?.binary ?? binary, variant?.solver_arm ?? arm, caseId, String(workers)];
+    const sample = { slot, arm, ...(variant ? { variant } : {}), state: 'invalid', reason: null };
     let processTreeStopped = false;
     process.stderr.write('[native-rust-cpu-abba] ' + caseId + ' ' + name + ' started\n');
     try {
@@ -255,8 +317,15 @@ async function main(argv) {
         outcome.supervisor_termination_reason === null, 'solver did not complete: ' + run.stderr.trim());
       const solver = JSON.parse(run.stdout.split(/(?:^|\r?\n)clearra_runtime_receipt=/)[0].trim());
       sample.solver = solver;
-      assert.equal(solver.compiled_source_commit, sourceRevision, 'binary is not bound to this checkout');
-      const accepted = validateSample(solver, caseId, arm, workers);
+      let accepted;
+      if (variant) {
+        accepted = validateRevisionSample(solver, caseId, workers, variant.source_revision);
+        revisionParallelism ??= solver.available_parallelism;
+        assert.equal(solver.available_parallelism, revisionParallelism, 'available CPU width changed within ABBA');
+      } else {
+        assert.equal(solver.compiled_source_commit, sourceRevision, 'binary is not bound to this checkout');
+        accepted = validateSample(solver, caseId, arm, workers);
+      }
       identity ??= accepted.identity;
       assert.deepEqual(accepted.identity, identity, 'qualified result identity mismatch');
       sample.worker_evidence = accepted.workerEvidence;
@@ -266,7 +335,7 @@ async function main(argv) {
       const coverage = solver.semantic.coverage_sha256;
       if (coverage !== null) coverageHashes[arm].add(coverage);
       if (CASES[caseId].compareCoverage) {
-        assert(new Set([...coverageHashes['native-c'], ...coverageHashes['rust-cpu']]).size <= 1,
+        assert(new Set(Object.values(coverageHashes).flatMap(values => [...values])).size <= 1,
           'qualified fixed-queue coverage union words disagree');
       }
       assert(typeof outcome.memory_pressure_observed === 'boolean' &&
@@ -291,7 +360,14 @@ async function main(argv) {
     if (!processTreeStopped) missingTreeProof = true;
     if (missingTreeProof) break;
   }
-  if (await sha256(binary) !== binaryHash) failure ??= 'example binary changed within ABBA';
+  if (variants) {
+    for (const [arm, variant] of Object.entries(variants)) {
+      const readbackError = await verifyReadback(arm, variant);
+      failure ??= readbackError;
+    }
+  } else if (await sha256(binary) !== binaryHash) {
+    failure ??= 'example binary changed within ABBA';
+  }
   const summary = {
     manifest, samples, failure: failure ?? null, semantic_identity: identity ?? null,
     all_owned_trees_stopped: !missingTreeProof,
@@ -307,7 +383,7 @@ async function main(argv) {
         coverage_sha256: semantic.coverage_sha256,
       })),
     },
-    ...summarize(samples, failure),
+    ...summarize(samples, failure, schedule),
   };
   write('summary.json', summary);
   process.stdout.write(JSON.stringify({
@@ -320,6 +396,25 @@ async function main(argv) {
 
   function write(name, content) {
     fs.writeFileSync(path.join(output, name), JSON.stringify(content, null, 2) + '\n', { flag: 'wx' });
+  }
+}
+
+function resolveExample(filename, manager) {
+  if (manager) checkedCommand(manager, ['storage', 'verify', '--path', filename]);
+  const binary = fs.realpathSync(filename);
+  assert(/^native_rust_cpu_abba(?:\.exe)?$/.test(path.basename(binary)), 'expected the ABBA example binary');
+  if (manager) {
+    if (binary !== filename) checkedCommand(manager, ['storage', 'verify', '--path', binary]);
+    assert(fs.statSync(binary).isFile(), 'expected a regular ABBA example file');
+  }
+  return binary;
+}
+
+async function verifyReadback(label, variant) {
+  try {
+    return await sha256(variant.binary) === variant.binary_sha256 ? null : label + ' binary changed within ABBA';
+  } catch {
+    return label + ' binary is unavailable for SHA-256 readback';
   }
 }
 
