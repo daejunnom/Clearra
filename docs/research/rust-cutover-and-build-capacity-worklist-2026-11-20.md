@@ -387,3 +387,32 @@ lazy cache, unchanged-node reuse and canonical string move with
 adjacent pinned revisions. Keep independent memory containment and
 work equality for each ablation. None of these measurements is
 published Pages, Apple/Windows hardware, or release acceptance evidence.
+
+### Native P7P4 memory ownership probe
+
+The separate diagnostic build at `6568decfc1213b35f26c5b20416e25c6e9ca5e0a`
+completed empty 4L SRS+ P7P4 with eight useful workers, 456,923
+ordered exact keys, and the same complete 4,233,600-pattern coverage.
+Its kernel HWM was 4,608.60 MiB; the largest 25 ms sampled RSS was
+4,597.85 MiB in parallel verification, not Geometry preparation or
+final result serialization. The most delayed worker publication in
+that cohort was 633 ms old.
+
+| Owner or subset | Observed logical capacity (MiB) |
+| --- | ---: |
+| Private standard-bag structures across workers | 3,178.67 |
+| ↳ union memo payload (included above) | 1,680.00 |
+| ↳ product memo payload (included above) | 562.57 |
+| Private piece-order languages | 485.17 |
+| Reachability | 34.56 |
+| Pending/retained canonical identities | 76.00 |
+| Shared geometry catalog, target index and solution-family plan | 6.66 |
+
+These logical capacities are not an exact allocator breakdown and
+should not be subtracted from kernel RSS to infer a missing allocation.
+The two memo rows are subsets, not additional memory. The separately
+retained local evidence is
+`_local/artifacts/benchmarks/native-rust-family/peak-owner-p7p4-w8-6568decf.log`.
+Do not use this diagnostic run's wall time as a performance arm.
+Exact dependency precomputation can remove repeated proof construction;
+it is not itself evidence that the dominant private union memo shrank.
